@@ -306,6 +306,9 @@ struct Rule {
 /// A token's rules, its claims bound in.
 pub struct Scope {
     subject: Option<String>,
+    /// When the token lapses, in milliseconds since the epoch: what a
+    /// request held open past it -- a subscription -- is ended at.
+    expires: Option<u64>,
     rules: Vec<Bound>,
     /// The tenants the token names in its tenant claim; `None` where it
     /// names none.
@@ -524,11 +527,17 @@ impl Access {
             ),
             _ => None,
         };
+        let expires = match claim("exp") {
+            Some(Value::Int(i)) => Some((*i).max(0) as u64 * 1000),
+            Some(Value::Float(f)) => Some((f.max(0.0) * 1000.0) as u64),
+            _ => None,
+        };
         Ok(Scope {
             subject: match claim("sub") {
                 Some(Value::Text(s)) => Some(s.clone()),
                 _ => None,
             },
+            expires,
             rules,
             tenants,
             unbound: self.demands.unbound_tenants,
@@ -874,6 +883,16 @@ impl Scope {
     /// The `sub` claim, when the token has one.
     pub fn subject(&self) -> Option<&str> {
         self.subject.as_deref()
+    }
+
+    /// When the token's `exp` passes, in milliseconds since the epoch;
+    /// `None` for a token that names none (`--jwt-require-exp off`). A
+    /// request is checked as it comes, so one held open -- a subscription
+    /// -- is ended here, or it outlived its token: a stream opened two
+    /// seconds before `exp` still delivered a change written four after,
+    /// while the token's own `get` was 401.
+    pub fn expires_ms(&self) -> Option<u64> {
+        self.expires
     }
 
     /// Whether the token may reach tenant `name` on a `--dir` node: its

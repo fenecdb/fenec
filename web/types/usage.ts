@@ -298,4 +298,37 @@ export async function remote() {
   void client.Fenec;
   // @ts-expect-error -- nor the sync layer
   void client.sync;
+
+  // A shape's subscription, and the stream reader under it.
+  const unsub = bare.subscribe(
+    'articles',
+    { year: 'gte.2024', select: ['title', 'year'] },
+    (ev) => {
+      if (ev.type === 'seed') expect<string>(ev.rows[0].title);
+      else {
+        expect<number[]>(ev.dels);
+        expect<boolean>(ev.schema);
+        expect<string>(ev.puts[0].title);
+      }
+    },
+    { onError: (e) => void e, onState: (s) => expect<'open' | 'retry'>(s) },
+  );
+  expect<() => void>(unsub);
+  bare.subscribe('articles', null, () => {});
+  // @ts-expect-error -- no such collection
+  bare.subscribe('nothing', null, () => {});
+  // @ts-expect-error -- a shape's values are texts
+  bare.subscribe('articles', { year: 2024 }, () => {});
+  bare.subscribe('articles', {}, (ev) => {
+    // @ts-expect-error -- a seed has no puts
+    if (ev.type === 'seed') void ev.puts;
+  });
+  // @ts-expect-error -- the state is one of two
+  bare.subscribe('articles', {}, () => {}, { onState: (s: 'closed') => void s });
+  const ev: client.ShapeEvent = { type: 'change', seq: 1, puts: [], dels: [7], schema: false };
+  void ev;
+  for await (const e of client.sseEvents(new Response('event: seed\ndata: {}\n\n'))) {
+    expect<client.SseEvent>(e);
+    expect<string>(e.data);
+  }
 }

@@ -22,8 +22,18 @@ impl Drop for Node {
     }
 }
 
-/// A node taking `access`'s JSON Web Tokens beside its data token `data`.
-fn node_with(tag: &str, access: Option<Arc<fenec_http::access::Access>>) -> Node {
+/// A node taking `access`'s JSON Web Tokens beside its data token `data`,
+/// answering browsers from `cors`.
+fn node_cors(
+    tag: &str,
+    access: Option<Arc<fenec_http::access::Access>>,
+    cors: Option<&str>,
+) -> Node {
+    // The wait after a refusal is the process's, counted by address and
+    // doubled to 5 s: every test here asks from 127.0.0.1, so the refusals
+    // of the tests running at once held one's 401 past its read timeout.
+    // tests/audit.rs and fenec-shard's tests/refusals.rs hold the wait.
+    fenec_http::audit::set_delay(0);
     let dir = std::env::temp_dir().join(format!(
         "fenec-shard-{tag}-{}-{:?}",
         std::process::id(),
@@ -36,6 +46,7 @@ fn node_with(tag: &str, access: Option<Arc<fenec_http::access::Access>>) -> Node
         stream_keepalive: Duration::from_millis(80),
         token: access.is_some().then(|| "data".to_string()),
         access,
+        cors: cors.map(String::from),
         ..fenec_http::Config::default()
     };
     let server = fenec_http::Server::with_tenants(Arc::clone(&tenants), cfg);
@@ -63,8 +74,18 @@ fn cluster_with(
     token: Option<&str>,
     access: Option<Arc<fenec_http::access::Access>>,
 ) -> Cluster {
+    cluster_cors(tag, n, token, access, None)
+}
+
+fn cluster_cors(
+    tag: &str,
+    n: usize,
+    token: Option<&str>,
+    access: Option<Arc<fenec_http::access::Access>>,
+    cors: Option<&str>,
+) -> Cluster {
     let nodes: Vec<Node> = (1..=n)
-        .map(|i| node_with(&format!("{tag}{i}"), access.clone()))
+        .map(|i| node_cors(&format!("{tag}{i}"), access.clone(), cors))
         .collect();
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
@@ -516,4 +537,84 @@ fn a_token_for_one_tenant_reaches_no_other_through_the_router() {
             "{out}"
         );
     }
+}
+
+/// A page on another origin talks to its tenant through the router: the
+/// preflight the browser sends first carries no token, and was refused
+/// with 401 by the node, so the page could send nothing.
+#[test]
+fn a_preflight_reaches_its_tenant_through_the_router_with_no_token() {
+    let access = Arc::new(
+        fenec_http::access::Access::new(
+            b"thirty-two bytes and a few more, for HS256",
+            "notes  read,write  where owner = $jwt.sub\n",
+        )
+        .unwrap(),
+    );
+    let c = cluster_cors("cors", 1, None, Some(access), Some("https://app.example"));
+    c.create("acme", None);
+    let mut sock = TcpStream::connect(("127.0.0.1", c.port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        sock,
+        "OPTIONS /t/acme/query HTTP/1.1\r\nHost: t\r\nOrigin: https://app.example\r\n\
+         Access-Control-Request-Method: POST\r\n\
+         Access-Control-Request-Headers: authorization, content-type\r\n\
+         Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut out = String::new();
+    let _ = sock.read_to_string(&mut out);
+    assert!(out.starts_with("HTTP/1.1 204"), "{out}");
+    assert!(
+        out.contains("Access-Control-Allow-Origin: https://app.example"),
+        "{out}"
+    );
+    // The query itself still needs its token.
+    assert_eq!(c.query("acme", "get notes").0, 401);
+}
+
+/// A new tenant's schema took the nodes' data token, which reaches every
+/// tenant on every node, so the app that created tenants held it. The
+/// router applies it as it creates the tenant, with each node's admin token
+/// it holds already: the app needs the router's token alone.
+#[test]
+fn a_tenant_is_created_with_its_schema_by_the_routers_token_alone() {
+    let access = Arc::new(
+        fenec_http::access::Access::new(
+            b"thirty-two bytes and a few more, for HS256",
+            "notes  read,write  where owner = $jwt.sub\n",
+        )
+        .unwrap(),
+    );
+    let c = cluster_with("schema", 1, Some("rt"), Some(Arc::clone(&access)));
+    let schema = r#"{"schema":"create collection notes (owner text @hash, title text)"}"#;
+    let r = c.call("PUT", "/_shard/tenants/acme", schema, Some("rt"));
+    assert_eq!(r.0, 201, "{}", r.1);
+    assert!(body(&r).contains(r#""schema":{"#), "{}", r.1);
+    // A person's token writes and reads it at once.
+    let alice = access.mint(r#"{"sub":"alice","tenant":"acme"}"#).unwrap();
+    let w = c.call(
+        "POST",
+        "/t/acme/notes",
+        r#"{"title":"first"}"#,
+        Some(&alice),
+    );
+    assert_eq!(w.0, 201, "{}", w.1);
+    let got = c.call("GET", "/t/acme/notes?select=title", "", Some(&alice));
+    assert_eq!(body(&got), r#"[{"title":"first"}]"#);
+
+    // A schema that does not read leaves no tenant, on the node or in the
+    // directory; nor does the router's token missing.
+    let bad = r#"{"schema":"create collection notes (title textt)"}"#;
+    let r = c.call("PUT", "/_shard/tenants/globex", bad, Some("rt"));
+    assert_eq!(r.0, 400, "{}", r.1);
+    assert_eq!(
+        c.call("PUT", "/_shard/tenants/initech", schema, None).0,
+        401
+    );
+    assert_eq!(c.nodes[0].tenants.names(), ["acme"]);
+    let list = c.call("GET", "/_shard/tenants", "", Some("rt"));
+    assert!(!body(&list).contains("globex"), "{}", list.1);
 }

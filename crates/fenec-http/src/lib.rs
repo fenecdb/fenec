@@ -133,6 +133,11 @@ pub struct Config {
     /// Data footprint ceiling in bytes (0 = off): fenec-server's
     /// `--max-memory`, held on every write; see [`over_ceiling`].
     pub max_memory: usize,
+    /// What a router marks the requests it forwards with
+    /// ([`audit::router_mark`]): made from `admin_token` on a tenant node,
+    /// which a router reaches with it. A request bearing it is waited out
+    /// at the router after a refusal, keyed by the client it names.
+    pub router_mark: Option<String>,
 }
 
 impl Default for Config {
@@ -156,6 +161,7 @@ impl Default for Config {
             max_import: 1 << 30,
             access: None,
             max_memory: 0,
+            router_mark: None,
         }
     }
 }
@@ -224,7 +230,10 @@ impl Server {
 
     /// One database per tenant under `/t/<tenant>/`, plus `/_admin/`. Each
     /// tenant gets its own watcher as it is opened.
-    pub fn with_tenants(tenants: Arc<Tenants>, cfg: Config) -> Server {
+    pub fn with_tenants(tenants: Arc<Tenants>, mut cfg: Config) -> Server {
+        if cfg.router_mark.is_none() {
+            cfg.router_mark = cfg.admin_token.as_deref().map(audit::router_mark);
+        }
         if cfg.access.is_some() {
             tenants.check_scoped_writes();
         }
@@ -456,6 +465,9 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 return;
             }
         };
+        if cfg.router_mark.is_some() {
+            audit::request(&req, cfg.router_mark.as_deref());
+        }
         let keep_alive = req.keep_alive;
         let head_only = req.method == Method::Head;
         timing::lap(timing::Phase::Http);
@@ -482,6 +494,23 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             && !matches!(backend, Backend::Metrics { .. })
         {
             let resp = Response::json(200, &br#"{"ok":true}"#[..]);
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
+
+        // A browser's preflight carries no `Authorization` -- the Fetch
+        // standard sends none -- so it is answered before any token is
+        // asked for, a tenant looked up or a lock taken: authenticated, it
+        // was 401 on any server with a token, and a page on another origin
+        // could send nothing. It reads nothing and says only what the CORS
+        // headers already say on every answer.
+        if req.method == Method::Options
+            && !matches!(backend, Backend::Metrics { .. })
+            && cors_allows(cfg, &req)
+        {
+            let resp = cors(Response::empty(204), cfg);
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }
@@ -1017,31 +1046,7 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
             if cfg.read_only {
                 return Response::error(403, "the server is in read-only mode");
             }
-            metrics::wrote();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as i64);
-            let mut guard = held::write(db);
-            let r = fenec_abi::schema(&mut guard, body, true, Some(now));
-            let durability = match &r {
-                Ok(o) if o.applied => match flush_for(cfg, &mut guard) {
-                    Ok(d) => d,
-                    Err(e) => return error_response(&e),
-                },
-                _ => None,
-            };
-            let seq = guard.change_seq();
-            drop(guard);
-            if let Err(e) = await_durable(db, durability) {
-                return error_response(&e);
-            }
-            return match r {
-                Ok(o) if o.plan.refusals.is_empty() => {
-                    with_seq(Response::json(200, o.json()), Some(seq))
-                }
-                Ok(o) => Response::json(409, o.json()),
-                Err(e) => error_response(&e),
-            };
+            return apply_schema(db, cfg, body);
         }
         _ => {
             return Response::error(
@@ -1052,6 +1057,36 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
     };
     match outcome {
         Ok(o) => Response::json(200, o.json()),
+        Err(e) => error_response(&e),
+    }
+}
+
+/// `POST /_schema/apply`, and a tenant's schema as a router creates it
+/// (`POST /_admin/tenants/<t>/schema`): the description's migrations, then
+/// what only adds, one block under the write lock, synced as a write is.
+/// 409 with the plan's refusals, which write nothing.
+pub(crate) fn apply_schema(db: &Arc<RwLock<Database>>, cfg: &Config, body: &str) -> Response {
+    metrics::wrote();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let mut guard = held::write(db);
+    let r = fenec_abi::schema(&mut guard, body, true, Some(now));
+    let durability = match &r {
+        Ok(o) if o.applied => match flush_for(cfg, &mut guard) {
+            Ok(d) => d,
+            Err(e) => return error_response(&e),
+        },
+        _ => None,
+    };
+    let seq = guard.change_seq();
+    drop(guard);
+    if let Err(e) = await_durable(db, durability) {
+        return error_response(&e);
+    }
+    match r {
+        Ok(o) if o.plan.refusals.is_empty() => with_seq(Response::json(200, o.json()), Some(seq)),
+        Ok(o) => Response::json(409, o.json()),
         Err(e) => error_response(&e),
     }
 }
@@ -1145,7 +1180,17 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         // Asked for only: a read that sends none is answered as it was, no
         // tag worked out (the first poll sends `"0"`).
         let asked = req.header("if-none-match");
-        let tag = asked.and_then(|_| etag(&guard, &stmt, body));
+        // A scoped token's tag is its answer's own ([`content_tag`]): the
+        // query runs every time, and 304 says only that its rows are the
+        // rows it had. Tagged by the change counter, 304 against 200 -- and
+        // the 304's speed -- told it when anyone wrote to what it reads,
+        // rows it may not see among them, and the tag how many writes the
+        // database had taken.
+        let by_content = asked.is_some() && who.scope().is_some();
+        let tag = match by_content {
+            true => None,
+            false => asked.and_then(|_| etag(&guard, &stmt, body)),
+        };
         if let (Some(t), Some(asked)) = (&tag, asked) {
             if unchanged(&guard, &stmt, asked) {
                 return Response::json(304, Vec::new()).header("ETag", t);
@@ -1160,6 +1205,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                 let mut resp = Response::json(200, body).versioned(fenec_core::VERSION);
                 if let Some(t) = &tag {
                     resp = resp.header("ETag", t);
+                }
+                if by_content {
+                    resp = same_answer(resp, asked);
                 }
                 timing::lap(timing::Phase::Render);
                 return resp;
@@ -1215,9 +1263,13 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             let resp = visible(who, resp);
             statements::rows(counted(&resp));
             let out = with_seq(api::render_any(&resp, fenec_core::VERSION), seq);
-            match &tagged {
+            let out = match &tagged {
                 Some(t) => out.header("ETag", t),
                 None => out,
+            };
+            match stmt.is_read_only() && who.scope().is_some() {
+                true => same_answer(out, req.header("if-none-match")),
+                false => out,
             }
         }
         Err(e) => error_response(&e),
@@ -1254,6 +1306,38 @@ fn etag(db: &Database, stmt: &Statement, text: &str) -> Option<String> {
         }
     }
     Some(format!("\"{}\"", db.change_seq()))
+}
+
+/// A scoped read's tag: a digest of its answer, so that it says nothing a
+/// token's rows do not -- not when, nor how often, a collection was
+/// written. Strong: the same bytes are the same answer.
+fn content_tag(body: &[u8]) -> String {
+    let d = crypto::sha256(body);
+    let mut t = String::with_capacity(36);
+    t.push_str("\"c");
+    for b in &d[..16] {
+        t.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
+        t.push(char::from_digit((b & 15) as u32, 16).unwrap_or('0'));
+    }
+    t.push('"');
+    t
+}
+
+/// A scoped read's answer, tagged by its content where a tag was asked
+/// for, and 304 with no body where it is the one `asked` names.
+fn same_answer(resp: Response, asked: Option<&str>) -> Response {
+    let Some(asked) = asked else {
+        return resp;
+    };
+    if resp.status != 200 {
+        return resp;
+    }
+    let tag = content_tag(&resp.body);
+    if asked.trim() == tag {
+        http::give_back(resp.body);
+        return Response::json(304, Vec::new()).header("ETag", &tag);
+    }
+    resp.header("ETag", &tag)
 }
 
 /// Whether no write since the change `asked` names -- an `ETag` [`etag`]
@@ -1590,6 +1674,17 @@ fn error_response(e: &Error) -> Response {
         | Error::Unmet(m) => m.as_str(),
     };
     Response::error(api::status_of(e), msg)
+}
+
+/// Whether `--http-cors` lets `req`'s origin in: `*` lets every one, an
+/// origin itself alone. A preflight from another is answered as before,
+/// after its token.
+fn cors_allows(cfg: &Config, req: &Request) -> bool {
+    match cfg.cors.as_deref() {
+        None => false,
+        Some("*") => true,
+        Some(allowed) => req.header("origin") == Some(allowed),
+    }
 }
 
 fn cors(resp: Response, cfg: &Config) -> Response {

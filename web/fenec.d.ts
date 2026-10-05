@@ -960,7 +960,69 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
     cb: (rows: any[]) => void,
     opts: LiveOptions & ({ collections: string[] } | { poll: number }),
   ): () => void;
+
+  /**
+   * A shape's rows and every change to them (`GET /<collection>/changes`):
+   * a `seed` first, the whole shape, then each `change` as it lands. A
+   * stream that ends is opened again and seeds again; one refused or ended
+   * for its token (a `FenecError` of status 401 to `onError`, as the server
+   * ends one at its token's `exp`) is not. Returns the function that stops it.
+   */
+  subscribe<K extends keyof S & string>(
+    collection: K,
+    shape: ShapeFilter | null | undefined,
+    onEvent: (ev: ShapeEvent<Row<S[K]>>) => void,
+    opts?: SubscribeOptions,
+  ): () => void;
 }
+
+/**
+ * A subscription's shape, as the REST surface writes it: a field's filter
+ * (`{ team: 'eq.design', year: 'gte.2024' }`), `where` (a FenecQL
+ * condition) and `select` (the fields kept, `id` always among them).
+ */
+export type ShapeFilter = { select?: string | readonly string[]; where?: string } & {
+  [field: string]: string | readonly string[] | undefined;
+};
+
+/** The whole shape: what the subscriber held is replaced by `rows`. */
+export interface ShapeSeed<R = Row<Fields>> {
+  type: 'seed';
+  /** The change the shape stands at. */
+  seq: number;
+  rows: R[];
+}
+
+/** What changed since the last event: rows written into the shape, ids that left it. */
+export interface ShapeChange<R = Row<Fields>> {
+  type: 'change';
+  seq: number;
+  puts: R[];
+  dels: number[];
+  /** The collection's schema changed. */
+  schema: boolean;
+}
+
+export type ShapeEvent<R = Row<Fields>> = ShapeSeed<R> | ShapeChange<R>;
+
+export interface SubscribeOptions {
+  /** Why a stream ended or was refused; else the client's `onError`, else thrown. */
+  onError?: (e: unknown) => void;
+  /** `'open'` at each seed, `'retry'` while it waits to open the stream again. */
+  onState?: (state: 'open' | 'retry') => void;
+}
+
+/** An event of a server-sent event stream: its name and its data as sent. */
+export interface SseEvent {
+  name: string;
+  data: string;
+}
+
+/**
+ * The events of a server-sent event stream read off a `fetch` answer's
+ * body -- `EventSource` cannot send `Authorization`.
+ */
+export function sseEvents(res: Response): AsyncGenerator<SseEvent, void, unknown>;
 
 /**
  * With a schema declared in code: the server's schema is checked against it,

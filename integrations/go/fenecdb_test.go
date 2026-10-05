@@ -478,6 +478,35 @@ func TestAScopedToken(t *testing.T) {
 	}
 }
 
+// The server ends a scoped stream at its token's exp: the last event is an
+// *Error of Status 401, the refusal the token's next request would get.
+func TestAScopedStreamEndsAtItsTokensExp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	db := root()
+	if _, err := db.Exec(ctx, "create collection notes (title text, owner text)"); err != nil {
+		statusOf(t, err) // made by a test before: 409
+	}
+	claims := fmt.Sprintf(`{"sub":"alice","exp":%d}`, time.Now().Unix()+2)
+	out, err := exec.Command(binary, "--jwt-secret", jwtSecret, "--mint-token", claims).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := fenecdb.New(primary, fenecdb.WithToken(strings.TrimSpace(string(out))))
+	events := must(alice.Subscribe(ctx, "notes", nil)).of(t)
+	if seed := <-events; seed.Type != "seed" {
+		t.Fatalf("the seed: %+v", seed)
+	}
+	var last fenecdb.Event
+	for e := range events {
+		last = e
+	}
+	var e *fenecdb.Error
+	if last.Type != "error" || !errors.As(last.Err, &e) || e.Status != 401 || e.Code != fenecdb.CodeUnauthorized {
+		t.Fatalf("the stream's end: %+v", last)
+	}
+}
+
 func TestHealth(t *testing.T) {
 	// No token needed.
 	if err := fenecdb.New(primary).Health(context.Background()); err != nil {

@@ -378,3 +378,24 @@ fn a_node_that_takes_no_lease_is_never_failed_over_on_its_own() {
     // Its writes go on where its clients reach it.
     assert_eq!(query(nodes[0].port, "/t/acme/query", "put c {x: 1}").0, 200);
 }
+
+/// A tenant created with its schema under leases: the node takes a write
+/// only once its lease names the tenant, so the schema is applied after the
+/// grant, and its replica follows it there.
+#[test]
+fn a_tenant_created_with_its_schema_takes_it_under_a_lease_and_its_replica_follows() {
+    let (nodes, port) = three("schema", true);
+    let (status, body) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme",
+        r#"{"schema":"create collection notes (t text)"}"#,
+        None,
+    );
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = query(port, "/t/acme/query", "put notes {t: \"x\"}");
+    assert_eq!(status, 200, "{body}");
+    let (_, replica) = placed(port, "acme");
+    let replica = by_name(&nodes, &replica.expect("a replica"));
+    until(replica.port, "/t/acme/query", "get notes", "\"x\"");
+}

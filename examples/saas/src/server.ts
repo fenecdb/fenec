@@ -8,11 +8,17 @@
 //
 // The browser reads and writes its organisation through /db/ with its own
 // access token: this server passes the request to fenec-shard as it came
-// and the node holds it to policy.txt. /db/ is a pipe rather than the
-// router's own address because fenec-server answers a CORS preflight only
-// with a token, which a browser never sends on one (README, gaps), and
-// because one origin behind one TLS terminator is how this would be
-// deployed anyway.
+// and the node holds it to policy.txt. A page on another origin could reach
+// the router itself now -- fenec-server answers a CORS preflight before it
+// asks for a token, and the nodes allow this origin -- but /db/ stays: one
+// origin behind one TLS terminator is how this would be deployed, the CSP's
+// `connect-src 'self'` holds the page to it, and the router stays off the
+// public network. Behind the pipe the router counts refusals by this
+// server's address, so every refusal through the pipe shares one doubling
+// wait; a page's tokens are minted here and refreshed half a minute before
+// they lapse, so a person's own requests are seldom among them, and a
+// deployment that wants the router's per-client waits points the page at
+// the router (README, gaps).
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';

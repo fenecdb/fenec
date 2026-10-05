@@ -236,7 +236,7 @@ function Open() {
 <table>
 <thead><tr><th>Provider</th><th>Where a query runs</th><th>A render after a write</th><th>Loads</th></tr></thead>
 <tbody>
-<tr><td><code>connect(url)</code>, <code>@fenecdb/web/client</code></td><td>on the server, each time</td><td>waits for the server: the subscription's change, then the query's round trip</td><td>no module, 7 KB brotli of client</td></tr>
+<tr><td><code>connect(url)</code>, <code>@fenecdb/web/client</code></td><td>on the server, each time</td><td>waits for the server: the subscription's change, then the query's round trip</td><td>no module, 8 KB brotli of client</td></tr>
 <tr><td><code>sync({ url, shapes })</code></td><td>in the page, over the replica</td><td>waits for nothing: this tab's write is local, another client's arrives on the stream</td><td><code>fenec.wasm</code>, 195 KB brotli</td></tr>
 <tr><td><code>Fenec.open()</code></td><td>in the page, over its own database</td><td>waits for nothing</td><td>the same <code>fenec.wasm</code></td></tr>
 </tbody>

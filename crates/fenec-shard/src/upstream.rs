@@ -86,12 +86,17 @@ impl Pool {
         addr: &str,
         method: &str,
         target: &str,
-        headers: &[(String, String)],
+        headers: &[(&str, &str)],
         body: &[u8],
     ) -> io::Result<Answer> {
-        let mut req = format!("{method} {target} HTTP/1.1\r\nHost: {addr}\r\n");
+        let mut req = String::with_capacity(256);
+        for part in [method, " ", target, " HTTP/1.1\r\nHost: ", addr, "\r\n"] {
+            req.push_str(part);
+        }
         for (k, v) in headers {
-            req.push_str(&format!("{k}: {v}\r\n"));
+            for part in [k, ": ", v, "\r\n"] {
+                req.push_str(part);
+            }
         }
         req.push_str(&format!(
             "Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
@@ -172,7 +177,8 @@ impl Pool {
         token: &str,
         body: &[u8],
     ) -> io::Result<(u16, Vec<u8>)> {
-        let headers = [("Authorization".to_string(), format!("Bearer {token}"))];
+        let bearer = format!("Bearer {token}");
+        let headers = [("Authorization", bearer.as_str())];
         let a = self.send(addr, method, target, &headers, body)?;
         let status = a.status;
         let body = a.read_body(self, method == "HEAD")?;

@@ -42,7 +42,7 @@ import { FenecHttp, connect, sseEvents } from './http.js';
 export {
   FenecError, Query, from, or, and, not, raw, inc, expr, bucket, countDistinct, first, last,
 } from './builder.js';
-export { FenecHttp, connect } from './http.js';
+export { FenecHttp, connect, sseEvents } from './http.js';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -2352,6 +2352,12 @@ export class FenecSync {
       this.#clearConnectionFault();
       for await (const ev of sseEvents(res)) {
         if (s.stream !== ctl) return;
+        // The server ends a stream at its token's `exp` with a 401: a
+        // fresh token is wanted before it opens again, as for a request.
+        if (ev.name === 'error' && /"status":\s*401\b/.test(ev.data)) {
+          this.#cancel(s);
+          return this.#wantToken();
+        }
         await this.#onEvent(s, ev);
       }
     } catch (e) {

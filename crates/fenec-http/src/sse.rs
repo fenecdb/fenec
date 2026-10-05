@@ -176,16 +176,32 @@ pub fn serve(
 
     // Parsing needs the schema, and the schema needs a read lock. The lock is
     // released immediately: held for the whole stream it would stop all writes.
+    //
+    // A scoped stream of a shape that holds nothing -- `where=false`, which
+    // `FenecHttp.live` opens to learn that what its query reads was
+    // written -- is told of the writes to rows its token may read, and of
+    // nothing else: it follows the token's own filter, its ids kept here and
+    // never sent, and a write to one of them, or one of them leaving, is a
+    // change holding no rows. ANDed with the token's filter, the shape
+    // matched no row, a scoped stream hears only of rows it was sent, and
+    // such a live query never ran again; told of every write, it would hand
+    // the token the moments of other users' writes.
     let sub = {
         let guard = crate::held::read(db);
         api::subscription(&guard, req).and_then(|mut sub| {
+            let mut quiet = false;
             if let Some(scope) = who.scope() {
-                sub.filter = scope.restrict(&sub.collection, sub.filter.take())?;
+                quiet = matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
+                let shape = if quiet { None } else { sub.filter.take() };
+                if quiet {
+                    sub.project = Some(vec!["id".to_string()]);
+                }
+                sub.filter = scope.restrict(&sub.collection, shape)?;
             }
-            Ok(sub)
+            Ok((sub, quiet))
         })
     };
-    let sub = match sub {
+    let (sub, quiet) = match sub {
         Ok(s) => s,
         Err(e) => {
             let _ = write_head(
@@ -221,13 +237,27 @@ pub fn serve(
         // holds are not known here, and without them no deletion could be
         // told apart from someone else's write.
         Some(n) if seen.is_none() => n,
-        _ => match seed(out, db, &sub, &mut seen) {
+        _ => match seed(out, db, &sub, &mut seen, quiet) {
             Ok(seq) => seq,
             Err(_) => return,
         },
     };
 
+    // A token is checked as the stream opens, and a stream is held for as
+    // long as its client stays: past the token's `exp` it is ended, as the
+    // token's next request would be refused. Kept open, it went on
+    // delivering what the token could no longer read -- a member taken
+    // off a team heard the team until the client went away. The `error`
+    // event says 401, which a client takes as it takes a refused request:
+    // a fresh token, then the stream again.
+    let expires = who.scope().and_then(|s| s.expires_ms());
+    let left = || expires.map(|at| Duration::from_millis(at.saturating_sub(now_ms())));
+
     loop {
+        if left().is_some_and(|l| l.is_zero()) {
+            let _ = event(out, "error", EXPIRED);
+            return;
+        }
         if hub.is_closed() {
             let _ = event(
                 out,
@@ -253,7 +283,7 @@ pub fn serve(
                 let _ = event(out, "error", &error_json(&e));
                 return;
             }
-            Ok(Changes::Reseed) => match seed(out, db, &sub, &mut seen) {
+            Ok(Changes::Reseed) => match seed(out, db, &sub, &mut seen, quiet) {
                 Ok(seq) => cursor = seq,
                 Err(_) => return,
             },
@@ -269,6 +299,10 @@ pub fn serve(
                 // people's writes overflowed the ring. An empty batch is not
                 // sent, but the cursor is current.
                 let empty = b.puts.rows.is_empty() && b.dels.is_empty() && !b.schema_changed;
+                if quiet {
+                    b.puts.rows.clear();
+                    b.dels.clear();
+                }
                 if !empty && event(out, "change", &change_json(&b)).is_err() {
                     return;
                 }
@@ -279,9 +313,8 @@ pub fn serve(
         // Keep-alive: proxies and NAT tables drop silent connections. A
         // comment line is valid in SSE and produces no event on the client
         // side.
-        if hub.wait(cursor, cfg.stream_keepalive) <= cursor
-            && out.write_all(b": keepalive\n\n").is_err()
-        {
+        let keepalive = left().map_or(cfg.stream_keepalive, |l| l.min(cfg.stream_keepalive));
+        if hub.wait(cursor, keepalive) <= cursor && out.write_all(b": keepalive\n\n").is_err() {
             return;
         }
         if out.flush().is_err() {
@@ -300,6 +333,7 @@ fn seed(
     db: &Arc<RwLock<Database>>,
     sub: &api::Subscription,
     seen: &mut Option<std::collections::HashSet<DocId>>,
+    quiet: bool,
 ) -> std::io::Result<u64> {
     let (rows, seq) = {
         let guard = crate::held::read(db);
@@ -309,7 +343,11 @@ fn seed(
                 if let Some(seen) = seen {
                     *seen = rs.rows.iter().map(|r| r.id).collect();
                 }
-                (api::rows_json(&rs), guard.change_seq())
+                let rows = match quiet {
+                    true => String::from("[]"),
+                    false => api::rows_json(&rs),
+                };
+                (rows, guard.change_seq())
             }
             Ok(_) => (String::from("[]"), guard.change_seq()),
             Err(e) => {
@@ -320,6 +358,16 @@ fn seed(
     };
     event(out, "seed", &format!("{{\"seq\":{seq},\"rows\":{rows}}}"))?;
     Ok(seq)
+}
+
+/// The last event of a stream whose token's `exp` passed: what a refused
+/// request says, and its status, for a client to fetch a fresh token on.
+pub const EXPIRED: &str = r#"{"error":"the token has expired","status":401}"#;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn change_json(b: &ChangeBatch) -> String {

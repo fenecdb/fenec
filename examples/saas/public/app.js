@@ -157,81 +157,41 @@ async function write(access, statements) {
   }
 }
 
-/** Server-sent events off a fetch body (`EventSource` cannot send a token). */
-async function* events(res) {
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) return;
-      buf += decoder.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf('\n\n')) >= 0) {
-        const block = buf.slice(0, i);
-        buf = buf.slice(i + 2);
-        let name = '';
-        let data = '';
-        for (const line of block.split('\n')) {
-          if (line.startsWith('event:')) name = line.slice(6).trim();
-          else if (line.startsWith('data:')) data += line.slice(5).trim();
-        }
-        if (name) yield { name, data: data ? JSON.parse(data) : null };
-      }
-    }
-  } finally {
-    reader.cancel().catch(() => {});
-  }
-}
-
 /**
  * A subscription to a shape, kept open: its seed and every change after,
- * opened again with backoff when it ends -- a tenant moved to another node
- * ends it -- and with the newest token. fenec-server checks a stream's
- * token when it opens and not after, so the stream is also closed and
- * opened again at every refresh: a team taken away, or a member removed,
- * stops reaching the board within a token's life (README, gaps).
- * `onState` hears 'on' and 'retry'.
+ * through the client's own (`db.subscribe`), which opens a stream that ends
+ * -- a tenant moved to another node ends it -- again with backoff. The
+ * server ends a stream at its token's `exp` with a 401, which the client
+ * hands `onError` and does not retry: here that is a fresh token and the
+ * stream again. It is also opened again at every refresh, a belt: a team
+ * taken away stops reaching the board at the refresh rather than at the
+ * old token's `exp`. `onState` hears 'on' and 'retry'.
  */
-function subscribe(slug, path, onEvent, onState) {
-  const stop = new AbortController();
+function subscribe(slug, collection, shape, onEvent, onState) {
+  let closed = false;
   let current = null;
-  const renewed = () => current?.abort();
-  tokenListeners.add(renewed);
-  stop.signal.addEventListener('abort', () => {
-    tokenListeners.delete(renewed);
-    current?.abort();
-  });
-  (async () => {
-    for (let attempt = 0; !stop.signal.aborted; attempt++) {
-      current = new AbortController();
-      try {
-        const access = await accessFor(slug);
-        if (!access) return;
-        const res = await fetch(`${access.db}${path}`, {
-          headers: { authorization: `Bearer ${access.token}`, accept: 'text/event-stream' },
-          signal: current.signal,
-        });
-        if (!res.ok) throw new Error(`subscription: ${res.status}`);
-        for await (const ev of events(res)) {
-          attempt = 0;
-          onState('on');
-          onEvent(ev);
-        }
-      } catch {
-        if (stop.signal.aborted) return;
-        // Closed for a new token: open again at once.
-        if (current.signal.aborted) {
-          attempt = -1;
-          continue;
-        }
-      }
-      onState('retry');
-      await new Promise((r) => setTimeout(r, Math.min(10_000, 250 * 2 ** attempt)));
-    }
-  })();
-  return () => stop.abort();
+  const open = async () => {
+    current?.();
+    current = null;
+    const access = await accessFor(slug);
+    if (!access || closed) return;
+    current = dbOf(access).subscribe(collection, shape, onEvent, {
+      onState: (s) => onState(s === 'open' ? 'on' : 'retry'),
+      onError: (err) => {
+        if (err?.status !== 401 || closed) return;
+        onState('retry');
+        session.access.delete(slug);
+        setTimeout(open, 250);
+      },
+    });
+  };
+  tokenListeners.add(open);
+  open();
+  return () => {
+    closed = true;
+    tokenListeners.delete(open);
+    current?.();
+  };
 }
 
 // ------------------------------------------------------------------ routes
@@ -592,19 +552,20 @@ async function boardView(slug, ctx, teamKey) {
   // in, whatever the shape asks for.
   const stop = subscribe(
     slug,
-    `/tasks/changes?team=eq.${encodeURIComponent(team.key)}`,
+    'tasks',
+    { team: `eq.${team.key}` },
     (ev) => {
-      if (ev.name === 'seed') {
+      if (ev.type === 'seed') {
         tasks.clear();
-        for (const r of ev.data.rows) tasks.set(r.id, r);
+        for (const r of ev.rows) tasks.set(r.id, r);
         draw();
-      } else if (ev.name === 'change') {
+      } else {
         const changed = [];
-        for (const r of ev.data.puts ?? []) {
+        for (const r of ev.puts) {
           tasks.set(r.id, r);
           changed.push(r.id);
         }
-        for (const id of ev.data.dels ?? []) tasks.delete(id);
+        for (const id of ev.dels) tasks.delete(id);
         draw(changed);
       }
     },
@@ -715,14 +676,15 @@ async function openTask(slug, ctx, id, people, nameOf) {
   };
   const stop = subscribe(
     slug,
-    `/comments/changes?task=eq.${id}`,
+    'comments',
+    { task: `eq.${id}` },
     (ev) => {
-      if (ev.name === 'seed') {
+      if (ev.type === 'seed') {
         comments.clear();
-        for (const r of ev.data.rows) comments.set(r.id, r);
+        for (const r of ev.rows) comments.set(r.id, r);
       } else {
-        for (const r of ev.data.puts ?? []) comments.set(r.id, r);
-        for (const d of ev.data.dels ?? []) comments.delete(d);
+        for (const r of ev.puts) comments.set(r.id, r);
+        for (const d of ev.dels) comments.delete(d);
       }
       drawThread();
     },

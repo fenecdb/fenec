@@ -404,9 +404,18 @@ no counter would leave every replica one change off. The
 history (record kind 8, `History`) moves none, as a graph a server keeps in
 the tail does, and neither is sent. A promotion forks the history, a replica is continued only from a position
 the primary's history passed through and sent an image otherwise, and a
-following database refuses writes (`Error::ReadOnly`, 403). Lag is 0.20 ms
-p50 under `--sync always` and at most 283 ms under `--sync 250`; ten failovers
-under `always` lost no acknowledged write. An archive (`fenec archive`,
+following database refuses writes (`Error::ReadOnly`, 403). A durable
+write is answered once every stream has written it into its socket
+(`Feed::wait_sent` in the `Tee`'s durability, `SENT_WAIT` a second at
+most, a stream that missed it `lagging` and not waited for until it
+catches up): sent after the answer, a write answered in the moment before
+was lost when the primary died -- a node of the SaaS example killed under
+eight writers lost one in 3 of 60 runs on main, none in 120 since -- and
+a socket's bytes reach the replica after the process is killed, though
+not after the machine dies. Lag is 0.04 ms p50 under `--sync always`
+(0.14 before the wait) and at most 283 ms under `--sync 250`, durable
+writes 254 a second against 246; ten failovers under `always` lost no
+acknowledged write. An archive (`fenec archive`,
 `fenec-http/src/archive.rs`) is the same stream written to files, each write
 with the time the primary appended it; `fenec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fenecdb file is exactly
@@ -498,7 +507,22 @@ set writes against the filter, found through a thread-local set by `within()`
 around the execution -- a scoped write executed outside `within` goes
 unchecked. A scoped subscription keeps the ids it sent and reports deletions
 only for those; the unscoped shape's "a changed id that does not match is a
-deletion" would hand every user everyone's ids. The algorithm is the key's,
+deletion" would hand every user everyone's ids. A scoped stream of a shape
+that holds nothing (`where=false`, what `FenecHttp.live` opens) follows the
+token's own filter instead, its ids kept server side and never sent, and a
+write to one, or one leaving, is a change naming no row: ANDed with the
+filter the shape matched nothing and a scoped live query never ran again,
+and told of every write it would have had the moments of other users'. A
+stream is ended at its token's `exp` (`Scope::expires_ms`, the keep-alive
+wait bounded by it) with `event: error` and `{"error":"the token has
+expired","status":401}`, which every client takes as a refused request --
+`FenecHttp.live` and `subscribe` stop with a `FenecError` of status 401,
+the sync layer asks for a token (a scenario), Go's stream ends with an
+`*Error` of 401, .NET's with `Event.Status`: a stream opened two seconds
+before `exp` delivered a change written four after, while the token's `get`
+was 401. A scoped read's poll tag is a digest of its answer (`content_tag`,
+the query run every time): the change counter's tag, and a 304 answered
+unrun, told it when anyone wrote to what it reads. The algorithm is the key's,
 never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
 `RSA` keys (2048 bits up, `crypto::RsaKey`, 64-bit limbs: 166 us a check in
 32-bit ones, 38 now) for an identity provider's RS256, a `kid` picking the
@@ -550,7 +574,14 @@ holding it; one naming none is 403 unless `--jwt-unbound-tenants`. It is
 asked once in `route_tenant`, before the tenant is looked up -- so a
 refusal says nothing of which tenants exist -- and every route below the
 prefix passes there: a new one cannot skip it. The router forwards
-`Authorization` and holds no keys, so the node enforces it. A tenant's
+`Authorization` and holds no keys, so the node enforces it. A tenant is
+created with its schema through the router (`PUT /_shard/tenants/<t>
+{schema}`, FenecQL text read before anything is placed, applied on the
+node by `POST /_admin/tenants/<t>/schema` with the admin token the router
+holds, once the lease names the tenant, and the tenant taken back off the
+node and the directory when refused): applying it took the nodes'
+`--http-token`, which reaches every tenant, so the app creating tenants
+held it. A tenant's
 database installs the `Check` hook as a single one does
 (`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
 and a scoped write to a tenant went unchecked.
@@ -1340,6 +1371,22 @@ thread-local set as the connection starts, a connection being a thread. A
 refusal waits 100 ms, doubled for each more from its address within a
 minute, 5 s at most; a good token clears the count, asking the table only
 when an address has one (`FAILING`), so the hooks cost a request 12 ns.
+Behind `fenec-shard` every request came from the router's address -- four
+forged tokens made a fifth client's expired one wait 1.6 s, and any good
+token cleared the attacker's count -- so the router waits out a refusal
+itself, by its client's address (`forward` calls `audit::http`), and a node
+waits none for a request bearing `Fenec-Router: <address> <mark>`, the mark
+16 bytes of an HMAC of its admin token (`audit::router_mark`,
+`Config::router_mark`), the address the log's `peer` (the router `via`):
+the router drops the header from what a client sends, and a node believes
+it from no one else. At the router the count is one across every node.
+As two headers and the whole HMAC it added 2.5 us to the 22 a request
+through the router took; as one, with the forwarded headers borrowed
+rather than cloned and written without `format!` (`Pool::send`), 0.85 us
+on average over four turns against main, inside its spread of 21.2-23.0. A browser's preflight is
+answered 204 before any token is asked, where `--http-cors` lets its origin
+in (`cors_allows`): authenticated first, it was 401 and a page on another
+origin could send nothing.
 Reads and writes are no events. A test that opens the log is a `[[test]]`
 of its own: the log and the counts are the process's.
 
@@ -1468,7 +1515,13 @@ holds none: the query is sent with `If-None-Match` and the server answers
 `unchanged` in `fenec-http`, the change ring's
 `changed_collections_since`; a read of rows that expire, calling `now()`
 or holding an inner `get` is never tagged), 54 us against 95 for a page
-of 24 run. `db.batch([...], { idempotencyKey })` posts `/batch` -- a
+of 24 run. `db.subscribe(collection, shape, onEvent, { onError, onState })`
+keeps a shape over a server -- a seed, then each change -- opened again with
+backoff and seeding again, stopped by a 401; `sseEvents` is exported with
+it, the types beside (`ShapeFilter`, `ShapeEvent`, `SubscribeOptions`; a
+sync shape was `Shape` already), and an app bundling `connect`, rows and
+`live` went 7 905 -> 8 277 bytes brotli, `FenecHttp` one class a bundler
+keeps whole. `db.batch([...], { idempotencyKey })` posts `/batch` -- a
 builder query, a text or `[text, params]` a statement -- and a stopped one
 throws `FenecError` with `at`, `status` and `completed`; `run` takes a key,
 `withIdempotencyKey` makes a copy sharing `seq`, and every SDK has the same
@@ -2370,7 +2423,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 59 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 60 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,
@@ -2559,6 +2612,12 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   counts, `/_metrics` or the statements', is a `[[test]]` of its own:
   beside the others it would count theirs. Measurement programs are
   `crates/fenec-core/examples/` and are wired to `make` targets, not to CI.
+- The wait after a refusal is the process's, so the servers of a test binary
+  that holds many tests ask with none (`audit::set_delay(0)` in their
+  helpers): every test asks from 127.0.0.1, and their refusals together
+  held one test's 401 past its read timeout. `fenec-http`'s
+  `tests/audit.rs` and `fenec-shard`'s `tests/refusals.rs` hold the wait,
+  each a `[[test]]` of its own.
 - A test that fails and passes on a rerun is a bug, the test's or the code's:
   it is reproduced -- in a loop, under load (`docker run --cpus=3` beside
   busy loops is GitHub's three-core runner) -- and fixed, never retried

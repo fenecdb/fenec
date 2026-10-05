@@ -405,6 +405,16 @@ impl Run {
                 let name = text(member(step, "do"));
                 self.event(&c, &name, &obj(data));
             }
+            "error" => {
+                let c = shape_collection(self);
+                let mut data = Vec::new();
+                for k in ["error", "status"] {
+                    if let Some(v) = member(step, k) {
+                        data.push((k, v.clone()));
+                    }
+                }
+                self.event(&c, "error", &obj(data));
+            }
             "drop" => {
                 let ids: Vec<u64> = self.streams.drain(..).map(|s| s.0).collect();
                 for id in ids {

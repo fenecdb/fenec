@@ -157,6 +157,7 @@ image:</p>
 <tr><td><code>GET /_admin/tenants</code></td><td>names on disk</td></tr>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;</code></td><td>create an empty tenant (409 if it exists)</td></tr>
 <tr><td><code>DELETE /_admin/tenants/&lt;t&gt;</code></td><td>end its streams, close it, remove the file</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/schema</code></td><td>a schema description, applied as <code>/_schema/apply</code> applies it: what the router sends for a tenant created with a schema</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/freeze</code></td><td>refuse writes and wait for the ones in flight</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/thaw</code></td><td>accept writes again</td></tr>
 <tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
@@ -207,7 +208,7 @@ does not return them.</p>
 <tr><td><code>PUT /_shard/nodes/&lt;n&gt;</code></td><td><code>{addr, token}</code>; checked against the node before it is recorded</td></tr>
 <tr><td><code>DELETE /_shard/nodes/&lt;n&gt;</code></td><td>refused while the node holds a tenant</td></tr>
 <tr><td><code>GET /_shard/tenants</code></td><td>name, node and state of each tenant</td></tr>
-<tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{node}</code> to choose, otherwise the node with the fewest bytes on disk</td></tr>
+<tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{node}</code> to choose, otherwise the node with the fewest bytes on disk; <code>{schema}</code>, FenecQL <code>create collection</code> text, applied there before the tenant is answered (below)</td></tr>
 <tr><td><code>DELETE /_shard/tenants/&lt;t&gt;</code></td><td>delete on the node, then forget</td></tr>
 <tr><td><code>POST /_shard/tenants/&lt;t&gt;/move</code></td><td><code>{to}</code>; see below</td></tr>
 <tr><td><code>GET /_metrics</code></td><td>what the router answered and forwarded, the nodes' time and the ones it could not reach, and its moves, in Prometheus's text format (<a href="monitoring.html#router">Monitoring</a>)</td></tr>
@@ -218,6 +219,31 @@ does not return them.</p>
 <p>Placement goes by disk rather than memory: memory counts only the open
 tenants, and which ones are open depends on who asked last.</p>
 </details>
+
+<h2 id="schema">A tenant with its schema</h2>
+
+<p>A tenant is created empty. Applying its schema afterwards took the nodes'
+data token, which reaches every tenant on every node, so the app that
+creates tenants -- one an organisation signs up -- held it. Hand the schema
+to the router instead, and the app needs the router's token alone:</p>
+
+<pre data-lang="bash">curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root' \
+     -d '{"schema":"create collection notes (owner text @hash, title text)"}'
+# {"tenant":"acme","node":"n1","schema":{"kind":"schema","applied":true,...}}
+</pre>
+
+<ul>
+  <li><b>Applied on the node</b> with the admin token the router holds for
+    it (<code>POST /_admin/tenants/&lt;t&gt;/schema</code>), as
+    <code>/_schema/apply</code> applies a description: one block, synced as
+    a write is.</li>
+  <li><b>With its schema or not at all:</b> a schema that does not read is
+    refused (400) before anything is placed, and one the node refuses takes
+    the tenant back off the node and out of the directory.</li>
+  <li><b>Under leases</b> it is applied once the node's lease names the
+    tenant, since the node takes no write before; a replica follows it as it
+    follows every write.</li>
+</ul>
 
 <h2>Moving a tenant</h2>
 

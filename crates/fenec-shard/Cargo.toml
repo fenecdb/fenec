@@ -27,3 +27,8 @@ path = "tests/all.rs"
 [[test]]
 name = "metrics"
 path = "tests/metrics.rs"
+
+# Apart: the wait after a refusal is counted by the process.
+[[test]]
+name = "refusals"
+path = "tests/refusals.rs"

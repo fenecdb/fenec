@@ -373,6 +373,25 @@ public sealed class ClientTests(Servers servers)
         Assert.Equal((403, "forbidden"), (e.Status, e.Code));
     }
 
+    // The server ends a scoped stream at its token's exp: the last event is an error of status 401, the
+    // refusal the token's next request would get, for the caller to subscribe again with a fresh one.
+    [Fact]
+    public async Task AScopedStreamEndsAtItsTokensExp()
+    {
+        using var db = Root();
+        try { await db.ExecAsync("create collection notes (title text, owner text)"); }
+        catch (FenecException taken) when (taken.Status == 409) { } // made by a test before
+        var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 2;
+        using var alice = new FenecClient(servers.Primary,
+            new FenecClientOptions { Token = servers.Mint($"{{\"sub\":\"alice\",\"exp\":{exp}}}") });
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var events = new List<Event>();
+        await foreach (var ev in alice.SubscribeAsync("notes", null, cts.Token)) events.Add(ev);
+        Assert.Equal("seed", events[0].Type);
+        Assert.Equal(("error", 401), (events[^1].Type, events[^1].Status));
+        Assert.Contains("expired", events[^1].Error);
+    }
+
     [Fact]
     public async Task Health()
     {

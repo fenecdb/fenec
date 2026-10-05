@@ -101,6 +101,10 @@ pub struct Router {
     /// `upstream_timeout`, so a node that does not answer cannot hold up
     /// the others' renewals until theirs lapse too.
     leases: Option<(lease::Leases, Pool)>,
+    /// Each node's mark for what is forwarded to it
+    /// (`fenec_http::audit::router_mark`), by its admin token: an HMAC
+    /// worked out once, not a request.
+    marks: Mutex<std::collections::HashMap<String, Arc<str>>>,
 }
 
 /// An operation failure, shaped as an HTTP status and message.
@@ -125,6 +129,7 @@ impl Router {
             repl,
             pool: Pool::new(cfg.upstream_timeout),
             busy: Mutex::new(HashSet::new()),
+            marks: Mutex::new(Default::default()),
             live: AtomicUsize::new(0),
             leases: cfg
                 .auto_failover
@@ -314,6 +319,18 @@ impl Router {
         }
     }
 
+    /// The mark of what is forwarded to the node whose admin token is
+    /// `token`.
+    fn mark(&self, token: &str) -> Arc<str> {
+        let mut marks = self.marks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = marks.get(token) {
+            return Arc::clone(m);
+        }
+        let m: Arc<str> = fenec_http::audit::router_mark(token).into();
+        marks.insert(token.to_string(), Arc::clone(&m));
+        m
+    }
+
     fn read_dir(&self) -> std::sync::RwLockReadGuard<'_, Directory> {
         self.dir.read().unwrap_or_else(|e| e.into_inner())
     }
@@ -361,7 +378,7 @@ impl Router {
                 }
             }
             let keep = match req.segments().first() {
-                Some(&"t") => self.forward(&req, &mut out, arrived),
+                Some(&"t") => self.forward(&req, &mut out, arrived, peer),
                 Some(&"_replication") => {
                     let Some(repl) = self.repl.clone() else {
                         let _ = Response::error(404, "this router has no --replication-token")
@@ -403,7 +420,13 @@ impl Router {
 
     /// Forwards one request and copies the answer back, and counts it.
     /// Returns whether the client connection can carry another request.
-    fn forward(&self, req: &Request, out: &mut TcpStream, arrived: Instant) -> bool {
+    fn forward(
+        &self,
+        req: &Request,
+        out: &mut TcpStream,
+        arrived: Instant,
+        peer: Option<std::net::SocketAddr>,
+    ) -> bool {
         let head_only = req.method == Method::Head;
         let reply = |out: &mut TcpStream, resp: Response| {
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
@@ -414,9 +437,10 @@ impl Router {
         let tenant = segs.get(1).copied().unwrap_or("");
         let addr = {
             let dir = self.read_dir();
-            let node = dir
-                .placement(tenant)
-                .and_then(|p| dir.node(&p.node).map(|n| (p.node.clone(), n.addr.clone())));
+            let node = dir.placement(tenant).and_then(|p| {
+                dir.node(&p.node)
+                    .map(|n| (p.node.clone(), n.addr.clone(), self.mark(&n.token)))
+            });
             match node {
                 Some(n) => n,
                 // A standby whose maps have not come from the primary yet
@@ -437,14 +461,28 @@ impl Router {
                 }
             }
         };
-        let (node, addr) = addr;
+        let (node, addr, mark) = addr;
 
-        let headers: Vec<(String, String)> = req
+        // The node believes the client's address from the router alone:
+        // what a client sent under this name is dropped, and the router's
+        // own put in its place.
+        // Borrowed, not cloned: a request's headers were copied into
+        // `String`s here and formatted one by one into the head, which with
+        // the router's own header made a request through it 1.5 us slower.
+        let named = peer.map(|p| format!("{} {mark}", p.ip()));
+        let mut headers: Vec<(&str, &str)> = req
             .headers
             .iter()
-            .filter(|(k, _)| !hop_by_hop(k) && !k.eq_ignore_ascii_case("host"))
-            .cloned()
+            .filter(|(k, _)| {
+                !hop_by_hop(k)
+                    && !k.eq_ignore_ascii_case("host")
+                    && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
+            })
+            .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
+        if let Some(named) = &named {
+            headers.push((fenec_http::audit::ROUTER_HEADER, named));
+        }
         let sent = Instant::now();
         let answer =
             match self
@@ -465,6 +503,10 @@ impl Router {
             };
 
         let status = answer.status;
+        // A refusal waits here, by the client's address, before it is
+        // answered -- the node waits none for what the router forwards --
+        // and a token taken starts that address's count again, no other.
+        fenec_http::audit::http(req, status, peer);
         let mut head = format!("HTTP/1.1 {status} {}\r\n", http::reason(status));
         for (k, v) in &answer.headers {
             if !hop_by_hop(k) && !k.eq_ignore_ascii_case("content-length") {
@@ -526,7 +568,9 @@ impl Router {
     /// PUT    /_shard/nodes/<n>   {addr, token} add or change a node
     /// DELETE /_shard/nodes/<n>                 refused while it holds tenants
     /// GET    /_shard/tenants                   [{name, node, state}]
-    /// PUT    /_shard/tenants/<t> [{node}]      place and create; least disk wins
+    /// PUT    /_shard/tenants/<t> [{node, schema}]  place and create; least disk
+    ///                                       wins; `schema`, FenecQL text, applied
+    ///                                       there before the tenant is answered
     /// DELETE /_shard/tenants/<t>               delete on the node, then forget
     /// POST   /_shard/tenants/<t>/move {to}     move to another node
     /// PUT    /_shard/nodes/<n> {addr, token, standby}  standby: the node
@@ -568,7 +612,9 @@ impl Router {
             (Method::Post, ["nodes", n, "failover"]) => self.failover(n),
             (Method::Post, ["replicas"]) => Ok(self.repair()),
             (Method::Get, ["tenants"]) => Ok(self.list_tenants()),
-            (Method::Put, ["tenants", t]) => self.create(t, field(&body, "node")),
+            (Method::Put, ["tenants", t]) => {
+                self.create(t, field(&body, "node"), field(&body, "schema"))
+            }
             (Method::Delete, ["tenants", t]) => self.delete(t),
             (Method::Post, ["tenants", t, "move"]) => match field(&body, "to") {
                 Some(to) => self.relocate(t, to),
@@ -1272,8 +1318,14 @@ impl Router {
             .ok_or_else(|| Fail(404, format!("no node `{name}`")))
     }
 
-    fn create(&self, tenant: &str, node: Option<&str>) -> Outcome<Response> {
+    fn create(&self, tenant: &str, node: Option<&str>, schema: Option<&str>) -> Outcome<Response> {
         fenec_http::tenants::check_name(tenant).map_err(|r| Fail(r.0, r.1))?;
+        // Read before anything is placed: a schema that does not read
+        // leaves no tenant behind.
+        let schema = schema
+            .map(fenec_http::admin::schema_description)
+            .transpose()
+            .map_err(|e| Fail(400, e))?;
         let _claim = self.claim(tenant)?;
         if self.read_dir().placement(tenant).is_some() {
             return Err(Fail(409, format!("tenant `{tenant}` already exists")));
@@ -1296,6 +1348,43 @@ impl Router {
             return Err(internal(e));
         }
         self.lease_now(&name);
+        // The schema, applied on the node with its admin token once the
+        // lease names the tenant, which a write needs: the app that creates
+        // tenants holds the router's token alone, where it held the nodes'
+        // data token, which reaches every tenant, to apply it itself. A
+        // schema refused takes the tenant back off the node and out of the
+        // directory: a tenant is there with its schema or not at all.
+        let applied = match &schema {
+            None => None,
+            Some(d) => {
+                let target = format!("/_admin/tenants/{tenant}/schema");
+                let got = self
+                    .pool
+                    .call(&n.addr, "POST", &target, &n.token, d.as_bytes());
+                match got {
+                    Ok((200, body)) => Some(String::from_utf8_lossy(&body).into_owned()),
+                    other => {
+                        let _ = self.pool.call(
+                            &n.addr,
+                            "DELETE",
+                            &format!("/_admin/tenants/{tenant}"),
+                            &n.token,
+                            b"",
+                        );
+                        if let Err(e) = self.write_dir().remove_tenant(tenant) {
+                            fenec_http::log!("tenant `{tenant}` stayed in the directory: {e}");
+                        }
+                        self.lease_now(&name);
+                        return Err(match other {
+                            Ok((status, body)) => {
+                                Fail(status, String::from_utf8_lossy(&body).into_owned())
+                            }
+                            Err(e) => Fail(502, format!("node `{name}` did not answer: {e}")),
+                        });
+                    }
+                }
+            }
+        };
         // The replica follows into a file of its own, so the tenant is
         // created on the standby as well.
         let warning = self.on_standby(&name, "PUT", &target);
@@ -1309,9 +1398,13 @@ impl Router {
         Ok(Response::json(
             201,
             format!(
-                "{{\"tenant\":{},\"node\":{}{}{}}}",
+                "{{\"tenant\":{},\"node\":{}{}{}{}}}",
                 quote(tenant),
                 quote(&name),
+                match &applied {
+                    None => String::new(),
+                    Some(o) => format!(",\"schema\":{o}"),
+                },
                 match &warning {
                     None => String::new(),
                     Some(w) => format!(",\"replica\":{}", quote(w)),

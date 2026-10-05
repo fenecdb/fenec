@@ -1291,6 +1291,15 @@ impl Sync {
             if self.shapes[i].stream != Some(id) {
                 break;
             }
+            // The server ends a stream at its token's `exp` with a 401: the
+            // token is refused as a request's would be, so a fresh one is
+            // wanted before the stream opens again -- retried with the same
+            // token, it was refused at every attempt.
+            if ev.name == "error" && stream_status(&ev.data) == Some(401) {
+                self.drop_stream(i, true);
+                self.want_token();
+                return;
+            }
             let r = match ev.name.as_str() {
                 "seed" => self.seed(db, i, &ev.data),
                 "change" if self.shapes[i].seeded => self.change(db, i, &ev.data),
@@ -2037,6 +2046,12 @@ fn message(status: u16, body: &str) -> String {
         (None, 0) => "the server could not be reached".into(),
         (None, s) => format!("HTTP {s}: {}", body.chars().take(200).collect::<String>()),
     }
+}
+
+/// The `status` a stream's `error` event names, where it names one.
+fn stream_status(data: &str) -> Option<u16> {
+    let m = members(data).ok()?;
+    field(&m, "status")?.trim().parse().ok()
 }
 
 /// A statement's filter, for the rows it reaches.

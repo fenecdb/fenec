@@ -255,6 +255,12 @@ class Run {
         this.event(st.shape ?? 0, st.do, data);
         break;
       }
+      case 'error': {
+        const data = { error: st.error };
+        if ('status' in st) data.status = st.status;
+        this.event(st.shape ?? 0, 'error', data);
+        break;
+      }
       case 'drop':
         for (const s of this.open.splice(0)) s.ctl.error(new TypeError('connection reset'));
         break;

@@ -19,7 +19,7 @@ the page does.</p>
 <table>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
-<tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">7 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
+<tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">8 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
 <tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">195 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
@@ -45,7 +45,7 @@ invariants by 16 clients, a crash under <code>kill -9</code> and its
 security tests.</p>
 
 <p>Beside a module the page loads <code>fenec.js</code> and the two modules it
-imports, 42 KB brotli as they are served with no build step; a bundler keeps
+imports, 43 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -76,7 +76,7 @@ re-exports the builder (<code>builder.js</code>) and the HTTP client
 its glue, persistence and the sync layer. It reaches nothing else — no
 WebAssembly, no IndexedDB, no files — and a test fails if it does. An app
 that calls <code>connect</code> and reads a builder query's rows bundles to
-7 KB brotli through it and to 10 KB through <code>@fenecdb/web</code>,
+8 KB brotli through it and to 10 KB through <code>@fenecdb/web</code>,
 whose <code>Fenec</code> class and its glue a bundler cannot drop (esbuild,
 minified): 2.5 KB of JavaScript, and no <code>.wasm</code> either way.</p>
 
@@ -87,8 +87,45 @@ the query again on the server. The first rows wait for every stream's seed,
 a burst of writes runs it once after the run under way, and a stream that
 ends is opened again, its seed running the query, since writes may have
 come between. <code>useLiveQuery</code> takes the endpoint as it takes a
-replica.</p>
+replica. Under a scoped token the server tells such a stream of the writes
+to rows the token may read, and of no other (<a href="/docs/http#subscriptions">HTTP</a>).
+A token refused, or lapsed under an open stream -- the server ends a stream
+at its token's <code>exp</code> -- is a <code>FenecError</code> of status
+401 to <code>onError</code>, and the live query stops there, for the app to
+open it again with a fresh token.</p>
 </details>
+
+<h3 id="subscribe">A shape's rows, as they change</h3>
+
+<p><code>db.subscribe</code> keeps a shape -- the rows of a collection a
+filter selects -- rather than a query's answer: a <code>seed</code> with the
+whole shape, then each <code>change</code>, the rows written into it and the
+ids that left it. The shape is the REST surface's: a field's filter,
+<code>where</code> and <code>select</code>.</p>
+
+<pre data-lang="ts">import { connect } from '@fenecdb/web/client';
+
+const db = connect('https://db.example.com/t/acme', { token: 'a token' });
+const tasks = new Map&lt;number, unknown&gt;();
+const stop = db.subscribe('tasks', { team: 'eq.design', select: ['title', 'status'] }, (ev) =&gt; {
+  if (ev.type === 'seed') {
+    tasks.clear();
+    for (const r of ev.rows) tasks.set(r.id, r);
+  } else {
+    for (const r of ev.puts) tasks.set(r.id, r);
+    for (const id of ev.dels) tasks.delete(id);
+  }
+}, {
+  onError: (e) =&gt; console.warn(e),          // status 401: a fresh token, then subscribe again
+  onState: (s) =&gt; console.log(s),           // 'open' at each seed, 'retry' while it waits
+});
+</pre>
+
+<p>A stream that ends -- a tenant moved, the network -- is opened again
+(250 ms, doubling to 15 s) and seeds again; one refused or ended for its
+token is not. <code>sseEvents(res)</code>, the reader under it, takes any
+<code>fetch</code> answer of server-sent events: <code>EventSource</code>
+cannot send <code>Authorization</code>.</p>
 
 <h3 id="batch">Batches, retries and polling</h3>
 

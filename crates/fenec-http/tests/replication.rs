@@ -703,3 +703,103 @@ fn a_primary_and_its_replica_compact_on_their_own_while_writes_go_on() {
     assert_eq!(r.follower.as_ref().unwrap().images(), 0, "{images} before");
     assert_eq!(rows(&r, "get items"), rows(&p, "get items"));
 }
+
+/// The writes a raw replication stream has been sent: the last one, after
+/// reading whatever the socket holds now and waiting for nothing more.
+struct RawStream {
+    s: TcpStream,
+    buf: Vec<u8>,
+    head: bool,
+    last: u64,
+}
+
+impl RawStream {
+    fn open(port: u16) -> RawStream {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            s,
+            "GET /_replication?since=0 HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
+        )
+        .unwrap();
+        RawStream {
+            s,
+            buf: Vec::new(),
+            head: false,
+            last: 0,
+        }
+    }
+
+    /// Reads what has arrived, blocking for none of it.
+    fn drain(&mut self) {
+        self.s.set_nonblocking(true).unwrap();
+        let mut chunk = [0u8; 1 << 16];
+        loop {
+            match self.s.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        self.s.set_nonblocking(false).unwrap();
+        if !self.head {
+            let Some(end) = self.buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                return;
+            };
+            assert!(self.buf.starts_with(b"HTTP/1.1 200"));
+            self.buf.drain(..end + 4);
+            self.head = true;
+        }
+        while self.buf.len() >= 9 {
+            let len = u64::from_le_bytes(self.buf[1..9].try_into().unwrap()) as usize;
+            if self.buf.len() < 9 + len {
+                break;
+            }
+            let at = |i: usize| u64::from_le_bytes(self.buf[9 + i..17 + i].try_into().unwrap());
+            match self.buf[0] {
+                // [version][image][seq]...
+                b'H' => self.last = self.last.max(at(2)),
+                // [first][n]...
+                b'W' => self.last = self.last.max(at(0) + at(8) - 1),
+                _ => {}
+            }
+            self.buf.drain(..9 + len);
+        }
+    }
+}
+
+/// A durable write is answered once the stream to each replica has sent it:
+/// sent after the answer, a write the client was told about was lost when
+/// the primary died between the two, and its replica was promoted without
+/// it (Trellis's node killed under eight writers, 3 runs in 60). Bytes in
+/// the stream's socket reach the replica after the process is gone, so each
+/// answered write must be in the stream already, with nothing waited for.
+#[test]
+fn a_durable_write_is_answered_once_its_replicas_streams_have_sent_it() {
+    let d = dir("sent-first");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    assert_eq!(query(&p, SCHEMA).0, 200);
+    let mut stream = RawStream::open(p.port);
+    // Once the stream has its first write it is sending, and every write
+    // after that waits for it.
+    write_some(&p, 0, 1);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stream.last < seq(&p) {
+        assert!(
+            Instant::now() < deadline,
+            "the stream never sent the first write"
+        );
+        stream.drain();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    for i in 1..1000 {
+        write_some(&p, i, 1);
+        let answered = seq(&p);
+        stream.drain();
+        assert!(
+            stream.last >= answered,
+            "write {answered} was answered before its stream sent it (sent {})",
+            stream.last
+        );
+    }
+}

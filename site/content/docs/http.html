@@ -451,6 +451,15 @@ memory and a thread each, and every write wakes every stream, which reads
 what it changed: a write's p50 went from 0.26 ms with none to 0.94 with 60
 and 3.1 with 500. A page thousands view should not hold one a viewer; it
 polls (below).</p>
+
+<p>Under a scoped token, a stream of a shape that holds nothing
+(<code>where=false</code>) is told of the writes to rows the token may
+read, and of nothing else: the server follows the token's own filter, keeps
+the ids it selects and sends none, and a write to one of them, or one of
+them leaving the token's rows, is a <code>change</code> holding no rows.
+ANDed with the token's filter, the shape matched nothing and
+<code>FenecHttp.live</code> never ran again; told of every write, the
+stream would hand the token the moments of other users' writes.</p>
 </details>
 
 <h2 id="polling">Polling a read</h2>
@@ -475,6 +484,12 @@ curl -si http://127.0.0.1:8080/query -H 'If-None-Match: "48211"' -d '...the same
   <li><b>Untagged</b>, and run each time: a read of a collection whose rows
     expire (<code>@ttl</code>), one calling <code>now()</code>, one holding an
     inner <code>get</code> — answers that move with no write.</li>
+  <li><b>A scoped token's tag is its answer's</b> (<code>"c…"</code>, a
+    digest of the rows): its query runs every time and is answered 304 when
+    the rows are the ones it had. Tagged by the change counter, 304 against
+    200 -- and a 304's speed -- told it when anyone wrote to what it reads,
+    other users' rows among them, and the tag how many writes the database
+    had taken.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -612,7 +627,7 @@ of it on an open network.</p>
 <table>
 <tbody>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time</td></tr>
-<tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all</td></tr>
+<tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all. A browser&rsquo;s preflight (<code>OPTIONS</code>) from that origin, or any with <code>*</code>, is answered 204 before a token is asked for -- the browser sends none with it -- on a single database and under <code>/t/&lt;tenant&gt;/</code>, through the router too</td></tr>
 <tr><td><code>--http-read-only</code></td><td>write endpoints return 403; <code>fenec-server</code>'s own path is unaffected</td></tr>
 <tr><td>a replica</td><td>every write returns 403, whatever the flags: its writes come from its primary</td></tr>
 <tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
@@ -781,7 +796,18 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     gives claims naming no <code>exp</code> one an hour away. A rule with <code>for</code> applies
     to tokens whose <code>role</code> claim names that role, or lists it; rules on one
     collection widen each other; a rule whose filter names a claim the token
-    lacks does not apply. A subscription is checked when it opens.</li>
+    lacks does not apply. A subscription is checked when it opens, and
+    ended at its token's <code>exp</code> with
+    <code>event: error</code> and
+    <code>{"error":"the token has expired","status":401}</code>: the
+    client takes it as a refused request, fetches a fresh token and opens
+    the stream again (<code>FenecHttp.live</code>, <code>subscribe</code>,
+    the sync layer, Go's <code>*Error</code> and .NET's
+    <code>Event.Status</code>). Without it a stream outlived its token, and
+    a member taken off a team heard the team until the client went away.
+    No other request is held open past its token: a read sent with
+    <code>Fenec-After</code> is checked again once its wait ends, and
+    <code>/_changes</code> takes no scoped token.</li>
   <li><b>Refusals</b> tell a scoped token only what it may read: a
     <code>@unique</code> clash (409) names the field, not the document
     holding the value nor the value, since that row is another user's.</li>

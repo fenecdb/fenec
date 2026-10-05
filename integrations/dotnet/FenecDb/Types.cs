@@ -75,6 +75,10 @@ public sealed record Event(
     bool Schema,
     string? Error)
 {
+    /// <summary>An <c>error</c> event's status, where the server gave one: 401 when it ended the stream at its
+    /// token's <c>exp</c>, for the caller to subscribe again with a fresh token.</summary>
+    public int? Status { get; init; }
+
     internal static Event Failed(string error) => new("error", 0, [], [], [], false, error);
 
     internal static Event Of(string name, string data)
@@ -84,7 +88,10 @@ public sealed record Event(
             using var doc = JsonDocument.Parse(data);
             var d = doc.RootElement;
             if (name == "error")
-                return Failed(d.TryGetProperty("error", out var e) ? e.GetString() ?? data : data);
+                return Failed(d.TryGetProperty("error", out var e) ? e.GetString() ?? data : data) with
+                {
+                    Status = d.TryGetProperty("status", out var st) && st.TryGetInt32(out var n) ? n : null,
+                };
             return new Event(
                 name,
                 d.TryGetProperty("seq", out var s) ? s.GetInt64() : 0,

@@ -227,9 +227,19 @@ minute waits <code>--auth-delay</code> (100 ms by default). Each further
 failure from that address doubles the wait, up to 5 s. This applies to every
 401, logged or not. A guessing client gets about one try every five seconds
 per address. A request with a good token waits for nothing, and clears its
-address's count. Behind a reverse proxy every client has the proxy's
-address, so the proxy's own rate limit is the one that counts there.
-<code>--auth-delay 0</code> turns the wait off.</p>
+address's count. Behind <code>fenec-shard</code> the router waits out a
+refusal itself, keyed by its client's address, and the node waits none for
+what the router forwards: counted at the node, every client had the
+router's address, four forged tokens in a row made a fifth client's expired
+one wait 1.6 s, and any good token from anyone cleared the attacker's
+count. The node knows a forwarded request by a mark the router derives
+from the node's <code>--admin-token</code>, sent beside the client's address
+(<code>Fenec-Router: &lt;address&gt; &lt;mark&gt;</code>); the router drops
+the header from what a client sends, and a node believes it from no one
+else. Its audit log names the client as <code>peer</code> and the router as
+<code>via</code>. Behind another reverse proxy every client has the
+proxy's address, so the proxy's own rate limit is the one that counts
+there. <code>--auth-delay 0</code> turns the wait off.</p>
 </details>
 
 <h2 id="router">The router</h2>
