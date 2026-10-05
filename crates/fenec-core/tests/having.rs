@@ -57,6 +57,11 @@ fn having_keeps_the_groups_it_holds_for_and_count_counts_them() {
             vec![Value::Text("u4".into()), Value::Int(2), Value::Int(6)],
         ]
     );
+    // Those who started at all: a null is not a value.
+    assert_eq!(
+        rows(&db, &format!("{firsts} having a != null count")),
+        [vec![Value::Int(4)]]
+    );
     // The funnel's last step in one statement: one row, not one a visitor.
     assert_eq!(
         rows(&db, &format!("{firsts} having b >= a count")),
