@@ -1134,6 +1134,31 @@ export class Query {
     return [`set ${this.#s.collection} ${body}${where}${requireClause(opts)}`, params];
   }
 
+  /**
+   * The upsert's text, `put ... if absent else set {patch}`: a document
+   * whose id or first `@unique` value a row holds sets that row by the
+   * patch, every other one is inserted. The patch is an update's: a value
+   * may be `inc(n)` or `expr(text, ...params)`, and in an expression
+   * `new.f` reads the document's own `f` -- so a counter is one statement,
+   * not a read, a choice and a write that two clients can interleave:
+   *
+   *   hits.upsert({ key, n: 1 }, { n: expr('n + new.n') })
+   *   hits.upsert({ key, n: 1 }, { n: inc(1) })
+   *
+   * The documents' parameters are numbered first, then the patch's.
+   */
+  toUpsert(docs, patch, opts = {}) {
+    this.#assertPlain('upsert');
+    const list = Array.isArray(docs) ? docs : [docs];
+    if (list.length === 0) throw new FenecError('cannot write an empty document list');
+    const params = [];
+    const bind = binder(params);
+    const body = list.map((d) => renderDoc(d, bind, 'insert')).join(', ');
+    const set = renderDoc(patch, bind, 'update');
+    const required = requireClause(opts);
+    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`} if absent else set ${set}${required}`, params];
+  }
+
   /** The `del` text. */
   toDelete(opts = {}) {
     this.#assertPlain('delete');
@@ -1151,6 +1176,17 @@ export class Query {
     const list = Array.isArray(docs) ? docs : [docs];
     if (list.length === 0) return 0;
     return (await this.#exec(...this.toInsert(list, opts))).count ?? 0;
+  }
+
+  /**
+   * `put ... if absent else set` -- a single document or an array, each
+   * inserted or, where a row holds its id or `@unique` value, that row set
+   * by the patch. Returns: rows set and made together.
+   */
+  async upsert(docs, patch, opts = {}) {
+    const list = Array.isArray(docs) ? docs : [docs];
+    if (list.length === 0) return 0;
+    return (await this.#exec(...this.toUpsert(list, patch, opts))).count ?? 0;
   }
 
   /** `set` -- updates the rows matching the filter. Returns: rows affected. */
@@ -1177,8 +1213,8 @@ export class Query {
     // out, `.lookup(...).delete()` deleted every parent it filtered.
     if (this.#s.lookups.length) throw new FenecError(`${verb} cannot be used with \`lookup\``);
     if (this.#s.facets.length) throw new FenecError(`${verb} cannot be used with \`facet\``);
-    if (verb === 'insert' && this.#s.cond.length) {
-      throw new FenecError('insert cannot be used with `where`');
+    if ((verb === 'insert' || verb === 'upsert') && this.#s.cond.length) {
+      throw new FenecError(`${verb} cannot be used with \`where\``);
     }
   }
 

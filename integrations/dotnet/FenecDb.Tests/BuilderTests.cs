@@ -176,6 +176,7 @@ public sealed class BuilderTests(Servers servers)
                     "toFenecQL" => q.ToFenecQL(),
                     "toInsert" => q.ToInsert(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
                     "toUpdate" => q.ToUpdate(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "toUpsert" => q.ToUpsert(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require"))),
                     "toDelete" => q.ToDelete(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require"))),
                     _ => null,
                 };
@@ -194,6 +195,7 @@ public sealed class BuilderTests(Servers servers)
                     "explain" => q.ExplainAsync(),
                     "insert" => q.InsertAsync(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
                     "update" => q.UpdateAsync(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "upsert" => q.UpsertAsync(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require"))),
                     "delete" => q.DeleteAsync(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require"))),
                     _ => null,
                 };

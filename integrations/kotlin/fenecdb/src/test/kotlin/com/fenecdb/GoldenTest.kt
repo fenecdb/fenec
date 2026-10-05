@@ -125,6 +125,7 @@ class GoldenTest {
                         "toFenecQL" -> q.toFenecQL()
                         "toInsert" -> q.toInsert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1))
                         "toUpdate" -> q.toUpdate(value(a[0]), all(1), require(1))
+                        "toUpsert" -> q.toUpsert(value(a[0]), value(a[1]), require(2))
                         "toDelete" -> q.toDelete(all(0), require(0))
                         "rows" -> null.also { q.rows() }
                         "first" -> null.also { q.first() }
@@ -132,6 +133,7 @@ class GoldenTest {
                         "explain" -> null.also { q.explain() }
                         "insert" -> null.also { q.insert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1)) }
                         "update" -> null.also { q.update(value(a[0]), all(1), require(1)) }
+                        "upsert" -> null.also { q.upsert(value(a[0]), value(a[1]), require(2)) }
                         "delete" -> null.also { q.delete(all(0), require(0)) }
                         else -> {
                             q = step(q, op, a)

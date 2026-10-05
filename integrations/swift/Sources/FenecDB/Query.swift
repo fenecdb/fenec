@@ -1056,7 +1056,7 @@ public struct Query: Sendable {
         if let extra = extraClause { throw FenecError.builder("\(verb) cannot be used with `\(extra)`") }
         if !lookups.isEmpty { throw FenecError.builder("\(verb) cannot be used with `lookup`") }
         if !facets.isEmpty { throw FenecError.builder("\(verb) cannot be used with `facet`") }
-        if verb == "insert", !cond.isEmpty { throw FenecError.builder("insert cannot be used with `where`") }
+        if verb == "insert" || verb == "upsert", !cond.isEmpty { throw FenecError.builder("\(verb) cannot be used with `where`") }
     }
 
     // An update or delete of every row is too easy to do by accident and
@@ -1107,6 +1107,22 @@ public struct Query: Sendable {
         let body = try Builder.renderDoc(try patch.fenecValue(), bind)
         let filter = try requireFilter("update", all, bind)
         return ("set \(collection) \(body)\(filter)\(try Query.requireClause(require))", bind.params)
+    }
+
+    /// The upsert, `put ... if absent else set {patch}`, not run: a document
+    /// whose id or first `@unique` value a row holds sets that row by the
+    /// patch -- an update's, `.inc` and `.expr` with it, and in an
+    /// expression `new.f` the document's own `f` -- and every other one is
+    /// inserted. The documents' parameters come first, then the patch's.
+    public func toUpsert(_ docs: any FenecValue, _ patch: any FenecValue, require: Int? = nil) throws -> (text: String, params: [Value]) {
+        try assertPlain("upsert")
+        let list = Query.docs(try docs.fenecValue())
+        guard !list.isEmpty else { throw FenecError.builder("cannot write an empty document list") }
+        let bind = Binder()
+        let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
+        let set = try Builder.renderDoc(try patch.fenecValue(), bind)
+        let required = try Query.requireClause(require)
+        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]") if absent else set \(set)\(required)", bind.params)
     }
 
     /// The `del` of the rows the filter names, not run; with no filter it is
@@ -1165,6 +1181,17 @@ public struct Query: Sendable {
         let v = try docs.fenecValue()
         if case .array(let list) = v, list.isEmpty { return 0 }
         return try await run(toInsert(v, ifAbsent: ifAbsent, require: require)).affected
+    }
+
+    /// Inserts each document, or, where a row holds its id or `@unique`
+    /// value, sets that row by the patch --
+    /// `upsert(["key": k, "n": 1], ["n": .expr("n + new.n")])`: the
+    /// rows it set and made together. None is no statement.
+    @discardableResult
+    public func upsert(_ docs: any FenecValue, _ patch: any FenecValue, require: Int? = nil) async throws -> Int {
+        let v = try docs.fenecValue()
+        if case .array(let list) = v, list.isEmpty { return 0 }
+        return try await run(toUpsert(v, patch, require: require)).affected
     }
 
     /// Sets the patch's fields on the rows the filter names; with no filter

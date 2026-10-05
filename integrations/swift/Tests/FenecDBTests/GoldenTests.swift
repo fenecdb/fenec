@@ -160,6 +160,7 @@ import Testing
                 case "toFenecQL": made = try q.toFenecQL()
                 case "toInsert": made = try q.toInsert(docs(), ifAbsent: absent(), require: require(1))
                 case "toUpdate": made = try q.toUpdate(docs(), all: all(1), require: require(1))
+                case "toUpsert": made = try q.toUpsert(docs(), value(a[1]), require: require(2))
                 case "toDelete": made = try q.toDelete(all: all(0), require: require(0))
                 case "rows": _ = try await q.rows()
                 case "first": _ = try await q.first()
@@ -167,6 +168,7 @@ import Testing
                 case "explain": _ = try await q.explain()
                 case "insert": _ = try await q.insert(docs(), ifAbsent: absent(), require: require(1))
                 case "update": _ = try await q.update(docs(), all: all(1), require: require(1))
+                case "upsert": _ = try await q.upsert(docs(), value(a[1]), require: require(2))
                 case "delete": _ = try await q.delete(all: all(0), require: require(0))
                 default:
                     q = try step(q, op, a)

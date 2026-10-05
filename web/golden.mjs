@@ -9,8 +9,9 @@
 //
 // A case is a chain of steps, `{op, args}`, starting with `from` and
 // ending with what turns it into a statement: `toFenecQL`, `toInsert`,
-// `toUpdate`, `toDelete`, or an endpoint -- `rows`, `first`, `count`,
-// `explain`, `insert`, `update`, `delete` -- whose statement is the one it
+// `toUpdate`, `toUpsert`, `toDelete`, or an endpoint -- `rows`, `first`,
+// `count`, `explain`, `insert`, `update`, `upsert`, `delete` -- whose
+// statement is the one it
 // sends. Arguments are JSON, and what JSON has no word for is an object of
 // one `$` key, which no field name can start with:
 //
@@ -63,8 +64,8 @@ function arg(x) {
   return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, arg(v)]));
 }
 
-const TEXT = new Set(['toFenecQL', 'toInsert', 'toUpdate', 'toDelete']);
-const ENDPOINTS = new Set(['rows', 'first', 'count', 'explain', 'insert', 'update', 'delete']);
+const TEXT = new Set(['toFenecQL', 'toInsert', 'toUpdate', 'toUpsert', 'toDelete']);
+const ENDPOINTS = new Set(['rows', 'first', 'count', 'explain', 'insert', 'update', 'upsert', 'delete']);
 
 // What each endpoint is answered, as the HTTP transport hands it over.
 function answer(sql) {
@@ -421,6 +422,18 @@ c('a compare-and-set names the version it read', docs, ['where', 'id', 4], ['whe
 c('insert if absent', ['from', 'locks'], ['insert', { name: 'job', owner: 'a', at: { $expr: ['now()'] } }, { ifAbsent: true }]);
 c('insert of several if absent', ['from', 'locks'], ['toInsert', [{ id: 1, owner: 'a' }, { id: 2, owner: 'a' }], { ifAbsent: true }]);
 c('insert with ifAbsent false is a put', ['from', 'locks'], ['toInsert', { id: 1 }, { ifAbsent: false }]);
+
+// put ... if absent else set: an upsert, the documents' parameters first,
+// then the patch's; in an expression `new.f` is the document's own field.
+const hits = ['from', 'hits'];
+c('upsert one document with inc', hits, ['upsert', { key: 'ip1', n: 1 }, { n: { $inc: 1 } }]);
+c('upsert several adds their own counts', hits, ['toUpsert', [{ key: 'a', n: 2 }, { key: 'b', n: 3 }], { n: { $expr: ['n + new.n'] }, seen: { $expr: ['now()'] } }]);
+c('upsert binds a plain value in the patch', hits, ['toUpsert', { key: 'a', owner: 'x' }, { owner: 'y', 'meta.by': 'z' }]);
+c('upsert require', hits, ['upsert', { id: 4, n: 1 }, { n: { $expr: ['n + ?', 1] } }, { require: 1 }]);
+c('upsert of no documents', hits, ['toUpsert', [], { n: 1 }]);
+c('upsert of an empty patch', hits, ['toUpsert', { key: 'a' }, {}]);
+c('upsert takes no where', hits, ['where', 'key', 'a'], ['upsert', { key: 'a' }, { n: 1 }]);
+c('inc in an upsert document is refused', hits, ['toUpsert', { n: { $inc: 1 } }, { n: 1 }]);
 
 // `{ require: n }`: the write must write exactly n rows, or it and its
 // batch are put back (412).

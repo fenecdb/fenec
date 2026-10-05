@@ -792,6 +792,7 @@ export declare class Query<
   /** The text of the write statements, without running them. The write side of `toFenecQL`. */
   toInsert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): [sql: string, params: unknown[]];
   toUpdate(patch: Insert<F>, opts?: WriteOptions): [sql: string, params: unknown[]];
+  toUpsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: RequireOptions): [sql: string, params: unknown[]];
   toDelete(opts?: WriteOptions): [sql: string, params: unknown[]];
 
   /** The query's collection. */
@@ -829,6 +830,15 @@ export declare class Query<
    */
   insert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): Promise<number>;
   update(patch: Insert<F>, opts?: WriteOptions): Promise<number>;
+  /**
+   * `put ... if absent else set {patch}`: each document inserted, or,
+   * where a row holds its `id` or first `@unique` value, that row set by
+   * the patch -- an update's, `inc(n)` and `expr(...)` with it, and in an
+   * expression `new.f` the document's own `f`:
+   * `upsert({ key, n: 1 }, { n: expr('n + new.n') })`. The count is the
+   * rows set and made together.
+   */
+  upsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: RequireOptions): Promise<number>;
   delete(opts?: WriteOptions): Promise<number>;
 }
 

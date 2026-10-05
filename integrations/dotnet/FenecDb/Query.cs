@@ -1004,7 +1004,7 @@ public sealed class Query
         if (ExtraClause() is { } extra) throw Builder.Refuse($"{verb} cannot be used with `{extra}`");
         if (_s.Lookups.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `lookup`");
         if (_s.Facets.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `facet`");
-        if (verb == "insert" && _s.Cond.Count > 0) throw Builder.Refuse("insert cannot be used with `where`");
+        if (verb is "insert" or "upsert" && _s.Cond.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `where`");
     }
 
     // An update or delete of every row is too easy to do by accident and cannot be undone: it has to be asked
@@ -1053,6 +1053,21 @@ public sealed class Query
         var body = Builder.RenderDoc(patch, bind, "update");
         var where = RequireFilter("update", all, bind);
         return ($"set {_s.Collection} {body}{where}{RequireClause(require)}", bind.Params);
+    }
+
+    /// <summary>The upsert, <c>put ... if absent else set {patch}</c>, not sent: a document whose id or first
+    /// <c>@unique</c> value a row holds sets that row by the patch -- an update's, <c>Inc</c> and <c>Expr</c> with
+    /// it, and in an expression <c>new.f</c> the document's own <c>f</c> -- and every other one is inserted. The
+    /// documents' parameters come first, then the patch's.</summary>
+    public (string Text, IReadOnlyList<object?> Parameters) ToUpsert(object docs, object patch, long? require = null)
+    {
+        AssertPlain("upsert");
+        var list = DocsOf(docs);
+        if (list.Count == 0) throw Builder.Refuse("cannot write an empty document list");
+        var bind = new Binder();
+        var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind, "insert")));
+        var set = Builder.RenderDoc(patch, bind, "update");
+        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")} if absent else set {set}{RequireClause(require)}", bind.Params);
     }
 
     /// <summary>The <c>del</c> of the rows the filter names, not sent; with no filter it is refused unless
@@ -1133,6 +1148,16 @@ public sealed class Query
         DocsOf(docs).Count == 0
             ? Task.FromResult(new ExecResult(0, null, 0, false))
             : ExecAsync(ToInsert(docs, ifAbsent, require), cancellationToken);
+
+    /// <summary>Inserts each document, or, where a row holds its id or <c>@unique</c> value, sets that row by the
+    /// patch -- <c>UpsertAsync(new { key, n = 1 }, new Dictionary&lt;string, object?&gt; { ["n"] =
+    /// Computed.Expr("n + new.n") })</c>; the result's <c>Affected</c> is the rows set and made together. None is
+    /// no request.</summary>
+    public Task<ExecResult> UpsertAsync(object docs, object patch, long? require = null,
+        CancellationToken cancellationToken = default) =>
+        DocsOf(docs).Count == 0
+            ? Task.FromResult(new ExecResult(0, null, 0, false))
+            : ExecAsync(ToUpsert(docs, patch, require), cancellationToken);
 
     /// <summary>Sets the patch's fields on the rows the filter names; with no filter it is refused unless
     /// <paramref name="all"/>.</summary>
