@@ -71,7 +71,7 @@ re-exports the builder (<code>builder.js</code>) and the HTTP client
 its glue, persistence and the sync layer. It reaches nothing else — no
 WebAssembly, no IndexedDB, no files — and a test fails if it does. An app
 that calls <code>connect</code> and reads a builder query's rows bundles to
-6 KB brotli through it and to 9 KB through <code>@fenecdb/web</code>,
+7 KB brotli through it and to 10 KB through <code>@fenecdb/web</code>,
 whose <code>Fenec</code> class and its glue a bundler cannot drop (esbuild,
 minified): 2.5 KB of JavaScript, and no <code>.wasm</code> either way.</p>
 
@@ -84,6 +84,49 @@ ends is opened again, its seed running the query, since writes may have
 come between. <code>useLiveQuery</code> takes the endpoint as it takes a
 replica.</p>
 </details>
+
+<h3 id="batch">Batches, retries and polling</h3>
+
+<p><code>db.batch</code> sends statements as one <code>/batch</code>: every
+write lands or none does. Each is a builder query, a FenecQL text, or
+<code>[text, params]</code> as <code>toInsert</code>, <code>toUpdate</code>
+and <code>toDelete</code> make them; with an <code>idempotencyKey</code> a
+retry after a timeout is answered as the first was.</p>
+
+<pre data-lang="ts">import { connect, inc, FenecError } from '@fenecdb/web/client';
+
+const db = connect('https://db.example.com', { token: 'a token' });
+const stock = db.from('inventory');
+try {
+  const { results, replayed } = await db.batch(
+    [
+      stock.where('sku', 'TENT-1').where('available', '>=', 2).toUpdate({ available: inc(-2) }, { require: 1 }),
+      db.from('orders').toInsert({ number: 'SG-1', sku: 'TENT-1', qty: 2 }),
+    ],
+    { idempotencyKey: 'checkout-7f3a' },
+  );
+  console.log(results, replayed);
+} catch (e) {
+  // 412: the statement at `at` wrote no row where it required one, and nothing landed.
+  if (e instanceof FenecError && e.status === 412) console.log('sold out', e.at);
+}
+await db.run('put orders {number: $1}', ['SG-2'], { idempotencyKey: 'order-SG-2' });
+await db.withIdempotencyKey('order-SG-3').from('orders').insert({ number: 'SG-3' });
+// No stream held: the server answers 304, not running the query, while nothing it reads was written.
+const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) => console.log(rows[0]), { poll: 5000 });
+</pre>
+
+<ul>
+  <li><b>A refusal names its statement:</b> <code>FenecError</code>'s
+    <code>at</code> (from 0), its <code>status</code> (412 a
+    <code>require</code> not met, 409 a value taken, 422 a key sent with
+    another request) and <code>completed</code>.</li>
+  <li><b>A write answers where it left the database,</b>
+    <code>seq</code>, and the client keeps the last as <code>db.seq</code>.</li>
+  <li><b><code>{ poll }</code> is for a page many view:</b> a stream is a
+    server thread and a wake-up at every write, a poll holds nothing between
+    rounds (<a href="/docs/http#polling">Polling a read</a>).</li>
+</ul>
 
 <h2>Opening a database</h2>
 
@@ -900,7 +943,27 @@ offsets. <code>.facet(field, { top })</code> takes a field or a path into a
 <code>json</code> one, and <code>run()</code> hands the counts as its
 <code>facets</code> too — see <a href="/docs/fenecql#facets">Facets</a>.
 A facet beside <code>near</code> is refused: <code>near</code> ranks every
-row rather than selecting some, so the counts would be the filter's alone.</p>
+row rather than selecting some, so the counts would be the filter's alone.
+<code>{ disjunctive: true }</code> counts a facet without the filter's own
+conditions on its field, and <code>{ ranges: [0, 2500, 5000] }</code> counts
+a number by range (<a href="/docs/fenecql#disjunctive-facets">
+Counted without its own filter</a>, <a href="/docs/fenecql#range-facets">Ranges</a>).</p>
+
+<p>A query built in steps keeps the type it was declared with, so a facet
+asked after the declaration is typed as any facet: <code>rows.facets</code>
+is there, each field's counts <code>FacetCount[]</code>, and maybe absent.
+To keep each field's own type, ask the facets in the declaration and add
+the steps that keep the row's type after it:</p>
+
+<pre data-lang="ts">import { connect } from '@fenecdb/web/client';
+
+const db = connect('https://db.example.com');
+const chosen: string | undefined = 'acme';
+let q = db.from('products').select('name').facet('brand', { disjunctive: true });
+if (chosen) q = q.where('brand', chosen);
+const rows = await q.limit(24).rows();
+rows.facets.brand.map((f) => f.count);   // typed
+</pre>
 </details>
 
 <h2>Seeing what it produces</h2>

@@ -70,7 +70,7 @@ make scale-bench         # fenec-server over HTTP against pgvector at scale: loa
 make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server vs PostgreSQL and MongoDB in Docker, durable and buffered (YCSB_ARGS)
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
-make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan
+make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 ```
@@ -1403,7 +1403,24 @@ of a shape that holds nothing (`select=id&where=false`), every change a
 write to it, the query run again on the server; the first rows wait for
 every seed, a stream that ends is opened again and its seed runs the
 query, and a text names what it reads or is refused -- so `useLiveQuery`
-takes `connect()` as it takes `sync()`. `FenecHttp` calls `fetch` on its
+takes `connect()` as it takes `sync()`. A stream is a server thread
+(45 to 57 KB resident) and a wake-up at every write -- a write's p50 went
+0.26 -> 0.94 ms beside 60 streams and 3.1 beside 500 -- so `{ poll: ms }`
+holds none: the query is sent with `If-None-Match` and the server answers
+304 without running it while no collection it reads was written (`etag`,
+`unchanged` in `fenec-http`, the change ring's
+`changed_collections_since`; a read of rows that expire, calling `now()`
+or holding an inner `get` is never tagged), 54 us against 95 for a page
+of 24 run. `db.batch([...], { idempotencyKey })` posts `/batch` -- a
+builder query, a text or `[text, params]` a statement -- and a stopped one
+throws `FenecError` with `at`, `status` and `completed`; `run` takes a key,
+`withIdempotencyKey` makes a copy sharing `seq`, and every SDK has the same
+(Go's `Error.At`, .NET's `FenecException.At`, Python's `idempotency_key=`,
+the Swift, Kotlin and Dart remotes' `batch`). A replayed answer carries the
+database's change as its `Fenec-Seq`, which holds the write. `Rows<P, {}>`
+carries `facets?: Facets`: a `let` keeps its declared type, so a facet
+asked after it was lost to the type. The client grew 6 -> 7.4 KB brotli in
+an app's bundle. `FenecHttp` calls `fetch` on its
 own (`#request`): as its method, a browser's `fetch` throws "Illegal
 invocation", which Node's does not. `sync()` opens
 the full `./fenec.wasm` unless given `wasm` or `local`. A replica's module
@@ -1811,6 +1828,26 @@ and the browser module loads 20 000 x 128 with a hash, an ordered and a text
 index in 19.0 ms against 41.8; the first read of each pays its build. It
 cost the module 0.7 KB brotli, most of it a builder and a cell a kind.
 
+**A server warms what an open left for the first read** (`--warm`,
+`fenec_http::warm`). The first `match` after a start built its `@text`
+index inside the request: a shop's first search page took 2.68 s to its
+largest paint against 1.40 warm. `Database::unbuilt_indexes` lists the
+derived indexes nothing has built, `warm_index` builds one as its first read
+would, and a thread of the server's builds them one at a time, each under
+the read lock on its own -- reads go on, one needing the index waits for
+that build, a write waits out one index at most. The thread starts once the
+HTTP endpoint is up: `Server::new` takes the write lock for its watcher,
+and a build's read lock held the listener back by its 141 ms. Over 100 000
+products with a text, two hash and an ordered index the first answer came
+16 ms after the start either way, the indexes were built 208 ms after it,
+and the first `match` took 1.4 ms against 166; the process held 99 MB
+against 88 for a cold one that had searched. On by default for a file (an
+index is declared to be read; `--warm off`, or a list of collections and
+`collection.field`s), off for a `--dir` node's tenants, which open per
+request and close when idle (`Tenants::with_warm` when asked). The native
+library has `fenec_warm` (and each binding a `warm`), embedded Rust
+`Database::warm`.
+
 **`rerank` deliberately uses no index.** `match ... rerank` takes candidates
 from the inverted index and reorders them by exact distance over vectors read
 straight out of the store — so a collection can do vector retrieval with no
@@ -1874,6 +1911,36 @@ a snippet's 2 to 4; a facet over every row 0.01 ms through `@hash` and 6.1 by
 the scan (`make search-bench`). The browser module grew 20.2 KB, 7.0 KB
 brotli; the one without indexes 3.9 KB brotli, which counts facets and
 refuses a `match` and its marks.
+
+**A disjunctive facet's filter is split where the filter is written.**
+`facet brand disjunctive` counts over the rows the query selects with the
+`and` chain's terms that read the field alone left out (`Facet::rest`,
+`Select::split_facets`); a term reading it beside another field is
+refused, not guessed at. The split is the parser's and a REST `facet=`'s,
+from the filter as written: `scoped()` and `@ttl`'s `alive` reach the
+split filters through `each_filter_mut`, so a token's rules and an expiry
+are never what is left out -- split after them, `facet owner disjunctive`
+counted every user's rows (`tests/access.rs`). A select built in code is
+split in `answered_select`, before the expiry; one that leaves nothing
+out is a plain facet. Each disjunctive facet finds its own rows
+(`facet_set`: `matching_ids`, `match`'s `matched_set`, a required
+`lookup`) in the same statement under the same lock. `facet price ranges
+[0, 2500, 5000]` counts a number by range, every range in order, value
+`[from, to]` (`facet_ranges`): through a `@sorted` field's index when every
+bound is a key it holds exactly (`SortedIndex::range_counts`: over every
+row two searches and the chunks' lengths between, `Chunked::count`; under a
+filter its entries walked against the set's bits) and by reading the field
+otherwise; the lexer keeps `ranges [..]` as written, as it keeps `in
+[..]`, an `f32` vector holding no bound past 2^24 exactly. Over 100 000
+rows: six ranges 0.004 ms through the index against 4.7 read, 0.15
+against 0.19 under a filter keeping 3%; a page with two disjunctive facets
+0.75 ms in process as its three statements were, over HTTP 0.95 against
+1.19 in turn. The value-count scan keeps its own loop (`each_value` serves
+the ranges): through a shared one, inlined and all, it went 4.8 -> 5.2
+ms, and with `facet` out of line 4.8 -> 5.6 (`#[inline(always)]`). The
+two cost the browser module 2.9 KB brotli -- the split, the ranges'
+read and index paths, the parser -- kept in it, so a replica or a page
+answers a shop's sidebar as its server does.
 
 **`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
 sparse vector is held as its non-zero entries, `(index, weight)` ascending

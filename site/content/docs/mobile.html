@@ -473,6 +473,32 @@ let open = try await db.from("todos").where("done", false).rows()</pre>
 <code>replica.remote</code> is the same, for what the replica does not
 hold. Live queries are the file's alone.</p>
 
+<p>Several writes that must land together are one <code>batch</code>
+(<code>POST /batch</code>): the builder's <code>toInsert</code>,
+<code>toUpdate</code> and <code>toDelete</code> under one write lock, all
+of them or none. One that stops it is an error naming its place
+(<code>at</code>, from 0) and the HTTP <code>status</code> -- 412, code
+<code>unmet</code>, for a write whose <code>require</code> was not met. A
+retry after a timeout cannot tell whether the write ran, so a write that
+must not run twice goes under an idempotency key: the second answer is the
+first one kept (<code>replayed</code>), and the key sent with another
+request is refused (422).</p>
+
+<pre data-lang="swift">let accounts = try db.from("accounts")
+let done = try await db.batch([
+    try accounts.where("id", from).where("balance", ">=", 10).toUpdate(["balance": .inc(-10)] as Value, require: 1),
+    try accounts.where("id", to).toUpdate(["balance": .inc(10)] as Value, require: 1),
+], idempotencyKey: transferID)
+// done.results, done.seq, done.replayed
+try await db.withIdempotencyKey(orderID).from("orders").insert(order)</pre>
+
+<p>Kotlin's is <code>db.batch(listOf(...), idempotencyKey = id)</code> and
+<code>runList(text, params, idempotencyKey = id)</code>, Dart's
+<code>db.batch([...], idempotencyKey: id)</code>; all three have
+<code>withIdempotencyKey(key)</code>, a copy whose every write -- the
+builder's too -- carries the key, and <code>seq</code>, the change the last
+write left the server at.</p>
+
 <h2 id="file">Where the file lives</h2>
 
 <p>Anywhere the app may write. On iOS the app's Application Support
@@ -548,6 +574,14 @@ grown three times the graph's record since its last save, so an app that
 opens and closes often does not grow its file by a graph each time;
 <code>checkpoint()</code> saves everything, and an open after it links
 nothing.</p>
+<p>The hash, text, ordered and sparse indexes are never in the file: an
+open leaves each for the first statement that reads it, which builds it
+first -- a <code>@text</code> index of 100 000 products took that search
+141 ms. <code>warm()</code> builds them off the main thread as the app
+starts, each under the read lock on its own so reads go on beside it, and
+answers how many it built; <code>warm(["docs", "orders.status"])</code>
+builds those collections' and fields' alone (Kotlin
+<code>warm(listOf(...))</code>, Dart <code>warm([...])</code>).</p>
 </details>
 
 <h2 id="threads">Threads</h2>

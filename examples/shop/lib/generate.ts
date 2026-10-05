@@ -31,7 +31,10 @@ export function slugify(s: string): string {
     .replace(/^-|-$/g, '');
 }
 
-/** Price bands the category pages filter by, in cents. */
+/**
+ * Price bands the category pages filter by, in cents: counted by `facet
+ * price ranges [...]` over the `@sorted` price, and no field of their own.
+ */
 export const PRICE_BANDS = [
   { slug: 'under-25', label: 'Under $25', max: 2500 },
   { slug: '25-50', label: '$25 to $50', max: 5000 },
@@ -39,10 +42,6 @@ export const PRICE_BANDS = [
   { slug: '100-250', label: '$100 to $250', max: 25000 },
   { slug: '250-plus', label: '$250 and over', max: Infinity },
 ] as const;
-
-export function bandOf(cents: number): string {
-  return PRICE_BANDS.find((b) => cents < b.max)!.slug;
-}
 
 export interface GeneratedProduct {
   sku: string;
@@ -52,7 +51,6 @@ export interface GeneratedProduct {
   category: string;
   brand: string;
   price: number;
-  priceBand: string;
   colour: string;
   material: string;
   size: string;
@@ -127,7 +125,6 @@ export function generate(count = 10_000, seed = 0x5a4d6721): { products: Generat
       category: c.slug,
       brand,
       price,
-      priceBand: bandOf(price),
       colour,
       material,
       size,

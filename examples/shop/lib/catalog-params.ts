@@ -16,7 +16,7 @@ export type Sort = keyof typeof SORTS;
 export const FILTERS = {
   category: { field: 'category', label: 'Category' },
   brand: { field: 'brand', label: 'Brand' },
-  price: { field: 'priceBand', label: 'Price' },
+  price: { field: 'price', label: 'Price' },
   colour: { field: 'colour', label: 'Colour' },
   material: { field: 'material', label: 'Material' },
 } as const;

@@ -29,7 +29,7 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
            [fuse [k N] [candidates N]]             -- match and near, both ranking
            [order &lt;field&gt; [collate und|tr] [asc|desc], ...] [limit N] [offset N]
-           [facet &lt;field&gt; [top N], ...]          -- value counts over every matched row
+           [facet &lt;field&gt; [top N | ranges [..]] [disjunctive], ...]   -- value counts over every matched row
            [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]...
 get &lt;name&gt; select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
            match &lt;field&gt; &lt;text&gt; ...           -- where the words matched
@@ -1361,6 +1361,65 @@ field over every row 0.01 ms, read from every row 6.1 ms
 and 9.3 ms against the filter's own 5.9 ms
 for a <code>count</code>. Beside a <code>match</code> reaching about
 16 667 rows, two facets took a query from 0.06 to 1.6 ms.</p>
+</details>
+
+<h3 id="disjunctive-facets">Counted without its own filter</h3>
+
+<p>With a brand chosen, a sidebar's "Brand" should still list the other
+brands to add, each with the count it would have. <code>disjunctive</code>
+counts a facet over the rows the query selects with the filter's own
+conditions on that field left out; the page, and every other facet, stay
+the query's.</p>
+
+<pre data-lang="fenecql">get products where category = "tents" and brand in ["acme", "nova"] and color = "red"
+  facet brand disjunctive, color disjunctive, material
+  order price limit 24
+</pre>
+
+<p>Here <code>brand</code> counts over the red tents of every brand,
+<code>color</code> over the acme and nova tents of every colour, and
+<code>material</code> over the page's rows. A condition left out is a term
+of the <code>where</code>'s <code>and</code> chain that reads the field
+alone — <code>brand = ...</code>, <code>brand in [...]</code>, <code>(brand =
+"a" or brand = "b")</code>, a range — and one reading the field beside
+another (<code>brand = "a" or sale</code>) is refused rather than guessed
+at. A token's rules and a collection's expiry are never left out: they are
+ANDed into each facet's own filter too.</p>
+
+<h3 id="range-facets">Ranges</h3>
+
+<p><code>ranges [b1, b2, ...]</code> counts the rows whose number falls in
+each range — from a bound, included, to the next, excluded — rather than by
+value: every range, in order, an empty one with 0, its value the
+<code>[from, to]</code> pair. A null, a <code>NaN</code> and a number
+outside every range count in none; a list counts once in each range a value
+of it falls in.</p>
+
+<pre data-lang="fenecql">get products where category = "tents" limit 24
+  facet price ranges [0, 2500, 5000, 10000, 25000] disjunctive
+</pre>
+
+<pre data-lang="json">"price": [{"value": [0, 2500], "count": 31}, {"value": [2500, 5000], "count": 112},
+          {"value": [5000, 10000], "count": 204}, {"value": [10000, 25000], "count": 96}]</pre>
+
+<p>The bounds are numbers written out, rising, two to 10 001 of them, and no
+<code>top</code> goes with them. A <code>@sorted</code> field counts them from
+its index when every bound is a key it holds exactly — over every row two
+searches a range and the lengths of the chunks between, under a filter its
+entries walked against the filter's rows — and anything else reads the field
+of every row (<code>12.5</code> against an <code>int</code> field is read).</p>
+
+<details class="deep"><summary>Measured</summary>
+<p>Over 100 000 rows (<code>make search-bench</code>, an M1 Air): six ranges
+of a <code>@sorted</code> price over every row 0.004 ms against 4.7 ms read
+from every row; under a filter keeping 3%, 0.15 against 0.19 ms; keeping
+half, 5.1 against 8.1. A category page with a brand and a colour chosen,
+its page and two disjunctive facets beside a range facet in one statement,
+took 0.75 ms in process against 0.75 ms for the three statements it was
+before; over HTTP 0.95 ms against 1.19 for the three in turn and 0.61 for
+the three at once on three connections. What one statement buys is one
+request, one connection and counts read under one lock — the same rows
+every facet counted — not less work.</p>
 </details>
 
 <h2>Explain</h2>

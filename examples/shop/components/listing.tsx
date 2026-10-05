@@ -31,7 +31,8 @@ export function FacetList({ s, facets, keys, labels }: { s: ListingState; facets
         {keys.map((k) => {
           const counts = (facets[FILTERS[k].field] ?? []).filter((f) => f.value !== null);
           if (!counts.length) return null;
-          const shown = k === 'price' ? [...counts].sort((a, b) => order(a.value) - order(b.value)) : counts;
+          // The price's ranges come in their order, the rest most first.
+          const shown = counts;
           return (
             <section className="facet" key={k} aria-label={FILTERS[k].label}>
               <h2>{FILTERS[k].label}</h2>
@@ -57,8 +58,6 @@ export function FacetList({ s, facets, keys, labels }: { s: ListingState; facets
   );
 }
 
-const BAND_ORDER = ['under-25', '25-50', '50-100', '100-250', '250-plus'];
-const order = (v: string | null) => BAND_ORDER.indexOf(v ?? '');
 
 export function SortLinks({ s }: { s: ListingState }) {
   return (

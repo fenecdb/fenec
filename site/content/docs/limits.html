@@ -100,6 +100,7 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td><code>in (get …)</code> values</td><td class="n"><b>100 000</b></td><td>distinct values, each counted once however many rows hold it; a query error naming the bound when the inner <code>get</code> finds more; never a set cut short</td></tr>
 <tr><td><code>in (get …)</code> nesting</td><td class="n"><b>4 levels</b></td><td>a query error when exceeded; each level runs a query before the one around it</td></tr>
 <tr><td>values of one <code>facet</code></td><td class="n"><b>10 000</b></td><td>a query error when a facet without <code>top</code> finds more, and for <code>top</code> past it; never a list cut where it stopped</td></tr>
+<tr><td>ranges of one <code>facet ... ranges</code></td><td class="n"><b>10 000</b></td><td>a query error past 10 001 bounds; every range answers</td></tr>
 <tr><td><code>json</code> value nesting</td><td class="n"><b>64 levels</b></td><td>objects and lists inside one another; a write or a JSON text deeper is refused, never cut</td></tr>
 <tr><td>path length</td><td class="n"><b>64 keys</b></td><td>past its field (<code>meta.a.b</code> is two); a query error, since no value nests deeper</td></tr>
 <tr><td>session stack (<code>fenec-server</code>)</td><td class="n">8 MiB</td><td>virtual; the deepest expression wants ~750 KiB in release, ~5 MiB in debug</td></tr>

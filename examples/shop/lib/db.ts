@@ -58,44 +58,26 @@ export interface BatchResult {
 }
 
 /**
- * `POST /batch`: the statements as one block -- all of them land or none
- * do -- and, with `key`, an `Idempotency-Key`, so a retry after a timeout
- * is answered as the first was and writes nothing twice.
- * `@fenecdb/web/client` has no batch of its own (README, "Gaps").
+ * `POST /batch` through the client's `batch`: the statements as one block
+ * -- all of them land or none do -- and, with `key`, an `Idempotency-Key`,
+ * so a retry after a timeout is answered as the first was and writes
+ * nothing twice. A refusal is answered rather than thrown, its status and
+ * the statement it stopped at (`at`), since each caller tells the shopper
+ * which line of the order it was.
  */
 export async function batch(statements: Statement[], opts: { key?: string; token?: string } = {}): Promise<BatchResult> {
-  const headers: Record<string, string> = {
-    'content-type': 'application/x-ndjson',
-    authorization: `Bearer ${opts.token ?? ROOT}`,
-  };
-  if (opts.key) headers['idempotency-key'] = opts.key;
-  const body = statements.map(([query, params]) => JSON.stringify({ query, params: params ?? [] })).join('\n');
-  const res = await fetch(`${FENEC_URL}/batch`, { method: 'POST', headers, body, cache: 'no-store' });
-  const text = await res.text();
-  let json: { results?: unknown[]; error?: string; at?: number } = {};
+  const conn = opts.token ? connect(FENEC_URL, { token: opts.token }) : await db();
   try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    throw new FenecError(`fenec-server did not answer JSON (${res.status}): ${text.slice(0, 200)}`);
+    const r = await conn.batch(statements, { idempotencyKey: opts.key });
+    return { status: 200, replayed: r.replayed, results: r.results };
+  } catch (e) {
+    if (!(e instanceof FenecError) || e.status === undefined) throw e;
+    return { status: e.status, replayed: false, results: [], error: e.message, at: e.at };
   }
-  return {
-    status: res.status,
-    replayed: res.headers.get('idempotent-replayed') === 'true',
-    results: json.results ?? [],
-    error: json.error,
-    at: json.at,
-  };
 }
 
 /** One statement over `/query`, for what the builder cannot say. */
 export async function query<T = Record<string, unknown>>(text: string, params: unknown[] = [], token = ROOT): Promise<T[]> {
-  const res = await fetch(`${FENEC_URL}/query`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    body: JSON.stringify({ query: text, params }),
-    cache: 'no-store',
-  });
-  const json = await res.json();
-  if (!res.ok) throw new FenecError(json?.error ?? `HTTP ${res.status}`);
-  return Array.isArray(json) ? json : (json.rows ?? []);
+  const conn = token === ROOT ? await db() : connect(FENEC_URL, { token });
+  return (await conn.rows(text, params)) as T[];
 }

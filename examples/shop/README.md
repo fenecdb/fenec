@@ -37,7 +37,7 @@ Every product, maker and review is generated. No card is charged.
  POST /api/pay      ─────────▶  │  mock provider capture, then /batch      ──▶ insert orders, order_lines
                                                                               del carts  (one block)
  live stock island  ──── GET /api/stock-token (role: stock, 10 min) ───────▶ FenecHttp.live: a
-   (after the first touch)      then straight to fenec-server, CORS          subscription to inventory
+   (after the first touch)      then straight to fenec-server, CORS          poll, 304 while unchanged
 ```
 
 The site's server holds two kinds of token:
@@ -102,11 +102,11 @@ this checkout's packages. CI's `examples (shop)` job runs it with
 | Part | fenecdb |
 | --- | --- |
 | Schema | Declared in code with `fenecTable` (`lib/schema.ts`); `connect(url, { schema, migrate: true })` makes what is missing when seeding, and the pages connect with `schema` alone, which only checks |
-| Catalog | `@unique` on `sku` and `slug`, `@hash` on `category`, `brand`, `priceBand` and `colour`, `@sorted` on `price`, `rating` and `added`; prices in integer cents |
-| Category page | `facet brand, priceBand, colour, material` beside the page; a facet with a filter on is counted again without its own filter, as a query of its own run at the same time; `order` over a `@sorted` field walks the index; `offset`/`limit` pages |
+| Catalog | `@unique` on `sku` and `slug`, `@hash` on `category`, `brand` and `colour`, `@sorted` on `price`, `rating` and `added`; prices in integer cents |
+| Category page | `facet brand, price ranges [...], colour, material` beside the page, in its statement; a facet with a filter on is `disjunctive`, counted without its own filter; `order` over a `@sorted` field walks the index; `offset`/`limit` pages |
 | Search | `match description $1` over `@text(prefix=5)`, so a part of a word or a late typo finds it ("titanum" finds titanium); `highlight(name)` and `snippet(description, 26)` as UTF-16 offsets, drawn as `<mark>` nodes so no text is read as HTML; `facet category, brand, ...` |
 | Related products | `near features $v` within the category, over an `@hnsw` vector of the product's attributes (`lib/features.ts`) |
-| Product page | Incremental static regeneration (5 minutes); stock from `inventory`, then `FenecHttp.live` in the browser |
+| Product page | Incremental static regeneration (5 minutes); stock from `inventory`, then `FenecHttp.live` polled in the browser |
 | Cart | Under the shopper's JWT: `put carts {...} if absent`, then `set carts {qty: qty + $1} where line = $2 and qty + $1 <= 20 require 1`, one `/batch`; `@ttl(7d)` on `touched` expires an abandoned line; `lookup products on sku = sku` prices the lines in the same query |
 | Checkout | One `/batch` with an `Idempotency-Key`: `set inventory {available: available - $1, reserved: reserved + $1} where sku = $2 and available >= $1 require 1` for each line, `insert orders`, `insert order_lines`, `del carts` |
 | Payment | A mock provider's idempotent capture, then one `/batch`: `insert payments` (`@unique` on the order, so a second capture is a clash), `set orders {status: "paid"} where number = $1 and status = "reserved" require 1`, the units moved from reserved to sold |
@@ -279,37 +279,39 @@ not what means the same.
 
 ## Gaps this example hit
 
-These are beyond those already listed for inventory and payments:
+These are beyond those already listed for inventory and payments. Six of
+the seven are closed now, and the shop uses what closed them:
 
-1. **`@fenecdb/web/client` has no `/batch` and no `Idempotency-Key`.** The
-   builder writes the statements, but checkout and the cart post `/batch`
-   with a `fetch` of their own (`lib/db.ts`'s `batch`). A
-   `db.batch([...], { key })` returning each result, with `at` and
-   `replayed`, would remove it.
-2. **No assertion without a write.** Checkout reads prices, then writes the
-   order in the batch. A price changed in between is not caught inside the
-   block: `require` belongs to writes. Something like `get products where
-   sku = $1 and price = $2 require 1`, inside the `/batch`, would make the
-   price part of the transaction.
-3. **No disjunctive facets.** A facet should count without its own filter,
-   so that "Brand" still lists the other brands to add. Today that takes
-   one query for each active facet beside the page's query
-   (`lib/catalog.ts`).
-4. **A facet over ranges.** The price bands are a field written at seed
-   time (`priceBand`), because a facet counts values, not ranges of a
-   `@sorted` field.
-5. **A live query per viewer is a server thread.** `FenecHttp.live` in the
-   browser holds a subscription (`--http-max-streams`, 64 by default). The
-   shop opens it only on the shopper's first interaction, but a busy product
-   page would need a fan-out through the site's server rather than a stream
-   for each viewer.
-6. **The first search after a start is slow.** Text indexes are derived and
-   built on the first read: 2.68 s of LCP for that first search page against
-   1.40 s after. A warm-up statement at start, or an option to build an
-   index at open, would hide it.
-7. **The builder's row type loses `facets`** when a query is built in steps
-   (`let q = ...; q = q.facet(...)`). The value is there, but `rows.facets`
-   needs a cast.
+1. **`/batch` and `Idempotency-Key` in the client.** Checkout and the cart
+   go through `db.batch([...], { idempotencyKey })`, which answers each
+   statement's result and throws a `FenecError` naming the statement that
+   stopped it (`at`) and why (`status`, 412 for a `require` not met).
+   `lib/db.ts`'s `batch` is a few lines over it, where it posted `/batch`
+   with a `fetch` of its own.
+2. **No assertion without a write.** Still open. Checkout reads prices,
+   then writes the order in the batch. A price changed in between is not
+   caught inside the block: `require` belongs to writes. Something like
+   `get products where sku = $1 and price = $2 require 1`, inside the
+   `/batch`, would make the price part of the transaction.
+3. **Disjunctive facets.** A facet with a filter on is `facet brand
+   disjunctive`: counted without its own filter, so "Brand" still lists
+   the other brands to add, in the page's own statement -- where each was
+   a query of its own (`lib/catalog.ts`).
+4. **A facet over ranges.** The price bands are `facet price ranges [0,
+   2500, 5000, 10000, 25000, ...]` over the `@sorted` price, counted from
+   its index; the `priceBand` field written at seed time is gone.
+5. **A live query per viewer was a server thread.** The live stock polls
+   (`FenecHttp.live(..., { poll: 5000 })`): the server answers 304 without
+   running the query while the stock has not moved, and holds no stream,
+   no thread, between rounds.
+6. **The first search after a start was slow.** `fenec-server` builds the
+   derived indexes after the open, beside the first requests (`--warm`,
+   on by default for a file; `scripts/db.sh` writes it out), so the first
+   search does not build its text index: 2.68 s of LCP for that first
+   search page against 1.40 s warm before.
+7. **The builder's row type lost `facets`** when a query was built in
+   steps. A query whose type names no facet reads its counts as `Facets`,
+   maybe absent, and `rows.facets` needs no cast.
 
 The inventory pattern, `@ttl` that cannot give stock back (hence the
 `holdUntil` field and the reaper), and the composite unique the cart works
