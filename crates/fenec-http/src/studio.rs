@@ -76,6 +76,41 @@ pub static ASSETS: &[Asset] = &[
         "studio/statements.js",
         "text/javascript; charset=utf-8"
     ),
+    // The views past the rows, each fetched the first time it opens.
+    file!("views.css", "studio/views.css", "text/css; charset=utf-8"),
+    file!("kit.js", "studio/kit.js", "text/javascript; charset=utf-8"),
+    file!(
+        "statements-views.js",
+        "studio/statements-views.js",
+        "text/javascript; charset=utf-8"
+    ),
+    file!(
+        "editor.js",
+        "studio/editor.js",
+        "text/javascript; charset=utf-8"
+    ),
+    file!(
+        "schema.js",
+        "studio/schema.js",
+        "text/javascript; charset=utf-8"
+    ),
+    file!(
+        "live.js",
+        "studio/live.js",
+        "text/javascript; charset=utf-8"
+    ),
+    file!(
+        "admin.js",
+        "studio/admin.js",
+        "text/javascript; charset=utf-8"
+    ),
+    // site/highlight.js with build.py's rules written in (`make
+    // studio-highlight`; site/test_highlight.py refuses a stale one).
+    file!(
+        "highlight.js",
+        "studio/highlight.js",
+        "text/javascript; charset=utf-8"
+    ),
     file!("mark.svg", "site/mark.svg", "image/svg+xml"),
     file!(
         "plex-mono-400.woff2",

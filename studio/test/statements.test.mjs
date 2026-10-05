@@ -22,7 +22,7 @@ registerHooks({
     return next(specifier, context);
   },
 });
-const S = await import('../statements.js');
+const S = { ...(await import('../statements.js')), ...(await import('../statements-views.js')) };
 const { readInput, vectorSummary } = await import('../values.js');
 const { parseMetrics, claimsOf } = await import('../connect.js');
 
@@ -177,6 +177,161 @@ test('the metrics and a token are read, not believed', () => {
   assert.deepEqual(claimsOf(t), { sub: 'ali', exp: 9 });
   assert.equal(claimsOf('opaque-server-token'), null);
   assert.equal(claimsOf('a.%%%.c'), null);
+});
+
+// ------------------------------------------------------------------ the query editor
+
+test('the editor cuts a text at each ; outside its strings and comments, and rewrites nothing', () => {
+  const text = 'get a where t = ";" -- a ; in a comment\n  limit 5;\n\n-- only a comment;\nget b where u = \'x;y\'';
+  const got = S.splitStatements(text);
+  assert.deepEqual(
+    got.map((s) => s.text),
+    // A `;` in a comment ends nothing: the comment is the next statement's.
+    ['get a where t = ";" -- a ; in a comment\n  limit 5', "-- only a comment;\nget b where u = 'x;y'"],
+  );
+  // Where each starts, so a refusal can point at it.
+  assert.equal(text.slice(got[1].at, got[1].at + 7), '-- only');
+  assert.deepEqual(S.splitStatements('  ;  -- nothing\n;'), []);
+  // A string left open ends at its line, as the lexer refuses it there.
+  assert.deepEqual(S.splitStatements('get a where t = "open\n; get b').map((s) => s.text), ['get a where t = "open', 'get b']);
+});
+
+test('one statement goes to /query with its parameters; several, a list each, to /batch', () => {
+  for (const v of NASTY) {
+    const r = S.editorRequest('get orders where note = $1', JSON.stringify([v]));
+    assert.deepEqual(r, { kind: 'query', text: 'get orders where note = $1', params: [v] });
+  }
+  assert.deepEqual(S.editorRequest('get a; get b'), { kind: 'batch', items: [['get a', []], ['get b', []]] });
+  assert.deepEqual(S.editorRequest('get a where x = $1; del b where y = $1', '[[1], ["z"]]'), {
+    kind: 'batch',
+    items: [
+      ['get a where x = $1', [1]],
+      ['del b where y = $1', ['z']],
+    ],
+  });
+  assert.throws(() => S.editorRequest('get a; get b', '[1, 2]'), /2 statements run as one batch/);
+  assert.throws(() => S.editorRequest('get a', '{"a": 1}'), S.StatementError);
+  assert.throws(() => S.editorRequest('get a', '[1,'), S.StatementError);
+  assert.throws(() => S.editorRequest('-- nothing'), /nothing to run/);
+});
+
+test('a plan is asked of a get as typed, explain in front, the same parameters', () => {
+  assert.deepEqual(S.explained({ text: '-- why\nget orders where id = $1', params: [7] }), { text: 'explain get orders where id = $1', params: [7] });
+  assert.ok(S.explainable('select a from b'));
+  assert.ok(!S.explainable('del orders where id = 1'));
+  assert.ok(S.isExplain('  explain get a'));
+  assert.throws(() => S.explained({ text: 'set a {b: 1}', params: [] }), S.StatementError);
+});
+
+// ------------------------------------------------------------------ the schema
+
+test('a schema change names only what FenecQL writes, and checks each option', () => {
+  assert.deepEqual(S.createIndex('orders', 'total', { kind: 'sorted' }), { text: 'create index on orders (total) @sorted', params: [] });
+  assert.equal(S.createIndex('docs', 'title', { kind: 'text', prefix: 6, chars: true }).text, 'create index on docs (title) @text(prefix=6, chars)');
+  assert.equal(S.createIndex('docs', 'title', { kind: 'text', prefix: '' }).text, 'create index on docs (title) @text');
+  assert.equal(S.createIndex('docs', 'emb', { kind: 'hnsw', metric: 'l2', quant: 'int8' }).text, 'create index on docs (emb) @hnsw(l2, quant=int8)');
+  assert.equal(S.createIndex('ev', 'at', { kind: 'ttl', ttl: '7d' }).text, 'create index on ev (at) @ttl(7d)');
+  assert.deepEqual(S.indexSpec({ kind: 'ttl', ttl: '90m' }).json, { kind: 'ttl', ms: 5_400_000 });
+  assert.equal(S.addField('odd', 'ölçü2', 'text', { collate: 'tr', index: { kind: 'hash' } }).text, 'alter collection odd add field ölçü2 text collate tr @hash');
+  assert.equal(S.addField('docs', 'v', 'vector<768, f16>').text, 'alter collection docs add field v vector<768, f16>');
+  assert.equal(S.renameField('orders', 'note', 'memo').text, 'alter collection orders rename field note to memo');
+  assert.equal(S.dropField('orders', 'note').text, 'alter collection orders drop field note');
+  assert.equal(S.dropCollection('orders').text, 'drop collection orders');
+  for (const bad of ['a b', 'x) @hash; drop collection orders --', '', 'a.b', '$1']) {
+    assert.throws(() => S.createIndex('orders', bad, { kind: 'hash' }), S.StatementError, bad);
+    assert.throws(() => S.createIndex(bad, 'f', { kind: 'hash' }), S.StatementError, bad);
+    assert.throws(() => S.addField('orders', bad, 'text'), S.StatementError, bad);
+    assert.throws(() => S.renameField('orders', 'note', bad), S.StatementError, bad);
+    assert.throws(() => S.dropField('orders', bad), S.StatementError, bad);
+    assert.throws(() => S.dropCollection(bad), S.StatementError, bad);
+  }
+  for (const bad of ['text @hash', 'vector<0>', 'int; drop collection a', '[json]', 'vector<8>) @hnsw']) {
+    assert.throws(() => S.addField('orders', 'f', bad), S.StatementError, bad);
+  }
+  for (const bad of [{ kind: 'ttl', ttl: '7 days' }, { kind: 'ttl', ttl: '0d' }, { kind: 'text', prefix: 65 }, { kind: 'hnsw', metric: 'cos' }, { kind: 'hnsw', metric: 'l2', quant: 'bit' }, { kind: 'btree' }]) {
+    assert.throws(() => S.indexSpec(bad), S.StatementError, JSON.stringify(bad));
+  }
+  assert.throws(() => S.createIndex('orders', 'id', { kind: 'hash' }), S.StatementError);
+  assert.throws(() => S.addField('orders', 'n', 'int', { collate: 'tr' }), /orders text/);
+  assert.deepEqual(S.indexKinds('vector<8>'), ['hnsw']);
+  assert.deepEqual(S.indexKinds('json'), []);
+});
+
+test('the plan is asked of the collection as it would be after the change, and of nothing else', () => {
+  const desc = {
+    format: 1,
+    collections: [
+      { name: 'orders', fields: [{ name: 'total', type: 'float' }, { name: 'note', type: 'text', index: { kind: 'hash' } }] },
+      { name: 'docs', fields: [{ name: 'title', type: 'text' }] },
+    ],
+  };
+  const frozen = JSON.stringify(desc);
+  assert.deepEqual(S.planned(desc, { op: 'index', collection: 'orders', field: 'total', index: { kind: 'sorted' } }), {
+    format: 1,
+    collections: [{ name: 'orders', fields: [{ name: 'total', type: 'float', index: { kind: 'sorted' } }, { name: 'note', type: 'text', index: { kind: 'hash' } }] }],
+  });
+  assert.deepEqual(S.planned(desc, { op: 'add', collection: 'docs', field: 'at', type: 'timestamp', index: { kind: 'ttl', ttl: '1h' } }).collections[0].fields[1], {
+    name: 'at',
+    type: 'timestamp',
+    index: { kind: 'ttl', ms: 3_600_000 },
+  });
+  assert.equal(S.planned(desc, { op: 'rename', collection: 'orders', from: 'note', to: 'memo' }).collections[0].fields[1].name, 'memo');
+  assert.deepEqual(S.planned(desc, { op: 'drop-field', collection: 'orders', field: 'note' }).collections[0].fields, [{ name: 'total', type: 'float' }]);
+  assert.deepEqual(S.planned(desc, { op: 'drop', collection: 'docs' }), { format: 1, collections: [] });
+  assert.throws(() => S.planned(desc, { op: 'index', collection: 'nope', field: 'x', index: { kind: 'hash' } }), S.StatementError);
+  assert.throws(() => S.planned(desc, { op: 'rename', collection: 'orders', from: 'gone', to: 'x' }), S.StatementError);
+  // The schema read from the server is never changed in place.
+  assert.equal(JSON.stringify(desc), frozen);
+  const texts = S.createTexts('create collection orders (a int @hash)\ncreate index on orders (meta.k) @hash\ncreate collection ölçü (b text)\n');
+  assert.deepEqual([...texts], [
+    ['orders', ['create collection orders (a int @hash)', 'create index on orders (meta.k) @hash']],
+    ['ölçü', ['create collection ölçü (b text)']],
+  ]);
+});
+
+test('an answer\'s columns are read off its rows; the metrics off their text', async () => {
+  const { columnsOf } = await import('../kit.js');
+  assert.deepEqual(columnsOf([{ n: 1, id: 2, v: [0.1, 0.2, 0.3, 0.4], m: { a: 1 } }, { n: 1.5, t: 'x', ok: true, m: null }]), [
+    { name: 'id', type: 'int' },
+    { name: 'n', type: 'float' },
+    { name: 'v', type: 'vector<4>' },
+    { name: 'm', type: 'json' },
+    { name: 't', type: 'text' },
+    { name: 'ok', type: 'bool' },
+  ]);
+  const { prometheus, total, quantile } = await import('../admin.js');
+  const m = prometheus(
+    [
+      '# TYPE fenec_statements_total counter',
+      'fenec_statements_total{kind="read"} 90',
+      'fenec_statements_total{kind="write"} 10',
+      'fenec_statement_duration_seconds_bucket{kind="read",le="0.001"} 50',
+      'fenec_statement_duration_seconds_bucket{kind="read",le="0.01"} 90',
+      'fenec_statement_duration_seconds_bucket{kind="read",le="+Inf"} 100',
+      'fenec_data_bytes{collection="a \\"b\\""} 7',
+    ].join('\n'),
+  );
+  assert.equal(total(m, 'fenec_statements_total'), 100);
+  assert.equal(total(m, 'fenec_statements_total', { kind: 'write' }), 10);
+  assert.equal(total(m, 'fenec_nothing'), null);
+  assert.equal(m.at(-1).labels.collection, 'a "b"');
+  assert.equal(quantile(m, 'fenec_statement_duration_seconds', 0.5, { kind: 'read' }), 0.001);
+  assert.ok(Math.abs(quantile(m, 'fenec_statement_duration_seconds', 0.7, { kind: 'read' }) - 0.0055) < 1e-12);
+});
+
+// Each view is a module of its own, fetched when it opens: what it adds,
+// with the stylesheet and the modules the views share, gzipped.
+test('each view past the rows loads apart from the first load, and small', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const gz = (f) => gzipSync(readFileSync(join(here, '..', f)), { level: 9 }).length;
+  const shared = gz('views.css') + gz('kit.js') + gz('highlight.js') + gz('statements-views.js');
+  const page = readFileSync(join(here, '..', 'index.html'), 'utf8');
+  for (const view of ['editor.js', 'schema.js', 'live.js', 'admin.js', 'kit.js', 'highlight.js', 'views.css', 'statements-views.js']) {
+    assert.ok(!page.includes(view), `${view} is on the first load`);
+  }
+  for (const view of ['editor.js', 'schema.js', 'live.js', 'admin.js']) {
+    assert.ok(shared + gz(view) < 24_000, `${view}: ${shared + gz(view)} bytes gzipped`);
+  }
 });
 
 // The first load: every script and style the page fetches, gzipped, under

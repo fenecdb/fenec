@@ -39,18 +39,20 @@ export const ROUTER = 'studio-test-router-token';
 
 /**
  * fenec-shard with the studio on, in front of the tenant node at `node`
- * (started with `tenants: true`), and `tenants` placed on it.
+ * (started with `tenants: true`), and `tenants` placed on it. `token` is
+ * the router's own: the nodes' data token makes one token for both, as the
+ * admin view's list of tenants needs.
  */
-export async function startRouter(node, tenants) {
+export async function startRouter(node, tenants, { token = ROUTER } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'fenec-studio-router-'));
   const port = await freePort();
-  const args = ['--listen', `127.0.0.1:${port}`, '--directory', join(dir, 'shard.fenec'), '--token', ROUTER, '--auth-delay', '0', '--studio'];
+  const args = ['--listen', `127.0.0.1:${port}`, '--directory', join(dir, 'shard.fenec'), '--token', token, '--auth-delay', '0', '--studio'];
   const child = spawn(binary('fenec-shard', 'FENEC_SHARD'), args, { stdio: ['ignore', 'ignore', 'pipe'] });
   let log = '';
   child.stderr.on('data', (d) => (log += d));
   const url = `http://127.0.0.1:${port}`;
   const admin = (method, path, body) =>
-    fetch(`${url}${path}`, { method, headers: { authorization: `Bearer ${ROUTER}` }, body: body && JSON.stringify(body) });
+    fetch(`${url}${path}`, { method, headers: { authorization: `Bearer ${token}` }, body: body && JSON.stringify(body) });
   for (let i = 0; ; i++) {
     try {
       if ((await admin('GET', '/_shard/nodes')).ok) break;

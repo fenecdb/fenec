@@ -60,18 +60,20 @@ async function signIn(p, token) {
   await p.waitForSelector('.row:not(.pending)');
 }
 
-/** The text of row `i`'s cell under `field`, once its block is in. */
-async function cell(p, i, field) {
+/** The text of row `i`'s cell under `field`, once its block is in, in the grid under `within`. */
+async function cell(p, i, field, within = 'body') {
   return p.waitForFunction(
-    (i, field) => {
-      const names = [...document.querySelectorAll('.grid-head .col-name')].map((e) => e.textContent);
-      const row = document.querySelector(`.row[aria-rowindex="${i + 3}"]:not(.pending):not([hidden])`);
+    (i, field, within) => {
+      const root = document.querySelector(within);
+      const names = [...root.querySelectorAll('.grid-head .col-name')].map((e) => e.textContent);
+      const row = root.querySelector(`.row[aria-rowindex="${i + 3}"]:not(.pending):not([hidden])`);
       const at = names.indexOf(field);
       return row && at >= 0 ? row.children[at].textContent : null;
     },
     { timeout: 10_000 },
     i,
     field,
+    within,
   ).then((h) => h.jsonValue());
 }
 
@@ -297,6 +299,199 @@ test('scrolling 100 000 rows takes no task over 50 ms', async (t) => {
   await p.close();
 });
 
+/** A view opened from its tab, its module loaded. */
+async function view(p, name, ready) {
+  await p.click(`.view-tab[data-view="${name}"]`);
+  await p.waitForSelector(ready, { timeout: 10_000 });
+}
+
+/** The query editor's text replaced, its parameters set, and run with Ctrl+Enter. */
+async function runQuery(p, text, params = '[]') {
+  await p.$eval('#query', (e) => (e.value = ''));
+  await p.type('#query', text);
+  await p.$eval('#query-params', (e, v) => (e.value = v), params);
+  await p.focus('#query');
+  await p.keyboard.down('Control');
+  await p.keyboard.press('Enter');
+  await p.keyboard.up('Control');
+}
+
+test('the query editor: parameters, the plan, a batch refused at its statement', async () => {
+  const p = await page();
+  await signIn(p, TOKEN);
+  await view(p, 'query', '#query');
+  // It says what it is: the token's authority, no more.
+  assert.match(await p.$eval('#query-note', (e) => e.textContent), /with your token: it may do what the token may, and nothing more/);
+  // Coloured by the docs' rules, drawn as text nodes over the textarea.
+  await runQuery(p, 'get orders where owner = $1 and total > $2 order placed desc limit 20', '["carol", 500]');
+  await p.waitForFunction(() => document.querySelector('.ed-meta .ed-status')?.textContent === '200', { timeout: 10_000 });
+  assert.ok(await p.$('.hl.on .hl-mirror span.t-kw'));
+  assert.equal(await p.$eval('.hl-mirror', (e) => e.textContent.trim()), 'get orders where owner = $1 and total > $2 order placed desc limit 20');
+  const want = await query(server.url, 'get orders where owner = $1 and total > $2 order placed desc limit 20', ['carol', 500]);
+  assert.equal(await cell(p, 0, 'id', '.ed'), String(want[0].id));
+  assert.equal(await cell(p, 0, 'owner', '.ed'), 'carol');
+  const meta = await p.$eval('.ed-meta', (e) => e.textContent);
+  assert.match(meta, /took/);
+  assert.match(meta, new RegExp(`rows${want.length}`));
+  assert.match(await p.$eval('.ed-rid', (e) => e.textContent), /^[0-9a-f]{16}$/);
+
+  // The JSON, as the server answered it.
+  await p.click('.ed-tab[data-tab="json"]');
+  assert.deepEqual(JSON.parse(await p.$eval('.ed-json', (e) => e.textContent)), want);
+
+  // The plan: explain asked of the same text, with the same parameters.
+  await p.click('.ed-tab[data-tab="plan"]');
+  await p.waitForSelector('.plan-steps li', { timeout: 10_000 });
+  const plan = await p.$$eval('.plan-steps li', (ls) => ls.map((l) => [l.querySelector('.plan-kind').textContent, l.querySelector('.plan-what').textContent]));
+  const explained = await query(server.url, 'explain get orders where owner = $1 and total > $2 order placed desc limit 20', ['carol', 500]);
+  assert.deepEqual(plan, explained.map((r) => /^([a-z]+):\s*(.*)$/s.exec(r.plan).slice(1)));
+  assert.match(plan.flat().join(' '), /hash index on owner/);
+
+  // A write: its Fenec-Seq beside the answer.
+  await runQuery(p, 'set odd {ölçü: $1} where limit = 2', '[3.25]');
+  await p.waitForFunction(() => /Wrote 1 row/.test(document.querySelector('.ed-out')?.textContent ?? ''), { timeout: 10_000 });
+  assert.match(await p.$eval('.ed-meta', (e) => e.textContent), /change\d+/);
+
+  // Several statements are one /batch; the one that stops it is named, and
+  // none of its writes land.
+  const before = await count('get odd count');
+  await runQuery(p, 'insert odd {limit: $1};\nget nope limit 1', '[[40], []]');
+  await p.waitForSelector('.ed-refusal', { timeout: 10_000 });
+  const refusal = await p.$eval('.ed-refusal', (e) => e.textContent);
+  assert.match(refusal, /HTTP 404/);
+  assert.match(refusal, /nope/);
+  assert.match(refusal, /Statement 2 of 2 stopped the batch/);
+  assert.equal(await count('get odd count'), before);
+  // The editor points at it.
+  assert.equal(await p.$eval('#query', (e) => e.value.slice(e.selectionStart, e.selectionEnd)), 'get nope limit 1');
+
+  // Kept in history, and saved by name, in this browser.
+  await p.click('.ed-actions .btn:not(.primary)');
+  await p.waitForSelector('dialog[open] #save-name');
+  await p.type('#save-name', 'refused batch');
+  await p.click('dialog[open] button[type=submit]');
+  await p.waitForFunction(() => /refused batch/.test(document.querySelector('.ed-list')?.textContent ?? ''));
+  const kept = await p.evaluate(() => [localStorage.getItem('fenec-studio-saved'), localStorage.getItem('fenec-studio-history'), JSON.stringify(localStorage)]);
+  assert.match(kept[0], /get nope/);
+  assert.match(kept[1], /owner = \$1/);
+  assert.ok(!kept[2].includes(TOKEN), 'the token reached localStorage');
+
+  assert.deepEqual(p.problems, []);
+  await p.close();
+});
+
+test('the schema: an index through its preview and plan; a drop only once its name is typed', async () => {
+  await query(server.url, 'create collection scratch (n int)');
+  const p = await page();
+  await signIn(p, TOKEN);
+  await open(p, 'odd');
+  await view(p, 'schema', '.sc-create');
+  assert.equal(await p.$eval('.sc-create', (e) => e.textContent), 'create collection odd (limit int @sorted, order text @hash, ölçü float)');
+
+  // An index on ölçü: the statement, then what the declared-schema plan says.
+  await p.click('button[aria-label="Add an index on ölçü"]');
+  await p.waitForSelector('dialog[open] #sc-kind');
+  await p.select('#sc-kind', 'sorted');
+  await p.waitForFunction(() => document.querySelector('dialog[open] .sc-statement')?.textContent === 'create index on odd (ölçü) @sorted');
+  await p.waitForFunction(() => /create index on odd \(ölçü\) @sorted/.test(document.querySelector('dialog[open] .sc-plan')?.textContent ?? ''), { timeout: 10_000 });
+  await p.waitForFunction(() => !document.querySelector('dialog[open] button[type=submit]').disabled);
+  await p.click('dialog[open] button[type=submit]');
+  await p.waitForFunction(() => /ölçü float @sorted/.test(document.querySelector('.sc-create')?.textContent ?? ''), { timeout: 10_000 });
+  const odd = (await query(server.url, 'describe odd'))[0];
+  assert.equal(odd.fields.find((f) => f.name === 'ölçü').index, 'sorted');
+
+  // A collection dropped: its name typed before the button does anything.
+  await p.click('.coll[data-name="scratch"] .coll-line');
+  await p.waitForFunction(() => document.querySelector('.sc .view-title')?.textContent === 'scratch');
+  await p.waitForFunction(() => /create collection scratch/.test(document.querySelector('.sc-create')?.textContent ?? ''), { timeout: 10_000 });
+  await p.click('.sc-actions .btn.danger');
+  await p.waitForSelector('dialog[open] #sc-confirm');
+  await p.waitForFunction(() => /drop collection scratch/.test(document.querySelector('dialog[open] .sc-statement')?.textContent ?? ''));
+  // The plan of it: a collection the description leaves out is left alone.
+  await p.waitForFunction(() => /leaves alone/.test(document.querySelector('dialog[open] .sc-plan')?.textContent ?? ''), { timeout: 10_000 });
+  const go = 'dialog[open] button[type=submit]';
+  assert.equal(await p.$eval(go, (b) => b.disabled), true);
+  await p.type('#sc-confirm', 'scratc');
+  assert.equal(await p.$eval(go, (b) => b.disabled), true);
+  await p.type('#sc-confirm', 'h');
+  assert.equal(await p.$eval(go, (b) => b.disabled), false);
+  await p.click(go);
+  await p.waitForFunction(() => !document.querySelector('.coll[data-name="scratch"]'), { timeout: 10_000 });
+  assert.ok(!(await query(server.url, 'collections')).some((c) => c.name === 'scratch'));
+
+  assert.deepEqual(p.problems, []);
+  await p.close();
+});
+
+test('the live view: rows arrive as they are written, and pause', async () => {
+  const p = await page();
+  await signIn(p, TOKEN);
+  await open(p, 'docs');
+  await view(p, 'live', '#live-where');
+  await p.waitForFunction(() => /300 rows of docs/.test(document.querySelector('.lv-status')?.textContent ?? ''), { timeout: 10_000 });
+  await query(server.url, 'insert docs {title: $1, lang: $2, code: $3}', ['a fox at dusk', 'en', 'LIVE-1']);
+  await p.waitForFunction(() => [...document.querySelectorAll('.lv .row[data-mark="new"]')].some((r) => r.textContent.includes('a fox at dusk')), { timeout: 10_000 });
+  assert.match(await p.$eval('.lv-log', (e) => e.textContent), /1 new/);
+
+  // Paused, a change waits; resumed, it lands.
+  await p.click('.lv .actions .btn');
+  await query(server.url, 'set docs {title: $1} where code = $2', ['a fox at night', 'LIVE-1']);
+  await p.waitForFunction(() => /Paused: 1 change waits/.test(document.querySelector('.lv-status')?.textContent ?? ''), { timeout: 10_000 });
+  assert.ok(!(await p.$eval('.lv .grid', (e) => e.textContent)).includes('a fox at night'));
+  await p.click('.lv .actions .btn');
+  await p.waitForFunction(() => [...document.querySelectorAll('.lv .row[data-mark="changed"]')].some((r) => r.textContent.includes('a fox at night')), { timeout: 10_000 });
+  await query(server.url, 'del docs where code = $1', ['LIVE-1']);
+  await p.waitForFunction(() => /1 deleted/.test(document.querySelector('.lv-log')?.textContent ?? ''), { timeout: 10_000 });
+
+  // The admin view, for the server's token.
+  await view(p, 'admin', '.ad-table');
+  await p.waitForFunction(() => /File/.test(document.querySelector('.ad-numbers')?.textContent ?? ''), { timeout: 10_000 });
+  const numbers = await p.$eval('.ad-numbers', (e) => e.textContent);
+  for (const what of ['Reads', 'Writes', 'Read latency', 'File', 'Reclaimable', 'Compactions']) assert.match(numbers, new RegExp(what));
+  // The shapes run most: the seed's 300 inserts among them, as typed.
+  await p.click('.seg:not([aria-pressed="true"])');
+  await p.waitForFunction(() => /insert docs \{title: \$1/.test(document.querySelector('.ad-statements')?.textContent ?? ''));
+
+  assert.deepEqual(p.problems, []);
+  await p.close();
+});
+
+test('as one user: no admin view, and the live view shows no other user\'s row', async () => {
+  const p = await page();
+  const alice = jwt({ sub: 'alice', role: 'analyst' });
+  await signIn(p, alice);
+  // No admin tab, and its key opens nothing.
+  assert.deepEqual(await p.$$eval('.view-tab', (ts) => ts.map((t) => t.dataset.view)), ['rows', 'query', 'schema', 'live']);
+  await p.keyboard.press('5');
+  assert.equal(await p.$('.ad'), null);
+
+  await open(p, 'orders');
+  await view(p, 'live', '#live-where');
+  // The whole of alice's orders is past what a seed may hold.
+  await p.waitForFunction(() => /Narrow them/.test(document.querySelector('.lv-status')?.textContent ?? ''), { timeout: 10_000 });
+  await p.type('#live-where', 'customer = "customer-001"');
+  await p.keyboard.press('Enter');
+  const mine = await count('get orders where customer = $1 and owner = $2 count', ['customer-001', 'alice']);
+  await p.waitForFunction((n) => new RegExp(`^${n} rows? of orders`).test(document.querySelector('.lv-status')?.textContent ?? ''), { timeout: 10_000 }, mine);
+  // bob's write first, then alice's: only hers arrives.
+  await query(server.url, 'insert orders {customer: $1, owner: $2, note: $3}', ['customer-001', 'bob', 'bob was here']);
+  await query(server.url, 'insert orders {customer: $1, owner: $2, note: $3}', ['customer-001', 'alice', 'alice was here']);
+  await p.waitForFunction(() => document.querySelector('.lv .grid')?.textContent.includes('alice was here'), { timeout: 10_000 });
+  // bob's row moved to alice's is a new row of hers; alice's moved to bob's leaves.
+  await query(server.url, 'set orders {owner: $1} where note = $2', ['bob', 'alice was here']);
+  await p.waitForFunction(() => /1 deleted/.test(document.querySelector('.lv-log')?.textContent ?? ''), { timeout: 10_000 });
+  const text = await p.$eval('.lv', (e) => e.textContent);
+  assert.ok(!text.includes('bob was here'), 'bob\'s row reached alice');
+  const owners = await p.$$eval('.lv .row:not([hidden])', (rows) => {
+    const names = [...document.querySelectorAll('.lv .grid-head .col-name')].map((e) => e.textContent);
+    return rows.map((r) => r.children[names.indexOf('owner')]?.textContent);
+  });
+  assert.ok(owners.length > 0 && owners.every((o) => o === 'alice'), owners.join(','));
+
+  assert.deepEqual(p.problems, []);
+  await p.close();
+});
+
 /** `notes` in each tenant, as many rows as given, at `url` (a node or a router). */
 async function notes(url, tenants) {
   for (const [t, n] of tenants) {
@@ -361,6 +556,38 @@ test('through a router: the tenant a token names, or the one typed', async () =>
     await p.type('#tenant', 'globex');
     await p.click('.signin button[type=submit]');
     await waitCount(p, 4);
+    assert.deepEqual(p.problems, []);
+    await p.close();
+  } finally {
+    await router.stop();
+    await node.stop();
+  }
+});
+
+test('through a router whose token is the nodes\': the admin view lists the tenants, their nodes and sizes', async () => {
+  const node = await startServer({ tenants: true, studio: false });
+  const router = await startRouter(node, ['acme', 'globex'], { token: TOKEN });
+  try {
+    await notes(router.url, [
+      ['acme', 3],
+      ['globex', 1],
+    ]);
+    const p = await page();
+    await p.goto(`${router.url}/_studio/`);
+    await p.waitForSelector('#token');
+    await p.type('#token', TOKEN);
+    await p.click('.signin button[type=submit]');
+    await waitCount(p, 3);
+    await view(p, 'admin', '.ad-tenants');
+    const rows = await p.$$eval('.ad-tenants tbody tr', (trs) => trs.map((tr) => [...tr.children].map((td) => td.textContent)));
+    assert.deepEqual(rows.map((r) => r.slice(0, 3)), [
+      ['acme', 'n1', 'active'],
+      ['globex', 'n1', 'active'],
+    ]);
+    for (const r of rows) assert.match(r[3], /^\d+(\.\d)? (B|KB|MB)$/);
+    // The router's own counts, and the tenant's statements through it.
+    await p.waitForFunction(() => /Requests/.test(document.querySelector('.ad-numbers')?.textContent ?? ''), { timeout: 10_000 });
+    await p.waitForFunction(() => /get notes/.test(document.querySelector('.ad-statements')?.textContent ?? ''), { timeout: 10_000 });
     assert.deepEqual(p.problems, []);
     await p.close();
   } finally {

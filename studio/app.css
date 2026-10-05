@@ -168,6 +168,14 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 .tenant-pick .sep { color: var(--muted); }
 .tenant { height: 26px; font-family: var(--mono); font-size: 12px; max-width: 160px; }
 .top-end { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+
+/* The views, as tabs in the bar: the one open is marked as the active cell
+   and the current collection are, in the sun's amber. */
+.views { display: flex; align-items: stretch; align-self: stretch; gap: 2px; margin-left: 12px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.view-tab { border: 0; background: none; padding: 0 10px; color: var(--ink-2); cursor: pointer; border-bottom: 2px solid transparent; border-top: 2px solid transparent; white-space: nowrap; }
+.view-tab:hover { color: var(--ink); background: var(--surface-2); }
+.view-tab[aria-current="page"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--sun-line); }
+.view-tab:focus-visible { outline-offset: -2px; }
 .side-toggle { display: none; }
 
 .who {
@@ -190,6 +198,11 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 @media (prefers-reduced-motion: reduce) { .horizon-fill { transition: none; } }
 
 .body { display: grid; grid-template-columns: 248px minmax(0, 1fr) auto; min-height: 0; }
+.body:not([data-view="rows"]) > .main, .body:not([data-view="rows"]) > .inspector { display: none; }
+.body[data-view="rows"] > .view-host { display: none; }
+.view-host { min-height: 0; min-width: 0; display: grid; background: var(--surface); }
+.view { min-height: 0; min-width: 0; }
+.view-loading { margin: 24px; color: var(--muted); }
 
 /* ------------------------------------------------------------- sidebar */
 
@@ -376,6 +389,8 @@ kbd { font-size: 11.5px; padding: 1px 6px; border: 1px solid var(--rule-2); bord
   .side-open .side-host { transform: none; }
   .inspector { position: absolute; z-index: 4; inset: 30% 0 0 0; width: auto; border-left: 0; border-top: 1px solid var(--rule); box-shadow: var(--shadow); }
   .brand-name, .server-host { display: none; }
+  .views { margin-left: 0; }
+  .view-tab { padding: 0 7px; }
   .top { gap: 8px; padding: 0 8px; }
   .who { max-width: 46vw; }
   .who-exp { display: none; }
