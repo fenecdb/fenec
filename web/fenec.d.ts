@@ -182,7 +182,8 @@ type AnySchema<S> = Record<keyof S, Fields>;
 /** An aggregate of a select list, as FenecQL spells it. */
 export type Aggregate<F extends Fields> =
   | 'count(*)'
-  | `${'sum' | 'avg' | 'min' | 'max'}(${keyof F & string})`;
+  | `count(distinct ${keyof F & string})`
+  | `${'sum' | 'avg' | 'min' | 'max' | 'first' | 'last'}(${keyof F & string})`;
 
 export type Row<F extends Fields> = F & { id: number };
 
@@ -396,7 +397,44 @@ export function inc(by?: number): Computed;
  * A value as a FenecQL expression over the row, `?` placeholders bound to
  * parameters in order: `{ at: expr('now()') }`, `{ total: expr('price * ?', 1.2) }`.
  */
-export function expr(sql: string, ...params: unknown[]): Computed;
+export function expr(sql: string, ...params: unknown[]): Expression;
+
+declare const named: unique symbol;
+
+/**
+ * An expression for a select list or a group, as well as a value: what
+ * `expr()`, `bucket()`, `countDistinct()`, `first()` and `last()` make.
+ */
+export interface Expression extends Computed {
+  /** The name the column answers under: `select ... as <name>`. */
+  as<N extends string>(name: N): Named<N>;
+}
+
+/** An expression `as` named: a column of the select list under `N`. */
+export interface Named<N extends string> extends Expression {
+  readonly [named]: N;
+}
+
+/** What `bucket` takes: `'15m'`, `'1h'`, `'1d'`, `'1w'`, `'1mo'`, `'1y'`. */
+export type Interval = `${number}${'ms' | 's' | 'm' | 'h' | 'd' | 'w' | 'mo' | 'y'}`;
+
+/**
+ * `bucket(field, interval)`: the start of the interval a timestamp falls
+ * in, in UTC -- weeks from a Monday, months and years by the calendar.
+ */
+export function bucket(field: string, interval: Interval): Expression;
+
+/** `count(distinct field)`: how many distinct values the rows hold. */
+export function countDistinct(field: string): Expression;
+
+/**
+ * `first(field [by key])`: the value of the row least by `key` -- by the
+ * order the rows were written without one -- that has a value.
+ */
+export function first(field: string, by?: string): Expression;
+
+/** `last(field [by key])`: as `first`, the row greatest by `key`. */
+export function last(field: string, by?: string): Expression;
 
 /** Executor: `(sql, params)` -> response. A `Fenec` instance also works. */
 export type Exec = (sql: string, params: unknown[]) => unknown;
@@ -512,6 +550,22 @@ export declare class Query<
   select<K extends keyof Row<F> & string, A extends Aggregate<F>>(
     ...cols: (K | A)[]
   ): Query<F, Pick<Row<F>, K> & { [N in A]: number | string | null }, L, Rel, At, Fa>;
+  /**
+   * Expressions among the fields and aggregates, each answering under the
+   * name its `as` gives it:
+   *
+   *   db.from('ticks').select('sym', expr('sum(px * qty) / sum(qty)').as('vwap')).group('sym')
+   */
+  select<K extends keyof Row<F> & string, A extends Aggregate<F>, N extends string>(
+    ...cols: (K | A | Named<N> | Expression)[]
+  ): Query<
+    F,
+    Pick<Row<F>, K> & { [X in A]: number | string | null } & { [X in N]: Json },
+    L,
+    Rel,
+    At,
+    Fa
+  >;
   select(): Query<F, Row<F>, L, Rel, At, Fa>;
   /** Fields and paths into json fields, each path answering under its text. */
   select<C extends (keyof Row<F> & string) | JsonPath<F>>(
@@ -580,8 +634,12 @@ export declare class Query<
     opts?: { top?: number; disjunctive?: boolean },
   ): Query<F, P, L, Rel, At, Fa & { [N in K]: FacetCount<Json>[] }>;
 
-  /** `group field`: one row per value, for a select list that aggregates. */
-  group(field: keyof Row<F> & string): Query<F, P, L, Rel, At, Fa>;
+  /**
+   * `group a, b`: one row per distinct set of the keys' values, for a
+   * select list that aggregates. A key is a field or a path, a name the
+   * list gives a column with `as`, or an expression -- `bucket('at', '1h')`.
+   */
+  group(...keys: (string | Expression | (string | Expression)[])[]): Query<F, P, L, Rel, At, Fa>;
 
   where(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At, Fa>;
   where<K extends keyof Row<F> & string>(

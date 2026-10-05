@@ -40,7 +40,9 @@ test('the client reaches the builder and the HTTP client, and nothing of the eng
 });
 
 test('the client exports what fenec.js does of it, the same objects', () => {
-  assert.deepEqual(Object.keys(client).sort(), ['FenecError', 'FenecHttp', 'Query', 'and', 'connect', 'expr', 'from', 'inc', 'not', 'or', 'raw']);
+  assert.deepEqual(Object.keys(client).sort(), [
+    'FenecError', 'FenecHttp', 'Query', 'and', 'bucket', 'connect', 'countDistinct', 'expr', 'first', 'from', 'inc', 'last', 'not', 'or', 'raw',
+  ]);
   for (const [name, value] of Object.entries(client)) assert.equal(value, fenec[name], name);
   assert.equal(client.from('docs').where('year', 2024).toFenecQL()[0], 'get docs where year = $1');
 });

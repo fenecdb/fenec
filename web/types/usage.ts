@@ -8,10 +8,14 @@ import {
   FenecHttp,
   FenecError,
   and,
+  bucket,
   connect,
+  countDistinct,
   expr,
+  first,
   from,
   inc,
+  last,
   not,
   openFile,
   or,
@@ -150,6 +154,19 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
 
   const grouped = await db.from('articles').select('year', 'count(*)', 'avg(year)').group('year').rows();
   expect<number | null>(grouped[0].year);
+  const bars = await db
+    .from('articles')
+    .select(bucket('published', '1h').as('hour'), first('title', 'published').as('open'), last('title'), 'count(distinct year)')
+    .group('hour', bucket('published', '1d'))
+    .rows();
+  expect<Json>(bars[0].hour);
+  expect<Json>(bars[0].open);
+  expect<number | string | null>(bars[0]['count(distinct year)']);
+  await db.from('articles').select('title', expr('year * ?', 2).as('twice'), countDistinct('year')).group(['title']).rows();
+  // @ts-expect-error -- a bucket's interval is a number and a unit
+  bucket('published', 'hourly');
+  // @ts-expect-error -- `inc()` names no column
+  inc(1).as('n');
 
   const withReviews = await db
     .from('articles')
