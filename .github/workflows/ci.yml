@@ -318,6 +318,41 @@ jobs:
           SHOP_FENEC_SERVER="$PWD/target/release/fenec-server" SHOP_LIGHTHOUSE=1 \
             CHROME_PATH="$(command -v google-chrome)" examples/run-tests.sh shop
 
+  # examples/ledger: the payments ledger over a release fenec-server tenant
+  # node -- 16 clients making 20 000 operations in process and over HTTP and
+  # every invariant after, the security tests, the change-stream sink, a
+  # sealed backup restored, and a server killed with SIGKILL under the load. A job of its own, like the
+  # shop's: a release server, and about two minutes of load.
+  ledger:
+    name: examples (ledger)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-ledger-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-ledger-
+
+      - name: The ledger
+        run: |
+          make wasm
+          cargo build --release -p fenec-server -p fenec-cli
+          LEDGER_FENEC_SERVER="$PWD/target/release/fenec-server" LEDGER_FENEC_CLI="$PWD/target/release/fenec" \
+            examples/run-tests.sh ledger
+
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest

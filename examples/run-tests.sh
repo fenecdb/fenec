@@ -120,6 +120,18 @@ run_shop() {
         FENEC_PORT=$port SHOP_PORT=$((port + 1)) sh scripts/ci.sh)
 }
 
+# The ledger (examples/ledger/scripts/ci.sh): a tenant node of its own over a
+# new directory, lint, and its invariant, security, sink and crash tests;
+# LEDGER_BENCH=1 adds the measurements.
+run_ledger() {
+    has node || { missing node "ledger"; return; }
+    w=$(npm_example ledger)
+    [ -x "${LEDGER_FENEC_CLI:-$root/target/debug/fenec}" ] || "$cargo" build -q -p fenec-cli --manifest-path "$root/Cargo.toml"
+    (cd "$w" && FENEC_SERVER="${LEDGER_FENEC_SERVER:-$root/target/debug/fenec-server}" \
+        FENEC_CLI="${LEDGER_FENEC_CLI:-$root/target/debug/fenec}" \
+        FENEC_PORT=$((port + 2)) sh scripts/ci.sh)
+}
+
 run_python() {
     has python3 || { missing python3 "python"; return; }
     serve python
@@ -171,7 +183,7 @@ run_flutter() {
     (cd "$here/flutter" && ./run-tests.sh)
 }
 
-all="node-server web-local react shop python go dotnet rust swift kotlin-android flutter"
+all="node-server web-local react shop ledger python go dotnet rust swift kotlin-android flutter"
 "$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 for e in ${*:-$all}; do
     echo "== $e"
@@ -180,6 +192,7 @@ for e in ${*:-$all}; do
         web-local) run_web_local ;;
         react) run_react ;;
         shop) run_shop ;;
+        ledger) run_ledger ;;
         python) run_python ;;
         go) run_go ;;
         dotnet) run_dotnet ;;
