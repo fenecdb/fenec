@@ -1,0 +1,28 @@
+{
+  "name": "fenecdb-ledger",
+  "private": true,
+  "type": "module",
+  "description": "Quire, a double-entry ledger on fenec-server: transfers, refunds and holds as guarded /batch blocks, an append-only journal, reconciliation, a change-stream sink, and an operator console",
+  "scripts": {
+    "db": "sh scripts/db.sh",
+    "setup": "tsx scripts/setup.ts",
+    "start": "tsx src/server.ts",
+    "sink": "tsx scripts/sink.ts",
+    "lint": "tsc --noEmit && eslint . --max-warnings 0",
+    "test": "node --import tsx --test --test-reporter=spec --test-concurrency=1 test/*.test.ts",
+    "bench": "tsx scripts/bench.ts",
+    "recon-bench": "tsx scripts/recon-bench.ts",
+    "ci": "sh scripts/ci.sh"
+  },
+  "dependencies": {
+    "@fenecdb/web": "0.1.10"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "26.6.4",
+    "eslint": "9.39.5",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
+  }
+}

@@ -38,6 +38,7 @@ restarts.
 | [`kotlin-android`](kotlin-android) | Kotlin, Compose | local | an Android app over a file in `filesDir`, a live `Flow`; a JVM CLI | `gradle :app:installDebug` |
 | [`flutter`](flutter) | Dart, Flutter | local | a Flutter app over a file in Application Support, `StreamBuilder` over a live query | `flutter run` |
 | [`shop`](shop) | Next.js, TypeScript | server | not the Notes app: a desert-gear shop of 10 000 products -- category pages with facets, search with highlights, carts under scoped tokens, a checkout that cannot oversell -- with its tests, Lighthouse scores and load test | `npm install && npm run db`, then `npm run seed && npm run build && npm start` |
+| [`ledger`](ledger) | Node, TypeScript | server | not the Notes app: a double-entry payments ledger on a tenant node -- transfers, refunds and holds as guarded `/batch` blocks with idempotency keys, an append-only journal, reconciliation, the journal streamed to a sink, scoped and tenant-bound tokens -- held by 16 clients' 20 000 operations, a `kill -9` under load and its security tests, an operator console | `npm install && npm run db`, then `npm run setup && npm start` |
 | [`integrations/cloudflare/example`](../integrations/cloudflare/example) | JavaScript | Durable Object | a database kept in a Durable Object's storage (`@fenecdb/cloudflare`); not the Notes app | `npx wrangler dev` |
 
 *Server* means the example talks to a `fenec-server` over HTTP; start one

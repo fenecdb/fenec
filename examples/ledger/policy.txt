@@ -1,0 +1,39 @@
+# Who may read and write what, with a JSON Web Token (src/tokens.ts).
+# Every token also names its tenant: on a --dir node it reaches only that
+# tenant's file. The operator's token (--http-token) is not a JWT and is
+# held to none of this; the ledger's server never holds it.
+#
+# collection   access                rows                                                  role
+
+# A customer: the accounts the token lists, joint ones included, and the
+# movements and entries that touch them. Customers write nothing here:
+# every movement goes through the ledger's server.
+accounts       read                  where ext in $jwt.accounts
+transfers      read                  where src in $jwt.accounts or dst in $jwt.accounts
+journal        read                  where account in $jwt.accounts
+holds          read                  where account in $jwt.accounts
+
+# The ledger's server: moves money, so it updates balances, and appends to
+# the journal. It cannot delete an account, and nothing below lets it edit
+# or delete an entry.
+accounts       read,update                                                                 for app
+accounts       insert                where balance = 0 and held = 0 and kind = "customer"  for app
+users          read                                                                        for app
+journal        read,insert                                                                 for app
+transfers      read,insert,update                                                          for app
+holds          read,insert,update                                                          for app
+limits         read,insert,update                                                          for app
+events         read,insert                                                                 for app
+
+# An operator in the console reads everything; what they change goes
+# through the server, which writes it to `events`.
+accounts       read                                                                        for admin
+journal        read                                                                        for admin
+transfers      read                                                                        for admin
+holds          read                                                                        for admin
+events         read                                                                        for admin
+
+# History is written once. No JWT updates or deletes here, whatever its
+# role: a rule granting it would stop the server at startup.
+journal        append-only
+events         append-only

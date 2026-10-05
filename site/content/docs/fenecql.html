@@ -1692,6 +1692,10 @@ curl -s -X POST localhost:8080/batch -H "Idempotency-Key: t1" --data-binary @-
     and a journal that accounts for every balance
     (<code>crates/fenec-core/tests/require.rs</code>,
     <code>crates/fenec-http/tests/require.rs</code>).</li>
+  <li><b>A whole ledger</b> built this way — refunds, holds, an
+    append-only journal, reconciliation, a change-stream sink, scoped
+    tokens — is
+    <a href="https://github.com/fenecdb/fenec/tree/main/examples/ledger">examples/ledger</a>.</li>
 </ul>
 
 <h3 id="checkout">Checkout</h3>
