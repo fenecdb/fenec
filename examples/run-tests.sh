@@ -132,6 +132,18 @@ run_ledger() {
         FENEC_PORT=$((port + 2)) sh scripts/ci.sh)
 }
 
+# Trellis (examples/saas/scripts/ci.sh): lint, and its auth, token, role,
+# realtime, search and operations tests, each file over a cluster of its
+# own -- three tenant nodes and fenec-shard; SAAS_BENCH=1 adds the
+# measurements.
+run_saas() {
+    has node || { missing node "saas"; return; }
+    w=$(npm_example saas)
+    [ -x "${SAAS_FENEC_SHARD:-$root/target/debug/fenec-shard}" ] || "$cargo" build -q -p fenec-shard --manifest-path "$root/Cargo.toml"
+    (cd "$w" && FENEC_SERVER="${SAAS_FENEC_SERVER:-$root/target/debug/fenec-server}" \
+        FENEC_SHARD="${SAAS_FENEC_SHARD:-$root/target/debug/fenec-shard}" sh scripts/ci.sh)
+}
+
 run_python() {
     has python3 || { missing python3 "python"; return; }
     serve python
@@ -183,7 +195,7 @@ run_flutter() {
     (cd "$here/flutter" && ./run-tests.sh)
 }
 
-all="node-server web-local react shop ledger python go dotnet rust swift kotlin-android flutter"
+all="node-server web-local react shop ledger saas python go dotnet rust swift kotlin-android flutter"
 "$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 for e in ${*:-$all}; do
     echo "== $e"
@@ -193,6 +205,7 @@ for e in ${*:-$all}; do
         react) run_react ;;
         shop) run_shop ;;
         ledger) run_ledger ;;
+        saas) run_saas ;;
         python) run_python ;;
         go) run_go ;;
         dotnet) run_dotnet ;;

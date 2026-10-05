@@ -353,6 +353,41 @@ jobs:
           LEDGER_FENEC_SERVER="$PWD/target/release/fenec-server" LEDGER_FENEC_CLI="$PWD/target/release/fenec" \
             examples/run-tests.sh ledger
 
+  # examples/saas: Trellis, the team workspace, over release fenec-server
+  # tenant nodes and fenec-shard -- its auth and token attack tests, the
+  # role matrix against the router, scoped subscriptions and search, a
+  # tenant moved and a node killed under load. A job of its own, like the
+  # ledger's: release binaries, and a cluster a test file.
+  saas:
+    name: examples (saas)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-saas-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-saas-
+
+      - name: Trellis
+        run: |
+          make wasm
+          cargo build --release -p fenec-server -p fenec-shard
+          SAAS_FENEC_SERVER="$PWD/target/release/fenec-server" SAAS_FENEC_SHARD="$PWD/target/release/fenec-shard" \
+            examples/run-tests.sh saas
+
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest
