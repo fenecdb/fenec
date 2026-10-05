@@ -25,6 +25,10 @@ usage: fenec-shard [options]
                             Data requests pass their own Authorization through
                             to the nodes, which check it against --http-token
       --insecure            allow a non-loopback address without --token
+      --studio              serve fenec studio, the admin pages, at /_studio/:
+                            a tenant's collections and rows in a browser,
+                            through this router, with the token pasted in.
+                            Off by default; keep it on a private network
       --audit <path>        append a JSON line to this file for each request
                             refused for its token and each /_shard/ request
                             that changes something
@@ -95,6 +99,11 @@ fn main() {
             "--directory" | "-d" => path = next(&mut i, "--directory"),
             "--token" => cfg.token = Some(next(&mut i, "--token")),
             "--insecure" => cfg.insecure = true,
+            "--studio" => {
+                let s = fenec_http::studio::Studio::new(fenec_http::studio::ASSETS, None)
+                    .unwrap_or_else(|e| fail(&e));
+                cfg.studio = Some(Arc::new(s));
+            }
             "--audit" => {
                 let p = next(&mut i, "--audit");
                 if let Err(e) = fenec_http::audit::open(std::path::Path::new(&p)) {

@@ -1,0 +1,213 @@
+<!--
+title: Studio — fenecdb
+description: fenec studio, the admin pages fenec-server serves with --studio: collections, rows, filters, facets and edits in a browser, with the token you paste and no authority of its own.
+-->
+
+<h1>Studio</h1>
+<p class="kicker">fenec studio is the server's own admin page: its collections,
+their rows and their schema in a browser, and the edits you make there. Start
+the server with <code>--studio</code> and open <code>/_studio/</code>.</p>
+
+<h2>Turn it on</h2>
+
+<p>Add <code>--studio</code> to <code>fenec-server</code>, open
+<code>/_studio/</code> on the same address, and paste a token.</p>
+
+<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080 \
+         --http-token "$TOKEN" --studio
+
+open http://127.0.0.1:8080/_studio/
+</pre>
+
+<figure class="shot">
+<img src="../images/studio-grid-dark.webp" width="1280" height="800" alt="fenec studio: the collections on the left with their row counts and a collection's fields and indexes, 100 000 orders in a grid with counts by status and owner above it, and one row unfolded on the right, its json field as a tree and its vector summarised">
+<figcaption>100 000 orders, counted by their <code>@hash</code> fields, one row unfolded.</figcaption>
+</figure>
+
+<ul>
+  <li><b>Off by default.</b> Without <code>--studio</code>,
+    <code>/_studio/</code> answers 404, as an unknown path does.</li>
+  <li><b>No new authority.</b> The page reads and writes with the token
+    you paste, over the same HTTP surface every client uses.</li>
+  <li><b>A tool for operators:</b> keep it on a private network or behind
+    your own sign-in (<a href="#security">Security</a>).</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The studio is plain ES modules and CSS from the repository's
+<code>studio/</code> folder, with the HTTP client and query builder of
+<code>@fenecdb/web/client</code> beside them — no framework and no build
+step. The server embeds the files, so the binary is all you deploy. Its
+first load is 56 KB of JavaScript and CSS, gzipped, its modules preloaded
+together from the page. The server sends the
+files as they are, uncompressed; a proxy in front may compress them.</p>
+<p>A router serves it too: <code>fenec-shard --studio</code> puts the
+same pages on the router's address, where each tenant is reached through
+the router (<a href="#tenants">Tenants</a>).</p>
+</details>
+
+<h2>Connect</h2>
+
+<p>The server is the page's own address unless you name another, and the
+token is the one the server takes: its <code>--http-token</code>, or a JSON
+Web Token its policy holds to its rows. The top bar says who the server takes
+it for.</p>
+
+<ul>
+  <li><b>Your token stays in the tab.</b> It is kept in session storage and
+    forgotten when the tab closes: never in local storage, a cookie or a
+    URL.</li>
+  <li><b>Who you are:</b> the token's subject, role and tenant, the rules
+    that apply to it, and how long until its <code>exp</code>. The line
+    under the top bar shortens as the token's life runs out, and the page
+    warns you five minutes before it does.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The identity comes from <code>GET /_whoami</code>, which any client may
+ask: <code>open</code> on a server that asks for no token,
+<code>full</code> for the server's token, and <code>scoped</code> for a JSON
+Web Token, with each rule of the policy that applies to it — the
+collection, the grants, the fields an update may change and the rows, as
+the policy writes the filter. A token is shown its own rules and no
+other's: a rule for a role it does not hold is not among them. It grants
+nothing; a token the server refuses gets the same 401 here as anywhere.</p>
+<pre data-lang="bash">curl -H "Authorization: Bearer $ALICE" http://127.0.0.1:8080/_whoami
+# {"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice",
+#  "tenants":null,"unbound":false,"append_only":[],
+#  "rules":[{"collection":"orders","grants":["read","insert","update","delete"],
+#            "fields":null,"rows":"owner = $jwt.sub"}]}
+</pre>
+<p>The token's claims — its subject, role and <code>exp</code> — are read
+in the page to show them, and decide nothing: the server checks the token on
+every request.</p>
+</details>
+
+<h2>Collections and rows</h2>
+
+<p>The sidebar lists the collections the token can read, each with its rows
+and its fields' types and indexes. The grid shows a collection's rows, as many
+as it holds, read a page at a time as you scroll.</p>
+
+<ul>
+  <li><b>Sort</b> by <code>id</code>, or by a field an index orders:
+    <code>@sorted</code> or <code>@ttl</code>.</li>
+  <li><b>Filter</b> with a <code>where</code> clause in FenecQL and its
+    parameters, or a box under each column: <code>abc</code>,
+    <code>=v</code>, <code>&gt;=v</code>, <code>a..b</code>,
+    <code>null</code>.</li>
+  <li><b>Counts by value</b> for each <code>@hash</code> field, over what
+    the filter selects; pick one to filter by it.</li>
+  <li><b>A row unfolded</b> (Space): a <code>json</code> field as a tree, a
+    vector as its dimension, its length and its first components.</li>
+  <li><b>File size</b> and what a compact would give back, where the token
+    may read <code>/_metrics</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A page is 100 rows. In id order the page after one already read is asked
+for by its last id — <code>get orders where id &gt; $1 limit 100</code> —
+which walks the id index from there; a page reached by a jump, or under an
+order, by its offset. Only the rows in view are drawn, so 100 000 rows cost
+what 40 do: a scroll down the whole collection and back in Chrome took no
+task over 50 ms (<code>make studio-test</code>). Past 8 million pixels of
+rows the scroll bar stands for the rows in proportion, since browsers cap an
+element's height.</p>
+<p>The count and the counts by value are one <code>/batch</code> of reads,
+under one read lock, so they are of one moment. A vector is never written
+out whole: 768 numbers in a cell are noise.</p>
+</details>
+
+<h2>Edit</h2>
+
+<p>Enter writes a cell, N opens a form for a new row, and Delete removes one
+after you confirm the statement it will send.</p>
+
+<pre data-lang="fenecql">set orders {note: $1} where id = $2 require 1
+insert orders {customer: $1, total: $2}
+del orders where id = $1 require 1
+</pre>
+
+<ul>
+  <li><b>Every value is a parameter.</b> A text shaped as FenecQL is stored
+    as it reads.</li>
+  <li><b>Every write is a <code>/batch</code></b> with an
+    <code>Idempotency-Key</code>, so a retry cannot write it twice.</li>
+  <li><b>A refusal says why:</b> 403 names the field the policy refused, and
+    412 says the row changed — deleted, or no longer the token's — since it
+    was read.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>require 1</code> makes a write that found no row a refusal (412)
+rather than a quiet <code>affected 0</code>, so an edit of a row someone
+deleted meanwhile is told so. The form is built from the schema: a box a
+field, typed as the field is, the statement written out below it as you
+fill it. A name FenecQL cannot write is refused rather than spliced into the
+text, and the <code>where</code> clause you type is held inside parentheses
+it cannot close, so it stays one condition among the page's.</p>
+</details>
+
+<h2>Keys</h2>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td><code>/</code></td><td>the <code>where</code> clause</td></tr>
+<tr><td><code>Alt+1</code>, <code>Alt+2</code></td><td>the collections, the rows</td></tr>
+<tr><td>arrows, <code>Page Up</code>, <code>Page Down</code></td><td>move between cells</td></tr>
+<tr><td><code>Enter</code>, <code>F2</code></td><td>edit the cell</td></tr>
+<tr><td><code>Space</code></td><td>the whole row</td></tr>
+<tr><td><code>C</code></td><td>copy the row as JSON</td></tr>
+<tr><td><code>S</code></td><td>sort by the column, where its index orders it</td></tr>
+<tr><td><code>N</code>, <code>Delete</code></td><td>a new row; delete the row, once confirmed</td></tr>
+<tr><td><code>R</code>, <code>?</code></td><td>read the rows again; every key</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="tenants">Tenants</h2>
+
+<p>On a tenant node or a router, the top bar picks the tenant: those the
+token's tenant claim names, or the node's or router's list where the token
+may read it. Otherwise type the tenant when you connect.</p>
+
+<pre data-lang="bash">fenec-server --dir tenants --http 127.0.0.1:8081 --admin-token "$ADMIN" --studio
+fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --studio
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>A token is bound to the tenants it names on a node, so the picker offers
+nothing it would be refused. Through a router the studio is on the router's
+address and every tenant is that same origin; a page served by a node would
+be another origin to the router. <code>--studio-connect &lt;origin&gt;</code>
+lets the pages a server serves send requests to one more origin, which its
+content security policy names.</p>
+</details>
+
+<figure class="shot">
+<div class="shot-row">
+<img src="../images/studio-phone-light.webp" width="390" height="844" alt="fenec studio on a phone, light: the orders grid with its where clause above">
+<img src="../images/studio-phone-dark.webp" width="390" height="844" alt="fenec studio on a phone, dark: the same grid">
+</div>
+<figcaption>On a phone, light and dark: the collections slide in from the side.</figcaption>
+</figure>
+
+<h2 id="security">Security</h2>
+
+<p>The studio is a new surface, not a new authority. Treat it as you would
+the server's own port: keep it on a private network, or behind your own
+sign-in and TLS.</p>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td>authority</td><td>none of its own: every statement carries the pasted token, so a scoped token sees its rows alone — in the grid, the counts and the facets</td></tr>
+<tr><td>the token</td><td>session storage of one tab; sent only as <code>Authorization: Bearer</code></td></tr>
+<tr><td>headers</td><td><code>Content-Security-Policy</code> with <code>default-src 'self'</code>, no inline script, <code>connect-src 'self'</code> and the <code>--studio-connect</code> origin; <code>X-Frame-Options: DENY</code>; <code>nosniff</code>; no referrer</td></tr>
+<tr><td>values</td><td>shown as text, never as markup; sent as parameters, never spliced</td></tr>
+<tr><td>caching</td><td>the page is never kept; its modules are asked about again each load (<code>ETag</code>, 304)</td></tr>
+<tr><td>off</td><td>without <code>--studio</code>, 404</td></tr>
+</tbody>
+</table>
+</div>

@@ -55,6 +55,7 @@ pub mod replication;
 pub mod seal;
 pub mod sse;
 pub mod statements;
+pub mod studio;
 pub mod sweep;
 pub mod tenants;
 pub mod timing;
@@ -138,6 +139,9 @@ pub struct Config {
     /// which a router reaches with it. A request bearing it is waited out
     /// at the router after a refusal, keyed by the client it names.
     pub router_mark: Option<String>,
+    /// The studio's files, served under `/_studio/` (`--studio`); `None`
+    /// answers that path 404.
+    pub studio: Option<Arc<studio::Studio>>,
 }
 
 impl Default for Config {
@@ -162,6 +166,7 @@ impl Default for Config {
             access: None,
             max_memory: 0,
             router_mark: None,
+            studio: None,
         }
     }
 }
@@ -387,6 +392,43 @@ fn authenticate(cfg: &Config, req: &Request) -> std::result::Result<Who, Respons
     Err(refuse("invalid or missing token"))
 }
 
+/// `GET /_whoami`: who the server takes the request's token for -- `open`
+/// on a server that asks for none, `full` for its own token, `scoped` for a
+/// JSON Web Token, with the rules that apply to it (`Scope::summary_into`)
+/// -- and where it was asked: a single database, a tenant node's root, or a
+/// tenant under it. A client shows a person what their token may do before
+/// they find out by a refusal; it grants nothing, and a token the server
+/// refuses is answered as everywhere else.
+fn whoami(cfg: &Config, req: &Request, node: &str, tenant: Option<&str>) -> Response {
+    if !matches!(req.method, Method::Get | Method::Head) {
+        return Response::error(405, "/_whoami is read with GET");
+    }
+    let who = match authenticate(cfg, req) {
+        Ok(who) => who,
+        Err(deny) => return deny,
+    };
+    let mut out = String::from("{\"node\":");
+    fenec_core::json::escape_into(&mut out, node);
+    out.push_str(",\"tenant\":");
+    match tenant {
+        Some(t) => fenec_core::json::escape_into(&mut out, t),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"read_only\":");
+    out.push_str(if cfg.read_only { "true" } else { "false" });
+    out.push_str(",\"kind\":");
+    match &who {
+        Who::Full if cfg.token.is_none() && cfg.access.is_none() => out.push_str("\"open\""),
+        Who::Full => out.push_str("\"full\""),
+        Who::Scoped(scope) => {
+            out.push_str("\"scoped\",");
+            scope.summary_into(&mut out);
+        }
+    }
+    out.push('}');
+    Response::json(200, out)
+}
+
 /// Whether `req` may read what every statement cost where it is sent: what
 /// reads the data there without a scope, or the admin token. A JWT's user
 /// is held to its rows, and the statements name every collection.
@@ -517,6 +559,18 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             continue;
         }
 
+        // The studio's files (`--studio`): static, the same for everyone,
+        // and asking no token -- the token is the page's to send with each
+        // request it makes, which the rest of this loop answers as any
+        // client's. Off, the path is a 404 like an unknown one.
+        if studio::is_studio(&req) && !matches!(backend, Backend::Metrics { .. }) {
+            let resp = studio::handle(cfg.studio.as_deref(), &req);
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
+
         // Before any routing: the metrics are the node's, not a tenant's.
         let scrape =
             matches!(req.method, Method::Get | Method::Head) && req.segments() == ["_metrics"];
@@ -616,6 +670,23 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     }
                 }
             }
+        }
+        if req.segments() == ["_whoami"] {
+            let node = if tenant.is_some() {
+                "tenants"
+            } else {
+                "single"
+            };
+            let resp = whoami(cfg, &req, node, tenant.as_ref().map(|t| t.name()));
+            audit::http(&req, resp.status, peer);
+            if cors(resp, cfg)
+                .write(&mut out, keep_alive, head_only)
+                .is_err()
+                || !keep_alive
+            {
+                return;
+            }
+            continue;
         }
         // The writes on disk, documents and all (`cdc.rs`): to what reads
         // every row. A scoped token's filter holds no deletion of a row it
@@ -763,6 +834,11 @@ fn route_tenant(
     let segs = req.segments();
     if segs.first() == Some(&"_admin") {
         return Err(admin::handle(tenants, cfg, req));
+    }
+    // The node's own answer, before a tenant is chosen: which tenants the
+    // token's claim names is what a client picks one from.
+    if segs.as_slice() == ["_whoami"] {
+        return Err(whoami(cfg, req, "tenants", None));
     }
     if req.body.len() > cfg.max_body {
         return Err(Response::error(

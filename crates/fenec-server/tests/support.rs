@@ -223,6 +223,18 @@ impl Http {
             .expect("the server closed the connection")
     }
 
+    /// [`Http::ask`] with headers of its own.
+    pub fn ask_with(
+        &mut self,
+        method: &str,
+        target: &str,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> Answer {
+        self.try_ask(method, target, body, headers)
+            .expect("the server closed the connection")
+    }
+
     /// A statement through `POST <prefix>/query`: its body, or the status
     /// and body it was refused with.
     pub fn query_at(&mut self, prefix: &str, q: &str) -> Result<String, (u16, String)> {

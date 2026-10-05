@@ -665,6 +665,15 @@ tbody tr { transition: background .2s; }
 tbody tr:hover { background: rgba(244,169,60,.045); }
 tbody tr:last-child td { border-bottom: 0; }
 
+/* A screenshot: its own width and height in the markup, so the page keeps
+   its place while it loads; a row of them side by side where a phone's
+   two themes are shown. */
+.shot { margin: 26px 0; }
+.shot img { display: block; width: 100%; height: auto; border: 1px solid var(--rule-hot); border-radius: 10px; }
+.shot figcaption { margin-top: 10px; color: var(--sand-dim); font-size: 14px; }
+.shot-row { display: flex; gap: 16px; }
+.shot-row img { min-width: 0; flex: 1 1 0; }
+
 /* ===================================================================== docs */
 
 .shell {

@@ -47,6 +47,7 @@ make builder-golden   # integrations/builder-golden.json written again from the 
 make schema-golden    # integrations/schema-golden.json: declarations, FenecQL texts and plans, through the module (web/schema-golden.mjs)
 make docs-types   # every data-lang="ts" example on the site under tsc --strict (web/types/docs.mjs; part of make types-check)
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
+make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
@@ -585,6 +586,37 @@ held it. A tenant's
 database installs the `Check` hook as a single one does
 (`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
 and a scoped write to a tenant went unchecked.
+
+**fenec studio is a page with no authority of its own** (`studio/`,
+`fenec_http::studio`, `--studio` on `fenec-server` and `fenec-shard`; off,
+`/_studio/` is a 404 as an unknown path is). Plain ES modules and CSS with
+no build step, importing `web/client.js` as any page would; the files are
+embedded by `include_bytes!` under fenec-http's `studio` feature, which the
+two binaries turn on and the shell does not: +210 KB of each release binary
+on aarch64-apple-darwin, the files 193 KB of it. They are served before any
+token is asked, with a strict CSP (`script-src 'self'`, no inline script,
+`connect-src 'self'` and the one `--studio-connect` origin, which is
+checked to be an origin since it is written into a header), `DENY` framing,
+the page `no-store` and the rest revalidated by an `ETag` of their bytes;
+the names are not hashed, since the modules import each other by name. The
+token is pasted into the page, kept in its tab's `sessionStorage` and sent
+as a client sends it, so the server's scope rewrite holds the grid, the
+counts and the facets to a scoped token's rows. Every statement is written
+in `studio/statements.js`: values as parameters, a name refused unless it is
+one FenecQL writes, the typed `where` held inside parentheses it cannot
+close; writes are `/batch`es under an `Idempotency-Key`, a cell's `set ...
+where id = $2 require 1`, so a row deleted meanwhile is a 412. `GET
+/_whoami` is what it shows a token by: `open`, `full` or `scoped` with the
+rules that apply to it, the filter as the policy writes it
+(`Scope::summary_into`). The grid reads 100 rows a block, the block after
+one in id order by `id > $last`, a jump or an order by offset, and draws
+only the rows in view: a scroll down 100 000 rows and back took no long task,
+the longest frame 18.7 ms in headless Chrome. Its first load is 56 KB of JS
+and CSS gzipped (`site/build.py` holds the docs to it), served uncompressed.
+`make studio-test` runs it in Chrome (puppeteer-core, `studio/`'s one dev
+dependency) against a debug server, a tenant node and a router; on macOS
+Chrome 148's new headless mode never answered puppeteer's clicks, so the
+harness prefers the headless shell.
 
 **A server's `create index` and `compact` run beside the database**
 (`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied

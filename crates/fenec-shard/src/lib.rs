@@ -67,6 +67,11 @@ pub struct Config {
     /// router renews it every third of this, and fails a node over once a
     /// tenth past it has gone by unrenewed. `None`: failover is by hand.
     pub auto_failover: Option<Duration>,
+    /// fenec studio at `/_studio/` (`--studio`): the same pages a node
+    /// serves, on the router's origin, so the tenants they reach through it
+    /// are this origin's -- a page a node served would be another origin's
+    /// to the router, and its tokens' preflights refused there.
+    pub studio: Option<Arc<fenec_http::studio::Studio>>,
 }
 
 impl Default for Config {
@@ -81,6 +86,7 @@ impl Default for Config {
             upstream_timeout: Duration::from_secs(60),
             replicas: false,
             auto_failover: None,
+            studio: None,
         }
     }
 }
@@ -400,6 +406,11 @@ impl Router {
                     }
                 }
                 Some(&"_shard") => answer(&mut out, Route::Shard, self.admin(&req)),
+                Some(&"_studio") => answer(
+                    &mut out,
+                    Route::Other,
+                    fenec_http::studio::handle(self.cfg.studio.as_deref(), &req),
+                ),
                 Some(&"_metrics") => answer(&mut out, Route::Metrics, self.metrics(&req)),
                 _ => answer(
                     &mut out,

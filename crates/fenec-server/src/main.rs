@@ -107,6 +107,13 @@ usage: fenec-server [options]
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
       --http-read-only      turn off writes
+      --studio              serve fenec studio, the admin pages, at
+                            /_studio/: collections, rows and edits in a
+                            browser, with the token pasted into the page and
+                            no authority of their own. Off by default; keep
+                            it on a private network or behind your own auth
+      --studio-connect <origin>  an origin the studio's pages may also send
+                            requests to: a router (https://router:8080)
       --idempotency-ttl <s>  how long a write's Idempotency-Key and answer
                             are kept, in seconds. default: 86400
       --http-max-streams <n>  ceiling on concurrent subscriptions (0 = unlimited)
@@ -246,6 +253,8 @@ fn main() {
     let mut follow_publication: Option<String> = None;
     let mut follow_opts = fenec_import::Options::new("");
     let mut follow_named = false;
+    let mut studio = false;
+    let mut studio_connect: Option<String> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut metrics: Option<String> = None;
@@ -433,6 +442,8 @@ fn main() {
                 });
             }
             "--insecure" => http_cfg.insecure = true,
+            "--studio" => studio = true,
+            "--studio-connect" => studio_connect = Some(next(&mut i, "--studio-connect")),
             "--follow" => follow_url = Some(next(&mut i, "--follow")),
             "--follow-table" => follow_table = Some(next(&mut i, "--follow-table")),
             "--follow-into" => follow_into = Some(next(&mut i, "--follow-into")),
@@ -491,6 +502,16 @@ fn main() {
         (false, Some(_)) => fail(
             "--policy needs --jwt-secret or --jwt-keys: the rules are for the tokens they verify",
         ),
+        (false, None) => {}
+    }
+
+    match (studio, studio_connect.as_deref()) {
+        (true, connect) => {
+            let s = fenec_http::studio::Studio::new(fenec_http::studio::ASSETS, connect)
+                .unwrap_or_else(|e| fail(&e));
+            http_cfg.studio = Some(Arc::new(s));
+        }
+        (false, Some(_)) => fail("--studio-connect is for the studio: add --studio"),
         (false, None) => {}
     }
 
