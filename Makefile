@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -54,9 +54,12 @@ test:
 ##                     declares, the check at an open, migrations, fenec types --schema
 ##   fenec.client.test.js  @fenecdb/web/client: the modules it reaches hold no
 ##                     engine, and its live queries over a scripted server
+##   studio/test/statements.test.mjs  fenec studio's statements: every value a
+##                     parameter, every name one FenecQL writes, its first load
+##                     under 120 KB gzipped
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test --test-reporter=spec web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js; \
+		node --test --test-reporter=spec web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js studio/test/statements.test.mjs; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -73,6 +76,15 @@ sync-scenarios-check:
 ## held to (web/golden.mjs holds the chains; fenec.test.js checks the file)
 builder-golden:
 	node web/golden.mjs
+
+## fenec studio in a headless Chrome (puppeteer-core, studio/'s one dev
+## dependency) against the debug fenec-server: the server token's browse,
+## sort, filter, edit, insert and delete, one user's rows alone, and a scroll
+## through 100 000 rows with no long task. Chrome is CHROME_PATH, else the
+## one puppeteer keeps in ~/.cache/puppeteer
+studio-test:
+	$(CARGO) build -p fenec-server
+	cd studio && npm ci --no-audit --no-fund --loglevel=error && npm run e2e
 
 ## AGENTS.md written again from CLAUDE.md: the same text under its own
 ## title (tools/agents_md.py; CI runs it with --check)

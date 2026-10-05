@@ -133,6 +133,14 @@ jobs:
       - name: Test
         run: make test
 
+      # fenec studio (`--studio`) in the runner's Chrome against the debug
+      # fenec-server `make test` built: signed in with the server's token
+      # and as one user of a policy, a scroll through 100 000 rows held to
+      # no long task. About 40 s, puppeteer-core and no browser download.
+      - name: fenec studio end to end
+        if: matrix.os == 'ubuntu-latest'
+        run: CHROME_PATH="$(command -v google-chrome)" make studio-test
+
       # make test checks it too, but only where the module was built; here
       # it was, and a runner that skipped a scenario fails the job.
       - name: Both sync runners ran every scenario
