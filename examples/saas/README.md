@@ -75,7 +75,7 @@ Every person, company and address in it is invented.
                 (Authorization: access token)    runs the /batch, the app                      decides who may invite whom
                                                  mails the code
  new org ────── POST /api/orgs ──────────────▶ slug in accounts (@unique), PUT /_shard/tenants/o-<slug> (router token),
-                                                 schema applied (operator token), first owner and team (app token)
+                                                 schema applied by the router, first owner and team (app token)
 ```
 
 Tokens, each with one job:
@@ -85,7 +85,7 @@ Tokens, each with one job:
 | A person, in an organisation | an access token: `sub`, `tenant` (the organisation's), `role` (their role and every role below it), `teams` (a list claim), `exp` five minutes on | what policy.txt grants their role, over the rows of their teams: from the browser, straight to the database |
 | A person, signed in | a refresh token, 32 random bytes in an HttpOnly cookie, stored as its SHA-256; and an API token naming no tenant | get access tokens; call this app's API. fenec-server refuses the API token everywhere (403: no tenant) |
 | This app | its own access token per tenant (`role: app`) | the auth flows: accounts, sessions, links, limits, the first owner of an organisation, invitations taken up. Never rewrite a log |
-| This app, provisioning | the router's token and the nodes' operator token | place a new organisation's tenant and apply its schema. No request handler uses either |
+| This app, provisioning | the router's token | place a new organisation's tenant with its schema, which the router applies on the node. No request handler uses it |
 | The operator | `--http-token`, `--admin-token`, the router's token | everything, including corrections to append-only logs |
 
 The signing key is RSA, made once into `data/keys/` and held by the app
@@ -141,12 +141,12 @@ it against release builds of `fenec-server` and `fenec-shard`.
 | Comments only as yourself | `comments insert,update(body, edited) where team in $jwt.teams and author = $jwt.sub`: the author is pinned to the token |
 | Admins cannot touch owners | `members update(role, teams),delete where role != "owner" for admin`: the filter holds the row before and after |
 | Logs nobody rewrites | `audit append-only`, `security_log append-only`: no JWT updates or deletes, the app's included |
-| Live boards | `GET /t/<t>/tasks/changes?team=eq.<key>` with the person's token: a seed and every change, held to `teams` |
+| Live boards | `db.subscribe('tasks', { team: 'eq.<key>' }, ...)` with the person's token (`GET /t/<t>/tasks/changes`): a seed and every change, held to `teams`, ended at the token's `exp` |
 | Search | `match` with `highlight()` and `snippet()`; BM25 over the rows the token may read |
 | Writes that land once | `db.batch([...], { idempotencyKey })`, retried with the same key after a 503 or a dropped connection |
 | Moving an organisation | `POST /_shard/tenants/<t>/move`: writes get 503 with `Retry-After` for the moment of the copy |
 | Losing a node | `--replicas`, `--auto-failover <s>` and nodes with `--lease`; `--sync always` |
-| Refused tokens | `--audit` logs every 401, and a refusal waits 100 ms, doubled for each more from its address |
+| Refused tokens | `--audit` logs every 401, and a refusal waits 100 ms, doubled for each more from its address -- at the router, by the client's address |
 
 The whole policy is [`policy.txt`](policy.txt); the schemas are
 [`schema/accounts.fenecql`](schema/accounts.fenecql) and
@@ -179,13 +179,14 @@ The whole policy is [`policy.txt`](policy.txt); the schemas are
 
 - **TLS.** fenec-server and this app speak plain HTTP; both go behind a TLS
   terminator, which `Secure` cookies then need (`TRELLIS_ORIGIN=https://…`).
-- **The app's process.** It holds the signing key, the router's token and
-  the nodes' operator token (for provisioning). Compromised, it can do
+- **The app's process.** It holds the signing key and the router's token
+  (for provisioning). Compromised, it can do
   anything; what it cannot do with its request-path token is rewrite the
   logs. A deployment splits provisioning into a service of its own.
 - **A token's life.** A role changed or a member removed counts from the
-  next refresh, at most five minutes. A subscription is checked when it
-  opens, so the page reopens its streams at every refresh (gaps, below).
+  next refresh, at most five minutes. A subscription ends at its token's
+  `exp`, and the page reopens its streams at every refresh besides (gaps,
+  below).
 - **Mail.** The development mailbox stands in for a mail service; SPF,
   DKIM and the inbox itself are outside.
 - **Abuse past one machine's limits.** The rate limits live in the
@@ -206,7 +207,7 @@ The whole policy is [`policy.txt`](policy.txt); the schemas are
 | `auth.test.ts` (21) | hashing, normalisation, the same answer and time for an unknown email, both rate limits under 16 and 40 concurrent attempts, rotation, reuse revoking the family, a race of 8, sign-out, cross-origin, verification once, a reset once and not after 30 minutes (a row 31 minutes old), forgot's same answer, the security log append-only |
 | `tokens.test.ts` (23) | 14 tokens against fenec-server, every route of another tenant, admin routes, the app's API, refusal waits doubling, ID token attacks, single sign-on end to end and a callback in another browser |
 | `tenancy.test.ts` (6) | the role matrix below, a member's team change by `/query`, REST `PATCH` and `/batch` (put back whole), the author pinned, invitations once, for their address and not after 72 hours, a role change and a removal counting from the next refresh |
-| `realtime.test.ts` (7) | a subscription hears its teams only, a task leaving the team is a deletion then silence, a shape naming another team, another tenant's stream, the `/db/` pipe, scoped BM25 and facets, comments |
+| `realtime.test.ts` (10) | a subscription hears its teams only, a task leaving the team is a deletion then silence, a shape naming another team, another tenant's stream, the `/db/` pipe, scoped BM25 and facets, comments, a live query under a person's token, the client's `subscribe`, a preflight through the router |
 | `operations.test.ts` (2) | a tenant moved under 8 writers, a node killed under 8 writers |
 
 The role matrix, each operation tried with the person's own token straight
@@ -280,56 +281,49 @@ neighbour moves the quiet organisation's median by 0.01 ms and its p99 by
 1.8 ms: the two are separate files with separate locks, sharing the node's
 cores and disk.
 
-## Gaps found
+## Gaps found, and closed
 
-New fenecdb gaps this example hit, each with the statement and the
-smallest fix:
+Six fenecdb gaps this example hit, each closed in fenecdb since, and what
+Trellis does now:
 
-1. **A CORS preflight is refused whenever the server has a token.**
-   `OPTIONS /t/o-acme/query` with `Origin` and
-   `Access-Control-Request-Headers: authorization` answers 401 (with the
-   CORS headers), and a browser then sends nothing: `handle` in
-   `fenec-http/src/lib.rs` authenticates before it answers a preflight,
-   which by the Fetch standard never carries `Authorization`. So "a
-   browser can talk to the database directly" holds only from the same
-   origin; Trellis pipes `/db/` to the router for that reason. Fix: answer
-   `Method::Options` with 204 before `authenticate`, on a single database
-   and under `/t/<t>/`, when `--http-cors` is set.
-2. **`FenecHttp.live` never fires under a scoped token.**
-   `connect(url, { token }).live('get tasks where team = $1', cb, { params,
-   collections: ['tasks'] })` calls `cb` once: its stream's shape is
-   `where=false`, ANDed with the token's filter, and a scoped subscription
-   is told only of rows it was sent, so no write ever reaches it. The board
-   opens a real shape (`tasks/changes?team=eq.<key>`) instead. Fix: for a
-   scoped token, tell an empty-shape subscription of writes to rows the
-   token may read (ids only), or have `live` open `select=id` without
-   `where=false` and pay the seed of ids.
-3. **The client has no shape subscription, and keeps its SSE reader to
-   itself.** `@fenecdb/web/client` exports `live` but no `subscribe(shape)`
-   with its seed and changes, and `sseEvents` is not in the package's
-   exports, so `public/app.js` and `test/sse.ts` each carry one. Fix:
-   export `sseEvents` and a `subscribe(collection, shape, onEvent)`.
-4. **A subscription outlives its token.** A stream opened with a token
-   whose `exp` was two seconds away still delivered a change written four
-   seconds later, while the same token's `get` was 401: a stream is checked
-   when it opens. A member removed from a team keeps hearing it until the
-   stream closes. Trellis closes and reopens its streams at every refresh.
-   Fix: end a scoped stream at its token's `exp` with an `error` event the
-   client reopens on.
-5. **Refusal waits count the router's address.** Behind `fenec-shard`
-   every request reaches a node from the router, so the node's doubling
-   wait keys every client's refusals to one address: four forged tokens in
-   a row waited 101, 204, 402 and 803 ms, a fifth user's expired token
-   would wait 1.6 s, and any good token from anyone resets the attacker's
-   count. Fix: the router sends the client's address (`Forwarded`) and the
-   node keys its waits by it when the peer is a router it trusts; or the
-   router applies the wait itself to a 401 it forwards.
-6. **A new tenant's schema needs the operator's token.** Placing a tenant
-   takes the router's token and applying its schema the nodes'
-   `--http-token`, which reaches every tenant on every node, so the process
-   that creates organisations holds both. Fix: `PUT
-   /_shard/tenants/<t>` takes a schema description and applies it as it
-   creates the tenant, so provisioning needs the router's token alone.
+1. **A CORS preflight was refused whenever the server had a token.**
+   `OPTIONS /t/o-acme/query` answered 401, since `handle` authenticated
+   first, and a browser sends no `Authorization` on a preflight. A node
+   now answers a preflight from an origin `--http-cors` allows with 204
+   before asking for a token, through the router too (`realtime`: the
+   router's preflight). The `/db/` pipe stays, for its other reasons: one
+   origin behind one TLS terminator, the CSP's `connect-src 'self'`, and
+   the router kept off the public network. Behind it the router counts
+   refusals by the app's address (gap 5), so a deployment that wants its
+   per-client waits points the page at the router, which now answers it.
+2. **`FenecHttp.live` never fired under a scoped token.** Its stream's
+   shape, `where=false`, was ANDed with the token's filter, and a scoped
+   stream hears only of rows it was sent. Such a stream is now told of the
+   writes to rows the token may read, naming none, and of nothing else;
+   a polled live query's tag is its answer's digest under a scoped token,
+   so 304 tells it nothing of other teams' writes (`realtime`: a live query
+   under Mia's token runs for her write and not for Bea's five).
+3. **The client had no shape subscription, and kept its SSE reader to
+   itself.** `db.subscribe(collection, shape, onEvent, { onError, onState })`
+   and `sseEvents` are the client's now, with their types: the board and
+   the comments are `db.subscribe`, and `test/sse.ts` re-exports the
+   client's reader where it carried one.
+4. **A subscription outlived its token.** A stream is now ended at its
+   token's `exp` with an `error` event of status 401, which the client hands
+   `onError` and does not retry; the page fetches a fresh token and
+   subscribes again. It still reopens its streams at every refresh, as a
+   belt: a team taken away stops reaching the board at the refresh rather
+   than at the old token's `exp`.
+5. **Refusal waits counted the router's address.** The router now waits
+   out a refusal itself, keyed by its client's address, and a node waits
+   none for what the router forwards (it knows it by a mark derived from
+   its admin token): an attacker's forged tokens slow the attacker, and a
+   good token clears only its own address's count.
+6. **A new tenant's schema needed the operator's token.** `PUT
+   /_shard/tenants/<t>` takes `{"schema": "<FenecQL>"}` and applies it on
+   the node with the admin token the router holds: provisioning sends the
+   router's token alone (`src/trellis.ts`), and no request this app makes
+   carries the nodes' `--http-token`.
 
 What earlier work closed and this example uses rather than works around:
 `require`, tenant-bound tokens, `exp` required, list claims, per-operation

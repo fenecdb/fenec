@@ -5,6 +5,7 @@
 // score of theirs. The same through the app's /db/ pipe.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
+import { connect, type ShapeEvent } from '@fenecdb/web/client';
 import { sseEvents } from './sse.ts';
 import { Browser, join_, organisation, person, query, start, type Env } from './harness.ts';
 
@@ -184,4 +185,69 @@ test('comments are searched the same way', async () => {
   const r = await query(env, T, miaT, 'get comments select body, highlight(body) match body "quarterly confidential"');
   const rows = r.body as { body: string; 'highlight(body)': [number, number][] }[];
   assert.deepEqual(rows.map((x) => x.body), ['The quarterly numbers look fine']);
+});
+
+// What the board leans on now that fenecdb closed the gaps it hit: a live
+// query under a person's token, the client's own subscription, and a page on
+// another origin reaching the router with no pipe.
+test('a live query under a person\'s token runs again for their teams\' writes, and no others', async () => {
+  const db = connect(`${env.cfg.routerUrl}/t/${T}`, { token: miaT });
+  const runs: string[][] = [];
+  const stop = db.live(db.from('tasks').select('title').where('title', 'Live mark'), (rows) => runs.push(rows.map((r) => String(r.title))));
+  try {
+    const until = async (pred: () => boolean) => {
+      const t0 = Date.now();
+      while (!pred()) {
+        if (Date.now() - t0 > 10_000) throw new Error(`timed out; ran ${JSON.stringify(runs)}`);
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+    await until(() => runs.length === 1);
+    for (let i = 0; i < 5; i++) {
+      await query(env, T, beaT, 'insert tasks {team: $1, title: "Live mark", status: "backlog", updated: now()}', [teamB]);
+    }
+    await query(env, T, miaT, 'insert tasks {team: $1, title: "Live mark", status: "backlog", updated: now()}', [teamA]);
+    await until(() => runs.at(-1)?.length === 1);
+    // Bea's five ran nothing: the query ran for the seed and for Mia's write.
+    assert.equal(runs.length, 2, JSON.stringify(runs));
+  } finally {
+    stop();
+  }
+});
+
+test('the client subscribes to a shape with its seed and changes', async () => {
+  const db = connect(`${env.cfg.routerUrl}/t/${T}`, { token: miaT });
+  const events: ShapeEvent[] = [];
+  const stop = db.subscribe('tasks', { team: `eq.${teamA}` }, (ev) => events.push(ev));
+  try {
+    const t0 = Date.now();
+    const until = async (pred: () => boolean) => {
+      while (!pred()) {
+        if (Date.now() - t0 > 10_000) throw new Error(`timed out; got ${JSON.stringify(events)}`);
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+    await until(() => events.length === 1);
+    assert.equal(events[0].type, 'seed');
+    await query(env, T, beaT, 'insert tasks {team: $1, title: "Subscribed secret", status: "backlog", updated: now()}', [teamB]);
+    await query(env, T, miaT, 'insert tasks {team: $1, title: "Subscribed", status: "backlog", updated: now()}', [teamA]);
+    await until(() => events.some((e) => e.type === 'change' && e.puts.some((r) => r.title === 'Subscribed')));
+    assert.ok(!JSON.stringify(events).includes('Subscribed secret'));
+  } finally {
+    stop();
+  }
+});
+
+test('a page on another origin reaches the router: its preflight needs no token', async () => {
+  const res = await fetch(`${env.cfg.routerUrl}/t/${T}/query`, {
+    method: 'OPTIONS',
+    headers: {
+      origin: env.cfg.origin,
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'authorization, content-type',
+    },
+  });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get('access-control-allow-origin'), env.cfg.origin);
+  assert.match(res.headers.get('access-control-allow-headers') ?? '', /authorization/);
 });

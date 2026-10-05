@@ -13,7 +13,7 @@ export interface Config {
   publicRouterUrl: string;
   /** The router's own token: places tenants. Only org creation uses it. */
   shardToken: string;
-  /** The nodes' --http-token: applies a new tenant's schema, nothing else. */
+  /** The nodes' --http-token, the operator's: the app's requests never carry it (the router applies a new tenant's schema); the cluster and the tests' checks do. */
   operatorToken: string;
   /** Where the signing key and the JWKS the nodes read live. */
   keysDir: string;

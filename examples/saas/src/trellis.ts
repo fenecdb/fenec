@@ -87,18 +87,18 @@ export class Trellis {
   }
 
   async #placeTenant(tenant: string, schema: string): Promise<void> {
+    // The router places the tenant and applies its schema there, with the
+    // nodes' admin tokens it holds: this app needs the router's token alone,
+    // where it held the nodes' data token, which reaches every tenant, to
+    // apply the schema itself. A tenant is there with its schema or not at
+    // all; one that exists (409) keeps the one it was made with, and a
+    // change to it is a migration the operator runs.
     const put = await fetch(`${this.cfg.routerUrl}/_shard/tenants/${tenant}`, {
       method: 'PUT',
-      headers: { authorization: `Bearer ${this.cfg.shardToken}` },
+      headers: { authorization: `Bearer ${this.cfg.shardToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ schema }),
     });
     if (!put.ok && put.status !== 409) throw new Error(`place ${tenant}: ${put.status} ${await put.text()}`);
-    // The schema is the operator's to apply: no scoped token changes one.
-    const applied = await fetch(`${this.cfg.routerUrl}/t/${tenant}/_schema/apply`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${this.cfg.operatorToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ format: 1, fenecql: schema }),
-    });
-    if (!applied.ok) throw new Error(`schema of ${tenant}: ${applied.status} ${await applied.text()}`);
   }
 
   // ------------------------------------------------------------- the tokens

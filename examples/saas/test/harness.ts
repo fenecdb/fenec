@@ -52,6 +52,7 @@ export async function start(base: number, over: Partial<Config> & { lease?: numb
     keysDir: cfg.keysDir,
     operatorToken: cfg.operatorToken,
     shardToken: cfg.shardToken,
+    cors: cfg.origin,
     nodeFlags: ['--http-max-streams', '512', ...(nodeFlags ?? [])],
   });
   await cluster.start();
