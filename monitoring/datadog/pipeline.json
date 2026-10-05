@@ -1,0 +1,113 @@
+{
+  "name": "fenecdb",
+  "is_enabled": true,
+  "filter": {
+    "query": "source:fenecdb"
+  },
+  "processors": [
+    {
+      "type": "grok-parser",
+      "name": "A text line's request id",
+      "is_enabled": true,
+      "source": "message",
+      "samples": [
+        "sync error: Input/output error request_id=9f2c41d07ab35e18"
+      ],
+      "grok": {
+        "support_rules": "",
+        "match_rules": "server_line %{data:message} request_id=%{notSpace:request_id}"
+      }
+    },
+    {
+      "type": "date-remapper",
+      "name": "When the event happened",
+      "is_enabled": true,
+      "sources": [
+        "at"
+      ]
+    },
+    {
+      "type": "status-remapper",
+      "name": "The line's level as its status",
+      "is_enabled": true,
+      "sources": [
+        "level"
+      ]
+    },
+    {
+      "type": "arithmetic-processor",
+      "name": "A slow statement's duration, in nanoseconds",
+      "is_enabled": true,
+      "expression": "duration_ms * 1000000",
+      "target": "duration",
+      "is_replace_missing": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "The request id",
+      "is_enabled": true,
+      "sources": [
+        "request_id"
+      ],
+      "source_type": "attribute",
+      "target": "http.request_id",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "grok-parser",
+      "name": "The client's address",
+      "is_enabled": true,
+      "source": "peer",
+      "samples": [
+        "10.0.0.7:53112",
+        "[::1]:53112"
+      ],
+      "grok": {
+        "support_rules": "",
+        "match_rules": "peer \\[?%{data:network.client.ip}\\]?:%{integer:network.client.port}"
+      }
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "The HTTP method",
+      "is_enabled": true,
+      "sources": [
+        "method"
+      ],
+      "source_type": "attribute",
+      "target": "http.method",
+      "target_type": "attribute",
+      "preserve_source": false,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "The HTTP path",
+      "is_enabled": true,
+      "sources": [
+        "path"
+      ],
+      "source_type": "attribute",
+      "target": "http.url_details.path",
+      "target_type": "attribute",
+      "preserve_source": false,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "An admin request's status code",
+      "is_enabled": true,
+      "sources": [
+        "http_status"
+      ],
+      "source_type": "attribute",
+      "target": "http.status_code",
+      "target_type": "attribute",
+      "target_format": "integer",
+      "preserve_source": false,
+      "override_on_conflict": false
+    }
+  ]
+}

@@ -5,6 +5,7 @@
 
 mod crash;
 mod follow;
+mod logs;
 mod shutdown;
 mod studio;
 mod support;

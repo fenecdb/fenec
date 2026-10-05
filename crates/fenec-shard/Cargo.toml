@@ -34,5 +34,9 @@ name = "refusals"
 path = "tests/refusals.rs"
 
 [[test]]
+name = "datadog"
+path = "tests/datadog.rs"
+
+[[test]]
 name = "request_id"
 path = "tests/request_id.rs"

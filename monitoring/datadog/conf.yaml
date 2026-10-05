@@ -1,0 +1,90 @@
+# The Datadog Agent's configuration for fenecdb: /_metrics through the
+# OpenMetrics check, and the audit and slow-statement logs. Copy it to
+# /etc/datadog-agent/conf.d/openmetrics.d/conf.yaml (or conf.d/fenecdb.d/), set
+# the address and the token, and restart the Agent.
+#
+# What arrives, with `namespace: fenecdb` and the `fenec_` prefix taken off:
+#   a counter   fenec_statements_total              -> fenecdb.statements.count
+#   a gauge     fenec_documents{collection="notes"} -> fenecdb.documents, tag collection:notes
+#   a histogram fenec_statement_duration_seconds    -> fenecdb.statement_duration_seconds.bucket
+#               (a distribution: turn on its percentiles in the metric's summary),
+#               .sum and .count
+# Every label is a tag: kind, collection, route, code, node, outcome, version.
+# No label names a tenant -- a tenant node publishes its tenants' counts
+# together -- so a node's role goes in `tags` below, and a tenant's own figures
+# come from the logs' `tenant` attribute and /t/<tenant>/_stats/statements.
+#
+# crates/fenec-shard/tests/datadog.rs holds every name in `metrics` to a real
+# scrape of a server, a replica, a tenant node and a router.
+
+init_config:
+
+instances:
+  - openmetrics_endpoint: http://127.0.0.1:9464/_metrics
+    # The token fenec-server takes as --admin-token or --http-token
+    # (fenec-shard: --token). Kept out of the file with the Agent's secrets
+    # management, "Bearer ENC[fenec_metrics_token]"; under Autodiscovery,
+    # "Bearer %%env_FENEC_METRICS_TOKEN%%".
+    headers:
+      Authorization: "Bearer CHANGE-ME"
+    namespace: fenecdb
+    raw_metric_prefix: fenec_
+    metrics:
+      # Every server
+      - build_info
+      - start_time_seconds
+      - statements
+      - statement_errors
+      - statement_duration_seconds
+      - slow_statements
+      - refused
+      - auto_compactions
+      - connections
+      - memory_bytes
+      - vectors_unlinked
+      # A file's server
+      - documents
+      - data_bytes
+      - dead_bytes
+      - file_bytes
+      - reclaimable_bytes
+      - change_sequence
+      - storage_failed
+      # Replication: a primary's replicas, a replica's lag
+      - replicas
+      - ^replica_.*$
+      # A tenant node (--dir)
+      - ^tenants.*$
+      # The router (fenec-shard)
+      - ^router_.*$
+    # Histograms as distributions, so that p50/p95/p99 are taken over every
+    # server's buckets together, as Prometheus's histogram_quantile does.
+    histogram_buckets_as_distributions: true
+    collect_counters_with_distributions: false
+    tags:
+      - service:fenecdb
+      # What this process is: server, replica, tenant-node or router.
+      - fenec_role:server
+
+# Log collection: `logs_enabled: true` in datadog.yaml as well. Both files are
+# JSON lines -- the audit log (--audit) and the slow statements fenec-server
+# writes to stderr -- and monitoring/datadog/pipeline.json is the pipeline that
+# remaps them. stderr also holds the server's own text lines (start, errors),
+# which arrive as their message; one written while a request was served ends
+# with `request_id=<id>`, which the pipeline's first processor takes out.
+logs:
+  - type: file
+    path: /var/log/fenec/audit.log
+    service: fenecdb
+    source: fenecdb
+    tags:
+      - log:audit
+  # fenec-server ... 2>> /var/log/fenec/server.log, or under Docker the
+  # container's own log (`type: docker` with the same source and service, or
+  # the label com.datadoghq.ad.logs='[{"source":"fenecdb","service":"fenecdb"}]').
+  - type: file
+    path: /var/log/fenec/server.log
+    service: fenecdb
+    source: fenecdb
+    tags:
+      - log:server
