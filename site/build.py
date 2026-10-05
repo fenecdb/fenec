@@ -1218,7 +1218,20 @@ def build():
 
     shutil.copy(os.path.join(ROOT, "mark.svg"), os.path.join(OUT, "favicon.svg"))
 
-    emit("styles.css", open(os.path.join(ROOT, "styles.css"), encoding="utf-8").read())
+    # The web fonts, named by their hash like the rest: styles.css names
+    # them and the template preloads one, so both are rewritten to the
+    # hashed names, and _headers caches them for good.
+    os.makedirs(os.path.join(OUT, "fonts"), exist_ok=True)
+    styles = open(os.path.join(ROOT, "styles.css"), encoding="utf-8").read()
+    for name in sorted(os.listdir(os.path.join(ROOT, "fonts"))):
+        if not name.endswith(".woff2"):
+            continue
+        blob = open(os.path.join(ROOT, "fonts", name), "rb").read()
+        hashed = f"fonts/{name[:-6]}.{hashlib.sha256(blob).hexdigest()[:10]}.woff2"
+        open(os.path.join(OUT, hashed), "wb").write(blob)
+        assets[f"fonts/{name}"] = hashed
+        styles = styles.replace(f"url(fonts/{name})", f"url({hashed})")
+    emit("styles.css", styles)
 
     for path in sorted(pages):
         rel = os.path.relpath(path, os.path.join(ROOT, "content"))

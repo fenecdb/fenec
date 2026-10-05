@@ -4,13 +4,104 @@
    and vectors drawn as the stars they mathematically resemble. Speed is shown
    rather than claimed: the hero runs the real engine and races its results. */
 
-/* A fallback sized to Bricolage's width (measured: 93.4% of Arial's over a
-   sentence of the page), so the swap when the web font lands moves no line:
-   unsized, the hero's paragraph gained a line and shifted the page by 0.165. */
+/* The web fonts are served from here, the latin and latin-ext subsets Google
+   Fonts made of them (OFL, in fonts/): its stylesheet was a render-blocking
+   request to a second origin and its files a third, and neither could be
+   preloaded or cached as the site's hashed assets are. Each subset is fetched
+   only when a page holds one of its characters: latin-ext for Turkish. */
 @font-face {
-  font-family: "Bricolage Fallback";
-  src: local("Arial"), local("Helvetica"), local("Roboto");
-  size-adjust: 93.4%;
+  font-family: "Bricolage Grotesque"; font-weight: 400 700; font-display: swap;
+  src: url(fonts/bricolage-latin.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Bricolage Grotesque"; font-weight: 400 700; font-display: swap;
+  src: url(fonts/bricolage-latin-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap;
+  src: url(fonts/plex-mono-400-latin.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-weight: 400; font-display: swap;
+  src: url(fonts/plex-mono-400-latin-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap;
+  src: url(fonts/plex-mono-500-latin.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-weight: 500; font-display: swap;
+  src: url(fonts/plex-mono-500-latin-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* Until they land the text is set in a local font made to take the room the
+   web font will: as wide over the site's own text (size-adjust, Bricolage's
+   width over Arial's across every paragraph, or every heading for 700, in
+   Chrome), with Bricolage's ascent and descent (0.93 and 0.27 of the em) and
+   no line gap, so a swap moves no line and no box. A weight each, since
+   Bricolage is variable and Arial is not: 400 is 104.8% of Arial, 700 101.8%
+   of Arial Bold. Arimo and Liberation Sans have Arial's metrics. At 93.4%
+   before, the fallback was narrower, and a docs page's heading and code
+   blocks moved when the fonts came: the quickstart's CLS was 0.0106 at
+   1280 px, every load, and with these 0 (site/README.md, The fonts). Each
+   stands in only for the characters the web fonts hold: one they lack, an
+   arrow or a kanji, never swaps, and is set by the system's font throughout.
+   A measure is written in em, not ch: a ch is the width of the font's "0",
+   0.651 of the em in Bricolage at 400 and 0.665 at 700, against Arial's
+   0.556 however it is sized for its text, so a column 62ch wide narrowed by
+   a seventh under the fallback and every paragraph in it wrapped again. Each
+   em width is the ch it was, in Bricolage, so the page sets as it did. */
+@font-face {
+  font-family: "Bricolage Fallback"; font-weight: 400;
+  src: local("Arial"), local("ArialMT"), local("Arimo"), local("Liberation Sans");
+  size-adjust: 104.84%; ascent-override: 88.71%; descent-override: 25.75%; line-gap-override: 0%;
+  unicode-range: U+0000-02CC, U+02CE-02D7, U+02DA, U+02DC-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2000-206F, U+20A0-20C0, U+2113, U+2122, U+2191, U+2193, U+2212, U+2215, U+2C60-2C7F, U+A720-A7FF, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Bricolage Fallback"; font-weight: 500;
+  src: local("Arial"), local("ArialMT"), local("Arimo"), local("Liberation Sans");
+  size-adjust: 106.26%; ascent-override: 87.52%; descent-override: 25.41%; line-gap-override: 0%;
+  unicode-range: U+0000-02CC, U+02CE-02D7, U+02DA, U+02DC-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2000-206F, U+20A0-20C0, U+2113, U+2122, U+2191, U+2193, U+2212, U+2215, U+2C60-2C7F, U+A720-A7FF, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Bricolage Fallback"; font-weight: 600;
+  src: local("Arial Bold"), local("Arial-BoldMT"), local("Arimo Bold"), local("Liberation Sans Bold");
+  size-adjust: 100.38%; ascent-override: 92.65%; descent-override: 26.90%; line-gap-override: 0%;
+  unicode-range: U+0000-02CC, U+02CE-02D7, U+02DA, U+02DC-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2000-206F, U+20A0-20C0, U+2113, U+2122, U+2191, U+2193, U+2212, U+2215, U+2C60-2C7F, U+A720-A7FF, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Bricolage Fallback"; font-weight: 650;
+  src: local("Arial Bold"), local("Arial-BoldMT"), local("Arimo Bold"), local("Liberation Sans Bold");
+  size-adjust: 100.95%; ascent-override: 92.12%; descent-override: 26.75%; line-gap-override: 0%;
+  unicode-range: U+0000-02CC, U+02CE-02D7, U+02DA, U+02DC-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2000-206F, U+20A0-20C0, U+2113, U+2122, U+2191, U+2193, U+2212, U+2215, U+2C60-2C7F, U+A720-A7FF, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Bricolage Fallback"; font-weight: 700;
+  src: local("Arial Bold"), local("Arial-BoldMT"), local("Arimo Bold"), local("Liberation Sans Bold");
+  size-adjust: 101.81%; ascent-override: 91.35%; descent-override: 26.52%; line-gap-override: 0%;
+  unicode-range: U+0000-02CC, U+02CE-02D7, U+02DA, U+02DC-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2000-206F, U+20A0-20C0, U+2113, U+2122, U+2191, U+2193, U+2212, U+2215, U+2C60-2C7F, U+A720-A7FF, U+FEFF, U+FFFD;
+}
+/* Every monospace face advances a fixed width, Plex 0.6 of the em, Menlo
+   0.602 and Courier New 0.6001, so the size-adjust is that ratio exactly,
+   and the overrides are Plex's 1.025 and 0.275. Menlo on a Mac; Courier New,
+   or Liberation Mono and Cousine with its metrics, elsewhere. */
+@font-face {
+  font-family: "Plex Mono Fallback"; font-weight: 100 900;
+  src: local("Menlo Regular"), local("Menlo-Regular");
+  size-adjust: 99.66%; ascent-override: 102.85%; descent-override: 27.59%; line-gap-override: 0%;
+  unicode-range: U+0000-02CC, U+02CE-02D7, U+02DA, U+02DC-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2000-206F, U+20A0-20C0, U+2113, U+2122, U+2191, U+2193, U+2212, U+2215, U+2C60-2C7F, U+A720-A7FF, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Plex Mono Courier"; font-weight: 100 900;
+  src: local("Courier New"), local("CourierNewPSMT"), local("Liberation Mono"), local("Cousine");
+  size-adjust: 99.98%; ascent-override: 102.52%; descent-override: 27.50%; line-gap-override: 0%;
+  unicode-range: U+0000-02CC, U+02CE-02D7, U+02DA, U+02DC-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2000-206F, U+20A0-20C0, U+2113, U+2122, U+2191, U+2193, U+2212, U+2215, U+2C60-2C7F, U+A720-A7FF, U+FEFF, U+FFFD;
 }
 
 :root {
@@ -43,10 +134,10 @@
   --panel-2:  #1D1430;
 
   --sans: "Bricolage Grotesque", "Bricolage Fallback", system-ui, -apple-system, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono: "IBM Plex Mono", "Plex Mono Fallback", "Plex Mono Courier", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --gutter: clamp(20px, 5vw, 68px);
-  --measure: 66ch;
+  --measure: 42.9881em;  /* 66ch of Bricolage at 400; see the fonts above */
   --ease: cubic-bezier(.22, 1, .36, 1);
 }
 
@@ -371,7 +462,7 @@ html:not(.js) .search-open-btn { display: none; }
 @keyframes fadeout { to { opacity: 0; } }
 
 .hero-say {
-  margin: 0; max-width: 15ch;
+  margin: 0; max-width: 9.98em; /* 15ch at 700 */
   font: 700 clamp(31px, 4.4vw, 58px)/1.03 var(--sans);
   letter-spacing: -.04em;
   background: linear-gradient(168deg, var(--star) 8%, var(--sun-hot) 48%, var(--ember) 96%);
@@ -379,7 +470,7 @@ html:not(.js) .search-open-btn { display: none; }
   filter: drop-shadow(0 4px 26px rgba(0,0,0,.55));
 }
 .hero-sub {
-  margin: 20px 0 0; max-width: 46ch; color: var(--sand-2); font-size: 18px;
+  margin: 20px 0 0; max-width: 29.9614em; color: var(--sand-2); font-size: 18px; /* 46ch */
   text-shadow: 0 2px 18px rgba(7,10,24,.85);
 }
 .hero-cta { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 28px; }
@@ -431,7 +522,7 @@ html:not(.js) .search-open-btn { display: none; }
 .band { position: relative; padding: clamp(78px, 10vw, 140px) var(--gutter); }
 .band-in { max-width: 1180px; margin: 0 auto; }
 .band h2 {
-  margin: 0 0 12px; max-width: 22ch;
+  margin: 0 0 12px; max-width: 14.6374em; /* 22ch at 700 */
   font: 700 clamp(30px, 4.4vw, 52px)/1.06 var(--sans); letter-spacing: -.035em;
   color: var(--star);
 }
@@ -646,7 +737,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .doc { padding: 40px 0 100px; min-width: 0; }
 .doc article > :first-child { margin-top: 0; }
 .doc h1 {
-  margin: 0 0 16px; max-width: 19ch;
+  margin: 0 0 16px; max-width: 12.6414em; /* 19ch at 700 */
   font: 700 clamp(34px, 4.6vw, 52px)/1.04 var(--sans); letter-spacing: -.038em;
   background: linear-gradient(160deg, var(--star), var(--sun-hot));
   -webkit-background-clip: text; background-clip: text; color: transparent;
@@ -743,7 +834,7 @@ tbody tr:last-child td { border-bottom: 0; }
 @media (max-width: 760px) { .foot-in { grid-template-columns: 1fr; } }
 .foot-mark { margin: 0 0 14px; }
 .foot-mark .mark { width: 64px; height: 64px; display: block; }
-.foot p { margin: 0; color: var(--sand-dim); font-size: 15.5px; max-width: 44ch; }
+.foot p { margin: 0; color: var(--sand-dim); font-size: 15.5px; max-width: 28.6587em; } /* 44ch */
 .foot ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 9px 26px; }
 .foot a { color: var(--sand-2); text-decoration: none; font-size: 15.5px; }
 .foot a:hover { color: var(--sun-hot); }
@@ -1182,7 +1273,7 @@ tbody tr:last-child td { border-bottom: 0; }
    kept, folded under "Details", for whoever wants them. */
 
 .doc { font-size: 16.5px; line-height: 1.7; }
-.doc p, .doc ul, .doc ol { max-width: 62ch; }
+.doc p, .doc ul, .doc ol { max-width: 40.3827em; } /* 62ch */
 .doc h2 { margin-top: 56px; }
 /* Inline code reads as text set in another face, not as a badge. */
 .doc code:not(.code code) {
@@ -1200,7 +1291,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .steps-doc > li > p:first-child { margin-bottom: 8px; color: var(--sand); }
 
 details.deep {
-  margin: 18px 0 8px; max-width: 72ch;
+  margin: 18px 0 8px; max-width: 46.8961em; /* 72ch */
   border: 1px solid var(--rule); border-radius: 10px; background: rgba(21,15,38,.45);
 }
 details.deep > summary {

@@ -90,6 +90,8 @@ site/
   search.css      the dialog's styles, loaded with it
   search-index.mjs  writes the search index through the module (build.py runs it)
   search.test.mjs   known queries and the page each must find first
+  fonts/          Bricolage Grotesque and IBM Plex Mono, Google Fonts' latin
+                  and latin-ext subsets, and their licence (OFL)
   content/
     index.html    the home page
     404.html      served by not_found_handling
@@ -276,3 +278,27 @@ Two things were measured and fixed, and are worth not reintroducing:
 
 Both canvases stop entirely once the hero scrolls out of view, and while the tab
 is hidden.
+
+## The fonts
+
+Bricolage Grotesque and IBM Plex Mono are served from `fonts/`, Google
+Fonts' own latin and latin-ext subsets, named by their hash like the rest
+and cached for good; the page preloads Bricolage's latin file, which every
+page sets text in. Through Google Fonts the page waited on a render-blocking
+stylesheet from a second origin and fetched the files from a third.
+
+Until a font lands, its text is set in a local font sized to take the room
+it will (`styles.css`): Arial per weight for Bricolage, Menlo or Courier New
+for Plex, each with the web font's width over the site's own text and its
+ascent and descent, so the swap moves nothing. Widths that read the font --
+`ch` -- are written in em instead, the ch they were in Bricolage, since no
+fallback has both Bricolage's width and its wide "0". A character the web
+fonts lack is set by the system's font throughout, so it never swaps.
+
+Measured in headless Chrome, 20 loads a page and width, cache off: the
+quickstart's CLS at 1280 px was 0.0106 on every load, the docs index's and
+the server page's 0.0021, FenecQL's 0.0037 and the home page's 0.0054, all
+of it the fonts, and the playground's 0.0084, 0.0034 of it. It is 0 on those
+pages, and the playground's 0.005 left is its engine filling in the schema. With the fonts
+held back 600 ms the swap moves nothing but one text run of FenecQL's page
+at 390 px (0.0004), where a line breaks at another word.
