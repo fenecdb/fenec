@@ -198,6 +198,9 @@ class Fenec {
   final Worker _worker;
   var _closed = false;
 
+  /// The close under way or done, which a second [close] awaits.
+  Future<void>? _closing;
+
   /// Writes under way, which a live query's look waits out.
   var _inflight = 0;
   late final Lives lives = Lives(this);
@@ -377,8 +380,11 @@ class Fenec {
   Future<void> checkpoint() async => _answer(await _worker.call('checkpoint', [_handle]));
 
   /// Saves the graphs, syncs and lets the file go; the live queries stop.
-  Future<void> close() async {
-    if (_closed) return;
+  /// A close called while another runs waits for it: returning at once, it
+  /// let its caller open the file again before the first had let it go.
+  Future<void> close() => _closing ??= _close();
+
+  Future<void> _close() async {
     _closed = true;
     await _replica?._stop();
     lives.clear();

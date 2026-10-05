@@ -284,6 +284,89 @@ fn a_file_is_there_again_after_a_close() {
     by_handle(fenec_close, h);
 }
 
+/// A file closed is free to open again at once, whatever else the process
+/// does meanwhile: here a thread spawning children, as Swift's tests start
+/// a server beside another test's close and open. An `flock` was the open
+/// file's, which a child spawned while it was open shares until its exec,
+/// and the open after a close was refused now and then: 48 to 66 of these
+/// 3 000 in each run, and once in a CI run of `swift test`.
+#[test]
+fn a_file_closed_opens_again_beside_children_spawned() {
+    let path = scratch("spawned");
+    let p = path.to_str().unwrap();
+    let h = open(p, FENEC_OPEN_NO_SYNC).unwrap();
+    query(h, "create collection t (n int)", "");
+    by_handle(fenec_close, h);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spawning = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut n = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = std::process::Command::new("/bin/sh")
+                    .args(["-c", ":"])
+                    .status();
+                n += 1;
+            }
+            n
+        })
+    };
+    let mut refused = Vec::new();
+    for i in 0..3_000 {
+        match open(p, FENEC_OPEN_NO_SYNC | FENEC_OPEN_NO_AUTO_COMPACT) {
+            Ok(h) => assert_eq!(by_handle(fenec_close, h), (FENEC_OK, String::new())),
+            Err(e) => refused.push((i, e)),
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let spawned = spawning.join().unwrap();
+    assert!(spawned > 0);
+    assert!(refused.is_empty(), "{} refused: {refused:?}", refused.len());
+}
+
+/// The lock still keeps another process out: the test binary run again
+/// as a child that opens the file and holds it until its stdin ends.
+#[test]
+fn another_process_cannot_open_a_file_held_open() {
+    if let Ok(p) = std::env::var("FENEC_FFI_HOLD") {
+        let h = open(&p, 0).unwrap();
+        println!("held");
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
+        let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8; 1]);
+        by_handle(fenec_close, h);
+        return;
+    }
+    let path = scratch("other-process");
+    let p = path.to_str().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "ffi::another_process_cannot_open_a_file_held_open",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("FENEC_FFI_HOLD", p)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Waits for the child's word that it holds the file.
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("held") {
+        line.clear();
+        let n = std::io::BufRead::read_line(&mut out, &mut line).unwrap();
+        assert!(n > 0, "the child ended before it held the file");
+    }
+    let (code, r) = open(p, 0).unwrap_err();
+    assert_eq!(code, FENEC_LOCKED, "{r}");
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    let h = open(p, 0).unwrap();
+    by_handle(fenec_close, h);
+}
+
 #[test]
 fn a_handle_opened_not_to_sync_writes_on_sync_and_flush() {
     let path = scratch("nosync");
