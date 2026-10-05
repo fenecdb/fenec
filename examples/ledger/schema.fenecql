@@ -1,0 +1,90 @@
+-- The ledger's collections. scripts/setup.ts applies this file to each
+-- tenant through POST /t/<tenant>/_schema/apply; the tests in process hand
+-- it to Fenec.open. Amounts are integers in minor units (cents), so every
+-- sum is exact.
+
+-- An account. `balance` is what it holds and `held` what holds reserve,
+-- so `balance - held` is what it may spend. A customer account never goes
+-- below zero; the one `world` account per currency is where money enters
+-- and leaves the ledger, and goes negative by what is in it.
+create collection accounts (
+  ext      text @unique,
+  name     text,
+  holders  [text],
+  currency text @hash,
+  balance  int,
+  held     int,
+  status   text @hash,
+  kind     text @hash,
+  opened   timestamp
+)
+
+-- The journal: two entries a movement, summing to zero. policy.txt makes it
+-- append-only for every token but the operator's.
+create collection journal (
+  entry    text @unique,
+  tx       text @hash,
+  account  text @hash,
+  currency text @hash,
+  amount   int,
+  kind     text,
+  at       timestamp @sorted
+)
+
+-- A movement: a transfer, a deposit, a capture, a refund. `refunded`
+-- counts what refunds have given back of it, and never passes `amount`.
+create collection transfers (
+  ref      text @unique,
+  kind     text @hash,
+  src      text @hash,
+  dst      text @hash,
+  currency text,
+  amount   int,
+  refunded int,
+  of       text @hash,
+  memo     text,
+  at       timestamp @sorted
+)
+
+-- A hold reserves `amount` of an account until it is captured, released,
+-- or lapses at `until`. `until` is @sorted, not @ttl: a row past its ttl
+-- leaves every read, and the reaper could no longer find it to give the
+-- reserved money back.
+create collection holds (
+  ref      text @unique,
+  account  text @hash,
+  currency text,
+  amount   int,
+  captured int,
+  state    text @hash,
+  until    timestamp @sorted,
+  at       timestamp
+)
+
+-- Transfers per account per window: the counter recipe. A window's row is
+-- made by the first transfer in it and expires a minute later, so the next
+-- transfer starts a new one.
+create collection limits (
+  account  text @unique,
+  n        int,
+  at       timestamp @ttl(1m)
+)
+
+-- What operators did: an account opened, frozen or thawed, money deposited.
+-- Append-only, like the journal.
+create collection events (
+  who      text @hash,
+  what     text,
+  account  text @hash,
+  detail   text,
+  at       timestamp @sorted
+)
+
+-- Who signs in to the console: operators (role "admin") and customers
+-- (role "customer"). A password is kept as scrypt's output and its salt.
+create collection users (
+  name     text @unique,
+  display  text,
+  hash     text,
+  role     text
+)
