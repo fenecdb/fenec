@@ -1156,7 +1156,22 @@ read lock (`Database::expired`) and 1 000 rows deleted under the write
 lock as a block of ordinary deletes (`Database::sweep`, the filter
 written there, since a `del` leaves expired rows out): replicas,
 `/_changes`, archives and subscriptions see deletes. A replica, a
-following tenant and the browser never sweep. 100 000 rows past their
+following tenant and the browser never sweep. `expired()` in a filter
+reads the rows past their time (`Expr::asks_expired`, answered in
+`answer_filter` as `field <= now - ttl`, a range of the index, the alive
+test left out; `not expired()` is the default read), in every place a
+filter goes, `set` and `del` too: a reaper's, which gives back what a
+lapsed hold reserved -- `del holds where expired() and id = $1 require 1`
+beside the give-back, one block, the delete the once-only guard -- where
+a ledger kept holds `@sorted` and reaped by hand, since a row the sweep
+deleted unseen kept its money in `held` for good. The sweeper deletes a
+row a sweep's period past its time (`sweep::GRACE`, `pass_after`), so a
+reaper as frequent sees every one; at the first pass after its time a row
+that lapsed a moment before went unseen whatever the reaper's period. A
+scoped token reaches them only by the policy's `expired` grant
+(`Scope::reaping`), never through `write` or `*`; a rule's own filter
+takes none. A collection without `@ttl` refuses it by name (the registry
+has no `expired`, and says so). 100 000 rows past their
 time out of 200 000 went in 0.56 s, the lock held 1.06 ms a batch at the
 median and 2.3 at most; a read tests each row's time, so a `count` over
 a million rows half past their time is a scan, 68.8 ms against 1.1 with
@@ -1167,6 +1182,7 @@ off (field change 4, the index kept). `_idempotency`'s `at` is the first
 user: its purge on the write path went. The two features cost the browser
 module 16.4 KB, 5.7 KB brotli -- 18.7 KB more while a ttl printed back
 through a float, which brought the standard library's float formatting.
+`expired()` cost it 561 bytes, 98 brotli.
 
 **`alter collection` rewrites no document; positions are not places.** A
 document is its values in field order, so a field added goes last and a

@@ -29,7 +29,10 @@
 //! the three writes. An `insert` is a put of new documents; `update` is a
 //! `set`, and `delete` a `del`, of rows the token may also read. A token
 //! may insert into a collection it cannot read -- an event stream, a trail
-//! a client appends to -- which is then not listed to it.
+//! a client appends to -- which is then not listed to it. `expired` grants
+//! the rows past their `@ttl` that `expired()` reads, a reaper's: a
+//! statement asking it is held to those rules' filters as well, and
+//! neither `write` nor `*` grants it.
 //!
 //! **`append-only`** is a line of its own, `<collection> append-only`,
 //! with no filter and no role: no scoped token updates or deletes there,
@@ -264,6 +267,10 @@ const READ: u8 = 1;
 const INSERT: u8 = 2;
 const UPDATE: u8 = 4;
 const DELETE: u8 = 8;
+/// `expired`: the rows past their `@ttl`, which `expired()` reads and
+/// every other read leaves out -- a reaper's, never granted by `read`,
+/// `write` or `*`: a hold that lapsed is not a user's to see again.
+const EXPIRED: u8 = 16;
 /// `write`.
 const WRITES: u8 = INSERT | UPDATE | DELETE;
 
@@ -636,9 +643,10 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
             "insert" => named |= INSERT,
             "update" => named |= UPDATE,
             "delete" => named |= DELETE,
+            "expired" => ops |= EXPIRED,
             other => {
                 return Err(format!(
-                    "`{other}` is none of read, insert, update, delete and write"
+                    "`{other}` is none of read, insert, update, delete, write and expired"
                 ))
             }
         }
@@ -705,6 +713,11 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         // inner `get` would itself be scoped by the rules it is part of.
         if sel.filter.as_ref().is_some_and(Expr::has_subquery) {
             return Err("a rule's filter takes no `in (get ...)`".into());
+        }
+        // Tested against a document on its own as well, where nothing
+        // answers it; what a token may reap is the `expired` grant's.
+        if sel.filter.as_ref().is_some_and(Expr::asks_expired) {
+            return Err("a rule's filter takes no `expired()`: grant `expired`".into());
         }
         sel.filter
     };
@@ -876,7 +889,8 @@ impl Scope {
     fn select(&self, mut sel: Select) -> Result<Select> {
         sel.each_filter_mut(&mut |collection, filter| {
             self.inner(filter)?;
-            *filter = self.restrict(collection, filter.take())?;
+            let f = self.reaping(collection, filter.take())?;
+            *filter = self.restrict(collection, f)?;
             Ok(())
         })?;
         // A `match` held to some of the rows is scored over the rows its
@@ -889,6 +903,24 @@ impl Scope {
             m.within = true;
         }
         Ok(sel)
+    }
+
+    /// `filter`, and where it asks `expired()` the filters of the rules
+    /// granting `expired` ANDed in: a token reads, changes or deletes the
+    /// rows past their time only by a grant naming them, beside the one
+    /// its statement needs anyway.
+    fn reaping(&self, collection: &str, filter: Option<Expr>) -> Result<Option<Expr>> {
+        if !filter.as_ref().is_some_and(Expr::asks_expired) {
+            return Ok(filter);
+        }
+        match self.filter(collection, EXPIRED) {
+            Some(f) => Ok(and(filter, f)),
+            None if !self.known(collection) => Err(self.refused(collection, "read")),
+            None => Err(denied(format!(
+                "this token may not read the rows of `{collection}` past their time: \
+                 that is the `expired` grant's"
+            ))),
+        }
     }
 
     /// Each inner `get` in `filter` held to the read rules ([`Self::select`]).
@@ -979,6 +1011,7 @@ impl Scope {
             } => {
                 let f = self.writable(&collection, UPDATE)?;
                 self.inner(&mut filter)?;
+                let filter = self.reaping(&collection, filter)?;
                 Statement::Update {
                     collection,
                     set,
@@ -993,6 +1026,7 @@ impl Scope {
             } => {
                 let f = self.writable(&collection, DELETE)?;
                 self.inner(&mut filter)?;
+                let filter = self.reaping(&collection, filter)?;
                 Statement::Delete {
                     collection,
                     filter: and(filter, f),

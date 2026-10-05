@@ -131,9 +131,16 @@ impl Registry {
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value> {
-        let f = self
-            .function(name)
-            .ok_or_else(|| Error::Query(format!("unknown function `{name}`")))?;
+        let f = self.function(name).ok_or_else(|| {
+            match name.eq_ignore_ascii_case(crate::query::EXPIRED) {
+                true => Error::Query(
+                    "`expired()` reads the rows past their `@ttl`, and this collection \
+                     has no `@ttl`"
+                        .into(),
+                ),
+                false => Error::Query(format!("unknown function `{name}`")),
+            }
+        })?;
         let (lo, hi) = f.arity();
         if args.len() < lo || hi.map(|h| args.len() > h).unwrap_or(false) {
             return Err(Error::Query(format!(

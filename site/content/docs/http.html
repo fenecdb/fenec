@@ -709,7 +709,13 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     <code>del</code>, of rows the token may read and the filters of the
     rules granting them, a <code>set</code>'s rows checked again after. A
     token may insert into a collection it cannot read, such as an event
-    stream: its reads of it are refused with 403 and it is not listed.</li>
+    stream: its reads of it are refused with 403 and it is not listed.
+    <code>expired</code> grants the rows past their <code>@ttl</code>, which
+    <code>expired()</code> reads (<a href="/docs/fenecql#reaper">the
+    reaper</a>): a statement asking it is held to the filters of the rules
+    granting <code>expired</code> beside the ones its operation needs, and
+    neither <code>write</code> nor <code>*</code> grants it — a lapsed hold
+    is the reaper's, not a user's to see again.</li>
   <li><b><code>append-only</code></b> is a line of its own,
     <code>journal append-only</code>, with no filter and no role. No scoped
     token updates or deletes there, by any route — <code>/query</code>,

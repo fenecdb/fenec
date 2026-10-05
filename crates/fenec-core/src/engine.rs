@@ -5322,10 +5322,20 @@ impl Database {
         if let Some(f) = filter {
             f.each_subquery_mut(&mut |e| self.answer_subquery(e, params, depth))?;
         }
-        if let Some(alive) = self.alive(collection)? {
+        if let Some(Expr::Not(past)) = self.alive(collection)? {
+            // `expired()`: the rows past their time, which a reaper reads to
+            // give back what the sweep would delete unseen -- a hold's money,
+            // a reservation's stock. The filter says which rows it reads, so
+            // the test that leaves them out is not added; `field <= cutoff`
+            // is a range of the ordered index, where `alive`'s `not` is not.
+            // One walk that answers and tells: a second to ask first was
+            // 485 bytes of the browser module.
+            if filter.as_mut().is_some_and(|f| f.answer_expired(&past)) {
+                return Ok(());
+            }
             *filter = Some(match filter.take() {
-                Some(f) => Expr::And(Box::new(f), Box::new(alive)),
-                None => alive,
+                Some(f) => Expr::And(Box::new(f), Box::new(Expr::Not(past))),
+                None => Expr::Not(past),
             });
         }
         Ok(())

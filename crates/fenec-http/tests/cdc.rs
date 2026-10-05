@@ -507,3 +507,41 @@ fn a_sweep_comes_as_deletes() {
         ]
     );
 }
+
+/// The sweeper leaves a row a sweep's period past its time before it
+/// deletes it, so a reaper coming by as often reads it with `expired()`
+/// and gives back what it held; swept at the first pass after its time, a
+/// row that lapsed a moment before went unseen.
+#[test]
+fn a_row_past_its_time_waits_a_sweep_for_its_reaper() {
+    let n = start("grace", replication::DEFAULT_BUFFER);
+    n.run("create collection holds (amount int, until timestamp @ttl(1ms))");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    n.run(&format!(
+        "put holds [{{amount: 5, until: {}}}, {{amount: 7, until: 1}}]",
+        now - 1000
+    ));
+    let grace = fenec_http::sweep::GRACE;
+    assert_eq!(
+        fenec_http::sweep::pass_after("test", &n.db, grace),
+        1,
+        "only the one past its time by a sweep's period"
+    );
+    let expired = |n: &Node| {
+        let db = n.db.read().unwrap();
+        let stmt = fenec_ql::parse_one("get holds select amount where expired()").unwrap();
+        let r = db.query(&stmt, &[]).unwrap();
+        r.rows()
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.values[0].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(expired(&n), [fenec_core::value::Value::Int(5)]);
+    assert_eq!(fenec_http::sweep::pass("test", &n.db), 1);
+    assert!(expired(&n).is_empty());
+}

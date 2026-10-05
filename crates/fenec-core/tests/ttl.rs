@@ -563,3 +563,137 @@ fn a_read_needs_a_time() {
     run(&mut db, "put k {at: now()}", &[]);
     assert_eq!(count(&db, "get k count"), 2);
 }
+
+/// `expired()` reads the rows past their time, which every other read
+/// leaves out: a reaper's way to give back what a lapsed hold reserved
+/// before the row goes. It is the test written out, `seen <= now - ttl`,
+/// wherever a filter over the collection holds it -- `get`, `count`, a
+/// `lookup` level, an inner `get`, `set` and `del` -- and `not expired()`
+/// is what a read finds without it.
+#[test]
+fn expired_reads_what_every_other_read_leaves_out() {
+    let mut db = Database::new();
+    fixture(&mut db);
+    let past = format!("seen <= {}", NOW - TTL);
+    let alive = format!("not (seen <= {})", NOW - TTL);
+    for (s, t) in [
+        (
+            "get s where expired() order id".to_string(),
+            format!("get t where {past} order id"),
+        ),
+        (
+            "get s where expired() count".into(),
+            format!("get t where {past} count"),
+        ),
+        (
+            "get s where expired() and user = \"u7\" order seen desc limit 5".into(),
+            format!("get t where {past} and user = \"u7\" order seen desc limit 5"),
+        ),
+        (
+            "get s where not expired() order id".into(),
+            "get s order id".into(),
+        ),
+        (
+            "get s select user, count(*) where expired() or n = 3 group user".into(),
+            format!("get t select user, count(*) where {past} or n = 3 group user"),
+        ),
+        (
+            "get u order id lookup s on user = name where expired() order id limit 3".into(),
+            format!("get u order id lookup t on user = name where {past} order id limit 3"),
+        ),
+        (
+            "get u where name in (get s select user where expired() and n = 4) order id".into(),
+            format!("get u where name in (get t select user where {past} and n = 4) order id"),
+        ),
+        // An inner `get` of a collection whose rows expire, under an outer
+        // `expired()`: the inner one leaves them out as any read does.
+        (
+            "get s where expired() and user in (get s select user where n = 4) count".into(),
+            format!(
+                "get t where {past} and user in (get t select user where {alive} and n = 4) count"
+            ),
+        ),
+    ] {
+        assert_eq!(rows(&db, &s, &[]), rows(&db, &t, &[]), "\n{s}\n{t}");
+    }
+    let expired = count(&db, "get s where expired() count");
+    assert!(expired > 0);
+    // A range of the ordered index, not a scan.
+    let plan = rows(&db, "explain get s where expired()", &[]);
+    assert!(
+        format!("{plan:?}").contains("the ordered index on seen"),
+        "{plan:?}"
+    );
+
+    // `set` and `del` reach them by it; the living are left alone.
+    let living = count(&db, "get s count");
+    run(&mut db, "set s {n: 1000} where expired() and n = 2", &[]);
+    assert_eq!(
+        count(&db, "get s where expired() and n = 1000 count"),
+        count(&db, &format!("get t where {past} and n = 2 count"))
+    );
+    run(&mut db, "del s where expired()", &[]);
+    assert_eq!(count(&db, "get s where expired() count"), 0);
+    assert_eq!(count(&db, "get s count"), living);
+
+    // A collection with no `@ttl` has nothing past its time.
+    let stmt = fenec_ql::parse_one("get u where expired()").unwrap();
+    let e = db.query(&stmt, &[]).unwrap_err();
+    assert!(e.to_string().contains("has no `@ttl`"), "{e}");
+}
+
+/// The reaper: a hold lapsed is read with `expired()`, its money given back
+/// and the hold deleted in one block, the delete required -- so of two
+/// reapers, or a reaper and a capture racing it, one gives it back and the
+/// other is refused whole.
+#[test]
+fn a_reaper_gives_back_once() {
+    let mut db = Database::new();
+    db.set_clock(Some(NOW));
+    run(
+        &mut db,
+        "create collection accounts (ext text @unique, balance int, held int);
+         create collection holds (account text @hash, amount int, until timestamp @ttl(1ms));
+         put accounts {ext: \"a\", balance: 100, held: 30};
+         put holds [{account: \"a\", amount: 10, until: $1}, {account: \"a\", amount: 20, until: $2}]",
+        &[Value::Timestamp(NOW - 2), Value::Timestamp(NOW + 60_000)],
+    );
+    // The lapsed one is out of every read, and `expired()` finds it.
+    assert_eq!(count(&db, "get holds count"), 1);
+    let lapsed = rows(
+        &db,
+        "get holds select id, account, amount where expired()",
+        &[],
+    );
+    assert_eq!(lapsed.rows.len(), 1);
+    let (id, amount) = (
+        lapsed.rows[0].values[0].clone(),
+        lapsed.rows[0].values[2].clone(),
+    );
+    assert_eq!(amount, Value::Int(10));
+    let reap = fenec_ql::parse(
+        "del holds where expired() and id = $1 require 1;
+         set accounts {held: held - $2} where ext = $3 and held >= $2 require 1",
+    )
+    .unwrap();
+    let params = [id, amount, Value::Text("a".into())];
+    let give_back = |db: &mut Database| -> fenec_core::error::Result<()> {
+        db.begin()?;
+        for s in &reap {
+            if let Err(e) = db.execute_with(s, &params) {
+                db.rollback();
+                return Err(e);
+            }
+        }
+        db.commit()
+    };
+    give_back(&mut db).unwrap();
+    let e = give_back(&mut db).unwrap_err();
+    assert!(matches!(e, Error::Unmet(_)), "{e}");
+    assert_eq!(
+        rows(&db, "get accounts select held", &[]).rows[0].values[0],
+        Value::Int(20)
+    );
+    db.set_clock(Some(0));
+    assert_eq!(count(&db, "get holds count"), 1, "the lapsed hold is gone");
+}
