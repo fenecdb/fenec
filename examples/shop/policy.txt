@@ -1,0 +1,13 @@
+# Who may read and write what, with a JSON Web Token the shop mints
+# (lib/db.ts). The shop's server keeps its own token, which reaches
+# everything; a shopper's token reaches only the shopper's rows.
+#
+# collection   access       rows                        role
+carts          read,write   where owner = $jwt.sub
+orders         read         where owner = $jwt.sub
+order_lines    read         where owner = $jwt.sub
+products       read
+categories     read
+# The live stock on a product page: a token the browser holds, which reads
+# stock and nothing else.
+inventory      read                                     for stock

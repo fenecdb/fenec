@@ -37,6 +37,7 @@ restarts.
 | [`swift`](swift) | Swift, SwiftUI | local | a macOS app (the same views on iOS) over a file in Application Support, `LiveQuery`; a CLI | `swift run NotesApp` |
 | [`kotlin-android`](kotlin-android) | Kotlin, Compose | local | an Android app over a file in `filesDir`, a live `Flow`; a JVM CLI | `gradle :app:installDebug` |
 | [`flutter`](flutter) | Dart, Flutter | local | a Flutter app over a file in Application Support, `StreamBuilder` over a live query | `flutter run` |
+| [`shop`](shop) | Next.js, TypeScript | server | not the Notes app: a desert-gear shop of 10 000 products -- category pages with facets, search with highlights, carts under scoped tokens, a checkout that cannot oversell -- with its tests, Lighthouse scores and load test | `npm install && npm run db`, then `npm run seed && npm run build && npm start` |
 | [`integrations/cloudflare/example`](../integrations/cloudflare/example) | JavaScript | Durable Object | a database kept in a Durable Object's storage (`@fenecdb/cloudflare`); not the Notes app | `npx wrangler dev` |
 
 *Server* means the example talks to a `fenec-server` over HTTP; start one
@@ -76,6 +77,7 @@ overrides.
 ```sh
 make examples-test                        # every example whose toolchain is here
 examples/run-tests.sh python go rust      # some of them
+SHOP_LIGHTHOUSE=1 examples/run-tests.sh shop   # the shop, its Lighthouse budgets too
 ```
 
 Each runs its `smoke`: create, search, filter, a live update where the

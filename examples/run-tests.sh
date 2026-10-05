@@ -55,14 +55,16 @@ copy() {
     rm -rf "$dir/$1"
     mkdir -p "$dir/$1"
     (cd "$here/$1" && tar cf - --exclude node_modules --exclude dist --exclude target \
-        --exclude bin --exclude obj --exclude .build --exclude build .) | (cd "$dir/$1" && tar xf -)
+        --exclude bin --exclude obj --exclude .build --exclude build --exclude .next \
+        --exclude data --exclude .lighthouseci .) | (cd "$dir/$1" && tar xf -)
     echo "$dir/$1"
 }
 
 # @fenecdb/web and @fenecdb/react as npm would publish them, packed here.
 packed() {
     [ -f "$dir/packs/done" ] && return 0
-    [ -f "$root/web/fenec.wasm" ] || (cd "$root" && make -s wasm)
+    # To stderr: what an npm example prints on stdout is its directory.
+    [ -f "$root/web/fenec.wasm" ] || (cd "$root" && make -s wasm) >&2
     mkdir -p "$dir/packs"
     (cd "$root/web" && npm pack -q --pack-destination "$dir/packs" >/dev/null)
     (cd "$root/integrations/react" && npm pack -q --pack-destination "$dir/packs" >/dev/null)
@@ -106,6 +108,16 @@ run_react() {
     sed -i.bak -e 's#^export const db = await local#// &#' -e 's#^// \(export const db = await synced\)#\1#' "$w/src/db.ts"
     grep -q '^export const db = await synced' "$w/src/db.ts"
     (cd "$w" && npx tsc --noEmit)
+}
+
+# The shop (examples/shop/scripts/ci.sh): a server and a Next.js site of its
+# own, the catalog seeded, lint and its correctness, security and SEO tests;
+# SHOP_LIGHTHOUSE=1 adds Lighthouse CI, SHOP_LOAD=1 the timings and load test.
+run_shop() {
+    has node || { missing node "shop"; return; }
+    w=$(npm_example shop)
+    (cd "$w" && FENEC_SERVER="${SHOP_FENEC_SERVER:-$root/target/debug/fenec-server}" \
+        FENEC_PORT=$port SHOP_PORT=$((port + 1)) sh scripts/ci.sh)
 }
 
 run_python() {
@@ -159,7 +171,7 @@ run_flutter() {
     (cd "$here/flutter" && ./run-tests.sh)
 }
 
-all="node-server web-local react python go dotnet rust swift kotlin-android flutter"
+all="node-server web-local react shop python go dotnet rust swift kotlin-android flutter"
 "$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 for e in ${*:-$all}; do
     echo "== $e"
@@ -167,6 +179,7 @@ for e in ${*:-$all}; do
         node-server) run_node_server ;;
         web-local) run_web_local ;;
         react) run_react ;;
+        shop) run_shop ;;
         python) run_python ;;
         go) run_go ;;
         dotnet) run_dotnet ;;
