@@ -17,7 +17,11 @@
 //   {"$or": [c, ...]}, {"$and": [c, ...]}, {"$not": c}   or(), and(), not()
 //   {"$raw": [text, param, ...]}                          raw()
 //   {"$inc": n}                                           inc(n), a value
-//   {"$expr": [text, param, ...]}                         expr(), a value
+//   {"$expr": [text, param, ...]}                         expr(), a value or a column
+//   {"$bucket": [field, interval]}                        bucket(field, interval)
+//   {"$countDistinct": field}                             countDistinct(field)
+//   {"$first": [field]}, {"$first": [field, by]}          first(field [, by]); "$last" too
+//   {"$as": [column, name]}                               column.as(name)
 //   {"$date": "2026-09-19T12:34:56.000Z"}                 a date
 //   {"$f32": [0.5, 0.25]}                                 a Float32Array
 //
@@ -31,7 +35,9 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { from, or, and, not, raw, inc, expr, FenecError } from './fenec.js';
+import {
+  from, or, and, not, raw, inc, expr, bucket, countDistinct, first, last, FenecError,
+} from './fenec.js';
 
 export const GOLDEN = fileURLToPath(new URL('../integrations/builder-golden.json', import.meta.url));
 
@@ -47,6 +53,11 @@ function arg(x) {
   if ('$raw' in x) return raw(x.$raw[0], ...x.$raw.slice(1).map(arg));
   if ('$inc' in x) return inc(x.$inc);
   if ('$expr' in x) return expr(x.$expr[0], ...x.$expr.slice(1).map(arg));
+  if ('$bucket' in x) return bucket(...x.$bucket);
+  if ('$countDistinct' in x) return countDistinct(x.$countDistinct);
+  if ('$first' in x) return first(...x.$first);
+  if ('$last' in x) return last(...x.$last);
+  if ('$as' in x) return arg(x.$as[0]).as(x.$as[1]);
   if ('$date' in x) return new Date(x.$date);
   if ('$f32' in x) return Float32Array.from(x.$f32);
   return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, arg(v)]));
@@ -203,7 +214,7 @@ for (const bad of ['meta.', '.meta', 'meta..lang', 'meta.1x', '1x', 'a b', '']) 
 c('an object condition names its fields too', docs, ['where', { 'a-b': 1 }], Q);
 c('names are Unicode letters, digits and _', ['from', 'páginas'], ['where', 'año', 2024], ['where', 'şehir_2', 'İzmir'], ['where', '_x', 1], ['select', 'résumé', 'हिंदी'], Q);
 c('a near field is a name, not a path', docs, ['near', 'meta.v', [1, 0]], Q);
-c('a group field is a name, not a path', ['from', 'orders'], ['select', 'count(*)'], ['group', 'meta.status'], Q);
+c('a group key may be a path', ['from', 'orders'], ['select', 'count(*)'], ['group', 'meta.status'], Q);
 
 // order, limit, offset.
 c('order is ascending unless told', docs, ['order', 'year'], Q);
@@ -300,7 +311,29 @@ c('an aggregate takes no match', ['from', 'orders'], ['select', 'sum(total)'], [
 c('an aggregate takes no lookup', ['from', 'orders'], ['select', 'count(*)'], ['lookup', 'lines', { on: 'order_id' }], Q);
 c('an aggregate that is not there', ['from', 'orders'], ['select', 'median(total)'], Q);
 c('an aggregate of two fields', ['from', 'orders'], ['select', 'sum(a b)'], Q);
-c('an aggregate of a path', ['from', 'orders'], ['select', 'sum(meta.total)'], Q);
+c('an aggregate of a path', ['from', 'orders'], ['select', 'sum(meta.total)', 'Count( Distinct meta.user )'], Q);
+
+// Expressions in the select list, in aggregates and as group keys.
+const ticks = ['from', 'ticks'];
+c('a column worked out, named, its values bound first', ticks, ['select', 'sym', { $as: [{ $expr: ['px * ?', 2] }, 'scaled'] }], ['where', 'qty', '>', 1], Q);
+c('a column worked out with no name', ticks, ['select', { $expr: ['px * qty'] }], Q);
+c('one-minute bars', ticks, ['select', { $as: [{ $bucket: ['at', '1m'] }, 'minute'] }, { $as: [{ $first: ['px', 'at'] }, 'open'] }, 'max(px)', 'min(px)', { $as: [{ $last: ['px', 'at'] }, 'close'] }, 'sum(qty)'], ['where', 'sym', 'S07'], ['group', 'minute'], ['order', 'minute', 'desc'], ['limit', 60], Q);
+c('first and last without by, as written', ticks, ['select', 'first(px)', 'LAST(px)', { $first: ['meta.px'] }], Q);
+c('vwap: an expression over aggregates', ticks, ['select', 'sym', { $as: [{ $expr: ['sum(px * qty) / sum(qty)'] }, 'vwap'] }], ['group', 'sym'], ['order', 'vwap', 'desc'], Q);
+c('distinct users an hour', ['from', 'events'], ['select', { $as: [{ $bucket: ['at', '1h'] }, 'hour'] }, { $countDistinct: 'user' }], ['where', 'at', '>=', { $date: '2026-09-19T00:00:00.000Z' }], ['group', 'hour'], ['order', 'count(distinct user)', 'desc'], Q);
+c('group by several keys and an expression', ['from', 'events'], ['select', 'name', 'country', 'count(*)'], ['group', 'name', 'country', { $bucket: ['at', '1d'] }], Q);
+c('group by a list of keys', ['from', 'events'], ['select', 'name', 'count(*)'], ['group', ['name', 'meta.plan']], Q);
+c('an expression in group takes its values bound', ['from', 'events'], ['select', 'count(*)'], ['where', 'name', 'buy'], ['group', { $expr: ['coalesce(country, ?)', 'none'] }], Q);
+c('calendar intervals', ['from', 'events'], ['select', { $as: [{ $bucket: ['at', '1mo'] }, 'm'] }, { $as: [{ $bucket: ['at', '1w'] }, 'w'] }, 'count(*)'], ['group', 'm', 'w'], Q);
+c('a bucket takes a duration', ['from', 'events'], ['select', 'count(*)'], ['group', { $bucket: ['at', '1 m'] }], Q);
+c('a bucket takes a duration past zero', ['from', 'events'], ['select', 'count(*)'], ['group', { $bucket: ['at', '0h'] }], Q);
+c('a bucket takes a unit it knows', ['from', 'events'], ['select', 'count(*)'], ['group', { $bucket: ['at', '5q'] }], Q);
+c('a bucket field is a field', ['from', 'events'], ['select', 'count(*)'], ['group', { $bucket: ['at; del events', '1m'] }], Q);
+c('a column name is a name', ticks, ['select', { $as: [{ $expr: ['px * qty'] }, 'a b'] }], Q);
+c('a column name is no path', ticks, ['select', { $as: [{ $expr: ['px * qty'] }, 'a.b'] }], Q);
+c('a distinct count reads a field', ticks, ['select', { $countDistinct: 'a, b' }], Q);
+c('first reads a field', ticks, ['select', { $first: ['px', 'at desc'] }], Q);
+c('group takes at least one key', ticks, ['select', 'count(*)'], ['group'], Q);
 
 // lookup.
 c('lookup is terminal: its clauses bind to the child', ['from', 'products'], ['where', 'year', 2024], ['limit', 20], ['lookup', 'reviews', { on: 'product_id', select: ['stars', 'body'], where: { stars: { gte: 4 } }, order: [['created', 'desc']], limit: 3, offset: 1 }], Q);

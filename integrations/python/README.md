@@ -33,6 +33,23 @@ docs.where("year", "<", 2000).delete()        # no filter: refused unless all=Tr
 docs.where("lang", "tr").count()
 ```
 
+Aggregates go in `select` as FenecQL spells them, and `group` takes one key
+or more; `bucket`, `count_distinct`, `first`, `last` and `expr` make a
+column, named with `.as_(name)` (`as` being Python's keyword):
+
+```python
+from fenecdb import bucket, expr, first, last
+
+bars = (db.collection("ticks")
+          .select(bucket("at", "1m").as_("minute"), first("px", "at").as_("open"),
+                  "max(px)", "min(px)", last("px", "at").as_("close"),
+                  expr("sum(px * qty) / sum(qty)").as_("vwap"))
+          .where("sym", "S07")
+          .group("minute")
+          .order("minute", "desc")
+          .rows())
+```
+
 `facet(field, ranges=[0, 25, 50])` counts by ranges of numbers, each
 value `[from, to]`, and `disjunctive=True` counts past the filter's own
 condition on the field, as a shop's filter list does.

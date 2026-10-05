@@ -54,12 +54,16 @@ class Cond {
 
 /// A value a write works out over the row it writes, rendered as FenecQL
 /// with its values as parameters: [Computed.inc] and [Computed.expr], as the
-/// JS builder's `inc` and `expr`.
+/// JS builder's `inc` and `expr`. An expression is a column too -- of
+/// [Query.select], or a key of [Query.group] -- as are [Computed.bucket],
+/// [Computed.countDistinct], [Computed.first] and [Computed.last], and [as]
+/// names the column it answers under.
 class Computed {
   final Object? _by;
   final String? _sql;
   final List<Object?> _params;
-  Computed._(this._by, this._sql, this._params);
+  final String? _name;
+  Computed._(this._by, this._sql, this._params, [this._name]);
 
   /// `{'n': Computed.inc(1)}` in an update: the field plus [by], counting
   /// from 0 where it is null -- `n: coalesce(n, 0) + $1` -- worked out under
@@ -71,8 +75,40 @@ class Computed {
 
   /// A value as a FenecQL expression over the row, each `?` bound to the
   /// next parameter: `Computed.expr('now()')`, `Computed.expr('price * ?', [1.2])`.
+  /// In a select list it is a column: `Computed.expr('sum(px * qty) / sum(qty)').as('vwap')`.
   static Computed expr(String sql, [List<Object?> params = const []]) => Computed._(null, sql, params);
+
+  /// `bucket(field, interval)`: the start of the interval a timestamp falls
+  /// in -- `'15m'`, `'1h'`, `'1d'`, `'1w'` (from a Monday), `'1mo'`, `'1y'`,
+  /// in UTC -- for a select list or a group. The interval is written into
+  /// the text, since it is a part of the statement's shape.
+  static Computed bucket(String field, String interval) {
+    if (!_interval.hasMatch(interval)) {
+      throw _refuse("bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': ${_quote(interval)}");
+    }
+    return Computed._(null, 'bucket(${_pathOf(field)}, $interval)', const []);
+  }
+
+  /// `count(distinct field)`: how many distinct values the rows hold.
+  static Computed countDistinct(String field) => Computed._(null, 'count(distinct ${_pathOf(field)})', const []);
+
+  /// `first(field)`, or `first(field by key)`: the value of the row least by
+  /// [by] -- by the order the rows were written without one -- that has a
+  /// value; a bar's open is `Computed.first('px', 'at')`.
+  static Computed first(String field, [String? by]) => _pick('first', field, by);
+
+  /// `last(field [by key])`: as [first], the row greatest by [by].
+  static Computed last(String field, [String? by]) => _pick('last', field, by);
+
+  static Computed _pick(String fn, String field, String? by) =>
+      Computed._(null, '$fn(${_pathOf(field)}${by == null ? '' : ' by ${_pathOf(by)}'})', const []);
+
+  /// The name the column answers under: `select ... as <name>`.
+  Computed as(String name) => Computed._(_by, _sql, _params, _identOf(name, 'column'));
 }
+
+// `15m`, `1h`, `1d`, `1w`, `3mo`, `1y`: what `bucket` takes.
+final _interval = RegExp(r'^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$');
 
 /// One key of a lookup's order: a field, `asc` or `desc`, and a collation
 /// (`tr` or `und`).
@@ -136,7 +172,17 @@ String _pathOf(String name) => _path.hasMatch(name) ? name : throw _refuse('inva
 
 // The JS builder's aggregate pattern, case-blind over ASCII as JavaScript's
 // `i` flag without `u` is.
-final _aggregate = RegExp(r'^(count)\(\*?\)$|^(sum|avg|min|max)\(([A-Za-z_][A-Za-z0-9_]*)\)$', caseSensitive: false);
+const _names = r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*';
+final _aggregate = RegExp(
+    r'^(count)\(\*?\)$|^count\(\s*distinct\s+(' +
+        _names +
+        r')\s*\)$|^(sum|avg|min|max|first|last)\((' +
+        _names +
+        r')\)$',
+    caseSensitive: false);
+
+// What makes an expression an aggregate's: a call of one.
+final _aggregateCall = RegExp(r'\b(count|sum|avg|min|max|first|last)\s*\(', caseSensitive: false);
 
 /// What JavaScript's `String.prototype.trim` takes off. Dart's own `trim`
 /// takes Unicode's White_Space, which holds U+0085 where JavaScript's does
@@ -157,14 +203,51 @@ String _jsTrim(String s) {
   return s.substring(a, b);
 }
 
-/// A select item: a field, or an aggregate spelled as FenecQL spells it --
-/// `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- answering under
-/// that name.
-(String, bool) _column(String name) {
+/// A select item's name: a field, or an aggregate of one spelled as
+/// FenecQL spells it -- `count(*)`, `count(distinct user)`, `sum(total)`,
+/// `avg(f)`, `min(f)`, `max(f)`, `first(f)`, `last(f)`, a path where a field
+/// goes -- answering under that name.
+(String, bool) _columnName(String name) {
   final m = _aggregate.firstMatch(_jsTrim(name));
   if (m == null) return (_pathOf(name), false);
   if (m[1] != null) return ('count(*)', true);
-  return ('${m[2]!.toLowerCase()}(${m[3]})', true);
+  if (m[2] != null) return ('count(distinct ${m[2]})', true);
+  return ('${m[3]!.toLowerCase()}(${m[4]})', true);
+}
+
+/// A select item: a name, or an expression -- an aggregate's when it calls one.
+(Object, bool) _column(Object c) => switch (c) {
+      String() => _columnName(c),
+      Computed(_sql: final String sql) => (c, _aggregateCall.hasMatch(sql)),
+      _ => throw _refuse('a column is a name or an expression, and inc() is neither'),
+    };
+
+/// A group key: a field or a path, a name the list gives a column, or an expression.
+Object _groupKey(Object k) => switch (k) {
+      String() => _pathOf(k),
+      Computed(_sql: String()) => k,
+      _ => throw _refuse('a group key is a name or an expression, and inc() is neither'),
+    };
+
+/// An expression's text, each `?` bound to the next of its parameters.
+String _exprText(Computed v, String Function(Object?) bind) {
+  final pieces = v._sql!.split('?');
+  final out = StringBuffer();
+  for (var i = 0; i < pieces.length - 1; i++) {
+    if (i >= v._params.length) throw _refuse('expr(): more `?` placeholders than parameters');
+    out
+      ..write(pieces[i])
+      ..write(bind(v._params[i]));
+  }
+  if (pieces.length - 1 != v._params.length) throw _refuse('expr(): too many parameters given');
+  return (out..write(pieces.last)).toString();
+}
+
+/// A select item or a group key as text, an expression's values bound.
+String _columnText(Object c, String Function(Object?) bind) {
+  if (c is! Computed) return c as String;
+  final text = _exprText(c, bind);
+  return c._name == null ? text : '$text as ${c._name}';
 }
 
 bool _direction(String dir) => switch (dir.toLowerCase()) {
@@ -360,9 +443,9 @@ String _textOf(Object? v, String what) =>
 class Query {
   final String collection;
   final Exec? _exec;
-  final List<String>? _project;
+  final List<Object>? _project; // each a name or a Computed
   final bool _aggregate;
-  final String? _group;
+  final List<Object>? _group; // each a name or a Computed
   final List<Node> _cond;
   final _Vector? _near;
   final (String, String)? _match;
@@ -380,9 +463,9 @@ class Query {
 
   Query._(this.collection,
       {Exec? exec,
-      List<String>? project,
+      List<Object>? project,
       bool aggregate = false,
-      String? group,
+      List<Object>? group,
       List<Node> cond = const [],
       _Vector? near,
       (String, String)? match,
@@ -442,9 +525,9 @@ class Query {
   }) =>
       Query._(collection,
           exec: identical(exec, _keep) ? _exec : exec as Exec?,
-          project: identical(project, _keep) ? _project : project as List<String>?,
+          project: identical(project, _keep) ? _project : project as List<Object>?,
           aggregate: aggregate ?? _aggregate,
-          group: identical(group, _keep) ? _group : group as String?,
+          group: identical(group, _keep) ? _group : group as List<Object>?,
           cond: cond ?? _cond,
           near: identical(near, _keep) ? _near : near as _Vector?,
           match: identical(match, _keep) ? _match : match as (String, String)?,
@@ -472,15 +555,26 @@ class Query {
 
   /// `select a, b`; none, or `'*'`, is every field. Aggregates go in the same
   /// list as FenecQL spells them and answer under that name:
-  /// `select(['status', 'count(*)', 'sum(total)']).group('status')`.
-  Query select(List<String> columns) {
+  /// `select(['status', 'count(*)', 'sum(total)']).group('status')`. An
+  /// expression -- [Computed.expr], [Computed.bucket],
+  /// [Computed.countDistinct], [Computed.first], [Computed.last] -- answers
+  /// under the name its [Computed.as] gives it:
+  /// `select(['sym', Computed.expr('sum(px * qty) / sum(qty)').as('vwap')]).group('sym')`.
+  Query select(List<Object> columns) {
     if (columns.isEmpty || columns.contains('*')) return _with(project: null, aggregate: false);
     final cs = columns.map(_column).toList();
     return _with(project: [for (final c in cs) c.$1], aggregate: cs.any((c) => c.$2));
   }
 
-  /// `group field`: a row per value, for a select list that aggregates.
-  Query group(String field) => _with(group: _identOf(field));
+  /// `group a, b`: a row per distinct set of the keys' values, for a select
+  /// list that aggregates. [keys] is one key or a list of them, each a field
+  /// or a path, a name the list gives a column with [Computed.as], or an
+  /// expression: `group(['sym', Computed.bucket('at', '1h')])`.
+  Query group(Object keys) {
+    final list = keys is List ? keys.cast<Object>() : [keys];
+    if (list.isEmpty) throw _refuse('group takes at least one key');
+    return _with(group: list.map(_groupKey).toList());
+  }
 
   /// `where(field, op, value)`, `where(field, spec)` or `where(condition)`,
   /// joined to the conditions before with `and`. The op is a symbol or its
@@ -628,7 +722,7 @@ class Query {
   /// in Turkish order, `'und'` in Unicode's root order.
   Query order(String field, [String direction = 'asc', String? collate]) =>
       // Over groups a key may be an aggregate of the list, by its name.
-      _with(order: [..._order, _Key(_column(field).$1, _direction(direction), _collation(collate))]);
+      _with(order: [..._order, _Key(_columnName(field).$1, _direction(direction), _collation(collate))]);
 
   /// How many rows come back.
   Query limit(int n) => _with(limit: _whole(n, 'limit'));
@@ -656,7 +750,10 @@ class Query {
 
   String _text(String Function(Object?) bind) {
     // The engine refuses each of these too; failing here runs nothing.
-    if (_group != null && !_aggregate) throw _refuse("group $_group needs an aggregate in select: 'count(*)'");
+    if (_group != null && !_aggregate) {
+      final keys = _group.map((k) => k is Computed ? k._sql : k).join(', ');
+      throw _refuse("group $keys needs an aggregate in select: 'count(*)'");
+    }
     if (_aggregate) {
       final clash = _near != null
           ? 'near'
@@ -729,14 +826,17 @@ class Query {
     // The marks after the fields `select` named, or after every field, each
     // binding its ellipsis and tags in the order written.
     final items = [for (final m in _marks) _markText(m, bind)];
+    // The list's values are bound after the marks', as the JS builder binds
+    // them: a parameter is named by its number, so either order reads alike.
+    final cols = _project?.map((c) => _columnText(c, bind)).toList();
     final select = [
-      ...?_project ?? (items.isEmpty ? null : const ['*']),
+      ...?cols ?? (items.isEmpty ? null : const ['*']),
       ...items
     ];
     if (select.isNotEmpty) sql.write(' select ${select.join(', ')}');
     final w = _whereOf(_cond, bind);
     if (w != null) sql.write(' where $w');
-    if (_group != null) sql.write(' group $_group');
+    if (_group != null) sql.write(' group ${_group.map((k) => _columnText(k, bind)).join(', ')}');
     if (_near != null) {
       sql.write(' near ${_near.field} ${bind(_near.vector)}');
       if (_near.n != null) sql.write(' ef ${_near.n}');
@@ -862,21 +962,11 @@ class Query {
   /// A document's value: [Computed]'s text, or a parameter.
   static String _value(String key, Object? v, String Function(Object?) bind, bool insert) {
     if (v is! Computed) return bind(v);
-    final sql = v._sql;
-    if (sql == null) {
+    if (v._sql == null) {
       if (insert) throw _refuse('inc() reads the row it changes: use it in update (field: $key)');
       return 'coalesce($key, 0) + ${bind(v._by)}';
     }
-    final pieces = sql.split('?');
-    final out = StringBuffer();
-    for (var i = 0; i < pieces.length - 1; i++) {
-      if (i >= v._params.length) throw _refuse('expr(): more `?` placeholders than parameters');
-      out
-        ..write(pieces[i])
-        ..write(bind(v._params[i]));
-    }
-    if (pieces.length - 1 != v._params.length) throw _refuse('expr(): too many parameters given');
-    return (out..write(pieces.last)).toString();
+    return _exprText(v, bind);
   }
 
   /// The `put` of a document -- a map of fields, in its order -- or a list of

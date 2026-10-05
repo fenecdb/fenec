@@ -84,6 +84,80 @@ extension Value {
     }
 }
 
+/// A select-list item or a group key: a name -- a field, a path into a json
+/// field, an aggregate spelled as FenecQL spells it, `"count(*)"`,
+/// `"count(distinct user)"`, `"sum(total)"`, `"first(px)"` -- or an
+/// expression, which `as` names as a column: `.expr(...)`, `.bucket(...)`,
+/// `.countDistinct(...)`, `.first(...)`, `.last(...)`. A string literal is a
+/// name.
+///
+///     try db.from("ticks")
+///         .select(.bucket("at", "1m").as("minute"), .first("px", by: "at").as("open"), "max(px)")
+///         .group("minute")
+public struct Column: Sendable, ExpressibleByStringLiteral {
+    enum Kind: Sendable {
+        case name(String)
+        case expr(sql: String, params: [Value], name: String?)
+    }
+
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+
+    /// A field, a path or an aggregate, by its name.
+    public init(_ name: String) { kind = .name(name) }
+
+    public init(stringLiteral value: String) { self.init(value) }
+
+    /// A FenecQL expression over the row -- or over the group's rows, when
+    /// it calls an aggregate -- each `?` bound to the next parameter:
+    /// `.expr("sum(px * qty) / sum(qty)").as("vwap")`.
+    public static func expr(_ sql: String, _ params: Value...) -> Column { expr(sql, params) }
+
+    static func expr(_ sql: String, _ params: [Value]) -> Column { Column(.expr(sql: sql, params: params, name: nil)) }
+
+    /// `bucket(field, interval)`: the start of the interval a timestamp
+    /// falls in -- `"15m"`, `"1h"`, `"1d"`, `"1w"` (from a Monday), `"1mo"`,
+    /// `"1y"`, in UTC. The interval is written into the text, since it is a
+    /// part of the statement's shape, so it is checked here.
+    public static func bucket(_ field: String, _ interval: String) throws -> Column {
+        guard Builder.isInterval(interval) else {
+            throw FenecError.builder(
+                "bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': \(Builder.quote(interval))")
+        }
+        return expr("bucket(\(try Builder.path(field)), \(interval))", [])
+    }
+
+    /// `count(distinct field)`: how many distinct values the rows hold.
+    public static func countDistinct(_ field: String) throws -> Column {
+        expr("count(distinct \(try Builder.path(field)))", [])
+    }
+
+    /// `first(field)`, or `first(field by key)`: the value of the row least
+    /// by `by` -- by the order the rows were written without one -- that has
+    /// a value; a bar's open is `.first("px", by: "at")`.
+    public static func first(_ field: String, by: String? = nil) throws -> Column { try pick("first", field, by) }
+
+    /// `last(field [by key])`: as `first`, the row greatest by `by`.
+    public static func last(_ field: String, by: String? = nil) throws -> Column { try pick("last", field, by) }
+
+    static func pick(_ fn: String, _ field: String, _ by: String?) throws -> Column {
+        let f = try Builder.path(field)
+        let b = try by.map { " by \(try Builder.path($0))" } ?? ""
+        return expr("\(fn)(\(f)\(b))", [])
+    }
+
+    /// The name the column answers under: `select ... as <name>`. A name
+    /// is no path, and only an expression takes one: a field answers under
+    /// its own.
+    public func `as`(_ name: String) throws -> Column {
+        guard case .expr(let sql, let params, _) = kind else {
+            throw FenecError.builder("as() names an expression; a field answers under its own name")
+        }
+        return Column(.expr(sql: sql, params: params, name: try Builder.ident(name, "column")))
+    }
+}
+
 /// One key of a lookup's order: a field, `asc` or `desc`, and a collation
 /// (`tr` or `und`). A string literal is an ascending key.
 public struct SortKey: Sendable, ExpressibleByStringLiteral {
@@ -176,24 +250,92 @@ enum Builder {
         return s.unicodeScalars.allSatisfy { $0.isASCII && ($0.properties.isAlphabetic || ("0"..."9").contains($0) || $0 == "_") }
     }
 
-    /// A select item: a field, or an aggregate spelled as FenecQL spells it
-    /// -- `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- answering
-    /// under that name. Read by hand rather than by a case-blind pattern,
-    /// which would fold the Kelvin sign onto `k` where the JS builder's does
-    /// not.
-    static func column(_ name: String) throws -> (text: String, aggregate: Bool) {
-        var scalars = Substring(name).unicodeScalars[...]
+    /// A dotted path of ASCII names, as the JS builder's aggregate pattern
+    /// takes one inside an aggregate.
+    static func asciiPath(_ s: Substring) -> Bool {
+        s.split(separator: ".", omittingEmptySubsequences: false).allSatisfy(asciiIdent)
+    }
+
+    static func trimJS(_ s: Substring) -> Substring {
+        var scalars = s.unicodeScalars[...]
         while let f = scalars.first, jsSpace(f) { scalars.removeFirst() }
         while let l = scalars.last, jsSpace(l) { scalars.removeLast() }
-        let s = Substring(scalars)
+        return Substring(scalars)
+    }
+
+    /// A select item's name: a field, or an aggregate of one spelled as
+    /// FenecQL spells it -- `count(*)`, `count(distinct user)`,
+    /// `sum(total)`, `avg(f)`, `min(f)`, `max(f)`, `first(f)`, `last(f)`, a
+    /// path where a field goes -- answering under that name. Read by hand
+    /// rather than by a case-blind pattern, which would fold the Kelvin sign
+    /// onto `k` where the JS builder's does not.
+    static func column(_ name: String) throws -> (text: String, aggregate: Bool) {
+        let s = trimJS(Substring(name))
         if let open = s.firstIndex(of: "("), open > s.startIndex, s.hasSuffix(")") {
             let fn = s[s.startIndex..<open]
             let arg = s[s.index(after: open)..<s.index(before: s.endIndex)]
             let low = fn.unicodeScalars.allSatisfy({ $0.isASCII && $0.properties.isAlphabetic }) ? fn.lowercased() : nil
             if low == "count", arg.isEmpty || arg == "*" { return ("count(*)", true) }
-            if let low, ["sum", "avg", "min", "max"].contains(low), asciiIdent(arg) { return ("\(low)(\(arg))", true) }
+            if low == "count", let field = distinct(arg) { return ("count(distinct \(field))", true) }
+            if let low, ["sum", "avg", "min", "max", "first", "last"].contains(low), asciiPath(arg) {
+                return ("\(low)(\(arg))", true)
+            }
         }
         return (try path(name), false)
+    }
+
+    /// The field of `distinct <field>`, with JavaScript's `\s` around and
+    /// between, the word in any case of its ASCII letters.
+    static func distinct(_ arg: Substring) -> Substring? {
+        let a = trimJS(arg)
+        let word = a.unicodeScalars.prefix(8)
+        guard word.count == 8, Substring(word).lowercased() == "distinct",
+            word.allSatisfy(\.isASCII)
+        else { return nil }
+        let rest = Substring(a.unicodeScalars.dropFirst(8))
+        guard let f = rest.unicodeScalars.first, jsSpace(f) else { return nil }
+        let field = trimJS(rest)
+        return asciiPath(field) ? field : nil
+    }
+
+    /// What a select list holds: a name made its text, or an expression,
+    /// an aggregate's when it calls one.
+    static func column(_ c: Column) throws -> (column: Column, aggregate: Bool) {
+        switch c.kind {
+        case .name(let name):
+            let (text, aggregate) = try column(name)
+            return (Column(text), aggregate)
+        case .expr(let sql, _, _):
+            let calls = sql.range(of: #"\b(count|sum|avg|min|max|first|last)\s*\("#, options: [.regularExpression, .caseInsensitive])
+            return (c, calls != nil)
+        }
+    }
+
+    /// `15m`, `1h`, `1d`, `1w`, `3mo`, `1y`: what `bucket` takes.
+    static func isInterval(_ s: String) -> Bool {
+        s.range(of: #"^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$"#, options: .regularExpression) != nil
+    }
+
+    /// A select item or a group key as text, an expression's values bound.
+    static func columnText(_ c: Column, _ bind: Binder) throws -> String {
+        switch c.kind {
+        case .name(let text): return text
+        case .expr(let sql, let params, let name):
+            let text = try exprText(sql, params, bind)
+            return name.map { "\(text) as \($0)" } ?? text
+        }
+    }
+
+    /// An expression's text, each `?` bound to the next of its parameters.
+    static func exprText(_ sql: String, _ params: [Value], _ bind: Binder) throws -> String {
+        let pieces = sql.split(separator: "?", omittingEmptySubsequences: false)
+        var out = ""
+        for i in 0..<pieces.count - 1 {
+            guard i < params.count else { throw FenecError.builder("expr(): more `?` placeholders than parameters") }
+            out += pieces[i] + bind.bind(params[i])
+        }
+        guard pieces.count - 1 == params.count else { throw FenecError.builder("expr(): too many parameters given") }
+        return out + pieces[pieces.count - 1]
     }
 
     static func direction(_ dir: String) throws -> Bool {
@@ -374,16 +516,7 @@ enum Builder {
             }
             return "coalesce(\(key), 0) + \(bind.bind(by))"
         }
-        let sql = r["sql"]?.string ?? ""
-        let params = r["params"]?.array ?? []
-        let pieces = sql.split(separator: "?", omittingEmptySubsequences: false)
-        var out = ""
-        for i in 0..<pieces.count - 1 {
-            guard i < params.count else { throw FenecError.builder("expr(): more `?` placeholders than parameters") }
-            out += pieces[i] + bind.bind(params[i])
-        }
-        guard pieces.count - 1 == params.count else { throw FenecError.builder("expr(): too many parameters given") }
-        return out + pieces[pieces.count - 1]
+        return try exprText(r["sql"]?.string ?? "", r["params"]?.array ?? [], bind)
     }
 
     /// Whether a `raw` fragment may read a collection of its own.
@@ -443,9 +576,9 @@ public struct Query: Sendable {
     typealias Exec = @Sendable (String, [Value]) async throws -> Answer
 
     public let collection: String
-    var project: [String]?
+    var project: [Column]?
     var aggregate = false
-    var group: String?
+    var group: [Column]?
     var cond: [Node] = []
     var near: VectorClause?
     var match: (field: String, query: Value)?
@@ -499,18 +632,36 @@ public struct Query: Sendable {
     /// `.select("status", "count(*)", "sum(total)").group("status")`.
     public func select(_ columns: String...) throws -> Query { try select(columns) }
 
-    public func select(_ columns: [String]) throws -> Query {
-        if columns.isEmpty || columns.contains("*") {
+    public func select(_ columns: [String]) throws -> Query { try select(columns.map { Column($0) }) }
+
+    /// A list holding expressions too, each answering under the name its
+    /// `as` gives it: `.select("sym", .expr("sum(px * qty) / sum(qty)").as("vwap")).group("sym")`.
+    /// One column at the least, so that `select()` is the names' overload.
+    public func select(_ column: Column, _ more: Column...) throws -> Query { try select([column] + more) }
+
+    public func select(_ columns: [Column]) throws -> Query {
+        if columns.isEmpty || columns.contains(where: { if case .name("*") = $0.kind { true } else { false } }) {
             return with { $0.project = nil; $0.aggregate = false }
         }
         let cs = try columns.map(Builder.column)
-        return with { $0.project = cs.map(\.text); $0.aggregate = cs.contains { $0.aggregate } }
+        return with { $0.project = cs.map(\.column); $0.aggregate = cs.contains { $0.aggregate } }
     }
 
     /// `group field`: a row per value, for a select list that aggregates.
-    public func group(_ field: String) throws -> Query {
-        let f = try Builder.ident(field)
-        return with { $0.group = f }
+    public func group(_ field: String) throws -> Query { try group([Column(field)]) }
+
+    /// `group a, b`: a row per distinct set of the keys' values. A key is a
+    /// field or a path, a name the list gives a column with `as`, or an
+    /// expression: `.group("sym", .bucket("at", "1h"))`.
+    public func group(_ key: Column, _ more: Column...) throws -> Query { try group([key] + more) }
+
+    public func group(_ keys: [Column]) throws -> Query {
+        if keys.isEmpty { throw FenecError.builder("group takes at least one key") }
+        let ks = try keys.map { k -> Column in
+            if case .name(let name) = k.kind { return Column(try Builder.path(name)) }
+            return k
+        }
+        return with { $0.group = ks }
     }
 
     /// `highlight(field)` in the select list: where the terms `match` found
@@ -746,7 +897,13 @@ public struct Query: Sendable {
     private func text(_ bind: Binder) throws -> String {
         // The engine refuses each of these too; failing here runs nothing.
         if let group, !aggregate {
-            throw FenecError.builder("group \(group) needs an aggregate in select: 'count(*)'")
+            let keys = group.map { k -> String in
+                switch k.kind {
+                case .name(let name): return name
+                case .expr(let sql, _, _): return sql
+                }
+            }
+            throw FenecError.builder("group \(keys.joined(separator: ", ")) needs an aggregate in select: 'count(*)'")
         }
         if aggregate {
             let clash = near != nil ? "near" : match != nil ? "match" : !lookups.isEmpty ? "lookup" : count ? "count" : nil
@@ -811,9 +968,13 @@ public struct Query: Sendable {
             if let t = m.tags { s += ", \(bind.bind(.string(t.pre))), \(bind.bind(.string(t.post)))" }
             return s + ")"
         }
-        if project != nil || !items.isEmpty { sql += " select " + ((project ?? ["*"]) + items).joined(separator: ", ") }
+        // The list's values are bound after the marks', as the JS builder
+        // binds them: a parameter is named by its number, so either order
+        // reads alike.
+        let columns = try project?.map { try Builder.columnText($0, bind) }
+        if columns != nil || !items.isEmpty { sql += " select " + ((columns ?? ["*"]) + items).joined(separator: ", ") }
         if let w = try whereOf(cond, bind) { sql += " where \(w)" }
-        if let group { sql += " group \(group)" }
+        if let group { sql += " group " + (try group.map { try Builder.columnText($0, bind) }).joined(separator: ", ") }
         if let near {
             sql += " near \(near.field) \(bind.bind(near.vector))"
             if let ef = near.n { sql += " ef \(ef)" }

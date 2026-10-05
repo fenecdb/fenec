@@ -55,9 +55,21 @@ class Cond internal constructor(internal val node: Node) {
 
 /**
  * A value a write works out over the row it writes, rendered as FenecQL with
- * its values as parameters: [inc] and [expr], as the JS builder's.
+ * its values as parameters: [inc] and [expr], as the JS builder's. An
+ * expression is a column too -- of [Query.select], or a key of
+ * [Query.group] -- as are [bucket], [countDistinct], [first] and [last], and
+ * [alias] names the column it answers under (the JS builder's `as`, which is
+ * a hard keyword in Kotlin).
  */
-class Computed private constructor(internal val by: Any?, internal val sql: String?, internal val params: List<Any?>) {
+class Computed private constructor(
+    internal val by: Any?,
+    internal val sql: String?,
+    internal val params: List<Any?>,
+    internal val name: String? = null,
+) {
+    /** The name the column answers under: `select ... as <name>`. A name, not a path. */
+    fun alias(name: String): Computed = Computed(by, sql, params, Builder.ident(name, "column"))
+
     companion object {
         /**
          * `mapOf("n" to Computed.inc(1))` in an update: the field plus [by],
@@ -79,8 +91,46 @@ class Computed private constructor(internal val by: Any?, internal val sql: Stri
         /**
          * A value as a FenecQL expression over the row, each `?` bound to
          * the next parameter: `Computed.expr("now()")`, `Computed.expr("price * ?", 1.2)`.
+         * In a select list it is a column: `Computed.expr("sum(px * qty) / sum(qty)").alias("vwap")`.
          */
         @JvmStatic fun expr(sql: String, vararg params: Any?): Computed = Computed(null, sql, params.toList())
+
+        // `15m`, `1h`, `1d`, `1w`, `3mo`, `1y`: what `bucket` takes.
+        private val INTERVAL = Regex("^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$")
+
+        /**
+         * `bucket(field, interval)`: the start of the interval a timestamp
+         * falls in -- `"15m"`, `"1h"`, `"1d"`, `"1w"` (from a Monday),
+         * `"1mo"`, `"1y"`, in UTC -- for a select list or a group. The
+         * interval is written into the text, since it is a part of the
+         * statement's shape.
+         */
+        @JvmStatic fun bucket(field: String, interval: String): Computed {
+            if (!INTERVAL.matches(interval)) {
+                throw refuse("bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': ${Builder.quote(interval)}")
+            }
+            return Computed(null, "bucket(${Builder.path(field)}, $interval)", emptyList())
+        }
+
+        /** `count(distinct field)`: how many distinct values the rows hold. */
+        @JvmStatic fun countDistinct(field: String): Computed =
+            Computed(null, "count(distinct ${Builder.path(field)})", emptyList())
+
+        /**
+         * `first(field)`, or `first(field by key)`: the value of the row
+         * least by [by] -- by the order the rows were written without one --
+         * that has a value; a bar's open is `Computed.first("px", "at")`.
+         */
+        @JvmStatic @JvmOverloads fun first(field: String, by: String? = null): Computed = pick("first", field, by)
+
+        /** `last(field [by key])`: as [first], the row greatest by [by]. */
+        @JvmStatic @JvmOverloads fun last(field: String, by: String? = null): Computed = pick("last", field, by)
+
+        private fun pick(fn: String, field: String, by: String?): Computed {
+            val f = Builder.path(field)
+            val b = by?.let { " by ${Builder.path(it)}" } ?: ""
+            return Computed(null, "$fn($f$b)", emptyList())
+        }
     }
 }
 
@@ -153,11 +203,16 @@ internal object Builder {
         s.isNotEmpty() && (s[0] in 'a'..'z' || s[0] in 'A'..'Z' || s[0] == '_') &&
             s.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' }
 
+    /** A dotted path of ASCII names, as the JS builder's aggregate pattern takes one inside an aggregate. */
+    private fun asciiPath(s: String): Boolean = s.split('.').all(::asciiIdent)
+
     /**
-     * A select item: a field, or an aggregate spelled as FenecQL spells it --
-     * `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- answering
-     * under that name. Read by hand rather than by a case-blind pattern,
-     * which folds the Kelvin sign onto `k` where the JS builder's does not.
+     * A select item's name: a field, or an aggregate of one spelled as
+     * FenecQL spells it -- `count(*)`, `count(distinct user)`, `sum(total)`,
+     * `avg(f)`, `min(f)`, `max(f)`, `first(f)`, `last(f)`, a path where a
+     * field goes -- answering under that name. Read by hand rather than by
+     * a case-blind pattern, which folds the Kelvin sign onto `k` where the
+     * JS builder's does not.
      */
     fun column(name: String): Pair<String, Boolean> {
         val s = name.trim(::jsSpace)
@@ -167,9 +222,55 @@ internal object Builder {
             val arg = s.substring(open + 1, s.length - 1)
             val low = if (fn.all { it in 'a'..'z' || it in 'A'..'Z' }) fn.lowercase() else null
             if (low == "count" && (arg.isEmpty() || arg == "*")) return "count(*)" to true
-            if (low in setOf("sum", "avg", "min", "max") && asciiIdent(arg)) return "$low($arg)" to true
+            if (low == "count") distinct(arg)?.let { return "count(distinct $it)" to true }
+            if (low in setOf("sum", "avg", "min", "max", "first", "last") && asciiPath(arg)) return "$low($arg)" to true
         }
         return path(name) to false
+    }
+
+    /** The field of `distinct <field>`, JavaScript's `\s` around and between, the word in any case of its ASCII letters. */
+    private fun distinct(arg: String): String? {
+        val a = arg.trim(::jsSpace)
+        if (a.length < 9 || !a.regionMatches(0, "distinct", 0, 8, ignoreCase = true)) return null
+        if (!a.substring(0, 8).all { it in 'a'..'z' || it in 'A'..'Z' } || !jsSpace(a[8])) return null
+        val field = a.substring(8).trim(::jsSpace)
+        return if (asciiPath(field)) field else null
+    }
+
+    // What makes an expression an aggregate's: a call of one.
+    private val AGGREGATE_CALL = Regex("\\b(count|sum|avg|min|max|first|last)\\s*\\(", RegexOption.IGNORE_CASE)
+
+    /** A select item: a name made its text, or an expression -- an aggregate's when it calls one. */
+    fun column(c: Any?): Pair<Any, Boolean> = when {
+        c is String -> column(c)
+        c is Computed && c.sql != null -> c to AGGREGATE_CALL.containsMatchIn(c.sql)
+        else -> throw refuse("a column is a name or an expression, and inc() is neither")
+    }
+
+    /** A group key: a field or a path, a name the list gives a column, or an expression. */
+    fun groupKey(k: Any?): Any = when {
+        k is String -> path(k)
+        k is Computed && k.sql != null -> k
+        else -> throw refuse("a group key is a name or an expression, and inc() is neither")
+    }
+
+    /** A select item or a group key as text, an expression's values bound. */
+    fun columnText(c: Any, bind: Binder): String {
+        if (c !is Computed) return c as String
+        val text = exprText(c, bind)
+        return c.name?.let { "$text as $it" } ?: text
+    }
+
+    /** An expression's text, each `?` bound to the next of its parameters. */
+    private fun exprText(v: Computed, bind: Binder): String {
+        val pieces = v.sql!!.split('?')
+        val out = StringBuilder()
+        for (i in 0 until pieces.size - 1) {
+            if (i >= v.params.size) throw refuse("expr(): more `?` placeholders than parameters")
+            out.append(pieces[i]).append(bind.bind(v.params[i]))
+        }
+        if (pieces.size - 1 != v.params.size) throw refuse("expr(): too many parameters given")
+        return out.append(pieces.last()).toString()
     }
 
     fun direction(dir: String): Boolean = when (dir.lowercase()) {
@@ -307,19 +408,11 @@ internal object Builder {
     /** A document's value: [Computed]'s text, or a parameter. */
     private fun value(key: String, v: Any?, bind: Binder, insert: Boolean): String {
         if (v !is Computed) return bind.bind(v)
-        val sql = v.sql
-        if (sql == null) {
+        if (v.sql == null) {
             if (insert) throw refuse("inc() reads the row it changes: use it in update (field: $key)")
             return "coalesce($key, 0) + ${bind.bind(v.by)}"
         }
-        val pieces = sql.split('?')
-        val out = StringBuilder()
-        for (i in 0 until pieces.size - 1) {
-            if (i >= v.params.size) throw refuse("expr(): more `?` placeholders than parameters")
-            out.append(pieces[i]).append(bind.bind(v.params[i]))
-        }
-        if (pieces.size - 1 != v.params.size) throw refuse("expr(): too many parameters given")
-        return out.append(pieces.last()).toString()
+        return exprText(v, bind)
     }
 
     /** Whether a `raw` fragment may read a collection of its own. */
@@ -369,9 +462,9 @@ class Query private constructor(private val s: State) {
     private data class State(
         val collection: String,
         val exec: (suspend (String, List<Any?>) -> Answer)? = null,
-        val project: List<String>? = null,
+        val project: List<Any>? = null, // each a name or a Computed
         val aggregate: Boolean = false,
-        val group: String? = null,
+        val group: List<Any>? = null, // each a name or a Computed
         val cond: List<Node> = emptyList(),
         val near: VectorClause? = null,
         val match: Pair<String, String>? = null,
@@ -412,18 +505,32 @@ class Query private constructor(private val s: State) {
     /**
      * `select a, b`; none, or `"*"`, is every field. Aggregates go in the same
      * list as FenecQL spells them and answer under that name:
-     * `select("status", "count(*)", "sum(total)").group("status")`.
+     * `select("status", "count(*)", "sum(total)").group("status")`. A column
+     * is a name or an expression -- [Computed.expr], [Computed.bucket],
+     * [Computed.countDistinct], [Computed.first], [Computed.last] -- which
+     * answers under the name its [Computed.alias] gives it:
+     * `select("sym", Computed.expr("sum(px * qty) / sum(qty)").alias("vwap")).group("sym")`.
      */
-    fun select(vararg columns: String): Query = select(columns.toList())
+    fun select(vararg columns: Any): Query = select(columns.toList())
 
-    fun select(columns: List<String>): Query {
+    fun select(columns: List<Any>): Query {
         if (columns.isEmpty() || "*" in columns) return Query(s.copy(project = null, aggregate = false))
-        val cs = columns.map(Builder::column)
+        val cs = columns.map { Builder.column(it) }
         return Query(s.copy(project = cs.map { it.first }, aggregate = cs.any { it.second }))
     }
 
-    /** `group field`: a row per value, for a select list that aggregates. */
-    fun group(field: String): Query = Query(s.copy(group = Builder.ident(field)))
+    /**
+     * `group a, b`: a row per distinct set of the keys' values, for a select
+     * list that aggregates. A key is a field or a path, a name the list gives
+     * a column with [Computed.alias], or an expression:
+     * `group("sym", Computed.bucket("at", "1h"))`.
+     */
+    fun group(vararg keys: Any): Query = group(keys.toList())
+
+    fun group(keys: List<Any>): Query {
+        if (keys.isEmpty()) throw refuse("group takes at least one key")
+        return Query(s.copy(group = keys.map(Builder::groupKey)))
+    }
 
     /**
      * `field op value`, joined to the conditions before with `and`. The op is
@@ -606,7 +713,10 @@ class Query private constructor(private val s: State) {
 
     private fun text(bind: Binder): String {
         // The engine refuses each of these too; failing here runs nothing.
-        if (s.group != null && !s.aggregate) throw refuse("group ${s.group} needs an aggregate in select: 'count(*)'")
+        if (s.group != null && !s.aggregate) {
+            val keys = s.group.joinToString(", ") { if (it is Computed) it.sql!! else it as String }
+            throw refuse("group $keys needs an aggregate in select: 'count(*)'")
+        }
         if (s.aggregate) {
             val clash = when {
                 s.near != null -> "near"
@@ -676,11 +786,15 @@ class Query private constructor(private val s: State) {
             if (m.pre != null) item.append(", ").append(bind.bind(m.pre)).append(", ").append(bind.bind(m.post))
             item.append(")").toString()
         }
-        if (s.project != null || items.isNotEmpty()) {
-            sql.append(" select ").append(((s.project ?: listOf("*")) + items).joinToString(", "))
+        // The list's values are bound after the marks', as the JS builder
+        // binds them: a parameter is named by its number, so either order
+        // reads alike.
+        val columns = s.project?.map { Builder.columnText(it, bind) }
+        if (columns != null || items.isNotEmpty()) {
+            sql.append(" select ").append(((columns ?: listOf("*")) + items).joinToString(", "))
         }
         whereOf(s.cond, bind)?.let { sql.append(" where ").append(it) }
-        s.group?.let { sql.append(" group ").append(it) }
+        s.group?.let { g -> sql.append(" group ").append(g.joinToString(", ") { Builder.columnText(it, bind) }) }
         s.near?.let { n ->
             sql.append(" near ${n.field} ${bind.bind(n.vector)}")
             n.n?.let { sql.append(" ef $it") }

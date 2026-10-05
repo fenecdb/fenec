@@ -264,7 +264,8 @@ fn what_does_not_combine_is_refused() {
         ),
         ("get t select g group g", "needs an aggregate"),
         ("get t select count(n)", "count(*)"),
-        ("get t select median(n)", "not an aggregate"),
+        ("get t select median(n)", "answers under a name"),
+        ("get t select median(n) as m", "unknown function"),
         ("get t select g, count(*) group g order n", "not a column"),
         ("get t select sum(nope)", "nope"),
     ] {

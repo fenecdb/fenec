@@ -298,6 +298,10 @@ impl SortedIndex {
     pub fn range_counts(&self, keys: &[Key], member: Option<&[u64]>) -> Option<Vec<u64>> {
         match *self {}
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn each_int(&self, r: &Range, f: &mut dyn FnMut(i64) -> Result<()>) -> Result<bool> {
+        match *self {}
+    }
     pub fn walk(
         &self,
         desc: bool,

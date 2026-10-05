@@ -281,6 +281,37 @@ pub mod builtins {
             "converts text or epoch milliseconds into a timestamp",
             |a| { a[0].clone().coerce(&crate::value::DataType::Timestamp) }
         );
+        reg!(
+            r,
+            "bucket",
+            2,
+            Some(2),
+            "the start of the interval a timestamp falls in: bucket(at, 15m)",
+            |a| { crate::query::Interval::of(&a[1])?.truncate(&a[0]) }
+        );
+        // As PostgreSQL's: nulls are passed over, and null only when every
+        // value is. One function for both, the order its one difference.
+        fn extreme(a: &[Value], larger: bool) -> Value {
+            let mut best: Option<&Value> = None;
+            for v in a.iter().filter(|v| !v.is_null()) {
+                let o = best.map(|b| v.cmp_value(b));
+                let want = if larger {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                };
+                if o.is_none_or(|o| o == want) {
+                    best = Some(v);
+                }
+            }
+            best.cloned().unwrap_or(Value::Null)
+        }
+        reg!(r, "greatest", 1, None, "the largest of its values", |a| {
+            Ok(extreme(a, true))
+        });
+        reg!(r, "least", 1, None, "the smallest of its values", |a| {
+            Ok(extreme(a, false))
+        });
         reg!(r, "norm", 1, Some(1), "vector length (L2 norm)", |a| {
             Ok(Value::Float(vector::norm(&vec_arg(&a[0])?) as f64))
         });

@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
+mod aggregate;
 #[cfg(not(target_arch = "wasm32"))]
 mod garbage;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1991,6 +1992,8 @@ enum Source<'a> {
     Id,
     At((usize, Option<&'a str>)),
     Mark(usize),
+    /// A computed column of the list, by its place in `Select::computed`.
+    Calc(usize),
 }
 
 /// The places in the payload of a select's fields, when its columns are
@@ -5005,6 +5008,7 @@ impl Database {
             || !sel.facets.is_empty()
             || !sel.marks.is_empty()
             || sel.require.is_some()
+            || !sel.computed.is_empty()
         {
             return Ok(None);
         }
@@ -5348,7 +5352,8 @@ impl Database {
         let ranked = inner.near.is_some() || inner.matcher.is_some();
         let plain = !ranked
             && inner.aggregate.is_empty()
-            && inner.group.is_none()
+            && inner.group.is_empty()
+            && inner.computed.is_empty()
             && inner.limit.is_none()
             && inner.offset == 0;
         let items = if plain {
@@ -5358,7 +5363,7 @@ impl Database {
             // it: a scan stops there rather than gather a million values to
             // refuse them. `near` and `match` are bounded by their own
             // pages, and an aggregate without `group` answers one row.
-            if !ranked && (inner.aggregate.is_empty() || inner.group.is_some()) {
+            if !ranked && (inner.aggregate.is_empty() || !inner.group.is_empty()) {
                 let bound = MAX_SUBQUERY_VALUES + 1;
                 inner.limit = Some(inner.limit.map_or(bound, |l| l.min(bound)));
             }
@@ -7621,14 +7626,24 @@ impl Database {
         let mut taken = vec![false; sel.marks.len()];
         for col in &columns {
             let mark = (0..sel.marks.len()).find(|&i| !taken[i] && sel.marks[i].label() == *col);
-            sources.push(match (mark, col == "id") {
-                (Some(i), _) => {
+            let calc = sel.computed.iter().position(|k| k.name == *col);
+            sources.push(match (mark, calc, col == "id") {
+                (Some(i), ..) => {
                     taken[i] = true;
                     Source::Mark(i)
                 }
-                (None, true) => Source::Id,
-                (None, false) => Source::At(source_or_err(&c.schema, col, "")?),
+                (None, Some(i), _) => Source::Calc(i),
+                (None, None, true) => Source::Id,
+                (None, None, false) => Source::At(source_or_err(&c.schema, col, "")?),
             });
+        }
+        // The computed columns, bound once a query: each row's fields they
+        // read decoded in one pass, apart from the columns' own.
+        let exprs: Vec<&Expr> = sel.computed.iter().map(|k| &k.expr).collect();
+        let mut calc = aggregate::Reader::new(c, &exprs, params)?;
+        let mut calcs = Vec::with_capacity(exprs.len());
+        for e in &exprs {
+            calcs.push(calc.bind(e)?);
         }
         let limit = sel.limit.unwrap_or(usize::MAX);
         let scored: Vec<(DocId, Option<f32>)>;
@@ -7702,10 +7717,13 @@ impl Database {
                 rows.push(Row { id, values, score });
                 continue;
             }
+            let found = calcs.is_empty() || calc.read(id, &self.registry, self.clock)?;
             for src in &sources {
                 values.push(match src {
                     Source::Id => Value::Int(id as i64),
                     Source::At(at) => read_source(&c.store, id, *at)?,
+                    Source::Calc(i) if found => calc.env[calcs[*i]].clone(),
+                    Source::Calc(_) => Value::Null,
                     // Without the text index no `match` ran, and the marking
                     // is left out of the build.
                     Source::Mark(i) => match (&terms, cfg!(feature = "text")) {
@@ -8236,199 +8254,6 @@ impl Database {
         Ok(FacetValues {
             field: f.field.clone(),
             values,
-        })
-    }
-
-    /// An aggregating select: the rows the filter finds -- through the same
-    /// indexes any select uses -- folded into one row, or one per value of
-    /// the `group` field, each row in the select list's order.
-    ///
-    /// Written as plain loops over types the engine already has -- the hash
-    /// index's map, `order`'s sort: the first version, in iterator chains
-    /// over types of its own, was 25 KB of the browser module.
-    fn aggregate(&self, c: &Collection, sel: &Select, params: &[Value]) -> Result<ResultSet> {
-        let pos_of = |name: &str| match name.contains('.') {
-            // Folded by its field's type, which a path has none of.
-            true => Err(Error::Query(format!(
-                "`{name}` is a path: an aggregate and `group` read a field"
-            ))),
-            false => c
-                .schema
-                .field_pos(name)
-                .ok_or_else(|| Error::NotFound(format!("field `{name}`"))),
-        };
-        // Every field the list and the group read, each read once a row, in
-        // field order. Kept sorted as it is built: a handful of fields, and
-        // `sort` over them was a sort instantiation of its own in the
-        // browser module.
-        let mut positions: Vec<usize> = Vec::new();
-        let names = sel.aggregate.iter().filter_map(Agg::field);
-        for f in names.chain(sel.group.as_deref()) {
-            let p = pos_of(f)?;
-            if let Err(i) = positions.binary_search(&p) {
-                positions.insert(i, p);
-            }
-        }
-        let slot_of = |pos: usize| positions.iter().position(|p| *p == pos).unwrap_or(0);
-        // Each item's slot in a row read, and its fold as a group starts it.
-        let mut slots = Vec::with_capacity(sel.aggregate.len());
-        let mut start = Vec::with_capacity(sel.aggregate.len());
-        for a in &sel.aggregate {
-            match a.field() {
-                Some(f) => {
-                    let pos = pos_of(f)?;
-                    slots.push(Some(slot_of(pos)));
-                    let f = &c.schema.fields[pos];
-                    start.push(Fold::new(a, &f.ty, f.collate)?);
-                }
-                None => {
-                    slots.push(None);
-                    start.push(Fold::new(a, &DataType::Int, None)?);
-                }
-            }
-        }
-        let group = match &sel.group {
-            Some(g) => Some(slot_of(pos_of(g)?)),
-            None => None,
-        };
-
-        let ids = self.matching_ids(&sel.collection, &sel.filter, params)?;
-        // A group's number under its key's encoding. The hash index's own map
-        // type, holding one number: a map of another type was 1 KB of the
-        // browser module.
-        let mut index: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
-        let mut keys: Vec<Value> = Vec::new();
-        let mut folds: Vec<Vec<Fold>> = Vec::new();
-        if group.is_none() {
-            keys.push(Value::Null);
-            folds.push(start.clone());
-        }
-        let mut row = Vec::with_capacity(positions.len());
-        let mut key = Vec::new();
-        let mut places = Vec::with_capacity(positions.len());
-        for &p in &positions {
-            places.push(c.schema.place(p));
-        }
-        for &id in &ids {
-            if !c.store.read_fields(id, &places, &mut row)? {
-                continue;
-            }
-            let at = match group {
-                None => 0,
-                Some(g) => {
-                    key.clear();
-                    crate::codec::encode_value(&mut key, &row[g]);
-                    // Looked up first and entered only when new: an entry a
-                    // row cloned the key every row, 81 -> 100 ms over a
-                    // million.
-                    match index.get(&key) {
-                        Some(n) => n[0] as usize,
-                        None => {
-                            index
-                                .entry(key.clone())
-                                .or_default()
-                                .push(keys.len() as DocId);
-                            keys.push(row[g].clone());
-                            folds.push(start.clone());
-                            keys.len() - 1
-                        }
-                    }
-                }
-            };
-            for (i, fold) in folds[at].iter_mut().enumerate() {
-                match slots[i] {
-                    Some(s) => fold.add(&row[s])?,
-                    None => fold.add(&Value::Bool(true))?,
-                }
-            }
-        }
-        let n = keys.len();
-        plan(|| {
-            format!(
-                "aggregate: {} rows into {n} {}",
-                ids.len(),
-                if n == 1 { "group" } else { "groups" }
-            )
-        });
-
-        let mut columns = Vec::with_capacity(sel.aggregate.len());
-        for a in &sel.aggregate {
-            columns.push(a.label());
-        }
-        let width = columns.len();
-        let mut values: Vec<Value> = Vec::with_capacity(n * width);
-        for (k, group_folds) in keys.iter().zip(folds) {
-            for (a, f) in sel.aggregate.iter().zip(group_folds) {
-                values.push(match a {
-                    Agg::Key(_) => k.clone(),
-                    _ => f.value(),
-                });
-            }
-        }
-        // Groups come out by their key unless `order` says otherwise, naming
-        // the list's columns; the key breaks what the order leaves tied.
-        let mut order: Vec<OrderKey> = Vec::with_capacity(sel.order.len() + 1);
-        let mut picked: Vec<usize> = Vec::with_capacity(sel.order.len());
-        for s in &sel.order {
-            let name = &s.field;
-            let Some(at) = columns.iter().position(|c| c == name) else {
-                return Err(Error::Query(format!(
-                    "`order {name}`: not a column of this select"
-                )));
-            };
-            if let Some(coll) = s.collate {
-                // Only the key and `min`/`max` carry a field's values;
-                // `count`, `sum` and `avg` are numbers whatever they read.
-                let text = match &sel.aggregate[at] {
-                    Agg::Key(f) | Agg::Min(f) | Agg::Max(f) => {
-                        c.schema.field(f).is_some_and(|f| collatable(&f.ty))
-                    }
-                    _ => false,
-                };
-                if !text {
-                    return Err(Error::Query(format!(
-                        "`collate {}` orders text; `{name}` is not",
-                        coll.name()
-                    )));
-                }
-            }
-            // The group key, `min` and `max` carry a field's values, and
-            // order in its collation when the query names none.
-            let field = match &sel.aggregate[at] {
-                Agg::Key(f) | Agg::Min(f) | Agg::Max(f) => {
-                    c.schema.field(f).and_then(|f| f.collate)
-                }
-                _ => None,
-            };
-            picked.push(at);
-            order.push((None, s.asc, s.collate.or(field), None));
-        }
-        order.push((None, true, None, None));
-        let w = order.len();
-        let mut flat: Vec<Value> = Vec::with_capacity(n * w);
-        for g in 0..n {
-            for &at in &picked {
-                flat.push(values[g * width + at].clone());
-            }
-            flat.push(keys[g].clone());
-        }
-        let k = sel.limit.map_or(n, |l| l.saturating_add(sel.offset)).min(n);
-        let mut rows = Vec::with_capacity(k.saturating_sub(sel.offset));
-        for g in order_rows(&flat, w, n, &order, k)
-            .into_iter()
-            .skip(sel.offset)
-        {
-            rows.push(Row {
-                id: 0,
-                values: values[g * width..g * width + width].to_vec(),
-                score: None,
-            });
-        }
-        Ok(ResultSet {
-            columns,
-            rows,
-            nested: None,
-            facets: Vec::new(),
         })
     }
 
@@ -9124,112 +8949,6 @@ fn updated(schema: &Schema, old: &Document, set: &[Assign], ctx: &EvalCtx) -> Re
         }
     }
     Ok(doc)
-}
-
-/// One aggregate's running value over a group's rows. Nulls are skipped
-/// by every one but the row count, as SQL's are.
-#[derive(Clone)]
-enum Fold {
-    Count(i64),
-    /// An int field's sum, and how many values went in.
-    SumInt(i64, u64),
-    SumFloat(f64, u64),
-    Avg(f64, u64),
-    /// `true` for `max`; the field's collation, which its text orders in.
-    Extreme(Option<Value>, bool, Option<Collation>),
-}
-
-impl Fold {
-    fn new(a: &Agg, ty: &DataType, coll: Option<Collation>) -> Result<Fold> {
-        let numeric = |what: &str, f: &str| {
-            Error::Type(format!(
-                "`{what}({f})` needs an int or float field; `{f}` is {}",
-                ty.name()
-            ))
-        };
-        Ok(match a {
-            Agg::Count | Agg::Key(_) => Fold::Count(0),
-            Agg::Sum(f) => match ty {
-                DataType::Int => Fold::SumInt(0, 0),
-                DataType::Float => Fold::SumFloat(0.0, 0),
-                _ => return Err(numeric("sum", f)),
-            },
-            Agg::Avg(f) => match ty {
-                DataType::Int | DataType::Float => Fold::Avg(0.0, 0),
-                _ => return Err(numeric("avg", f)),
-            },
-            Agg::Min(f) | Agg::Max(f) => match ty {
-                DataType::Int
-                | DataType::Float
-                | DataType::Timestamp
-                | DataType::Text
-                | DataType::Bool => Fold::Extreme(None, matches!(a, Agg::Max(_)), coll),
-                _ => {
-                    return Err(Error::Type(format!(
-                        "`{}` needs a field with an order; `{f}` is {}",
-                        a.label(),
-                        ty.name()
-                    )))
-                }
-            },
-        })
-    }
-
-    fn add(&mut self, v: &Value) -> Result<()> {
-        if matches!(v, Value::Null) && !matches!(self, Fold::Count(_)) {
-            return Ok(());
-        }
-        match self {
-            Fold::Count(n) => *n += 1,
-            Fold::SumInt(sum, n) => {
-                let Value::Int(i) = v else { return Ok(()) };
-                *sum = sum
-                    .checked_add(*i)
-                    .ok_or_else(|| Error::Query("the sum does not fit a 64-bit int".into()))?;
-                *n += 1;
-            }
-            Fold::SumFloat(sum, n) | Fold::Avg(sum, n) => {
-                let x = match v {
-                    Value::Int(i) => *i as f64,
-                    Value::Float(f) => *f,
-                    _ => return Ok(()),
-                };
-                *sum += x;
-                *n += 1;
-            }
-            Fold::Extreme(best, max, coll) => {
-                let better = match best {
-                    None => true,
-                    Some(b) => {
-                        let o = match coll {
-                            Some(c) => c.compare_values(v, b),
-                            None => v.cmp_value(b),
-                        };
-                        if *max {
-                            o == Ordering::Greater
-                        } else {
-                            o == Ordering::Less
-                        }
-                    }
-                };
-                if better {
-                    *best = Some(v.clone());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn value(self) -> Value {
-        match self {
-            Fold::Count(n) => Value::Int(n),
-            Fold::SumInt(_, 0) | Fold::SumFloat(_, 0) | Fold::Avg(_, 0) => Value::Null,
-            Fold::SumInt(s, _) => Value::Int(s),
-            Fold::SumFloat(s, _) => Value::Float(s),
-            Fold::Avg(s, n) => Value::Float(s / n as f64),
-            Fold::Extreme(v, ..) => v.unwrap_or(Value::Null),
-        }
-    }
 }
 
 thread_local! {

@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace FenecDb;
 
@@ -77,8 +78,10 @@ public sealed class Cond
 }
 
 /// <summary>
-/// A value worked out over the row a write writes: what <see cref="Inc"/> and <see cref="Expr"/> make, rendered as
-/// FenecQL with its values as parameters.
+/// A value worked out over a row: what <see cref="Inc"/> and <see cref="Expr"/> make for a write, and what
+/// <see cref="Expr"/>, <see cref="Bucket"/>, <see cref="CountDistinct"/>, <see cref="First"/> and
+/// <see cref="Last"/> make for <see cref="Query.Select"/> or <see cref="Query.Group"/>, rendered as FenecQL with its
+/// values as parameters.
 /// </summary>
 public sealed class Computed
 {
@@ -86,9 +89,42 @@ public sealed class Computed
     internal readonly object? By;
     internal readonly string Sql = "";
     internal readonly List<object?> Values = [];
+    internal readonly string? Name;
 
-    Computed(string kind, object? by, string sql, List<object?> values) =>
-        (Kind, By, Sql, Values) = (kind, by, sql, values);
+    Computed(string kind, object? by, string sql, List<object?> values, string? name = null) =>
+        (Kind, By, Sql, Values, Name) = (kind, by, sql, values, name);
+
+    /// <summary>The name the column answers under: <c>select ... as name</c>.</summary>
+    public Computed As(string name) => new(Kind, By, Sql, Values, Builder.Ident(name, "column"));
+
+    // What Bucket takes -- 15m, 1h, 1d, 1w, 3mo, 1y -- written into the text as a literal, since it is a part of
+    // the statement's shape. \z, not $, which lets a trailing newline through.
+    static readonly Regex Interval = new(@"^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)\z", RegexOptions.CultureInvariant);
+
+    /// <summary>The start of the interval a timestamp falls in -- <c>"15m"</c>, <c>"1h"</c>, <c>"1d"</c>,
+    /// <c>"1w"</c> (from a Monday), <c>"1mo"</c>, <c>"1y"</c>, in UTC -- for a select list or a group:
+    /// <c>db.From("ticks").Select(Computed.Bucket("at", "1m").As("minute"), "count(*)").Group("minute")</c>.</summary>
+    public static Computed Bucket(string field, string interval)
+    {
+        if (interval is null || !Interval.IsMatch(interval))
+            throw Builder.Refuse($"bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': {Builder.Quote(interval)}");
+        return new("expr", null, $"bucket({Builder.FieldPath(field)}, {interval})", []);
+    }
+
+    /// <summary><c>count(distinct field)</c>: how many distinct values the rows hold.</summary>
+    public static Computed CountDistinct(string field) =>
+        new("expr", null, $"count(distinct {Builder.FieldPath(field)})", []);
+
+    /// <summary><c>first(field)</c>, or <c>first(field by key)</c>: the value of the row least by
+    /// <paramref name="by"/> -- by the order the rows were written without one -- that has a value; a bar's open is
+    /// <c>Computed.First("px", "at")</c>.</summary>
+    public static Computed First(string field, string? by = null) => Pick("first", field, by);
+
+    /// <summary><c>last(field [by key])</c>: as <see cref="First"/>, the row greatest by <paramref name="by"/>.</summary>
+    public static Computed Last(string field, string? by = null) => Pick("last", field, by);
+
+    static Computed Pick(string fn, string field, string? by) =>
+        new("expr", null, $"{fn}({Builder.FieldPath(field)}{(by is null ? "" : $" by {Builder.FieldPath(by)}")})", []);
 
     /// <summary>A field plus <paramref name="by"/> in an update, counting from 0 where it is null --
     /// <c>["n"] = Computed.Inc(1)</c> is <c>n: coalesce(n, 0) + $1</c> -- worked out under the server's write
@@ -224,35 +260,118 @@ internal static class Builder
         return b.Append('"').ToString();
     }
 
-    // What JavaScript's String.prototype.trim takes off, which the JS builder trims an aggregate with.
+    // What JavaScript's String.prototype.trim takes off, which the JS builder trims an aggregate with, and what
+    // its \s matches.
     static bool JsSpace(char c) => c is '\t' or '\n' or '\v' or '\f' or '\r' or ' '
         || (int)c is 0xa0 or 0x1680 or 0x2028 or 0x2029 or 0x202f or 0x205f or 0x3000 or 0xfeff or (>= 0x2000 and <= 0x200a);
 
     static bool AsciiIdent(string s) =>
         s.Length > 0 && (char.IsAsciiLetter(s[0]) || s[0] == '_') && s.All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
 
-    /// <summary>A select item: a field, or an aggregate spelled as FenecQL spells it -- count(*), sum(total),
-    /// avg(f), min(f), max(f) -- answering under that name. Read by hand rather than by a case-blind pattern,
-    /// which folds the Kelvin sign onto k where the JS builder's does not.</summary>
+    static bool AsciiPath(string s) => s.Split('.').All(AsciiIdent);
+
+    static string JsTrim(string s, bool start = true, bool end = true)
+    {
+        int from = 0, to = s.Length;
+        while (start && from < to && JsSpace(s[from])) from++;
+        while (end && to > from && JsSpace(s[to - 1])) to--;
+        return s[from..to];
+    }
+
+    // ASCII letters lowered alone: ToLowerInvariant and the case-blind comparisons fold the Kelvin sign onto k and
+    // the long s onto s, where the JS builder's patterns do not.
+    static string AsciiLower(string s) => string.Create(s.Length, s, (span, src) =>
+    {
+        for (var i = 0; i < src.Length; i++) span[i] = char.IsAsciiLetterUpper(src[i]) ? (char)(src[i] | 0x20) : src[i];
+    });
+
+    /// <summary>A select item: a field, or an aggregate of one spelled as FenecQL spells it -- count(*),
+    /// count(distinct user), sum(total), avg(f), min(f), max(f), first(f), last(f), a path where a field goes --
+    /// answering under that name. Read by hand rather than by a case-blind pattern, which folds the Kelvin sign
+    /// onto k where the JS builder's does not.</summary>
     public static (string Text, bool Aggregate) Column(string? name)
     {
         if (name is not null)
         {
-            var start = 0;
-            var end = name.Length;
-            while (start < end && JsSpace(name[start])) start++;
-            while (end > start && JsSpace(name[end - 1])) end--;
-            var s = name[start..end];
+            var s = JsTrim(name);
             var open = s.IndexOf('(');
             if (open > 0 && s.EndsWith(')'))
             {
                 string fn = s[..open], arg = s[(open + 1)..^1];
                 var low = fn.All(char.IsAsciiLetter) ? fn.ToLowerInvariant() : null;
-                if (low == "count" && arg is "" or "*") return ("count(*)", true);
-                if (low is "sum" or "avg" or "min" or "max" && AsciiIdent(arg)) return ($"{low}({arg})", true);
+                if (low == "count")
+                {
+                    if (arg is "" or "*") return ("count(*)", true);
+                    // count(distinct f), spaces as JavaScript's \s reads them.
+                    var a = JsTrim(arg, end: false);
+                    if (a.Length > 8 && AsciiLower(a[..8]) == "distinct" && JsSpace(a[8]) && AsciiPath(JsTrim(a[8..])))
+                        return ($"count(distinct {JsTrim(a[8..])})", true);
+                }
+                if (low is "sum" or "avg" or "min" or "max" or "first" or "last" && AsciiPath(arg))
+                    return ($"{low}({arg})", true);
             }
         }
         return (FieldPath(name), false);
+    }
+
+    static readonly string[] AggregateCalls = ["count", "sum", "avg", "min", "max", "first", "last"];
+
+    /// <summary>What makes an expression an aggregate's: a call of one, the JS builder's
+    /// <c>/\b(count|sum|...)\s*\(/i</c> -- a name after no ASCII word character, spaces, then a parenthesis.</summary>
+    public static bool CallsAggregate(string sql)
+    {
+        var low = AsciiLower(sql);
+        foreach (var fn in AggregateCalls)
+        {
+            for (var i = low.IndexOf(fn, StringComparison.Ordinal); i >= 0; i = low.IndexOf(fn, i + 1, StringComparison.Ordinal))
+            {
+                if (i > 0 && (char.IsAsciiLetterOrDigit(low[i - 1]) || low[i - 1] == '_')) continue;
+                if (JsTrim(low[(i + fn.Length)..], end: false).StartsWith('(')) return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Select's and Group's arguments, a list among them taken for its items as the JS builder's
+    /// flat() takes it.</summary>
+    public static List<object?> Flat(object?[] args)
+    {
+        var flat = new List<object?>();
+        foreach (var a in args)
+        {
+            if (a is not string && a is not Computed && a is IEnumerable list) flat.AddRange(list.Cast<object?>());
+            else flat.Add(a);
+        }
+        return flat;
+    }
+
+    public static (List<SelectItem> Items, bool Aggregate) Columns(List<object?> flat, bool key)
+    {
+        var items = new List<SelectItem>();
+        var aggregate = false;
+        foreach (var c in flat)
+        {
+            switch (c)
+            {
+                case string name when key:
+                    items.Add(new(FieldPath(name), null));
+                    break;
+                case string name:
+                    var (text, agg) = Column(name);
+                    items.Add(new(text, null));
+                    aggregate |= agg;
+                    break;
+                case Computed { Kind: "expr" } e:
+                    items.Add(new(null, e));
+                    aggregate |= CallsAggregate(e.Sql);
+                    break;
+                case Computed:
+                    throw Refuse("inc() is a value to write, not a column");
+                default:
+                    throw Refuse($"invalid field name: {JsJson(c)}");
+            }
+        }
+        return (items, aggregate);
     }
 
     public static bool Direction(string? dir) => dir?.ToLowerInvariant() switch
@@ -431,6 +550,18 @@ internal static class Builder
     }
 }
 
+/// <summary>A select-list item or a group key: a name or an aggregate's text, or an expression whose values are
+/// bound as it renders.</summary>
+internal sealed record SelectItem(string? Text, Computed? Expr)
+{
+    public string Render(Binder bind)
+    {
+        if (Expr is null) return Text!;
+        var text = Expr.Render("select", bind, "");
+        return Expr.Name is null ? text : $"{text} as {Expr.Name}";
+    }
+}
+
 internal sealed class Binder
 {
     public List<object?> Params { get; } = [];
@@ -466,9 +597,9 @@ public sealed class Query
 
     sealed record State(string Collection, FenecClient? Client)
     {
-        public IReadOnlyList<string>? Project { get; init; }
+        public IReadOnlyList<SelectItem>? Project { get; init; }
         public bool Aggregate { get; init; }
-        public string? Group { get; init; }
+        public IReadOnlyList<SelectItem>? Group { get; init; }
         public IReadOnlyList<Node> Cond { get; init; } = [];
         public VectorClause? Near { get; init; }
         public (string Field, object? Query)? Match { get; init; }
@@ -498,16 +629,27 @@ public sealed class Query
     public string Collection => _s.Collection;
 
     /// <summary><c>select a, b</c>; none, or <c>"*"</c>, is every field. Aggregates go in the same list as
-    /// FenecQL spells them and answer under that name: <c>Select("status", "count(*)", "sum(total)").Group("status")</c>.</summary>
-    public Query Select(params string[] columns)
+    /// FenecQL spells them and answer under that name: <c>Select("status", "count(*)", "sum(total)").Group("status")</c>;
+    /// an expression -- <see cref="Computed.Expr"/>, <see cref="Computed.Bucket"/>, <see cref="Computed.CountDistinct"/>,
+    /// <see cref="Computed.First"/>, <see cref="Computed.Last"/> -- under the name its <see cref="Computed.As"/> gives
+    /// it: <c>Select("sym", Computed.Expr("sum(px * qty) / sum(qty)").As("vwap")).Group("sym")</c>.</summary>
+    public Query Select(params object?[] columns)
     {
-        if (columns.Length == 0 || columns.Contains("*")) return new(_s with { Project = null, Aggregate = false });
-        var cs = columns.Select(Builder.Column).ToList();
-        return new(_s with { Project = cs.Select(c => c.Text).ToList(), Aggregate = cs.Any(c => c.Aggregate) });
+        var flat = Builder.Flat(columns);
+        if (flat.Count == 0 || flat.Contains("*")) return new(_s with { Project = null, Aggregate = false });
+        var (items, aggregate) = Builder.Columns(flat, false);
+        return new(_s with { Project = items, Aggregate = aggregate });
     }
 
-    /// <summary><c>group field</c>: a row per value, for a select list that aggregates.</summary>
-    public Query Group(string field) => new(_s with { Group = Builder.Ident(field) });
+    /// <summary><c>group a, b</c>: a row per distinct set of the keys' values, for a select list that aggregates. A
+    /// key is a field or a path, a name the list gives a column with <see cref="Computed.As"/>, or an expression:
+    /// <c>Group("sym", Computed.Bucket("at", "1h"))</c>.</summary>
+    public Query Group(params object?[] keys)
+    {
+        var (items, _) = Builder.Columns(Builder.Flat(keys), true);
+        if (items.Count == 0) throw Builder.Refuse("group takes at least one key");
+        return new(_s with { Group = items });
+    }
 
     /// <summary><c>field op value</c>, joined to the conditions before with <c>and</c>. The op is a symbol or its
     /// word: <c>=</c>, <c>!=</c>, <c>&lt;</c>, <c>&lt;=</c>, <c>&gt;</c>, <c>&gt;=</c>, <c>~</c>, <c>has</c>,
@@ -712,7 +854,8 @@ public sealed class Query
         var s = _s;
         // The engine refuses each of these too; failing here sends nothing.
         if (s.Group is not null && !s.Aggregate)
-            throw Builder.Refuse($"group {s.Group} needs an aggregate in select: 'count(*)'");
+            throw Builder.Refuse(
+                $"group {string.Join(", ", s.Group.Select(k => k.Text ?? k.Expr!.Sql))} needs an aggregate in select: 'count(*)'");
         if (s.Aggregate)
         {
             var clash = s.Near is not null ? "near" : s.Match is not null ? "match"
@@ -776,10 +919,12 @@ public sealed class Query
             if (m.Pre is not null) item.Append(", ").Append(bind.Bind(m.Pre)).Append(", ").Append(bind.Bind(m.Post));
             return item.Append(')').ToString();
         }).ToList();
-        if (s.Project is not null || items.Count > 0)
-            sql.Append(" select ").Append(string.Join(", ", [.. s.Project ?? ["*"], .. items]));
+        // The list's values next, before the where's, which come after them in the text.
+        var cols = s.Project?.Select(c => c.Render(bind)).ToList();
+        if (cols is not null || items.Count > 0)
+            sql.Append(" select ").Append(string.Join(", ", [.. cols ?? ["*"], .. items]));
         if (WhereOf(s.Cond, bind) is { } where) sql.Append(" where ").Append(where);
-        if (s.Group is not null) sql.Append(" group ").Append(s.Group);
+        if (s.Group is not null) sql.Append(" group ").Append(string.Join(", ", s.Group.Select(k => k.Render(bind))));
         if (s.Near is { } near)
         {
             sql.Append($" near {near.Field} {bind.Bind(near.Vector)}");

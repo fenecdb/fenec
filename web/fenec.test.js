@@ -1587,6 +1587,40 @@ test('aggregates end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm 
   assert.deepEqual(whole, { 'min(total)': 7, 'max(total)': 30 });
 });
 
+test('bars, distinct counts and computed columns end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec, bucket, countDistinct, first, last, expr: ex } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection ticks (sym text @hash, at timestamp @sorted, px float, qty int, user int)');
+  const t0 = Date.parse('2026-09-19T10:00:00Z');
+  // Written out of time order: open and close go by `at`, not by id.
+  await db.from('ticks').insert([
+    { sym: 'S', at: new Date(t0 + 30_000), px: 10.5, qty: 2, user: 1 },
+    { sym: 'S', at: new Date(t0 + 1_000), px: 10, qty: 1, user: 2 },
+    { sym: 'S', at: new Date(t0 + 59_000), px: 11, qty: 3, user: 1 },
+    { sym: 'S', at: new Date(t0 + 61_000), px: 12, qty: 4, user: 3 },
+  ]);
+  const bars = await db
+    .from('ticks')
+    .select(
+      bucket('at', '1m').as('minute'),
+      first('px', 'at').as('open'),
+      'max(px)',
+      'min(px)',
+      last('px', 'at').as('close'),
+      ex('sum(px * qty) / sum(qty)').as('vwap'),
+      countDistinct('user'),
+    )
+    .where('sym', 'S')
+    .group('minute')
+    .rows();
+  assert.deepEqual(bars, [
+    { minute: '2026-09-19T10:00:00Z', open: 10, 'max(px)': 11, 'min(px)': 10, close: 11, vwap: (10.5 * 2 + 10 + 33) / 6, 'count(distinct user)': 2 },
+    { minute: '2026-09-19T10:01:00Z', open: 12, 'max(px)': 12, 'min(px)': 12, close: 12, vwap: 12, 'count(distinct user)': 1 },
+  ]);
+  const [row] = await db.from('ticks').select('qty', ex('px * qty * ?', 2).as('twice')).order('at').limit(1).rows();
+  assert.deepEqual(row, { qty: 1, twice: 20 });
+});
+
 test('lookup chain end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

@@ -18,8 +18,11 @@
 //!            match <field> <text> ...       -- the spans the match's terms were read from
 //! where  <field> in (get <name> select <field> ...)  -- the inner get's one column, run once
 //! alter  collection <name> alter field <field> @ttl(<duration>) | @sorted
-//! get    <name> select [<key>,] count(*) | sum(f) | avg(f) | min(f) | max(f), ...
-//!            [where <expr>] [group <key> [order <column> [desc]] [limit N] [offset N]]
+//! get    <name> select [<key>,] count(*) | count(distinct e) | sum(e) | avg(e) | min(e)
+//!            | max(e) | first(e [by k]) | last(e [by k]) [as <name>], ...
+//!            [where <expr>] [group <key>, ... [order <column> [desc]] [limit N] [offset N]]
+//! get    <name> select a, <expr> as <name>   -- a column worked out over each row
+//! bucket(at, 15m) | greatest(a, b) | least(a, b) | case when <c> then <v> ... [else <v>] end
 //! select a, b from <name> ...            -- the classic SQL order works too
 //! put    <name> { ... } if absent         -- a document whose id or @unique value is held is passed over
 //! set    <name> { k: v, ... } [where <expr>] -- v may read the row: {n: n + 1, at: now()}
@@ -169,12 +172,15 @@ fn one(mut s: Vec<Statement>) -> Result<Statement> {
 /// A select list as `get ... select` reads one.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SelectList {
-    /// The columns, a mark's under its label; `None` for `*`.
+    /// The columns, a mark's and a computed one's under its name; `None`
+    /// for `*`.
     pub project: Option<Vec<String>>,
-    /// The aggregates, when the list has any: then there are no columns.
-    pub aggregate: Vec<Agg>,
+    /// Every item, when the list has an aggregate: then there are no columns.
+    pub aggregate: Vec<Column>,
     /// `highlight()` and `snippet()`, in the order written.
     pub marks: Vec<Mark>,
+    /// The items worked out over each row, `px * qty as notional`.
+    pub computed: Vec<Column>,
 }
 
 /// A select list on its own -- `status, sum(total), count(*)` -- as `get
@@ -191,6 +197,23 @@ pub fn parse_select_list(src: &str) -> Result<SelectList> {
     let list = p.select_list()?;
     if !p.at_eof() {
         return p.err("a select list ends where the text does");
+    }
+    Ok(list)
+}
+
+/// A group list on its own -- `symbol, bucket(at, 1m)` -- as `get ...
+/// group` reads one, for a query string's `group=`.
+pub fn parse_group_list(src: &str) -> Result<Vec<Expr>> {
+    let mut p = Parser {
+        toks: tokenize(src)?,
+        i: 0,
+        depth: 0,
+        subqueries: 0,
+        exact: false,
+    };
+    let list = p.group_list()?;
+    if !p.at_eof() {
+        return p.err("a group list ends where the text does");
     }
     Ok(list)
 }
@@ -878,6 +901,7 @@ impl Parser {
             project: list.project,
             aggregate: list.aggregate,
             marks: list.marks,
+            computed: list.computed,
             ..Default::default()
         };
 
@@ -885,6 +909,7 @@ impl Parser {
             if self.eat_kw("select") {
                 let l = self.select_list()?;
                 (sel.project, sel.aggregate, sel.marks) = (l.project, l.aggregate, l.marks);
+                sel.computed = l.computed;
                 continue;
             }
             if self.eat_kw("facet") {
@@ -892,8 +917,7 @@ impl Parser {
                 continue;
             }
             if self.eat_kw("group") {
-                self.eat_kw("by");
-                sel.group = Some(self.path()?);
+                sel.group = self.group_list()?;
                 continue;
             }
             if self.eat_kw("where") {
@@ -1045,11 +1069,14 @@ impl Parser {
             let mut field = self.path()?;
             if matches!(self.peek(), Tok::LParen) {
                 self.next();
+                let name = field.to_ascii_lowercase();
                 if matches!(self.peek(), Tok::Star) {
                     self.next();
                     field = COUNT_COLUMN.to_string();
+                } else if name == "count" && self.eat_kw("distinct") {
+                    field = format!("count(distinct {})", self.path()?);
                 } else {
-                    field = format!("{}({})", field.to_ascii_lowercase(), self.path()?);
+                    field = format!("{name}({})", self.path()?);
                 }
                 self.expect(Tok::RParen)?;
             }
@@ -1195,6 +1222,18 @@ impl Parser {
         self.eat_kw("from").then_some(list)
     }
 
+    /// `group symbol, bucket(at, 1m)`: the keys, each an expression over the
+    /// row or a name the select list gives an item.
+    fn group_list(&mut self) -> Result<Vec<Expr>> {
+        self.eat_kw("by");
+        let mut out = vec![self.expr()?];
+        while matches!(self.peek(), Tok::Comma) {
+            self.next();
+            out.push(self.expr()?);
+        }
+        Ok(out)
+    }
+
     /// `brand top 5 disjunctive, price ranges [0, 2500, 5000], color`: each
     /// field or path, how many of its commonest values or which ranges of
     /// its numbers, and whether the filter's own conditions on it count.
@@ -1244,11 +1283,14 @@ impl Parser {
         })
     }
 
-    /// A select list: `*`, fields, or -- once any item is an aggregate
-    /// call -- an aggregating list, whose plain fields are the group's key.
-    /// `count` needs its parentheses there: bare, it is a field of that
-    /// name. `highlight()` and `snippet()` go among the fields, or after a
-    /// `*`.
+    /// A select list: `*`, fields, or -- once any item calls an aggregate
+    /// -- an aggregating list, whose items are folded over the rows or are
+    /// the group's keys. An item is an expression, named with `as`; a
+    /// field, or an aggregate of one, answers under the text it was
+    /// written as when it is not named (`label_of`), and anything else
+    /// needs `as`. `count` needs its parentheses there: bare, it is a field
+    /// of that name. `highlight()` and `snippet()` go among the fields, or
+    /// after a `*`.
     fn select_list(&mut self) -> Result<SelectList> {
         let mut out = SelectList::default();
         let star = matches!(self.peek(), Tok::Star);
@@ -1259,63 +1301,69 @@ impl Parser {
             }
             self.next();
         }
-        let mut items = Vec::new();
-        let mut aggregates = false;
+        // Each item as written, and where; a mark's is its label, at `MAX`.
+        let mut items: Vec<(Expr, Option<String>, usize)> = Vec::new();
+        let mut names = Vec::new();
         loop {
-            let name = self.path()?;
-            let low = name.to_ascii_lowercase();
-            if matches!(self.peek(), Tok::LParen) && matches!(low.as_str(), "highlight" | "snippet")
-            {
-                self.next();
+            let at = self.pos();
+            let mark = match (self.peek(), self.toks.get(self.i + 1).map(|t| &t.tok)) {
+                (Tok::Ident(n), Some(Tok::LParen)) => {
+                    let low = n.to_ascii_lowercase();
+                    matches!(low.as_str(), "highlight" | "snippet").then_some(low)
+                }
+                _ => None,
+            };
+            if let Some(low) = mark {
+                self.i += 2;
                 let mark = self.mark(low == "snippet")?;
-                items.push(Agg::Key(mark.label()));
+                items.push((Expr::Lit(Value::Null), Some(mark.label()), usize::MAX));
                 out.marks.push(mark);
             } else if star {
                 return self.err("after `*` the list takes `highlight()` and `snippet()` alone");
-            } else if matches!(self.peek(), Tok::LParen) {
-                self.next();
-                let arg = if matches!(self.peek(), Tok::Star | Tok::RParen) {
-                    if matches!(self.peek(), Tok::Star) {
-                        self.next();
-                    }
-                    None
-                } else {
-                    Some(self.path()?)
-                };
-                self.expect(Tok::RParen)?;
-                items.push(match (name.to_ascii_lowercase().as_str(), arg) {
-                    ("count", None) => Agg::Count,
-                    ("sum", Some(f)) => Agg::Sum(f),
-                    ("avg", Some(f)) => Agg::Avg(f),
-                    ("min", Some(f)) => Agg::Min(f),
-                    ("max", Some(f)) => Agg::Max(f),
-                    ("count", Some(_)) => {
-                        return self.err("`count` counts rows: `count(*)`, not a field")
-                    }
-                    (f @ ("sum" | "avg" | "min" | "max"), None) => {
-                        return self.err(format!("`{f}` needs a field: `{f}(<field>)`"))
-                    }
-                    (other, _) => {
-                        return self.err(format!(
-                            "`{other}` is not an aggregate: count, sum, avg, min or max"
-                        ))
-                    }
-                });
-                aggregates = true;
             } else {
-                items.push(Agg::Key(name));
+                let e = self.expr()?;
+                let name = match self.eat_kw("as") {
+                    true => Some(self.ident()?),
+                    false => None,
+                };
+                items.push((e, name, at));
             }
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
             self.next();
         }
+        let aggregates = items.iter().any(|(e, ..)| e.has_aggregate());
+        for (e, name, at) in items {
+            if let (Some(label), usize::MAX) = (&name, at) {
+                names.push(label.clone());
+                continue;
+            }
+            let plain = matches!((&e, &name), (Expr::Field(_), None));
+            let name = match name.or_else(|| label_of(&e)) {
+                Some(n) => n,
+                None => {
+                    self.i = self.toks.iter().position(|t| t.pos >= at).unwrap_or(self.i);
+                    return self.err(
+                        "an item that is not a field, or an aggregate of one -- count, sum, \
+                         avg, min, max, first, last -- answers under a name: `<expr> as <name>`",
+                    );
+                }
+            };
+            if aggregates {
+                out.aggregate.push(Column { expr: e, name });
+                continue;
+            }
+            names.push(name.clone());
+            if !plain {
+                out.computed.push(Column { expr: e, name });
+            }
+        }
         if aggregates {
-            out.aggregate = items;
             return Ok(out);
         }
         if !star {
-            out.project = Some(items.into_iter().map(|a| a.label()).collect());
+            out.project = Some(names);
         }
         Ok(out)
     }
@@ -1565,6 +1613,72 @@ impl Parser {
         Ok(e)
     }
 
+    /// A call's arguments, its `(` read. Four shapes are a call's too:
+    /// `count(*)`, a call of nothing; `count(distinct e)`, whose argument is
+    /// a call of `distinct`; `first(e by k)`, of two; and `bucket(at, 15m)`,
+    /// whose duration is the text `15m`.
+    #[inline(never)]
+    fn call(&mut self, name: String) -> Result<Expr> {
+        let mut args = Vec::new();
+        if name == "count" && matches!(self.peek(), Tok::Star) {
+            self.next();
+        } else if name == "count"
+            && self.peek_kw("distinct")
+            && !matches!(
+                self.toks.get(self.i + 1).map(|t| &t.tok),
+                Some(Tok::RParen | Tok::Comma)
+            )
+        {
+            self.next();
+            args.push(Expr::Call("distinct".into(), vec![self.expr()?]));
+        }
+        loop {
+            if matches!(self.peek(), Tok::RParen) || !args.is_empty() && name == "count" {
+                break;
+            }
+            let duration = match (self.peek(), self.toks.get(self.i + 1).map(|t| &t.tok)) {
+                (Tok::Int(n), Some(Tok::Ident(u))) if name == "bucket" && args.len() == 1 => {
+                    Some(format!("{n}{}", u.to_ascii_lowercase()))
+                }
+                _ => None,
+            };
+            match duration {
+                Some(d) => {
+                    self.i += 2;
+                    args.push(Expr::Lit(Value::Text(d)));
+                }
+                None => args.push(self.expr()?),
+            }
+            if args.len() == 1 && matches!(name.as_str(), "first" | "last") && self.eat_kw("by") {
+                args.push(self.expr()?);
+            }
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        self.expect(Tok::RParen)?;
+        Ok(Expr::Call(name, args))
+    }
+
+    /// `case when <cond> then <value> ... [else <value>] end`, `case` read:
+    /// a call of its conditions and values in turn and the `else` last,
+    /// which `eval` works out lazily.
+    #[inline(never)]
+    fn case(&mut self) -> Result<Expr> {
+        let mut args = Vec::new();
+        while self.eat_kw("when") {
+            args.push(self.expr()?);
+            self.expect_kw("then")?;
+            args.push(self.expr()?);
+        }
+        if self.eat_kw("else") {
+            args.push(self.expr()?);
+        }
+        self.expect_kw("end")?;
+        Ok(Expr::Call("case".into(), args))
+    }
+
     /// `(get <collection> select <field> ...)` after `in`: a query whose one
     /// column is the list, run before the query around it.
     fn subquery(&mut self, left: Expr) -> Result<Expr> {
@@ -1710,21 +1824,12 @@ impl Parser {
                     _ => {}
                 }
                 self.next();
+                if lower == "case" && self.peek_kw("when") {
+                    return self.case();
+                }
                 if matches!(self.peek(), Tok::LParen) {
                     self.next();
-                    let mut args = Vec::new();
-                    loop {
-                        if matches!(self.peek(), Tok::RParen) {
-                            break;
-                        }
-                        args.push(self.expr()?);
-                        if !matches!(self.peek(), Tok::Comma) {
-                            break;
-                        }
-                        self.next();
-                    }
-                    self.expect(Tok::RParen)?;
-                    return Ok(Expr::Call(lower, args));
+                    return self.call(lower);
                 }
                 Ok(Expr::Field(name))
             }

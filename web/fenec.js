@@ -39,7 +39,9 @@ import {
 } from './builder.js';
 import { FenecHttp, connect, sseEvents } from './http.js';
 
-export { FenecError, Query, from, or, and, not, raw, inc, expr } from './builder.js';
+export {
+  FenecError, Query, from, or, and, not, raw, inc, expr, bucket, countDistinct, first, last,
+} from './builder.js';
 export { FenecHttp, connect } from './http.js';
 
 const enc = new TextEncoder();

@@ -46,6 +46,9 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
   counts past the filter's own condition on the field, as a shop's filter list does.
 - A `Dictionary<string, object?>` is the builder's object condition, its operators a dictionary too; a refused
   step throws `FenecQueryException` with the JS builder's message.
+- Aggregates go in `Select` as FenecQL spells them (`"count(*)"`, `"sum(total)"`), and `Group` takes one key or
+  more; `Computed.Bucket(field, "1m")`, `CountDistinct`, `First(field, by)`, `Last` and `Expr` make a column,
+  named with `.As(name)`: `Select(Computed.Bucket("at", "1h").As("hour"), "count(*)").Group("hour")`.
 - To see the text and parameters a chain builds, for logging or a test, `q.ToFenecQL()` returns them and runs
   nothing; a query needs no call to it before it runs.
 

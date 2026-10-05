@@ -1,0 +1,156 @@
+<!--
+title: Analytics and market data — fenecdb
+description: Rollups by the minute, distinct users, funnels and retention over events; bars, VWAP and the latest price over ticks — each a statement, with what it costs over a million rows.
+-->
+
+<h1>Analytics and market data</h1>
+<p class="kicker">Counts by the minute, distinct users, funnels, bars and
+VWAP: one statement each, over the rows as they were written.</p>
+
+<p>Four things in the select list make these work. An item is an
+expression — <code>px * qty</code>, or an aggregate of one,
+<code>sum(px * qty)</code>, or an expression over aggregates,
+<code>sum(px * qty) / sum(qty)</code>. <code>group</code> takes several
+keys, and <code>bucket(at, 1m)</code> makes a time one. <code>count(distinct
+user)</code> counts values, exactly. And <code>first(px by at)</code> and
+<code>last(px by at)</code> take the value of the earliest and latest row of
+a group. See <a href="/docs/fenecql#aggregates">Aggregates</a> for the
+rules.</p>
+
+<p>Every FenecQL block on this page is run, statement by statement, by a
+test (<code>crates/fenec-core/tests/analytics_docs.rs</code>), and each
+<code>-- → x</code> is the first value of the first row it checks. The
+costs are <code>make analytics-bench</code> on an M1 Air, in process, over
+a million events and a million ticks; over HTTP a request adds its round
+trip.</p>
+
+<h2 id="analytics">Analytics</h2>
+
+<p>Raw events, one row each. <code>at</code> takes <code>@sorted</code> —
+or <code>@ttl(30d)</code>, which is an ordered index whose rows expire — so
+a time range reads only its rows.</p>
+
+<pre data-lang="fenecql">create collection events (user int @hash, name text @hash, at timestamp @sorted, country text, props json)
+put events [{user: 1, name: "view", at: "2026-05-03T09:00:10Z", country: "TR", props: {plan: "pro", v: 3}}, {user: 1, name: "cart", at: "2026-05-03T09:02:00Z", country: "TR", props: {plan: "pro", v: 1}}, {user: 1, name: "buy", at: "2026-05-03T09:05:30Z", country: "TR", props: {plan: "pro", v: 9}}, {user: 2, name: "view", at: "2026-05-03T09:01:00Z", country: "US", props: {plan: "free", v: 2}}, {user: 2, name: "view", at: "2026-05-03T10:15:00Z", country: "US", props: {plan: "free", v: 2}}, {user: 3, name: "view", at: "2026-05-03T10:20:00Z", country: "DE", props: {plan: "free", v: 1}}, {user: 3, name: "buy", at: "2026-05-03T10:40:00Z", country: "DE", props: {plan: "free", v: 5}}, {user: 1, name: "view", at: "2026-05-04T08:00:00Z", country: "TR", props: {plan: "pro", v: 1}}]
+</pre>
+
+<h3 id="rollups">Rollups</h3>
+
+<p>Counts by the hour, or the minute: <code>bucket</code> truncates a
+timestamp to the interval it falls in, in UTC — <code>ms</code>,
+<code>s</code>, <code>m</code>, <code>h</code>, <code>d</code> from the
+epoch, <code>w</code> from a Monday, <code>mo</code> and <code>y</code> by
+the calendar. Name it with <code>as</code> and group by the name.</p>
+
+<pre data-lang="fenecql">get events select bucket(at, 1h) as hour, count(*) as n where at >= "2026-05-03" and at < "2026-05-04" group hour   -- → "2026-05-03T09:00:00Z"
+get events select count(*) as n, bucket(at, 1h) as hour where at >= "2026-05-03" and at < "2026-05-04" group hour   -- → 4: the first hour's
+get events select count(*) as n, name, bucket(at, 1d) as day group name, day order n desc, name   -- → 4: views on the 3rd
+get events select sum(props.v) as v, props.plan group props.plan order v desc   -- → 14: a json path summed
+</pre>
+
+<p>A count by <code>bucket</code> of the field a range is on reads its
+ordered index and no row: per-minute counts over a day of a million events
+— 1 441 groups of 143 000 rows — take 4.0 ms, where grouping by a minute
+field written at ingest, which reads the rows, takes 19.5. A raw collection under <code>@ttl</code> keeps a few days; a job that
+runs these statements writes the rollups into a collection without one
+before the raw rows go.</p>
+
+<h3 id="distinct">Distinct users</h3>
+
+<p><code>count(distinct f)</code> holds each value once a group, exactly,
+up to a million values a query — about 70 MB — and refuses a query past
+that rather than count short.</p>
+
+<pre data-lang="fenecql">get events select count(distinct user) as users, bucket(at, 1d) as day group day   -- → 3: on the 3rd
+get events select count(distinct user) where at >= "2026-05-04"   -- → 1
+get events select user, count(distinct bucket(at, 1d)) as days group user order days desc, user   -- → 1: active two days
+</pre>
+
+<p>Distinct users per hour over seven days of a million events, 169
+groups: 125 ms. Before, a query an hour listed the users and the client
+counted them: 7.7 s.</p>
+
+<h3 id="funnels">Funnels</h3>
+
+<p>How many users reached each step, and how many of the viewers
+bought:</p>
+
+<pre data-lang="fenecql">get events select count(distinct user) as users, name where name in ["view", "cart", "buy"] group name order users desc   -- → 3: viewed
+get events select count(distinct user) where name = "buy" and user in (get events select user where name = "view")   -- → 2: viewed and bought
+</pre>
+
+<p>The inner <code>get</code> is a list of up to 100 000 values; past that
+ask from the users' side with <code>lookup … required</code> (<a
+href="/docs/fenecql#subqueries">Subqueries</a>). An ordered funnel — a
+view, then a buy within the hour — is each user's events in time order,
+which the client walks.</p>
+
+<h3 id="retention">Retention</h3>
+
+<p>Each user's first day is their cohort, and the days they came back are
+a group of two keys. The table of cohorts by days since is folded from
+these two answers on the client.</p>
+
+<pre data-lang="fenecql">get events select user, min(bucket(at, 1d)) as cohort group user   -- → 1
+get events select user, bucket(at, 1d) as day, count(*) as events group user, day   -- → 1
+</pre>
+
+<h2 id="market-data">Market data</h2>
+
+<p>Ticks, one row each, written as they come — not always in time
+order.</p>
+
+<pre data-lang="fenecql">create collection ticks (sym text @hash, at timestamp @sorted, px float, qty int)
+put ticks [{sym: "S07", at: "2026-05-03T10:00:05Z", px: 100.25, qty: 10}, {sym: "S07", at: "2026-05-03T10:00:40Z", px: 101.5, qty: 5}, {sym: "S07", at: "2026-05-03T10:00:20Z", px: 99.75, qty: 20}, {sym: "S07", at: "2026-05-03T10:01:10Z", px: 102.25, qty: 1}, {sym: "S07", at: "2026-05-03T10:01:50Z", px: 101.75, qty: 4}, {sym: "S08", at: "2026-05-03T10:00:30Z", px: 50.5, qty: 100}, {sym: "S08", at: "2026-05-03T10:01:30Z", px: 51.25, qty: 50}]
+</pre>
+
+<h3 id="ohlc">Bars</h3>
+
+<p>Open, high, low, close and volume, a bar a minute. <code>first(px by
+at)</code> is the price of the bar's earliest tick, whatever order they
+were written in; a tie in <code>at</code> goes to the row written first,
+and <code>last</code>'s to the row written last. Without <code>by</code>
+they take the order the rows were written in.</p>
+
+<pre data-lang="fenecql">get ticks select bucket(at, 1m) as bar, first(px by at) as open, max(px) as high, min(px) as low, last(px by at) as close, sum(qty) as volume where sym = "S07" group bar   -- → "2026-05-03T10:00:00Z"
+get ticks select first(px by at) as open, bucket(at, 1m) as bar where sym = "S07" group bar   -- → 100.25
+get ticks select last(px by at) as close, bucket(at, 1m) as bar where sym = "S07" group bar   -- → 101.5
+get ticks select max(px) - min(px) as range where sym = "S07"   -- → 2.5
+</pre>
+
+<p>An hour of one-minute bars of one symbol out of a million ticks over
+50: 1.7 ms in process, 2.3 over HTTP. Before, open and close were two
+queries a bar, 120 for the hour: 195 ms in process, 278 over HTTP.</p>
+
+<h3 id="vwap">VWAP</h3>
+
+<p>The volume-weighted average price is an expression over two
+aggregates:</p>
+
+<pre data-lang="fenecql">get ticks select sum(px * qty) / sum(qty) as vwap, sym group sym order sym   -- → 100.35625
+get ticks select sym, sum(px * qty) as notional, sum(qty) as volume group sym order notional desc   -- → "S08"
+</pre>
+
+<p>Every symbol's over a million ticks: 118 ms. Before, the client read
+every tick out and summed them: 173 ms in process, and a million rows
+over the wire.</p>
+
+<h3 id="latest">The latest price</h3>
+
+<pre data-lang="fenecql">get ticks select last(px by at) as px, sym group sym order sym   -- → 101.75
+</pre>
+
+<p>Every symbol's, a scan of the million ticks: 108 ms, against 129 for
+a query a symbol (<code>where sym = $1 order at desc limit 1</code>, each
+sorting its symbol's 20 000 rows). A page that shows it all the time
+keeps a row a symbol instead:</p>
+
+<pre data-lang="fenecql">create collection quotes (sym text @unique, px float, high float, low float)
+put quotes {sym: "S07", px: 101.75, high: 101.75, low: 101.75} if absent   -- → 1
+set quotes {px: 99.5, high: greatest(high, 99.5), low: least(low, 99.5)} where sym = "S07"   -- → 1
+get quotes select low where sym = "S07"   -- → 99.5
+get quotes select case when px < high then "below" else "at the high" end as where_it_is where sym = "S07"   -- → "below"
+</pre>
+
+<p><code>greatest</code> and <code>least</code> pass a null over, and
+<code>case</code> works out only the branch it takes.</p>

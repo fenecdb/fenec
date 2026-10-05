@@ -30,6 +30,21 @@ Object? value(Object? v) {
       final e = v[r'$expr'] as List;
       return Computed.expr(e[0] as String, [for (final x in e.skip(1)) value(x)]);
     }
+    if (v.containsKey(r'$bucket')) {
+      final b = v[r'$bucket'] as List;
+      return Computed.bucket(b[0] as String, b[1] as String);
+    }
+    if (v.containsKey(r'$countDistinct')) return Computed.countDistinct(v[r'$countDistinct'] as String);
+    for (final (key, pick) in [(r'$first', Computed.first), (r'$last', Computed.last)]) {
+      if (v.containsKey(key)) {
+        final f = v[key] as List;
+        return pick(f[0] as String, f.length > 1 ? f[1] as String : null);
+      }
+    }
+    if (v.containsKey(r'$as')) {
+      final a = v[r'$as'] as List;
+      return (value(a[0]) as Computed).as(a[1] as String);
+    }
     return {for (final e in v.entries) e.key as String: value(e.value)};
   }
   if (v is List) return [for (final x in v) value(x)];
@@ -63,7 +78,7 @@ List<SortKey> keys(Object? v) {
 }
 
 Query step(Query q, String op, List a) => switch ((op, a.length)) {
-      ('select', _) => q.select(a.cast<String>()),
+      ('select', _) => q.select([for (final c in a) value(c)!]),
       ('where', 3) => q.where(a[0] as String, a[1], value(a[2])),
       ('where', 2) => q.where(a[0] as String, value(a[1])),
       ('where', _) => q.where(cond(a[0])),
@@ -82,7 +97,9 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
           top: opt(a, 1, 'top') as int?,
           ranges: opt(a, 1, 'ranges') as List<Object?>?,
           disjunctive: opt(a, 1, 'disjunctive')),
-      ('group', _) => q.group(a[0] as String),
+      // One key as itself, several (or none) as the list they are.
+      ('group', 1) => q.group(value(a[0])!),
+      ('group', _) => q.group([for (final k in a) value(k)!]),
       ('order', _) => q.order(a[0] as String, a.length > 1 ? a[1] as String : 'asc', opt(a, 2, 'collate') as String?),
       ('limit', _) => q.limit(a[0] as int),
       ('offset', _) => q.offset(a[0] as int),

@@ -32,6 +32,11 @@ class GoldenTest {
                 v.containsKey("\$f32") -> v.list("\$f32")!!.let { l -> FloatArray(l.size) { (l[it] as Number).toFloat() } }
                 v.containsKey("\$inc") -> Computed.inc(v["\$inc"])
                 v.containsKey("\$expr") -> v.list("\$expr")!!.let { Computed.expr(it[0] as String, *it.drop(1).map(::value).toTypedArray()) }
+                v.containsKey("\$bucket") -> v.list("\$bucket")!!.let { Computed.bucket(it[0] as String, it[1] as String) }
+                v.containsKey("\$countDistinct") -> Computed.countDistinct(v.string("\$countDistinct")!!)
+                v.containsKey("\$first") -> v.list("\$first")!!.let { Computed.first(it[0] as String, it.getOrNull(1) as String?) }
+                v.containsKey("\$last") -> v.list("\$last")!!.let { Computed.last(it[0] as String, it.getOrNull(1) as String?) }
+                v.containsKey("\$as") -> v.list("\$as")!!.let { (value(it[0]) as Computed).alias(it[1] as String) }
                 else -> LinkedHashMap<String, Any?>().also { m -> v.forEach { (k, x) -> m[k] = value(x) } }
             }
             is List<*> -> v.map(::value)
@@ -63,7 +68,7 @@ class GoldenTest {
         }
 
         fun step(q: Query, op: String, a: List<Any?>): Query = when {
-            op == "select" -> q.select(a.map { it as String })
+            op == "select" -> q.select(a.map { value(it)!! })
             op == "where" && a.size == 3 -> q.where(a[0] as String, a[1] as String, value(a[2]))
             op == "where" && a.size == 2 -> q.where(a[0] as String, value(a[1]))
             op == "where" -> q.where(cond(a[0]))
@@ -74,7 +79,9 @@ class GoldenTest {
             op == "rerank" -> q.rerank(a[0] as String, value(a[1]), opt(a, 2, "candidates") as Long?)
             op == "match" -> q.match(a[0] as String, a[1] as String)
             op == "fuse" -> q.fuse(opt(a, 0, "k") as Long?, opt(a, 0, "candidates") as Long?)
-            op == "group" -> q.group(a[0] as String)
+            // One key as itself, several (or none) as the list they are.
+            op == "group" && a.size == 1 -> (value(a[0]) as Any).let { if (it is List<*>) q.group(it.map { k -> k!! }) else q.group(it) }
+            op == "group" -> q.group(a.map { value(it)!! })
             op == "order" -> q.order(a[0] as String, a.getOrNull(1) as? String ?: "asc", opt(a, 2, "collate") as String?)
             op == "limit" -> q.limit(a[0] as Long)
             op == "offset" -> q.offset(a[0] as Long)

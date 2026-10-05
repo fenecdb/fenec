@@ -163,17 +163,38 @@ export function path(name) {
 }
 
 /**
- * A select-list item: a field, or an aggregate spelled as FenecQL spells it
- * -- `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- which answers
- * under that same name.
+ * A select-list item: a field, or an aggregate of one spelled as FenecQL
+ * spells it -- `count(*)`, `count(distinct user)`, `sum(total)`, `avg(f)`,
+ * `min(f)`, `max(f)`, `first(f)`, `last(f)`, a path where a field goes --
+ * which answers under that same name.
  */
-const AGGREGATE = /^(count)\(\*?\)$|^(sum|avg|min|max)\(([A-Za-z_][A-Za-z0-9_]*)\)$/i;
+const NAMES = '[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*';
+const AGGREGATE = new RegExp(
+  `^(count)\\(\\*?\\)$|^count\\(\\s*distinct\\s+(${NAMES})\\s*\\)$|^(sum|avg|min|max|first|last)\\((${NAMES})\\)$`,
+  'i',
+);
+// What makes an expression an aggregate's: a call of one.
+const AGGREGATE_CALL = /\b(count|sum|avg|min|max|first|last)\s*\(/i;
 
 function column(name) {
+  if (name !== null && typeof name === 'object' && name[EXPR] === 'expr') {
+    return { node: name, aggregate: AGGREGATE_CALL.test(name.sql) };
+  }
   const m = typeof name === 'string' ? AGGREGATE.exec(name.trim()) : null;
   if (!m) return { text: path(name), aggregate: false };
-  const text = m[1] ? 'count(*)' : `${m[2].toLowerCase()}(${m[3]})`;
+  const text = m[1]
+    ? 'count(*)'
+    : m[2]
+      ? `count(distinct ${m[2]})`
+      : `${m[3].toLowerCase()}(${m[4]})`;
   return { text, aggregate: true };
+}
+
+/** A select item or a group key as text, an expression's values bound. */
+function columnText(c, bind) {
+  if (c.text !== undefined) return c.text;
+  const text = value('select', c.node, bind, null);
+  return c.node.name ? `${text} as ${c.node.name}` : text;
 }
 
 /** `limit`, `offset`, `ef` cannot be parameterised: FenecQL wants a literal. */
@@ -269,6 +290,25 @@ export function raw(sql, ...params) {
 const EXPR = Symbol('fenec.expr');
 
 /**
+ * What `expr()`, `bucket()`, `countDistinct()`, `first()` and `last()`
+ * make: an expression, which `as` names as a column of a select list --
+ * `bucket('at', '1m').as('minute')`, `expr('px * qty').as('notional')`.
+ */
+class Computed {
+  constructor(sql, params, name) {
+    this[EXPR] = 'expr';
+    this.sql = sql;
+    this.params = params;
+    if (name !== undefined) this.name = name;
+  }
+
+  /** The name the column answers under: `select ... as <name>`. */
+  as(name) {
+    return new Computed(this.sql, this.params, ident(name, 'column'));
+  }
+}
+
+/**
  * `{ n: inc(1) }` in an update: the field plus `by`, counting from 0 where
  * it is null -- `n: coalesce(n, 0) + $1` -- worked out under the server's
  * write lock, so increments from many clients all land.
@@ -287,7 +327,50 @@ export function inc(by = 1) {
  */
 export function expr(sql, ...params) {
   if (typeof sql !== 'string') throw new FenecError('expr() expects text');
-  return { [EXPR]: 'expr', sql, params };
+  return new Computed(sql, params);
+}
+
+// `15m`, `1h`, `1d`, `1w`, `3mo`, `1y`: what `bucket` takes, written into
+// the text as a literal, since it is a part of the statement's shape.
+const INTERVAL = /^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$/;
+
+/**
+ * `bucket(field, interval)`: the start of the interval a timestamp falls
+ * in -- `'15m'`, `'1h'`, `'1d'`, `'1w'` (from a Monday), `'1mo'`, `'1y'`,
+ * in UTC -- for a select list or a group:
+ *
+ *   from('ticks').select(bucket('at', '1m').as('minute'), 'count(*)').group('minute')
+ */
+export function bucket(field, interval) {
+  if (typeof interval !== 'string' || !INTERVAL.test(interval)) {
+    throw new FenecError(
+      `bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': ${JSON.stringify(interval)}`,
+    );
+  }
+  return new Computed(`bucket(${path(field)}, ${interval})`, []);
+}
+
+/** `count(distinct field)`: how many distinct values the rows hold. */
+export function countDistinct(field) {
+  return new Computed(`count(distinct ${path(field)})`, []);
+}
+
+/**
+ * `first(field)`, or `first(field by key)`: the value of the row least by
+ * `key` -- by the order the rows were written without one -- that has a
+ * value; a bar's open is `first('px', 'at')`.
+ */
+export function first(field, by) {
+  return pick('first', field, by);
+}
+
+/** `last(field [by key])`: as `first`, the row greatest by `key`. */
+export function last(field, by) {
+  return pick('last', field, by);
+}
+
+function pick(fn, field, by) {
+  return new Computed(`${fn}(${path(field)}${by === undefined ? '' : ` by ${path(by)}`})`, []);
 }
 
 /** A document's value: `inc`'s and `expr`'s text, or a parameter. */
@@ -521,9 +604,11 @@ export class Query {
   /**
    * `select a, b` -- no arguments, or `'*'`, means every field. Aggregates
    * go in the same list, spelled as FenecQL spells them, and answer under
-   * that name:
+   * that name; an expression -- `expr()`, `bucket()`, `countDistinct()`,
+   * `first()`, `last()` -- answers under the name its `as` gives it:
    *
    *   db.from('orders').select('status', 'count(*)', 'sum(total)').group('status')
+   *   db.from('ticks').select('sym', expr('sum(px * qty) / sum(qty)').as('vwap')).group('sym')
    */
   select(...cols) {
     const flat = cols.flat();
@@ -531,10 +616,7 @@ export class Query {
       return this.#with({ project: null, aggregate: false });
     }
     const list = flat.map((c) => column(c));
-    return this.#with({
-      project: list.map((c) => c.text),
-      aggregate: list.some((c) => c.aggregate),
-    });
+    return this.#with({ project: list, aggregate: list.some((c) => c.aggregate) });
   }
 
   /**
@@ -619,9 +701,19 @@ export class Query {
     return this.#with({ facets: [...this.#s.facets, f] });
   }
 
-  /** `group field` -- one row per value, for a select list that aggregates. */
-  group(field) {
-    return this.#with({ group: ident(field) });
+  /**
+   * `group a, b` -- one row per distinct set of the keys' values, for a
+   * select list that aggregates. A key is a field or a path, a name the
+   * list gives a column with `as`, or an expression: `bucket('at', '1h')`.
+   */
+  group(...keys) {
+    const flat = keys.flat();
+    if (flat.length === 0) throw new FenecError('group takes at least one key');
+    return this.#with({
+      group: flat.map((k) => (k !== null && typeof k === 'object' && k[EXPR] === 'expr'
+        ? { node: k }
+        : { text: path(k) })),
+    });
   }
 
   /**
@@ -766,7 +858,7 @@ export class Query {
     return this.#with({
       order: [
         ...this.#s.order,
-        { field: column(field).text, asc: direction(dir), collate: collation(collate) },
+        { field: column(field).text ?? path(field), asc: direction(dir), collate: collation(collate) },
       ],
     });
   }
@@ -821,7 +913,8 @@ export class Query {
     const { match, rerank, lookups, aggregate, group, fuse, marks, facets } = this.#s;
     // The engine refuses these too; failing here never sends a query.
     if (group && !aggregate) {
-      throw new FenecError(`group ${group} needs an aggregate in select: 'count(*)'`);
+      const keys = group.map((k) => k.text ?? k.node.sql).join(', ');
+      throw new FenecError(`group ${keys} needs an aggregate in select: 'count(*)'`);
     }
     if (aggregate) {
       const clash = near ? 'near' : match ? 'match' : lookups.length ? 'lookup' : count ? 'count' : null;
@@ -903,10 +996,13 @@ export class Query {
       if (m.pre !== undefined) s += `, ${bind(m.pre, m.field)}, ${bind(m.post, m.field)}`;
       return `${s})`;
     });
-    if (project || items.length) sql += ` select ${[...(project ?? ['*']), ...items].join(', ')}`;
+    // The list's values are bound before the filter's, as they come before it
+    // in the text (the marks' tags were bound above).
+    const cols = project?.map((c) => columnText(c, bind));
+    if (project || items.length) sql += ` select ${[...(cols ?? ['*']), ...items].join(', ')}`;
     const where = this.#where(bind);
     if (where) sql += ` where ${where}`;
-    if (group) sql += ` group ${group}`;
+    if (group) sql += ` group ${group.map((k) => columnText(k, bind)).join(', ')}`;
     if (near) {
       sql += ` near ${near.field} ${bind(near.vector, near.field)}`;
       if (near.ef !== null) sql += ` ef ${near.ef}`;
