@@ -20,6 +20,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
 mod aggregate;
+mod bucket;
+pub use bucket::Bucket;
 #[cfg(not(target_arch = "wasm32"))]
 mod garbage;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1096,7 +1098,7 @@ impl Sink for NullSink {
 /// opened again.
 #[derive(Default)]
 pub struct HashIndex {
-    map: crate::maps::Map<Vec<u8>, Vec<DocId>>,
+    map: crate::maps::Map<Vec<u8>, Bucket>,
     heap: usize,
 }
 
@@ -1105,8 +1107,8 @@ pub struct HashIndex {
 // second time, 650 bytes of the browser module.
 #[allow(clippy::ptr_arg)]
 impl HashIndex {
-    /// The documents under `key`, in the order they were added.
-    pub fn get(&self, key: &Vec<u8>) -> Option<&Vec<DocId>> {
+    /// The documents under `key`, ascending.
+    pub fn get(&self, key: &Vec<u8>) -> Option<&Bucket> {
         self.map.get(key)
     }
 
@@ -1116,7 +1118,7 @@ impl HashIndex {
     }
 
     /// Each value's encoding and the documents under it.
-    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &Vec<DocId>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &Bucket)> {
         self.map.iter()
     }
 
@@ -1127,29 +1129,29 @@ impl HashIndex {
     fn add(&mut self, key: Vec<u8>, id: DocId) {
         let key_bytes = key.capacity();
         let bucket = self.map.entry(key).or_default();
-        let before = bucket.capacity();
-        if before == 0 {
+        if bucket.is_empty() {
             self.heap += key_bytes;
         }
-        bucket.push(id);
-        self.heap += (bucket.capacity() - before) * std::mem::size_of::<DocId>();
+        self.heap = self.heap.wrapping_add_signed(bucket.add(id));
     }
 
+    /// Takes `id` out of the bucket under `key`: a binary search, and a
+    /// run of at most 512 ids moved (`Bucket`).
     fn remove(&mut self, key: &Vec<u8>, id: DocId) {
         let Some(bucket) = self.map.get_mut(key) else {
             return;
         };
-        bucket.retain(|d| *d != id);
+        self.heap = self.heap.wrapping_add_signed(bucket.remove(id));
         if bucket.is_empty() {
             if let Some((k, b)) = self.map.remove_entry(key) {
-                self.heap -= k.capacity() + b.capacity() * std::mem::size_of::<DocId>();
+                self.heap -= k.capacity() + b.heap_bytes();
             }
         }
     }
 
     /// The table, the keys and the buckets as they sit in memory.
     pub fn memory_bytes(&self) -> usize {
-        self.map.capacity() * (std::mem::size_of::<(Vec<u8>, Vec<DocId>)>() + 1) + self.heap
+        self.map.capacity() * (std::mem::size_of::<(Vec<u8>, Bucket)>() + 1) + self.heap
     }
 
     /// A value two documents or more hold, `null` aside, and two of them:
@@ -1162,7 +1164,8 @@ impl HashIndex {
             .iter()
             .find(|(k, ids)| ids.len() > 1 && **k != null)?;
         let v = crate::codec::decode_value(key, &mut 0).ok()?;
-        Some((v, ids[0], ids[1]))
+        let mut two = ids.iter();
+        Some((v, two.next()?, two.next()?))
     }
 }
 
@@ -1559,7 +1562,7 @@ impl Collection {
                 continue;
             };
             if let Some(b) = ix.get(&hash_key(v)) {
-                out.extend(b.iter().filter(|&&d| d != doc.id).map(|&d| (f, d)));
+                out.extend(b.iter().filter(|&d| d != doc.id).map(|d| (f, d)));
             }
         }
         Ok(out)
@@ -2321,7 +2324,7 @@ impl<'a> Probe<'a> {
                 let Some(ids) = map.get(&hash_key(&k)) else {
                     return Ok(false);
                 };
-                for &id in ids {
+                for id in ids.iter() {
                     if child.store.contains(id) && pred(id)? {
                         return Ok(true);
                     }
@@ -2365,15 +2368,10 @@ impl<'a> Probe<'a> {
                 let Some(ids) = map.get(&hash_key(&k)) else {
                     return;
                 };
-                // A bucket can hold ids whose document is gone.
-                out.extend(ids.iter().copied().filter(|id| child.store.contains(*id)));
-                // Insertion order is not id order -- an upsert removes an id
-                // and pushes it back at the end -- so the children would
-                // otherwise reshuffle after a rewrite that changed nothing.
-                out.sort_unstable();
-                // A duplicate here is not one extra row but one extra child
-                // *per parent*. The pass is free on a list this short.
-                out.dedup();
+                // A bucket can hold ids whose document is gone. It holds
+                // them ascending and each once, so the children come in id
+                // order whatever order they were written in.
+                out.extend(ids.iter().filter(|id| child.store.contains(*id)));
             }
         }
     }
@@ -6131,7 +6129,7 @@ impl Database {
             let Some(key) = lookup_key(&c.schema, field, val) else {
                 continue;
             };
-            let bucket = map.get(&key).cloned().unwrap_or_default();
+            let bucket = map.get(&key).map_or_else(Vec::new, Bucket::to_vec);
             if candidates
                 .as_ref()
                 .map(|c| bucket.len() < c.len())
@@ -6184,7 +6182,7 @@ impl Database {
                     break;
                 };
                 if let Some(bucket) = map.get(&key) {
-                    union.extend_from_slice(bucket);
+                    union.extend(bucket.iter());
                 }
             }
             if !whole {
@@ -7230,10 +7228,10 @@ impl Database {
         child: &'a Collection,
         filter: &Expr,
         params: &[Value],
-    ) -> Option<&'a [DocId]> {
+    ) -> Option<Option<&'a Bucket>> {
         let mut eqs = Vec::new();
         filter.conjunct_equalities(params, &mut eqs);
-        let mut best: Option<&[DocId]> = None;
+        let mut best: Option<Option<&Bucket>> = None;
         for (field, val) in eqs {
             let Ok(Some(map)) = child.hash(field) else {
                 continue;
@@ -7244,8 +7242,9 @@ impl Database {
             let Ok(key) = val.clone().coerce(&fd.ty) else {
                 continue;
             };
-            let bucket: &[DocId] = map.get(&hash_key(&key)).map_or(&[], |b| b.as_slice());
-            if best.map(|b| bucket.len() < b.len()).unwrap_or(true) {
+            let bucket = map.get(&hash_key(&key));
+            let len = |b: Option<&Bucket>| b.map_or(0, Bucket::len);
+            if best.map(|b| len(bucket) < len(b)).unwrap_or(true) {
                 best = Some(bucket);
             }
         }
@@ -7271,7 +7270,7 @@ impl Database {
         &self,
         steps: &[Step],
         ids: Vec<DocId>,
-        candidates: &[DocId],
+        candidates: Option<&Bucket>,
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
         let l = steps[0].l;
@@ -7288,7 +7287,7 @@ impl Database {
         };
 
         let mut keys: Vec<DocId> = Vec::new();
-        for &cid in candidates {
+        for cid in candidates.unwrap_or(&bucket::EMPTY).iter() {
             // The bucket can name a document that is gone.
             if !child.store.contains(cid) {
                 continue;
@@ -7378,7 +7377,7 @@ impl Database {
             if let Some(f) = &l.filter {
                 if let Some(cands) = Self::child_candidates(child, f, ctx.params) {
                     let n = child.store.len() as u64;
-                    let b = cands.len() as u64;
+                    let b = cands.map_or(0, Bucket::len) as u64;
                     if (ids.len() as u64).saturating_mul(n) > b.saturating_mul(b) {
                         let parents = ids.len();
                         let kept = self.retain_via_children(&steps, ids, cands, ctx)?;
@@ -7386,7 +7385,7 @@ impl Database {
                             format!(
                                 "required: from the child side, {} children in a hash bucket, \
                                  {} of {parents} parents kept",
-                                cands.len(),
+                                cands.map_or(0, Bucket::len),
                                 kept.len()
                             )
                         });
@@ -8070,7 +8069,7 @@ impl Database {
                     let mut n = docs.len() as u64;
                     if let (Some(bits), false) = (&*member, all) {
                         n = 0;
-                        for &d in docs {
+                        for d in docs.iter() {
                             let w = bits.get(d as usize / 64).copied().unwrap_or(0);
                             n += (w >> (d % 64)) & 1;
                         }
@@ -8088,19 +8087,16 @@ impl Database {
                 // A value's number under its encoding, and the row it was
                 // last counted for: a list holding a value twice counts its
                 // row once. The hash index's own map type.
-                let mut index: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
+                let mut index: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
                 let mut last: Vec<usize> = Vec::new();
                 let mut key = Vec::new();
                 let mut count = |row: usize, v: &Value| {
                     key.clear();
                     crate::codec::encode_value(&mut key, v);
                     let at = match index.get(&key) {
-                        Some(n) => n[0] as usize,
+                        Some(n) => n.first().unwrap_or(0) as usize,
                         None => {
-                            index
-                                .entry(key.clone())
-                                .or_default()
-                                .push(counted.len() as DocId);
+                            index.insert(key.clone(), Bucket::one(counted.len() as DocId));
                             counted.push((v.clone(), 0));
                             last.push(usize::MAX);
                             counted.len() - 1

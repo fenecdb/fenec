@@ -3,6 +3,8 @@
 //! ```text
 //! cargo run --release -p fenec-core --example expiry -- reads [rows]
 //! cargo run --release -p fenec-core --example expiry -- sweep [expired] [batch]
+//! cargo run --release -p fenec-core --example expiry -- hash [rows] [expired] [batch]
+//! cargo run --release -p fenec-core --example expiry -- writes [rows]
 //! ```
 //!
 //! `reads` holds the same documents in three collections: `t` under a plain
@@ -15,6 +17,12 @@
 //! and sweeps them as a server's sweeper does: a batch found under the
 //! read lock (`Database::expired`), deleted under the write lock
 //! (`Database::sweep`), the file's durability run after it.
+//!
+//! `hash` writes `rows` events in the order they came, a `@hash` field of
+//! five values beside the `@ttl` one, the oldest `expired` of them past
+//! their time, and sweeps those as `sweep` does: each row leaves a bucket
+//! of a fifth of the collection. `writes` times a lone `put` and a lone
+//! `del` of a row among `rows`, with that field under `@hash` and without.
 
 use fenec_core::prelude::*;
 use std::time::Instant;
@@ -217,11 +225,139 @@ fn sweep(expired: usize, batch: usize) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The write lock's hold a batch of the sweep, as `sweep` takes it.
+fn sweep_batches(db: Database, collection: &str, batch: usize) -> (usize, Vec<f64>) {
+    let lock = std::sync::RwLock::new(db);
+    let (mut held, mut swept) = (Vec::new(), 0);
+    loop {
+        let ids = lock
+            .read()
+            .unwrap()
+            .expired(collection, NOW, batch)
+            .unwrap();
+        if ids.is_empty() {
+            break;
+        }
+        let s = Instant::now();
+        {
+            let mut g = lock.write().unwrap();
+            swept += g.sweep(collection, NOW, &ids).unwrap();
+        }
+        held.push(s.elapsed().as_secs_f64() * 1e3);
+        if ids.len() < batch {
+            break;
+        }
+    }
+    (swept, held)
+}
+
+/// `rows` events a page at a time, times ascending with the ids, the
+/// first `expired` of them past their time; `kind` of five values.
+fn events(db: &mut Database, collection: &str, rows: usize, expired: usize) {
+    let base = NOW - HOUR - expired as i64 + 1;
+    for page in 0..rows.div_ceil(10_000) {
+        let docs: Vec<String> = (page * 10_000..((page + 1) * 10_000).min(rows))
+            .map(|i| {
+                format!(
+                    "{{kind: \"k{}\", n: {}, at: {}}}",
+                    i % 5,
+                    i % 1000,
+                    base + i as i64
+                )
+            })
+            .collect();
+        exec(db, &format!("put {collection} [{}]", docs.join(",")));
+    }
+}
+
+fn hash_sweep(rows: usize, expired: usize, batch: usize) {
+    let mut db = Database::new();
+    db.set_clock(Some(NOW));
+    exec(
+        &mut db,
+        "create collection events (kind text @hash, n int, at timestamp @ttl(1h))",
+    );
+    let t = Instant::now();
+    events(&mut db, "events", rows, expired);
+    // Built, as the first read after an open builds it.
+    exec(&mut db, "get events where kind = \"k0\" limit 1");
+    println!(
+        "{rows} rows, a @hash field of 5 values: written in {:.1} s",
+        t.elapsed().as_secs_f64()
+    );
+    let (swept, mut held) = sweep_batches(db, "events", batch);
+    held.sort_by(|a, b| a.total_cmp(b));
+    let at = |q: f64| held[((held.len() - 1) as f64 * q).round() as usize];
+    println!(
+        "  {swept} expired rows swept in {} batches of {batch}: write lock held p50 {:.2} ms, \
+         max {:.2}",
+        held.len(),
+        at(0.5),
+        at(1.0)
+    );
+}
+
+/// A lone `put` and a lone `del` among `rows` rows: the median of 21
+/// rounds of 1 000 each, in nanoseconds a write.
+fn writes(rows: usize) {
+    for (name, decl) in [
+        (
+            "@hash",
+            "create collection events (kind text @hash, n int, at timestamp)",
+        ),
+        (
+            "none ",
+            "create collection events (kind text, n int, at timestamp)",
+        ),
+    ] {
+        let mut db = Database::new();
+        exec(&mut db, decl);
+        events(&mut db, "events", rows, 0);
+        exec(&mut db, "get events where kind = \"k0\" limit 1");
+        let put = fenec_ql::parse_one("put events {kind: $1, n: 1, at: 5}").unwrap();
+        let del = fenec_ql::parse_one("del events where id = $1").unwrap();
+        let (mut puts, mut dels) = (Vec::new(), Vec::new());
+        let mut x: u64 = 3;
+        for _ in 0..21 {
+            let kinds: Vec<Value> = (0..1000)
+                .map(|i| Value::Text(format!("k{}", i % 5)))
+                .collect();
+            let s = Instant::now();
+            for k in &kinds {
+                db.execute_with(&put, std::slice::from_ref(k)).unwrap();
+            }
+            puts.push(s.elapsed().as_nanos() as f64 / 1000.0);
+            // Rows here and there among the first `rows`.
+            let ids: Vec<Value> = (0..1000)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    Value::Int((x % rows as u64) as i64 + 1)
+                })
+                .collect();
+            let s = Instant::now();
+            for id in &ids {
+                db.execute_with(&del, std::slice::from_ref(id)).unwrap();
+            }
+            dels.push(s.elapsed().as_nanos() as f64 / 1000.0);
+        }
+        puts.sort_by(|a, b| a.total_cmp(b));
+        dels.sort_by(|a, b| a.total_cmp(b));
+        println!(
+            "{rows} rows, kind {name}: a put {:.0} ns, a del {:.0} ns",
+            puts[10], dels[10]
+        );
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let num = |i: usize, d: usize| args.get(i).and_then(|a| a.parse().ok()).unwrap_or(d);
     match args.get(1).map(String::as_str) {
         Some("sweep") => sweep(num(2, 100_000), num(3, 1_000)),
+        Some("hash") => hash_sweep(num(2, 10_000_000), num(3, 20_000), num(4, 1_000)),
+        Some("writes") => writes(num(2, 1_000_000)),
         _ => reads(num(2, 1_000_000)),
     }
 }

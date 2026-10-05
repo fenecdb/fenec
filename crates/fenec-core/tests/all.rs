@@ -10,6 +10,7 @@ mod analytics;
 mod analytics_docs;
 mod autocompact;
 mod blocks;
+mod buckets;
 mod changes;
 mod collate;
 mod crash;

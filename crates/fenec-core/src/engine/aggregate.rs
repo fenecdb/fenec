@@ -389,7 +389,7 @@ impl Fold {
         by: Option<&Value>,
         id: DocId,
         at: (usize, usize),
-        seen: &mut crate::maps::Map<Vec<u8>, Vec<DocId>>,
+        seen: &mut crate::maps::Map<Vec<u8>, Bucket>,
         key: &mut Vec<u8>,
     ) -> Result<()> {
         if v.is_null() {
@@ -408,7 +408,7 @@ impl Fold {
                              values: a count is not cut short, so narrow the filter"
                         )));
                     }
-                    seen.insert(key.clone(), Vec::new());
+                    seen.insert(key.clone(), Bucket::default());
                     *n += 1;
                 }
             }
@@ -694,8 +694,8 @@ impl Database {
         // map type, holding one number: a map of another type was 1 KB of
         // the browser module. `count(distinct ...)`'s values go in one more
         // of them, each under its item's and its group's numbers.
-        let mut index: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
-        let mut seen: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
+        let mut index: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
+        let mut seen: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
         let mut key_values: Vec<Value> = Vec::new();
         let mut folds: Vec<Fold> = Vec::new();
         let mut groups = 0usize;
@@ -754,9 +754,9 @@ impl Database {
                         last
                     } else {
                         let g = match index.get(&key) {
-                            Some(n) => n[0] as usize,
+                            Some(n) => n.first().unwrap_or(0) as usize,
                             None => {
-                                index.entry(key.clone()).or_default().push(groups as DocId);
+                                index.insert(key.clone(), Bucket::one(groups as DocId));
                                 for t in &terms {
                                     key_values.push(rd.env[*t].clone());
                                 }

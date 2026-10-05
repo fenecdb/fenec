@@ -73,7 +73,7 @@ make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server 
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
-make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows
+make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 ```
@@ -1178,6 +1178,29 @@ it and asks nothing: the primary did. A scoped token is told the field
 alone (`access::told`, in `within`): the clash names the other row's id
 and echoes its value, which told alice that bob's profile existed, where,
 and what it held.
+
+**A `@hash` bucket holds its ids ascending, in runs** (`engine/bucket.rs`).
+A bucket was a `Vec` in the order its ids came, and a row left it by
+`retain`, a walk of the whole bucket: with a field of a few values -- a
+country, a device, an event's name -- every delete walked a fifth of the
+collection, and the `@ttl` sweep held the write lock 370 to 500 ms a
+thousand rows of an analytics site's 594 000 events, every dashboard read
+waiting behind it. Now an id is found by binary search, and past 512 ids a
+bucket is runs of at most 512 (`Bucket::Runs`, behind a box so a bucket
+is the size of a `Vec`), so a removal moves one run's tail -- the sweep
+takes the oldest rows, which one ascending list holds first and would
+move all of. A run left a quarter full joins the next where both fit; a
+bucket of one run is a list again, so a `@unique` value's costs what it
+did. Over 10 000 000 rows with a field of five values the sweep holds the
+lock 0.79 ms a thousand rows against 825 (`make ttl-bench`'s `hash`); a
+lone `del` among a million rows 1.09 us against 76 to 134, a lone `put`
+699 to 708 ns against 708 to 754 (`writes`). Readers take a bucket's ids
+in order through one iterator (`Bucket::iter`, `Ids`), so `lookup`'s
+children no longer sort them, and the maps a group's or a facet value's
+number is kept in are of the index's own type (`Bucket::one`): through
+`flatten` and a second map type the change was 1.3 KB brotli of the
+browser module. Its buckets stay one sorted list (the runs `cfg`'d out,
+a removal a `memmove` of the rest): 390 bytes, 0.4 KB brotli.
 
 **`in (get ...)` is answered before the query, as the list it is.**
 `Expr::InSelect` holds an inner `Select`; `Database::answered` (from
