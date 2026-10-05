@@ -17,6 +17,18 @@
 //! `--sync always` right after its own fsync. `--sync off` makes nothing
 //! durable before shutdown, so a server with replicas refuses it.
 //!
+//! **A durable write is answered once every stream has sent it.** Under
+//! `--sync always` the answer waits, after the fsync, until each replica's
+//! stream has written the record into its socket ([`Feed::wait_sent`],
+//! [`SENT_WAIT`] at most): sent after the answer, a write the client was
+//! told about was lost whenever the primary died between the two -- 3 runs
+//! in 60 of Trellis's node killed under eight writers. Bytes a socket holds
+//! reach the replica after the process that wrote them is killed; a machine
+//! that dies takes them with it, so this is the process's guarantee, not
+//! the machine's. A stream that misses the wait is not waited for again
+//! until it has caught up, so a replica that stalls costs the writes one
+//! wait, not one each.
+//!
 //! **Positions are change numbers.** Every write moves the change counter by
 //! one, on the primary as on its replicas: a replica's position is its own
 //! counter, a subscriber's cursor means the same change on either, and a
@@ -79,6 +91,12 @@ const DURABLE_WAIT: Duration = Duration::from_secs(30);
 
 const VERSION: u8 = 1;
 
+/// How long a durable write waits for the streams to send it. A stream
+/// sends within microseconds of the fsync; one that has not in this long is
+/// stalled -- its replica not reading, or its socket full -- and the write
+/// is answered without it.
+pub const SENT_WAIT: Duration = Duration::from_secs(1);
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -110,6 +128,17 @@ pub fn fresh_id() -> u64 {
 pub struct Feed {
     ring: Mutex<Ring>,
     cv: Condvar,
+    /// The streams sending from it, and how far each has sent.
+    senders: Mutex<Vec<Sender>>,
+    sent_cv: Condvar,
+}
+
+/// A stream as a durable write waits for it: the last write it put into its
+/// socket, and whether it missed a wait and has not caught up since.
+struct Sender {
+    key: u64,
+    sent: u64,
+    lagging: bool,
 }
 
 struct Ring {
@@ -186,7 +215,61 @@ impl Feed {
                 closed: false,
             }),
             cv: Condvar::new(),
+            senders: Mutex::new(Vec::new()),
+            sent_cv: Condvar::new(),
         })
+    }
+
+    /// A stream begins sending after write `at`.
+    pub(crate) fn sending(&self, key: u64, at: u64) {
+        lock(&self.senders).push(Sender {
+            key,
+            sent: at,
+            lagging: false,
+        });
+    }
+
+    /// The stream `key` has written everything up to `sent` into its
+    /// socket; `caught_up` when that is every durable write there is, which
+    /// has a stream that missed a wait waited for again.
+    pub(crate) fn sent(&self, key: u64, sent: u64, caught_up: bool) {
+        let mut s = lock(&self.senders);
+        if let Some(x) = s.iter_mut().find(|x| x.key == key) {
+            x.sent = x.sent.max(sent);
+            x.lagging &= !caught_up;
+        }
+        drop(s);
+        self.sent_cv.notify_all();
+    }
+
+    /// The stream `key` has ended.
+    pub(crate) fn stopped(&self, key: u64) {
+        lock(&self.senders).retain(|x| x.key != key);
+        self.sent_cv.notify_all();
+    }
+
+    /// Waits until every stream that is keeping up has sent write `upto`,
+    /// `timeout` at most; a stream that has not by then is lagging.
+    pub fn wait_sent(&self, upto: u64, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut s = lock(&self.senders);
+        loop {
+            if s.iter().all(|x| x.lagging || x.sent >= upto) {
+                return;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                for x in s.iter_mut().filter(|x| x.sent < upto) {
+                    x.lagging = true;
+                }
+                return;
+            }
+            s = self
+                .sent_cv
+                .wait_timeout(s, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
     }
 
     /// Starts over at `seq`, every write up to it on disk and none kept:
@@ -519,6 +602,7 @@ impl Sink for Tee {
                 Ok(Some(Box::new(move || {
                     durable()?;
                     feed.mark_durable(upto);
+                    feed.wait_sent(upto, SENT_WAIT);
                     Ok(())
                 })))
             }
@@ -948,6 +1032,10 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
         return;
     }
 
+    // A durable write waits for this stream from here on: what it held
+    // before, the image's, it already has.
+    feed.sending(key, seq);
+    let _stopped = Stopped(feed, key);
     let mut cursor = seq;
     loop {
         match feed.next(cursor, epoch, MESSAGE) {
@@ -959,11 +1047,13 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
                     return;
                 }
                 cursor = last;
+                feed.sent(key, cursor, false);
                 if let Some(s) = lock(&repl.streams).iter_mut().find(|s| s.key == key) {
                     s.sent = cursor;
                 }
             }
             Next::Nothing => {
+                feed.sent(key, cursor, true);
                 feed.wait(cursor, epoch, ALIVE);
                 if feed.durable() <= cursor {
                     let alive = u64s(&[feed.seq(), feed.durable(), now_ms()]);
@@ -995,6 +1085,14 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
                 return;
             }
         }
+    }
+}
+
+/// Takes a finished stream off what durable writes wait for.
+struct Stopped<'a>(&'a Feed, u64);
+impl Drop for Stopped<'_> {
+    fn drop(&mut self) {
+        self.0.stopped(self.1);
     }
 }
 

@@ -144,7 +144,7 @@ curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
 
 <details class="deep"><summary>Details</summary>
 <p>A replica is behind its primary by the time a write takes to reach it —
-0.2 ms at the median under <code>--sync always</code>, up to the sync
+0.04 ms at the median under <code>--sync always</code>, up to the sync
 interval otherwise — so a client that writes on the primary and reads on a
 replica can read from before its own write. Over HTTP a write's answer
 names the change it left the database at, <code>Fenec-Seq</code>; a request
@@ -204,16 +204,22 @@ replica-bench</code>, macOS, loopback).</p>
 
 <p>Under <code>250</code> the loss is the policy's own: those writes were
 answered before any fsync and were not on the primary's disk either. Under
-<code>always</code> a write is answered after its fsync and sent right after,
-so what can be lost is a write whose answer went out in the fraction of a
-millisecond before it was sent — none of the ten failovers caught one. No
-failover left the replica holding a write the client had not been answered
-for.</p>
+<code>always</code> a write is answered after its fsync and once the stream
+to each replica has written it into its socket, which the kernel delivers
+after the process that wrote it is killed. Sent after the answer, as it was
+before, a write answered in the fraction of a millisecond before it
+was sent was lost: none of these ten failovers caught one, while a node of
+the SaaS example killed under eight writers lost one in 3 of 60 runs, and
+none in 120 since. A stream that has not sent a write within a second is
+not waited for until it catches up again, so a stalled replica costs the
+writes one wait. A machine that dies takes its sockets with it: this holds
+for a process killed, not for a power loss. No failover left the replica
+holding a write the client had not been answered for.</p>
 </details>
 
 <h2>What it costs</h2>
 
-<p>A write is readable on a replica 0.2 ms after the primary answered it
+<p>A write is readable on a replica 0.04 ms after the primary answered it
 under <code>--sync always</code>, and within the sync interval otherwise. A
 replica keeps up with a bulk load.</p>
 
@@ -221,7 +227,7 @@ replica keeps up with a bulk load.</p>
 <table>
 <thead><tr><th>primary's <code>--sync</code></th><th class="n">p50</th><th class="n">p95</th><th class="n">p99</th><th class="n">max</th></tr></thead>
 <tbody>
-<tr><td><code>always</code>, writes back to back</td><td class="n">0.20 ms</td><td class="n">0.30 ms</td><td class="n">0.37 ms</td><td class="n">0.44 ms</td></tr>
+<tr><td><code>always</code>, writes back to back</td><td class="n">0.04 ms</td><td class="n">0.06 ms</td><td class="n">0.09 ms</td><td class="n">2.77 ms</td></tr>
 <tr><td><code>250</code>, 250 writes a second</td><td class="n">148 ms</td><td class="n">262 ms</td><td class="n">273 ms</td><td class="n">282 ms</td></tr>
 </tbody>
 </table>

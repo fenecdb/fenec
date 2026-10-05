@@ -404,9 +404,18 @@ no counter would leave every replica one change off. The
 history (record kind 8, `History`) moves none, as a graph a server keeps in
 the tail does, and neither is sent. A promotion forks the history, a replica is continued only from a position
 the primary's history passed through and sent an image otherwise, and a
-following database refuses writes (`Error::ReadOnly`, 403). Lag is 0.20 ms
-p50 under `--sync always` and at most 283 ms under `--sync 250`; ten failovers
-under `always` lost no acknowledged write. An archive (`fenec archive`,
+following database refuses writes (`Error::ReadOnly`, 403). A durable
+write is answered once every stream has written it into its socket
+(`Feed::wait_sent` in the `Tee`'s durability, `SENT_WAIT` a second at
+most, a stream that missed it `lagging` and not waited for until it
+catches up): sent after the answer, a write answered in the moment before
+was lost when the primary died -- a node of the SaaS example killed under
+eight writers lost one in 3 of 60 runs on main, none in 120 since -- and
+a socket's bytes reach the replica after the process is killed, though
+not after the machine dies. Lag is 0.04 ms p50 under `--sync always`
+(0.14 before the wait) and at most 283 ms under `--sync 250`, durable
+writes 254 a second against 246; ten failovers under `always` lost no
+acknowledged write. An archive (`fenec archive`,
 `fenec-http/src/archive.rs`) is the same stream written to files, each write
 with the time the primary appended it; `fenec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fenecdb file is exactly
