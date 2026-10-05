@@ -3,7 +3,7 @@
 // whose queries run on a server loads this and not the module
 // (`@fenecdb/web/client`).
 
-import { FenecError, Query, checked, declared, ident, nameOf, normalize, rowsOf } from './builder.js';
+import { FenecError, Query, checked, declared, ident, nameOf, normalize, rowsOf, whole } from './builder.js';
 
 // ----------------------------------------------------------- HTTP endpoint
 //
@@ -23,24 +23,104 @@ export class FenecHttp {
    */
   onError = null;
 
+  #key;
+  #last;
+
   constructor(url, opts = {}) {
     this.#url = String(url).replace(/\/+$/, '');
     this.#token = opts.token ?? null;
     this.#fetch = opts.fetch ?? globalThis.fetch;
+    this.#key = opts.idempotencyKey ?? null;
+    // Shared with every copy `withIdempotencyKey` makes, as Go's and
+    // .NET's clients share theirs.
+    this.#last = opts[LAST] ?? { seq: null };
     if (typeof this.#fetch !== 'function') {
       throw new FenecError('fetch not found: pass one via opts.fetch');
     }
   }
 
-  /** Runs FenecQL. The return shape matches `run` on the wasm path. */
-  async run(sql, params = []) {
-    const body = await this.#post('/query', { query: sql, params: params.map((p) => normalize(p)) });
+  /**
+   * The change the last write through this client, or a copy of it, left
+   * the database at (`Fenec-Seq`); `null` before any.
+   */
+  get seq() {
+    return this.#last.seq;
+  }
+
+  /**
+   * A copy whose writes carry `key` as their `Idempotency-Key`: sent again
+   * after a timeout, a write is answered as it was the first time and not
+   * made twice (`replayed` on its answer). One key a write: the same key
+   * with another request is refused (422). What a builder's writes take,
+   * since they reach `run` with no options of their own:
+   * `db.withIdempotencyKey(k).from('orders').insert(order)`.
+   */
+  withIdempotencyKey(key) {
+    if (typeof key !== 'string' || !key) throw new FenecError('an idempotency key is a text, not empty');
+    const copy = new this.constructor(this.#url, {
+      token: this.#token,
+      fetch: this.#fetch,
+      idempotencyKey: key,
+      [LAST]: this.#last,
+    });
+    // The schema `connect` checked, and its relations, go with it.
+    if (declared.has(this)) declared.set(copy, declared.get(this));
+    copy.onError = this.onError;
+    return copy;
+  }
+
+  /**
+   * Runs FenecQL. The return shape matches `run` on the wasm path; a write
+   * also says the change it left the database at (`seq`) and whether the
+   * answer is the one kept for its key (`replayed`). `{ idempotencyKey }`
+   * sends one with this statement.
+   */
+  async run(sql, params = [], opts = {}) {
+    const { body, seq, replayed } = await this.#send(
+      '/query',
+      'application/json',
+      JSON.stringify({ query: sql, params: params.map((p) => normalize(p)) }),
+      opts.idempotencyKey ?? this.#key,
+    );
     // The endpoint returns rows as a plain array; the builder expects `{rows}`.
     if (Array.isArray(body)) return { rows: body };
     if (body && typeof body.affected === 'number') {
-      return { kind: 'affected', count: body.affected };
+      return { kind: 'affected', count: body.affected, seq, replayed };
     }
     return body;
+  }
+
+  /**
+   * `POST /batch`: the statements in order under one write lock, as one
+   * block -- their writes all land, or at the first error none of them do.
+   * Each is a builder query (a read), a FenecQL text, or `[text, params]`,
+   * which a builder's `toInsert`, `toUpdate` and `toDelete` make. Answers
+   * each statement's result in order as the server writes it -- `{rows}`
+   * (and `facets`), `{affected}` or `{message}` -- with `seq` and
+   * `replayed`. With `{ idempotencyKey }` a retry after a timeout is
+   * answered as the first try was and writes nothing twice.
+   *
+   * A statement that stops it throws a `FenecError` whose `at` is that
+   * statement's place (from 0), `status` the refusal's kind -- 412 a
+   * write's `require` not met -- and `completed` how many stayed applied:
+   * none, but for a batch holding a `compact`, whose statements run on
+   * their own.
+   */
+  async batch(items, opts = {}) {
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new FenecError('batch takes a list of statements: queries, texts or [text, params]');
+    }
+    const lines = items.map((item, i) => {
+      const [sql, params] = statementOf(item, i);
+      return JSON.stringify({ query: sql, params: params.map((p) => normalize(p)) });
+    });
+    const { body, seq, replayed } = await this.#send(
+      '/batch',
+      'application/x-ndjson',
+      lines.join('\n'),
+      opts.idempotencyKey ?? this.#key,
+    );
+    return { results: body?.results ?? [], seq, replayed };
   }
 
   /**
@@ -55,9 +135,18 @@ export class FenecHttp {
 
   /** A POST's JSON answer; a status but `ok` among `also` is an error. */
   async #post(path, payload, also = []) {
-    const headers = { 'content-type': 'application/json' };
+    return (await this.#send(path, 'application/json', JSON.stringify(payload), null, also)).body;
+  }
+
+  /**
+   * A POST: its JSON answer, the change a write left the database at, and
+   * whether the answer is the one kept for `key`.
+   */
+  async #send(path, type, payload, key, also = []) {
+    const headers = { 'content-type': type };
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
-    const res = await this.#request(`${this.#url}${path}`, { method: 'POST', headers, body: JSON.stringify(payload) });
+    if (key) headers['idempotency-key'] = key;
+    const res = await this.#request(`${this.#url}${path}`, { method: 'POST', headers, body: payload });
     const text = await res.text();
     let body;
     try {
@@ -67,12 +156,19 @@ export class FenecHttp {
     }
     if (!res.ok && !also.includes(res.status)) {
       // The status is the refusal's kind: 412 a write's `require` not met,
-      // 409 a value taken, 403 outside the token's rules.
+      // 409 a value taken, 403 outside the token's rules, 422 a key sent
+      // with another request. A batch says which statement stopped it
+      // (`at`) and how many stayed applied (`completed`).
       const e = new FenecError(body?.error ?? `HTTP ${res.status}`);
       e.status = res.status;
+      if (typeof body?.at === 'number') e.at = body.at;
+      if (typeof body?.completed === 'number') e.completed = body.completed;
       throw e;
     }
-    return body;
+    const got = res.headers?.get?.('fenec-seq');
+    const seq = got ? Number(got) : null;
+    if (seq !== null) this.#last.seq = seq;
+    return { body, seq, replayed: res.headers?.get?.('idempotent-replayed') === 'true' };
   }
 
   async rows(sql, params = []) {
@@ -135,6 +231,7 @@ export class FenecHttp {
       rows = async () => rowsOf(await this.run(sql, params ?? []));
       reads = null;
     }
+    if (opts.poll !== undefined) return this.#poll(query, cb, opts);
     if (opts.collections) reads = opts.collections.map((c) => ident(c, 'collection'));
     if (!reads) {
       throw new FenecError('live over HTTP: name the collections a text reads, { collections: [...] }');
@@ -203,10 +300,71 @@ export class FenecHttp {
     return () => stop.abort();
   }
 
+  /**
+   * `live` with `{ poll: ms }`: no stream. The query is asked every `ms`
+   * with the tag of the last answer (`If-None-Match`), and the server
+   * answers 304 without running it while nothing it reads was written --
+   * so a page that thousands view holds no stream each: a stream is a
+   * server thread and a wake-up at every write (60 streams took a write's
+   * p50 from 0.26 to 0.94 ms, 500 to 3.1). A read of rows that expire,
+   * or calling `now()`, is run every time.
+   */
+  #poll(query, cb, opts) {
+    const [sql, params] =
+      query instanceof Query ? query.plain().toFenecQL() : typeof query === 'string' ? [query, opts.params ?? []] : query;
+    const every = whole(opts.poll, 'poll');
+    if (every < 100) throw new FenecError('live: poll is every 100 ms at the most often');
+    const onError = opts.onError ?? this.onError;
+    const stop = new AbortController();
+    const headers = { 'content-type': 'application/json' };
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    const body = JSON.stringify({ query: sql, params: (params ?? []).map((p) => normalize(p)) });
+    let tag = '"0"';
+    const round = async () => {
+      try {
+        const res = await this.#request(`${this.#url}/query`, {
+          method: 'POST',
+          headers: { ...headers, 'if-none-match': tag },
+          body,
+          signal: stop.signal,
+        });
+        if (res.status === 304) return;
+        const got = await res.json();
+        if (!res.ok) throw Object.assign(new FenecError(got?.error ?? `HTTP ${res.status}`), { status: res.status });
+        tag = res.headers.get('etag') ?? '"0"';
+        if (!stop.signal.aborted) cb(rowsOf(Array.isArray(got) ? { rows: got } : got));
+      } catch (err) {
+        if (stop.signal.aborted) return;
+        if (onError) onError(err);
+        else Promise.reject(err);
+      }
+    };
+    (async () => {
+      while (!stop.signal.aborted) {
+        await round();
+        await new Promise((r) => setTimeout(r, every));
+      }
+    })();
+    return () => stop.abort();
+  }
+
   /** Collection schemas. */
   async schemas() {
     return this.run('collections');
   }
+}
+
+/** The option a copy of a client is handed its original's `seq` under. */
+const LAST = Symbol('last');
+
+/** A `batch` item as `[text, params]`. */
+function statementOf(item, i) {
+  if (item instanceof Query) return item.toFenecQL();
+  if (typeof item === 'string') return [item, []];
+  if (Array.isArray(item) && typeof item[0] === 'string' && (item[1] === undefined || Array.isArray(item[1]))) {
+    return [item[0], item[1] ?? []];
+  }
+  throw new FenecError(`batch statement ${i}: a query, a FenecQL text or [text, params]`);
 }
 
 /**

@@ -129,12 +129,18 @@ public class FenecException : Exception
     /// but for one holding a compact, which runs each statement on its own and keeps what ran.</summary>
     public int Completed { get; }
 
-    /// <summary>A refusal with its status, message and, for a batch, how many statements were applied.</summary>
-    public FenecException(int status, string message, int completed = 0) : base(message)
+    /// <summary>The statement of a failed batch that stopped it, from 0: the write whose require was not met,
+    /// the put whose id was taken. <c>null</c> for anything but a batch's stop.</summary>
+    public int? At { get; }
+
+    /// <summary>A refusal with its status, message and, for a batch, how many statements were applied and
+    /// which one stopped it.</summary>
+    public FenecException(int status, string message, int completed = 0, int? at = null) : base(message)
     {
         Status = status;
         Code = CodeOf(status);
         Completed = completed;
+        At = at;
     }
 
     static string CodeOf(int status) => status switch
@@ -161,7 +167,8 @@ public class FenecException : Exception
             var r = doc.RootElement;
             if (r.ValueKind == JsonValueKind.Object && r.TryGetProperty("error", out var e))
                 return new FenecException(status, e.GetString() ?? body,
-                    r.TryGetProperty("completed", out var c) ? c.GetInt32() : 0);
+                    r.TryGetProperty("completed", out var c) ? c.GetInt32() : 0,
+                    r.TryGetProperty("at", out var at) ? at.GetInt32() : null);
         }
         catch (JsonException) { }
         return new FenecException(status, body.Trim());

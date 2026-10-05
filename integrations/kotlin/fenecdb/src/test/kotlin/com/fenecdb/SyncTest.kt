@@ -248,6 +248,49 @@ class SyncTest {
         assertEquals(FenecException.Code.DUPLICATE, e.code)
     }
 
+    /** A batch lands whole or not at all, says which statement stopped it, and under an idempotency key lands once. */
+    @Test
+    fun connectBatchesAndKeysWrites() = runBlocking {
+        val s = server("batch")
+        val db = Fenec.connect(s.url)
+        val tasks = db.from("tasks")
+        val out = db.batch(
+            listOf(
+                tasks.toInsert(mapOf("key" to "d", "title" to "four")),
+                tasks.where("key", "a").toUpdate(mapOf("priority" to 9), require = 1),
+                tasks.where("priority", ">=", 5).order("priority").select("key").toFenecQL(),
+            ),
+        )
+        assertEquals(3, out.results.size)
+        assertEquals(1L, out.results[0].affected)
+        assertEquals(listOf("b", "a"), out.results[2].rows.map { it.string("key") })
+        assertTrue(out.seq != null && out.seq == db.seq && !out.replayed)
+
+        val e = assertFailsWith<FenecException> {
+            db.batch(
+                listOf(
+                    tasks.toInsert(mapOf("key" to "e", "title" to "five")),
+                    tasks.where("key", "nobody").toDelete(require = 1),
+                ),
+            )
+        }
+        assertEquals(listOf<Any?>(FenecException.Code.UNMET, 412, 1, 0), listOf(e.code, e.status, e.at, e.completed))
+        assertEquals(4L, tasks.count())
+
+        val keyed = db.withIdempotencyKey("batch-1")
+        val stmts = listOf(tasks.toInsert(mapOf("key" to "f", "title" to "six")))
+        assertEquals(false, keyed.batch(stmts).replayed)
+        assertEquals(true, keyed.batch(stmts).replayed)
+        assertEquals(5L, tasks.count())
+        db.runList("""put tasks {key: "h"}""", emptyList(), idempotencyKey = "put-1")
+        db.runList("""put tasks {key: "h"}""", emptyList(), idempotencyKey = "put-1")
+        assertEquals(6L, tasks.count())
+        val reused = assertFailsWith<FenecException> {
+            db.runList("""put tasks {key: "i"}""", emptyList(), idempotencyKey = "put-1")
+        }
+        assertEquals(listOf<Any?>(422, null), listOf(reused.status, reused.at))
+    }
+
     /** `/query` answers `{"rows": [...], "facets": {...}}` when the query asked facets, the bare array otherwise. */
     @Test
     fun highlightsAndFacetsOverHttp() = runBlocking {

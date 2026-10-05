@@ -82,7 +82,7 @@ class GoldenTest {
             // Through the untyped call: the file holds a tag that is no text.
             op == "highlight" -> q.mark(a[0] as String, null, null, opt(a, 1, "pre"), opt(a, 1, "post"))
             op == "snippet" -> q.mark(a[0] as String, a[1] as Long, opt(a, 2, "ellipsis"), opt(a, 2, "pre"), opt(a, 2, "post"))
-            op == "facet" -> q.facet(a[0] as String, opt(a, 1, "top") as Long?)
+            op == "facet" -> q.facetOf(a[0] as String, opt(a, 1, "top") as Long?, opt(a, 1, "ranges") as List<Any?>?, opt(a, 1, "disjunctive"))
             op == "lookup" -> q.lookup(
                 a[0] as String,
                 on = opt(a, 1, "on") as String?,

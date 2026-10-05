@@ -17,6 +17,18 @@ class FenecException internal constructor(
     message: String,
     /** The parameters the library asked for again as JSON (`exact`). */
     internal val exact: List<Int>? = null,
+    /**
+     * The HTTP status a server refused with ([FenecRemote]): 422 is an
+     * idempotency key sent with another request. Null for the library's own.
+     */
+    val status: Int? = null,
+    /**
+     * The statement of a [FenecRemote.batch] that stopped it, from 0: the
+     * write whose `require` was not met, the put whose id was taken.
+     */
+    val at: Int? = null,
+    /** How many statements of a failed batch stayed applied: 0, since a batch lands whole, but for one holding a `compact`. */
+    val completed: Int? = null,
 ) : RuntimeException(message) {
     constructor(code: Code, message: String) : this(code, message, null)
 
@@ -315,6 +327,22 @@ class Fenec private constructor(internal val handle: Long) : AutoCloseable {
 
     fun checkpointBlocking() {
         FenecNative.answer(FenecNative.checkpoint(handle))
+    }
+
+    /**
+     * Builds the hash, text, ordered and sparse indexes an open leaves for
+     * their first read, so the first search does not pay for its index (a
+     * `@text` index of 100 000 products: 141 ms): those [only] names --
+     * collections and `collection.field`s -- or every one. Each under the
+     * read lock on its own, so reads go on beside it. Answers how many it
+     * built; call it after the open, as the app starts.
+     */
+    suspend fun warm(only: List<String> = emptyList()): Int = withContext(Dispatchers.IO) { warmBlocking(only) }
+
+    @JvmOverloads
+    fun warmBlocking(only: List<String> = emptyList()): Int {
+        val out = FenecNative.answer(FenecNative.warm(handle, only.joinToString(",").encodeToByteArray()))
+        return ((Json.parse(out) as? Row)?.long("built") ?: 0L).toInt()
     }
 
     /** Saves the graphs, syncs and lets the file go; the live queries stop. Waits for the calls under way. */

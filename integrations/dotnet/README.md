@@ -37,9 +37,13 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
 - `SubscribeAsync(collection, [new("year", "gte.2024")])` is an `IAsyncEnumerable<Event>` of `seed` and `change` events (SSE).
 - `ChangesAsync(since, wait)` reads every write on disk (`/_changes`); `HealthAsync()` asks `/_health`.
 - `FenecClientOptions` takes `Token`, `Tenant` (`/t/<tenant>/`), `Timeout` and an `HttpClient` of your own.
-- A refusal is a `FenecException` with `Status`, `Code` and the server's message; every call takes a `CancellationToken`.
+- A refusal is a `FenecException` with `Status`, `Code` and the server's message; a failed batch's also says which
+  statement stopped it, `At` (from 0; `null` otherwise), and how many stayed applied, `Completed`. Every call takes
+  a `CancellationToken`.
 - A `float[]` or `ReadOnlyMemory<float>` goes out as the decimals that read back as each float, so a vector round-trips to the bit.
 
+- `Facet(field, ranges: [0, 25, 50])` counts by ranges of numbers, each value `[from, to]`; `disjunctive: true`
+  counts past the filter's own condition on the field, as a shop's filter list does.
 - A `Dictionary<string, object?>` is the builder's object condition, its operators a dictionary too; a refused
   step throws `FenecQueryException` with the JS builder's message.
 - To see the text and parameters a chain builds, for logging or a test, `q.ToFenecQL()` returns them and runs

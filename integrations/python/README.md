@@ -33,6 +33,26 @@ docs.where("year", "<", 2000).delete()        # no filter: refused unless all=Tr
 docs.where("lang", "tr").count()
 ```
 
+`facet(field, ranges=[0, 25, 50])` counts by ranges of numbers, each
+value `[from, to]`, and `disjunctive=True` counts past the filter's own
+condition on the field, as a shop's filter list does.
+
+Several statements are one `batch`, a block under one write lock: all
+land or none, and a `FenecError` that stops it says which (`e.at`, from 0;
+412 for a write whose `require` was not met). A retry after a timeout
+cannot tell whether a write ran, so a write that must not run twice goes
+under an idempotency key -- the second answer is the first one kept
+(`db.replayed`), and the key with another request is refused (422):
+
+```python
+from fenecdb import inc
+
+debit = docs.where("id", 1).to_update({"stock": inc(-1)}, require=1)
+db.batch([debit, ("put orders {item: $1}", [1])], idempotency_key=order_id)
+db.with_idempotency_key(order_id).collection("orders").insert({"item": 1})
+db.seq                                        # the change the last write left the database at
+```
+
 To see the text and parameters a chain builds, for logging or a test,
 `to_fenecql()` returns them and runs nothing:
 `docs.select("title").limit(5).to_fenecql()` is

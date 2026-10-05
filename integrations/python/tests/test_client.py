@@ -53,7 +53,63 @@ def test_a_write_that_does_not_write_its_count_is_refused_and_put_back(client):
         with pytest.raises(FenecError) as e:
             client.batch([met, unmet])
         assert e.value.status == 412
+        # The second statement stopped it, and nothing of the batch stayed.
+        assert (e.value.at, e.value.completed) == (1, 0)
         assert client.query(f"get {name} select balance") == [{"balance": 5}]
+    finally:
+        client.query(f"drop collection if exists {name}")
+
+
+def test_a_range_facet_answers_its_bounds_and_a_disjunctive_one_counts_past_its_filter(client):
+    name = fresh("ranges")
+    client.query(f"create collection {name} (price float, kind text)")
+    try:
+        client.query(f"put {name} [{{price: 5, kind: \"a\"}}, {{price: 30, kind: \"b\"}}, {{price: 40, kind: \"b\"}}]")
+        q = (client.collection(name).where("kind", "a")
+             .facet("price", ranges=[0, 25, 50.5]).facet("kind", disjunctive=True).limit(0))
+        facets = q.rows().facets
+        assert facets["price"] == [([0, 25], 1), ([25, 50.5], 0)]
+        assert facets["kind"] == [("b", 2), ("a", 1)]
+    finally:
+        client.query(f"drop collection if exists {name}")
+
+
+def test_a_refusal_outside_a_batch_names_no_statement(client):
+    with pytest.raises(FenecError) as e:
+        client.query("get no_such_collection_here")
+    assert (e.value.at, e.value.completed) == (None, None)
+
+
+def test_an_idempotency_key_makes_a_write_once(client):
+    name = fresh("idem")
+    client.query(f"create collection {name} (t text)")
+    try:
+        put = f"put {name} {{t: $1}}"
+        assert client.query(put, ["once"], idempotency_key=f"{name}-1") == {"affected": 1}
+        assert not client.replayed
+        seq = client.seq
+        assert client.query(put, ["once"], idempotency_key=f"{name}-1") == {"affected": 1}
+        assert client.replayed
+        assert client.query(f"get {name} count") == [{"count": 1}]
+        with pytest.raises(FenecError) as e:
+            client.query(put, ["another"], idempotency_key=f"{name}-1")
+        assert e.value.status == 422
+
+        # A copy carries its key on every write, the builder's too, and
+        # shares the client's seq.
+        keyed = client.with_idempotency_key(f"{name}-2")
+        stmts = [(put, ["b1"]), (put, ["b2"])]
+        first = keyed.batch(stmts)
+        assert first["ok"] == 2 and not keyed.replayed
+        assert client.seq > seq
+        again = keyed.batch(stmts)
+        assert again["ok"] == 2 and keyed.replayed
+        assert client.query(f"get {name} count") == [{"count": 3}]
+        assert client.with_idempotency_key(f"{name}-3").collection(name).insert({"t": "c"}) == 1
+        assert client.with_idempotency_key(f"{name}-3").collection(name).insert({"t": "c"}) == 1
+        assert client.query(f"get {name} count") == [{"count": 4}]
+        with pytest.raises(ValueError):
+            client.with_idempotency_key("")
     finally:
         client.query(f"drop collection if exists {name}")
 

@@ -256,7 +256,7 @@ func TestABatchLandsWholeOrNotAtAll(t *testing.T) {
 		fenecdb.Stmt("del "+name+" where n = 1"),
 		fenecdb.Stmt("put "+name+" {nofield: 1}"))
 	e := statusOf(t, err)
-	if e.Status != 404 || e.Completed != 0 {
+	if e.Status != 404 || e.Completed != 0 || e.At != 2 {
 		t.Fatalf("a failing batch: %+v", e)
 	}
 	rows := must(db.Query(ctx, "get "+name+" select t order n")).of(t)
@@ -273,7 +273,7 @@ func TestAWriteThatMissesItsCountIsRefusedAndPutBack(t *testing.T) {
 	accounts := db.From(name)
 	must(accounts.Insert(ctx, fenecdb.D("name", "a", "balance", 10))).of(t)
 	_, err := accounts.Where("name", "=", "nobody").Update(ctx, fenecdb.D("balance", 0), fenecdb.Require(1))
-	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet || !strings.Contains(e.Message, "requires 1") {
+	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet || !strings.Contains(e.Message, "requires 1") || e.At != -1 {
 		t.Fatalf("an unmet update: %+v", e)
 	}
 	if r := must(accounts.Where("name", "=", "a").Update(ctx, fenecdb.D("balance", 5), fenecdb.Require(1))).of(t); r.Affected != 1 {
@@ -289,7 +289,7 @@ func TestAWriteThatMissesItsCountIsRefusedAndPutBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = db.Batch(ctx, fenecdb.Stmt(met, metParams...), fenecdb.Stmt(unmet, unmetParams...))
-	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet || e.Completed != 0 {
+	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet || e.Completed != 0 || e.At != 1 {
 		t.Fatalf("an unmet batch: %+v", e)
 	}
 	rows := must(db.Query(ctx, "get "+name+" select balance")).of(t)
@@ -315,6 +315,17 @@ func TestAnIdempotencyKeyIsReplayed(t *testing.T) {
 	_, err := key.Exec(ctx, "put "+name+" {t: $1}", "another")
 	if e := statusOf(t, err); e.Status != 422 || e.Code != fenecdb.CodeKeyReused {
 		t.Fatalf("a key with another request: %+v", e)
+	}
+	// A batch under a key of its own lands once as well.
+	batch := db.IdempotencyKey(name + "-2")
+	stmts := []fenecdb.Statement{fenecdb.Stmt("put "+name+" {t: $1}", "b1"), fenecdb.Stmt("put "+name+" {t: $1}", "b2")}
+	b1 := must(batch.Batch(ctx, stmts...)).of(t)
+	b2 := must(batch.Batch(ctx, stmts...)).of(t)
+	if b1.Replayed || !b2.Replayed || b2.OK != 2 || b1.Seq == 0 {
+		t.Fatalf("first batch %+v, again %+v", b1, b2)
+	}
+	if rows := must(db.Query(ctx, "get "+name+" count")).of(t); rows[0]["count"] != 3.0 {
+		t.Fatalf("a replayed batch made %v", rows)
 	}
 }
 

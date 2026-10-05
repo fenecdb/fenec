@@ -90,8 +90,35 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   expect<number>(found.facets['meta.lang'][0].count);
   // @ts-expect-error -- not asked for
   void found.facets.title;
-  // @ts-expect-error -- a query without facets has none
-  void (await db.from('articles').rows()).facets;
+  // A range facet's values are its ranges; a disjunctive one is typed as any.
+  const banded = await db
+    .from('articles')
+    .where('year', 2024)
+    .facet('year', { ranges: [2000, 2010, 2020], disjunctive: true })
+    .facet('tags', { top: 3, disjunctive: true })
+    .limit(0)
+    .rows();
+  expect<[number, number] | null>(banded.facets.year[0].value);
+  expect<string | null>(banded.facets.tags[0].value);
+  // @ts-expect-error -- ranges are numbers
+  db.from('articles').facet('year', { ranges: ['a', 'b'] });
+  // @ts-expect-error -- disjunctive is a boolean
+  db.from('articles').facet('year', { disjunctive: 'yes' });
+  // A query whose type names no facet reads them untyped, and maybe absent.
+  // @ts-expect-error -- maybe absent
+  void (await db.from('articles').rows()).facets.year;
+  // Built in steps, a `let` keeps the type it was declared with: the facets
+  // asked after are still there, each field's counts untyped.
+  let stepped = db.from('articles').select('title');
+  if (Math.random() > 0.5) stepped = stepped.where('year', 2024);
+  stepped = stepped.facet('year');
+  const steps = await stepped.limit(5).rows();
+  expect<number | undefined>(steps.facets?.year?.[0]?.count);
+  expect<string>(steps[0].title);
+  // Asked in the declaration, each field's type is kept through the steps.
+  let kept = db.from('articles').select('title').facet('year');
+  if (Math.random() > 0.5) kept = kept.where('year', 2024).order('title');
+  expect<number | null | undefined>((await kept.rows()).facets.year[0]?.value);
   // @ts-expect-error -- marks are of a text field
   db.from('articles').highlight('year');
   // @ts-expect-error -- both tags, or neither
@@ -221,6 +248,30 @@ export async function remote() {
   http.live('get articles', () => {}, { collections: ['articles'] });
   // @ts-expect-error -- a text alone does not say what it reads
   http.live('get articles', () => {});
+  // Polled, it need not: the server says whether what it read was written.
+  http.live('get articles', () => {}, { poll: 5000 });
+  http.live(http.from('articles').where('year', 2024), (rows) => expect<string>(rows[0].title), { poll: 5000 });
+
+  // `/batch` and keys: a query, a text, or [text, params] each.
+  const articles = http.from('articles');
+  const done = await http.batch(
+    [articles.where('year', 2024).toUpdate({ year: 2025 }, { require: 1 }), articles.select('title'), 'get articles count'],
+    { idempotencyKey: 'k' },
+  );
+  expect<boolean>(done.replayed);
+  expect<number | null>(done.seq);
+  const first = done.results[0];
+  if ('affected' in first) expect<number>(first.affected);
+  try {
+    await http.batch(['get articles']);
+  } catch (e) {
+    if (e instanceof FenecError) expect<number | undefined>(e.at);
+  }
+  // @ts-expect-error -- a statement is a query, a text or [text, params]
+  void http.batch([42]);
+  await http.run('put articles {title: $1}', ['a'], { idempotencyKey: 'k2' });
+  expect<FenecHttp<Schema>>(http.withIdempotencyKey('k3'));
+  expect<number | null>(http.seq);
 
   // `@fenecdb/web/client`: the same classes and builder, no engine.
   const bare = client.connect<Schema>('http://127.0.0.1:8080');

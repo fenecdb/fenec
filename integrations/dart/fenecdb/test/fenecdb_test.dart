@@ -112,6 +112,26 @@ void main() {
     expect((await docs.where('kind', 'b').facet('kind').rows()).facets, {
       'kind': [const FacetCount('b', 1)]
     });
+    // A range's value is its bounds, a list; a disjunctive facet counts
+    // past the filter's own condition on its field.
+    await db.execute('create collection p (price float, kind text)');
+    await db.execute('put p [{price: 5, kind: "a"}, {price: 30, kind: "b"}, {price: 40, kind: "b"}]');
+    final f = (await db
+            .from('p')
+            .where('kind', 'a')
+            .facet('price', ranges: [0, 25, 50.5])
+            .facet('kind', disjunctive: true)
+            .limit(0)
+            .answer())
+        .facets!;
+    expect([
+      for (final c in f['price']!) c.value
+    ], [
+      [0, 25],
+      [25, 50.5]
+    ]);
+    expect([for (final c in f['price']!) c.count], [1, 0]);
+    expect([for (final c in f['kind']!) (c.value, c.count)], [('b', 2), ('a', 1)]);
     await db.close();
   });
 
@@ -182,6 +202,20 @@ void main() {
     expect(await db.from('t').count(), 21);
     final near = await db.from('t').select(['title']).near('e', Float32List.fromList([0, 1])).limit(1).rows();
     expect(near.first['title'], 'n0');
+    await db.close();
+  });
+
+  test('warm builds what an open left, once', () async {
+    final path = scratch();
+    var db = await Fenec.open(path);
+    await db.execute('create collection docs (body text @text)');
+    await db.execute('put docs [{body: "rust is fast"}, {body: "go is simple"}]');
+    await db.close();
+    db = await Fenec.open(path);
+    expect(await db.warm(['docs']), 1);
+    final hits = await db.from('docs').select(['body']).match('body', 'rust').rows();
+    expect([for (final r in hits) r['body']], ['rust is fast']);
+    expect(await db.warm(), 0);
     await db.close();
   });
 

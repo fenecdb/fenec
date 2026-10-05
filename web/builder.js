@@ -583,6 +583,13 @@ export class Query {
    *
    *   db.from('products').match('title', 'phone').where('price', '<', 500)
    *     .facet('brand', { top: 10 }).facet('color').limit(20)
+   *
+   * `{ ranges: [0, 2500, 5000] }` counts the rows whose number falls in
+   * each range -- from a bound, included, to the next, excluded -- every
+   * range in order, `value` its `[from, to]`. `{ disjunctive: true }`
+   * counts over the rows the query selects with the filter's own
+   * conditions on the field left out, so a brand chosen still lists the
+   * other brands to add.
    */
   facet(field, opts = {}) {
     const f = { field: path(field), top: opts.top === undefined ? null : whole(opts.top, 'facet top') };
@@ -590,6 +597,25 @@ export class Query {
     if (this.#s.facets.some((g) => g.field === f.field)) {
       throw new FenecError(`facet ${f.field} is asked twice`);
     }
+    if (opts.ranges !== undefined) {
+      const r = opts.ranges;
+      // The engine's rule, refused before anything is sent.
+      if (
+        f.top !== null ||
+        !Array.isArray(r) ||
+        r.length < 2 ||
+        r.some((b, i) => typeof b !== 'number' || !Number.isFinite(b) || (i > 0 && !(b > r[i - 1])))
+      ) {
+        throw new FenecError(
+          `facet ${f.field} ranges takes 2 to 10 001 numbers, each above the one before, and no top: every range answers, in order`,
+        );
+      }
+      f.ranges = r.map(String);
+    }
+    if (opts.disjunctive !== undefined && typeof opts.disjunctive !== 'boolean') {
+      throw new FenecError(`facet ${f.field} disjunctive is true or false`);
+    }
+    f.disjunctive = opts.disjunctive === true;
     return this.#with({ facets: [...this.#s.facets, f] });
   }
 
@@ -907,7 +933,12 @@ export class Query {
     if (this.#s.require) sql += this.#s.require;
     if (count) sql += ' count';
     if (facets.length) {
-      sql += ` facet ${facets.map((f) => (f.top === null ? f.field : `${f.field} top ${f.top}`)).join(', ')}`;
+      const one = (f) =>
+        f.field +
+        (f.top === null ? '' : ` top ${f.top}`) +
+        (f.ranges ? ` ranges [${f.ranges.join(', ')}]` : '') +
+        (f.disjunctive ? ' disjunctive' : '');
+      sql += ` facet ${facets.map(one).join(', ')}`;
     }
     // Terminal, so every clause after it belongs to the child -- and being
     // emitted last, its parameters land after the parent's, which is the

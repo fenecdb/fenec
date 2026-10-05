@@ -207,8 +207,18 @@ export type Facets = Record<string, FacetCount[]>;
 /** The value a facet of a field counts: a list's elements one by one. */
 export type FacetValue<T> = NonNullable<T> extends readonly (infer E)[] ? E : NonNullable<T>;
 
-/** A query's rows, and when it asked for facets, the counts as `facets`. */
-export type Rows<P, Fa> = {} extends Fa ? P[] : P[] & { facets: Fa };
+/**
+ * A query's rows, and when it asked for facets, the counts as `facets`,
+ * typed by each field asked. A query whose type names no facet may still
+ * have asked for some: a `let` keeps the type it was declared with, so
+ * `let q = db.from(t); q = q.facet('brand')` reads its rows as one asking
+ * none. Those are `Facets`, each field's counts untyped, and may be
+ * absent; to keep each field's type, ask the facets in the expression the
+ * query is declared with -- `let q = db.from(t).facet('brand')` -- and
+ * reassign it with what keeps the row's type (`where`, `match`, `order`,
+ * `limit`).
+ */
+export type Rows<P, Fa> = {} extends Fa ? P[] & { facets?: Facets } : P[] & { facets: Fa };
 
 /**
  * The row shape a chained `lookup` produces: the new collection's rows are
@@ -408,6 +418,51 @@ export declare class FenecError extends Error {
   status?: number;
   /** A write the server refused: the text of its first statement. */
   query?: string;
+  /**
+   * The statement a `/batch` stopped at, from 0 (`FenecHttp.batch`): with
+   * `status` 412, the write whose `require` was not met.
+   */
+  at?: number;
+  /**
+   * How many statements of a stopped `/batch` stayed applied: none, but
+   * for a batch holding a `compact`, whose statements run on their own.
+   */
+  completed?: number;
+}
+
+/**
+ * One statement of `FenecHttp.batch`: a builder query (a read), a FenecQL
+ * text, or `[text, params]` -- what `toInsert`, `toUpdate` and `toDelete`
+ * make.
+ */
+export type BatchStatement =
+  | Query<any, any, any, any, any, any>
+  | string
+  | readonly [sql: string, params?: unknown[]];
+
+/** One statement's answer in a batch, as the server writes it. */
+export type BatchItem =
+  | { rows: Record<string, unknown>[]; facets?: Facets }
+  | { affected: number }
+  | { message: string };
+
+/** What `FenecHttp.batch` answers. */
+export interface BatchResult {
+  /** Each statement's answer, in order. */
+  results: BatchItem[];
+  /** The change the batch left the database at (`Fenec-Seq`). */
+  seq: number | null;
+  /** Whether the answer is the one kept for its `idempotencyKey`. */
+  replayed: boolean;
+}
+
+/**
+ * `{ idempotencyKey }`: a write sent again with the key is answered as it
+ * was the first time and not made twice; the key with another request is
+ * refused (422).
+ */
+export interface WriteOptions {
+  idempotencyKey?: string;
 }
 
 /**
@@ -501,13 +556,28 @@ export declare class Query<
    * first; a list counts once a row for each value. Beside the rows:
    * `rows().facets`, `run().facets`.
    */
+  /**
+   * `facet field ranges [...]`: how many rows hold a number in each range,
+   * from a bound, included, to the next, excluded -- every range, in
+   * order, its `value` the `[from, to]` pair. Through a `@sorted` field's
+   * index, or the field read.
+   */
+  facet<K extends (keyof Row<F> & string) | JsonPath<F>>(
+    field: K,
+    opts: { ranges: readonly number[]; disjunctive?: boolean },
+  ): Query<F, P, L, Rel, At, Fa & { [N in K]: FacetCount<[number, number]>[] }>;
+  /**
+   * `{ disjunctive: true }`: counted with the filter's own conditions on
+   * the field left out, so a brand chosen still lists every brand the
+   * other conditions leave.
+   */
   facet<K extends keyof Row<F> & string>(
     field: K,
-    opts?: { top?: number },
+    opts?: { top?: number; disjunctive?: boolean },
   ): Query<F, P, L, Rel, At, Fa & { [N in K]: FacetCount<FacetValue<Row<F>[K]>>[] }>;
   facet<K extends JsonPath<F>>(
     field: K,
-    opts?: { top?: number },
+    opts?: { top?: number; disjunctive?: boolean },
   ): Query<F, P, L, Rel, At, Fa & { [N in K]: FacetCount<Json>[] }>;
 
   /** `group field`: one row per value, for a select list that aggregates. */
@@ -780,8 +850,27 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
   constructor(url: string, opts?: HttpOptions);
   from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>;
   from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>;
-  run(sql: string, params?: unknown[]): Promise<any>;
+  /**
+   * Runs FenecQL; a write also answers `seq`, the change it left the
+   * database at, and `replayed`, whether the answer is the one kept for
+   * its `idempotencyKey`.
+   */
+  run(sql: string, params?: unknown[], opts?: WriteOptions): Promise<any>;
   rows(sql: string, params?: unknown[]): Promise<any[]>;
+  /**
+   * `POST /batch`: the statements in order as one block -- every write
+   * lands or none does -- and each one's answer. A statement that stops
+   * it throws a `FenecError` with its place (`at`) and the refusal's
+   * `status`: 412 for a `require` not met.
+   */
+  batch(statements: readonly BatchStatement[], opts?: WriteOptions): Promise<BatchResult>;
+  /**
+   * A copy whose writes carry `key` as their `Idempotency-Key` -- a
+   * builder's writes among them -- sharing this one's `seq`.
+   */
+  withIdempotencyKey(key: string): FenecHttp<S, Rel>;
+  /** The change the last write through this client, or a copy of it, left the database at. */
+  readonly seq: number | null;
   schemas(): Promise<{ collections?: SchemaInfo[] } | SchemaInfo[]>;
   /**
    * The server's database against a schema declared in code, in the
@@ -809,7 +898,7 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
   live(
     query: string | [sql: string, params: unknown[]],
     cb: (rows: any[]) => void,
-    opts: LiveOptions & { collections: string[] },
+    opts: LiveOptions & ({ collections: string[] } | { poll: number }),
   ): () => void;
 }
 
@@ -975,6 +1064,13 @@ export interface LiveOptions {
    * Given for a builder query, they stand in for those it names.
    */
   collections?: string[];
+  /**
+   * `FenecHttp.live` alone: ask the query every this many milliseconds
+   * (100 at least) instead of holding a stream, the server answering 304,
+   * the query not run, while nothing it reads was written. For a public
+   * page: a stream is a server thread a viewer.
+   */
+  poll?: number;
 }
 
 export interface PersistOptions {
