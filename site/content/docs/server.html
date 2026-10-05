@@ -331,8 +331,10 @@ opened, "healthy" also means "the documents are read".</p>
 <p>What the server is doing is at <code>/_metrics</code>, in Prometheus's
 text format: <code>--metrics &lt;address&gt;</code> opens a listener for it
 alone, and <code>--slow-ms &lt;ms&gt;</code> logs every statement at least
-that slow with its text. The metrics, a Grafana dashboard and the log are in
-<a href="/docs/monitoring">Monitoring</a>.</p>
+that slow with its text, a JSON line on stderr. The metrics, a Grafana
+dashboard, the log and the Datadog Agent's configuration are in
+<a href="/docs/monitoring">Monitoring</a> and <a href="/docs/datadog">Datadog and
+other monitoring systems</a>.</p>
 </details>
 
 <h2 id="containers">Run it in a container</h2>

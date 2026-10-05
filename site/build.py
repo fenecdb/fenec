@@ -75,6 +75,7 @@ NAV = [
         ("docs/server", "Server"),
         ("docs/replication", "Replication"),
         ("docs/monitoring", "Monitoring"),
+        ("docs/datadog", "Datadog and others"),
         ("docs/studio", "Studio"),
         ("docs/sharding", "Tenants and sharding"),
         ("docs/serverless", "Serverless and Cloudflare"),
