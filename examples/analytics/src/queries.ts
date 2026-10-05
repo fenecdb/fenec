@@ -1,7 +1,8 @@
 // The dashboard's questions, each one FenecQL statement under the site's
-// viewer token, sent side by side: a /batch would read one state, but it
-// takes the write lock, reads and all, and would hold ingest back for as
-// long as the slowest of them (README, "Gaps").
+// viewer token, sent side by side: each runs on a connection of the node's
+// under the read lock, so a page takes as long as its slowest question
+// rather than their sum. A /batch of them would read one state, but one
+// statement after another.
 //
 // Where the answers come from. Up to a day, and whenever a filter is set,
 // from the raw events: they hold every field, so any filter and any page

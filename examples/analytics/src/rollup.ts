@@ -533,7 +533,7 @@ export class RollupWorker {
     if (!force && quiet < 2000) return;
     this.#pulse.checked = now;
     const since = minuteOf(now) - 29 * MINUTE;
-    // Two reads, not a /batch: a batch takes the write lock, reads and all.
+    // Two reads side by side, the page's time the slower one's.
     const [a, m] = await Promise.all([
       this.#db.rows('get events select count(distinct user) as active where at >= $1', [iso(now - 5 * MINUTE)]),
       this.#db.rows('get events select bucket(at, 1m) as m, count(*) as n where at >= $1 and name = "pageview" group m', [iso(since)]),

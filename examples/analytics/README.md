@@ -355,7 +355,7 @@ Where the time goes at ten million events: over a day of raw events
 (330 000 rows), the facets and the series, each a scan of the day, about
 265 ms; over 30 days of rollups, the funnel, 968 ms -- a row for each
 visitor who started a signup in the month leaves the node, since the
-order of their steps is compared in the code (Gaps, 7) -- then the
+order of their steps is compared in the code (Gaps, 6) -- then the
 visitors' count, 350 ms. Without the funnel a month of rollups answers in
 under 400 ms. Two first ways measured at this size and replaced: the
 retention table grouped from a row per visitor and week took 560 to 700
@@ -472,9 +472,9 @@ HTML; it sends 7.5 to 9.
 - **A distinct count from the raw events stops at a million.** Visitors
   per page and per referrer, and a range's visitors with a filter set,
   are counted exactly or the page says they passed the bound.
-- **The worker and the dashboard share the write lock** with ingest: while
-  the worker keeps up with 16 clients, ingest runs at about half the rate
-  it has alone.
+- **The worker shares the write lock with ingest**: while it keeps up with
+  16 clients writing as fast as they can, ingest runs at about a third of
+  the rate it has alone.
 
 ## Gaps this example hit
 
@@ -494,13 +494,7 @@ close it.
    one pass (the sweep and a `del` group their ids by key and `retain`
    against a set once), or keep a bucket's ids ascending -- they are
    appended so -- and binary-search the one to take out.
-2. **A `/batch` of reads takes the write lock** (the ledger's gap 1,
-   still open). The dashboard's ten questions would read one state as one
-   `/batch`, but would hold ingest out for as long as the slowest; so they
-   go side by side as single reads, each seeing its own moment. The
-   rebuild's snapshot is a read `/batch` on purpose. Smallest: the read
-   lock for a batch whose statements only read.
-3. **No upsert that adds.** A rollup row is "make it at zero if missing,
+2. **No upsert that adds.** A rollup row is "make it at zero if missing,
    then add": `put minutes {key: $1, n: 0} if absent` and `set minutes {n:
    n + $2} where key = $1`, two statements a key, a thousand keys a page in
    a backfill. The worker now reads which keys exist before its block and
@@ -509,21 +503,21 @@ close it.
    absent else set {n: n + $k}` -- an upsert by the `@unique` key, the
    `set` reading the row it finds -- so a page is one statement a
    collection and no read.
-4. **A parameter cannot be the documents of a `put`.** `put events $1 if
+3. **A parameter cannot be the documents of a `put`.** `put events $1 if
    absent` with a list of objects is `expected {, found $1`, so every
    beacon's statement is written out with ten parameters an event
    (`{eid: $1, name: $2, ...}, {eid: $11, ...}`): a text per beacon size,
    and a rollup block's statements are texts of up to 500 documents, past
    the 1 KB the parse cache keeps. Smallest: a parameter where a document
    or a list of them goes.
-5. **`/_changes` does not say where the writes end.** Under `--sync 250`
+4. **`/_changes` does not say where the writes end.** Under `--sync 250`
    a write is in the stream only once an fsync covered it, so an empty
    page cannot tell a worker that has caught up from one whose writes are
    not on disk yet: `catchUp` waits out 600 ms of an empty page before it
    believes it. Smallest: the database's change counter beside
    `Fenec-Next` (`Fenec-Seq` on the answer), so a reader knows what is
    still to come.
-6. **A distinct count stops at a million, and has no mergeable form.**
+5. **A distinct count stops at a million, and has no mergeable form.**
    `get day_users select count(distinct user) where day >= $1` over the
    last 30 days of ten million events answered `count(distinct ...) holds
    more than 1000000 values: a count is not cut short, so narrow the
@@ -533,7 +527,7 @@ close it.
    distinct counts cannot be added, and fenecdb keeps no sketch a day
    could hold. Smallest (M): `approx_count_distinct(user)` folding
    HyperLogLog registers, mergeable across a rollup's rows.
-7. **No condition over a group's aggregates.** The ordered funnel's last
+6. **No condition over a group's aggregates.** The ordered funnel's last
    step is "visitors whose first finish is no earlier than their first
    start": `get firsts select user, min(case when name = $3 then at end) as
    a, min(case when name = $4 then at end) as b where day >= $1 group user`
