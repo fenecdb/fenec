@@ -1,6 +1,6 @@
 <!--
 title: Monitoring — fenecdb
-description: Prometheus metrics at /_metrics, a ready Grafana dashboard, a slow-statement log, per-statement counts and an audit log.
+description: Prometheus metrics at /_metrics, a ready Grafana dashboard, a slow-statement log, per-statement counts, an audit log and a request id in every line.
 -->
 
 <h1>Monitoring</h1>
@@ -18,8 +18,8 @@ fenec-server --file data.fenec --http 127.0.0.1:8080 \
          --metrics 0.0.0.0:9464 --admin-token "$SCRAPE" --slow-ms 100
 
 curl -H "Authorization: Bearer $SCRAPE" http://127.0.0.1:9464/_metrics
-# fenec_statements_total{transport="http",kind="read"} 1834
-# fenec_statement_duration_seconds_bucket{transport="http",kind="read",le="0.001"} 1790
+# fenec_statements_total{kind="read"} 1834
+# fenec_statement_duration_seconds_bucket{kind="read",le="0.001"} 1790
 # fenec_documents{collection="people"} 90000
 # ...
 </pre>
@@ -29,6 +29,9 @@ curl -H "Authorization: Bearer $SCRAPE" http://127.0.0.1:9464/_metrics
     <code>/_metrics</code> too.</li>
   <li><b>A scrape needs a token:</b> the server's (<code>--http-token</code>)
     or the admin one (<code>--admin-token</code>).</li>
+  <li><b>Datadog, New Relic, Elastic, Grafana Cloud</b> read the same
+    metrics and logs: <a href="/docs/datadog">Datadog and other monitoring
+    systems</a>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -49,7 +52,7 @@ as the HTTP listener does, or <code>--insecure</code>.</p>
 
 <h2>What is counted</h2>
 
-<p>Each statement is counted as a read or a write, by transport, with its
+<p>Each statement is counted as a read or a write, with its
 latency as the client saw it. Collections, memory, replication and tenants
 are reported as gauges.</p>
 
@@ -57,17 +60,18 @@ are reported as gauges.</p>
 <table>
 <thead><tr><th>Metric</th><th>Type</th><th>What it says</th></tr></thead>
 <tbody>
-<tr><td><code>fenec_statements_total{transport, kind}</code></td><td>counter</td><td>statements answered; <code>transport</code> is <code>http</code>, <code>kind</code> is <code>read</code> or <code>write</code></td></tr>
-<tr><td><code>fenec_statement_errors_total{transport, kind}</code></td><td>counter</td><td>statements answered with an error, the client's (a typo, a 404) or the server's</td></tr>
-<tr><td><code>fenec_statement_duration_seconds{transport, kind}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
-<tr><td><code>fenec_slow_statements_total{transport}</code></td><td>counter</td><td>statements over <code>--slow-ms</code>, each also in the log</td></tr>
-<tr><td><code>fenec_connections{transport}</code></td><td>gauge</td><td>connections open now; a scrape is not one</td></tr>
+<tr><td><code>fenec_statements_total{kind}</code></td><td>counter</td><td>statements answered; <code>kind</code> is <code>read</code> or <code>write</code></td></tr>
+<tr><td><code>fenec_statement_errors_total{kind}</code></td><td>counter</td><td>statements answered with an error, the client's (a typo, a 404) or the server's</td></tr>
+<tr><td><code>fenec_statement_duration_seconds{kind}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
+<tr><td><code>fenec_slow_statements_total</code></td><td>counter</td><td>statements over <code>--slow-ms</code>, each also in the log</td></tr>
+<tr><td><code>fenec_refused_total</code></td><td>counter</td><td>requests refused for their token (401), each also in the audit log</td></tr>
+<tr><td><code>fenec_connections</code></td><td>gauge</td><td>connections open now; a scrape is not one</td></tr>
 <tr><td><code>fenec_documents{collection}</code></td><td>gauge</td><td>documents in a collection</td></tr>
 <tr><td><code>fenec_data_bytes{collection}</code>, <code>fenec_dead_bytes{collection}</code></td><td>gauge</td><td>live records, and the overwritten and deleted ones <code>compact</code> gives back</td></tr>
 <tr><td><code>fenec_file_bytes</code>, <code>fenec_reclaimable_bytes</code></td><td>gauge</td><td>the file as written, and what a compact would give back of it now: the dead records, a record's head a write, the graph records a server appended in the tail; <code>--auto-compact</code> runs one once it passes its share (<a href="/docs/server#compaction">Compaction</a>)</td></tr>
 <tr><td><code>fenec_auto_compactions_total</code></td><td>counter</td><td>compacts the server ran on its own, every file it serves together</td></tr>
 <tr><td><code>fenec_memory_bytes</code></td><td>gauge</td><td>what the process holds of the database and <code>--max-memory</code> counts: the indexes, and the documents too where the file is not mapped (<code>--no-mmap</code>)</td></tr>
-<tr><td><code>fenec_change_sequence</code></td><td>gauge</td><td>the last write's sequence number; its rate is the writes per second, from any transport</td></tr>
+<tr><td><code>fenec_change_sequence</code></td><td>gauge</td><td>the last write's sequence number; its rate is the writes per second</td></tr>
 <tr><td><code>fenec_storage_failed</code></td><td>gauge</td><td>1 once the disk refused a write: writes stop until the file is reopened, reads go on</td></tr>
 <tr><td><code>fenec_vectors_unlinked</code></td><td>gauge</td><td>vectors the open left out of the graph after a crash: <code>near</code> measures each one until a thread beside the queries has linked them, and the gauge falls to 0; on a <code>--dir</code> node, the open tenants' together</td></tr>
 <tr><td><code>fenec_replicas</code></td><td>gauge</td><td>on a primary, the replicas streaming from it</td></tr>
@@ -112,7 +116,7 @@ file that runs fenec-server with both, the dashboard already loaded.</p>
 
 <p>It opens on the figures that decide whether anything needs doing — the
 version and uptime, whether the disk has refused a write, statements and
-errors per second, the memory footprint — then statements by transport and
+errors per second, the memory footprint — then statements by
 kind with their p50 and p99, errors, and slow statements a minute; documents,
 writes a second and each collection's dead share, the one that says when to
 <code>compact</code>; replication; tenants; and a router's requests, its
@@ -130,16 +134,22 @@ fenec_dead_bytes / (fenec_data_bytes + fenec_dead_bytes) > 0.5
 </pre>
 </details>
 
-<h2>Slow statements</h2>
+<h2 id="slow">Slow statements</h2>
 
 <p><code>--slow-ms 100</code> logs every statement that took 100 ms or
-longer, with what it ran.</p>
+longer, with what it ran, as a JSON line on stderr.</p>
 
-<pre data-lang="text">slow statement: 312.4 ms, http read: POST /query {"query":"get people select name order name collate tr"}
-slow statement: 148.9 ms, http write: POST /batch {"query":"put orders {person: 7, total: 4200}"} {"query":...</pre>
+<pre data-lang="json">{"at":"2026-10-05T09:30:12.310Z","event":"slow","level":"warn","proto":"http","peer":"10.0.0.7:53112","request_id":"9f2c41d07ab35e18","duration_ms":312.408,"kind":"read","failed":false,"statement":"POST /query {\"query\":\"get people select name order name collate tr\"}"}</pre>
 
 <details class="deep"><summary>Details</summary>
-<p>The log line uses the same timing the histogram has.</p>
+<p>The log line uses the same timing the histogram has. It is the audit
+log's shape — <code>at</code>, <code>event</code>, <code>level</code>, the
+peer and the <a href="#request-id">request id</a> — with the duration in
+milliseconds, whether the statement wrote (<code>kind</code>), whether it
+failed, the tenant on a tenant node, and the statement, so one parser reads
+both logs (<a href="/docs/datadog#logs">Datadog and other monitoring
+systems</a>). <code>--slow-ms 0</code> logs every statement, as PostgreSQL's
+<code>log_min_duration_statement = 0</code> does.</p>
 
 <p>A parameter's value is not logged, only how many there were: a value bound
 as <code>$1</code> stays out of the log, a literal written into the text does
@@ -196,9 +206,9 @@ not logged.</p>
 </ul>
 
 <details class="deep"><summary>Details</summary>
-<pre data-lang="json">{"at":"2026-10-01T09:30:12.310Z","event":"schema","proto":"http","peer":"10.0.0.7:53112","statement":"create collection notes (title text)","failed":false}
-{"at":"2026-10-01T09:32:05.117Z","event":"refused","proto":"http","peer":"198.51.100.4:40031","method":"GET","path":"/notes"}
-{"at":"2026-10-01T09:40:00.550Z","event":"admin","proto":"http","peer":"10.0.0.2:61200","method":"POST","path":"/_shard/tenants/acme/move","status":200}</pre>
+<pre data-lang="json">{"at":"2026-10-01T09:30:12.310Z","event":"schema","level":"info","proto":"http","peer":"10.0.0.7:53112","request_id":"5d0e7c2a91f4b366","statement":"create collection notes (title text)","failed":false}
+{"at":"2026-10-01T09:32:05.117Z","event":"refused","level":"warn","proto":"http","peer":"198.51.100.4:40031","request_id":"b81f03c6d2e94a57","method":"GET","path":"/notes"}
+{"at":"2026-10-01T09:40:00.550Z","event":"admin","level":"info","proto":"http","peer":"10.0.0.2:61200","request_id":"deploy-7","method":"POST","path":"/_shard/tenants/acme/move","http_status":200}</pre>
 
 <p><code>--audit &lt;path&gt;</code> appends one JSON line for each of these
 events:</p>
@@ -215,7 +225,11 @@ events:</p>
     <code>--audit</code> as well.</li>
 </ul>
 
-<p>Each line has the time, the protocol and the peer's address. Reads and
+<p>Each line has the time, a level (<code>warn</code> for a refusal,
+<code>info</code> otherwise), the protocol, the peer's address and the
+<a href="#request-id">request id</a>; an admin request's status is
+<code>http_status</code>, since a log collector takes a
+<code>status</code> for the line's level. Reads and
 writes are not logged, so the
 log costs nothing on their path. Lines are written as the events happen and
 are not synced: after a crash the log can lose its last lines, but the data
@@ -263,6 +277,7 @@ tenant moves. No label names a tenant.</p>
 <tr><td><code>fenec_router_request_duration_seconds{route}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
 <tr><td><code>fenec_router_upstream_duration_seconds</code></td><td>histogram</td><td>a forwarded request's time at its node: from its sending to the whole answer. Taken from the request's duration, it leaves the router's own</td></tr>
 <tr><td><code>fenec_router_upstream_errors_total{node}</code></td><td>counter</td><td>forwarded requests a node did not answer or broke off, each answered 502: the one to alert on</td></tr>
+<tr><td><code>fenec_router_refused_total</code></td><td>counter</td><td>requests refused for their token (401): the router's own, and its nodes' it passed on</td></tr>
 <tr><td><code>fenec_router_moves_total{outcome}</code></td><td>counter</td><td>tenant moves that began, <code>done</code> or <code>failed</code> and thawed; one refused before it began is not one</td></tr>
 <tr><td><code>fenec_router_move_duration_seconds</code></td><td>histogram</td><td>how long a move that was done took, the tenant frozen for all of it, in buckets from 10 ms to 1 000 s</td></tr>
 <tr><td><code>fenec_router_connections</code></td><td>gauge</td><td>client connections open now, the scrape's own among them</td></tr>
@@ -296,6 +311,30 @@ fenec_router_tenants_moving > 0
 increase(fenec_router_auto_failovers_total[5m]) > 0
 fenec_router_node_failed_over > 0
 </pre>
+</details>
+
+<h2 id="request-id">Request ids</h2>
+
+<p>Every answer carries an <code>X-Request-Id</code>, and every line its
+request wrote — the audit log's, the slow statement's, an error on stderr —
+carries the same id. A client's own id is kept; one is made where none was
+sent.</p>
+
+<pre data-lang="bash">curl -si -H 'X-Request-Id: checkout-7f3a' http://127.0.0.1:8080/_health | grep -i request-id
+# X-Request-Id: checkout-7f3a
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>An id a client sends is kept when it is printable ASCII of at most 128
+bytes; any other is replaced, as a header or a log line could not carry it
+whole. A made one is 16 hex characters. <code>fenec-shard</code> takes the
+client's id or makes one, sends it to the node, which takes it as its own,
+and answers with it: one request through the router has one id in the
+router's log, the node's and the answer. A text line on stderr written while
+a request was served — a sync error — ends with
+<code>request_id=&lt;id&gt;</code>. A subscription's and a replication
+stream's head carry the id too. Making one and writing it cost a request
+nothing measurable (<code>make requests-bench</code>, in turns).</p>
 </details>
 
 <h2>What it costs</h2>

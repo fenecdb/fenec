@@ -188,7 +188,9 @@ impl Router {
             if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
                 self.live.fetch_sub(1, Ordering::SeqCst);
                 let mut s = stream;
+                fenec_http::request_id::begin(None);
                 let _ = Response::error(503, "too many connections").write(&mut s, false, false);
+                fenec_http::request_id::end();
                 continue;
             }
             let router = Arc::clone(self);
@@ -360,10 +362,14 @@ impl Router {
                 Ok(Some(r)) => r,
                 Ok(None) => return,
                 Err(http::BadRequest(status, msg)) => {
+                    fenec_http::request_id::begin(None);
                     let _ = Response::error(status, &msg).write(&mut out, false, false);
                     return;
                 }
             };
+            // The client's id, or one made here, which the node is sent
+            // (`Pool::send`) and answers with.
+            fenec_http::request_id::begin_request(&req);
             let arrived = Instant::now();
             // Everything but a forwarded request is counted here, as it is
             // answered; `forward` counts its own, a stream at its head.
@@ -488,6 +494,7 @@ impl Router {
                 !hop_by_hop(k)
                     && !k.eq_ignore_ascii_case("host")
                     && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
+                    && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
             })
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
@@ -520,10 +527,22 @@ impl Router {
         fenec_http::audit::http(req, status, peer);
         let mut head = format!("HTTP/1.1 {status} {}\r\n", http::reason(status));
         for (k, v) in &answer.headers {
-            if !hop_by_hop(k) && !k.eq_ignore_ascii_case("content-length") {
+            // The node answers with the id it was sent; the router's own
+            // goes out in its place all the same, which a node from before
+            // the ids leaves out.
+            if !hop_by_hop(k)
+                && !k.eq_ignore_ascii_case("content-length")
+                && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
+            {
                 head.push_str(&format!("{k}: {v}\r\n"));
             }
         }
+        fenec_http::request_id::with(|id| {
+            head.push_str(fenec_http::request_id::HEADER);
+            head.push_str(": ");
+            head.push_str(id);
+            head.push_str("\r\n");
+        });
 
         if let Some(length) = answer.content_length() {
             let body = match answer.read_body(&self.pool, head_only) {

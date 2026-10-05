@@ -1422,6 +1422,37 @@ origin could send nothing.
 Reads and writes are no events. A test that opens the log is a `[[test]]`
 of its own: the log and the counts are the process's.
 
+**Every request has an id, in its answer and in every line it wrote**
+(`fenec_http::request_id`). Taken from `X-Request-Id` when it is printable
+ASCII of at most 128 bytes, made otherwise -- 16 hex characters,
+SplitMix64's finalizer over a key read from the system once a process, the
+thread's number and its count of requests, so no system call a request --
+and set as a thread-local where the request is read, as the audit log's
+peer is: `Response::write`, a subscription's and a replication stream's
+head send it, `audit::line` writes it as `request_id`, and `log!` ends a
+line with `request_id=<id>` while one is set. The slow statements are JSON
+lines on stderr through `audit::line` (`event` `slow`, `duration_ms`,
+`kind`, `tenant`, `statement`), so one parser reads both logs, and every
+line has a `level`; an admin event's status is `http_status`, since
+Datadog takes a `status` for the level. `--slow-ms 0` logs every statement,
+as PostgreSQL's `log_min_duration_statement = 0`. The router takes the
+client's id or makes one, drops the client's header, and `Pool::send` sends
+the thread's id with every request to a node, which takes it as its own;
+the router's answer carries its own id in place of the node's. An id costs 15 ns
+to make and 12 to keep a client's; in `make requests-bench`, eight
+runs in ABBA turns a minute apart, one client's p50 stayed 0.016-0.022 ms
+for a row by id either way, and eight clients' medians moved -12% to +6%
+by case with no sign shared -- the runs' own spread, the machine busy with
+other builds. `fenec_refused_total` (and the router's
+`fenec_router_refused_total`) count the 401s the audit log names.
+`monitoring/datadog/` holds the Agent's `conf.yaml` (OpenMetrics check,
+`namespace: fenecdb`, `raw_metric_prefix: fenec_`), `pipeline.json` and
+`dashboard.json`: `fenec-shard`'s `tests/datadog.rs` scrapes a primary, its
+replica, a tenant node and a router in process and fails on a metric the
+check keeps or the dashboard asks for that none of them sends, and
+`fenec-server`'s `tests/logs.rs` on an attribute the pipeline or the
+dashboard reads that no real line has.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels, a `lookup` chain at 8 and
 an `in (get ...)` at 100 000 values and 4 levels; all of them return a query

@@ -135,8 +135,8 @@ const SHARD: Shard = Shard {
 static SHARDS: [Shard; SHARD_COUNT] = [SHARD; SHARD_COUNT];
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 static CONNECTIONS: AtomicI64 = AtomicI64::new(0);
-/// `--slow-ms` in microseconds; 0 is off.
-static SLOW_MICROS: AtomicU64 = AtomicU64::new(0);
+/// `--slow-ms` in microseconds; `u64::MAX` is off, 0 every statement.
+static SLOW_MICROS: AtomicU64 = AtomicU64::new(u64::MAX);
 static STARTED: OnceLock<u64> = OnceLock::new();
 
 thread_local! {
@@ -165,6 +165,9 @@ pub fn wrote() {
 }
 
 /// Statements that took `ms` or longer are logged with their text: `--slow-ms`.
+/// 0 logs every statement, as PostgreSQL's `log_min_duration_statement`
+/// does: a log collector's pipeline is tried out on what a server answers
+/// now, not on what it answers slowly some day.
 pub fn set_slow(ms: u64) {
     SLOW_MICROS.store(ms.saturating_mul(1000), Ordering::Relaxed);
 }
@@ -183,7 +186,7 @@ fn now_secs() -> u64 {
 
 /// Counts a statement that took `took`, and logs it when it is slow. `text`
 /// is asked for only then.
-pub fn record(took: Duration, failed: bool, text: impl FnOnce() -> String) {
+pub fn record(took: Duration, failed: bool, tenant: Option<&str>, text: impl FnOnce() -> String) {
     let wrote = WROTE.with(|w| w.replace(false));
     let shard = &SHARDS[shard()];
     let s = &shard.statements[wrote as usize];
@@ -192,8 +195,7 @@ pub fn record(took: Duration, failed: bool, text: impl FnOnce() -> String) {
     if failed {
         s.errors.fetch_add(1, Ordering::Relaxed);
     }
-    let slow = SLOW_MICROS.load(Ordering::Relaxed);
-    if slow > 0 && micros >= slow {
+    if micros >= SLOW_MICROS.load(Ordering::Relaxed) {
         shard.slow.fetch_add(1, Ordering::Relaxed);
         let mut text = text();
         // A statement can be a bulk `put` of megabytes; the log wants what
@@ -206,14 +208,27 @@ pub fn record(took: Duration, failed: bool, text: impl FnOnce() -> String) {
             text.truncate(end);
             text.push_str("...");
         }
-        crate::log!(
-            "slow statement: {:.1} ms, {}{}: {}",
-            micros as f64 / 1000.0,
-            if wrote { "write" } else { "read" },
-            if failed { ", failed" } else { "" },
-            text.replace('\n', " ")
-        );
+        slow_line(micros, wrote, failed, tenant, &text);
     }
+}
+
+/// A slow statement's JSON line on stderr: the audit log's shape
+/// ([`crate::audit::line`]), so that a log collector reads both with one
+/// parser and joins either to the request by its `request_id`. Text, as it
+/// was, needed a pattern of its own in every collector.
+fn slow_line(micros: u64, wrote: bool, failed: bool, tenant: Option<&str>, text: &str) {
+    use crate::audit::{Field, Level};
+    let mut fields = vec![
+        ("duration_ms", Field::Num(micros as f64 / 1000.0)),
+        ("kind", Field::Text(if wrote { "write" } else { "read" })),
+        ("failed", Field::Bool(failed)),
+    ];
+    if let Some(t) = tenant {
+        fields.push(("tenant", Field::Text(t)));
+    }
+    fields.push(("statement", Field::Text(text)));
+    let line = crate::audit::line("slow", Level::Warn, &fields);
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
 }
 
 /// A connection, counted open for as long as this lives.
@@ -351,6 +366,12 @@ fn render(source: Source) -> String {
     );
     let slow: u64 = SHARDS.iter().map(|s| load(&s.slow)).sum();
     out.sample("fenec_slow_statements_total", &[], slow);
+    out.family(
+        "fenec_refused_total",
+        "counter",
+        "Requests refused for their token (401), each also in the audit log.",
+    );
+    out.sample("fenec_refused_total", &[], crate::audit::refused());
     out.family(
         "fenec_auto_compactions_total",
         "counter",

@@ -1,0 +1,279 @@
+<!--
+title: Datadog and other monitoring systems — fenecdb
+description: fenecdb under Datadog, New Relic, Elastic and Grafana Cloud: the OpenMetrics check for /_metrics, the JSON logs and their pipeline, a ready dashboard, and the request id that joins them.
+-->
+
+<h1>Datadog and other monitoring systems</h1>
+<p class="kicker">Everything a monitoring system needs from fenecdb is two
+things it already reads: <code>/_metrics</code> in Prometheus's format, and
+logs written as JSON lines. Datadog's check, pipeline and dashboard are ready
+in the repository.</p>
+
+<h2 id="datadog">Datadog in three steps</h2>
+
+<p>The repository's <code>monitoring/datadog/</code> holds the Agent's
+configuration, a logs pipeline and a dashboard.</p>
+
+<pre data-lang="bash"># 1. the check and the logs: the Agent reads /_metrics and both logs
+sudo cp monitoring/datadog/conf.yaml /etc/datadog-agent/conf.d/openmetrics.d/conf.yaml
+sudo systemctl restart datadog-agent     # with logs_enabled: true in datadog.yaml
+
+# 2. the pipeline that remaps the logs' attributes
+curl -X POST https://api.datadoghq.com/api/v1/logs/config/pipelines \
+  -H "DD-API-KEY: $DD_API_KEY" -H "DD-APPLICATION-KEY: $DD_APP_KEY" \
+  -H 'Content-Type: application/json' -d @monitoring/datadog/pipeline.json
+
+# 3. the dashboard
+curl -X POST https://api.datadoghq.com/api/v1/dashboard \
+  -H "DD-API-KEY: $DD_API_KEY" -H "DD-APPLICATION-KEY: $DD_APP_KEY" \
+  -H 'Content-Type: application/json' -d @monitoring/datadog/dashboard.json
+</pre>
+
+<ul>
+  <li><b>Every server</b>, replica, tenant node and router is an instance of
+    the same check, each with its own address and token.</li>
+  <li><b>The names are tested:</b> a test scrapes a real server, a replica,
+    a tenant node and a router, and fails if the check or the dashboard
+    names a metric none of them sends.</li>
+</ul>
+
+<h2 id="metrics">The metrics</h2>
+
+<p>The Agent's OpenMetrics check reads <code>/_metrics</code>. With
+<code>namespace: fenecdb</code> and the <code>fenec_</code> prefix taken off,
+the metrics arrive as <code>fenecdb.*</code>.</p>
+
+<pre data-lang="yaml">instances:
+  - openmetrics_endpoint: http://127.0.0.1:9464/_metrics
+    headers:
+      Authorization: "Bearer CHANGE-ME"   # --admin-token or --http-token
+    namespace: fenecdb
+    raw_metric_prefix: fenec_
+    metrics:
+      - statements
+      - statement_errors
+      - statement_duration_seconds
+      - refused
+      - change_sequence
+      - ^replica_.*$
+      - ^tenants.*$
+      - ^router_.*$
+      # ... the whole list is in monitoring/datadog/conf.yaml
+    histogram_buckets_as_distributions: true
+    tags:
+      - service:fenecdb
+      - fenec_role:server       # server, replica, tenant-node or router
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>In <code>/_metrics</code></th><th>In Datadog</th><th>Type</th></tr></thead>
+<tbody>
+<tr><td><code>fenec_statements_total{kind}</code></td><td><code>fenecdb.statements.count</code>, tag <code>kind</code></td><td>count: <code>.as_rate()</code> is a second's</td></tr>
+<tr><td><code>fenec_documents{collection}</code></td><td><code>fenecdb.documents</code>, tag <code>collection</code></td><td>gauge</td></tr>
+<tr><td><code>fenec_statement_duration_seconds</code></td><td><code>fenecdb.statement_duration_seconds.bucket</code>, <code>.sum</code>, <code>.count</code></td><td>distribution: <code>p99:</code> once percentiles are on</td></tr>
+<tr><td><code>fenec_router_requests_total{route, code}</code></td><td><code>fenecdb.router_requests.count</code>, tags <code>route</code>, <code>code</code></td><td>count</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>A counter loses its <code>_total</code> and arrives as a count,
+<code>fenecdb.&lt;name&gt;.count</code>; a gauge arrives under its name. A
+histogram's buckets arrive, with
+<code>histogram_buckets_as_distributions</code>, as one distribution,
+<code>fenecdb.&lt;name&gt;.bucket</code>, whose percentiles Datadog takes
+over every server's buckets together — as Prometheus's
+<code>histogram_quantile</code> does — once they are turned on in the
+metric's summary; its <code>.sum</code> and <code>.count</code> give the
+mean. Every label is a tag: <code>kind</code>, <code>collection</code>,
+<code>route</code>, <code>code</code>, <code>node</code>,
+<code>outcome</code>, <code>version</code>.</p>
+
+<p><b>No label names a tenant.</b> A tenant node publishes its tenants'
+counts together (<code>fenec_tenants</code>, <code>fenec_tenants_open</code>,
+<code>fenec_tenants_disk_bytes</code>): a tenant's collection names are not
+the node's to publish, and a tag per tenant would be as many series as there
+are customers, which Datadog bills by. So a node's role goes into the
+instance's <code>tags</code> — <code>fenec_role:tenant-node</code>,
+<code>fenec_node:n1</code> — and a tenant's own figures come from the logs,
+whose lines carry a <code>tenant</code> attribute, and from
+<code>/t/&lt;tenant&gt;/_stats/statements</code>.</p>
+
+<p>The token goes in the <code>Authorization</code> header: kept out of the
+file with the Agent's secrets management (<code>"Bearer
+ENC[fenec_metrics_token]"</code>), or under Autodiscovery as
+<code>"Bearer %%env_FENEC_METRICS_TOKEN%%"</code>. The metric names
+fenecdb publishes are in <a href="/docs/monitoring">Monitoring</a>.</p>
+</details>
+
+<h2 id="logs">The logs</h2>
+
+<p>The audit log (<code>--audit</code>) and the slow statements
+(<code>--slow-ms</code>, on stderr) are JSON lines, one event each, with the
+same attributes. The Agent tails both files; the pipeline makes their
+attributes Datadog's own.</p>
+
+<pre data-lang="json">{"at":"2026-10-05T09:30:12.310Z","event":"slow","level":"warn","proto":"http","peer":"10.0.0.7:53112","request_id":"9f2c41d07ab35e18","duration_ms":312.408,"kind":"read","failed":false,"tenant":"acme","statement":"POST /query {\"query\":\"get people order name\"}"}
+{"at":"2026-10-05T09:32:05.117Z","event":"refused","level":"warn","proto":"http","peer":"198.51.100.4:40031","request_id":"5d0e7c2a91f4b366","method":"GET","path":"/notes"}</pre>
+
+<pre data-lang="yaml">logs:
+  - type: file
+    path: /var/log/fenec/audit.log       # --audit /var/log/fenec/audit.log
+    service: fenecdb
+    source: fenecdb
+  - type: file
+    path: /var/log/fenec/server.log      # fenec-server ... 2>> /var/log/fenec/server.log
+    service: fenecdb
+    source: fenecdb
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Attribute</th><th>Remapped to</th><th>By</th></tr></thead>
+<tbody>
+<tr><td><code>service</code></td><td>the log's service</td><td>the Agent's <code>service: fenecdb</code></td></tr>
+<tr><td><code>level</code></td><td>the log's status: <code>info</code>, <code>warn</code></td><td>status remapper</td></tr>
+<tr><td><code>at</code></td><td>the log's date</td><td>date remapper</td></tr>
+<tr><td><code>duration_ms</code></td><td><code>duration</code>, in nanoseconds</td><td>arithmetic processor, <code>duration_ms * 1000000</code></td></tr>
+<tr><td><code>request_id</code></td><td><code>http.request_id</code>, kept as it is too</td><td>attribute remapper</td></tr>
+<tr><td><code>peer</code></td><td><code>network.client.ip</code>, <code>network.client.port</code></td><td>grok parser</td></tr>
+<tr><td><code>method</code>, <code>path</code>, <code>http_status</code></td><td><code>http.method</code>, <code>http.url_details.path</code>, <code>http.status_code</code></td><td>attribute remappers</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>Every line has <code>at</code>, <code>event</code>
+(<code>slow</code>, <code>refused</code>, <code>schema</code> or
+<code>admin</code>), <code>level</code>, <code>proto</code>,
+<code>peer</code> — with <code>via</code>, the router, where one forwarded
+the request — and the request's <code>request_id</code>. A slow statement
+adds <code>duration_ms</code>, <code>kind</code> (<code>read</code> or
+<code>write</code>), <code>failed</code>, <code>tenant</code> on a tenant
+node, and <code>statement</code>; a refusal <code>method</code> and
+<code>path</code>; a schema change <code>statement</code>, by its shape,
+<code>tenant</code> and <code>failed</code>; an admin request
+<code>method</code>, <code>path</code> and <code>http_status</code> — not
+<code>status</code>, which Datadog takes for the line's level before
+<code>level</code>.</p>
+
+<p>stderr also holds the server's own text lines — that it listens, what it
+linked, an error. One written while a request was served ends with
+<code>request_id=&lt;id&gt;</code>, which the pipeline's first processor, a
+grok parser over the message, takes out. Under Docker, the container's log
+is stderr: <code>type: docker</code> with the same <code>source</code> and
+<code>service</code>, or the label
+<code>com.datadoghq.ad.logs='[{"source":"fenecdb","service":"fenecdb"}]'</code>.</p>
+
+<p><code>--slow-ms 0</code> logs every statement, as PostgreSQL's
+<code>log_min_duration_statement = 0</code> does: a pipeline is tried out on
+what a server answers now. A test starts <code>fenec-server</code>, makes it
+write each kind of line, and fails if the pipeline or the dashboard reads an
+attribute none of them has. The <a href="/docs/monitoring#audit">audit
+log</a> and the <a href="/docs/monitoring#slow">slow statements</a> are
+described in Monitoring.</p>
+</details>
+
+<h2 id="dashboard">The dashboard</h2>
+
+<p><code>monitoring/datadog/dashboard.json</code> opens on whether the disk
+has refused a write, statements and errors a second, refusals and the memory
+footprint, then requests and their latency, writes and storage,
+replication, tenants, the router, and the logs.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>Its groups, each on the metrics <code>/_metrics</code> sends:</p>
+
+<ul>
+  <li><b>Requests:</b> statements a second by kind, errors, p50, p95 and p99
+    by kind, the mean, slow statements, refusals (401) and connections.</li>
+  <li><b>Writes and storage:</b> writes a second — the rate of
+    <code>fenecdb.change_sequence</code> — documents and each collection's
+    dead share, the file and what a compact would give back, compactions
+    <code>--auto-compact</code> ran, and vectors waiting to be linked.</li>
+  <li><b>Replication:</b> a replica's lag in writes, whether it is
+    connected, since it last heard from its primary, a primary's replicas,
+    reconnects and whole images.</li>
+  <li><b>Tenants:</b> on disk and open, their files, and the tenants placed
+    on each node.</li>
+  <li><b>Router:</b> requests by route and status class, its p99 against
+    its nodes', nodes it could not reach, moves and refusals.</li>
+  <li><b>Logs:</b> the slow statements, the refusals, and the schema
+    changes and admin requests, each with its request id.</li>
+</ul>
+
+<p>The <code>host</code> template variable picks one server or all of them.
+The percentiles need the distribution's percentiles turned on, once, in the
+metric's summary.</p>
+</details>
+
+<h2 id="request-id">One id a request</h2>
+
+<p>Every answer carries <code>X-Request-Id</code>, and every line the
+request wrote carries it as <code>request_id</code>: search the logs for the
+id a client reports.</p>
+
+<pre data-lang="bash">curl -i -H 'X-Request-Id: checkout-7f3a' -X POST http://127.0.0.1:8080/query \
+  -d '{"query":"get orders where id = 7"}'
+# HTTP/1.1 200 OK
+# X-Request-Id: checkout-7f3a
+</pre>
+
+<ul>
+  <li><b>The client's id is kept</b> when it is printable ASCII of at most
+    128 bytes; any other, or none, is replaced by 16 hex characters.</li>
+  <li><b>Through <code>fenec-shard</code></b> the router hands its id to the
+    node, so the router's lines, the node's and the answer have one id.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A load balancer or a gateway that sets <code>X-Request-Id</code> has its
+id carried through to fenecdb's logs; a client that sends none can read the
+one made for it off the answer — a subscription's and a replication
+stream's too — and report it. A made id is 64 bits of a mix of a key the
+process reads from the system once, the connection's thread and its count of
+requests: never the same twice within a process, and 15 ns to make, 12 to
+keep a client's. The id lives with the connection's thread, as the audit log's peer
+does, so nothing between the request's reading and a line's writing carries
+it. Making it, sending it and logging it cost a request nothing measurable:
+in <code>make requests-bench</code>, eight runs in turns, one client's
+round trip for a row by id stayed 0.016–0.022 ms either way.</p>
+</details>
+
+<h2 id="others">New Relic, Elastic, Grafana Cloud</h2>
+
+<p>Each reads the same two things: <code>/_metrics</code> as Prometheus
+metrics, and the JSON lines as logs.</p>
+
+<ul>
+  <li><b>New Relic:</b> the infrastructure agent's Prometheus OpenMetrics
+    integration (<code>nri-prometheus</code>) scrapes
+    <code>/_metrics</code> with the token as a bearer header, and the
+    metrics keep their names, <code>fenec_statements_total</code> and the
+    rest. Its log forwarder tails both files and parses each JSON line into
+    attributes; <code>request_id</code> is one.</li>
+  <li><b>Elastic:</b> Metricbeat's Prometheus module, its
+    <code>collector</code> metricset, reads <code>/_metrics</code>
+    (<code>metrics_path: /_metrics</code>, the token in
+    <code>headers</code>). Filebeat's <code>filestream</code> input with the
+    <code>ndjson</code> parser reads the logs, and an ingest pipeline's
+    <code>date</code> processor takes <code>at</code> as
+    <code>@timestamp</code> and <code>level</code> as
+    <code>log.level</code>.</li>
+  <li><b>Grafana Cloud:</b> Grafana Alloy's
+    <code>prometheus.scrape</code> reads <code>/_metrics</code> and
+    <code>prometheus.remote_write</code> sends it on — or a Prometheus of
+    your own with <code>remote_write</code> — and
+    <code>monitoring/grafana/fenecdb.json</code> is the dashboard. Alloy's
+    <code>loki.source.file</code> with a <code>stage.json</code> sends the
+    logs to Loki, <code>request_id</code> one of the fields.</li>
+</ul>
+
+<h2 id="tracing">Tracing</h2>
+
+<p>fenecdb emits no traces yet: there are no spans, and no
+<code>traceparent</code> is read or sent. OpenTelemetry is planned. Until
+then the request id is what joins a client's trace to fenecdb's logs: send
+the trace's id as <code>X-Request-Id</code>, and every line the request
+wrote carries it.</p>

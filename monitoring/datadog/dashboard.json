@@ -1,0 +1,1109 @@
+{
+  "title": "fenecdb",
+  "description": "fenec-server and fenec-shard through the Agent's OpenMetrics check (monitoring/datadog/conf.yaml) and the logs pipeline (pipeline.json). Every metric here is held to a real /_metrics scrape by crates/fenec-shard/tests/datadog.rs.",
+  "layout_type": "ordered",
+  "template_variables": [
+    {
+      "name": "host",
+      "prefix": "host",
+      "available_values": [],
+      "default": "*"
+    }
+  ],
+  "widgets": [
+    {
+      "definition": {
+        "title": "Overview",
+        "type": "group",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "title": "Storage failed (1: writes stopped)",
+              "type": "query_value",
+              "precision": 0,
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "max:fenecdb.storage_failed{$host}",
+                      "aggregator": "max"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ]
+                }
+              ],
+              "conditional_formats": [
+                {
+                  "comparator": ">=",
+                  "value": 1,
+                  "palette": "white_on_red"
+                },
+                {
+                  "comparator": "<",
+                  "value": 1,
+                  "palette": "white_on_green"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Statements a second",
+              "type": "query_value",
+              "precision": 1,
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.statements.count{$host}.as_rate()",
+                      "aggregator": "avg"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Errors a second",
+              "type": "query_value",
+              "precision": 2,
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.statement_errors.count{$host}.as_rate()",
+                      "aggregator": "avg"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Refused a second",
+              "type": "query_value",
+              "precision": 2,
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.refused.count{$host}.as_rate()",
+                      "aggregator": "avg"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Memory footprint",
+              "type": "query_value",
+              "precision": 0,
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.memory_bytes{$host}",
+                      "aggregator": "last"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ]
+                }
+              ],
+              "custom_unit": "B"
+            }
+          },
+          {
+            "definition": {
+              "title": "Versions running",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.build_info{$host} by {version}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "title": "Requests",
+        "type": "group",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "title": "Statements a second, by kind",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.statements.count{$host} by {kind}.as_rate()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Errors a second, by kind",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.statement_errors.count{$host} by {kind}.as_rate()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Latency p50 / p95 / p99, by kind (seconds)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "p50:fenecdb.statement_duration_seconds.bucket{$host} by {kind}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q2",
+                      "query": "p95:fenecdb.statement_duration_seconds.bucket{$host} by {kind}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q3",
+                      "query": "p99:fenecdb.statement_duration_seconds.bucket{$host} by {kind}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    },
+                    {
+                      "formula": "q2"
+                    },
+                    {
+                      "formula": "q3"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Mean latency, by kind (seconds)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.statement_duration_seconds.sum{$host} by {kind}.as_count()"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q2",
+                      "query": "sum:fenecdb.statement_duration_seconds.count{$host} by {kind}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1 / q2"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Slow statements (--slow-ms)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.slow_statements.count{$host}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Refused for their token (401)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.refused.count{$host}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Connections open",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.connections{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "title": "Writes and storage",
+        "type": "group",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "title": "Writes a second",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.change_sequence{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "per_second(q1)"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Documents, by collection",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.documents{$host} by {collection}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Dead share, by collection (compact gives it back)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.dead_bytes{$host} by {collection}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q2",
+                      "query": "sum:fenecdb.data_bytes{$host} by {collection}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1 / (q1 + q2)"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "File and what a compact would give back (bytes)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.file_bytes{$host}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q2",
+                      "query": "sum:fenecdb.reclaimable_bytes{$host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    },
+                    {
+                      "formula": "q2"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Compactions run on their own (--auto-compact)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.auto_compactions.count{$host}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Vectors waiting to be linked into the graph",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.vectors_unlinked{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "title": "Replication",
+        "type": "group",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "title": "Replica lag: writes on the primary's disk not applied",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "max:fenecdb.replica_behind{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Replica connected to its primary",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "min:fenecdb.replica_connected{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Since the primary was last heard from (seconds)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "max:fenecdb.replica_last_contact_seconds{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Replicas a primary feeds",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.replicas{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Reconnects and whole images",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.replica_reconnects.count{$host}.as_count()"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q2",
+                      "query": "sum:fenecdb.replica_images.count{$host}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    },
+                    {
+                      "formula": "q2"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "title": "Tenants",
+        "type": "group",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "title": "Tenants on disk and open",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.tenants{$host} by {host}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q2",
+                      "query": "sum:fenecdb.tenants_open{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    },
+                    {
+                      "formula": "q2"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Tenants' files (bytes)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.tenants_disk_bytes{$host} by {host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Tenants placed on each node (router)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "max:fenecdb.router_tenants{$host} by {node}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "title": "Router",
+        "type": "group",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "title": "Requests a second, by route and status class",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.router_requests.count{$host} by {route,code}.as_rate()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "p99: the router's answer against its nodes' (seconds)",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "p99:fenecdb.router_request_duration_seconds.bucket{$host,route:tenant}"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "q2",
+                      "query": "p99:fenecdb.router_upstream_duration_seconds.bucket{$host}"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    },
+                    {
+                      "formula": "q2"
+                    }
+                  ],
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Nodes it could not reach",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.router_upstream_errors.count{$host} by {node}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Tenant moves",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.router_moves.count{$host} by {outcome}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Refused at the router",
+              "type": "timeseries",
+              "show_legend": true,
+              "legend_layout": "auto",
+              "requests": [
+                {
+                  "response_format": "timeseries",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "q1",
+                      "query": "sum:fenecdb.router_refused.count{$host}.as_count()"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "q1"
+                    }
+                  ],
+                  "display_type": "bars"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "title": "Logs",
+        "type": "group",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "title": "Slow statements",
+              "type": "list_stream",
+              "requests": [
+                {
+                  "response_format": "event_list",
+                  "query": {
+                    "data_source": "logs_stream",
+                    "query_string": "source:fenecdb @event:slow",
+                    "indexes": [],
+                    "storage": "hot"
+                  },
+                  "columns": [
+                    {
+                      "field": "status_line",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "timestamp",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@duration_ms",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@kind",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@tenant",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@request_id",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@statement",
+                      "width": "auto"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Refusals",
+              "type": "list_stream",
+              "requests": [
+                {
+                  "response_format": "event_list",
+                  "query": {
+                    "data_source": "logs_stream",
+                    "query_string": "source:fenecdb @event:refused",
+                    "indexes": [],
+                    "storage": "hot"
+                  },
+                  "columns": [
+                    {
+                      "field": "status_line",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "timestamp",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@peer",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@method",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@path",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@request_id",
+                      "width": "auto"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "title": "Schema changes and admin requests",
+              "type": "list_stream",
+              "requests": [
+                {
+                  "response_format": "event_list",
+                  "query": {
+                    "data_source": "logs_stream",
+                    "query_string": "source:fenecdb @event:(schema OR admin)",
+                    "indexes": [],
+                    "storage": "hot"
+                  },
+                  "columns": [
+                    {
+                      "field": "status_line",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "timestamp",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@statement",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@path",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@http_status",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@request_id",
+                      "width": "auto"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

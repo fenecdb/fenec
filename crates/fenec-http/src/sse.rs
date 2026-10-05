@@ -421,6 +421,11 @@ fn write_head(
             "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n"
         ));
     }
+    crate::request_id::with(|id| {
+        if !id.is_empty() {
+            head.push_str(&format!("{}: {id}\r\n", crate::request_id::HEADER));
+        }
+    });
     head.push_str("\r\n");
     out.write_all(head.as_bytes())?;
     out.flush()

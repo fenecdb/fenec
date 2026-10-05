@@ -196,14 +196,17 @@ fn a_slow_statement_is_logged_with_its_text() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let log = s.server.log.lock().unwrap().clone();
-        if let Some(line) = log.lines().find(|l| l.starts_with("slow statement: ")) {
-            // The request as it came: its line, then its body.
+        if let Some(line) = log.lines().find(|l| l.contains(r#""event":"slow""#)) {
+            // A JSON line; the request as it came: its line, then its body.
             assert!(
-                line.contains(" ms, write: POST /query ") && line.contains("put t [{name:"),
+                line.starts_with('{')
+                    && line.contains(r#""kind":"write""#)
+                    && line.contains(r#""statement":"POST /query "#)
+                    && line.contains("put t [{name:"),
                 "{line}"
             );
             // Cut short: the statement is a megabyte, the line is not.
-            assert!(line.len() < 1200 && line.ends_with("..."), "{line}");
+            assert!(line.len() < 1400 && line.ends_with(r#"..."}"#), "{line}");
             assert!(!log.contains("987654"), "{log}");
             break;
         }

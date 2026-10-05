@@ -271,7 +271,8 @@ query; it is not a join and is not trying to be one.
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment |
 | [Integrations](https://fenecdb.com/docs/integrations) | LangChain and LlamaIndex vector stores over HTTP, `useLiveQuery` for React, the Go and .NET SDKs |
-| [Monitoring](https://fenecdb.com/docs/monitoring) | `/_metrics` in Prometheus's format, the Grafana dashboard in `monitoring/`, and the slow-statement log |
+| [Monitoring](https://fenecdb.com/docs/monitoring) | `/_metrics` in Prometheus's format, the Grafana dashboard in `monitoring/`, the slow-statement log and a request id in every line |
+| [Datadog and others](https://fenecdb.com/docs/datadog) | The Datadog Agent's check, logs pipeline and dashboard in `monitoring/datadog/`; New Relic, Elastic and Grafana Cloud |
 | [Sync](https://fenecdb.com/docs/sync) | A local replica that reads without the network and writes optimistically |
 | [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places and moves them |
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
