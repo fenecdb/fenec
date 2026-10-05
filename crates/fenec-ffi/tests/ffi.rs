@@ -471,6 +471,39 @@ fn schema(h: u64, text: &str, mode: u32) -> (i32, String) {
     taken(code, out)
 }
 
+fn warm(h: u64, only: &str) -> (i32, String) {
+    let mut out = std::ptr::null_mut();
+    let code = unsafe { fenec_warm(h, only.as_ptr(), only.len(), &mut out, std::ptr::null_mut()) };
+    taken(code, out)
+}
+
+/// What an open leaves for the first read is built by `fenec_warm`: those
+/// it names, then the rest, and none twice.
+#[test]
+fn warm_builds_what_an_open_left_unbuilt() {
+    let path = scratch("warm");
+    let p = path.to_str().unwrap();
+    let h = open(p, 0).unwrap();
+    query(
+        h,
+        "create collection t (a text @hash, b text @text, c int @sorted)",
+        "",
+    );
+    query(
+        h,
+        "put t [{a: \"x\", b: \"one two\", c: 1}, {a: \"y\", b: \"two\", c: 2}]",
+        "",
+    );
+    by_handle(fenec_close, h);
+    let h = open(p, 0).unwrap();
+    assert_eq!(warm(h, "t.b"), (FENEC_OK, r#"{"built":1}"#.into()));
+    assert_eq!(warm(h, ""), (FENEC_OK, r#"{"built":2}"#.into()));
+    assert_eq!(warm(h, ""), (FENEC_OK, r#"{"built":0}"#.into()));
+    let r = query(h, "get t select a match b \"two\" limit 5", "");
+    assert!(r.contains(r#""a":"y""#), "{r}");
+    by_handle(fenec_close, h);
+}
+
 /// A schema declared in code is compared and applied as the browser module
 /// does it, a file kept between, and described back as it was declared.
 #[test]

@@ -154,6 +154,8 @@ pub struct Tenants {
     /// Whether every tenant's database checks what a scoped token writes
     /// ([`Tenants::check_scoped_writes`]).
     checked: AtomicBool,
+    /// The derived indexes built as a tenant opens (`--warm`).
+    warm: Option<crate::warm::Warm>,
 }
 
 /// One tenant's open/closed state. Opening and closing a tenant both happen
@@ -187,6 +189,7 @@ impl Tenants {
             mapped: true,
             lease: None,
             checked: AtomicBool::new(false),
+            warm: None,
         })
     }
 
@@ -196,6 +199,13 @@ impl Tenants {
     /// has `--max-memory` count the data.
     pub fn with_mmap(mut self, on: bool) -> Tenants {
         self.mapped = on;
+        self
+    }
+
+    /// Builds each tenant's derived indexes as it opens, beside its first
+    /// requests (`fenec-server --warm`, [`crate::warm`]).
+    pub fn with_warm(mut self, warm: Option<crate::warm::Warm>) -> Tenants {
+        self.warm = warm;
         self
     }
 
@@ -610,6 +620,9 @@ impl Tenants {
         crate::link::beside(&format!("tenant `{name}`"), &db);
         crate::link::keep(&format!("tenant `{name}`"), &db);
         crate::sweep::watch(&format!("tenant `{name}`"), &db);
+        if let Some(w) = &self.warm {
+            crate::warm::start(&format!("tenant `{name}`"), &db, w);
+        }
         // The follower applies the primary node's writes for this tenant, and
         // holds the database -- not the tenant -- while it runs; `close`
         // therefore keeps a tenant with a running follower open.

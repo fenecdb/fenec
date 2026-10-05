@@ -575,3 +575,61 @@ fn health_answers_with_no_token_and_no_lock() {
     let (status, _) = Conn::open(h.port).ask("GET", "/collections", "").unwrap();
     assert_eq!(status, 401, "the rest still wants the token");
 }
+
+/// A read sent with `If-None-Match` is tagged with the change it answered
+/// at, and the tag sent back is answered 304 -- the query not run -- until
+/// a write touches a collection it reads; a read whose answer moves with
+/// the clock is never tagged.
+#[test]
+fn a_polled_read_is_answered_304_until_what_it_reads_is_written() {
+    let h = start(Config::default(), Database::new());
+    let mut c = Conn::open(h.port);
+    for q in [
+        "create collection stock (sku text @hash, n int)",
+        "create collection other (x int)",
+        "create collection seen (at timestamp @ttl(1h))",
+        r#"put stock {sku: "a", n: 3}"#,
+    ] {
+        ok(c.query(q));
+    }
+    let ask = |tag: &str, q: &str| -> (u16, Option<String>, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+        let body = format!("{{\"query\": {}}}", json_string(q));
+        write!(
+            s,
+            "POST /query HTTP/1.1\r\nHost: t\r\nIf-None-Match: {tag}\r\nConnection: close\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let (head, body) = out.split_once("\r\n\r\n").unwrap();
+        let etag = head
+            .lines()
+            .find_map(|l| l.strip_prefix("ETag: ").map(str::to_string));
+        (head[9..12].parse().unwrap(), etag, body.to_string())
+    };
+    let read = r#"get stock where sku = "a""#;
+    let (status, tag, body) = ask("\"0\"", read);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""n":3"#), "{body}");
+    let tag = tag.expect("tagged");
+    let (status, again, body) = ask(&tag, read);
+    assert_eq!((status, body.as_str()), (304, ""));
+    assert_eq!(again.as_deref(), Some(tag.as_str()));
+    // A write elsewhere leaves it as it was.
+    ok(c.query("put other {x: 1}"));
+    assert_eq!(ask(&tag, read).0, 304);
+    // One to what it reads answers it again, under a new tag.
+    ok(c.query(r#"set stock {n: 2} where sku = "a""#));
+    let (status, fresh, body) = ask(&tag, read);
+    assert_eq!(status, 200);
+    assert!(body.contains(r#""n":2"#), "{body}");
+    assert_ne!(fresh, Some(tag));
+    // Without the header, no tag; rows that expire, or `now()`, none either.
+    let (_, none, _) = ask("\"0\"", "get seen");
+    assert_eq!(none, None);
+    let (_, none, _) = ask("\"0\"", "get stock where n < now()");
+    assert_eq!(none, None);
+}

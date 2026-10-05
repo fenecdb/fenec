@@ -439,6 +439,43 @@ fn an_inner_get_reads_only_what_the_token_may() {
     assert!(e.contains("in (get ...)"), "{e}");
 }
 
+/// A disjunctive facet leaves the query's own conditions on its field out,
+/// and never the token's: `facet owner disjunctive` split after the rules
+/// were ANDed in would have counted every user's rows. By `/query` and by
+/// REST's `facet=`.
+#[test]
+fn a_disjunctive_facet_keeps_the_token_rules() {
+    let n = start();
+    for (owner, title) in [("alice", "a"), ("alice", "b"), ("bob", "c"), ("carol", "d")] {
+        let sql = format!(r#"put notes {{owner: "{owner}", title: "{title}"}}"#);
+        assert_eq!(n.query(ROOT, &sql).0, 200);
+    }
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let (status, body) = n.query(
+        &alice,
+        r#"get notes where owner = "alice" and title = "a" count facet owner disjunctive, title disjunctive"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(r#""owner":[{"value":"alice","count":1}]"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""title":[{"value":"a","count":1},{"value":"b","count":1}]"#),
+        "{body}"
+    );
+    assert!(!body.contains("bob") && !body.contains("carol"), "{body}");
+    let (status, body) = n.call(
+        Some(&alice),
+        "GET",
+        "/notes?owner=eq.alice&facet=owner%20disjunctive&limit=0",
+        "",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("alice"), "{body}");
+    assert!(!body.contains("bob") && !body.contains("carol"), "{body}");
+}
+
 /// A `@unique` clash told a scoped token that another user's row holds the
 /// value, naming the row's id and echoing the value: alice, who may not read
 /// bob's profile, learned that it exists and where by trying his email.

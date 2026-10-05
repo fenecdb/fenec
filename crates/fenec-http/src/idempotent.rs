@@ -170,7 +170,16 @@ pub fn answered(db: &Database, key: &Key, ttl_ms: i64) -> Option<Response> {
             "this Idempotency-Key came with another request: a key is for one",
         ));
     }
-    Some(Response::json(*status as u16, body.clone()).header("Idempotent-Replayed", "true"))
+    let mut sent =
+        Response::json(*status as u16, body.clone()).header("Idempotent-Replayed", "true");
+    // Where the database stands now, which holds the write: a client that
+    // reads on a replica after the replayed answer waits for it there, as
+    // after the first. Sent without, every SDK read a replay's `Fenec-Seq`
+    // as none.
+    if *status < 300 {
+        sent.seq = Some(db.change_seq());
+    }
+    Some(sent)
 }
 
 /// Keeps `resp` as `key`'s answer, in the block the write is in, for
