@@ -658,6 +658,7 @@ posts          write          where author = $jwt.sub
 messages       read,insert    where room in $jwt.rooms
 journal        read,insert    where owner = $jwt.sub
 journal        append-only
+accounts       update(balance, held)                              for app
 *              read                                               for dashboard
 </pre>
 
@@ -665,7 +666,8 @@ journal        append-only
   <li><b>Reads</b> only see the rows the rule allows.</li>
   <li><b>Writes</b> must stay inside the rule, or get 403. <code>write</code>
     grants <code>insert</code>, <code>update</code> and <code>delete</code>,
-    and each can be granted alone.</li>
+    and each can be granted alone; <code>update(balance, held)</code> grants
+    an update of those fields and no other.</li>
   <li><b><code>append-only</code></b> collections take inserts from scoped
     tokens, and refuse every update and delete with 403.</li>
   <li><b>A list claim</b>, such as <code>"rooms": ["r1", "r2"]</code>,
@@ -707,8 +709,17 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     documents, held to the filters of the rules granting
     <code>insert</code>; an update is a <code>set</code> and a delete a
     <code>del</code>, of rows the token may read and the filters of the
-    rules granting them, a <code>set</code>'s rows checked again after. A
-    token may insert into a collection it cannot read, such as an event
+    rules granting them, a <code>set</code>'s rows checked again after.
+    <code>update(balance, held, status)</code> names the fields an update
+    may change: a write over a row — a <code>set</code>, a REST
+    <code>PATCH</code> or <code>PUT</code>, a line of a <code>/batch</code> —
+    is judged by the fields it changes, and each of them must be one rule's
+    whose filter admits the row before and after, or it is refused with 403
+    naming a field (a batch holding it is put back whole). A field written
+    with the value it holds is not changed. Rules widen each other, each
+    with its fields and its rows: <code>notes update where owner =
+    $jwt.sub</code> beside <code>notes update(title)</code> changes every
+    field of the token's notes and the title of anyone's. A token may insert into a collection it cannot read, such as an event
     stream: its reads of it are refused with 403 and it is not listed.
     <code>expired</code> grants the rows past their <code>@ttl</code>, which
     <code>expired()</code> reads (<a href="/docs/fenecql#reaper">the

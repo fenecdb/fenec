@@ -26,7 +26,13 @@
 //! tell.
 //!
 //! **Grants** are `read`, `insert`, `update` and `delete`, and `write` is
-//! the three writes. An `insert` is a put of new documents; `update` is a
+//! the three writes. `update(balance, held)` grants an update of those
+//! fields alone: a write over a row by a scoped token -- a `set`, REST
+//! `PATCH` and `PUT`, a `/batch` -- is judged by the fields it changes,
+//! which must all be one granting rule's, a rule admitting the row before
+//! and after ([`Scope::overwrites`], through [`Check`]'s
+//! `before_overwrite`). A `put` naming an id would be judged the same way,
+//! by the fields that differ; a scoped token names none. An `insert` is a put of new documents; `update` is a
 //! `set`, and `delete` a `del`, of rows the token may also read. A token
 //! may insert into a collection it cannot read -- an event stream, a trail
 //! a client appends to -- which is then not listed to it. `expired` grants
@@ -288,6 +294,9 @@ struct Rule {
     ops: u8,
     /// The writes named one by one, which an `append-only` line refuses.
     named: u8,
+    /// `update(a, b)`: the fields an update by this rule may change; `None`
+    /// for every one (`update`, `write`).
+    fields: Option<Vec<String>>,
     /// With `$jwt.<claim>` as parameter `k`, the claim `claims[k]`.
     filter: Option<Expr>,
     claims: Vec<String>,
@@ -310,6 +319,7 @@ pub struct Scope {
 struct Bound {
     collection: Option<String>,
     ops: u8,
+    fields: Option<Vec<String>>,
     filter: Option<Expr>,
 }
 
@@ -496,6 +506,7 @@ impl Access {
             rules.push(Bound {
                 collection: r.collection.clone(),
                 ops: r.ops,
+                fields: r.fields.clone(),
                 filter: r.filter.as_ref().map(|f| bind(f, &values)),
             });
         }
@@ -634,24 +645,63 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         .split_once(char::is_whitespace)
         .ok_or("no access given")?;
     let rest = rest.trim_start();
-    let (grants, mut rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    // The grants end at the first space outside a field list:
+    // `read,update(balance, held)`.
+    let mut depth = 0i32;
+    let end = rest
+        .find(|c: char| {
+            depth += (c == '(') as i32 - (c == ')') as i32;
+            c.is_whitespace() && depth == 0
+        })
+        .unwrap_or(rest.len());
+    let (grants, mut rest) = rest.split_at(end);
     let (mut ops, mut named) = (0, 0);
-    for g in grants.split(',') {
+    // `update(a, b)`: the fields an update may change, `None` for every one.
+    let mut fields: Option<Vec<String>> = None;
+    let mut every_field = false;
+    for g in split_grants(grants)? {
         match g {
             "read" => ops |= READ,
-            "write" => ops |= WRITES,
+            "write" => {
+                ops |= WRITES;
+                every_field = true;
+            }
             "insert" => named |= INSERT,
-            "update" => named |= UPDATE,
+            "update" => {
+                named |= UPDATE;
+                every_field = true;
+            }
             "delete" => named |= DELETE,
             "expired" => ops |= EXPIRED,
+            g if g.starts_with("update(") && g.ends_with(')') => {
+                named |= UPDATE;
+                let list = fields.get_or_insert_with(Vec::new);
+                for f in g["update(".len()..g.len() - 1].split(',') {
+                    let f = f.trim();
+                    let ok = !f.is_empty()
+                        && f.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !f.starts_with(|c: char| c.is_ascii_digit());
+                    if !ok {
+                        return Err(format!("`{g}`: a field list names fields, `update(a, b)`"));
+                    }
+                    if f == "id" {
+                        return Err("`update(id)`: no write changes a document's id".into());
+                    }
+                    list.push(f.to_string());
+                }
+            }
             other => {
                 return Err(format!(
-                    "`{other}` is none of read, insert, update, delete, write and expired"
+                    "`{other}` is none of read, insert, update, update(<fields>), delete, \
+                     write and expired"
                 ))
             }
         }
     }
     ops |= named;
+    if every_field {
+        fields = None;
+    }
     let mut role = None;
     let words: Vec<&str> = rest.split_whitespace().collect();
     if words.len() >= 2 && words[words.len() - 2] == "for" {
@@ -725,10 +775,37 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         collection: (collection != "*").then(|| collection.to_string()),
         ops,
         named,
+        fields,
         filter,
         claims,
         role,
     })
+}
+
+/// The grants of a rule, split at the commas outside a field list.
+fn split_grants(grants: &str) -> std::result::Result<Vec<&str>, String> {
+    let (mut out, mut depth, mut from) = (Vec::new(), 0i32, 0);
+    for (i, c) in grants.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(grants[from..i].trim());
+                from = i + 1;
+            }
+            _ => {}
+        }
+        if !(0..=1).contains(&depth) {
+            return Err(format!(
+                "`{grants}`: a field list is one pair of parentheses"
+            ));
+        }
+    }
+    if depth != 0 {
+        return Err(format!("`{grants}`: a field list is not closed"));
+    }
+    out.push(grants[from..].trim());
+    Ok(out)
 }
 
 /// `e` with each parameter replaced by the claim it stands for.
@@ -1048,6 +1125,85 @@ impl Scope {
         })
     }
 
+    /// Whether the token may write `doc` over `old` in the collection
+    /// `schema` describes, when a rule granting it `update` there names the
+    /// fields it may change: the fields that differ -- a `set`'s, a `put`'s
+    /// over an id, whatever route -- must all be one such rule's, a rule
+    /// that also admits the row before (`USING`) and after (`WITH CHECK`).
+    /// Rules that name no fields reach every field, as before, so a policy
+    /// with no field list judges nothing here.
+    fn overwrites(
+        &self,
+        schema: &Schema,
+        old: &Document,
+        doc: &Document,
+        registry: &Registry,
+    ) -> Result<()> {
+        let name = schema.name.as_str();
+        let here =
+            |r: &&Bound| r.ops & UPDATE != 0 && r.collection.as_deref().is_none_or(|c| c == name);
+        if !self.rules.iter().filter(here).any(|r| r.fields.is_some()) {
+            return Ok(());
+        }
+        // Compared as their encodings: `==` takes -0.0 for 0.0.
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let mut changed = Vec::new();
+        for (field, v) in &doc.fields {
+            a.clear();
+            b.clear();
+            fenec_core::codec::encode_value(&mut a, v);
+            fenec_core::codec::encode_value(&mut b, old.get(field).unwrap_or(&Value::Null));
+            if a != b {
+                changed.push(field.as_str());
+            }
+        }
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let ctx = EvalCtx {
+            params: &[],
+            registry,
+            clock: None,
+        };
+        let admits = |f: &Option<Expr>, d: &Document| -> Result<bool> {
+            match f {
+                None => Ok(true),
+                Some(f) => Ok(truthy(&eval(f, &mut Written(d, schema), &ctx)?)),
+            }
+        };
+        let covers = |r: &Bound| {
+            r.fields
+                .as_ref()
+                .is_none_or(|fs| changed.iter().all(|c| fs.iter().any(|f| f == c)))
+        };
+        let (mut before, mut after) = (false, false);
+        for r in self.rules.iter().filter(here).filter(|r| covers(r)) {
+            before = before || admits(&r.filter, old)?;
+            after = after || admits(&r.filter, doc)?;
+            if before && after {
+                return Ok(());
+            }
+        }
+        // Name a field no rule lets it change, where there is one.
+        let granted = |c: &&str| {
+            self.rules
+                .iter()
+                .filter(here)
+                .any(|r| r.fields.as_ref().is_none_or(|fs| fs.iter().any(|f| f == c)))
+        };
+        Err(denied(match changed.iter().find(|c| !granted(c)) {
+            Some(field) => format!("this token may not change `{field}` in `{name}`"),
+            None => format!(
+                "this token may not change {} of that row of `{name}`",
+                changed
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }))
+    }
+
     /// Whether `doc`, as `op` would write it to `collection`, is one this
     /// token may write: an insert's by the rules granting `insert`, an
     /// update's by those granting `update`.
@@ -1163,6 +1319,12 @@ impl Hook for Check {
             "the document is outside what this token may write to `{}`",
             schema.name
         )))
+    }
+    fn before_overwrite(&self, schema: &Schema, old: &Document, doc: &Document) -> Result<()> {
+        match CURRENT.with(|c| c.borrow().clone()) {
+            Some(scope) => scope.overwrites(schema, old, doc, &self.registry),
+            None => Ok(()),
+        }
     }
 }
 

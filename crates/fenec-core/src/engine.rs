@@ -5924,9 +5924,21 @@ impl Database {
             // and the id handed out above handed out again, as a block put
             // back hands its ids out again: nothing of this document is in
             // the store for the block's mark to take back.
+            // The document written over, read before the hooks: a hook judges
+            // a write over one by what it changes.
+            let old = match op {
+                WriteOp::Update => c.store.read(&schema, doc.id)?,
+                _ => None,
+            };
             let checked = hooks
                 .iter()
                 .try_for_each(|h| h.before_write(&schema, op, &mut doc))
+                .and_then(|_| match &old {
+                    Some(old) => hooks
+                        .iter()
+                        .try_for_each(|h| h.before_overwrite(&schema, old, &doc)),
+                    None => Ok(()),
+                })
                 .and_then(|_| match c.unique_clash(&doc) {
                     // `if absent` passes over a value held as an id held.
                     Err(Error::Duplicate(_)) if if_absent => Ok(false),
@@ -5944,10 +5956,6 @@ impl Database {
                 }
             }
             // Drop the old index entries when overwriting.
-            let old = match op {
-                WriteOp::Update => c.store.read(&schema, doc.id)?,
-                _ => None,
-            };
             if let Some(old) = &old {
                 c.unindex_doc(old, Some(&doc));
             }
@@ -8337,6 +8345,9 @@ impl Database {
             let mut doc = updated(&schema, &old, &assigns, &ctx)?;
             for h in &hooks {
                 h.before_write(&schema, WriteOp::Update, &mut doc)?;
+            }
+            for h in &hooks {
+                h.before_overwrite(&schema, &old, &doc)?;
             }
             // An update makes a duplicate as a put does: `set email = "a"`
             // over two documents is refused at the second.

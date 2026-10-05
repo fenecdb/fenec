@@ -73,6 +73,14 @@ These are deliberate, and README explains each one:
   holding its words, the token's or not, as an index walk does: users who
   must learn nothing of each other's rows, not even through timing, belong
   in tenants, a file each, or in collections of their own.
+- **A scoped update reaches every field unless its grant names them.**
+  `accounts update for app` lets the app's token `set accounts {kind:
+  ...}` as freely as `{balance: ...}`; `accounts update(balance, held,
+  status) for app` refuses a write changing any other field (403), by
+  every route. A field list holds a token to fields, not to amounts: one
+  that may move a balance may move it anywhere its rules' filters allow,
+  and a journal beside it, append-only, is what a reconciliation holds it
+  to.
 - **`append-only` binds scoped tokens, not the server's own.** A policy's
   `<collection> append-only` refuses every update and delete a JSON Web
   Token asks for there; the `--http-token` still changes and deletes rows,

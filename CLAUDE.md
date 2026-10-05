@@ -510,7 +510,17 @@ A token naming no `exp` is refused (`Demands::require_exp`,
 `--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
 one may lie; `mint` stamps an hour on claims naming none. Grants are
 `read`, `insert`, `update` and `delete` (`write` the three, bits in
-`Rule::ops`), and the `Check` hook takes the write's op: an insert held to
+`Rule::ops`), `update(a, b)` the update of those fields alone
+(`Rule::fields`): `update` on `accounts` let a ledger's app token `set
+accounts {balance: balance + 500000}` and change an account's kind too,
+and `WITH CHECK` saw only the row after. A write over a row is judged by
+the fields that differ, as encodings (`Scope::overwrites`, through the
+hook's `before_overwrite`, which the engine calls with the row as it was
+-- a `set`'s and a `put`'s over an id, the old row read before the hooks
+rather than after, so no read more): each must be one granting rule's,
+that rule admitting the row before and after; a policy naming no field
+list judges nothing there, and an unscoped write meets an empty hook
+list or a thread-local found empty. And the `Check` hook takes the write's op: an insert held to
 the rules granting it, an update found and checked by its own, a delete
 found by its own; an update and a delete need read beside them, an insert
 none, so a client appends to a stream it cannot see. `<c> append-only`, a
