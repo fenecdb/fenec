@@ -1,0 +1,20 @@
+-- Kestrel's own tenant: the sites it measures and who may see them.
+
+-- A site: its tenant's name, the public key its tracker sends, the
+-- origins a beacon may come from, and its rate limit (events a second).
+create collection sites (
+  name    text @unique,
+  key     text @unique,
+  label   text,
+  origins [text],
+  rate    int
+)
+
+-- Who signs in, and the sites they may open. A password is scrypt's
+-- output and its salt.
+create collection users (
+  name    text @unique,
+  display text,
+  hash    text,
+  sites   [text]
+)

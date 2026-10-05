@@ -1,0 +1,42 @@
+# Who may read and write what, with a JSON Web Token (src/tokens.ts).
+# Every token names its tenant: on a --dir node it reaches that tenant's
+# file alone, so a site's dashboard token reads its own site and nothing
+# else. The node's own token (--http-token) is no JWT and is held to none
+# of this: setup and the rollup worker use it, the browser never sees it.
+#
+# collection    access          rows   role
+
+# A site's dashboard: reads the raw events and every rollup, writes nothing.
+events          read                   for viewer
+minutes         read                   for viewer
+days            read                   for viewer
+day_pages       read                   for viewer
+day_refs        read                   for viewer
+day_dims        read                   for viewer
+firsts          read                   for viewer
+day_users       read                   for viewer
+weekly          read                   for viewer
+cohorts         read                   for viewer
+visitors        read                   for viewer
+rollup_state    read                   for viewer
+pulse           read                   for viewer
+
+# The ingest endpoint: inserts events, nothing else. It cannot read them
+# back, change them or delete them, nor touch a rollup.
+events          insert                 for ingest
+
+# The market feed writes ticks and keeps the quotes; the market page reads.
+ticks           insert                 for feed
+quotes          read,insert,update     for feed
+ticks           read                   for viewer
+quotes          read                   for viewer
+
+# Kestrel's server reads the sites and users to sign people in and to
+# route beacons; changing them is the operator's.
+sites           read                   for app
+users           read                   for app
+
+# Raw events are written once. No JWT updates or deletes them, whatever
+# its role; the node's token keeps corrections, erasure and @ttl's sweep.
+events          append-only
+ticks           append-only

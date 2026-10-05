@@ -1,0 +1,148 @@
+-- A site's collections: one tenant per customer site, so one file each.
+-- scripts/setup.ts applies this to every site tenant through
+-- POST /t/<site>/_schema/apply.
+
+-- The raw events, one row each, kept 30 days. `eid` is the tracker's own
+-- id for the event (its batch id and place), so a beacon sent twice under
+-- another key is still written once (`put ... if absent`). `at` is @ttl:
+-- an ordered index whose rows leave every read after 30 days, so a range
+-- reads only its rows and a count by bucket reads the index alone.
+-- policy.txt makes it append-only: the ingest token inserts, no JWT
+-- updates or deletes.
+--
+-- No @hash on `name`, `country`, `device` or `browser`, though the facets
+-- and the funnel read them: a hash index's bucket is a list, and taking a
+-- row out of one walks it, so with a few values each of a hundred
+-- thousand rows the @ttl sweep held the write lock 370 to 500 ms for every
+-- 1 000 rows it deleted (README, "Gaps"). Every dashboard question has a
+-- range of `at`, which the ordered index answers, and its filter reads
+-- those rows alone.
+create collection events (
+  eid     text @unique,
+  name    text,
+  user    text,
+  path    text,
+  ref     text,
+  country text,
+  device  text,
+  browser text,
+  at      timestamp @ttl(30d),
+  props   json
+)
+
+-- The rollups, kept by the rollup worker (src/rollup.ts) from /_changes.
+-- Each row is keyed by what it counts, so the worker makes one with
+-- `put ... if absent` and adds to it with `set {n: n + $k}`.
+
+-- Events per minute and name: the 7-day chart. Kept a little longer than
+-- the raw events.
+create collection minutes (
+  key  text @unique,
+  at   timestamp @ttl(35d),
+  name text @hash,
+  n    int
+)
+
+-- Events per day and name, kept for good: long ranges.
+create collection days (
+  key  text @unique,
+  day  timestamp @sorted,
+  name text @hash,
+  n    int
+)
+
+-- Pageviews per day and page, and per day and referring site.
+create collection day_pages (
+  key  text @unique,
+  day  timestamp @sorted,
+  path text,
+  n    int
+)
+
+create collection day_refs (
+  key  text @unique,
+  day  timestamp @sorted,
+  ref  text,
+  n    int
+)
+
+-- A row per visitor and day they came: distinct visitors over any range
+-- of days, exactly, as count(distinct user) over these rows.
+create collection day_users (
+  key  text @unique,
+  day  timestamp @sorted,
+  user text
+)
+
+-- Events per day by country, by device and by browser (`dim`): the
+-- filters' counts over a long range, a few dozen rows a day.
+create collection day_dims (
+  key   text @unique,
+  day   timestamp @sorted,
+  dim   text,
+  value text,
+  n     int
+)
+
+-- The first time each day a visitor did each event that is not a
+-- pageview -- a signup started, finished -- for the funnel over a long
+-- range: a row for each such visitor and day, not for each pageview.
+create collection firsts (
+  key  text @unique,
+  day  timestamp @sorted,
+  name text,
+  user text,
+  at   timestamp
+)
+
+-- A row per visitor and week they came, with the week they first came
+-- (`cohort`), and each visitor's first day: the retention table is one
+-- statement, `group cohort, week`.
+create collection weekly (
+  key    text @unique,
+  week   timestamp @sorted,
+  user   text @hash,
+  cohort timestamp @sorted
+)
+
+-- Visitors of each cohort who came in each week: the retention table,
+-- a row a cell, kept as week rows are made and as a late event moves a
+-- visitor to an earlier cohort.
+create collection cohorts (
+  key    text @unique,
+  cohort timestamp @sorted,
+  week   timestamp,
+  n      int
+)
+
+-- A visitor's first and last day: the cohorts, and the visitors of a range
+-- that ends now, counted as `last >= day` through the ordered index -- a
+-- distinct count over a month of ten million events holds more than the
+-- million values `count(distinct)` takes.
+create collection visitors (
+  user  text @unique,
+  first timestamp @sorted,
+  last  timestamp @sorted
+)
+
+-- Where the worker stands in the change stream: the last change it
+-- applied, written in the same block as the rollups it made of it.
+create collection rollup_state (
+  name   text @unique,
+  seq    int,
+  events int,
+  day    timestamp,
+  at     timestamp
+)
+
+-- What the dashboard's "now" shows, worked out by the worker every few
+-- seconds: visitors in the last five minutes, pageviews a minute for the
+-- last half hour. A collection without @ttl, so a poll is answered 304
+-- while it has not changed.
+create collection pulse (
+  name    text @unique,
+  active  int,
+  views   int,
+  minutes json,
+  at      timestamp
+)

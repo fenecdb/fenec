@@ -24,6 +24,14 @@ costs are <code>make analytics-bench</code> on an M1 Air, in process, over
 a million events and a million ticks; over HTTP a request adds its round
 trip.</p>
 
+<p>These recipes make a whole application in
+<a href="https://github.com/fenecdb/fenec/tree/main/examples/analytics">examples/analytics</a>:
+a 572-byte tracker, beacons written once however often they are sent,
+rollups kept from the change stream exactly once, a dashboard that reads
+the raw events for a day and the rollups past it, a site a tenant, and
+the market data below with live prices — with its tests, Lighthouse
+scores and measurements at ten million events.</p>
+
 <h2 id="analytics">Analytics</h2>
 
 <p>Raw events, one row each. <code>at</code> takes <code>@sorted</code> —

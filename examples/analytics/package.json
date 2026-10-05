@@ -1,0 +1,32 @@
+{
+  "name": "fenecdb-analytics",
+  "private": true,
+  "type": "module",
+  "description": "Kestrel, product analytics on fenec-server: a tiny tracker, batched idempotent ingest, rollups kept from the change stream, a dashboard of SVG charts, and a market data view",
+  "scripts": {
+    "db": "sh scripts/db.sh",
+    "setup": "tsx scripts/setup.ts",
+    "build": "tsx scripts/build.ts",
+    "start": "tsx src/server.ts",
+    "lint": "tsc --noEmit && eslint . --max-warnings 0",
+    "test": "node --import tsx --test --test-reporter=spec --test-concurrency=1 test/*.test.ts",
+    "bench:ingest": "tsx scripts/bench-ingest.ts",
+    "bench:queries": "tsx scripts/bench-queries.ts",
+    "lighthouse": "sh scripts/lighthouse.sh",
+    "ci": "sh scripts/ci.sh"
+  },
+  "dependencies": {
+    "@fenecdb/web": "0.1.10"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@fontsource-variable/archivo": "5.3.0",
+    "@lhci/cli": "0.15.1",
+    "@types/node": "26.6.4",
+    "esbuild": "0.28.2",
+    "eslint": "9.39.5",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
+  }
+}

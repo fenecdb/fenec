@@ -1,0 +1,24 @@
+-- The market data tenant: ticks as they come, and a row a symbol kept
+-- with each batch of them.
+
+-- A tick: a trade's symbol, time, price and quantity. Kept a day (@ttl):
+-- a window or a bar reads the range of `at` it needs.
+create collection ticks (
+  sym text @hash,
+  at  timestamp @ttl(1d),
+  px  float,
+  qty int
+)
+
+-- The latest price a symbol, its session's open, high and low, kept by the
+-- feed in the block that writes its ticks. No @ttl, so the page's poll is
+-- answered 304 while no batch has landed.
+create collection quotes (
+  sym  text @unique,
+  px   float,
+  open float,
+  high float,
+  low  float,
+  n    int,
+  at   timestamp
+)

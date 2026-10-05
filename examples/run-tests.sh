@@ -144,6 +144,17 @@ run_saas() {
         FENEC_SHARD="${SAAS_FENEC_SHARD:-$root/target/debug/fenec-shard}" sh scripts/ci.sh)
 }
 
+# Kestrel (examples/analytics/scripts/ci.sh): a tenant node and the app of
+# its own, 40 days of history folded, lint and its correctness, security,
+# SEO and latency tests; ANALYTICS_LIGHTHOUSE=1 adds Lighthouse CI,
+# ANALYTICS_BENCH=1 the measurements.
+run_analytics() {
+    has node || { missing node "analytics"; return; }
+    w=$(npm_example analytics)
+    (cd "$w" && FENEC_SERVER="${ANALYTICS_FENEC_SERVER:-$root/target/debug/fenec-server}" \
+        FENEC_PORT=$((port + 4)) KESTREL_PORT=$((port + 5)) sh scripts/ci.sh)
+}
+
 run_python() {
     has python3 || { missing python3 "python"; return; }
     serve python
@@ -195,7 +206,7 @@ run_flutter() {
     (cd "$here/flutter" && ./run-tests.sh)
 }
 
-all="node-server web-local react shop ledger saas python go dotnet rust swift kotlin-android flutter"
+all="node-server web-local react shop ledger saas analytics python go dotnet rust swift kotlin-android flutter"
 "$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 for e in ${*:-$all}; do
     echo "== $e"
@@ -206,6 +217,7 @@ for e in ${*:-$all}; do
         shop) run_shop ;;
         ledger) run_ledger ;;
         saas) run_saas ;;
+        analytics) run_analytics ;;
         python) run_python ;;
         go) run_go ;;
         dotnet) run_dotnet ;;
