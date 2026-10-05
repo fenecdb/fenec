@@ -389,7 +389,9 @@ impl Response {
         keep_alive: bool,
         head_only: bool,
     ) -> std::io::Result<()> {
-        let mut head = String::with_capacity(160);
+        // Room for the id a client may send: past 160 bytes, a head with
+        // one made here was a second allocation an answer.
+        let mut head = String::with_capacity(256);
         head.push_str("HTTP/1.1 ");
         push_number(&mut head, self.status as u64);
         head.push(' ');
@@ -417,6 +419,13 @@ impl Response {
             push_number(&mut head, seq);
             head.push_str("\r\n");
         }
+        crate::request_id::with(|id| {
+            if !id.is_empty() {
+                head.push_str("X-Request-Id: ");
+                head.push_str(id);
+                head.push_str("\r\n");
+            }
+        });
         head.push_str("\r\n");
         let body: &[u8] = if head_only { &[] } else { &self.body };
         let mut parts = [IoSlice::new(head.as_bytes()), IoSlice::new(body)];

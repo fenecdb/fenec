@@ -29,12 +29,12 @@
 /// is gone -- a closed pipe, a log collector that restarted -- and a server
 /// thread that dies that way while logging a sync error, or while shutting
 /// down, leaves the process running and deaf to SIGTERM: the thread that
-/// would have acted on the signal is the one that died.
+/// would have acted on the signal is the one that died. A line written
+/// while a request is served ends with its id ([`request_id::log`]).
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
-        use ::std::io::Write as _;
-        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+        $crate::request_id::log(::std::format_args!($($arg)*));
     }};
 }
 
@@ -52,6 +52,7 @@ pub mod lease;
 pub mod link;
 pub mod metrics;
 pub mod replication;
+pub mod request_id;
 pub mod seal;
 pub mod sse;
 pub mod statements;
@@ -336,7 +337,9 @@ impl Server {
             if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
                 self.live.fetch_sub(1, Ordering::SeqCst);
                 let mut s = stream;
+                request_id::begin(None);
                 let _ = Response::error(503, "too many connections").write(&mut s, false, false);
+                request_id::end();
                 continue;
             }
 
@@ -503,10 +506,14 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             Ok(Some(req)) => req,
             Ok(None) => return,
             Err(http::BadRequest(status, msg)) => {
+                // A request that could not be read has an id all the same:
+                // its answer is what a client reports.
+                request_id::begin(None);
                 let _ = cors(Response::error(status, &msg), cfg).write(&mut out, false, false);
                 return;
             }
         };
+        request_id::begin_request(&req);
         if cfg.router_mark.is_some() {
             audit::request(&req, cfg.router_mark.as_deref());
         }
@@ -753,8 +760,9 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         if req.method != Method::Options {
             let (took, failed) = (started.elapsed(), resp.status >= 400);
             let what = describe(&req);
-            metrics::record(took, failed, || what.clone());
-            statements::record(tenant.as_ref().map(|t| t.name()), &what, took, failed);
+            let name = tenant.as_ref().map(|t| t.name());
+            metrics::record(took, failed, name, || what.clone());
+            statements::record(name, &what, took, failed);
         }
         // Let go of the tenant before writing: a slow client must not keep
         // it from closing.

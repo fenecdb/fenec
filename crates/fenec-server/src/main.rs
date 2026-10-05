@@ -129,7 +129,8 @@ usage: fenec-server [options]
                             24 bytes per entry
 
       --slow-ms <ms>        log every statement that takes this long or longer,
-                            with its text, from its arrival to its answer.
+                            with its text, from its arrival to its answer,
+                            as a JSON line on stderr; 0 logs every one.
                             Off by default
       --audit <path>        append a JSON line to this file for each request
                             refused for its token, each change of the schema

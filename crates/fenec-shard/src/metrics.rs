@@ -161,6 +161,16 @@ impl Drop for Connection {
 /// The counters' part of a scrape.
 pub fn counters(out: &mut Text) {
     out.family(
+        "fenec_router_refused_total",
+        "counter",
+        "Requests refused for their token (401), the router's own and its nodes' it passed on, each also in the audit log.",
+    );
+    out.sample(
+        "fenec_router_refused_total",
+        &[],
+        fenec_http::audit::refused(),
+    );
+    out.family(
         "fenec_router_requests_total",
         "counter",
         "Requests answered, by route and by status class.",

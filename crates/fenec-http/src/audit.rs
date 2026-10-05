@@ -8,8 +8,8 @@
 //! when, over what and from where:
 //!
 //! ```text
-//! {"at":"2026-10-01T09:30:12.041Z","event":"refused","proto":"http","peer":"10.0.0.7:53112","method":"POST","path":"/query"}
-//! {"at":"2026-10-01T09:30:12.310Z","event":"schema","proto":"http","peer":"10.0.0.7:53112","statement":"create collection notes (title text)","failed":false}
+//! {"at":"2026-10-01T09:30:12.041Z","event":"refused","level":"warn","proto":"http","peer":"10.0.0.7:53112","request_id":"9f2c41d07ab35e18","method":"POST","path":"/query"}
+//! {"at":"2026-10-01T09:30:12.310Z","event":"schema","level":"info","proto":"http","peer":"10.0.0.7:53112","request_id":"5d0e7c2a91f4b366","statement":"create collection notes (title text)","failed":false}
 //! ```
 //!
 //! Nothing on a read or a write's path writes to it: a line is a refusal,
@@ -131,6 +131,17 @@ pub enum Field<'a> {
     Text(&'a str),
     Int(u64),
     Bool(bool),
+    /// Written with three decimals: a duration in milliseconds.
+    Num(f64),
+}
+
+/// How much an event matters, as the line's `level` says it: what a log
+/// collector takes for its status (Datadog's `level`, Elastic's
+/// `log.level`) without a rule of its own.
+#[derive(Clone, Copy)]
+pub enum Level {
+    Info,
+    Warn,
 }
 
 /// Writes an event, with when, over what, from where and as whom.
@@ -138,8 +149,24 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
     let Some(log) = LOG.get() else {
         return;
     };
+    let level = match name {
+        "refused" => Level::Warn,
+        _ => Level::Info,
+    };
+    let line = line(name, level, fields);
+    let mut f = log.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = f.write_all(line.as_bytes()) {
+        crate::log!("audit log: {e}");
+    }
+}
+
+/// An event's JSON line, its newline included: when, what, how much it
+/// matters, over what, from where, the request's id, then `fields`. The
+/// slow-statement log writes its lines with it too, so that one parser
+/// reads both.
+pub fn line(name: &str, level: Level, fields: &[(&str, Field)]) -> String {
     let at = fenec_core::time::now_ms().map_or_else(|_| "?".into(), fenec_core::time::format_iso);
-    let mut line = String::with_capacity(160);
+    let mut line = String::with_capacity(192);
     let text = |line: &mut String, k: &str, v: &str| {
         line.push_str(",\"");
         line.push_str(k);
@@ -149,6 +176,11 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
     line.push_str("{\"at\":");
     fenec_core::json::escape_into(&mut line, &at);
     text(&mut line, "event", name);
+    let level = match level {
+        Level::Info => "info",
+        Level::Warn => "warn",
+    };
+    text(&mut line, "level", level);
     WHO.with(|w| {
         let w = w.borrow();
         if !w.proto.is_empty() {
@@ -166,6 +198,11 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
             (None, None) => {}
         }
     });
+    crate::request_id::with(|id| {
+        if !id.is_empty() {
+            text(&mut line, "request_id", id);
+        }
+    });
     for (k, v) in fields {
         match v {
             Field::Text(t) => text(&mut line, k, t),
@@ -175,14 +212,22 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
             Field::Bool(b) => {
                 line.push_str(&format!(",\"{k}\":{b}"));
             }
+            Field::Num(n) => {
+                line.push_str(&format!(",\"{k}\":{n:.3}"));
+            }
         }
     }
     line.push_str("}\n");
-    let mut f = log.lock().unwrap_or_else(|e| e.into_inner());
-    if let Err(e) = f.write_all(line.as_bytes()) {
-        crate::log!("audit log: {e}");
-    }
+    line
 }
+
+/// Requests refused for their token (401), counted whether or not a log
+/// is written: `fenec_refused_total`.
+pub fn refused() -> u64 {
+    REFUSED.load(Ordering::Relaxed)
+}
+
+static REFUSED: AtomicU64 = AtomicU64::new(0);
 
 /// A statement counted by its shape (`statements::record`): an event where
 /// it changes the schema.
@@ -215,6 +260,7 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
     let ip = peer.map(|p| p.ip());
     let path = req.target.split('?').next().unwrap_or("");
     if status == 401 {
+        REFUSED.fetch_add(1, Ordering::Relaxed);
         event(
             "refused",
             &[
@@ -240,7 +286,9 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
             &[
                 ("method", Field::Text(req.method.name())),
                 ("path", Field::Text(path)),
-                ("status", Field::Int(status as u64)),
+                // Not `status`, which a log collector takes for the line's
+                // level: Datadog's reads `status` first, and a 200 is none.
+                ("http_status", Field::Int(status as u64)),
             ],
         );
     }

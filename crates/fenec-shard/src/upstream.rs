@@ -98,6 +98,17 @@ impl Pool {
                 req.push_str(part);
             }
         }
+        // The id of the request this thread serves goes on to the node, which
+        // takes it as its own: one request through the router, one id in
+        // both logs. A forwarded request's own header is left out by
+        // `forward`, so it is never sent twice.
+        fenec_http::request_id::with(|id| {
+            if !id.is_empty() {
+                for part in [fenec_http::request_id::HEADER, ": ", id, "\r\n"] {
+                    req.push_str(part);
+                }
+            }
+        });
         req.push_str(&format!(
             "Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
             body.len()

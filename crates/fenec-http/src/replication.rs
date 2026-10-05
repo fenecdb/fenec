@@ -1004,9 +1004,20 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
     }
 
     let _ = out.set_write_timeout(Some(SILENCE));
-    let head = "HTTP/1.1 200 OK\r\nContent-Type: application/x-fenec-replication\r\n\
-                Cache-Control: no-cache, no-transform\r\nConnection: close\r\n\
-                X-Accel-Buffering: no\r\n\r\n";
+    let mut head = String::from(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/x-fenec-replication\r\n\
+         Cache-Control: no-cache, no-transform\r\nConnection: close\r\n\
+         X-Accel-Buffering: no\r\n",
+    );
+    crate::request_id::with(|id| {
+        if !id.is_empty() {
+            head.push_str(crate::request_id::HEADER);
+            head.push_str(": ");
+            head.push_str(id);
+            head.push_str("\r\n");
+        }
+    });
+    head.push_str("\r\n");
     let key = fresh_id();
     lock(&repl.streams).push(Stream {
         key,
