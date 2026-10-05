@@ -25,6 +25,8 @@
 //! bucket(at, 15m) | greatest(a, b) | least(a, b) | case when <c> then <v> ... [else <v>] end
 //! select a, b from <name> ...            -- the classic SQL order works too
 //! put    <name> { ... } if absent         -- a document whose id or @unique value is held is passed over
+//! put    <name> { ... } if absent else set { n: n + new.n }   -- or sets the row holding it
+//! put    <name> $1                       -- the documents a parameter holds: an object or a list
 //! set    <name> { k: v, ... } [where <expr>] -- v may read the row: {n: n + 1, at: now()}
 //! <expr> + - * / <expr>                  -- numbers, or a timestamp and milliseconds
 //! del    <name> [where <expr>]
@@ -798,7 +800,13 @@ impl Parser {
         self.eat_kw("into");
         let collection = self.ident()?;
         let mut docs = Vec::new();
-        if matches!(self.peek(), Tok::LBracket) {
+        let mut docs_param = None;
+        if let Tok::Param(i) = self.peek() {
+            // `put events $1`: the documents are the parameter's, an object
+            // or a list of them, so a page of any size is one text.
+            docs_param = Some(*i);
+            self.next();
+        } else if matches!(self.peek(), Tok::LBracket) {
             self.next();
             loop {
                 if matches!(self.peek(), Tok::RBracket) {
@@ -818,21 +826,30 @@ impl Parser {
                 docs.push(self.object()?);
             }
         }
-        if docs.is_empty() {
+        if docs.is_empty() && docs_param.is_none() {
             return self.err("put expects at least one document");
         }
         // `if absent`: a document whose id or `@unique` value is held is
-        // passed over, and the answer counts what was written.
+        // passed over, and the answer counts what was written. `else set
+        // {..}` sets the row holding it instead -- an upsert, `new.f`
+        // reading the document's `f`.
         let if_absent = self.eat_kw("if");
+        let mut else_set = None;
         if if_absent {
             self.expect_kw("absent")?;
+            if self.eat_kw("else") {
+                self.expect_kw("set")?;
+                else_set = Some(self.object()?);
+            }
         }
         let require = self.require()?;
         Ok(Statement::Put {
             collection,
             docs,
+            docs_param,
             insert: insert || if_absent,
             if_absent,
+            else_set,
             require,
         })
     }

@@ -68,6 +68,8 @@ fn main() {
             docs,
             insert: false,
             if_absent: false,
+            docs_param: None,
+            else_set: None,
             require: None,
         })
         .unwrap();
@@ -142,6 +144,8 @@ fn main() {
                 docs,
                 insert: false,
                 if_absent: false,
+                docs_param: None,
+                else_set: None,
                 require: None,
             })
             .unwrap();
@@ -180,6 +184,8 @@ fn main() {
                 docs,
                 insert: false,
                 if_absent: false,
+                docs_param: None,
+                else_set: None,
                 require: None,
             })
             .unwrap();

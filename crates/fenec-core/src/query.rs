@@ -1960,6 +1960,10 @@ pub enum Statement {
         collection: String,
         /// Field-expression pairs per document. Supplying `id` makes it an upsert.
         docs: Vec<Vec<(String, Expr)>>,
+        /// `put <name> $n`: the documents are the parameter's value, an
+        /// object or a list of objects, each member a field -- read as a
+        /// body's are, a json field's numbers as written. `docs` is empty.
+        docs_param: Option<usize>,
         /// `insert`: a document naming an id that is taken is refused
         /// (`Error::Duplicate`), where `put` writes over it.
         insert: bool,
@@ -1968,6 +1972,11 @@ pub enum Statement {
         /// refused, and not counted -- `SET NX`, whose answer (0 or 1) says
         /// whether the write was made. The parser sets `insert` with it.
         if_absent: bool,
+        /// `put ... if absent else set {..}`: the row holding the id or the
+        /// `@unique` value is set as a `set` sets it, each value over that
+        /// row, `new.f` the document's own `f`, and counted -- an upsert,
+        /// one statement under the write lock.
+        else_set: Option<Vec<(String, Expr)>>,
         /// `... require <n>`: the statement is refused (`Error::Unmet`), and
         /// so its block put back whole, unless it wrote exactly `n` rows.
         require: Option<u64>,
@@ -2046,13 +2055,44 @@ impl Expr {
     }
 }
 
+/// The documents parameter `i` holds for `put <collection> $i`: an object,
+/// or a list of objects, each a document's members.
+pub fn documents_in<'p>(
+    collection: &str,
+    i: usize,
+    params: &'p [Value],
+) -> Result<Vec<&'p [(String, Value)]>> {
+    let refused = |what: &str| {
+        Error::Type(format!(
+            "`put {collection} ${}` takes an object or a list of objects, not {what}",
+            i + 1
+        ))
+    };
+    match params.get(i) {
+        None => Err(Error::Query(format!("parameter ${} is not bound", i + 1))),
+        Some(Value::Object(m)) => Ok(vec![m.as_slice()]),
+        Some(Value::List(items)) => items
+            .iter()
+            .map(|item| match item {
+                Value::Object(m) => Ok(m.as_slice()),
+                other => Err(refused(&format!("a list holding {}", other.type_name()))),
+            })
+            .collect(),
+        Some(other) => Err(refused(other.type_name())),
+    }
+}
+
 impl Statement {
     /// Whether a literal in it holds a vector: when none does, no json
     /// field can be handed one, and nothing has to be asked of the schema.
     pub fn reads_vectors(&self) -> bool {
         let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::reads_vectors);
         match self {
-            Statement::Put { docs, .. } => docs.iter().flatten().any(|(_, e)| e.reads_vectors()),
+            Statement::Put { docs, else_set, .. } => docs
+                .iter()
+                .flatten()
+                .chain(else_set.iter().flatten())
+                .any(|(_, e)| e.reads_vectors()),
             Statement::Update { set, filter, .. } => {
                 set.iter().any(|(_, e)| e.reads_vectors()) || opt(filter)
             }
@@ -2082,13 +2122,60 @@ impl Statement {
         !matches!(self, Statement::Compact(_))
     }
 
+    /// A `put <name> $n` with the parameter's documents written into it,
+    /// each value a literal: what a scope's rules -- no `id`, its pinned
+    /// fields -- and a sync replica's matching read a document by. Any
+    /// other statement as it is.
+    pub fn with_documents(self, params: &[Value]) -> Result<Statement> {
+        let Statement::Put {
+            collection,
+            mut docs,
+            docs_param: Some(i),
+            insert,
+            if_absent,
+            else_set,
+            require,
+        } = self
+        else {
+            return Ok(self);
+        };
+        for members in documents_in(&collection, i, params)? {
+            docs.push(
+                members
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Expr::Lit(v.clone())))
+                    .collect(),
+            );
+        }
+        Ok(Statement::Put {
+            collection,
+            docs,
+            docs_param: None,
+            insert,
+            if_absent,
+            else_set,
+            require,
+        })
+    }
+
     /// Number of parameters the statement expects: the highest `$n` used.
     pub fn max_param(&self) -> usize {
         let opt = |e: &Option<Expr>| e.as_ref().map(|e| e.max_param()).unwrap_or(0);
         let pairs =
             |v: &Vec<(String, Expr)>| v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0);
         match self {
-            Statement::Put { docs, .. } => docs.iter().map(pairs).max().unwrap_or(0),
+            Statement::Put {
+                docs,
+                docs_param,
+                else_set,
+                ..
+            } => docs
+                .iter()
+                .chain(else_set)
+                .map(pairs)
+                .max()
+                .unwrap_or(0)
+                .max(docs_param.map_or(0, |i| i + 1)),
             Statement::Select(sel) | Statement::Explain(sel) => sel.max_param(),
             Statement::Update { set, filter, .. } => pairs(set).max(opt(filter)),
             Statement::Delete { filter, .. } => opt(filter),

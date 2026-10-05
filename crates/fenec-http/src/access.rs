@@ -1142,11 +1142,26 @@ impl Scope {
             Statement::Put {
                 collection,
                 mut docs,
+                docs_param,
                 insert,
                 if_absent,
+                else_set,
                 require,
             } => {
+                // `scoped()` writes a parameter's documents in first, so
+                // that each is held to the rules below.
+                if docs_param.is_some() {
+                    return Err(denied(
+                        "a scoped token's documents are read before it writes them".into(),
+                    ));
+                }
                 let f = self.writable(&collection, INSERT)?;
+                // An upsert sets the row holding the value as `set` would:
+                // the token updates as well as inserts, and the row it sets
+                // is one it may update (`Check::before_overwrite`).
+                if else_set.is_some() {
+                    self.writable(&collection, UPDATE)?;
+                }
                 let mut pins = Vec::new();
                 if let Some(f) = &f {
                     pinned(f, &mut pins);
@@ -1169,8 +1184,10 @@ impl Scope {
                 Statement::Put {
                     collection,
                     docs,
+                    docs_param,
                     insert,
                     if_absent,
+                    else_set,
                     require,
                 }
             }
@@ -1416,10 +1433,20 @@ impl Hook for Check {
         )))
     }
     fn before_overwrite(&self, schema: &Schema, old: &Document, doc: &Document) -> Result<()> {
-        match CURRENT.with(|c| c.borrow().clone()) {
-            Some(scope) => scope.overwrites(schema, old, doc, &self.registry),
-            None => Ok(()),
+        let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
+            return Ok(());
+        };
+        // The row written over is one the token may update: a `set` found
+        // it through the token's filter, and an upsert by the value it
+        // holds, which is any row's -- PostgreSQL's `ON CONFLICT DO UPDATE`
+        // asks the row the same of its `USING`.
+        if !scope.admits(schema, UPDATE, old, &self.registry)? {
+            return Err(denied(format!(
+                "the row of `{}` holding that value is outside what this token may update",
+                schema.name
+            )));
         }
+        scope.overwrites(schema, old, doc, &self.registry)
     }
 }
 

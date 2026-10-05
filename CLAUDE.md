@@ -1155,6 +1155,39 @@ which answer one row, nor in an inner `get`. Builders have it as a step,
 count, which the server landing the batch would never see. The module
 grew 1 017 bytes, 471 brotli.
 
+**`put ... if absent else set {..}` is an upsert; `put <c> $n` takes its
+documents from a parameter.** A rollup's row is "made at zero if missing,
+then added to", and was two statements a key -- `if absent`, then `set {n:
+n + $k}` -- or a read of which keys exist before the block. `else set`
+(`Statement::Put`'s `else_set`, only after `if absent`) sets the row
+holding a document's id or first `@unique` value as `set` sets a row
+(`Database::set_row`, which `update_rows` now calls a row), its values
+over that row and `new.f` the document's `f` (`Calc::New`, `Upserting` for
+an expression; `new.id` the id it names, or null; a name the collection
+does not have refused, never read as null), and counts it with the rows
+made; a row past its `@ttl` is made again, not set. The document's own
+hooks run as an insert's, the row's as a `set`'s. A key twice in one
+statement adds to the row the first made: the vectors written before a
+row is set are linked first (`index_written`), or the batch at the end
+put the first one's vector back over the set's. A scoped token needs
+update beside insert for it, and the row it sets must pass its update
+filter (`Check::before_overwrite` asks `admits` of the row written over,
+as PostgreSQL's `ON CONFLICT DO UPDATE` asks the row its `USING`): found
+by a value any row may hold, it was anyone's. `put <c> $n` (`docs_param`)
+writes the parameter's object, or each of its list of objects, a member a
+field (`documents_in`, `Database::document_of`): an object is read exact
+from the start, as a body's json field is, and a list of numbers in it
+becomes a vector's `f32`s through the field's type, so a beacon is one
+text whatever its size -- a page's statements were texts of up to 500
+documents, past the 1 KB the parse cache keeps. Scoped, `scoped()` writes
+the documents in first (`Statement::with_documents`), so each is held to
+the rules a written one is. A page of 1 000 events parsed and written
+takes 2.30 ms as `put ev $1` against 5.31 written out; a rollup page of
+1 000 keys, half new, 1.13 ms as one upsert against 1.47 for the read and
+the two writes, in process (`make analytics-bench`'s `writes`). The
+browser module grew 5.0 KB, 1.3 KB brotli -- 7.5 KB more while `new.` was
+cut off a name by a slice that can panic (`strip_prefix` now).
+
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
 before refuses the file rather than open it as a plain hash and take the

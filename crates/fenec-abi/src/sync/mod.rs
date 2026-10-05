@@ -358,6 +358,8 @@ fn put_docs(collection: &str, docs: Vec<Vec<(String, Value)>>) -> Statement {
             .collect(),
         insert: false,
         if_absent: false,
+        docs_param: None,
+        else_set: None,
         require: None,
     }
 }

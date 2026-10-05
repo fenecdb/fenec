@@ -398,6 +398,8 @@ fn write_marker(
         docs: vec![doc],
         insert: false,
         if_absent: false,
+        docs_param: None,
+        else_set: None,
         require: None,
     })?;
     db.sync()?;
@@ -1212,6 +1214,8 @@ impl<'a> Mirror<'a> {
                         docs,
                         insert: false,
                         if_absent: false,
+                        docs_param: None,
+                        else_set: None,
                         require: None,
                     }
                 }

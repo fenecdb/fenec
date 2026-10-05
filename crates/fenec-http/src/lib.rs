@@ -440,10 +440,11 @@ fn full(cfg: &Config, req: &Request) -> bool {
 }
 
 /// The statement as `who` may run it.
-fn scoped(who: &Who, stmt: Statement) -> fenec_core::error::Result<Statement> {
+fn scoped(who: &Who, stmt: Statement, params: &[Value]) -> fenec_core::error::Result<Statement> {
     match who.scope() {
         None => Ok(stmt),
-        Some(scope) => scope.rewrite(stmt),
+        // A parameter's documents written in, each held to the rules.
+        Some(scope) => scope.rewrite(stmt.with_documents(params)?),
     }
 }
 
@@ -1004,7 +1005,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(r) => r,
             Err(e) => return error_response(&e),
         };
-        let stmt = match scoped(&who, routed.statement) {
+        let stmt = match scoped(&who, routed.statement, &[]) {
             Ok(s) => s,
             Err(e) => return error_response(&e),
         };
@@ -1056,7 +1057,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(r) => r,
             Err(e) => return error_response(&e),
         };
-        let stmt = match scoped(&who, routed.statement) {
+        let stmt = match scoped(&who, routed.statement, &[]) {
             Ok(s) => s,
             Err(e) => return error_response(&e),
         };
@@ -1229,7 +1230,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     // into a copy of it.
     let stmt = match who.scope() {
         None => stmt,
-        Some(_) => match scoped(who, Arc::unwrap_or_clone(stmt)) {
+        Some(_) => match scoped(who, Arc::unwrap_or_clone(stmt), &params) {
             Ok(s) => Arc::new(s),
             Err(e) => return error_response(&e),
         },
@@ -1523,7 +1524,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     // leave the ones before it applied.
     let stmts = match stmts
         .into_iter()
-        .map(|(s, p)| scoped(who, s).map(|s| (s, p)))
+        .map(|(s, p)| scoped(who, s, &p).map(|s| (s, p)))
         .collect::<fenec_core::error::Result<Vec<_>>>()
     {
         Ok(s) => s,

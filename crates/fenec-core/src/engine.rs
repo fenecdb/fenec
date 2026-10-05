@@ -5186,14 +5186,24 @@ impl Database {
             Statement::Put {
                 collection,
                 docs,
+                docs_param,
                 insert,
                 if_absent,
+                else_set,
                 require,
             } => required(
                 if *insert { "insert" } else { "put" },
                 collection,
                 *require,
-                self.put(collection, docs, *insert, *if_absent, params),
+                self.put(
+                    collection,
+                    docs,
+                    *docs_param,
+                    *insert,
+                    *if_absent,
+                    else_set.as_deref(),
+                    params,
+                ),
             ),
             Statement::Select(sel) => read_required(sel, self.select(sel, params)?),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
@@ -5798,58 +5808,87 @@ impl Database {
         )))
     }
 
-    fn build_document(
-        &self,
-        schema: &Schema,
-        pairs: &[(String, Expr)],
-        params: &[Value],
-    ) -> Result<Document> {
-        let ctx = EvalCtx {
-            params,
-            registry: &self.registry,
-            clock: self.clock,
-        };
+    /// A document out of an object a parameter holds, each member a field:
+    /// `put <name> $n`. The object was read as a body's document is -- a
+    /// json field's numbers as written, a list of numbers made a vector's
+    /// `f32`s by the field it is given -- and keeps its members sorted,
+    /// which a document does not need.
+    fn document_of(schema: &Schema, members: &[(String, Value)]) -> Result<Document> {
         let mut doc = Document::default();
-        let mut explicit_id: Option<DocId> = None;
-        for (k, e) in pairs {
-            let v = eval(e, &mut NoRow, &ctx)?;
-            if k == "id" {
-                explicit_id = match v {
-                    Value::Int(i) if i > 0 => Some(i as u64),
-                    _ => return Err(Error::Type("`id` must be a positive integer".into())),
-                };
-                continue;
-            }
-            set_field(schema, &mut doc, k, v)?;
+        for (k, v) in members {
+            doc_field(schema, &mut doc, k, v.clone())?;
         }
-        for f in &schema.fields {
-            if doc.get(&f.name).is_none() {
-                if f.required {
-                    return Err(Error::Type(format!("field `{}` is required", f.name)));
-                }
-                doc.set(&f.name, Value::Null);
-            }
-        }
-        doc.id = explicit_id.unwrap_or(0);
-        Ok(doc)
+        doc_done(schema, doc)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn put(
         &mut self,
         collection: &str,
         docs: &[Vec<(String, Expr)>],
+        docs_param: Option<usize>,
         insert: bool,
         if_absent: bool,
+        else_set: Option<&[(String, Expr)]>,
+        params: &[Value],
+    ) -> Result<Response> {
+        // Taken out for the statement, as `set` takes it: an upsert's
+        // values call its functions while the row is written.
+        let registry = std::mem::take(&mut self.registry);
+        let out = self.put_with(
+            collection, docs, docs_param, insert, if_absent, else_set, &registry, params,
+        );
+        self.registry = registry;
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn put_with(
+        &mut self,
+        collection: &str,
+        docs: &[Vec<(String, Expr)>],
+        docs_param: Option<usize>,
+        insert: bool,
+        if_absent: bool,
+        else_set: Option<&[(String, Expr)]>,
+        registry: &Registry,
         params: &[Value],
     ) -> Result<Response> {
         let schema = self.collection(collection)?.schema.clone();
         let cid = self.collection(collection)?.id;
-        let hooks: Vec<_> = self.registry.hooks().to_vec();
+        let hooks: Vec<_> = registry.hooks().to_vec();
+        let ctx = EvalCtx {
+            params,
+            registry,
+            clock: self.clock,
+        };
 
         let mut built = Vec::with_capacity(docs.len());
         for pairs in docs {
-            built.push(self.build_document(&schema, pairs, params)?);
+            let mut doc = Document::default();
+            for (k, e) in pairs {
+                doc_field(&schema, &mut doc, k, eval(e, &mut NoRow, &ctx)?)?;
+            }
+            built.push(doc_done(&schema, doc)?);
         }
+        if let Some(i) = docs_param {
+            let given = documents_in(collection, i, params)?;
+            built.reserve(given.len());
+            for members in given {
+                built.push(Self::document_of(&schema, members)?);
+            }
+        }
+        // An upsert's pairs, bound once a statement as a `set`'s are, `new.f`
+        // reading the document put.
+        let assigns: Option<Vec<Assign>> = else_set.map(|set| {
+            set.iter()
+                .map(|(key, e)| Assign {
+                    key,
+                    at: schema.field_pos(key),
+                    calc: Calc::bind_upsert(&schema, e, &ctx),
+                })
+                .collect()
+        });
         if collate::PARTIAL {
             collate::refuse(
                 built
@@ -5894,6 +5933,9 @@ impl Database {
             }
             let c = self.collections.get_mut(collection).unwrap();
             let mark = c.store.mark();
+            // The row an upsert sets rather than the document written.
+            let mut held = None;
+            let named = doc.id != 0;
             let op = if doc.id == 0 {
                 doc.id = c.store.allocate_id();
                 WriteOp::Insert
@@ -5903,84 +5945,128 @@ impl Database {
                     None => false,
                 };
                 if insert && !gone {
-                    if if_absent {
+                    if !if_absent {
+                        // The statement is a block: what it wrote before
+                        // this one is put back with it.
+                        return Err(Error::Duplicate(format!(
+                            "`{collection}` holds a document {} already: insert makes new \
+                             ones, put writes over",
+                            doc.id
+                        )));
+                    }
+                    if assigns.is_none() {
                         continue;
                     }
-                    // The statement is a block: what it wrote before this
-                    // one is put back with it.
-                    return Err(Error::Duplicate(format!(
-                        "`{collection}` holds a document {} already: insert makes new \
-                         ones, put writes over",
-                        doc.id
-                    )));
+                    held = Some(doc.id);
                 }
                 WriteOp::Update
             } else {
                 WriteOp::Insert
             };
-            // Before anything is written, as a taken id is refused above --
-            // and the id handed out above handed out again, as a block put
-            // back hands its ids out again: nothing of this document is in
-            // the store for the block's mark to take back.
-            // The document written over, read before the hooks: a hook judges
-            // a write over one by what it changes.
-            let old = match op {
-                WriteOp::Update => c.store.read(&schema, doc.id)?,
-                _ => None,
-            };
-            let checked = hooks
-                .iter()
-                .try_for_each(|h| h.before_write(&schema, op, &mut doc))
-                .and_then(|_| match &old {
-                    Some(old) => hooks
-                        .iter()
-                        .try_for_each(|h| h.before_overwrite(&schema, old, &doc)),
-                    None => Ok(()),
-                })
-                .and_then(|_| match c.unique_clash(&doc) {
-                    // `if absent` passes over a value held as an id held.
-                    Err(Error::Duplicate(_)) if if_absent => Ok(false),
-                    r => r.map(|_| true),
-                });
-            match checked {
-                Ok(true) => {}
-                Ok(false) => {
-                    c.store.rewind(mark);
+            if held.is_none() {
+                // Before anything is written, as a taken id is refused above
+                // -- and the id handed out above handed out again, as a block
+                // put back hands its ids out again: nothing of this document
+                // is in the store for the block's mark to take back.
+                // The document written over, read before the hooks: a hook
+                // judges a write over one by what it changes.
+                let old = match op {
+                    WriteOp::Update => c.store.read(&schema, doc.id)?,
+                    _ => None,
+                };
+                let checked = hooks
+                    .iter()
+                    .try_for_each(|h| h.before_write(&schema, op, &mut doc))
+                    .and_then(|_| match &old {
+                        Some(old) => hooks
+                            .iter()
+                            .try_for_each(|h| h.before_overwrite(&schema, old, &doc)),
+                        None => Ok(()),
+                    })
+                    .and_then(|_| match c.unique_clash(&doc) {
+                        // `if absent` passes over a value held as an id held.
+                        Err(Error::Duplicate(_)) if if_absent => Ok(false),
+                        r => r.map(|_| true),
+                    });
+                match checked {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        c.store.rewind(mark);
+                        if assigns.is_none() {
+                            continue;
+                        }
+                        // The row holding the first `@unique` value it
+                        // holds, in the order the fields are declared.
+                        held = c.unique_holders(&doc)?.first().map(|(_, d)| *d);
+                        if !named {
+                            doc.id = 0;
+                        }
+                    }
+                    Err(e) => {
+                        c.store.rewind(mark);
+                        return Err(e);
+                    }
+                }
+                if held.is_none() {
+                    // Drop the old index entries when overwriting.
+                    if let Some(old) = &old {
+                        c.unindex_doc(old, Some(&doc));
+                    }
+                    let payload = Store::encode_doc(&schema, &doc);
+                    let was = c.store.loc(doc.id);
+                    let frame = c.store.append(OP_PUT, doc.id, &payload);
+                    c.index_scalar(&doc, old.as_ref());
+                    self.remember(cid, doc.id, was, mark);
+                    self.wal(REC_DATA, cid, &frame)?;
+                    self.note(cid, doc.id);
+                    for h in &hooks {
+                        h.after_write(collection, op, &doc)?;
+                    }
+                    written.push(doc);
+                    n += 1;
                     continue;
                 }
-                Err(e) => {
-                    c.store.rewind(mark);
-                    return Err(e);
-                }
             }
-            // Drop the old index entries when overwriting.
-            if let Some(old) = &old {
-                c.unindex_doc(old, Some(&doc));
+            // The upsert: the row held is set as `set` sets a row, the
+            // document `new`. The vectors written before it are linked
+            // first, so that a row this statement wrote and now sets is
+            // in the graph as it stood, and its new vector replaces it.
+            let (Some(id), Some(assigns)) = (held, &assigns) else {
+                continue;
+            };
+            if !written.is_empty() {
+                self.index_written(collection, &mut written);
             }
-            let payload = Store::encode_doc(&schema, &doc);
-            let was = c.store.loc(doc.id);
-            let frame = c.store.append(OP_PUT, doc.id, &payload);
-            c.index_scalar(&doc, old.as_ref());
-            self.remember(cid, doc.id, was, mark);
-            self.wal(REC_DATA, cid, &frame)?;
-            self.note(cid, doc.id);
-            for h in &hooks {
-                h.after_write(collection, op, &doc)?;
+            if self.set_row(
+                collection,
+                &schema,
+                cid,
+                id,
+                assigns,
+                &ctx,
+                &hooks,
+                Some(&doc),
+            )? {
+                n += 1;
             }
-            written.push(doc);
-            n += 1;
         }
-        // Vectors are indexed in a batch: construction can parallelise. In
-        // a block that defers, the block's statements are one batch.
+        self.index_written(collection, &mut written);
+        Ok(Response::Affected(n))
+    }
+
+    /// The vectors of the documents a `put` wrote, indexed in a batch:
+    /// construction can parallelise. In a block that defers, the block's
+    /// statements are one batch.
+    fn index_written(&mut self, collection: &str, written: &mut Vec<Document>) {
         let c = self.collections.get_mut(collection).unwrap();
         match self.block.as_mut().filter(|b| DEFERS && b.defers) {
             Some(b) => {
-                c.defer_vectors_batch(&written, &mut b.waiting);
+                c.defer_vectors_batch(written, &mut b.waiting);
                 self.link_waiting(LINK_AT);
             }
-            None => c.index_vectors_batch(&written),
+            None => c.index_vectors_batch(written),
         }
-        Ok(Response::Affected(n))
+        written.clear();
     }
 
     /// Finds the ids of the documents matching the filter.
@@ -8322,7 +8408,7 @@ impl Database {
                 let c = self.collection(collection)?;
                 for &id in &ids {
                     if let Some(doc) = c.store.read(&schema, id)? {
-                        let doc = updated(&schema, &doc, &assigns, &ctx)?;
+                        let doc = updated(&schema, &doc, &assigns, &ctx, None)?;
                         missing |= collation_missing(&schema, &doc) | collate::take_missing();
                     }
                 }
@@ -8331,37 +8417,56 @@ impl Database {
         }
 
         for id in ids {
-            let c = self.collections.get_mut(collection).unwrap();
-            // Read once: the row the expressions read is the one the
-            // indexes take out. Read twice, as it was, a `set` of a
-            // constant over 100 000 rows decoded each of them again.
-            let Some(old) = c.store.read(&schema, id)? else {
-                continue;
-            };
-            let mut doc = updated(&schema, &old, &assigns, &ctx)?;
-            for h in &hooks {
-                h.before_write(&schema, WriteOp::Update, &mut doc)?;
+            if self.set_row(collection, &schema, cid, id, &assigns, &ctx, &hooks, None)? {
+                n += 1;
             }
-            for h in &hooks {
-                h.before_overwrite(&schema, &old, &doc)?;
-            }
-            // An update makes a duplicate as a put does: `set email = "a"`
-            // over two documents is refused at the second.
-            c.unique_clash(&doc)?;
-            c.unindex_doc(&old, Some(&doc));
-            let payload = Store::encode_doc(&schema, &doc);
-            let (mark, was) = (c.store.mark(), c.store.loc(id));
-            let frame = c.store.append(OP_PUT, id, &payload);
-            c.index_doc(&doc, Some(&old));
-            self.remember(cid, id, was, mark);
-            self.wal(REC_DATA, cid, &frame)?;
-            self.note(cid, id);
-            for h in &hooks {
-                h.after_write(collection, WriteOp::Update, &doc)?;
-            }
-            n += 1;
         }
         Ok(Response::Affected(n))
+    }
+
+    /// Row `id` set by `assigns`, each over the row as it was -- and over
+    /// `new`, an upsert's document; whether there was such a row.
+    #[allow(clippy::too_many_arguments)]
+    fn set_row(
+        &mut self,
+        collection: &str,
+        schema: &Schema,
+        cid: u32,
+        id: DocId,
+        assigns: &[Assign],
+        ctx: &EvalCtx,
+        hooks: &[Arc<dyn crate::plugin::Hook>],
+        new: Option<&Document>,
+    ) -> Result<bool> {
+        let c = self.collections.get_mut(collection).unwrap();
+        // Read once: the row the expressions read is the one the indexes
+        // take out. Read twice, as it was, a `set` of a constant over
+        // 100 000 rows decoded each of them again.
+        let Some(old) = c.store.read(schema, id)? else {
+            return Ok(false);
+        };
+        let mut doc = updated(schema, &old, assigns, ctx, new)?;
+        for h in hooks {
+            h.before_write(schema, WriteOp::Update, &mut doc)?;
+        }
+        for h in hooks {
+            h.before_overwrite(schema, &old, &doc)?;
+        }
+        // An update makes a duplicate as a put does: `set email = "a"`
+        // over two documents is refused at the second.
+        c.unique_clash(&doc)?;
+        c.unindex_doc(&old, Some(&doc));
+        let payload = Store::encode_doc(schema, &doc);
+        let (mark, was) = (c.store.mark(), c.store.loc(id));
+        let frame = c.store.append(OP_PUT, id, &payload);
+        c.index_doc(&doc, Some(&old));
+        self.remember(cid, id, was, mark);
+        self.wal(REC_DATA, cid, &frame)?;
+        self.note(cid, id);
+        for h in hooks {
+            h.after_write(collection, WriteOp::Update, &doc)?;
+        }
+        Ok(true)
     }
 
     fn delete(
@@ -8797,8 +8902,9 @@ pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
         }
     };
     let filter = match stmt {
-        Statement::Put { docs, .. } => {
+        Statement::Put { docs, else_set, .. } => {
             docs.iter().flatten().for_each(&mut pair);
+            else_set.iter().flatten().for_each(&mut pair);
             None
         }
         Statement::Update { set, filter, .. } => {
@@ -8863,6 +8969,32 @@ fn filter_needs(schema: &Schema, filter: &Expr, out: &mut Exactly) {
 /// Sets `k` of `doc` to `v`: a field, coerced to its type, or a path into
 /// a json field (`meta.lang: "en"`), the one key set inside it and the rest
 /// kept, an object made where the path finds none.
+/// A field of a document being put, `id` naming the document.
+fn doc_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<()> {
+    if k == "id" {
+        doc.id = match v {
+            Value::Int(i) if i > 0 => i as u64,
+            _ => return Err(Error::Type("`id` must be a positive integer".into())),
+        };
+        return Ok(());
+    }
+    set_field(schema, doc, k, v)
+}
+
+/// A document being put with every field it was not given `null`, or
+/// refused for a required one.
+fn doc_done(schema: &Schema, mut doc: Document) -> Result<Document> {
+    for f in &schema.fields {
+        if doc.get(&f.name).is_none() {
+            if f.required {
+                return Err(Error::Type(format!("field `{}` is required", f.name)));
+            }
+            doc.set(&f.name, Value::Null);
+        }
+    }
+    Ok(doc)
+}
+
 fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<()> {
     if let Some((pos, keys)) = schema.path_of(k)? {
         let f = &schema.fields[pos];
@@ -8903,21 +9035,49 @@ struct Assign<'q> {
 enum Calc<'q> {
     Value(Value),
     Field(usize),
+    /// `new.f` in an upsert's `else set`: the document's `f`.
+    New(&'q str),
     Arith(ArithOp, Box<Calc<'q>>, Box<Calc<'q>>),
     Eval(&'q Expr),
 }
 
+/// What `new.` names in an upsert's `else set`: the document put, where
+/// the row's own fields are named bare -- `{n: n + new.n}`.
+const NEW: &str = "new.";
+
 impl<'q> Calc<'q> {
     fn bind(schema: &Schema, e: &'q Expr, ctx: &EvalCtx) -> Calc<'q> {
+        Self::bound(schema, e, ctx, false)
+    }
+
+    /// [`Calc::bind`] for an upsert's `else set`, where `new.f` is the
+    /// document's field.
+    fn bind_upsert(schema: &Schema, e: &'q Expr, ctx: &EvalCtx) -> Calc<'q> {
+        Self::bound(schema, e, ctx, true)
+    }
+
+    fn bound(schema: &Schema, e: &'q Expr, ctx: &EvalCtx, upsert: bool) -> Calc<'q> {
         match e {
+            // `strip_prefix`, not a slice: a slice that can panic brought a
+            // `char`'s formatting and Unicode's tables into the browser
+            // module (`make size-report WHY=slice_error_fail`).
+            Expr::Field(name) if upsert && name.starts_with(NEW) => {
+                match name
+                    .strip_prefix(NEW)
+                    .filter(|f| schema.field_pos(f).is_some())
+                {
+                    Some(f) => Calc::New(f),
+                    None => Calc::Eval(e),
+                }
+            }
             Expr::Field(name) => match schema.field_pos(name) {
                 Some(p) if name != "id" => Calc::Field(p),
                 _ => Calc::Eval(e),
             },
             Expr::Arith(op, a, b) => Calc::Arith(
                 *op,
-                Box::new(Calc::bind(schema, a, ctx)),
-                Box::new(Calc::bind(schema, b, ctx)),
+                Box::new(Calc::bound(schema, a, ctx, upsert)),
+                Box::new(Calc::bound(schema, b, ctx, upsert)),
             ),
             // Reading no field, the same on every row: `now()` is the one
             // time for the whole statement.
@@ -8935,23 +9095,69 @@ impl<'q> Calc<'q> {
         }
     }
 
-    fn value(&self, schema: &Schema, row: &Document, ctx: &EvalCtx) -> Result<Value> {
+    fn value(
+        &self,
+        schema: &Schema,
+        row: &Document,
+        ctx: &EvalCtx,
+        new: Option<&Document>,
+    ) -> Result<Value> {
         Ok(match self {
             Calc::Value(v) => v.clone(),
             Calc::Field(p) => row.fields.get(*p).map_or(Value::Null, |(_, v)| v.clone()),
+            Calc::New(f) => new.and_then(|d| d.get(f)).cloned().unwrap_or(Value::Null),
             Calc::Arith(op, a, b) => arith(
                 *op,
-                &a.value(schema, row, ctx)?,
-                &b.value(schema, row, ctx)?,
+                &a.value(schema, row, ctx, new)?,
+                &b.value(schema, row, ctx, new)?,
             )?,
-            Calc::Eval(e) => eval(e, &mut DocRow(row, schema), ctx)?,
+            Calc::Eval(e) => match new {
+                Some(new) => eval(e, &mut Upserting(DocRow(row, schema), new), ctx)?,
+                None => eval(e, &mut DocRow(row, schema), ctx)?,
+            },
         })
     }
 }
 
+/// The row an upsert's `else set` reads, and the document put as `new.`.
+struct Upserting<'a>(DocRow<'a>, &'a Document);
+
+impl RowAccess for Upserting<'_> {
+    fn id(&self) -> DocId {
+        self.0.id()
+    }
+    fn field(&mut self, name: &str) -> Result<Value> {
+        let Some(f) = name.strip_prefix(NEW) else {
+            return self.0.field(name);
+        };
+        if f == "id" {
+            return Ok(match self.1.id {
+                0 => Value::Null,
+                id => Value::Int(id as i64),
+            });
+        }
+        // One of its fields, or a path into a json one: a name the
+        // collection does not have is refused, not read as null.
+        let schema = self.0 .1;
+        if schema.path_of(f)?.is_none() && schema.field(f).is_none() {
+            return Err(Error::NotFound(format!("field `{f}`, read as `{name}`")));
+        }
+        Ok(self.1.at(f).cloned().unwrap_or(Value::Null))
+    }
+    fn collation(&self, name: &str) -> Option<Collation> {
+        self.0.collation(name.strip_prefix(NEW).unwrap_or(name))
+    }
+}
+
 /// `old` with a `set`'s pairs applied, every expression over the document
-/// as it was.
-fn updated(schema: &Schema, old: &Document, set: &[Assign], ctx: &EvalCtx) -> Result<Document> {
+/// as it was -- and an upsert's over `new`, the document put.
+fn updated(
+    schema: &Schema,
+    old: &Document,
+    set: &[Assign],
+    ctx: &EvalCtx,
+    new: Option<&Document>,
+) -> Result<Document> {
     let mut doc = old.clone();
     for a in set {
         // Checked before the value is worked out, over the document as it
@@ -8959,7 +9165,7 @@ fn updated(schema: &Schema, old: &Document, set: &[Assign], ctx: &EvalCtx) -> Re
         if a.at.is_none() && schema.path_of(a.key)?.is_none() {
             return Err(Error::NotFound(format!("field `{}`", a.key)));
         }
-        let v = a.calc.value(schema, old, ctx)?;
+        let v = a.calc.value(schema, old, ctx, new)?;
         match a.at {
             Some(p) => doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?,
             None => set_field(schema, &mut doc, a.key, v)?,
