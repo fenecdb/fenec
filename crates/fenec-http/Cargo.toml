@@ -19,6 +19,10 @@ fenec-abi.workspace = true
 # `timing`: where a request's time goes, phase by phase, at `GET /_timing`
 # (`src/timing.rs`); off, none of it is compiled.
 timing = []
+# `studio`: fenec studio's files, embedded (`src/studio.rs`, `ASSETS`), for
+# the binaries that serve it -- fenec-server and fenec-shard, `--studio`.
+# The shell, which reaches this crate for `fenec backup`, carries none.
+studio = []
 
 [[test]]
 name = "all"

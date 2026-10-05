@@ -299,6 +299,9 @@ struct Rule {
     fields: Option<Vec<String>>,
     /// With `$jwt.<claim>` as parameter `k`, the claim `claims[k]`.
     filter: Option<Expr>,
+    /// The filter as the policy writes it, `$jwt.<claim>` and all: what
+    /// `/_whoami` shows a token it applies to.
+    text: Option<Arc<str>>,
     claims: Vec<String>,
     role: Option<String>,
 }
@@ -324,6 +327,7 @@ struct Bound {
     ops: u8,
     fields: Option<Vec<String>>,
     filter: Option<Expr>,
+    text: Option<Arc<str>>,
 }
 
 fn denied(msg: String) -> Error {
@@ -511,6 +515,7 @@ impl Access {
                 ops: r.ops,
                 fields: r.fields.clone(),
                 filter: r.filter.as_ref().map(|f| bind(f, &values)),
+                text: r.text.clone(),
             });
         }
         // Anything but a text or a list of texts names no tenant: a number
@@ -720,6 +725,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
     }
     let rest = rest.trim();
     let mut claims = Vec::new();
+    let text = rest.strip_prefix("where").map(|t| Arc::from(t.trim()));
     let filter = if rest.is_empty() {
         None
     } else {
@@ -786,6 +792,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         named,
         fields,
         filter,
+        text,
         claims,
         role,
     })
@@ -854,6 +861,22 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
     }
 }
 
+/// A list of texts as JSON, `null` for none.
+fn texts_into(out: &mut String, list: Option<&[String]>) {
+    let Some(list) = list else {
+        out.push_str("null");
+        return;
+    };
+    out.push('[');
+    for (i, t) in list.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        fenec_core::json::escape_into(out, t);
+    }
+    out.push(']');
+}
+
 fn and(filter: Option<Expr>, more: Option<Expr>) -> Option<Expr> {
     match (filter, more) {
         (Some(a), Some(b)) => Some(Expr::And(Box::new(a), Box::new(b))),
@@ -907,6 +930,59 @@ impl Scope {
             None if self.unbound => Ok(()),
             None => Err("this token names no tenant, and this node serves tenants"),
         }
+    }
+
+    /// What the token may do, as `/_whoami` answers it: its `sub`, the
+    /// tenants its claim names, and each rule that applies to it -- the
+    /// collection, the grants, the fields an update may change and the
+    /// rows, the filter as the policy writes it. A token is shown its own
+    /// rules and no other's: a rule for a role it does not hold, or naming
+    /// a claim it lacks, never became one of its own.
+    pub fn summary_into(&self, out: &mut String) {
+        use fenec_core::json::escape_into;
+        out.push_str("\"sub\":");
+        match &self.subject {
+            Some(s) => escape_into(out, s),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"tenants\":");
+        texts_into(out, self.tenants.as_deref());
+        out.push_str(",\"unbound\":");
+        out.push_str(if self.unbound { "true" } else { "false" });
+        out.push_str(",\"append_only\":");
+        texts_into(out, Some(&self.append_only));
+        out.push_str(",\"rules\":[");
+        for (i, r) in self.rules.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"collection\":");
+            escape_into(out, r.collection.as_deref().unwrap_or("*"));
+            out.push_str(",\"grants\":[");
+            let names = [
+                (READ, "read"),
+                (INSERT, "insert"),
+                (UPDATE, "update"),
+                (DELETE, "delete"),
+                (EXPIRED, "expired"),
+            ];
+            let granted = names.iter().filter(|(bit, _)| r.ops & bit != 0);
+            for (k, (_, name)) in granted.enumerate() {
+                if k > 0 {
+                    out.push(',');
+                }
+                escape_into(out, name);
+            }
+            out.push_str("],\"fields\":");
+            texts_into(out, r.fields.as_deref());
+            out.push_str(",\"rows\":");
+            match &r.text {
+                Some(t) => escape_into(out, t),
+                None => out.push_str("null"),
+            }
+            out.push('}');
+        }
+        out.push(']');
     }
 
     /// Whether `collection` is `append-only` in the policy.

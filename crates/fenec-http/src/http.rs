@@ -454,6 +454,8 @@ pub fn reason(status: u16) -> &'static str {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        304 => "Not Modified",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
