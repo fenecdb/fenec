@@ -429,8 +429,10 @@ close it.
    a type error, so each block's entry ids travel as two more parameters.
    Smallest: `+` over two texts, or `concat(...)`.
 
-Before main gained `db.batch` in `@fenecdb/web/client`, `/batch` with a key
-was a `fetch` of its own here, as in the shop.
+`/batch` with a key goes through `@fenecdb/web/client`'s `db.batch(...,
+{ idempotencyKey })` (`src/store.ts`), whose `FenecError` carries the
+refusal's `status` and `at`. The change stream has no client method, so the
+sink reads `/_changes` with a `fetch` of its own.
 
 ## Files
 

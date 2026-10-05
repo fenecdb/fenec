@@ -3,6 +3,7 @@
 // writes every movement as one block of statements sharing one list of
 // parameters, so both run the same text.
 import type { Fenec } from '@fenecdb/web';
+import { connect, FenecError, type FenecHttp } from '@fenecdb/web/client';
 
 export type Outcome =
   | { ok: true; results: unknown[]; replayed: boolean; seq?: number }
@@ -29,47 +30,43 @@ export class StoreError extends Error {
 
 /**
  * fenec-server, reached at `base` (`http://host:port/t/<tenant>` on a
- * tenant node) with `token`. `/batch` runs the statements under the write
- * lock as one block; with `key`, as an `Idempotency-Key`, a retry is
- * answered as the first try was and moves nothing twice.
- * `@fenecdb/web/client` has no `/batch` (README, "Gaps"), hence this.
+ * tenant node) with `token`, through `@fenecdb/web/client`. Its `batch` is
+ * `POST /batch`: the statements under the write lock as one block, and
+ * with `idempotencyKey` a retry is answered as the first try was and moves
+ * nothing twice. A refusal comes back as a `FenecError` with its `status`
+ * and the statement it stopped at (`at`), which the ledger answers rather
+ * than throws.
  */
 export class HttpStore implements Store {
+  readonly #db: FenecHttp;
+
   constructor(
     readonly base: string,
     readonly token: string,
-  ) {}
+  ) {
+    this.#db = connect(base, { token });
+  }
 
   async batch(statements: string[], params: unknown[], opts: { key?: string } = {}): Promise<Outcome> {
-    const headers: Record<string, string> = {
-      'content-type': 'application/x-ndjson',
-      authorization: `Bearer ${this.token}`,
-    };
-    if (opts.key) headers['idempotency-key'] = opts.key;
-    const body = statements.map((query) => JSON.stringify({ query, params })).join('\n');
-    const res = await fetch(`${this.base}/batch`, { method: 'POST', headers, body });
-    const json = await parsed(res);
-    if (res.ok) {
-      const seq = Number(res.headers.get('fenec-seq') ?? NaN);
-      return {
-        ok: true,
-        results: json.results ?? [],
-        replayed: res.headers.get('idempotent-replayed') === 'true',
-        seq: Number.isFinite(seq) ? seq : undefined,
-      };
+    try {
+      const r = await this.#db.batch(
+        statements.map((q) => [q, params] as const),
+        { idempotencyKey: opts.key },
+      );
+      return { ok: true, results: r.results, replayed: r.replayed, seq: r.seq ?? undefined };
+    } catch (e) {
+      if (!(e instanceof FenecError) || e.status === undefined) throw e;
+      return { ok: false, status: e.status, error: e.message, at: e.at };
     }
-    return { ok: false, status: res.status, error: json.error ?? `HTTP ${res.status}`, at: json.at };
   }
 
   async rows<T = Record<string, unknown>>(query: string, params: unknown[] = []): Promise<T[]> {
-    const res = await fetch(`${this.base}/query`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
-      body: JSON.stringify({ query, params }),
-    });
-    const json = await parsed(res);
-    if (!res.ok) throw new StoreError(json.error ?? `HTTP ${res.status}`, res.status);
-    return (Array.isArray(json) ? json : (json.rows ?? [])) as T[];
+    try {
+      return (await this.#db.rows(query, params)) as T[];
+    } catch (e) {
+      if (e instanceof FenecError && e.status !== undefined) throw new StoreError(e.message, e.status);
+      throw e;
+    }
   }
 
   // A /batch of reads runs under the write lock like any batch: no write
@@ -79,16 +76,6 @@ export class HttpStore implements Store {
     if (!out.ok) throw new StoreError(out.error, out.status);
     const results = out.results.map((r) => (r as { rows?: Record<string, unknown>[] }).rows ?? []);
     return { results, seq: out.seq };
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function parsed(res: Response): Promise<any> {
-  const text = await res.text();
-  try {
-    return text ? JSON.parse(text) : {};
-  } catch {
-    throw new StoreError(`fenec-server did not answer JSON (${res.status}): ${text.slice(0, 200)}`, res.status);
   }
 }
 
