@@ -193,6 +193,18 @@ impl TextIndex {
     {
         match self.never {}
     }
+    pub fn search_within<F>(
+        &self,
+        query: &str,
+        k: usize,
+        accept: F,
+        within: Option<&[DocId]>,
+    ) -> Vec<(DocId, f32)>
+    where
+        F: Fn(DocId) -> bool,
+    {
+        match self.never {}
+    }
     pub fn matching(&self, query: &str) -> Vec<DocId> {
         match self.never {}
     }

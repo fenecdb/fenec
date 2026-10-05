@@ -647,6 +647,14 @@ export declare class Query<
   ): Query<F, P, L, Rel, At, Fa>;
   limit(n: number): Query<F, P, L, Rel, At, Fa>;
   offset(n: number): Query<F, P, L, Rel, At, Fa>;
+  /**
+   * `require n`: the rows the query answers, after `limit`, must number
+   * `n`, or it is refused -- 412 (`unmet`) over HTTP -- and the batch it is
+   * in put back. A checkout's guard on a read: `.where({ sku, price })
+   * .require(1)`. Not with `count` or an aggregate without `group`; a
+   * write takes `{ require: n }` instead.
+   */
+  require(n: number): Query<F, P, L, Rel, At, Fa>;
 
   /** The generated FenecQL and its parameters -- inspectable before running. */
   toFenecQL(): [sql: string, params: unknown[]];

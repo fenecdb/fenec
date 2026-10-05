@@ -927,7 +927,11 @@ impl Parser {
             if self.eat_kw("match") {
                 let field = self.ident()?;
                 let query = self.expr()?;
-                sel.matcher = Some(Match { field, query });
+                sel.matcher = Some(Match {
+                    field,
+                    query,
+                    within: false,
+                });
                 continue;
             }
             if self.eat_kw("fuse") {
@@ -977,6 +981,12 @@ impl Parser {
             }
             if self.eat_kw("offset") {
                 sel.offset = self.int()?.max(0) as usize;
+                continue;
+            }
+            // `require <n>`: the rows answered must number `n` -- before a
+            // `lookup`, whose clauses are the children's.
+            if self.peek_kw("require") {
+                sel.require = self.require()?;
                 continue;
             }
             // `lookup` is terminal: every clause after it binds to the child.
@@ -1142,6 +1152,10 @@ impl Parser {
             if self.eat_kw("required") {
                 l.required = true;
                 continue;
+            }
+            if self.eat_kw("require") {
+                return self
+                    .err("`require` counts the rows of the `get`, and goes before its `lookup`");
             }
             // Terminal here for the same reason it is terminal up there: the
             // clauses after it bind to the next collection down, so nothing

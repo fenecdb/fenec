@@ -491,3 +491,255 @@ fn a_unique_clash_tells_a_scoped_token_nothing_of_the_other_row() {
         "{body}"
     );
 }
+
+const LEDGER: &str = "\
+journal  read,write  where owner = $jwt.sub
+journal  append-only
+events   insert      where user = $jwt.sub
+";
+
+/// A `/batch` line.
+fn line(query: &str) -> String {
+    let mut out = String::from("{\"query\":");
+    fenec_core::json::escape_into(&mut out, query);
+    out.push('}');
+    out
+}
+
+/// An `append-only` journal: a scoped token with `write` inserts into it,
+/// and changes nothing in it by any route -- `/query`, REST, `/batch`, a
+/// `require` -- while the server's own token still does. An `insert`
+/// grant alone writes a collection the token cannot read.
+#[test]
+fn an_append_only_journal_takes_inserts_and_nothing_else() {
+    let n = start_with(
+        LEDGER,
+        &[
+            "create collection journal (owner text @hash, amount int)",
+            "create collection events (user text, name text)",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let rows = |sql: &str| n.query(ROOT, sql).1;
+
+    assert_eq!(
+        n.call(Some(&alice), "POST", "/journal", r#"{"amount":10}"#)
+            .0,
+        201
+    );
+    assert_eq!(
+        n.query(&alice, "insert journal {amount: 20} require 1").0,
+        200
+    );
+    assert_eq!(n.query(&alice, "put journal {amount: 30}").0, 200);
+    let batch = [
+        line("insert journal {amount: 40}"),
+        line("insert journal {amount: 50}"),
+    ];
+    let (status, body) = n.call(Some(&alice), "POST", "/batch", &batch.join("\n"));
+    assert_eq!(status, 200, "{body}");
+    let before = rows("get journal select amount order id");
+    assert_eq!(count(&before, "\"amount\""), 5, "{before}");
+
+    for sql in [
+        "set journal {amount: 1}",
+        "set journal {amount: 1} where id = 1 require 1",
+        "del journal",
+        "del journal where id = 1 require 1",
+        "put journal {id: 1, amount: 1}",
+    ] {
+        let (status, body) = n.query(&alice, sql);
+        assert_eq!(status, 403, "{sql}: {body}");
+    }
+    let (status, body) = n.query(&alice, "set journal {amount: 1}");
+    assert!(body.contains("append-only"), "{status} {body}");
+    for (method, target, body) in [
+        ("PATCH", "/journal?id=eq.1", r#"{"amount":1}"#),
+        ("PATCH", "/journal/all", r#"{"amount":1}"#),
+        ("DELETE", "/journal?id=eq.1", ""),
+        ("DELETE", "/journal/all", ""),
+    ] {
+        let (status, answer) = n.call(Some(&alice), method, target, body);
+        assert_eq!(status, 403, "{method} {target}: {answer}");
+    }
+    // A batch holding one is refused whole: its insert does not land.
+    let batch = [
+        line("insert journal {amount: 60}"),
+        line("del journal where id = 1"),
+    ];
+    let (status, body) = n.call(Some(&alice), "POST", "/batch", &batch.join("\n"));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(rows("get journal select amount order id"), before);
+
+    // The server's own token is not held to it.
+    assert_eq!(
+        n.query(ROOT, "set journal {amount: 11} where id = 1").0,
+        200
+    );
+
+    // Insert alone: written, never read, and only as the token's own.
+    assert_eq!(
+        n.call(Some(&alice), "POST", "/events", r#"{"name":"view"}"#)
+            .0,
+        201
+    );
+    assert_eq!(n.query(&alice, "insert events {name: 'buy'}").0, 200);
+    assert_eq!(n.call(Some(&alice), "GET", "/events", "").0, 403);
+    assert_eq!(n.query(&alice, "get events count").0, 403);
+    assert_eq!(
+        n.query(&alice, "insert events {user: 'bob', name: 'x'}").0,
+        403
+    );
+    assert_eq!(n.query(&alice, "set events {name: 'x'}").0, 403);
+    let (_, list) = n.call(Some(&alice), "GET", "/collections", "");
+    assert!(!list.contains("events"), "{list}");
+    let all = rows("get events select user, name order id");
+    assert_eq!(count(&all, "\"alice\""), 2, "{all}");
+}
+
+const ROOMS: &str = "\
+messages  read,insert  where room in $jwt.rooms
+";
+
+/// Room membership as a list claim: alice, in rooms r1 and r2, reads,
+/// writes and hears only those -- a post into r3 is refused -- and a token
+/// listing more rooms than a policy takes is refused.
+#[test]
+fn a_list_claim_scopes_reads_writes_and_subscriptions() {
+    let n = start_with(
+        ROOMS,
+        &["create collection messages (room text @hash, body text)"],
+    );
+    let alice = n.token(r#"{"sub":"alice","rooms":["r1","r2"]}"#);
+    let carol = n.token(r#"{"sub":"carol","rooms":["r3"]}"#);
+    let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    write!(
+        s,
+        "GET /messages/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+    )
+    .unwrap();
+    let mut heard = String::new();
+    listen(
+        &mut s,
+        &mut heard,
+        &|h| h.contains("event: seed"),
+        Duration::from_secs(3),
+    );
+
+    for (room, who) in [("r1", &alice), ("r2", &alice), ("r3", &carol)] {
+        let body = format!(r#"{{"room":"{room}","body":"in {room}"}}"#);
+        let (status, answer) = n.call(Some(who), "POST", "/messages", &body);
+        assert_eq!(status, 201, "{answer}");
+    }
+    let (status, body) = n.call(
+        Some(&alice),
+        "POST",
+        "/messages",
+        r#"{"room":"r3","body":"spoof"}"#,
+    );
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        n.query(&alice, "insert messages {room: 'r3', body: 'spoof'}")
+            .0,
+        403
+    );
+    // A post naming no room is in none of hers.
+    assert_eq!(n.query(&alice, "insert messages {body: 'nowhere'}").0, 403);
+
+    let (_, mine) = n.call(Some(&alice), "GET", "/messages", "");
+    assert!(
+        mine.contains("in r1") && mine.contains("in r2") && !mine.contains("in r3"),
+        "{mine}"
+    );
+    let (_, counted) = n.query(&alice, "get messages count");
+    assert!(counted.contains(":2"), "{counted}");
+
+    listen(
+        &mut s,
+        &mut heard,
+        &|h| h.contains("in r2"),
+        Duration::from_secs(3),
+    );
+    // A moment more, for anything that would have followed.
+    listen(&mut s, &mut heard, &|_| false, Duration::from_millis(300));
+    assert!(
+        heard.contains("in r1") && heard.contains("in r2"),
+        "{heard}"
+    );
+    assert!(
+        !heard.contains("in r3") && !heard.contains("spoof"),
+        "{heard}"
+    );
+
+    let rooms: Vec<String> = (0..=fenec_http::access::MAX_CLAIM_VALUES)
+        .map(|i| format!("\"r{i}\""))
+        .collect();
+    let many = n.token(&format!(r#"{{"sub":"m","rooms":[{}]}}"#, rooms.join(",")));
+    let (status, body) = n.call(Some(&many), "GET", "/messages", "");
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("1 000 values"), "{body}");
+}
+
+/// The `_score` of the first row an answer holds.
+fn first_score(body: &str) -> f64 {
+    let at = body.find("\"_score\":").expect(body) + "\"_score\":".len();
+    let digits: String = body[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | 'e' | 'E'))
+        .collect();
+    digits.parse().unwrap()
+}
+
+/// BM25 over the rows a token may read: alice's own memo scores what it
+/// scored before bob wrote 200 private memos holding the same word, where
+/// over the collection it went 9.87 -> 4.79 and told her how many of his
+/// held it. The server's own token still scores over the collection.
+#[test]
+fn a_scoped_match_scores_nothing_of_rows_the_token_cannot_read() {
+    let n = start_with(
+        "memos  read,write  where owner = $jwt.sub\n",
+        &["create collection memos (owner text @hash, body text @text)"],
+    );
+    let (alice, bob) = (n.token(r#"{"sub":"alice"}"#), n.token(r#"{"sub":"bob"}"#));
+    for body in [
+        "the initech memo",
+        "lunch on friday",
+        "a plan for the quarter",
+    ] {
+        let doc = format!(r#"{{"body":"{body}"}}"#);
+        assert_eq!(n.call(Some(&alice), "POST", "/memos", &doc).0, 201);
+    }
+    let ask = r#"get memos match body "initech" limit 5"#;
+    let (status, before) = n.query(&alice, ask);
+    assert_eq!(status, 200, "{before}");
+    let mine = r#"get memos where owner = "alice" match body "initech" limit 5"#;
+    let (_, root_before) = n.query(ROOT, mine);
+
+    let memos: Vec<String> = (0..200)
+        .map(|i| format!(r#"{{"body":"initech deal {i}, private"}}"#))
+        .collect();
+    let (status, body) = n.call(
+        Some(&bob),
+        "POST",
+        "/memos",
+        &format!("[{}]", memos.join(",")),
+    );
+    assert_eq!(status, 201, "{body}");
+
+    let (_, after) = n.query(&alice, ask);
+    assert_eq!(count(&after, "\"_score\""), 1, "{after}");
+    assert_eq!(
+        first_score(&after),
+        first_score(&before),
+        "{before} {after}"
+    );
+    // Over the collection the same memo's score fell: what alice no longer
+    // learns.
+    let (_, root_after) = n.query(ROOT, mine);
+    assert!(
+        first_score(&root_after) < first_score(&root_before),
+        "{root_before} {root_after}"
+    );
+}

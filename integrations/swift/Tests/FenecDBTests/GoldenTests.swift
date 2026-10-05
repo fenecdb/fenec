@@ -100,6 +100,7 @@ import Testing
             return try q.order(a[0].string!, a.count > 1 ? a[1].string! : "asc", collate: opt(a, 2, "collate")?.string)
         case ("limit", _): return try q.limit(a[0].int!)
         case ("offset", _): return try q.offset(a[0].int!)
+        case ("require", _): return try q.require(a[0].int!)
         case ("lookup", _):
             let select: [String]? = opt(a, 1, "select").map { $0.string.map { [$0] } ?? $0.array!.map { $0.string! } }
             return try q.lookup(

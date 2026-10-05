@@ -476,13 +476,19 @@ impl TextIndex {
         (self.total_terms as f32 / self.lengths.len() as f32).max(1.0)
     }
 
-    /// Robertson/Sparck-Jones idf, the `ln(1 + ...)` form: always positive, so
-    /// a term occurring in every document contributes ~0 rather than pushing
-    /// the score negative the way the unsmoothed form does.
-    fn idf(&self, df: usize) -> f32 {
-        let n = self.lengths.len() as f32;
-        let df = df as f32;
-        (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+    /// How many documents BM25 counts and their mean length: the index's,
+    /// or those of `within` (ascending), each length summed as the index
+    /// sums its own, so a set scores as an index holding it alone would.
+    fn counted(&self, within: Option<&[DocId]>) -> (usize, f32) {
+        let Some(w) = within else {
+            return (self.lengths.len(), self.avgdl());
+        };
+        let total: u64 = w.iter().map(|&d| self.lengths.get(d) as u64).sum();
+        let mean = match w.len() {
+            0 => 1.0,
+            n => (total as f32 / n as f32).max(1.0),
+        };
+        (w.len(), mean)
     }
 
     /// Every document holding a term of `query`, ascending: the set a
@@ -517,9 +523,31 @@ impl TextIndex {
     where
         F: Fn(DocId) -> bool,
     {
+        self.search_within(query, k, accept, None)
+    }
+
+    /// [`Self::search`], BM25's statistics taken over `within` (ascending)
+    /// when it is given: its documents counted, their mean length, and each
+    /// term's documents among them. A scoped token's `match` is scored so
+    /// ([`crate::query::Match::within`]): over the collection a score said
+    /// how many rows the token could not read held a term. A term none of
+    /// them holds is passed over, its list unwalked.
+    pub fn search_within<F>(
+        &self,
+        query: &str,
+        k: usize,
+        accept: F,
+        within: Option<&[DocId]>,
+    ) -> Vec<(DocId, f32)>
+    where
+        F: Fn(DocId) -> bool,
+    {
         if k == 0 || self.lengths.len() == 0 {
             return Vec::new();
         }
+        // The browser holds no scoped token to ask for it: left in, the
+        // counting was 151 bytes brotli of its module.
+        let within = within.filter(|_| cfg!(not(target_arch = "wasm32")));
         // Repeated query terms fold into a weight. Scoring the same postings
         // list twice would give the same answer for twice the walk.
         let mut qtf: Map<String, u32> = Map::default();
@@ -530,11 +558,19 @@ impl TextIndex {
             }
         });
 
-        let (k1, b, avgdl) = (self.spec.k1(), self.spec.b(), self.avgdl());
+        let (n, avgdl) = self.counted(within);
+        let (k1, b) = (self.spec.k1(), self.spec.b());
         let mut cursors: Vec<Cursor> = Vec::with_capacity(qtf.len());
         for (term, count) in &qtf {
             if let Some(list) = self.postings.get(term) {
-                let weight = *count as f32 * self.idf(list.len());
+                let df = match within {
+                    None => list.len(),
+                    Some(w) => held_by(&list.docs, w),
+                };
+                if df == 0 {
+                    continue;
+                }
+                let weight = *count as f32 * idf(n, df);
                 // The most this term can ever add to a document: its largest
                 // `tf`, against the most generous length normalisation there
                 // is (`dl` -> 0). An over-estimate is what makes it safe.
@@ -652,6 +688,37 @@ impl TextIndex {
     }
 }
 
+/// Robertson/Sparck-Jones idf of a term `df` of `n` documents hold, the
+/// `ln(1 + ...)` form: always positive, so a term occurring in every
+/// document contributes ~0 rather than pushing the score negative the way
+/// the unsmoothed form does.
+fn idf(n: usize, df: usize) -> f32 {
+    let (n, df) = (n as f32, df as f32);
+    (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+}
+
+/// How many of `docs` are in `within`, both ascending: the shorter walked,
+/// each looked for in the longer from where the last was found -- `|short|
+/// log |long|`, which for a user's rows against a common term's list is a
+/// few hundred steps.
+fn held_by(docs: &[DocId], within: &[DocId]) -> usize {
+    let (short, long) = if docs.len() <= within.len() {
+        (docs, within)
+    } else {
+        (within, docs)
+    };
+    let mut at = 0;
+    let mut n = 0;
+    for d in short {
+        at += long[at..].partition_point(|x| x < d);
+        if long.get(at) == Some(d) {
+            n += 1;
+            at += 1;
+        }
+    }
+    n
+}
+
 /// Highest score first, ties to the lower id. A function rather than a
 /// closure so that every ranking sorted this way -- `fuse`'s too -- shares
 /// one copy of the sort: a closure inside the generic `search` is a type of
@@ -754,7 +821,7 @@ impl TextIndex {
         let mut cursors: Vec<Cursor> = Vec::new();
         for (term, count) in &qtf {
             if let Some(list) = self.postings.get(term) {
-                let weight = *count as f32 * self.idf(list.len());
+                let weight = *count as f32 * idf(self.lengths.len(), list.len());
                 let tf = list.max_tf as f32;
                 cursors.push(Cursor {
                     at: 0,

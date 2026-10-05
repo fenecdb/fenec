@@ -107,10 +107,104 @@ fn require_parses_after_each_write_and_nowhere_else() {
         "set a {n: 1} require -1",
         "set a {n: 1} require $1",
         "del a require 1 where id = 2",
-        "get a require 1",
+        "get a require",
+        "get a require $1",
+        "get a count require 1",
+        "get a select sum(n) require 1",
+        "get a lookup b on x require 1",
+        "get b where x in (get a select id require 1)",
     ] {
         assert!(fenec_ql::parse_one(bad).is_err(), "{bad}");
     }
+}
+
+/// `get ... require <n>`: the rows a `get` answers -- after `limit` -- must
+/// number `n`, or the block it is in is put back, as a write's count is.
+/// A checkout asks "is the price still 12" beside the writes it guards.
+#[test]
+fn a_get_that_misses_its_count_puts_the_block_back() {
+    for (sql, want) in [
+        ("get a where n = 1 require 1", 1),
+        ("get a limit 1 require 1", 1),
+        ("get a require 0", 0),
+        ("get a select n, count(*) group n require 2", 2),
+        ("get a order n limit 5 require 1 lookup b on x", 1),
+    ] {
+        let Statement::Select(sel) = parse(sql) else {
+            panic!("{sql}");
+        };
+        assert_eq!(sel.require, Some(want), "{sql}");
+    }
+
+    let mut db = Database::new();
+    for sql in [
+        "create collection products (sku text @unique, price int, stock int)",
+        "create collection orders (sku text @hash, price int)",
+        "put products [{sku: \"tee\", price: 12, stock: 3}, {sku: \"cap\", price: 8, stock: 0}]",
+    ] {
+        run(&mut db, sql).unwrap();
+    }
+    let checkout: Vec<Statement> = [
+        "get products where sku = $1 and price = $2 and stock > 0 require 1",
+        "insert orders {sku: $1, price: $2}",
+        "set products {stock: stock - 1} where sku = $1 require 1",
+    ]
+    .iter()
+    .map(|s| parse(s))
+    .collect();
+    let buy = |db: &mut Database, sku: &str, price: i64| {
+        let params = [Value::Text(sku.into()), Value::Int(price)];
+        let block: Vec<(&Statement, &[Value])> =
+            checkout.iter().map(|s| (s, &params[..])).collect();
+        db.execute_block(&block)
+    };
+    // The price seen is the price paid.
+    let answers = buy(&mut db, "tee", 12).unwrap();
+    assert_eq!(answers[0].rows().unwrap().rows.len(), 1);
+    // A price that moved, or no stock: refused at the read, nothing written.
+    let seq = db.change_seq();
+    for (sku, price) in [("tee", 11), ("cap", 8), ("hat", 5)] {
+        let (at, e) = buy(&mut db, sku, price).unwrap_err();
+        assert_eq!(at, 0);
+        assert!(matches!(e, Error::Unmet(_)), "{e:?}");
+    }
+    assert_eq!(
+        Error::Unmet("`get products` answered 0 rows, and requires 1".into()),
+        buy(&mut db, "tee", 11).unwrap_err().1
+    );
+    assert_eq!(db.change_seq(), seq, "nothing landed");
+    assert_eq!(int(one(&db, "get orders count")), 1);
+
+    // Read in the block, it sees the writes before it there.
+    let block: Vec<Statement> = [
+        "set products {price: 13} where sku = \"tee\"",
+        "get products where price = 13 require 1",
+    ]
+    .iter()
+    .map(|s| parse(s))
+    .collect();
+    let refs: Vec<(&Statement, &[Value])> = block.iter().map(|s| (s, &[][..])).collect();
+    assert!(db.execute_block(&refs).is_ok());
+
+    // On its own, a read: the count after `limit`, refused as unmet.
+    let e = db.query(&parse("get products require 1"), &[]).unwrap_err();
+    assert_eq!(
+        e,
+        Error::Unmet("`get products` answered 2 rows, and requires 1".into())
+    );
+    assert!(db
+        .query(&parse("get products limit 1 require 1"), &[])
+        .is_ok());
+    assert!(db
+        .query(&parse("get products where sku = \"tee\" require 1"), &[])
+        .is_ok());
+    let mut out = String::new();
+    assert_eq!(
+        db.query_json(&parse("get products require 1"), &[], &mut out)
+            .unwrap(),
+        None,
+        "the quick path counts no rows"
+    );
 }
 
 #[test]
@@ -260,4 +354,48 @@ fn concurrent_transfers_neither_make_nor_lose_money() {
         ));
         assert_eq!(balance, START + moved, "{name}");
     }
+}
+
+/// The checkout of `fenecql.html#checkout`, as written there: a moved price,
+/// a used-up coupon and no stock each stop it at their line, nothing written.
+#[test]
+fn the_docs_checkout_stops_at_the_line_that_fails() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection products (sku text @unique, price int, stock int)",
+        "create collection coupons (code text @unique, off int, uses int, max_uses int)",
+        "create collection orders (ref text @unique, sku text @hash, paid int)",
+        "put products {sku: \"tee\", price: 12, stock: 1}",
+        "put coupons {code: \"C\", off: 2, uses: 0, max_uses: 1}",
+    ] {
+        run(&mut db, sql).unwrap();
+    }
+    let lines: Vec<Statement> = [
+        "get products where sku = $1 and price = $2 require 1",
+        "get coupons where code = $3 and uses < max_uses require 1",
+        "set products {stock: stock - 1} where sku = $1 and stock > 0 require 1",
+        "set coupons {uses: uses + 1} where code = $3 require 1",
+        "insert orders {ref: $4, sku: $1, paid: $2 - $5}",
+    ]
+    .iter()
+    .map(|s| parse(s))
+    .collect();
+    let buy = |db: &mut Database, price: i64, code: &str, r: &str| {
+        let params = [
+            Value::Text("tee".into()),
+            Value::Int(price),
+            Value::Text(code.into()),
+            Value::Text(r.into()),
+            Value::Int(2),
+        ];
+        let block: Vec<(&Statement, &[Value])> = lines.iter().map(|s| (s, &params[..])).collect();
+        db.execute_block(&block).map(|_| ()).map_err(|(at, _)| at)
+    };
+    assert_eq!(buy(&mut db, 11, "C", "o1"), Err(0));
+    assert_eq!(buy(&mut db, 12, "X", "o1"), Err(1));
+    assert_eq!(buy(&mut db, 12, "C", "o1"), Ok(()));
+    assert_eq!(buy(&mut db, 12, "C", "o2"), Err(1), "the coupon is used up");
+    run(&mut db, "set coupons {max_uses: 5}").unwrap();
+    assert_eq!(buy(&mut db, 12, "C", "o2"), Err(2), "no stock");
+    assert_eq!(int(one(&db, "get orders select sum(paid)")), 10);
 }

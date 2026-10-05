@@ -9,17 +9,40 @@
 //! level security lets a browser talk to the database directly:
 //!
 //! ```text
-//! # collection   access       rows                                 role
-//! notes          read,write   where owner = $jwt.sub
-//! posts          read         where published = true or author = $jwt.sub
-//! posts          write        where author = $jwt.sub
-//! *              read                                              for dashboard
+//! # collection   access         rows                                 role
+//! notes          read,write     where owner = $jwt.sub
+//! posts          read           where published = true or author = $jwt.sub
+//! posts          write          where author = $jwt.sub
+//! messages       read,insert    where room in $jwt.rooms
+//! journal        read,insert    where owner = $jwt.sub
+//! journal        append-only
+//! *              read                                                for dashboard
 //! ```
 //!
 //! A rule without `for` applies to every token; one with it, to tokens whose
-//! `role` claim names that role. Rules on one collection widen each other,
-//! as permissive policies do. A collection no rule lets a token read does
-//! not exist as far as that token can tell.
+//! `role` claim names that role (a text, or a list holding it). Rules on one
+//! collection widen each other, as permissive policies do. A collection no
+//! rule grants a token anything does not exist as far as that token can
+//! tell.
+//!
+//! **Grants** are `read`, `insert`, `update` and `delete`, and `write` is
+//! the three writes. An `insert` is a put of new documents; `update` is a
+//! `set`, and `delete` a `del`, of rows the token may also read. A token
+//! may insert into a collection it cannot read -- an event stream, a trail
+//! a client appends to -- which is then not listed to it.
+//!
+//! **`append-only`** is a line of its own, `<collection> append-only`,
+//! with no filter and no role: no scoped token updates or deletes there,
+//! whatever its rules grant -- `write` and `*` mean `insert` there, and a
+//! rule naming `update` or `delete` for it is refused at startup. It binds
+//! scoped tokens, not the server's own: a journal's rows are corrected,
+//! erased under the law or swept by `@ttl` by whoever holds that token,
+//! and an app server that should only append is given a scoped token too.
+//!
+//! **A list claim** goes on the right of `in`: `room in $jwt.rooms`, the
+//! claim a JSON array, matches the rooms it lists -- `in [$jwt.rooms,
+//! 'lobby']` those and one more -- and a text claim there is a list of one.
+//! A token whose claim lists more than [`MAX_CLAIM_VALUES`] is refused.
 //!
 //! **Reads** get the rule's filter ANDed into every level of the query:
 //! the collection's `where`, each `lookup` below it, a subscription's shape.
@@ -80,6 +103,9 @@ pub struct Access {
     /// The JWKS file the keys are read again from as it changes.
     source: Option<Source>,
     rules: Vec<Rule>,
+    /// The collections no scoped token updates or deletes in (`append-only`
+    /// lines), `*` for every one.
+    append_only: Arc<[String]>,
     /// Tokens already verified, by their text: a client sends the same one
     /// for as long as it lives, and an RS256 verification takes 38 us (166
     /// in 32-bit limbs), an HS256 token's with its parses 2.9, a token
@@ -233,11 +259,28 @@ fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
     Ok(keys)
 }
 
+/// What a rule grants, as bits: `read`, `insert`, `update`, `delete`.
+const READ: u8 = 1;
+const INSERT: u8 = 2;
+const UPDATE: u8 = 4;
+const DELETE: u8 = 8;
+/// `write`.
+const WRITES: u8 = INSERT | UPDATE | DELETE;
+
+/// The most values a list claim may hand a rule's `in`. A token is signed
+/// by whoever issues them, but the server builds a filter of the list on
+/// every request and tests it against every row read and every document
+/// written: a token listing a million rooms would cost every request it
+/// makes. 1 000 rooms or teams is far past a person's; past it, the
+/// membership belongs in the rows (a collection per room, or a tenant).
+pub const MAX_CLAIM_VALUES: usize = 1_000;
+
 struct Rule {
     /// `None` for `*`.
     collection: Option<String>,
-    read: bool,
-    write: bool,
+    ops: u8,
+    /// The writes named one by one, which an `append-only` line refuses.
+    named: u8,
     /// With `$jwt.<claim>` as parameter `k`, the claim `claims[k]`.
     filter: Option<Expr>,
     claims: Vec<String>,
@@ -253,12 +296,13 @@ pub struct Scope {
     tenants: Option<Vec<String>>,
     /// A token naming no tenant reaches every one (`--jwt-unbound-tenants`).
     unbound: bool,
+    /// The policy's `append-only` collections, `*` for every one.
+    append_only: Arc<[String]>,
 }
 
 struct Bound {
     collection: Option<String>,
-    read: bool,
-    write: bool,
+    ops: u8,
     filter: Option<Expr>,
 }
 
@@ -298,17 +342,46 @@ impl Access {
         policy: &str,
     ) -> std::result::Result<Access, String> {
         let mut rules = Vec::new();
+        let mut append_only = Vec::new();
+        let mut lines = Vec::new();
         for (n, line) in policy.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
                 continue;
             }
-            rules.push(rule(line).map_err(|e| format!("policy line {}: {e}", n + 1))?);
+            let at = |e: String| format!("policy line {}: {e}", n + 1);
+            let mut words = line.split_whitespace();
+            if let (Some(c), Some("append-only")) = (words.next(), words.next()) {
+                if words.next().is_some() {
+                    return Err(at("`append-only` takes no filter and no role: it holds \
+                                   every scoped token"
+                        .into()));
+                }
+                append_only.push(c.to_string());
+                continue;
+            }
+            rules.push(rule(line).map_err(at)?);
+            lines.push(n + 1);
+        }
+        // A rule granting what an `append-only` line takes away says two
+        // things, and which was meant is not for the server to guess.
+        // `write` and `*` stand for more than the one collection, and mean
+        // `insert` there.
+        for (r, n) in rules.iter().zip(lines) {
+            let Some(c) = &r.collection else { continue };
+            let named = r.named & (UPDATE | DELETE) != 0;
+            if named && append_only.iter().any(|a| a == "*" || a == c) {
+                return Err(format!(
+                    "policy line {n}: `{c}` is append-only, and the rule grants `update` or \
+                     `delete` there"
+                ));
+            }
         }
         Ok(Access {
             keys: RwLock::new(Arc::new(keys)),
             source,
             rules,
+            append_only: append_only.into(),
             verified: Default::default(),
             demands: Demands::default(),
         })
@@ -390,13 +463,15 @@ impl Access {
     pub fn scope(&self, token: &str, now: u64) -> std::result::Result<Scope, &'static str> {
         let claims = self.verify(token, now)?;
         let claim = |name: &str| claims.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-        let role = match claim("role") {
-            Some(Value::Text(r)) => Some(r.as_str()),
-            _ => None,
+        // A role is a text, or a list of them, the token holding each.
+        let has_role = |role: &str| match claim("role") {
+            Some(Value::Text(r)) => r == role,
+            Some(Value::List(l)) => l.iter().any(|v| v.as_text() == Some(role)),
+            _ => false,
         };
         let mut rules = Vec::new();
         'rules: for r in &self.rules {
-            if r.role.is_some() && r.role.as_deref() != role {
+            if r.role.as_deref().is_some_and(|role| !has_role(role)) {
                 continue;
             }
             // A rule naming a claim the token lacks does not apply: a filter
@@ -404,14 +479,16 @@ impl Access {
             let mut values = Vec::with_capacity(r.claims.len());
             for c in &r.claims {
                 match claim(c) {
+                    Some(Value::List(l)) if l.len() > MAX_CLAIM_VALUES => {
+                        return Err("a list claim the policy reads holds more than 1 000 values")
+                    }
                     Some(v) => values.push(v.clone()),
                     None => continue 'rules,
                 }
             }
             rules.push(Bound {
                 collection: r.collection.clone(),
-                read: r.read,
-                write: r.write,
+                ops: r.ops,
                 filter: r.filter.as_ref().map(|f| bind(f, &values)),
             });
         }
@@ -437,6 +514,7 @@ impl Access {
             rules,
             tenants,
             unbound: self.demands.unbound_tenants,
+            append_only: Arc::clone(&self.append_only),
         })
     }
 
@@ -488,7 +566,14 @@ impl Access {
         let object = |part: &str| {
             let bytes = b64url_decode(part).ok_or("not a JSON Web Token")?;
             let text = std::str::from_utf8(&bytes).map_err(|_| "not a JSON Web Token")?;
-            fenec_core::json::parse_object(text).map_err(|_| "not a JSON Web Token")
+            // Read as written: a list of numbers read the quick way is a
+            // vector of `f32`s, and a team `123456789` in `team in
+            // $jwt.teams` would have been 123456792 -- another team's. A
+            // member given twice is refused, as a document's is.
+            match fenec_core::json::parse_json(text) {
+                Ok(Value::Object(members)) => Ok(members),
+                _ => Err("not a JSON Web Token"),
+            }
         };
         // The algorithm is the server's, never the token's: a token saying
         // `none` -- or anything else -- is refused rather than believed.
@@ -534,22 +619,31 @@ impl Access {
     }
 }
 
-/// One line of a policy: `<collection|*> <read|write|read,write> [where
-/// <filter>] [for <role>]`.
+/// One line of a policy: `<collection|*> <grants> [where <filter>] [for
+/// <role>]`, the grants `read`, `insert`, `update`, `delete` and `write`
+/// joined by commas.
 fn rule(line: &str) -> std::result::Result<Rule, String> {
     let (collection, rest) = line
         .split_once(char::is_whitespace)
         .ok_or("no access given")?;
     let rest = rest.trim_start();
     let (grants, mut rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    let (mut read, mut write) = (false, false);
+    let (mut ops, mut named) = (0, 0);
     for g in grants.split(',') {
         match g {
-            "read" => read = true,
-            "write" => write = true,
-            other => return Err(format!("`{other}` is neither read nor write")),
+            "read" => ops |= READ,
+            "write" => ops |= WRITES,
+            "insert" => named |= INSERT,
+            "update" => named |= UPDATE,
+            "delete" => named |= DELETE,
+            other => {
+                return Err(format!(
+                    "`{other}` is none of read, insert, update, delete and write"
+                ))
+            }
         }
     }
+    ops |= named;
     let mut role = None;
     let words: Vec<&str> = rest.split_whitespace().collect();
     if words.len() >= 2 && words[words.len() - 2] == "for" {
@@ -587,7 +681,17 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
                     claims.len() - 1
                 }
             };
-            out.push_str(&format!("${}", k + 1));
+            // `in $jwt.rooms` is `in [$jwt.rooms]`, whose list claim
+            // [`bind`] spreads: FenecQL's `in` takes a list, and a
+            // parameter binds one value.
+            let is_in = out.trim_end().strip_suffix("in").is_some_and(|b| {
+                b.is_empty() || b.ends_with(|c: char| c.is_whitespace() || c == '(')
+            });
+            if is_in {
+                out.push_str(&format!("[${}]", k + 1));
+            } else {
+                out.push_str(&format!("${}", k + 1));
+            }
             s = &s[at + 5 + name.len()..];
         }
         out.push_str(s);
@@ -606,8 +710,8 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
     };
     Ok(Rule {
         collection: (collection != "*").then(|| collection.to_string()),
-        read,
-        write,
+        ops,
+        named,
         filter,
         claims,
         role,
@@ -628,7 +732,21 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
         Expr::Like(x, y) => Expr::Like(b(x), b(y)),
         Expr::Has(x, y) => Expr::Has(b(x), b(y)),
         Expr::Arith(op, x, y) => Expr::Arith(*op, b(x), b(y)),
-        Expr::In(x, items) => Expr::In(b(x), items.iter().map(|i| bind(i, values)).collect()),
+        // A list claim in an `in` list is its values: `room in [$1]`, the
+        // claim `["r1", "r2"]`, is `room in ["r1", "r2"]`.
+        Expr::In(x, items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for i in items {
+                match i {
+                    Expr::Param(k) => match &values[*k] {
+                        Value::List(l) => out.extend(l.iter().cloned().map(Expr::Lit)),
+                        v => out.push(Expr::Lit(v.clone())),
+                    },
+                    i => out.push(bind(i, values)),
+                }
+            }
+            Expr::In(b(x), out)
+        }
         // A rule holds none ([`rule`]).
         Expr::InSelect(..) => e.clone(),
         Expr::Call(f, args) => {
@@ -682,15 +800,23 @@ impl Scope {
         }
     }
 
+    /// Whether `collection` is `append-only` in the policy.
+    fn append_only(&self, collection: &str) -> bool {
+        self.append_only.iter().any(|a| a == "*" || a == collection)
+    }
+
     /// `None`: no access. `Some(None)`: every row. `Some(Some(f))`: the rows
-    /// `f` matches -- the rules' filters, any of them.
-    fn filter(&self, collection: &str, write: bool) -> Option<Option<Expr>> {
+    /// `f` matches -- the filters of the rules granting `op`, any of them.
+    fn filter(&self, collection: &str, op: u8) -> Option<Option<Expr>> {
+        if op & (UPDATE | DELETE) != 0 && self.append_only(collection) {
+            return None;
+        }
         let mut any = false;
         let mut every = false;
         let mut either: Option<Expr> = None;
         for r in &self.rules {
             let here = r.collection.as_deref().is_none_or(|c| c == collection);
-            if !here || !(if write { r.write } else { r.read }) {
+            if !here || r.ops & op == 0 {
                 continue;
             }
             any = true;
@@ -713,15 +839,32 @@ impl Scope {
 
     /// Whether the token may read `collection` at all.
     pub fn readable(&self, collection: &str) -> bool {
-        self.filter(collection, false).is_some()
+        self.filter(collection, READ).is_some()
+    }
+
+    /// Whether any rule grants the token anything on `collection`: one
+    /// none does does not exist for it.
+    fn known(&self, collection: &str) -> bool {
+        self.rules
+            .iter()
+            .any(|r| r.ops != 0 && r.collection.as_deref().is_none_or(|c| c == collection))
+    }
+
+    /// Why the token may not `what` in `collection`: it does not exist for
+    /// a token granted nothing there.
+    fn refused(&self, collection: &str, what: &str) -> Error {
+        if !self.known(collection) {
+            return Error::NotFound(format!("collection `{collection}`"));
+        }
+        denied(format!("this token may not {what} `{collection}`"))
     }
 
     /// The read filter of `collection`, ANDed into `filter`; a collection
-    /// the token may not read does not exist for it.
+    /// the token is granted nothing on does not exist for it.
     pub fn restrict(&self, collection: &str, filter: Option<Expr>) -> Result<Option<Expr>> {
         let f = self
-            .filter(collection, false)
-            .ok_or_else(|| Error::NotFound(format!("collection `{collection}`")))?;
+            .filter(collection, READ)
+            .ok_or_else(|| self.refused(collection, "read"))?;
         Ok(and(filter, f))
     }
 
@@ -736,6 +879,15 @@ impl Scope {
             *filter = self.restrict(collection, filter.take())?;
             Ok(())
         })?;
+        // A `match` held to some of the rows is scored over the rows its
+        // filter selects, not the collection: BM25's statistics over every
+        // row told a user how many rows it could not read held a word --
+        // alice's own memo scored 9.87, and 4.79 once bob had written 200
+        // private ones holding it.
+        let held = matches!(self.filter(&sel.collection, READ), Some(Some(_)));
+        if let Some(m) = sel.matcher.as_mut().filter(|_| held) {
+            m.within = true;
+        }
         Ok(sel)
     }
 
@@ -752,12 +904,30 @@ impl Scope {
         })
     }
 
-    fn writable(&self, collection: &str) -> Result<Option<Expr>> {
-        if !self.readable(collection) {
-            return Err(Error::NotFound(format!("collection `{collection}`")));
+    /// The rows of `collection` the token may `op` -- an insert's
+    /// documents, as written, an update's before and after, a delete's --
+    /// or why it may not. An update and a delete find their rows by a
+    /// filter, so they are of rows the token may read, as PostgreSQL's
+    /// need `SELECT` beside them; an insert needs no read.
+    fn writable(&self, collection: &str, op: u8) -> Result<Option<Expr>> {
+        let verb = match op {
+            INSERT => "insert into",
+            UPDATE => "update rows of",
+            _ => "delete rows of",
+        };
+        if op != INSERT {
+            if !self.readable(collection) {
+                return Err(self.refused(collection, verb));
+            }
+            if self.append_only(collection) {
+                return Err(denied(format!(
+                    "`{collection}` is append-only: a scoped token inserts into it, and \
+                     neither updates nor deletes its rows"
+                )));
+            }
         }
-        self.filter(collection, true)
-            .ok_or_else(|| denied(format!("this token may not write to `{collection}`")))
+        self.filter(collection, op)
+            .ok_or_else(|| self.refused(collection, verb))
     }
 
     /// The statement as this token may run it, or why it may not.
@@ -772,7 +942,7 @@ impl Scope {
                 if_absent,
                 require,
             } => {
-                let f = self.writable(&collection)?;
+                let f = self.writable(&collection, INSERT)?;
                 let mut pins = Vec::new();
                 if let Some(f) = &f {
                     pinned(f, &mut pins);
@@ -807,7 +977,7 @@ impl Scope {
                 mut filter,
                 require,
             } => {
-                let f = self.writable(&collection)?;
+                let f = self.writable(&collection, UPDATE)?;
                 self.inner(&mut filter)?;
                 Statement::Update {
                     collection,
@@ -821,7 +991,7 @@ impl Scope {
                 mut filter,
                 require,
             } => {
-                let f = self.writable(&collection)?;
+                let f = self.writable(&collection, DELETE)?;
                 self.inner(&mut filter)?;
                 Statement::Delete {
                     collection,
@@ -844,10 +1014,11 @@ impl Scope {
         })
     }
 
-    /// Whether `doc`, as it would be written to `collection`, is one this
-    /// token may write.
-    fn admits(&self, schema: &Schema, doc: &Document, registry: &Registry) -> Result<bool> {
-        match self.filter(&schema.name, true) {
+    /// Whether `doc`, as `op` would write it to `collection`, is one this
+    /// token may write: an insert's by the rules granting `insert`, an
+    /// update's by those granting `update`.
+    fn admits(&self, schema: &Schema, op: u8, doc: &Document, registry: &Registry) -> Result<bool> {
+        match self.filter(&schema.name, op) {
             None => Ok(false),
             Some(None) => Ok(true),
             Some(Some(f)) => {
@@ -944,7 +1115,14 @@ impl Hook for Check {
         let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
             return Ok(());
         };
-        if op == WriteOp::Delete || scope.admits(schema, doc, &self.registry)? {
+        let op = match op {
+            WriteOp::Insert => INSERT,
+            WriteOp::Update => UPDATE,
+            // A delete's rows were found through its filter, the token's
+            // ANDed in; nothing is written to check.
+            WriteOp::Delete => return Ok(()),
+        };
+        if scope.admits(schema, op, doc, &self.registry)? {
             return Ok(());
         }
         Err(denied(format!(
@@ -1160,8 +1338,8 @@ mod tests {
         assert!(alice.readable("notes") && alice.readable("posts"));
         assert!(!alice.readable("secrets"));
         // The write rule names a claim alice's token lacks: it does not apply.
-        assert!(alice.writable("posts").is_err());
-        let Some(Some(Expr::Cmp(CmpOp::Eq, _, v))) = alice.filter("notes", true) else {
+        assert!(alice.writable("posts", UPDATE).is_err());
+        let Some(Some(Expr::Cmp(CmpOp::Eq, _, v))) = alice.filter("notes", INSERT) else {
             panic!("a bound filter");
         };
         assert_eq!(*v, Expr::Lit(Value::Text("alice".into())));
@@ -1170,16 +1348,118 @@ mod tests {
             .scope(&a.mint(r#"{"sub":"d","role":"dashboard"}"#).unwrap(), 0)
             .unwrap();
         assert!(dash.readable("secrets"));
-        assert!(matches!(dash.filter("secrets", false), Some(None)));
-        assert!(dash.writable("secrets").is_err());
+        assert!(matches!(dash.filter("secrets", READ), Some(None)));
+        assert!(dash.writable("secrets", INSERT).is_err());
 
         for bad in [
             "notes",
             "notes admin",
             "notes read where",
             "notes read where $1 = 2",
+            "notes append-only where owner = $jwt.sub",
+            "notes append-only for admin",
+            "notes read,update\nnotes append-only",
+            "notes delete\n* append-only",
         ] {
             assert!(Access::new(SECRET, bad).is_err(), "{bad}");
         }
+    }
+
+    /// Each write is granted on its own, and `append-only` takes updates
+    /// and deletes from every scoped token, whatever `write` and `*` say.
+    #[test]
+    fn grants_are_per_operation_and_append_only_holds_every_token() {
+        let a = access(
+            "journal read,write where owner = $jwt.sub\n\
+             journal append-only\n\
+             events insert where user = $jwt.sub\n\
+             notes read,insert,update where owner = $jwt.sub\n\
+             * write for admin\n\
+             * read for admin\n",
+        );
+        let alice = a.scope(&a.mint(r#"{"sub":"alice"}"#).unwrap(), 0).unwrap();
+        assert!(alice.writable("journal", INSERT).is_ok());
+        for op in [UPDATE, DELETE] {
+            let e = alice.writable("journal", op).unwrap_err();
+            assert!(matches!(e, Error::Denied(_)) && e.to_string().contains("append-only"));
+        }
+        // Inserted into, never read: not listed, and its reads refused.
+        assert!(alice.writable("events", INSERT).is_ok());
+        assert!(!alice.readable("events"));
+        assert!(matches!(
+            alice.restrict("events", None),
+            Err(Error::Denied(_))
+        ));
+        assert!(matches!(
+            alice.writable("events", DELETE),
+            Err(Error::Denied(_))
+        ));
+        assert!(alice.writable("notes", UPDATE).is_ok());
+        assert!(matches!(
+            alice.writable("notes", DELETE),
+            Err(Error::Denied(_))
+        ));
+        // A collection granted nothing does not exist.
+        assert!(matches!(
+            alice.writable("secrets", INSERT),
+            Err(Error::NotFound(_))
+        ));
+
+        // A role claim may be a list.
+        let admin = a
+            .scope(
+                &a.mint(r#"{"sub":"root","role":["ops","admin"]}"#).unwrap(),
+                0,
+            )
+            .unwrap();
+        assert!(admin.writable("secrets", DELETE).is_ok());
+        assert!(admin.writable("journal", DELETE).is_err());
+    }
+
+    /// `in $jwt.rooms` takes a list claim's values, and a token listing
+    /// more than the bound is refused.
+    #[test]
+    fn a_list_claim_is_spread_into_in() {
+        let a = access(
+            "messages read,insert where room in $jwt.rooms\n\
+             rooms read where id in [$jwt.rooms, 0]\n",
+        );
+        let s = a
+            .scope(&a.mint(r#"{"sub":"a","rooms":["r1","r2"]}"#).unwrap(), 0)
+            .unwrap();
+        let Some(Some(Expr::In(_, items))) = s.filter("messages", READ) else {
+            panic!("an in list");
+        };
+        assert_eq!(
+            items,
+            vec![
+                Expr::Lit(Value::Text("r1".into())),
+                Expr::Lit(Value::Text("r2".into()))
+            ]
+        );
+        // Numbers stay as written, not a vector's f32s.
+        let s = a
+            .scope(&a.mint(r#"{"sub":"a","rooms":[123456789]}"#).unwrap(), 0)
+            .unwrap();
+        let Some(Some(Expr::In(_, items))) = s.filter("rooms", READ) else {
+            panic!("an in list");
+        };
+        assert_eq!(
+            items,
+            vec![Expr::Lit(Value::Int(123456789)), Expr::Lit(Value::Int(0))]
+        );
+        // A text claim is a list of one.
+        let s = a
+            .scope(&a.mint(r#"{"sub":"a","rooms":"r1"}"#).unwrap(), 0)
+            .unwrap();
+        let Some(Some(Expr::In(_, items))) = s.filter("messages", READ) else {
+            panic!("an in list");
+        };
+        assert_eq!(items.len(), 1);
+        let many: Vec<String> = (0..=MAX_CLAIM_VALUES)
+            .map(|i| format!("\"r{i}\""))
+            .collect();
+        let claims = format!(r#"{{"sub":"a","rooms":[{}]}}"#, many.join(","));
+        assert!(a.scope(&a.mint(&claims).unwrap(), 0).is_err());
     }
 }

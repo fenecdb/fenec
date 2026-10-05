@@ -220,4 +220,49 @@ fn main() {
             rows / queries.len() as u64
         );
     }
+
+    // A scoped token's `match`, scored over the rows its filter selects
+    // (`Match::within`) against the same filter scored over the
+    // collection: a brand's 2.5% of the rows, a quarter of one brand's, and
+    // half the collection.
+    println!("match limit 10 over a filter, BM25 over the collection / over its rows:");
+    for (what, filter) in [
+        ("brand = b1 (@hash), 2.5% of the rows", "brand = \"b1\""),
+        (
+            "brand = b1 and price < 250, 0.6%",
+            "brand = \"b1\" and price < 250",
+        ),
+        ("price < 500 (scan), half", "price < 500"),
+    ] {
+        let sql = format!("get d select id where {filter} match body $1 limit 10");
+        let over = |within: bool| {
+            let Ok(Statement::Select(mut sel)) = fenec_ql::parse_one(&sql) else {
+                return None;
+            };
+            sel.matcher.as_mut()?.within = within;
+            time_stmt(&db, &Statement::Select(sel), &queries)
+        };
+        show(&format!("{what}, collection"), over(false), q, "ms a query");
+        show(&format!("{what}, its rows"), over(true), q, "ms a query");
+    }
+}
+
+/// [`time`] for a statement made already.
+fn time_stmt(db: &Database, stmt: &Statement, queries: &[Value]) -> Option<f64> {
+    let run = |db: &Database| {
+        for q in queries {
+            std::hint::black_box(db.query(stmt, std::slice::from_ref(q)).ok()?);
+        }
+        Some(())
+    };
+    run(db)?;
+    let mut t: Vec<f64> = (0..RUNS)
+        .map(|_| {
+            let s = Instant::now();
+            run(db);
+            s.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    t.sort_by(|a, b| a.total_cmp(b));
+    Some(t[RUNS / 2])
 }

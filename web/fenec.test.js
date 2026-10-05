@@ -528,6 +528,30 @@ test('a write that misses its require puts its run back, in the module', { skip:
   assert.throws(() => db.from('accounts').where('name', 'a').toDelete({ require: -1 }), /whole number from 0/);
 });
 
+test('a read that misses its require puts its run back, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection products (sku text @unique, price int, stock int)');
+  db.run('create collection orders (sku text, price int)');
+  db.run('put products [{sku: "tee", price: 12, stock: 3}, {sku: "cap", price: 8, stock: 0}]');
+  // A checkout whose price moved: the read stops the run, nothing written.
+  const checkout = (price) =>
+    db.run(
+      'get products where sku = "tee" and price = $1 require 1; insert orders {sku: "tee", price: $1}; ' +
+        'set products {stock: stock - 1} where sku = "tee" require 1',
+      [price],
+    );
+  assert.throws(() => checkout(11), /unmet: `get products` answered 0 rows, and requires 1/);
+  assert.equal(await db.from('orders').count(), 0);
+  checkout(12);
+  assert.equal(await db.from('orders').count(), 1);
+  // Through the builder: the count after limit.
+  assert.equal((await db.from('products').limit(1).require(1).rows()).length, 1);
+  await assert.rejects(db.from('products').require(1).rows(), /unmet/);
+  assert.equal((await db.from('products').where('sku', 'cap').require(1).first()).price, 8);
+  assert.throws(() => db.from('orders').where('sku', 'in', db.from('products').select('sku').require(1)).toFenecQL(), /takes no require/);
+});
+
 test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

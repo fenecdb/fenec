@@ -218,10 +218,12 @@ class Run {
       w.docs.forEach((d, i) => sorted(d, `docs[${i}]`));
       return t.from(w.insert).insert(w.docs, opts);
     }
-    const c = w.update ?? w.delete;
+    const c = w.update ?? w.delete ?? w.get;
     let q = t.from(c);
     sorted(w.where ?? {}, 'where');
     for (const [k, v] of Object.entries(w.where ?? {})) q = q.where(k, v);
+    // A read in a batch: the builders' `.require(n)`.
+    if (w.get) return (w.require === undefined ? q : q.require(w.require)).rows();
     if (w.update) {
       sorted(w.set, 'set');
       // `{"$inc": n}` is inc(n), as the builders' golden file writes it.

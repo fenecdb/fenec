@@ -295,6 +295,82 @@ fn a_set_past_the_bound_is_refused() {
     assert_eq!(rows(&db, limited, &[]).rows[0].values[0], Value::Int(2));
 }
 
+/// The bound is on distinct values, not rows: a funnel's 125 000 `buy`
+/// events from 937 users were refused as more than 100 000 values. Rows
+/// past the bound holding few values are answered, a value repeated counts
+/// once toward it, and the twin -- the distinct values written out --
+/// agrees, through an index, a scan and a path.
+#[test]
+fn the_bound_counts_distinct_values() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection events (user int, name text @hash, meta json);
+         create collection users (n int @hash)",
+        &[],
+    );
+    let rows_n = MAX_SUBQUERY_VALUES + 25_000;
+    for chunk in (0..rows_n).collect::<Vec<_>>().chunks(10_000) {
+        let docs: Vec<String> = chunk
+            .iter()
+            .map(|i| {
+                format!(
+                    "{{user: {}, name: 'buy', meta: {{u: {}}}}}",
+                    i % 937,
+                    i % 937
+                )
+            })
+            .collect();
+        run(&mut db, &format!("put events [{}]", docs.join(",")), &[]);
+    }
+    run(&mut db, "put users [{n: 5}, {n: 936}, {n: 937}]", &[]);
+    for inner in [
+        "get events select user where name = 'buy'",
+        "get events select user",
+        "get events select user where user >= 0",
+        "get events select meta.u",
+        "get events select user order user desc",
+    ] {
+        let sql = format!("get users where n in ({inner}) count");
+        assert_eq!(
+            rows(&db, &sql, &[]).rows[0].values[0],
+            Value::Int(2),
+            "{sql}"
+        );
+    }
+    let listed: Vec<String> = (0..937).map(|i| i.to_string()).collect();
+    let twin = format!("get users where n in [{}] count", listed.join(","));
+    assert_eq!(rows(&db, &twin, &[]).rows[0].values[0], Value::Int(2));
+
+    // Each value held twice: exactly the bound of distinct values over
+    // twice as many rows is answered, one more value is not.
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection big (n int); create collection o (n int)",
+        &[],
+    );
+    for chunk in (0..2 * MAX_SUBQUERY_VALUES)
+        .collect::<Vec<_>>()
+        .chunks(20_000)
+    {
+        let docs: Vec<String> = chunk
+            .iter()
+            .map(|i| format!("{{n: {}}}", i % MAX_SUBQUERY_VALUES))
+            .collect();
+        run(&mut db, &format!("put big [{}]", docs.join(",")), &[]);
+    }
+    run(&mut db, "put o [{n: 5}, {n: 99999}, {n: 100000}]", &[]);
+    let sql = "get o where n in (get big select n) count";
+    assert_eq!(rows(&db, sql, &[]).rows[0].values[0], Value::Int(2));
+    run(&mut db, "put big {n: 100000}", &[]);
+    let e = query(&db, sql, &[]).unwrap_err();
+    assert!(
+        e.to_string().contains(&MAX_SUBQUERY_VALUES.to_string()),
+        "{e}"
+    );
+}
+
 #[test]
 fn nesting_is_bounded() {
     let mut db = Database::new();

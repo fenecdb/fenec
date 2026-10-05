@@ -588,16 +588,25 @@ over HTTP; the FenecQL and <code>fenec-server</code> paths are unaffected.</p>
 collections and which rows that token can read or write. A browser can then
 talk to the database directly.</p>
 
-<pre data-lang="text"># collection   access       rows                                role
-notes          read,write   where owner = $jwt.sub
-posts          read         where published = true or author = $jwt.sub
-posts          write        where author = $jwt.sub
-*              read                                             for dashboard
+<pre data-lang="text"># collection   access         rows                                role
+notes          read,write     where owner = $jwt.sub
+posts          read           where published = true or author = $jwt.sub
+posts          write          where author = $jwt.sub
+messages       read,insert    where room in $jwt.rooms
+journal        read,insert    where owner = $jwt.sub
+journal        append-only
+*              read                                               for dashboard
 </pre>
 
 <ul>
   <li><b>Reads</b> only see the rows the rule allows.</li>
-  <li><b>Writes</b> must stay inside the rule, or get 403.</li>
+  <li><b>Writes</b> must stay inside the rule, or get 403. <code>write</code>
+    grants <code>insert</code>, <code>update</code> and <code>delete</code>,
+    and each can be granted alone.</li>
+  <li><b><code>append-only</code></b> collections take inserts from scoped
+    tokens, and refuse every update and delete with 403.</li>
+  <li><b>A list claim</b>, such as <code>"rooms": ["r1", "r2"]</code>,
+    goes after <code>in</code>.</li>
   <li><b>The server's own <code>--http-token</code></b> still has full
     access.</li>
 </ul>
@@ -618,8 +627,9 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
 <ul>
   <li><b>Reads</b> get the rule's filter ANDed in at every level: the
     collection's <code>where</code>, each <code>lookup</code> below it, a
-    subscription's shape, a <code>count</code>. A collection no rule lets a
-    token read does not exist for it: 404, and absent from the list.</li>
+    subscription's shape, a <code>count</code>. A collection no rule grants
+    a token anything on does not exist for it: 404, and absent from the
+    list.</li>
   <li><b>Writes</b> get it twice, as PostgreSQL's <code>USING</code> and
     <code>WITH CHECK</code>: a <code>set</code> or <code>del</code> touches only
     the rows the filter matches, and every document written — a put, or a row
@@ -628,6 +638,48 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     gets the claim's value, so <code>{"title":"a"}</code> is alice's. A scoped
     put names no <code>id</code>, which could overwrite a row the token cannot
     see, and a scoped token changes no schema and runs no maintenance.</li>
+  <li><b>Grants</b> are <code>read</code>, <code>insert</code>,
+    <code>update</code> and <code>delete</code>, joined by commas, and
+    <code>write</code> is the three writes. An insert is a put of new
+    documents, held to the filters of the rules granting
+    <code>insert</code>; an update is a <code>set</code> and a delete a
+    <code>del</code>, of rows the token may read and the filters of the
+    rules granting them, a <code>set</code>'s rows checked again after. A
+    token may insert into a collection it cannot read, such as an event
+    stream: its reads of it are refused with 403 and it is not listed.</li>
+  <li><b><code>append-only</code></b> is a line of its own,
+    <code>journal append-only</code>, with no filter and no role. No scoped
+    token updates or deletes there, by any route — <code>/query</code>,
+    REST, <code>/batch</code> — whatever its rules grant: <code>write</code>
+    and <code>*</code> mean <code>insert</code> there, and a rule naming
+    <code>update</code> or <code>delete</code> for the collection stops the
+    server at startup. It binds JSON Web Tokens and not the server's own
+    token: corrections, erasure and <code>@ttl</code>'s sweep stay with
+    whoever holds that, and an app server that should only append is given
+    a scoped token of its own, a role for instance.</li>
+  <li><b>List claims.</b> A claim that is a JSON array goes after
+    <code>in</code>: <code>room in $jwt.rooms</code> matches the rooms it
+    lists, <code>room in [$jwt.rooms, "lobby"]</code> those and one more,
+    and a text claim there is a list of one. It holds reads, writes
+    (<code>WITH CHECK</code>: a post into a room the list does not hold is
+    403) and subscriptions alike. A token whose list claim holds more than
+    1 000 values is refused (401). A <code>role</code> claim may be a list
+    too, and a rule <code>for</code> a role applies when the list holds
+    it. Membership kept in another collection cannot be a rule: a rule
+    takes no <code>in (get …)</code>.</li>
+  <li><b><code>match</code> scores over the rows the token may read.</b>
+    BM25's statistics — how many documents, their mean length, how many
+    hold each word — are taken over the rows the query's filter selects,
+    the token's rules among them, not over the collection: there a user's
+    own memo scored 9.87, then 4.79 once another user wrote 200 private
+    memos holding the same word, which told the first how many of the
+    second's held it. A score is what a collection holding the user's rows
+    alone would give, and so is the order of <code>match</code>,
+    <code>rerank</code>'s candidates and <code>fuse</code>'s text side. It
+    costs the token's query its rows' lengths and each word's count among
+    them: over 100 000 documents, a filter keeping 2.5% took 0.16 ms and
+    takes 0.24, one keeping half 5.4 and 6.2. The server's own token
+    scores over the collection, as before.</li>
   <li><b>Subscriptions</b> are told only of rows they were sent: a scoped
     subscriber hears of a row leaving its shape only if the row was in it,
     so the ids other users write never reach it.</li>
@@ -640,7 +692,7 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     <code>--jwt-max-age &lt;s&gt;</code> also refuses one whose
     <code>exp</code> lies further ahead than that. <code>--mint-token</code>
     gives claims naming no <code>exp</code> one an hour away. A rule with <code>for</code> applies
-    to tokens whose <code>role</code> claim names that role; rules on one
+    to tokens whose <code>role</code> claim names that role, or lists it; rules on one
     collection widen each other; a rule whose filter names a claim the token
     lacks does not apply. A subscription is checked when it opens.</li>
   <li><b>Refusals</b> tell a scoped token only what it may read: a

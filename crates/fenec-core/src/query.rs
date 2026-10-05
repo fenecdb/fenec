@@ -670,6 +670,14 @@ pub struct Match {
     pub field: String,
     /// The query text, given directly or through a parameter.
     pub query: Expr,
+    /// BM25's statistics -- how many documents, their mean length, how
+    /// many hold each term -- over the rows the filter selects rather than
+    /// over the collection. No FenecQL says it: a scoped token's `match`
+    /// is made so (`fenec_http::access`), its filter holding its rules, so
+    /// that a score says nothing of rows it may not read -- over the
+    /// collection, alice's own memo scored 9.87 and then 4.79 once bob
+    /// wrote 200 private ones holding the same word.
+    pub within: bool,
 }
 
 /// The `rerank` clause: reorder what `match` found by exact vector distance.
@@ -788,9 +796,10 @@ pub struct Lookup {
 /// cut short is a wrong answer believed right.
 pub const MAX_LOOKUP_DEPTH: usize = 8;
 
-/// The most values an `in (get ...)` may hand its query. A larger set is a
-/// query error, never a set cut short, which would be a wrong answer
-/// believed right. The list is held whole while the query runs, and a
+/// The most distinct values an `in (get ...)` may hand its query, a value
+/// many rows hold counted once. A larger set is a query error, never a set
+/// cut short, which would be a wrong answer believed right. The list is
+/// held whole while the query runs, and a
 /// question over more is one `lookup ... required` asks from the other
 /// side, probing each parent's children rather than listing them.
 pub const MAX_SUBQUERY_VALUES: usize = 100_000;
@@ -987,6 +996,12 @@ pub struct Select {
     pub marks: Vec<Mark>,
     /// `facet`: value counts over every matched row, beside the page.
     pub facets: Vec<Facet>,
+    /// `require <n>`: the rows the `get` answers -- after `offset` and
+    /// `limit`, not counting a `lookup`'s children -- must number `n`, or
+    /// it is refused as `Error::Unmet` and the block it is in put back, as
+    /// a write's `require` is: a checkout's "the price is still 12" or "the
+    /// coupon is still good", read under the block's lock.
+    pub require: Option<u64>,
 }
 
 impl Select {
@@ -1099,6 +1114,17 @@ impl Select {
             }
         }
         self.check_marks_and_facets()?;
+        // `count` and an aggregate answer one row whatever matched: a
+        // `require 1` over them would always hold, and say nothing.
+        if self.require.is_some()
+            && (self.count || (!self.aggregate.is_empty() && self.group.is_none()))
+        {
+            return Err(Error::Query(
+                "`require` counts the rows a `get` answers, and `count` or an aggregate answers \
+                 one: require the rows themselves, `limit 1 require 1` for one to exist"
+                    .into(),
+            ));
+        }
         if !self.aggregate.is_empty() || self.group.is_some() {
             self.check_aggregate()?;
         }
@@ -1303,6 +1329,11 @@ impl Select {
         if self.lookup.is_some() {
             return Err(Error::Query(
                 "`in (get ...)` takes one column, and a `lookup` attaches children to it".into(),
+            ));
+        }
+        if self.require.is_some() {
+            return Err(Error::Query(
+                "`in (get ...)` takes no `require`: the statement around it does".into(),
             ));
         }
         self.check()
@@ -1784,6 +1815,7 @@ mod tests {
                 s.matcher = Some(Match {
                     field: "body".into(),
                     query: Expr::Param(0),
+                    within: false,
                 })
             }),
             ("count", |s: &mut Select| s.count = true),

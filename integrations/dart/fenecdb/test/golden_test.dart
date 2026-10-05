@@ -83,6 +83,7 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
       ('order', _) => q.order(a[0] as String, a.length > 1 ? a[1] as String : 'asc', opt(a, 2, 'collate') as String?),
       ('limit', _) => q.limit(a[0] as int),
       ('offset', _) => q.offset(a[0] as int),
+      ('require', _) => q.require(a[0] as int),
       ('lookup', _) => q.lookup(a[0] as String,
           on: opt(a, 1, 'on') as String?,
           parentKey: opt(a, 1, 'parentKey') as String?,

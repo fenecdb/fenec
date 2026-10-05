@@ -108,9 +108,12 @@ deliberately with <code>--insecure</code>.</p>
 <code>RSA</code> keys for an identity provider's RS256, a token's
 <code>kid</code> picking the key, the file read again as it changes) the
 server also takes JSON Web Tokens, each held to the rules of
-<code>--policy</code>: which collections, read or write, and which rows
-(<code>where owner = $jwt.sub</code>). A token that may only read is the
-reporting login a dashboard needs. The rules are ANDed into every statement
+<code>--policy</code>: which collections, to read, insert, update or delete,
+and which rows (<code>where owner = $jwt.sub</code>, <code>where room in
+$jwt.rooms</code>). A token that may only read is the reporting login a
+dashboard needs, one that may only insert a client appending events, and an
+<code>append-only</code> collection takes no update or delete from any token
+but the server's. The rules are ANDed into every statement
 a token runs, and every document it writes is checked against them as well
 (<a href="/docs/http#scoped-access">Scoped access</a>).
 <code>--mint-token '{"sub": "ada"}'</code> prints a token signed with the

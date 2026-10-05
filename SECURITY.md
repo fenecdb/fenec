@@ -66,6 +66,20 @@ These are deliberate, and README explains each one:
 - **`--jwt-unbound-tenants` takes a token naming no tenant for every tenant**
   of a `--dir` node. By default such a token is refused there (403), and a
   token naming a tenant reaches that tenant alone.
+- **A score is of the rows the request may read.** A scoped token's
+  `match` takes BM25's statistics over the rows its filter selects, so its
+  scores say nothing of rows it cannot read; the server's own token scores
+  over the collection. The time a `match` takes still grows with every row
+  holding its words, the token's or not, as an index walk does: users who
+  must learn nothing of each other's rows, not even through timing, belong
+  in tenants, a file each, or in collections of their own.
+- **`append-only` binds scoped tokens, not the server's own.** A policy's
+  `<collection> append-only` refuses every update and delete a JSON Web
+  Token asks for there; the `--http-token` still changes and deletes rows,
+  as corrections, erasure and `@ttl` sweeps need. An app server that should
+  only append is given a scoped token. Against whoever holds the server's
+  token and the file, an append-only log is a sealed archive
+  (`fenec archive --key-file`) kept elsewhere.
 - **Two processes opening the same file corrupts it.** There is a single writer
   and no lock file; this is why everything that writes a file runs as a thread
   of one `fenec-server`.

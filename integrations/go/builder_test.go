@@ -483,6 +483,8 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 			q = q.Limit(a[0].(int))
 		case "offset":
 			q = q.Offset(a[0].(int))
+		case "require":
+			q = q.Require(a[0].(int))
 		default:
 			if !last {
 				t.Fatalf("%s ends a chain", op)

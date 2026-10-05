@@ -754,6 +754,18 @@ export class Query {
   }
 
   /**
+   * `require n`: the rows the query answers -- after `limit` -- must number
+   * `n`, or it is refused (412, `unmet`) and the batch it is in put back,
+   * as a write's `{ require: n }` is. A checkout's guard on a read:
+   *
+   *   from('products').where({ sku, price }).require(1)    // still that price
+   *   from('coupons').where('code', c).limit(1).require(1)  // one exists
+   */
+  require(n) {
+    return this.#with({ require: requireClause({ require: n }) });
+  }
+
+  /**
    * The generated FenecQL and its parameters: `[sql, params]`.
    * This is the builder's only output -- it can be inspected before running,
    * logged, or handed to another transport.
@@ -772,6 +784,9 @@ export class Query {
         `an inner query of \`in\` selects exactly one column: from('${this.#s.collection}').select('id')`,
       );
     }
+    if (this.#s.require) {
+      throw new FenecError('an inner query of `in` takes no require: the query around it does');
+    }
     return this.#text(bind);
   }
 
@@ -787,6 +802,9 @@ export class Query {
       if (clash) throw new FenecError(`aggregates cannot be combined with ${clash}`);
       if (!group && (order.length || limit !== undefined || offset)) {
         throw new FenecError('aggregates answer one row; group makes a row per value');
+      }
+      if (!group && this.#s.require) {
+        throw new FenecError('require counts the rows a query answers, and an aggregate answers one');
       }
     }
     if (marks.length) {
@@ -885,6 +903,8 @@ export class Query {
     }
     if (limit !== undefined) sql += ` limit ${limit}`;
     if (offset) sql += ` offset ${offset}`;
+    // Before a lookup, whose clauses are the children's.
+    if (this.#s.require) sql += this.#s.require;
     if (count) sql += ' count';
     if (facets.length) {
       sql += ` facet ${facets.map((f) => (f.top === null ? f.field : `${f.field} top ${f.top}`)).join(', ')}`;
@@ -1019,6 +1039,9 @@ export class Query {
   // ignoring them in a write statement would invite the "limit(1) deletes a
   // single row" misconception.
   #assertPlain(verb) {
+    if (this.#s.require) {
+      throw new FenecError(`${verb} takes require as its option: ${verb}(..., { require: n })`);
+    }
     const extra = this.#extraClause();
     if (extra) throw new FenecError(`${verb} cannot be used with \`${extra}\``);
     // Not among the read clauses `count` refuses, since a required lookup
@@ -1035,7 +1058,7 @@ export class Query {
   // are meaningless over a count, and `near` truncates to its own ceiling.
   // The engine checks the same thing; failing here never sends the query.
   #assertCountable() {
-    const extra = this.#extraClause();
+    const extra = this.#extraClause() ?? (this.#s.require ? 'require' : null);
     if (extra) throw new FenecError(`count cannot be used with \`${extra}\``);
   }
 

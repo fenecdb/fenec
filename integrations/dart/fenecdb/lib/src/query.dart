@@ -359,6 +359,8 @@ class Query {
   final List<_Key> _order;
   final int? _limit;
   final int _offset;
+  // ` require n`, or none.
+  final String _require;
   final bool _count;
   final List<_Level> _lookups;
   final List<_Mark> _marks;
@@ -377,6 +379,7 @@ class Query {
       List<_Key> order = const [],
       int? limit,
       int offset = 0,
+      String require = '',
       bool count = false,
       List<_Level> lookups = const [],
       List<_Mark> marks = const [],
@@ -393,6 +396,7 @@ class Query {
         _order = order,
         _limit = limit,
         _offset = offset,
+        _require = require,
         _count = count,
         _lookups = lookups,
         _marks = marks,
@@ -418,6 +422,7 @@ class Query {
     List<_Key>? order,
     Object? limit = _keep,
     int? offset,
+    String? require,
     bool? count,
     List<_Level>? lookups,
     List<_Mark>? marks,
@@ -436,6 +441,7 @@ class Query {
           order: order ?? _order,
           limit: identical(limit, _keep) ? _limit : limit as int?,
           offset: offset ?? _offset,
+          require: require ?? _require,
           count: count ?? _count,
           lookups: lookups ?? _lookups,
           marks: marks ?? _marks,
@@ -596,6 +602,11 @@ class Query {
   /// How many rows are passed over first.
   Query offset(int n) => _with(offset: _whole(n, 'offset'));
 
+  /// `require n` on a read: the rows it answers, after [limit], must number
+  /// n, or it is refused (412, unmet) and the batch it is in put back, as a
+  /// write's `require` is -- a checkout's guard on a read.
+  Query require(int n) => _with(require: _requireClause(n));
+
   // ------------------------------------------------------------ the text
 
   /// The statement and its parameters, as they would be run.
@@ -625,6 +636,9 @@ class Query {
       if (clash != null) throw _refuse('aggregates cannot be combined with $clash');
       if (_group == null && (_order.isNotEmpty || _limit != null || _offset > 0)) {
         throw _refuse('aggregates answer one row; group makes a row per value');
+      }
+      if (_group == null && _require.isNotEmpty) {
+        throw _refuse('require counts the rows a query answers, and an aggregate answers one');
       }
     }
     if (_marks.isNotEmpty) {
@@ -673,7 +687,7 @@ class Query {
       }
     }
     if (_count) {
-      final extra = _extraClause();
+      final extra = _extraClause() ?? (_require.isNotEmpty ? 'require' : null);
       if (extra != null) throw _refuse('count cannot be used with `$extra`');
     }
 
@@ -707,6 +721,8 @@ class Query {
     _orderText(sql, _order);
     if (_limit != null) sql.write(' limit $_limit');
     if (_offset > 0) sql.write(' offset $_offset');
+    // Before a lookup, whose clauses are the children's.
+    sql.write(_require);
     if (_count) sql.write(' count');
     if (_facets.isNotEmpty) {
       sql.write(' facet ${_facets.map((f) => f.$2 == null ? f.$1 : '${f.$1} top ${f.$2}').join(', ')}');
@@ -770,6 +786,7 @@ class Query {
   // Near, order, limit mean something only to a read; dropped from a write,
   // limit(1).delete() would delete every row.
   void _assertPlain(String verb) {
+    if (_require.isNotEmpty) throw _refuse('$verb takes require as its option: $verb(..., { require: n })');
     final extra = _extraClause();
     if (extra != null) throw _refuse('$verb cannot be used with `$extra`');
     if (_lookups.isNotEmpty) throw _refuse('$verb cannot be used with `lookup`');

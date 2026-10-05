@@ -504,6 +504,12 @@ fn render_put(
     (format!("{verb} {collection} {body}"), params)
 }
 
+/// A `get ... require` beside a synced write: the guard would be the
+/// replica's count, and the server -- whose rows the write lands on --
+/// never sent it. The browser's `batch()` refuses one in the same words.
+const GUARDED: &str = "a `get ... require` counts the replica's rows and is not sent: a write \
+                       guarded by a read goes to the server itself";
+
 /// A write with `require` that reaches a row whose insert the server has not
 /// answered: refused before anything is applied, as the browser's sync
 /// refuses it (`integrations/sync-scenarios.json`).
@@ -1588,7 +1594,11 @@ impl Sync {
     pub fn claims(&self, stmts: &[Statement]) -> Result<bool> {
         let mut synced = 0;
         let mut other = 0;
+        let mut guarded = false;
         for s in stmts {
+            if let Statement::Select(sel) = s {
+                guarded |= sel.require.is_some() && self.synced(&sel.collection);
+            }
             let (c, write) = match s {
                 Statement::Put { collection, .. }
                 | Statement::Update { collection, .. }
@@ -1624,6 +1634,7 @@ impl Sync {
         }
         match (synced, other) {
             (0, _) => Ok(false),
+            _ if guarded => Err(Error::Query(GUARDED.into())),
             (_, 0) => Ok(true),
             _ => Err(Error::Query(
                 "a synced write goes to the server alone: send the statements over \

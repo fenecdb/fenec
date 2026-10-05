@@ -78,6 +78,7 @@ class GoldenTest {
             op == "order" -> q.order(a[0] as String, a.getOrNull(1) as? String ?: "asc", opt(a, 2, "collate") as String?)
             op == "limit" -> q.limit(a[0] as Long)
             op == "offset" -> q.offset(a[0] as Long)
+            op == "require" -> q.require(a[0] as Long)
             // Through the untyped call: the file holds a tag that is no text.
             op == "highlight" -> q.mark(a[0] as String, null, null, opt(a, 1, "pre"), opt(a, 1, "post"))
             op == "snippet" -> q.mark(a[0] as String, a[1] as Long, opt(a, 2, "ellipsis"), opt(a, 2, "pre"), opt(a, 2, "post"))

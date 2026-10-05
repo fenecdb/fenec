@@ -154,6 +154,9 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   db.from('articles').toUpdate({ year: 1 }, { all: true, require: 3 });
   // @ts-expect-error -- require is a count
   db.from('articles').where('id', 1).toDelete({ require: '1' });
+  expect<number>((await db.from('articles').where('year', 2024).limit(1).require(1).rows()).length);
+  // @ts-expect-error -- a read's require is a count too
+  db.from('articles').require('1');
 
   const [sql, params] = db.from('articles').where('year', 2024).toFenecQL();
   expect<string>(sql);

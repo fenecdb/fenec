@@ -495,7 +495,27 @@ A verified token is kept by its text (`verified`, 16 shards of 256, emptied
 when the keys change, `exp` asked each time): 0.27 us against 2.9 for HS256.
 A token naming no `exp` is refused (`Demands::require_exp`,
 `--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
-one may lie; `mint` stamps an hour on claims naming none.
+one may lie; `mint` stamps an hour on claims naming none. Grants are
+`read`, `insert`, `update` and `delete` (`write` the three, bits in
+`Rule::ops`), and the `Check` hook takes the write's op: an insert held to
+the rules granting it, an update found and checked by its own, a delete
+found by its own; an update and a delete need read beside them, an insert
+none, so a client appends to a stream it cannot see. `<c> append-only`, a
+line of no filter and no role, takes updates and deletes from every
+scoped token whatever its rules say -- a rule naming them there is refused
+at startup -- and not from the server's token, which keeps corrections,
+erasure and `@ttl`'s sweep: in the schema it would bind the operator too,
+a format change for an invariant whoever holds the file can break anyway.
+A list claim goes after `in` (`room in $jwt.rooms` is read as `in
+[$jwt.rooms]`, which `bind` spreads), more than `MAX_CLAIM_VALUES` (1 000)
+refuses the token, and claims are read exact (`json::parse_json`): a list
+of numbers read the quick way was `f32`s, team 123456789 matching
+123456792. A `match` the token reads through a filter is `Match::within`:
+BM25's count, mean length and document frequencies over the rows its
+filter selects (`TextIndex::search_within`), so a score is the one a
+collection of those rows alone gives -- alice's memo went 9.87 -> 4.79
+once bob wrote 200 holding the word -- 0.16 -> 0.24 ms for 2.5% of 100
+000 rows; the browser module leaves the counting out.
 
 **A token is bound to the tenant it names** (`Scope::reaches`,
 `route_tenant`). The policy is the node's, not a tenant's, so `owner =
@@ -1018,7 +1038,18 @@ its key, which would split the count. `tests/require.rs` (both crates)
 moves money between few accounts from eight threads in process and eight
 HTTP clients as `/batch`es, a credit in eight to an account that is not
 there: the sum stays and no balance goes below zero. The browser module
-grew 1 479 bytes, 310 brotli.
+grew 1 479 bytes, 310 brotli. A `get` takes it too (`Select::require`,
+parsed among its clauses, before a `lookup`): the rows it answers, after
+`offset` and `limit` -- `limit 1 require 1` is "one exists" -- must number
+`n`, or `read_required` refuses it as `Unmet` where the `get` is answered
+(`query`, `execute_inner`; `query_json` leaves a required one to `query`),
+and a `/batch`'s write lock makes the read a checkout's guard on the
+writes around it. Not beside `count` or an aggregate without `group`,
+which answer one row, nor in an inner `get`. Builders have it as a step,
+`.require(n)`; a replica's sync refuses one beside a synced write
+(`GUARDED`, the browser's `batch()` in the same words): the replica's
+count, which the server landing the batch would never see. The module
+grew 1 017 bytes, 471 brotli.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
@@ -1053,8 +1084,13 @@ filter goes, and the planner's "every element resolves or the list goes
 to the scan" rule, take it unchanged, and `eval` never meets one. Only
 a statement holding one, or reading a collection whose rows expire, is
 cloned: the rest costs a look at its filters. A null is left out of the
-list; past `MAX_SUBQUERY_VALUES` (100 000) it is a query error, the inner
-`get` read one value past the bound rather than gathered whole; past
+list; past `MAX_SUBQUERY_VALUES` (100 000) distinct values it is a query
+error: an inner `get` with no `limit`, `group` or ranking lists its
+matches' ids, as `count` does, and reads its column, the values told
+apart by their encodings only once there are more than the bound
+(`distinct_column`) -- cut at that many rows, 125 000 `buy` events of
+937 users were refused, and told apart as they came, a bucket of 1 967
+went 0.15 -> 0.36 ms; one with them is read one row past the bound; past
 `MAX_SUBQUERY_DEPTH` (4) refused in the parser and the engine. The inner
 `get` selects one column -- a field or one aggregate -- and no `lookup`
 or `count` (`Select::check_subquery`). A scoped token's `scoped()` holds
@@ -2163,7 +2199,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 58 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 59 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,
