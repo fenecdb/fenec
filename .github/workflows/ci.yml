@@ -388,6 +388,42 @@ jobs:
           SAAS_FENEC_SERVER="$PWD/target/release/fenec-server" SAAS_FENEC_SHARD="$PWD/target/release/fenec-shard" \
             examples/run-tests.sh saas
 
+  # examples/analytics: Kestrel, product analytics over a release
+  # fenec-server tenant node -- 40 days of history folded by the rollup
+  # worker, its correctness tests against brute force (rollups, funnel,
+  # retention, bars, VWAP), its security and SEO tests, its latency budgets
+  # and Lighthouse CI's in the runner's Chrome. A job of its own, like the
+  # shop's and the ledger's.
+  analytics:
+    name: examples (analytics)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-analytics-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-analytics-
+
+      - name: Kestrel
+        run: |
+          make wasm
+          cargo build --release -p fenec-server
+          ANALYTICS_FENEC_SERVER="$PWD/target/release/fenec-server" ANALYTICS_LIGHTHOUSE=1 \
+            CHROME_PATH="$(command -v google-chrome)" examples/run-tests.sh analytics
+
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest
