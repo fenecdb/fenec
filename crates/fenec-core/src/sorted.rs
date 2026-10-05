@@ -648,6 +648,27 @@ impl SortedIndex {
         Some(out)
     }
 
+    /// The values of an int or timestamp field's index within `r`,
+    /// ascending, a call each: what an aggregate counting by `bucket` over
+    /// the field reads instead of the rows. False, calling nothing, for an
+    /// index of another kind; the caller knows the field's type, since a
+    /// float's keys are numbers too.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn each_int(
+        &self,
+        r: &Range,
+        f: &mut dyn FnMut(i64) -> crate::error::Result<()>,
+    ) -> crate::error::Result<bool> {
+        let SortedIndex::Num(o) = self else {
+            return Ok(false);
+        };
+        let (lo, hi) = (num_bound(&r.lo, true), num_bound(&r.hi, false));
+        for e in o.keys.range(&lo, &hi) {
+            f((e.0 ^ (1 << 63)) as i64)?;
+        }
+        Ok(true)
+    }
+
     /// Walks the ids in order -- `null` first ascending, last descending, as
     /// `cmp_value` puts it below every value -- within `range` when one is
     /// given, calling `emit` until it returns `false`.

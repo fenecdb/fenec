@@ -326,6 +326,38 @@ fn aggregates_over_the_query_string() {
     );
     assert_eq!(get(h.port, "/remarks?select=sum(body)").status, 400);
     assert_eq!(get(h.port, "/remarks?select=count(*)&limit=1").status, 400);
+    // Expressions: a column worked out, keys of several, a distinct count
+    // and `first`, each the list's FenecQL.
+    let r = get(
+        h.port,
+        "/remarks?select=article_id,stars%20%3E%203%20as%20good,count(*),\
+         count(distinct%20body),first(body%20by%20stars)&group=article_id,good",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body.trim(),
+        "[{\"article_id\":1,\"good\":false,\"count\":1,\"count(distinct body)\":1,\
+         \"first(body)\":\"dense\"},\
+         {\"article_id\":1,\"good\":true,\"count\":1,\"count(distinct body)\":1,\
+         \"first(body)\":\"solid\"},\
+         {\"article_id\":3,\"good\":false,\"count\":1,\"count(distinct body)\":1,\
+         \"first(body)\":\"thin\"}]"
+    );
+    let r = get(
+        h.port,
+        "/remarks?select=body,stars%20*%202%20as%20twice&order=id&limit=1",
+    );
+    assert_eq!(r.body.trim(), "[{\"body\":\"solid\",\"twice\":10}]");
+    let r = call(
+        h.port,
+        "POST",
+        "/query",
+        Some(
+            r#"{"query": "get remarks select sum(stars * $1) / count(*) as mean group article_id order mean desc", "params": [10]}"#,
+        ),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body.trim(), "[{\"mean\":40},{\"mean\":20}]");
 }
 
 /// A query that asks for facets is answered `{"rows": [...], "facets":

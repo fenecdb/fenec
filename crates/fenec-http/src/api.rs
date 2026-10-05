@@ -170,11 +170,25 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
     };
     for (k, v) in &req.query {
         match k.as_str() {
-            // `select=status,sum(total),count(*)`: a list with an aggregate
-            // in it aggregates, as FenecQL's does.
-            "select" if v.contains('(') => sel.aggregate = aggregates(schema, v)?,
+            // `select=status,sum(total),count(*)`, `select=sym,px*qty as n`:
+            // a list with a call or a name given in it is FenecQL's, read
+            // by its parser -- one with an aggregate aggregates, as
+            // FenecQL's does.
+            "select" if v.contains('(') || v.contains(" as ") => {
+                let l = fenec_ql::parse_select_list(v)
+                    .map_err(|e| Error::Query(format!("`select`: {e}")))?;
+                (sel.aggregate, sel.computed) = (l.aggregate, l.computed);
+                if sel.aggregate.is_empty() {
+                    sel.project = l.project;
+                }
+            }
             "select" => sel.project = Some(projection(schema, v)?),
-            "group" => sel.group = Some(field_of(schema, v)?),
+            // `group=symbol,bucket(at, 1m)`: FenecQL's list, read by its
+            // parser; an unknown field is the engine's to refuse.
+            "group" => {
+                sel.group = fenec_ql::parse_group_list(v)
+                    .map_err(|e| Error::Query(format!("`group`: {e}")))?
+            }
             "order" => sel.order = order(schema, v)?,
             "limit" => sel.limit = Some(number(v, "limit")?),
             "offset" => sel.offset = number(v, "offset")?,
@@ -300,18 +314,6 @@ fn projection(schema: &Schema, raw: &str) -> Result<Vec<String>> {
         return Err(Error::Query("`select` is empty".into()));
     }
     Ok(out)
-}
-
-/// `select=status,sum(total),count(*)` -> the fields and aggregates, in
-/// order. The list is FenecQL's, parsed by FenecQL's parser.
-fn aggregates(schema: &Schema, raw: &str) -> Result<Vec<Agg>> {
-    let list = fenec_ql::parse_select_list(raw)
-        .map_err(|e| Error::Query(format!("`select`: {e}")))?
-        .aggregate;
-    for f in list.iter().filter_map(Agg::field) {
-        field(schema, f)?;
-    }
-    Ok(list)
 }
 
 /// `order=year.desc,title` -> `order year desc, title`. A collation's name

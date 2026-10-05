@@ -8,10 +8,10 @@ use fenec_core::prelude::*;
 const PAGE: &str = include_str!("../../../site/content/docs/redis.html");
 
 /// The page's `<pre data-lang="fenecql">` blocks, unescaped.
-fn blocks() -> Vec<String> {
+fn blocks(page: &str) -> Vec<String> {
     let open = "<pre data-lang=\"fenecql\">";
     let mut out = Vec::new();
-    let mut rest = PAGE;
+    let mut rest = page;
     while let Some(at) = rest.find(open) {
         rest = &rest[at + open.len()..];
         let end = rest.find("</pre>").expect("a block ends");
@@ -29,10 +29,22 @@ fn blocks() -> Vec<String> {
 
 #[test]
 fn every_recipe_runs_and_answers_what_the_page_says() {
+    let (statements, checked) = run_page(PAGE);
+    // The page has its recipes, and says what most of them answer.
+    assert!(
+        statements >= 30 && checked >= 20,
+        "{statements} run, {checked} checked"
+    );
+}
+
+/// Runs every statement of a page's blocks, in order, over one database
+/// whose clock is 2026-05-03T09:20Z: how many it ran and how many answers
+/// it checked. `analytics_docs.rs` runs its page through it too.
+pub(crate) fn run_page(page: &str) -> (usize, usize) {
     let mut db = Database::new();
     db.set_clock(Some(1_777_800_000_000));
     let (mut statements, mut checked) = (0, 0);
-    for block in blocks() {
+    for block in blocks(page) {
         for line in block.lines().filter(|l| !l.trim().is_empty()) {
             let (code, expect) = match line.split_once("-- →") {
                 Some((code, rest)) => (code, Some(rest.trim())),
@@ -54,7 +66,11 @@ fn every_recipe_runs_and_answers_what_the_page_says() {
             statements += 1;
             let Some(expect) = expect else { continue };
             // The answer is what comes before a `:` and its explanation.
-            let want = expect.split(':').next().unwrap().trim();
+            // A quoted answer is whole, `:`s and all: a time is one.
+            let want = match expect.strip_prefix('"').and_then(|e| e.find('"')) {
+                Some(end) => &expect[..end + 2],
+                None => expect.split(':').next().unwrap().trim(),
+            };
             let got = match &answer {
                 Response::Affected(n) => n.to_string(),
                 Response::Rows(rs) => match rs.rows.first().and_then(|r| r.values.first()) {
@@ -68,9 +84,5 @@ fn every_recipe_runs_and_answers_what_the_page_says() {
             checked += 1;
         }
     }
-    // The page has its recipes, and says what most of them answer.
-    assert!(
-        statements >= 30 && checked >= 20,
-        "{statements} run, {checked} checked"
-    );
+    (statements, checked)
 }

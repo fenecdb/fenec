@@ -312,7 +312,22 @@ fn a_path_reads_in_every_place_a_field_is_read() {
             &[]
         )
         .is_err());
-    // An aggregate reads a field.
+    // An aggregate and a group read a path as a field: its numbers sum
+    // whatever they were written as, and a text among them is refused.
+    let r = db
+        .query(
+            &fenec_ql::parse_one(
+                "get docs select meta.lang, sum(meta.source.rank) where meta.lang = \"tr\" \
+                 group meta.lang",
+            )
+            .unwrap(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        r.rows().unwrap().rows[0].values,
+        [Value::Text("tr".into()), Value::Float(10.5)]
+    );
     assert!(db
         .query(
             &fenec_ql::parse_one("get docs select sum(meta.source.rank)").unwrap(),
@@ -320,7 +335,7 @@ fn a_path_reads_in_every_place_a_field_is_read() {
         )
         .unwrap_err()
         .to_string()
-        .contains("path"));
+        .contains("takes numbers"));
 }
 
 #[test]

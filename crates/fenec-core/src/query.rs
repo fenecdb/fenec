@@ -103,6 +103,92 @@ impl Expr {
         }
     }
 
+    /// Calls `f` on each expression directly under this one -- the
+    /// operands, a call's arguments, an `in`'s left side and list -- and
+    /// not on an inner `get`, whose fields are its own collection's. One
+    /// walk, through `dyn`, for every question asked of a select list's
+    /// items: a generic one is a copy a caller in the browser module.
+    pub fn each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
+        match self {
+            Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => {}
+            Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::Like(a, b)
+            | Expr::Has(a, b)
+            | Expr::Arith(_, a, b) => {
+                f(a);
+                f(b);
+            }
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => f(a),
+            Expr::In(a, items) => {
+                f(a);
+                items.iter().for_each(f);
+            }
+            Expr::Call(_, args) => args.iter().for_each(f),
+        }
+    }
+
+    /// [`Expr::each_child`] over the children to change.
+    pub fn each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        match self {
+            Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => {}
+            Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::Like(a, b)
+            | Expr::Has(a, b)
+            | Expr::Arith(_, a, b) => {
+                f(a);
+                f(b);
+            }
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => f(a),
+            Expr::In(a, items) => {
+                f(a);
+                items.iter_mut().for_each(f);
+            }
+            Expr::Call(_, args) => args.iter_mut().for_each(f),
+        }
+    }
+
+    /// Changes it in place, outermost first: `f` puts what it answers for
+    /// in its place and says so, and the rest is walked into. How a select
+    /// list's items are bound once a query, over a copy: rebuilding the
+    /// tree a variant at a time was 2.1 KB of the browser module.
+    pub fn rewrite(&mut self, f: &mut dyn FnMut(&mut Expr) -> Result<bool>) -> Result<()> {
+        if f(self)? {
+            return Ok(());
+        }
+        let mut r = Ok(());
+        self.each_child_mut(&mut |c| {
+            if r.is_ok() {
+                r = c.rewrite(f);
+            }
+        });
+        r
+    }
+
+    /// The aggregate it calls at its top, if it is one -- `count`, `sum`,
+    /// `avg`, `min`, `max`, `first` or `last` -- by the lowercased name the
+    /// parser gives every call.
+    pub fn aggregate_name(&self) -> Option<&str> {
+        match self {
+            Expr::Call(name, _) if AGGREGATES.contains(&name.as_str()) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Whether an aggregate is anywhere in it: what makes a select list
+    /// fold its rows.
+    pub fn has_aggregate(&self) -> bool {
+        if self.aggregate_name().is_some() {
+            return true;
+        }
+        let mut any = false;
+        self.each_child(&mut |c| any = any || c.has_aggregate());
+        any
+    }
+
     /// Whether an `in (get ...)` is anywhere in it.
     pub fn has_subquery(&self) -> bool {
         match self {
@@ -589,6 +675,24 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             ) {
                 return Ok(Value::Timestamp(t));
             }
+            // `case when c then v ... else e end`, which the parser makes a
+            // call of its conditions and values in turn and the `else` last:
+            // a call, so that every walk over an expression reaches its
+            // parts with no variant of its own, and worked out lazily, as
+            // SQL's is -- `case when qty = 0 then null else px / qty end`
+            // divides only where it may.
+            if name == "case" {
+                let (pairs, rest) = args.as_chunks::<2>();
+                for [c, v] in pairs {
+                    if truthy(&eval(c, row, ctx)?) {
+                        return eval(v, row, ctx);
+                    }
+                }
+                return match rest {
+                    [e] => eval(e, row, ctx),
+                    _ => Ok(Value::Null),
+                };
+            }
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 vals.push(eval(a, row, ctx)?);
@@ -832,38 +936,171 @@ pub const COUNT_COLUMN: &str = "count";
 /// The one column `explain` answers with.
 pub const PLAN_COLUMN: &str = "plan";
 
-/// An item of an aggregating select list.
+/// The aggregates a select list may call, as the parser lowercases them.
+/// `count(*)` is a call with no argument, `count(distinct f)` one whose
+/// argument is a call of `distinct`, and `first(px by at)` one of two.
+pub const AGGREGATES: [&str; 7] = ["count", "sum", "avg", "min", "max", "first", "last"];
+
+/// The most distinct values a query's `count(distinct ...)` items hold
+/// between them, over all their groups. Each is its encoding in a hash
+/// map, about 60 to 70 bytes with the map's own -- some 70 MB at the
+/// bound -- so a count past it is refused rather than held, or cut short:
+/// a distinct count that stopped counting is a wrong answer believed right.
+pub const MAX_DISTINCT_VALUES: usize = 1_000_000;
+
+/// An item of a select list that is more than a field as it is: an
+/// aggregating list's every item -- `status`, `sum(total)`, `bucket(at,
+/// 1h) as hour`, `sum(px * qty) / sum(qty) as vwap` -- and a plain list's
+/// computed column, `px * qty as notional`. It answers under `name`: what
+/// `as` gave it, or, for a field or an aggregate of one, the text it was
+/// written as ([`label_of`]).
 #[derive(Debug, Clone, PartialEq)]
-pub enum Agg {
-    /// The group's own value: the `group` field, listed.
-    Key(String),
-    /// `count(*)`: the rows.
-    Count,
-    Sum(String),
-    Avg(String),
-    Min(String),
-    Max(String),
+pub struct Column {
+    pub expr: Expr,
+    pub name: String,
 }
 
-impl Agg {
-    /// The column it answers under: the field, `count`, `sum(total)`.
-    pub fn label(&self) -> String {
-        match self {
-            Agg::Key(f) => f.clone(),
-            Agg::Count => COUNT_COLUMN.to_string(),
-            Agg::Sum(f) => format!("sum({f})"),
-            Agg::Avg(f) => format!("avg({f})"),
-            Agg::Min(f) => format!("min({f})"),
-            Agg::Max(f) => format!("max({f})"),
+/// The name an item answers under when no `as` gives it one: a field's, or
+/// an aggregate of a field as it is written -- `count`, `sum(total)`,
+/// `count(distinct user)`, `first(px)` (with or without its `by`). `None`
+/// for anything else, which needs a name: a column called `px * qty` would
+/// have to be written back exactly as the parser read it.
+pub fn label_of(e: &Expr) -> Option<String> {
+    fn field(e: Option<&Expr>) -> Option<&str> {
+        match e {
+            Some(Expr::Field(f)) => Some(f),
+            _ => None,
         }
     }
-
-    /// The field it reads, if any.
-    pub fn field(&self) -> Option<&str> {
-        match self {
-            Agg::Count => None,
-            Agg::Key(f) | Agg::Sum(f) | Agg::Avg(f) | Agg::Min(f) | Agg::Max(f) => Some(f),
+    let Expr::Call(name, args) = e else {
+        return field(Some(e)).map(str::to_string);
+    };
+    let one = args.len() == 1 || (args.len() == 2 && matches!(name.as_str(), "first" | "last"));
+    match (name.as_str(), args.first()) {
+        ("count", None) => Some(COUNT_COLUMN.to_string()),
+        ("count", Some(Expr::Call(d, inner))) if d == "distinct" && inner.len() == 1 => {
+            field(inner.first()).map(|f| format!("count(distinct {f})"))
         }
+        _ if one && e.aggregate_name().is_some() => {
+            field(args.first()).map(|f| format!("{name}({f})"))
+        }
+        _ => None,
+    }
+}
+
+/// The field whose values a column carries, if it carries one's: the field
+/// itself, or its `min`, `max`, `first` or `last`. Its collation is the
+/// column's, and `collate` orders the column only when it is text.
+pub fn carried_field(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Field(f) => Some(f),
+        Expr::Call(name, args) if matches!(name.as_str(), "min" | "max" | "first" | "last") => {
+            match args.first() {
+                Some(Expr::Field(f)) => Some(f),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `bucket(at, 15m)`'s interval: a whole number of milliseconds from the
+/// epoch (`ms`, `s`, `m`, `h`, `d`), of weeks from a Monday (`w`), as ISO's
+/// begin, or of calendar months from January (`mo`, and `y` for twelve),
+/// all in UTC.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Interval {
+    /// A step of milliseconds, counted from an origin: the epoch, or for
+    /// weeks the Monday after it, 1970-01-05.
+    Ms(i64, i64),
+    Months(i64),
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+impl Interval {
+    /// The interval a value names: a whole number of milliseconds past
+    /// zero, or a duration's text, `15m`, `1h`, `1mo` -- what the parser
+    /// makes of `bucket(at, 15m)`, and what a parameter may hold.
+    pub fn of(v: &Value) -> Result<Interval> {
+        // Each unit's milliseconds, or as a negative number its months.
+        const UNITS: [(&str, i64); 8] = [
+            ("ms", 1),
+            ("s", 1_000),
+            ("m", 60_000),
+            ("h", 3_600_000),
+            ("d", DAY_MS),
+            ("w", 7 * DAY_MS),
+            ("mo", -1),
+            ("y", -12),
+        ];
+        let (mut n, mut unit) = (0i64, "ms");
+        match v {
+            Value::Int(ms) => n = *ms,
+            Value::Text(t) => {
+                unit = "";
+                for (i, b) in t.bytes().enumerate() {
+                    if !b.is_ascii_digit() {
+                        unit = t.get(i..).unwrap_or("");
+                        break;
+                    }
+                    n = n.saturating_mul(10).saturating_add((b - b'0') as i64);
+                }
+            }
+            _ => {}
+        }
+        let iv = match UNITS.iter().find(|u| u.0 == unit).map(|u| u.1) {
+            _ if n <= 0 => None,
+            Some(m) if m < 0 => n.checked_mul(-m).map(Interval::Months),
+            // 1970-01-05 was a Monday.
+            Some(ms) => n
+                .checked_mul(ms)
+                .map(|step| Interval::Ms(step, if unit == "w" { 4 * DAY_MS } else { 0 })),
+            None => None,
+        };
+        iv.ok_or_else(|| {
+            Error::Query(
+                "`bucket` takes an interval such as 15m, 1h, 1d, 1w or 1mo \
+                 (ms, s, m, h, d, w, mo, y), or milliseconds past zero"
+                    .into(),
+            )
+        })
+    }
+
+    /// The start of the interval a timestamp falls in -- or epoch
+    /// milliseconds as an int, answered as an int. Null stays null.
+    pub fn truncate(self, v: &Value) -> Result<Value> {
+        let t = match v {
+            Value::Null => return Ok(Value::Null),
+            Value::Timestamp(t) | Value::Int(t) => *t,
+            other => {
+                return Err(Error::Type(format!(
+                    "`bucket` takes a timestamp; found {}",
+                    other.type_name()
+                )))
+            }
+        };
+        let start = match self {
+            // Wrapping only past the ends of time, ±292 million years; in
+            // `i128` the division brought the compiler's own, 1 KB of the
+            // browser module.
+            Interval::Ms(n, origin) => t
+                .wrapping_sub(origin)
+                .div_euclid(n)
+                .wrapping_mul(n)
+                .wrapping_add(origin),
+            Interval::Months(n) => {
+                let (y, m, _) = crate::time::civil_from_days(t.div_euclid(DAY_MS));
+                let months = y * 12 + m as i64 - 1;
+                let b = months - months.rem_euclid(n);
+                crate::time::days_from_civil(b.div_euclid(12), b.rem_euclid(12) as u32 + 1, 1)
+                    .wrapping_mul(DAY_MS)
+            }
+        };
+        Ok(match v {
+            Value::Int(_) => Value::Int(start),
+            _ => Value::Timestamp(start),
+        })
     }
 }
 
@@ -1015,10 +1252,16 @@ pub struct Select {
     /// `lookup`: children of another collection, attached per row.
     pub lookup: Option<Lookup>,
     /// A select list that aggregates -- `select status, sum(total), count(*)`
-    /// -- in the order written. Empty: no aggregation.
-    pub aggregate: Vec<Agg>,
-    /// `group <field>`: one row per value of the field rather than one in all.
-    pub group: Option<String>,
+    /// -- in the order written, every item of it. Empty: no aggregation.
+    pub aggregate: Vec<Column>,
+    /// `group a, bucket(at, 1h)`: one row per distinct set of the keys'
+    /// values rather than one in all. A name the list gives an item with
+    /// `as` stands for that item ([`Select::group_keys`]).
+    pub group: Vec<Expr>,
+    /// A plain list's items that are more than a field: `px * qty as
+    /// notional`. Each answers under its name, which `project` holds where
+    /// it was written.
+    pub computed: Vec<Column>,
     /// `fuse`: `match` and `near` both, their rankings combined.
     pub fuse: Option<Fuse>,
     /// `highlight()` and `snippet()` items of the select list, in the order
@@ -1148,7 +1391,7 @@ impl Select {
         // `count` and an aggregate answer one row whatever matched: a
         // `require 1` over them would always hold, and say nothing.
         if self.require.is_some()
-            && (self.count || (!self.aggregate.is_empty() && self.group.is_none()))
+            && (self.count || (!self.aggregate.is_empty() && self.group.is_empty()))
         {
             return Err(Error::Query(
                 "`require` counts the rows a `get` answers, and `count` or an aggregate answers \
@@ -1156,8 +1399,21 @@ impl Select {
                     .into(),
             ));
         }
-        if !self.aggregate.is_empty() || self.group.is_some() {
+        if !self.aggregate.is_empty() || !self.group.is_empty() {
             self.check_aggregate()?;
+        }
+        // A computed column answers under its name, and a JSON row holds a
+        // name once.
+        for (i, c) in self.computed.iter().enumerate() {
+            let named = |n: &&String| **n == c.name;
+            if self.computed[..i].iter().any(|d| d.name == c.name)
+                || self.project.iter().flatten().filter(named).count() > 1
+            {
+                return Err(Error::Query(format!(
+                    "`{}` names two columns of the list",
+                    c.name
+                )));
+            }
         }
         if !self.count {
             return Ok(());
@@ -1316,6 +1572,10 @@ impl Select {
                 marks = marks.max(a.max_param());
             }
         }
+        let items = self.aggregate.iter().chain(&self.computed);
+        for e in items.map(|c| &c.expr).chain(&self.group) {
+            marks = marks.max(e.max_param());
+        }
         opt(&self.filter)
             .max(near)
             .max(m)
@@ -1463,7 +1723,7 @@ impl Select {
     /// single row has nothing to order or page. Grouped, the rows are the
     /// groups, and those do.
     fn check_aggregate(&self) -> Result<()> {
-        let Some(group) = &self.group else {
+        if self.group.is_empty() {
             let clash = if !self.order.is_empty() {
                 "order"
             } else if self.limit.is_some() {
@@ -1479,28 +1739,45 @@ impl Select {
                      `group` makes a row per value"
                 )));
             }
-            if let Some(Agg::Key(f)) = self.aggregate.iter().find(|a| matches!(a, Agg::Key(_))) {
-                return Err(Error::Query(format!(
-                    "`{f}` is neither aggregated nor grouped by"
-                )));
-            }
-            return self.check_aggregate_company();
-        };
-        if self.aggregate.is_empty() {
-            return Err(Error::Query(format!(
-                "`group {group}` needs an aggregate to answer with: `select {group}, count(*)`"
-            )));
+        } else if self.aggregate.is_empty() {
+            return Err(Error::Query(
+                "`group` needs an aggregate to answer with: `select <key>, count(*)`".into(),
+            ));
         }
-        for a in &self.aggregate {
-            if let Agg::Key(f) = a {
-                if f != group {
-                    return Err(Error::Query(format!(
-                        "`{f}` is neither aggregated nor grouped by"
-                    )));
-                }
+        let keys = self.group_keys();
+        for k in &keys {
+            if k.has_aggregate() {
+                return Err(Error::Query(
+                    "`group` takes the rows' values; an aggregate is the group's own".into(),
+                ));
+            }
+        }
+        for (i, c) in self.aggregate.iter().enumerate() {
+            grouped(&c.expr, &keys, false)?;
+            if self.aggregate[..i].iter().any(|d| d.name == c.name) {
+                return Err(Error::Query(format!(
+                    "`{}` names two columns of the list: name one with `as`",
+                    c.name
+                )));
             }
         }
         self.check_aggregate_company()
+    }
+
+    /// The group's keys as the rows are grouped by them: a name the list
+    /// gives an item with `as` -- `select bucket(at, 1h) as hour, count(*)
+    /// group hour` -- stands for that item's expression, before a field of
+    /// the same name; anything else is the key as written.
+    pub fn group_keys(&self) -> Vec<&Expr> {
+        let mut out = Vec::with_capacity(self.group.len());
+        for g in &self.group {
+            let named = match g {
+                Expr::Field(n) => self.aggregate.iter().find(|c| c.name == *n),
+                _ => None,
+            };
+            out.push(named.map_or(g, |c| &c.expr));
+        }
+        out
     }
 
     fn check_aggregate_company(&self) -> Result<()> {
@@ -1521,6 +1798,72 @@ impl Select {
             "aggregates cannot be used together with `{clash}`"
         )))
     }
+}
+
+/// Refuses what an item of an aggregating list cannot answer: a field read
+/// outside an aggregate that is no group key -- which value of the group's
+/// rows would it be? -- an aggregate inside another, `distinct` anywhere
+/// but in `count`, and an aggregate given the wrong arguments. `inside`:
+/// within an aggregate's arguments, where the rows' fields are what it reads.
+fn grouped(e: &Expr, keys: &[&Expr], inside: bool) -> Result<()> {
+    if !inside && keys.iter().any(|k| is_key(k, e)) {
+        return Ok(());
+    }
+    let Expr::Call(name, args) = e else {
+        if let (Expr::Field(f), false) = (e, inside) {
+            return Err(Error::Query(format!(
+                "`{f}` is neither aggregated nor grouped by: group by it, or by the name \
+                 an item reading it is given with `as`"
+            )));
+        }
+        let mut r = Ok(());
+        e.each_child(&mut |c| {
+            if r.is_ok() {
+                r = grouped(c, keys, inside);
+            }
+        });
+        return r;
+    };
+    let shape = match (name.as_str(), args.as_slice()) {
+        ("distinct", _) => "`distinct` counts values inside `count`: `count(distinct <field>)`",
+        _ if e.aggregate_name().is_some() && inside => {
+            "an aggregate inside another has no rows to fold: they are the outer one's"
+        }
+        ("count", [Expr::Call(d, x)]) if d == "distinct" && x.len() == 1 => {
+            return grouped(&x[0], keys, true);
+        }
+        ("count", []) => return Ok(()),
+        ("count", _) => {
+            "`count` counts rows or distinct values: `count(*)` or `count(distinct <field>)`"
+        }
+        ("first" | "last", [_] | [_, _]) | ("sum" | "avg" | "min" | "max", [_]) => "",
+        ("first" | "last", _) => {
+            "`first` and `last` take a value and what orders the rows: \
+                                  `first(<value> [by <key>])`"
+        }
+        ("min" | "max", [_, _, ..]) => {
+            "`min` and `max` fold one value over the rows; `least(a, b)` and \
+             `greatest(a, b)` take the smaller and larger of a row's"
+        }
+        ("sum" | "avg" | "min" | "max", _) => "an aggregate takes one value: `sum(<value>)`",
+        _ => "",
+    };
+    if !shape.is_empty() {
+        return Err(Error::Query(shape.into()));
+    }
+    let inside = inside || e.aggregate_name().is_some();
+    for a in args {
+        grouped(a, keys, inside)?;
+    }
+    Ok(())
+}
+
+/// Whether `e` is the group key `k`: the same field, or the very item a
+/// key names by the name `as` gives it. Not the same expression written
+/// twice -- `select bucket(at, 1h) as h ... group h` names it once -- since
+/// comparing two expressions whole was 1.5 KB of the browser module.
+pub fn is_key(k: &Expr, e: &Expr) -> bool {
+    std::ptr::eq(k, e) || matches!((k, e), (Expr::Field(a), Expr::Field(b)) if a == b)
 }
 
 #[derive(Debug, Clone, PartialEq)]
