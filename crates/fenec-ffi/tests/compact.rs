@@ -55,6 +55,14 @@ fn query(h: u64, sql: &str) -> String {
     text
 }
 
+/// A policy that compacts a test's few hundred kilobytes.
+fn small() -> CompactPolicy {
+    CompactPolicy {
+        ratio: 0.5,
+        floor: 64 << 10,
+    }
+}
+
 fn close(h: u64) {
     let mut out = std::ptr::null_mut();
     let code = unsafe { fenec_close(h, &mut out, std::ptr::null_mut()) };
@@ -66,13 +74,7 @@ fn close(h: u64) {
 /// the open said not to.
 #[test]
 fn a_file_the_app_keeps_updating_stays_near_what_it_holds() {
-    set_auto_compact(
-        CompactPolicy {
-            ratio: 0.5,
-            floor: 64 << 10,
-        },
-        Duration::from_millis(5),
-    );
+    set_auto_compact(small(), Duration::from_millis(5));
     let body = "x".repeat(500);
     let mut sizes = Vec::new();
     for flags in [
@@ -96,8 +98,21 @@ fn a_file_the_app_keeps_updating_stays_near_what_it_holds() {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        // The last look has had its chance.
-        std::thread::sleep(Duration::from_millis(50));
+        // The thread's last compact: once the writes stop, it compacts
+        // the file until the policy no longer asks for one. Waited for, not
+        // given 50 ms, which a loaded machine can keep the thread from
+        // looking in; bounded only so that a compact that never comes fails.
+        if flags & FENEC_OPEN_NO_AUTO_COMPACT == 0 {
+            let until = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let g = garbage(h).unwrap();
+                if !small().due(g) {
+                    break;
+                }
+                assert!(std::time::Instant::now() < until, "never compacted: {g:?}");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         assert!(query(h, "get t where n = 60 count").contains(r#"{"count":100}"#));
         close(h);
         sizes.push(std::fs::metadata(&path).unwrap().len());
@@ -118,13 +133,7 @@ fn a_file_the_app_keeps_updating_stays_near_what_it_holds() {
 /// compact due every few rounds, a close lands during one or between two.
 #[test]
 fn nothing_compacts_a_file_after_its_close() {
-    set_auto_compact(
-        CompactPolicy {
-            ratio: 0.5,
-            floor: 64 << 10,
-        },
-        Duration::from_millis(5),
-    );
+    set_auto_compact(small(), Duration::from_millis(5));
     let body = "x".repeat(500);
     let dir = std::env::temp_dir().join(format!("fenec-ffi-compact-close-{}", std::process::id()));
     let listing = || {

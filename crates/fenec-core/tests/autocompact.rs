@@ -312,3 +312,59 @@ fn an_image_adopted_during_a_compact_is_not_written_over() {
     drop(db);
     same(&fenec_core::fs::open(&path).unwrap(), &other);
 }
+
+/// A compact beside the writes copies the versions written during it after
+/// the image, which then holds the version each replaced, dead: counted as
+/// dead, not as what the compact kept, or the next compact is due that much
+/// later. Over the native library's thread, a compact during a burst of
+/// updates of 100 rows left 101 KB of them counted as kept, and the file
+/// stood at 307 KB, six times its 53 KB of rows, with nothing due.
+#[test]
+fn what_a_compact_beside_the_writes_leaves_dead_is_counted_dead() {
+    for mapped in [true, false] {
+        let path = tmp(&format!("beside-dead-{mapped}"));
+        let mut db = fenec_core::fs::open_with(&path, mapped, Box::new(Ok)).unwrap();
+        exec(&mut db, "create collection t (n int, body text)");
+        let body = "x".repeat(500);
+        for id in 1..=100 {
+            exec(
+                &mut db,
+                &format!("put t {{id: {id}, n: 0, body: \"{body}\"}}"),
+            );
+        }
+        for round in 1..=10 {
+            exec(&mut db, &format!("set t {{n: {round}}} where id > 0"));
+        }
+        let db = RwLock::new(db);
+        let compact = fenec_ql::parse_one("compact").unwrap();
+        let mut round = 10;
+        Database::maintain_with(&db, &compact, &mut || {
+            round += 1;
+            exec(
+                &mut db.write().unwrap(),
+                &format!("set t {{n: {round}}} where id > 0"),
+            );
+        })
+        .unwrap()
+        .unwrap();
+        let last = round;
+        assert!(last > 10, "no write landed during the compact");
+        let mut db = db.into_inner().unwrap();
+        db.sync().unwrap();
+        let g = db.garbage();
+        assert_eq!(db.compactions(), 1);
+        assert_eq!(g.file, std::fs::metadata(&path).unwrap().len());
+        // The schema and the counters: a few hundred bytes, not the 50 KB
+        // of rows written over during the compact.
+        assert!(g.kept < 4_096, "mapped {mapped}: {g:?}");
+        assert!(g.dead() > 50_000, "mapped {mapped}: {g:?}");
+        // The open counts them dead too, from the records it walks.
+        drop(db);
+        let again = fenec_core::fs::open_with(&path, mapped, Box::new(Ok)).unwrap();
+        assert_eq!(
+            (again.garbage().file, again.garbage().live),
+            (g.file, g.live)
+        );
+        assert_eq!(rows(&again, &format!("get t where n = {last}")).len(), 100);
+    }
+}

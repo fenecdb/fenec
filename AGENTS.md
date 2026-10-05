@@ -549,7 +549,10 @@ loaded). `Database::garbage` is the file's bytes as written (`appended`)
 against the live records' (`Store::total_bytes - dead_bytes`, which the
 stores counted as writes landed already and an image's index carries) and
 what the last compact kept besides the documents (`kept`: schemas,
-counters, graphs) -- a sum over the collections, nothing added to the write
+counters, graphs, the file less every record the stores hold -- the
+versions a compact beside the writes copied and saw written over are dead,
+and counted as kept they left a 307 KB file of 53 KB of rows not due
+again) -- a sum over the collections, nothing added to the write
 path: a lone put, put over and del measured 570/700/532 ns in memory either
 way, and 666/797/595 against 660/785/593 over a mapped file, inside the base
 build's own spread. `CompactPolicy` is the one rule (half the file dead and

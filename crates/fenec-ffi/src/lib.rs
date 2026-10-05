@@ -130,6 +130,16 @@ pub fn set_auto_compact(policy: CompactPolicy, every: std::time::Duration) {
     *AUTO_COMPACT.lock().unwrap_or_else(|e| e.into_inner()) = (policy, every);
 }
 
+/// What the file open under `handle` holds against what it reads
+/// (`Database::garbage`), `None` for no such handle: how a test waits for
+/// the thread's compact to have run, rather than for a time.
+#[doc(hidden)]
+pub fn garbage(handle: u64) -> Option<fenec_core::engine::Garbage> {
+    let n = native(handle).ok()?;
+    let db = n.db.read().unwrap_or_else(|e| e.into_inner());
+    Some(db.garbage())
+}
+
 /// An open database.
 struct Native {
     /// An `Arc` of its own for the compactor, which holds it weakly.
