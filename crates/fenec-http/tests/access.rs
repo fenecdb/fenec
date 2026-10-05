@@ -1191,6 +1191,8 @@ fn a_scoped_poll_learns_nothing_of_writes_it_may_not_read() {
     assert_eq!(status, 200);
     assert!(!root.starts_with("\"c"), "{root}");
     assert_eq!(ask(ROOT, &root).0, 304);
+}
+
 const COUNTS: &str = "\
 events   insert              where user = $jwt.sub
 tallies  read,write          where owner = $jwt.sub
