@@ -768,6 +768,53 @@ fn cors_headers_only_when_configured() {
         .is_some_and(|v| v.contains("fenec-seq")));
 }
 
+/// A browser sends a preflight with no `Authorization` -- the Fetch
+/// standard never puts one there -- and sends nothing more unless it is
+/// answered 2xx. Authenticated first, it was 401 on every server with a
+/// token, and a page on another origin could not reach one.
+#[test]
+fn a_preflight_is_answered_before_the_token_is_asked_for() {
+    let preflight = [
+        ("Origin", "https://app.example"),
+        ("Access-Control-Request-Method", "POST"),
+        (
+            "Access-Control-Request-Headers",
+            "authorization, content-type",
+        ),
+    ];
+    let h = start(Config {
+        token: Some("secret".into()),
+        cors: Some("https://app.example".into()),
+        ..Config::default()
+    });
+    let r = call_with(h.port, "OPTIONS", "/query", None, &preflight);
+    assert_eq!(r.status, 204, "{}", r.body);
+    assert_eq!(
+        r.header("Access-Control-Allow-Origin"),
+        Some("https://app.example")
+    );
+    assert!(r
+        .header("Access-Control-Allow-Headers")
+        .is_some_and(|v| v.contains("authorization")));
+    // The request after it still needs its token, and a preflight from an
+    // origin the server does not allow is answered as it was.
+    assert_eq!(call(h.port, "POST", "/query", Some("{}")).status, 401);
+    let other = [("Origin", "https://evil.example")];
+    assert_eq!(
+        call_with(h.port, "OPTIONS", "/query", None, &other).status,
+        401
+    );
+    // Without --http-cors nothing changes: no CORS answer to give.
+    let h = start(Config {
+        token: Some("secret".into()),
+        ..Config::default()
+    });
+    assert_eq!(
+        call_with(h.port, "OPTIONS", "/query", None, &preflight).status,
+        401
+    );
+}
+
 #[test]
 fn keep_alive_serves_two_requests_on_one_connection() {
     let h = start(Config::default());

@@ -24,6 +24,15 @@ impl Drop for Node {
 
 /// A node taking `access`'s JSON Web Tokens beside its data token `data`.
 fn node_with(tag: &str, access: Option<Arc<fenec_http::access::Access>>) -> Node {
+    node_cors(tag, access, None)
+}
+
+/// A node as [`node_with`] makes one, answering browsers from `cors`.
+fn node_cors(
+    tag: &str,
+    access: Option<Arc<fenec_http::access::Access>>,
+    cors: Option<&str>,
+) -> Node {
     let dir = std::env::temp_dir().join(format!(
         "fenec-shard-{tag}-{}-{:?}",
         std::process::id(),
@@ -36,6 +45,7 @@ fn node_with(tag: &str, access: Option<Arc<fenec_http::access::Access>>) -> Node
         stream_keepalive: Duration::from_millis(80),
         token: access.is_some().then(|| "data".to_string()),
         access,
+        cors: cors.map(String::from),
         ..fenec_http::Config::default()
     };
     let server = fenec_http::Server::with_tenants(Arc::clone(&tenants), cfg);
@@ -63,8 +73,18 @@ fn cluster_with(
     token: Option<&str>,
     access: Option<Arc<fenec_http::access::Access>>,
 ) -> Cluster {
+    cluster_cors(tag, n, token, access, None)
+}
+
+fn cluster_cors(
+    tag: &str,
+    n: usize,
+    token: Option<&str>,
+    access: Option<Arc<fenec_http::access::Access>>,
+    cors: Option<&str>,
+) -> Cluster {
     let nodes: Vec<Node> = (1..=n)
-        .map(|i| node_with(&format!("{tag}{i}"), access.clone()))
+        .map(|i| node_cors(&format!("{tag}{i}"), access.clone(), cors))
         .collect();
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
@@ -516,4 +536,40 @@ fn a_token_for_one_tenant_reaches_no_other_through_the_router() {
             "{out}"
         );
     }
+}
+
+/// A page on another origin talks to its tenant through the router: the
+/// preflight the browser sends first carries no token, and was refused
+/// with 401 by the node, so the page could send nothing.
+#[test]
+fn a_preflight_reaches_its_tenant_through_the_router_with_no_token() {
+    let access = Arc::new(
+        fenec_http::access::Access::new(
+            b"thirty-two bytes and a few more, for HS256",
+            "notes  read,write  where owner = $jwt.sub\n",
+        )
+        .unwrap(),
+    );
+    let c = cluster_cors("cors", 1, None, Some(access), Some("https://app.example"));
+    c.create("acme", None);
+    let mut sock = TcpStream::connect(("127.0.0.1", c.port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        sock,
+        "OPTIONS /t/acme/query HTTP/1.1\r\nHost: t\r\nOrigin: https://app.example\r\n\
+         Access-Control-Request-Method: POST\r\n\
+         Access-Control-Request-Headers: authorization, content-type\r\n\
+         Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut out = String::new();
+    let _ = sock.read_to_string(&mut out);
+    assert!(out.starts_with("HTTP/1.1 204"), "{out}");
+    assert!(
+        out.contains("Access-Control-Allow-Origin: https://app.example"),
+        "{out}"
+    );
+    // The query itself still needs its token.
+    assert_eq!(c.query("acme", "get notes").0, 401);
 }

@@ -488,6 +488,23 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             continue;
         }
 
+        // A browser's preflight carries no `Authorization` -- the Fetch
+        // standard sends none -- so it is answered before any token is
+        // asked for, a tenant looked up or a lock taken: authenticated, it
+        // was 401 on any server with a token, and a page on another origin
+        // could send nothing. It reads nothing and says only what the CORS
+        // headers already say on every answer.
+        if req.method == Method::Options
+            && !matches!(backend, Backend::Metrics { .. })
+            && cors_allows(cfg, &req)
+        {
+            let resp = cors(Response::empty(204), cfg);
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
+
         // Before any routing: the metrics are the node's, not a tenant's.
         let scrape =
             matches!(req.method, Method::Get | Method::Head) && req.segments() == ["_metrics"];
@@ -1590,6 +1607,17 @@ fn error_response(e: &Error) -> Response {
         | Error::Unmet(m) => m.as_str(),
     };
     Response::error(api::status_of(e), msg)
+}
+
+/// Whether `--http-cors` lets `req`'s origin in: `*` lets every one, an
+/// origin itself alone. A preflight from another is answered as before,
+/// after its token.
+fn cors_allows(cfg: &Config, req: &Request) -> bool {
+    match cfg.cors.as_deref() {
+        None => false,
+        Some("*") => true,
+        Some(allowed) => req.header("origin") == Some(allowed),
+    }
 }
 
 fn cors(resp: Response, cfg: &Config) -> Response {

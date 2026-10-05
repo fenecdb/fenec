@@ -612,7 +612,7 @@ of it on an open network.</p>
 <table>
 <tbody>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time</td></tr>
-<tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all</td></tr>
+<tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all. A browser&rsquo;s preflight (<code>OPTIONS</code>) from that origin, or any with <code>*</code>, is answered 204 before a token is asked for -- the browser sends none with it -- on a single database and under <code>/t/&lt;tenant&gt;/</code>, through the router too</td></tr>
 <tr><td><code>--http-read-only</code></td><td>write endpoints return 403; <code>fenec-server</code>'s own path is unaffected</td></tr>
 <tr><td>a replica</td><td>every write returns 403, whatever the flags: its writes come from its primary</td></tr>
 <tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
