@@ -10,7 +10,7 @@ import { appPort, log, pct, startApp, startNode, stopAll } from './bench-env.ts'
 
 const { addSite, setupControl } = await import('../src/setup.ts');
 const { db } = await import('../src/db.ts');
-const { insertText, params } = await import('../src/ingest.ts');
+const { INSERT, params } = await import('../src/ingest.ts');
 const { fold, block, RollupWorker } = await import('../src/rollup.ts');
 const { Traffic, userAgent } = await import('../src/sim.ts');
 const { dayOf, DAY } = await import('../src/time.ts');
@@ -109,7 +109,7 @@ for (const clients of [1, 4, 16]) {
 const direct = async (siteName: string, b: SimEvent[], batch: string, extra: (b: SimEvent[]) => [string, unknown[]][] = () => []) => {
   const ctx = { device: b[0].device, browser: b[0].browser, country: b[0].country, hosts: [] };
   const beacon = { key: '', batch, user: b[0].user.padEnd(8, '0'), events: b.map((e) => ({ name: e.name, path: e.path, ref: e.ref, age: 0, props: e.props })) };
-  const r = await db(siteName, 'ingest').batch([[insertText(b.length), params(beacon, ctx)], ...extra(b)], { idempotencyKey: `${siteName}:${batch}` });
+  const r = await db(siteName, 'ingest').batch([[INSERT, params(beacon, ctx)], ...extra(b)], { idempotencyKey: `${siteName}:${batch}` });
   return r.seq;
 };
 for (const clients of [1, 4, 16]) {
@@ -129,7 +129,7 @@ for (const clients of [1, 16]) {
     const beacon = { key: '', batch, user: b[0].user.padEnd(8, '0'), events: b.map((e) => ({ name: e.name, path: e.path, ref: e.ref, age: 0, props: e.props })) };
     const f = fold(b.map((e) => ({ ...e, user: beacon.user, at: Date.now() })));
     // The rollup statements without the worker's guard (the first): each beacon applies its own.
-    const res = await op.batch([[insertText(b.length), params(beacon, ctx)], ...block(f, 0, 0, new Map()).slice(1)], { idempotencyKey: `${s.name}:${batch}` });
+    const res = await op.batch([[INSERT, params(beacon, ctx)], ...block(f, 0, 0, new Map()).slice(1)], { idempotencyKey: `${s.name}:${batch}` });
     return res.seq;
   });
   results[`rollups on ingest, ${clients} client${clients > 1 ? 's' : ''}`] = fmt(r);

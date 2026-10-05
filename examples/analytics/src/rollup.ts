@@ -10,12 +10,13 @@
 // one block whose statements number the distinct keys the page touches, not
 // its events (README, "Measured", has both).
 //
-// The block writes what a page adds as a few statements a collection: the
-// worker reads first which of the page's keys have rows already, and
-// writes the new ones and the old ones over by id. The read is outside the
-// block, but the block is guarded by the worker's place (below), and every
-// rollup write is such a block: one that landed in between moved the place,
-// and this one is refused.
+// The block writes what a page adds as a statement a collection: an upsert
+// (`put <c> $1 if absent else set {n: n + new.n}`), each key made at its
+// count if missing and added to otherwise, the page's keys its one
+// parameter. Only the week rows are read first, for the cohorts; the read
+// is outside the block, but the block is guarded by the worker's place
+// (below), and every rollup write is such a block: one that landed in
+// between moved the place, and this one is refused.
 //
 // Exactly once in effect. The stream hands every write over at least once
 // -- the worker may crash after its block lands and before it knows -- so
@@ -127,21 +128,21 @@ export interface Visitor {
   last: number;
 }
 
-/** At most this many documents a statement: a statement's text grows with them. */
-const CHUNK = 500;
-
-/** `put <c> [docs] if absent`, the documents' fields as parameters, in chunks. */
-function puts(collection: string, fields: string[], rows: unknown[][], ifAbsent = true): Statement[] {
-  const out: Statement[] = [];
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const part = rows.slice(i, i + CHUNK);
-    const docs = part.map((_, j) => `{${fields.map((f, k) => `${f}: $${j * fields.length + k + 1}`).join(', ')}}`);
-    out.push([`put ${collection} [${docs.join(', ')}]${ifAbsent ? ' if absent' : ''}`, part.flat()]);
-  }
-  return out;
+/**
+ * `put <c> $1 <tail>`, the rows the parameter's documents: one statement
+ * whatever their number, the same text every page.
+ */
+function puts(collection: string, fields: string[], rows: unknown[][], tail = ''): Statement[] {
+  if (!rows.length) return [];
+  const docs = rows.map((r) => Object.fromEntries(fields.map((f, k) => [f, r[k]])));
+  return [[`put ${collection} $1${tail}`, [docs]]];
 }
 
-/** The rows a page's keys already have, by key: their ids, and a counter's `n` or a first time's `at`. */
+const ABSENT = ' if absent';
+/** A counter made at its count if missing, added to otherwise. */
+const ADD = ' if absent else set {n: n + new.n}';
+
+/** The week rows a page's keys already have, by key: what the cohorts are counted from. */
 export type Existing = Record<string, Map<string, { id: number; n: number; at: number }>>;
 
 /** The counters' collections, the field each is keyed in time by, and its labels. */
@@ -154,25 +155,15 @@ export const COUNTERS = [
 ] as const;
 
 /**
- * Counters by key. With the rows the keys have already (`ex`, read before
- * the block), two statements: the new rows written with their counts, the
- * old ones written over by id with theirs added -- what a key's own `set`
- * did in a statement each, a page of a backfill touching a thousand keys.
- * Without, the statements need read nothing first: each key made at zero if
- * missing, then added to.
+ * Counters by key: one upsert, each key made at its count if missing and
+ * added to otherwise, the page's keys its one parameter. It was a read of
+ * which keys had rows before the block, then the new rows and the old ones
+ * written over by id -- or two statements a key, a thousand keys a page of
+ * a backfill.
  */
-function counters(collection: string, time: string, labels: readonly string[], m: Map<string, { n: number } & Record<string, unknown>>, ex?: Existing): Statement[] {
+function counters(collection: string, time: string, labels: readonly string[], m: Map<string, { n: number } & Record<string, unknown>>): Statement[] {
   const fields = ['key', time, ...labels, 'n'];
-  const row = (key: string, v: { n: number } & Record<string, unknown>, n: number) => [key, iso(v[time] as number), ...labels.map((l) => v[l]), n];
-  if (!ex) {
-    const out = puts(collection, fields, [...m].map(([k, v]) => row(k, v, 0)));
-    for (const [key, v] of m) out.push([`set ${collection} {n: n + $2} where key = $1`, [key, v.n]]);
-    return out;
-  }
-  const had = ex[collection] ?? new Map();
-  const fresh = [...m].filter(([k]) => !had.has(k)).map(([k, v]) => row(k, v, v.n));
-  const old = [...m].filter(([k]) => had.has(k)).map(([k, v]) => [had.get(k)!.id, ...row(k, v, had.get(k)!.n + v.n)]);
-  return [...puts(collection, fields, fresh, false), ...puts(collection, ['id', ...fields], old, false)];
+  return puts(collection, fields, [...m].map(([k, v]) => [k, iso(v[time] as number), ...labels.map((l) => v[l]), v.n]), ADD);
 }
 
 /**
@@ -225,7 +216,6 @@ export function block(
   prev: number,
   next: number,
   known: Map<string, number>,
-  ex?: Existing,
   cohorts?: Map<string, { cohort: number; week: string; n: number }>,
   seen?: Map<string, Visitor>,
 ): Statement[] {
@@ -235,39 +225,34 @@ export function block(
       [prev, next, f.events, iso(f.maxDay)],
     ],
   ];
-  for (const [c, time, labels, field] of COUNTERS) out.push(...counters(c, time, labels, f[field] as Map<string, { n: number } & Record<string, unknown>>, ex));
+  for (const [c, time, labels, field] of COUNTERS) out.push(...counters(c, time, labels, f[field] as Map<string, { n: number } & Record<string, unknown>>));
   // A first time made if missing, and moved back if this page saw an earlier one.
   const firsts = [...f.firsts].map(([k, v]) => [k, iso(v.day), v.name, v.user, iso(v.at)]);
-  if (ex) {
-    const had = ex.firsts ?? new Map();
-    out.push(...puts('firsts', ['key', 'day', 'name', 'user', 'at'], firsts.filter(([k]) => !had.has(k as string)), false));
-    const moved = [...f.firsts].filter(([k, v]) => had.has(k) && v.at < had.get(k)!.at);
-    out.push(...puts('firsts', ['id', 'key', 'day', 'name', 'user', 'at'], moved.map(([k, v]) => [had.get(k)!.id, k, iso(v.day), v.name, v.user, iso(v.at)]), false));
-  } else {
-    out.push(...puts('firsts', ['key', 'day', 'name', 'user', 'at'], firsts));
-    for (const [k, v] of f.firsts) out.push(['set firsts {at: $2} where key = $1 and at > $2', [k, iso(v.at)]]);
-  }
-  out.push(...puts('day_users', ['key', 'day', 'user'], [...f.dayUsers].map(([k, v]) => [k, iso(v.day), v.user])));
+  out.push(...puts('firsts', ['key', 'day', 'name', 'user', 'at'], firsts, ' if absent else set {at: least(at, new.at)}'));
+  out.push(...puts('day_users', ['key', 'day', 'user'], [...f.dayUsers].map(([k, v]) => [k, iso(v.day), v.user]), ABSENT));
   const firstOf = (u: string) => Math.min(known.get(u) ?? Infinity, f.first.get(u) ?? Infinity);
-  out.push(...puts('weekly', ['key', 'week', 'user', 'cohort'], [...f.weekly].map(([k, v]) => [k, iso(v.week), v.user, iso(weekOf(firstOf(v.user)))])));
-  // A visitor's first and last day: new ones made, returning ones whose
-  // days moved written over by id. `last` is what counts the visitors of a
-  // range that ends now (`last >= day`), with no distinct count.
+  out.push(...puts('weekly', ['key', 'week', 'user', 'cohort'], [...f.weekly].map(([k, v]) => [k, iso(v.week), v.user, iso(weekOf(firstOf(v.user)))]), ABSENT));
+  // A visitor's first and last day, made or moved: `last` is what counts
+  // the visitors of a range that ends now (`last >= day`) off the ordered
+  // index, faster than a distinct count of a month's visitor-days.
   const lastOf = (u: string) => f.last.get(u) as number;
-  out.push(...puts('visitors', ['user', 'first', 'last'], [...f.first].filter(([u]) => !known.has(u)).map(([u, d]) => [u, iso(d), iso(lastOf(u))])));
+  out.push(
+    ...puts(
+      'visitors',
+      ['user', 'first', 'last'],
+      [...f.first].map(([u, d]) => [u, iso(d), iso(lastOf(u))]),
+      ' if absent else set {first: least(first, new.first), last: greatest(last, new.last)}',
+    ),
+  );
   if (seen) {
-    const moved: unknown[][] = [];
     for (const [u, d] of f.first) {
       const v = seen.get(u);
-      if (!v) continue;
-      const first = Math.min(v.first, d);
-      const last = Math.max(v.last, lastOf(u));
-      if (first !== v.first || last !== v.last) moved.push([v.id, u, iso(first), iso(last)]);
-      if (weekOf(first) !== weekOf(v.first)) out.push(['set weekly {cohort: $2} where user = $1', [u, iso(weekOf(first))]]);
+      if (v && weekOf(Math.min(v.first, d)) !== weekOf(v.first)) {
+        out.push(['set weekly {cohort: $2} where user = $1', [u, iso(weekOf(Math.min(v.first, d)))]]);
+      }
     }
-    out.push(...puts('visitors', ['id', 'user', 'first', 'last'], moved, false));
   }
-  if (cohorts) out.push(...counters('cohorts', 'cohort', ['week'], cohorts, ex));
+  if (cohorts) out.push(...counters('cohorts', 'cohort', ['week'], cohorts));
   return out;
 }
 
@@ -305,6 +290,8 @@ export class RollupWorker {
   refused = 0;
   /** Writes the last page held, events or not: 0 at the stream's end. */
   lines = 0;
+  /** The last write the node held as the last page was read (`Fenec-Seq`). */
+  end = 0;
 
   constructor(readonly opts: WorkerOptions) {
     this.site = opts.site;
@@ -319,16 +306,13 @@ export class RollupWorker {
     this.cursor = this.seq;
   }
 
-  /** The rows the page's counters and first times have already, read side by side. */
+  /**
+   * The week rows the page's keys have already: a week row the page makes
+   * counts its visitor in their cohort, one it finds does not. The counters
+   * and first times need no read: each is an upsert.
+   */
   async existing(f: Fold): Promise<Existing> {
-    const ex: Existing = {};
-    const read = async (c: string, value: string, keys: string[]) => void (ex[c] = await this.held(c, value, keys));
-    await Promise.all([
-      ...COUNTERS.map(([c, , , field]) => read(c, 'n', [...f[field].keys()])),
-      read('firsts', 'at', [...f.firsts.keys()]),
-      read('weekly', 'cohort', [...f.weekly.keys()]),
-    ]);
-    return ex;
+    return { weekly: await this.held('weekly', 'cohort', [...f.weekly.keys()]) };
   }
 
   /** The rows of `c` holding `keys`, by key: id and `value`, 500 keys to a statement. */
@@ -372,6 +356,9 @@ export class RollupWorker {
     }
     if (!res.ok) throw new Error(`/_changes: ${res.status} ${await res.text()}`);
     const next = Number(res.headers.get('fenec-next') ?? this.cursor);
+    // The last write the node holds, on disk or not yet: once the cursor
+    // reaches it there is nothing more to read.
+    this.end = Math.max(next, Number(res.headers.get('fenec-seq') ?? next));
     const events: RawEvent[] = [];
     this.lines = 0;
     for (const line of (await res.text()).split('\n')) {
@@ -400,9 +387,8 @@ export class RollupWorker {
       movedWeeks.set(u, (await this.#db.rows('get weekly select week where user = $1 limit 10000', [u])).map((r) => Date.parse(r.week)));
     }
     const cohorts = cohortDeltas(f, known, ex.weekly, movedWeeks);
-    ex.cohorts = await this.held('cohorts', 'n', [...cohorts.keys()]);
     try {
-      await this.#db.batch(block(f, this.seq, next, known, ex, cohorts, seen));
+      await this.#db.batch(block(f, this.seq, next, known, cohorts, seen));
     } catch (e) {
       if (e instanceof FenecError && e.status === 412 && e.at === 0) {
         // Another block moved the place first -- this worker's own, landed
@@ -467,18 +453,18 @@ export class RollupWorker {
       ['del firsts where day >= $1', p],
       ['del cohorts where week >= $1', p],
     ];
-    w.push(...puts('minutes', ['key', 'at', 'name', 'n'], rows[0].map((x) => [key(x.m, x.name), x.m, x.name, x.n]), false));
-    w.push(...puts('days', ['key', 'day', 'name', 'n'], rows[1].map((x) => [key(x.day, x.name), x.day, x.name, x.n]), false));
-    w.push(...puts('day_pages', ['key', 'day', 'path', 'n'], rows[2].map((x) => [key(x.day, x.path), x.day, x.path, x.n]), false));
-    w.push(...puts('day_refs', ['key', 'day', 'ref', 'n'], rows[3].map((x) => [key(x.day, x.ref), x.day, x.ref, x.n]), false));
-    w.push(...puts('day_users', ['key', 'day', 'user'], rows[4].map((x) => [key(x.day, x.user), x.day, x.user]), false));
+    w.push(...puts('minutes', ['key', 'at', 'name', 'n'], rows[0].map((x) => [key(x.m, x.name), x.m, x.name, x.n])));
+    w.push(...puts('days', ['key', 'day', 'name', 'n'], rows[1].map((x) => [key(x.day, x.name), x.day, x.name, x.n])));
+    w.push(...puts('day_pages', ['key', 'day', 'path', 'n'], rows[2].map((x) => [key(x.day, x.path), x.day, x.path, x.n])));
+    w.push(...puts('day_refs', ['key', 'day', 'ref', 'n'], rows[3].map((x) => [key(x.day, x.ref), x.day, x.ref, x.n])));
+    w.push(...puts('day_users', ['key', 'day', 'user'], rows[4].map((x) => [key(x.day, x.user), x.day, x.user])));
     // A week row's cohort is its visitor's first week: from the range, or
     // from `visitors` for one first seen before it (not deleted above).
     // Every visitor's days, from what `visitors` held and the range's events.
     const seen = await this.seen(rows[6].map((x) => x.user as string));
     const firstIn = new Map(rows[6].map((x) => [x.user as string, t(x.first)]));
     const cohort = (u: string) => iso(weekOf(Math.min(seen.get(u)?.first ?? Infinity, firstIn.get(u) ?? Infinity)));
-    w.push(...puts('weekly', ['key', 'week', 'user', 'cohort'], rows[5].map((x) => [key(x.week, x.user), x.week, x.user, cohort(x.user as string)]), false));
+    w.push(...puts('weekly', ['key', 'week', 'user', 'cohort'], rows[5].map((x) => [key(x.week, x.user), x.week, x.user, cohort(x.user as string)])));
     const counts = new Map<string, [string, string, number]>();
     for (const x of rows[5]) {
       const c = cohort(x.user as string);
@@ -487,12 +473,12 @@ export class RollupWorker {
       v[2]++;
       counts.set(k, v);
     }
-    w.push(...puts('cohorts', ['key', 'cohort', 'week', 'n'], [...counts].map(([k, v]) => [k, ...v]), false));
+    w.push(...puts('cohorts', ['key', 'cohort', 'week', 'n'], [...counts].map(([k, v]) => [k, ...v])));
     DIMS.forEach((d, i) =>
-      w.push(...puts('day_dims', ['key', 'day', 'dim', 'value', 'n'], rows[9 + i].map((x) => [`${iso(t(x.day))}|${d}|${x.value}`, x.day, d, x.value, x.n]), false)),
+      w.push(...puts('day_dims', ['key', 'day', 'dim', 'value', 'n'], rows[9 + i].map((x) => [`${iso(t(x.day))}|${d}|${x.value}`, x.day, d, x.value, x.n]))),
     );
-    w.push(...puts('firsts', ['key', 'day', 'name', 'user', 'at'], rows[12].map((x) => [`${iso(t(x.day))}|${x.name}|${x.user}`, x.day, x.name, x.user, x.at]), false));
-    w.push(...puts('visitors', ['user', 'first', 'last'], rows[6].filter((x) => !seen.has(x.user as string)).map((x) => [x.user, x.first, x.last]), false));
+    w.push(...puts('firsts', ['key', 'day', 'name', 'user', 'at'], rows[12].map((x) => [`${iso(t(x.day))}|${x.name}|${x.user}`, x.day, x.name, x.user, x.at])));
+    w.push(...puts('visitors', ['user', 'first', 'last'], rows[6].filter((x) => !seen.has(x.user as string)).map((x) => [x.user, x.first, x.last])));
     w.push(
       ...puts(
         'visitors',
@@ -503,7 +489,6 @@ export class RollupWorker {
             const v = seen.get(x.user as string) as Visitor;
             return [v.id, x.user, iso(Math.min(v.first, t(x.first))), iso(Math.max(v.last, t(x.last)))];
           }),
-        false,
       ),
     );
     try {
@@ -552,18 +537,22 @@ export class RollupWorker {
   }
 
   /**
-   * Opens and applies pages until one holds no write for `quiet` ms: the
-   * stream's end, for now. The stream hands over only what an fsync
-   * covered, so a write made a moment ago under `--sync 250` is not in it
-   * yet: an empty page waits longer than that before it counts as the end.
+   * Opens and applies pages until the cursor reaches the last write the
+   * node holds, which each answer names (`Fenec-Seq`): the stream's end,
+   * for now. A write not on disk yet -- under `--sync 250`, for up to 250
+   * ms -- is not in the stream, so a page short of the end waits for it
+   * (`wait`), at most `quiet` ms. Before the header said where the writes
+   * end, an empty page could not tell the end from writes still to come,
+   * and the worker waited out 600 ms of empty pages before it believed it.
    */
-  async catchUp(quiet = 600): Promise<void> {
+  async catchUp(quiet = 1000): Promise<void> {
     await this.open();
     for (;;) {
       await this.step({ wait: 0 });
       if (this.lines > 0) continue;
+      if (this.cursor >= this.end) break;
       await this.step({ wait: quiet });
-      if (this.lines === 0) break;
+      if (this.lines === 0 && this.cursor < this.end) break;
     }
     await this.pulse(true);
   }

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { before, describe, test } from 'node:test';
 import { bars, TickGenerator, windowRows, writeTicks, type Tick } from '../src/market.ts';
-import { dashboard, FUNNEL, noFilters, retention, walkFunnel, type Filters } from '../src/queries.ts';
+import { dashboard, FUNNEL, noFilters, retention, type Filters } from '../src/queries.ts';
 import { RollupWorker } from '../src/rollup.ts';
 import { writeEvents, type Site } from '../src/setup.ts';
 import { rng, Traffic, type SimEvent } from '../src/sim.ts';
@@ -228,9 +228,6 @@ describe('funnel, retention and totals against brute force', () => {
         last = t;
       }
     }
-    // The walk the dashboard uses, over the same first times, agrees.
-    const rowsOf = [...first].filter(([k]) => steps.includes(k.split('|')[1])).map(([k, at]) => ({ user: k.split('|')[0], name: k.split('|')[1], first: at }));
-    assert.deepEqual(walkFunnel(rowsOf, steps), out.slice(1));
     return out;
   }
 

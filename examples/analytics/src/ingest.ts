@@ -163,32 +163,29 @@ export interface Context {
   now?: number;
 }
 
-const shapes = new Map<number, string>();
+/**
+ * The statement that writes a beacon's events: its documents are its one
+ * parameter, so every beacon is the same text, parsed once and kept by the
+ * node. Written out, ten parameters an event, it was a text per beacon size.
+ */
+export const INSERT = 'put events $1 if absent';
 
-/** The statement that writes `n` events: their documents as parameters, ten each. */
-export function insertText(n: number): string {
-  let s = shapes.get(n);
-  if (s) return s;
-  const docs: string[] = [];
-  for (let i = 0; i < n; i++) {
-    const p = (k: number) => `$${i * 10 + k}`;
-    docs.push(
-      `{eid: ${p(1)}, name: ${p(2)}, user: ${p(3)}, path: ${p(4)}, ref: ${p(5)}, country: ${p(6)}, device: ${p(7)}, browser: ${p(8)}, at: ${p(9)}, props: ${p(10)}}`,
-    );
-  }
-  s = `put events [${docs.join(', ')}] if absent`;
-  shapes.set(n, s);
-  return s;
-}
-
+/** A beacon's events as documents: the parameter of `INSERT`. */
 export function params(b: Beacon, ctx: Context): unknown[] {
   const now = ctx.now ?? Date.now();
-  const out: unknown[] = [];
-  b.events.forEach((e, i) => {
-    const ref = ctx.hosts.includes(e.ref) ? '' : e.ref;
-    out.push(`${b.batch}:${i}`, e.name, b.user, e.path, ref, ctx.country, ctx.device, ctx.browser, new Date(now - e.age).toISOString(), e.props);
-  });
-  return out;
+  const docs = b.events.map((e, i) => ({
+    eid: `${b.batch}:${i}`,
+    name: e.name,
+    user: b.user,
+    path: e.path,
+    ref: ctx.hosts.includes(e.ref) ? '' : e.ref,
+    country: ctx.country,
+    device: ctx.device,
+    browser: ctx.browser,
+    at: new Date(now - e.age).toISOString(),
+    props: e.props,
+  }));
+  return [docs];
 }
 
 export interface Written {
@@ -207,7 +204,7 @@ export interface Written {
  */
 export async function write(site: string, b: Beacon, ctx: Context): Promise<Written> {
   try {
-    const r = await db(site, 'ingest').batch([[insertText(b.events.length), params(b, ctx)]], {
+    const r = await db(site, 'ingest').batch([[INSERT, params(b, ctx)]], {
       idempotencyKey: `${site}:${b.batch}`,
     });
     const a = r.results[0] as { affected?: number };

@@ -149,14 +149,17 @@ beacons of 20 events (`npm run bench:ingest`), the rollups written in each
 beacon's block take ingest from 168 000 to 65 000 events a second at 16
 clients, and from 81 000 to 29 000 at one.
 
-So ingest writes one statement a beacon -- `put events [...] if absent` --
-and a worker a site folds the events from `/_changes` into the rollups, a
-page of up to 2 000 at a time, as one `/batch`. A page's rows of a
-rollup are written as two statements a collection: the worker first reads
-which of the page's keys have rows already (`existing`), then writes the
-new rows with their counts and the old ones over by id with theirs added.
-Written a key at a time, a `set {n: n + k}` each, a page of a backfill was
-a block of a thousand statements.
+So ingest writes one statement a beacon -- `put events $1 if absent`, the
+beacon's events its one parameter, so every beacon is the same text the
+node parsed once -- and a worker a site folds the events from `/_changes`
+into the rollups, a page of up to 2 000 at a time, as one `/batch`. A
+page's rows of a rollup are one upsert a collection, the page's keys its
+parameter: `put minutes $1 if absent else set {n: n + new.n}` makes each
+key at its count and adds to the ones that have a row. Written a key at a
+time, a `set {n: n + k}` each, a page of a backfill was a block of a
+thousand statements; then the worker read which keys had rows first and
+wrote the new ones and the old ones over by id, two statements and a
+round trip more.
 
 **Exactly once.** The stream hands every write over at least once. The
 worker keeps its place in the database, in `rollup_state`, and moves it in
@@ -164,22 +167,28 @@ the block that writes the counts:
 
 ```
 set rollup_state {seq: $next, events: events + $n, ...} where name = "rollups" and seq = $prev require 1
-put minutes [{key: ..., n: ...}, ...]            -- the page's new rows
-put minutes [{id: ..., key: ..., n: ...}, ...]   -- the old ones, their counts added
+put minutes $1 if absent else set {n: n + new.n}   -- the page's counts, made or added to
 ...
 ```
 
 A page applied twice finds `seq` moved and the whole block is refused
 (412, `at` 0): no event counts twice, and none is skipped, since the place
 moves only with the counts of every event before it. The same guard makes
-the read of the existing rows safe: every rollup write is such a block, so
-one landing between the read and the write moved the place, and the stale
+the one read before the block safe -- which of the page's week rows exist,
+which the cohorts count from: every rollup write is such a block, so one
+landing between the read and the write moved the place, and the stale
 block is refused and read again. Each event is a write the change counter
 numbers once, so the change number is the event's key here; the event's
 own id (`eid`, `@unique`) is what kept a beacon sent twice from being
 written twice before the stream saw it. The tests crash a worker after its
 block landed, race two workers, and rebuild, and compare every rollup with
 the raw events each time.
+
+A worker catching up (`catchUp`, before the server serves, and in the
+tests) reads until its cursor reaches the last write the node holds,
+which every answer of `/_changes` names (`Fenec-Seq`); before that header,
+an empty page could not tell the end from writes not on disk yet under
+`--sync 250`, and it waited out 600 ms of empty pages to be sure.
 
 A worker that falls further behind than the node keeps (`410`) rebuilds
 the rollups from the raw events from the week before (`rebuild`), in one
@@ -220,10 +229,14 @@ that count as if the other filters were set.
 
 A visitor counts at a step when they took it no earlier than the first
 time they took the step before; a visit is the first step, so its count
-is the range's visitors. From the raw events the steps' first times are
-one statement (`group user, name` with `min(at)`); past a day they come
-from `firsts`, a row for each visitor, day and event that is not a
-pageview -- a few percent of the events -- and the code walks them.
+is the range's visitors. Each visitor's first time at each step is a
+group of the raw events (`min(case when name = $k then at end)`), or past
+a day of `firsts`, a row for each visitor, day and event that is not a
+pageview -- a few percent of the events -- and `having` compares and
+counts them: `... group user having b >= a count` is the visitors who
+finished no earlier than they started, one row. Before `having` a row a
+visitor left the node and the code walked them: 968 ms of a month's
+dashboard at ten million events.
 
 Retention is one statement over `cohorts`, a counter for each cohort (the
 week a visitor first came) and week: a cohort's size is its own week's
@@ -249,8 +262,9 @@ for the dashboard's long ranges: `visitors` keeps each visitor's first
 and last day (`@sorted`), every range ends now, and the visitors of a
 range are those last seen in it -- `get visitors select count(*) where
 last >= $1`, a range of an ordered index. From the raw events, a range
-or a filter wide enough to pass a million is told so on the page, with
-the event counts it could give.
+or a filter wide enough to pass a million is counted again with
+`approx_count_distinct(user)`, a HyperLogLog sketch within about 1%, and
+the page says it is an estimate.
 
 ### Live by polling, twice
 
@@ -266,12 +280,18 @@ four seconds after they load, by when they have loaded.
 ### No `@hash` on the events' low-cardinality fields
 
 The facets and the funnel read `name`, `country`, `device` and `browser`,
-and a hash index would answer an equality on them. But a hash bucket is a
-list, and taking a row out of one walks it: with a few values each of a
-hundred thousand rows, the `@ttl` sweep held the write lock 370 to 500 ms
-for every 1 000 rows it deleted, and every dashboard question waited
-behind it (Gaps, 1). Every question has a range of `at`, which the `@ttl`
-index answers, and its filter reads those rows alone.
+and a hash index would answer an equality on them. A bucket of a few
+values holds a fifth of the rows: when a row left one by a walk of the
+bucket, the `@ttl` sweep held the write lock 370 to 500 ms for every 1 000
+rows it deleted and every dashboard question waited behind it (Gaps, 1).
+fenecdb keeps a bucket's ids in order now, a removal a binary search, and
+the sweep holds the lock under a millisecond a thousand rows -- the
+rollups' `name @hash` beside `@ttl(35d)` on `minutes` is swept so. The
+events stay unindexed for another reason, measured once the sweep was
+not one: every question has a range of `at`, which the `@ttl` index
+answers, and gathering a bucket of a fifth of the rows cost more than the
+range's rows -- the hour's dashboard over a million events took 8.7 ms
+with the four indexed.
 
 ## Design
 
@@ -354,10 +374,11 @@ the node at 1.56 GB resident (macOS's count, with its allocator's cache).
 Where the time goes at ten million events: over a day of raw events
 (330 000 rows), the facets and the series, each a scan of the day, about
 265 ms; over 30 days of rollups, the funnel, 968 ms -- a row for each
-visitor who started a signup in the month leaves the node, since the
-order of their steps is compared in the code (Gaps, 6) -- then the
-visitors' count, 350 ms. Without the funnel a month of rollups answers in
-under 400 ms. Two first ways measured at this size and replaced: the
+visitor who started a signup in the month left the node, since the
+order of their steps was compared in the code (Gaps, 6) -- then the
+visitors' count, 350 ms. With `having` the funnel is two counts and the
+month's dashboard 621 ms at the median, measured again on a machine at a
+load of 7 to 9 (at a million events 46.5 ms against 88). Two first ways measured at this size and replaced: the
 retention table grouped from a row per visitor and week took 560 to 700
 ms of every range, and `count(distinct user)` over a month of visitor-days
 refused to count past a million.
@@ -436,13 +457,13 @@ HTML; it sends 7.5 to 9.
 
 | Part | fenecdb |
 | --- | --- |
-| Raw events | `eid text @unique`, `at timestamp @ttl(30d)`, a `json` field for properties; `put ... if absent`; `events append-only` and an `insert`-only grant in `policy.txt` |
+| Raw events | `eid text @unique`, `at timestamp @ttl(30d)`, a `json` field for properties; `put events $1 if absent`, a beacon's events one parameter; `events append-only` and an `insert`-only grant in `policy.txt` |
 | Ingest | `db.batch([...], { idempotencyKey })` (`POST /batch` with `Idempotency-Key`), its 422 for a key sent with another request |
-| Rollups | `/_changes` with `since` and `wait`; a `/batch` guarded by `set ... require 1`; `put` with ids to write rows over; `greatest`; a read `/batch` for a rebuild's snapshot and its `Fenec-Seq` |
+| Rollups | `/_changes` with `since` and `wait`, and `Fenec-Seq` to know it is caught up; a `/batch` guarded by `set ... require 1`; `put <c> $1 if absent else set {n: n + new.n}`, a page's keys one upsert; `least`, `greatest`; a read `/batch` for a rebuild's snapshot and its `Fenec-Seq` |
 | Visitors over time | `bucket(at, 1m | 30m)` with `count(distinct user)` and `sum(case when ... end)`; past a day, `bucket` over the rollups, and the day's visitors by `count(*)` over `day_users`, which reads the `@sorted` index alone |
-| Top pages and referrers | `group path` with `count(*)` and `count(distinct user)`, `order ... desc limit 10` |
+| Top pages and referrers | `group path` with `count(*)` and `count(distinct user)` -- `approx_count_distinct(user)` past a million -- `order ... desc limit 10` |
 | Filters | `facet country top 12 disjunctive, device disjunctive, browser top 8 disjunctive` with `country in [...]`; past a day, `group dim, value` over `day_dims` |
-| Funnel | `group user, name` with `min(at)`, `name in [...]` |
+| Funnel | `group user` with `min(case when name = $k then at end)`, `name in [...]`, `having b >= a count` |
 | Retention | `cohorts`, counters kept by the worker; `weekly` with `user @hash` for a visitor whose cohort moves |
 | Visitors of a range | `count(*) where last >= $1` over `visitors.last @sorted` |
 | Live "now" | `FenecHttp.live(text, cb, { poll })` and its 304s; a row without `@ttl` |
@@ -468,18 +489,21 @@ HTML; it sends 7.5 to 9.
   rollups by country and device too.
 - **Visitors of a range that does not end now** are not kept: every
   range the dashboard offers ends now. Past days' visitors are each day's,
-  from `day_users`.
-- **A distinct count from the raw events stops at a million.** Visitors
+  from `day_users`; any range of days could be counted from them with
+  `approx_count_distinct(user)`, a scan of their rows.
+- **Past a million, the raw events' visitors are estimated.** Visitors
   per page and per referrer, and a range's visitors with a filter set,
-  are counted exactly or the page says they passed the bound.
+  are counted exactly up to a million (`count(distinct user)`), and past
+  it in a HyperLogLog sketch (`approx_count_distinct`, about 1%); the page
+  says which.
 - **The worker shares the write lock with ingest**: while it keeps up with
   16 clients writing as fast as they can, ingest runs at about a third of
   the rate it has alone.
 
-## Gaps this example hit
+## Gaps this example hit, and how they closed
 
-Each with the statement that showed it and the smallest feature that would
-close it.
+Each with the statement that showed it, the smallest feature that would
+close it, and the one fenecdb made, which Kestrel now uses.
 
 1. **Taking a row out of a `@hash` bucket walks the bucket.**
    `HashIndex::remove` is `bucket.retain(|d| *d != id)`. With `country`,
@@ -494,6 +518,13 @@ close it.
    one pass (the sweep and a `del` group their ids by key and `retain`
    against a set once), or keep a bucket's ids ascending -- they are
    appended so -- and binary-search the one to take out.
+   **Closed:** a bucket is ascending, and past 512 ids runs of at most
+   512; a removal is a binary search and one run's tail moved. Over ten
+   million rows with a field of five values the sweep holds the lock 0.79
+   ms a thousand rows against 825, a lone `del` 1.09 us against 76 to 134.
+   The rollups' `minutes`, `name @hash` beside `@ttl(35d)`, are swept so;
+   the events' four stay unindexed, a range of `at` being cheaper to read
+   than a bucket (Decisions).
 2. **No upsert that adds.** A rollup row is "make it at zero if missing,
    then add": `put minutes {key: $1, n: 0} if absent` and `set minutes {n:
    n + $2} where key = $1`, two statements a key, a thousand keys a page in
@@ -503,6 +534,10 @@ close it.
    absent else set {n: n + $k}` -- an upsert by the `@unique` key, the
    `set` reading the row it finds -- so a page is one statement a
    collection and no read.
+   **Closed:** `put minutes $1 if absent else set {n: n + new.n}`, one
+   statement a collection, the page its parameter: a page of 1 000 keys,
+   half new, 1.09 ms in process against 1.49 for the read and the two
+   writes, and a round trip less. The worker reads only the week rows now.
 3. **A parameter cannot be the documents of a `put`.** `put events $1 if
    absent` with a list of objects is `expected {, found $1`, so every
    beacon's statement is written out with ten parameters an event
@@ -510,6 +545,9 @@ close it.
    and a rollup block's statements are texts of up to 500 documents, past
    the 1 KB the parse cache keeps. Smallest: a parameter where a document
    or a list of them goes.
+   **Closed:** `put events $1 if absent`, a beacon's events its one
+   parameter: 1 000 events parse and land in 2.2 ms against 3.0 written
+   out, and every beacon is the one text the node keeps parsed.
 4. **`/_changes` does not say where the writes end.** Under `--sync 250`
    a write is in the stream only once an fsync covered it, so an empty
    page cannot tell a worker that has caught up from one whose writes are
@@ -517,6 +555,9 @@ close it.
    believes it. Smallest: the database's change counter beside
    `Fenec-Next` (`Fenec-Seq` on the answer), so a reader knows what is
    still to come.
+   **Closed:** every answer carries `Fenec-Seq`; `catchUp` reads until its
+   cursor reaches it -- 4.7 ms when caught up already, against 609, and
+   505 ms after a beacon (two fsyncs under `--sync 250`) against 932.
 5. **A distinct count stops at a million, and has no mergeable form.**
    `get day_users select count(distinct user) where day >= $1` over the
    last 30 days of ten million events answered `count(distinct ...) holds
@@ -527,6 +568,12 @@ close it.
    distinct counts cannot be added, and fenecdb keeps no sketch a day
    could hold. Smallest (M): `approx_count_distinct(user)` folding
    HyperLogLog registers, mergeable across a rollup's rows.
+   **Closed:** `approx_count_distinct(e)`, 2^14 registers, a standard
+   error of 0.81% in at most 16 KB a group, and `hll_accumulate`,
+   `hll_combine` and `hll_estimate` for sketches kept as bytes and merged.
+   The raw path counts a range's visitors with it past a million, where
+   it said it could not; a range that ends now still reads `last >= day`,
+   faster than any count of a month's visitor-days.
 6. **No condition over a group's aggregates.** The ordered funnel's last
    step is "visitors whose first finish is no earlier than their first
    start": `get firsts select user, min(case when name = $3 then at end) as
@@ -536,6 +583,11 @@ close it.
    counts: 968 ms of a month's dashboard at ten million events. Smallest:
    `having <expr>` over a group's items, with `count` after it counting the
    groups that pass (`... group user having b >= a count`).
+   **Closed:** that statement, and `having a != null count` beside it for
+   the first step. At a million events a month's dashboard takes 46.5 ms
+   against 88 before; at ten million 621 ms against 1.15 s, on a machine
+   at a load of 7 to 9 -- one row an answer, where every visitor's row
+   left the node.
 
 ## Files
 
