@@ -14,9 +14,10 @@ journal        read                  where account in $jwt.accounts
 holds          read                  where account in $jwt.accounts
 
 # The ledger's server: moves money, so it updates balances, and appends to
-# the journal. It cannot delete an account, and nothing below lets it edit
-# or delete an entry.
-accounts       read,update                                                                 for app
+# the journal. It changes an account's balance, held and status and no
+# other field, cannot delete an account, and nothing below lets it edit or
+# delete an entry.
+accounts       read,update(balance, held, status)                                          for app
 accounts       insert                where balance = 0 and held = 0 and kind = "customer"  for app
 users          read                                                                        for app
 journal        read,insert                                                                 for app

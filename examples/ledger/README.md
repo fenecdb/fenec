@@ -125,16 +125,16 @@ Every movement of money is one block of FenecQL statements sent as one
 
 ```
 put limits {account: $1, n: 0, at: now()} if absent                         -- the rate window
-set limits {n: n + 1} where account = $1 and n < $10 require 1              -- 429 past the limit
+set limits {n: n + 1} where account = $1 and n < $8 require 1               -- 429 past the limit
 get accounts select ext where ext = $2 and status = "open"
     and currency = $4 and kind = "customer" limit 1 require 1                  -- the recipient
 get accounts select ext where ext = $1 and status = "open"
     and currency = $4 and kind = "customer" limit 1 require 1                  -- the source
 set accounts {balance: balance - $3} where ext = $1 and balance - held >= $3 require 1
 set accounts {balance: balance + $3} where ext = $2 require 1
-get accounts select ext where ext = $1 and holders has $11 limit 1 require 1   -- a customer's own
-insert journal [{entry: $8, tx: $5, account: $1, amount: 0 - $3, ...},
-                {entry: $9, tx: $5, account: $2, amount: $3, ...}]
+get accounts select ext where ext = $1 and holders has $9 limit 1 require 1    -- a customer's own
+insert journal [{entry: $5 + ":dr", tx: $5, account: $1, amount: 0 - $3, ...},
+                {entry: $5 + ":cr", tx: $5, account: $2, amount: $3, ...}]
 insert transfers {ref: $5, kind: "transfer", src: $1, dst: $2, amount: $3, refunded: 0, ...}
 ```
 
@@ -152,23 +152,25 @@ funds, not the holder.
 | Journal = balances | Both entries land in the block that moves the balances, or nothing does | per account, the balance is the sum of its entries; per currency, both sides; per movement, its two entries sum to zero |
 | A movement to a missing, frozen or other-currency account moves nothing | `get accounts ... require 1` guards that read without writing | refused as `recipient`/`source`, and the sums above |
 | Each idempotency key makes one movement | `Idempotency-Key` on the `/batch`: the key and its answer land in the same block as the movement, and a retry, even one sent at the same moment, is answered with the first answer. Behind it, `transfers.ref` is `@unique`, and the ref is derived from the key | per key, at most one answer that made it; the movements in the ledger are exactly those acknowledged |
-| Refunds never exceed the original | The refund's first statement is a counter and its guard: `set transfers {refunded: refunded + $3} where ref = $10 and refunded + $3 <= amount require 1` | four refunds of one payment, each up to 60% of it, raced again and again: per payment, `refunded` is the sum of its refunds and never past `amount` |
+| Refunds never exceed the original | The refund's first statement is a counter and its guard: `set transfers {refunded: refunded + $3} where ref = $8 and refunded + $3 <= amount require 1` | four refunds of one payment, each up to 60% of it, raced again and again: per payment, `refunded` is the sum of its refunds and never past `amount` |
 | A hold reserves money it has; capture, release and lapse happen once | `held` grows under the debit's guard; the hold's `state` moves from `"held"` in a guarded `set` (`state = "held" and until > now()` to capture, `until <= now()` to lapse) | per account, `held` is the sum of its live holds; every hold ended exactly once (captures, releases and lapses counted per hold); captures racing releases and the reaper |
 | The journal and events are never edited | `journal append-only` and `events append-only` in `policy.txt`: no JWT updates or deletes there, whatever its role | 403 on every path, below |
-| A customer spends only from an account they hold | The console reads the source under the customer's own token (their `accounts` list claim), and the block requires `holders has $11` again under the lock | below |
+| A customer spends only from an account they hold | The console reads the source under the customer's own token (their `accounts` list claim), and the block requires `holders has $9` again under the lock | below |
 | Transfers per account per minute are limited | The counter recipe: a window's row made by `put ... if absent`, expiring a minute later (`@ttl`), counted under a guard. The window lives in the row, not its key, so a retry a minute later is the same request and its key still matches | below |
 
 A refused transfer is put back whole, its window count included, so the
 limit counts transfers made, not attempts.
 
-**Holds are `@sorted`, not `@ttl`.** A row past its `@ttl` leaves every
-read at once and the sweeper deletes it, so a hold that lapsed could no
-longer be found to give its money back: the `held` counter would keep it
-for ever. A hold keeps `until` under `@sorted`, and the reaper (every 5 s
-in the console's server) releases those past it,
-each in a block guarded by `state = "held" and until <= now()`. A capture
-checks `until > now()` in its own guard, so a lapsed hold cannot be
-captured even before the reaper comes by.
+**Holds are `@sorted`, not `@ttl`.** A hold's row is its record: captured,
+released or lapsed, it stays, and the invariants count how each ended.
+Under `@ttl` the sweeper would delete every hold a while after its `until`,
+captured ones too. A hold keeps `until` under `@sorted`, and the reaper
+(every 5 s in the console's server) releases those past it, each in a
+block guarded by `state = "held" and until <= now()`. A capture checks
+`until > now()` in its own guard, so a lapsed hold cannot be captured even
+before the reaper comes by. A hold kept only while it lives would take
+`@ttl` and a reaper reading `expired()` (`site/content/docs/fenecql.html`,
+the reaper).
 
 ### Under concurrency: 20 000 operations, 16 clients
 
@@ -239,9 +241,13 @@ hold:
   same batch too), `PATCH` and `DELETE`; a `put` naming an entry's id;
   `drop`, `alter` and `compact`; `/_schema/apply`: each 403. It cannot open
   an account holding money, open an outside account, or delete one.
-- **What it can do is caught.** The app's token can still edit a balance:
-  grants are per collection, not per field (Gaps). A test does exactly that,
-  and reconciliation reports the account, its balance and the sum of its
+- **It changes balances and nothing else of an account.** The policy
+  grants the app `update(balance, held, status)` on `accounts`: a write
+  changing an account's kind, currency, holders or id is 403, by `/query`
+  and `PATCH`, and nothing of it lands.
+- **What it can do is caught.** The app's token can still edit a balance,
+  which it must to move money. A test does exactly that, and
+  reconciliation reports the account, its balance and the sum of its
   entries. The journal, which no JWT can edit, is the truth to correct it
   from, with the node's own token.
 - **An operator's admin token** reads everything and writes nothing.
@@ -264,11 +270,12 @@ hold:
 fenecdb has one writer and no snapshots of its own. A read takes the shared
 lock, so one statement sees one state; but balances and entries are two
 collections, and a write may land between two reads. So `src/reconcile.ts`
-sends its four reads as one `/batch`. A batch runs under the write lock, of
-reads too, so no write lands between the first read and the last, and the
-answer's `Fenec-Seq` names the change the books stood at. The price is that
-transfers wait for it: at a million entries the snapshot takes 250 ms, and
-a transfer arriving meanwhile waits up to that long (below).
+sends its four reads as one `/batch`. A batch of reads alone runs under
+one read lock, so no write lands between the first read and the last, and
+the answer's `Fenec-Seq` names the change the books stood at; other reads
+go on beside it. The price is that transfers wait for it, as a write waits
+for any read: at a million entries the snapshot takes 250 ms, and a
+transfer arriving meanwhile waits up to that long (below).
 
 The other way is the change stream. `/_changes` hands out every write on
 disk, numbered by the change counter, documents and all. A consumer that
@@ -327,9 +334,11 @@ currencies (`npm run recon-bench`):
 | transfers from 4 clients, alone | 8 487/s, p99 3.28 ms, the longest 6.7 ms |
 | the same beside a reconciliation every second | 6 217/s, p99 3.34 ms, the longest 350 ms |
 
-The snapshot holds the write lock, so the transfers that arrive during it
+The snapshot holds the read lock, so the transfers that arrive during it
 wait for it: the p99 does not move, the longest wait is the snapshot's
-length.
+length. (Measured when a batch of reads still took the write lock; under
+the read lock a write waits the same, `make recon-bench` in the
+repository.)
 
 ### The change stream
 
@@ -389,7 +398,8 @@ every page it put 13 ms between a transfer and its line at the median.
 ## Gaps this example hit
 
 Each with the statement that showed it and the smallest feature that would
-close it.
+close it. All six are closed now (`ledger-gaps`); what the ledger uses of
+them is said after each.
 
 1. **A `/batch` of reads takes the write lock.** `handle_batch` takes
    `held::write` whatever the statements, so the reconciliation's four
@@ -397,6 +407,8 @@ close it.
    Smallest: take the read lock when every statement only reads, as the
    native library already does (`fenec_abi::read_only`); readers would go on
    beside it. Writers waiting is the price of one writer and no snapshot.
+   *Closed:* a batch of reads alone takes the read lock; transfers still
+   wait for the snapshot.
 2. **A consumer's commit wakes its own reads.** `GET
    /t/acme/_changes?consumer=journal-sink&wait=1000` answered at once, with
    no lines and `Fenec-Next` past its place, after every
@@ -405,29 +417,35 @@ close it.
    committed every answer committed in a loop, 30 000 fsynced writes in a
    few idle minutes. The sink reads by its own cursor (`since=`) and commits
    only pages that held writes. Smallest: a read by `consumer=` starts past
-   the `_consumers` writes after its place, so it waits.
+   the `_consumers` writes after its place, so it waits. *Closed:* a read
+   waits past the writes the stream leaves out, and a commit past nothing
+   but cursors writes nothing; the sink keeps its own cursor, which it
+   needs for a lost file.
 3. **Grants are per collection, not per field.**
    `set accounts {balance: balance + 500000} where ext = "dev-main"` under
    the app's token is 200: `update` on `accounts` reaches every field, and
    `WITH CHECK` tests only the row after. Smallest: fields a grant may
    change, `accounts update(balance, held, status) for app`, any other
    field refused (403); or a check over the row before and after
-   (`where new.kind = old.kind`).
+   (`where new.kind = old.kind`). *Closed:* `policy.txt` grants
+   `update(balance, held, status)`, and the security test holds it.
 4. **`@ttl` cannot give anything back.** A hold whose `until` were `@ttl`
    would leave every read when it lapsed, and its money would stay in
    `held`. Smallest: a read of the rows past their time for a reaper
    (`get holds expired where ...`), so the sweep's work can be done once
    by the application before the row goes. (The shop met the same with
-   stock.)
+   stock.) *Closed:* `expired()` reads them, granted by `expired`; the
+   ledger keeps its holds `@sorted`, since a hold's row is its record.
 5. **The module's `run` of several statements does not say which one
    stopped it.** In process a refused transfer's error names `set accounts`,
    and the debit and the credit are both that. `LocalStore` runs the
    prefixes again, each ended by a statement that always fails, to find it.
    Smallest: `"at"` in the module's error, which `fenec_abi::execute`
-   already knows.
+   already knows. *Closed:* `LocalStore` reads the error's `at`.
 6. **No text concatenation.** `insert journal {entry: $5 + ":dr", ...}` is
    a type error, so each block's entry ids travel as two more parameters.
-   Smallest: `+` over two texts, or `concat(...)`.
+   Smallest: `+` over two texts, or `concat(...)`. *Closed:* the ids are
+   `$5 + ":dr"` and `$5 + ":cr"`.
 
 `/batch` with a key goes through `@fenecdb/web/client`'s `db.batch(...,
 { idempotencyKey })` (`src/store.ts`), whose `FenecError` carries the
