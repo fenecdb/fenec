@@ -279,8 +279,8 @@ not what means the same.
 
 ## Gaps this example hit
 
-These are beyond those already listed for inventory and payments. Six of
-the seven are closed now, and the shop uses what closed them:
+These are beyond those already listed for inventory and payments. All seven
+are closed now, and the shop uses what closed them:
 
 1. **`/batch` and `Idempotency-Key` in the client.** Checkout and the cart
    go through `db.batch([...], { idempotencyKey })`, which answers each
@@ -288,11 +288,10 @@ the seven are closed now, and the shop uses what closed them:
    stopped it (`at`) and why (`status`, 412 for a `require` not met).
    `lib/db.ts`'s `batch` is a few lines over it, where it posted `/batch`
    with a `fetch` of its own.
-2. **No assertion without a write.** Still open. Checkout reads prices,
-   then writes the order in the batch. A price changed in between is not
-   caught inside the block: `require` belongs to writes. Something like
-   `get products where sku = $1 and price = $2 require 1`, inside the
-   `/batch`, would make the price part of the transaction.
+2. **An assertion without a write.** Checkout holds each line's price inside
+   its block: `get products select sku where sku = $1 and price = $2 limit 1
+   require 1` beside the stock it takes, so a price changed since the cart
+   was read is a 412 at that statement and nothing of the order lands.
 3. **Disjunctive facets.** A facet with a filter on is `facet brand
    disjunctive`: counted without its own filter, so "Brand" still lists
    the other brands to add, in the page's own statement -- where each was

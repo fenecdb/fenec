@@ -19,8 +19,8 @@ the page does.</p>
 <table>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
-<tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">6 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">185 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">7 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">188 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
@@ -40,7 +40,7 @@ checkout that cannot oversell, with its Lighthouse scores, timings and
 load test measured.</p>
 
 <p>Beside a module the page loads <code>fenec.js</code> and the two modules it
-imports, 39 KB brotli as they are served with no build step; a bundler keeps
+imports, 41 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -675,7 +675,7 @@ another set is a build option.</p>
 <pre data-lang="bash">make wasm                          # every index: 181 KB brotli
 make wasm FEATURES="text sorted"   # no graph, no sparse index: 160 KB
 make wasm FEATURES=none            # none of the four: 142 KB
-make wasm FEATURES=none SCHEMA=0   # nor the schema check: 139 KB
+make wasm FEATURES=none SCHEMA=0   # nor the schema check: 141 KB
 </pre>
 
 <div class="tbl">
