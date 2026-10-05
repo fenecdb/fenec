@@ -979,6 +979,12 @@ impl Parser {
                 sel.offset = self.int()?.max(0) as usize;
                 continue;
             }
+            // `require <n>`: the rows answered must number `n` -- before a
+            // `lookup`, whose clauses are the children's.
+            if self.peek_kw("require") {
+                sel.require = self.require()?;
+                continue;
+            }
             // `lookup` is terminal: every clause after it binds to the child.
             // Scoping by position is what keeps qualified names out of the
             // language -- `where` means on either side exactly what it always
@@ -1142,6 +1148,10 @@ impl Parser {
             if self.eat_kw("required") {
                 l.required = true;
                 continue;
+            }
+            if self.eat_kw("require") {
+                return self
+                    .err("`require` counts the rows of the `get`, and goes before its `lookup`");
             }
             // Terminal here for the same reason it is terminal up there: the
             // clauses after it bind to the next collection down, so nothing

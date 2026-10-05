@@ -365,6 +365,7 @@ class Query private constructor(private val s: State) {
         val order: List<Key> = emptyList(),
         val limit: Long? = null,
         val offset: Long = 0,
+        val require: String = "",
         val count: Boolean = false,
         val lookups: List<Level> = emptyList(),
         val marks: List<Mark> = emptyList(),
@@ -552,6 +553,13 @@ class Query private constructor(private val s: State) {
     /** How many rows are passed over first. */
     fun offset(n: Long): Query = Query(s.copy(offset = Builder.whole(n, "offset")))
 
+    /**
+     * `require n` on a read: the rows it answers, after [limit], must number
+     * n, or it is refused (412, unmet) and the batch it is in put back, as a
+     * write's `require` is -- a checkout's guard on a read.
+     */
+    fun require(n: Long): Query = Query(s.copy(require = requireClause(n)))
+
     // ---------------------------------------------------------------- the text
 
     /** The statement and its parameters, as they would be run. */
@@ -574,6 +582,9 @@ class Query private constructor(private val s: State) {
             if (clash != null) throw refuse("aggregates cannot be combined with $clash")
             if (s.group == null && (s.order.isNotEmpty() || s.limit != null || s.offset > 0)) {
                 throw refuse("aggregates answer one row; group makes a row per value")
+            }
+            if (s.group == null && s.require.isNotEmpty()) {
+                throw refuse("require counts the rows a query answers, and an aggregate answers one")
             }
         }
         if (s.marks.isNotEmpty()) {
@@ -613,7 +624,10 @@ class Query private constructor(private val s: State) {
                 seen.add(l.collection)
             }
         }
-        if (s.count) extraClause()?.let { throw refuse("count cannot be used with `$it`") }
+        if (s.count) {
+            (extraClause() ?: if (s.require.isNotEmpty()) "require" else null)
+                ?.let { throw refuse("count cannot be used with `$it`") }
+        }
 
         val sql = StringBuilder("get ${s.collection}")
         // The marks after the fields `select` named, or after every field;
@@ -649,6 +663,8 @@ class Query private constructor(private val s: State) {
         appendOrder(sql, s.order)
         s.limit?.let { sql.append(" limit $it") }
         if (s.offset > 0) sql.append(" offset ${s.offset}")
+        // Before a lookup, whose clauses are the children's.
+        sql.append(s.require)
         if (s.count) sql.append(" count")
         if (s.facets.isNotEmpty()) {
             sql.append(" facet ").append(s.facets.joinToString(", ") { f -> f.top?.let { "${f.field} top $it" } ?: f.field })
@@ -692,6 +708,7 @@ class Query private constructor(private val s: State) {
     // Near, order, limit mean something only to a read; dropped from a write,
     // limit(1).delete() would delete every row.
     private fun assertPlain(verb: String) {
+        if (s.require.isNotEmpty()) throw refuse("$verb takes require as its option: $verb(..., { require: n })")
         extraClause()?.let { throw refuse("$verb cannot be used with `$it`") }
         if (s.lookups.isNotEmpty()) throw refuse("$verb cannot be used with `lookup`")
         if (s.facets.isNotEmpty()) throw refuse("$verb cannot be used with `facet`")

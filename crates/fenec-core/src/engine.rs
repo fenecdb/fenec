@@ -188,6 +188,24 @@ fn required(
         _ => out,
     }
 }
+/// A `get`'s rows held to its `require <n>`, as [`required`] holds a
+/// write's count: the rows it answers, after `offset` and `limit`. Read in
+/// a block -- a `/batch` -- under its write lock, so what it saw is what
+/// the writes around it see, and refused, the block is put back.
+fn read_required(sel: &Select, rows: ResultSet) -> Result<Response> {
+    match sel.require {
+        Some(want) if rows.rows.len() as u64 != want => {
+            let n = rows.rows.len();
+            Err(Error::Unmet(format!(
+                "`get {}` answered {n} {}, and requires {want}",
+                sel.collection,
+                if n == 1 { "row" } else { "rows" }
+            )))
+        }
+        _ => Ok(Response::Rows(rows)),
+    }
+}
+
 /// The expiry a [`FIELD_TTL`] change leaves its field with.
 fn ttl_after(ch: &FieldChange) -> Option<u64> {
     ch.schema.field(&ch.field).and_then(|f| f.index.ttl())
@@ -4857,7 +4875,7 @@ impl Database {
         self.refuse_inexact(stmt, params)?;
         let stmt = self.answered(stmt, params)?;
         match &*stmt {
-            Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
+            Statement::Select(sel) => read_required(sel, self.select(sel, params)?),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
             Statement::ListCollections => Ok(Response::Schemas(
                 self.order
@@ -4901,6 +4919,7 @@ impl Database {
             || sel.lookup.is_some()
             || !sel.facets.is_empty()
             || !sel.marks.is_empty()
+            || sel.require.is_some()
         {
             return Ok(None);
         }
@@ -5089,7 +5108,7 @@ impl Database {
                 *require,
                 self.put(collection, docs, *insert, *if_absent, params),
             ),
-            Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
+            Statement::Select(sel) => read_required(sel, self.select(sel, params)?),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
             Statement::Update {
                 collection,

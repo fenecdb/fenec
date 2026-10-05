@@ -391,6 +391,21 @@ c('insert require', ['from', 'journal'], ['toInsert', [{ tx: 1, amount: -5 }, { 
 c('insert if absent require', ['from', 'locks'], ['insert', { name: 'job', owner: 'a' }, { ifAbsent: true, require: 1 }]);
 c('require takes no negative', docs, ['where', 'id', 1], ['toDelete', { require: -1 }]);
 
+// `require(n)` on a read: the rows it answers, after limit, must number n,
+// or it and its batch are put back (412): a checkout's guard.
+c('get require', ['from', 'products'], ['where', 'sku', 'tee'], ['where', 'price', 12], ['require', 1], Q);
+c('get require counts after limit', ['from', 'coupons'], ['where', 'code', 'X1'], ['limit', 1], ['require', 1], Q);
+c('get require none', ['from', 'holds'], ['where', 'sku', 'tee'], ['where', 'state', 'held'], ['require', 0], Q);
+c('get require goes before a lookup', ['from', 'orders'], ['where', 'id', 3], ['require', 1], ['lookup', 'lines', { on: 'order_id', limit: 5 }], Q);
+c('get require over groups', ['from', 'orders'], ['select', 'status', 'count(*)'], ['group', 'status'], ['require', 2], Q);
+c('rows sends require', ['from', 'products'], ['where', 'sku', 'tee'], ['require', 1], ['rows']);
+c('first keeps require', ['from', 'products'], ['where', 'sku', 'tee'], ['require', 1], ['first']);
+c('a later require replaces the earlier', docs, ['require', 2], ['require', 1], Q);
+c('get require takes no negative', docs, ['require', -1], Q);
+c('count takes no require', docs, ['where', 'a', 1], ['require', 1], ['count']);
+c('a whole-collection aggregate takes no require', ['from', 'orders'], ['select', 'count(*)'], ['require', 1], Q);
+c('a write takes require as its option', docs, ['where', 'id', 1], ['require', 1], ['delete']);
+
 // ------------------------------------------------------------------ writing
 
 async function generate() {

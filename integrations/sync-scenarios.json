@@ -1,7 +1,7 @@
 {
   "about": [
     "One script for both of a replica's syncs: the browser's FenecSync (web/fenec.js, run by web/fenec.sync.scenarios.test.js) and the native core every binding drives (crates/fenec-abi/src/sync, run by crates/fenec-abi/tests/scenarios.rs).",
-    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with it), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
+    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / batch, and get, a read with its require, in a batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with it), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
     "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (the statuses refused writes were told with), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent).",
     "An object expected is a subset of the one that came; a list is whole. A string `<name>` is any value, the same wherever the name comes again and another than every other name's: a key made for an insert, an Idempotency-Key. In a step's data a bound `<name>` stands for its value, so the server's copy of a row carries the key the app made. `@name` in rows or puts is a fixture.",
     "Writes are written with their fields in alphabetical order, as the builders render them in the order given: JavaScript keeps an object's order and the native runner's JSON sorts it. A temporary id is 2^52 = 4503599627370496 and up.",
@@ -467,6 +467,20 @@
           "error": "a write with `require` cannot reach a row whose insert the server has not answered yet", "requests": [], "pending": 1,
           "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "new"}]}}},
         {"do": "answer", "status": 200, "seq": 4, "body": {"affected": 1}, "expect": {"pending": 0}}
+      ]
+    },
+    {
+      "name": "a read's require beside a synced write is refused, since the server would never see it",
+      "covers": "fenecql.html#require: a get's require counts the rows it answers where it runs, and a replica's batch is checked by the server alone",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"batch": [{"get": "tasks", "where": {"title": "one"}, "require": 1}, {"update": "tasks", "set": {"title": "Y"}, "where": {"id": 1}}]}, "expect": {
+          "error": "a `get ... require` counts the replica's rows and is not sent", "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"batch": [{"update": "tasks", "set": {"title": "Y"}, "where": {"id": 1}}, {"update": "tasks", "set": {"title": "Z"}, "where": {"id": 2}}]}, "expect": {
+          "requests": [{"path": "/batch", "key": "<w1>", "lines": 2}], "pending": 1,
+          "rows": {"tasks": [{"id": 1, "title": "Y"}, {"id": 2, "title": "Z"}]}}}
       ]
     },
     {

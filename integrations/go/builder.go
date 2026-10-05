@@ -691,6 +691,7 @@ type Builder struct {
 	limit      int
 	hasLimit   bool
 	offset     int
+	require    string // " require n", or none
 	count      bool
 	lookups    []lookupLevel
 	marks      []mark
@@ -1112,6 +1113,17 @@ func (b *Builder) Offset(n int) *Builder {
 	})
 }
 
+// Require is `require n` on a read: the rows it answers, after Limit, must
+// number n, or it is refused (412, CodeUnmet) and the batch it is in put
+// back, as a write's Require option is -- a checkout's guard on a read,
+// From("products").Where(...).Require(1).
+func (b *Builder) Require(n int) *Builder {
+	return b.step(func(d *Builder) (err error) {
+		d.require, err = requireClause(opts{require: &n})
+		return err
+	})
+}
+
 // ToFenecQL is the statement and its parameters, as they would be sent.
 func (b *Builder) ToFenecQL() (string, []any, error) {
 	if b.err != nil {
@@ -1138,6 +1150,9 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		}
 		if b.group == "" && (len(b.order) > 0 || b.hasLimit || b.offset > 0) {
 			return "", nil, refuse("aggregates answer one row; group makes a row per value")
+		}
+		if b.group == "" && b.require != "" {
+			return "", nil, refuse("require counts the rows a query answers, and an aggregate answers one")
 		}
 	}
 	if len(b.marks) > 0 {
@@ -1197,7 +1212,11 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		}
 	}
 	if b.count {
-		if extra := b.extraClause(); extra != "" {
+		extra := b.extraClause()
+		if extra == "" && b.require != "" {
+			extra = "require"
+		}
+		if extra != "" {
 			return "", nil, refuse("count cannot be used with `%s`", extra)
 		}
 	}
@@ -1271,6 +1290,8 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 	if b.offset > 0 {
 		fmt.Fprintf(&sql, " offset %d", b.offset)
 	}
+	// Before a lookup, whose clauses are the children's.
+	sql.WriteString(b.require)
 	if b.count {
 		sql.WriteString(" count")
 	}
@@ -1360,6 +1381,9 @@ func (b *Builder) extraClause() string {
 func (b *Builder) assertPlain(verb string) error {
 	if b.err != nil {
 		return b.err
+	}
+	if b.require != "" {
+		return refuse("%s takes require as its option: %s(..., { require: n })", verb, verb)
 	}
 	if extra := b.extraClause(); extra != "" {
 		return refuse("%s cannot be used with `%s`", verb, extra)

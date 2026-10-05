@@ -441,6 +441,8 @@ public struct Query: Sendable {
     var order: [(field: String, asc: Bool, collate: String?)] = []
     var limit: Int?
     var offset = 0
+    /// ` require n`, or none.
+    var requirement = ""
     var count = false
     var lookups: [Level] = []
     var marks: [Mark] = []
@@ -674,6 +676,14 @@ public struct Query: Sendable {
         return with { $0.offset = n }
     }
 
+    /// `require n` on a read: the rows it answers, after `limit`, must
+    /// number n, or it is refused (412, unmet) and the batch it is in put
+    /// back, as a write's `require` is -- a checkout's guard on a read.
+    public func require(_ n: Int) throws -> Query {
+        let clause = try Query.requireClause(n)
+        return with { $0.requirement = clause }
+    }
+
     // ------------------------------------------------------------- the text
 
     /// The statement and its parameters, as they would be run.
@@ -692,6 +702,9 @@ public struct Query: Sendable {
             if let clash { throw FenecError.builder("aggregates cannot be combined with \(clash)") }
             if group == nil, !order.isEmpty || limit != nil || offset > 0 {
                 throw FenecError.builder("aggregates answer one row; group makes a row per value")
+            }
+            if group == nil, !requirement.isEmpty {
+                throw FenecError.builder("require counts the rows a query answers, and an aggregate answers one")
             }
         }
         if let first = marks.first {
@@ -733,7 +746,9 @@ public struct Query: Sendable {
                 seen.append(l.collection)
             }
         }
-        if count, let extra = extraClause { throw FenecError.builder("count cannot be used with `\(extra)`") }
+        if count, let extra = extraClause ?? (requirement.isEmpty ? nil : "require") {
+            throw FenecError.builder("count cannot be used with `\(extra)`")
+        }
 
         var sql = "get \(collection)"
         // The marks after the fields `select` named, or after every field;
@@ -766,6 +781,8 @@ public struct Query: Sendable {
         sql += Query.orderText(order)
         if let limit { sql += " limit \(limit)" }
         if offset > 0 { sql += " offset \(offset)" }
+        // Before a lookup, whose clauses are the children's.
+        sql += requirement
         if count { sql += " count" }
         if !facets.isEmpty {
             sql += " facet " + facets.map { f in f.top.map { "\(f.field) top \($0)" } ?? f.field }.joined(separator: ", ")
@@ -814,6 +831,9 @@ public struct Query: Sendable {
     // Near, order, limit mean something only to a read; dropped from a
     // write, `limit(1).delete()` would delete every row.
     private func assertPlain(_ verb: String) throws {
+        if !requirement.isEmpty {
+            throw FenecError.builder("\(verb) takes require as its option: \(verb)(..., { require: n })")
+        }
         if let extra = extraClause { throw FenecError.builder("\(verb) cannot be used with `\(extra)`") }
         if !lookups.isEmpty { throw FenecError.builder("\(verb) cannot be used with `lookup`") }
         if !facets.isEmpty { throw FenecError.builder("\(verb) cannot be used with `facet`") }

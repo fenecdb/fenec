@@ -112,6 +112,11 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
         let wh = filter(member(w, "where"), params, &mut bind);
         return format!("del {c}{wh}{required}");
     }
+    // A read in a batch: the builders' `.require(n)`.
+    if let Some(Value::Text(c)) = member(w, "get") {
+        let wh = filter(member(w, "where"), params, &mut bind);
+        return format!("get {c}{wh}{required}");
+    }
     if let Some(Value::List(ws)) = member(w, "batch") {
         return ws
             .iter()

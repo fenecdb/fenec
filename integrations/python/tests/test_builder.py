@@ -127,7 +127,7 @@ def step_of(q, op, args):
         return q.snippet(args[0], args[1], **kwargs(args[2] if len(args) > 2 else None))
     if op == "facet":
         return q.facet(args[0], **kwargs(args[1] if len(args) > 1 else None))
-    if op in ("match", "group", "limit", "offset"):
+    if op in ("match", "group", "limit", "offset", "require"):
         return getattr(q, op)(*args)
     raise AssertionError(f"no builder step {op}")
 

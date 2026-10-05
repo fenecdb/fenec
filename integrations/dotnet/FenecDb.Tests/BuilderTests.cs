@@ -101,6 +101,7 @@ public sealed class BuilderTests(Servers servers)
         "order" => q.Order(a[0].GetString()!, a.Length > 1 ? a[1].GetString()! : "asc", Opt(a, 2, "collate")?.GetString()),
         "limit" => q.Limit(a[0].GetInt64()),
         "offset" => q.Offset(a[0].GetInt64()),
+        "require" => q.Require(a[0].GetInt64()),
         "lookup" => q.Lookup(a[0].GetString()!,
             on: Opt(a, 1, "on")?.GetString(),
             parentKey: Opt(a, 1, "parentKey")?.GetString(),

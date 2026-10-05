@@ -499,6 +499,7 @@ class _Builder:
             "lookups": [],
             "marks": [],
             "facets": [],
+            "require": "",
         }
 
     def _with(self: Q, **patch: Any) -> Q:
@@ -671,6 +672,13 @@ class _Builder:
     def offset(self: Q, n: int) -> Q:
         return self._with(offset=_whole(n, "offset"))
 
+    def require(self: Q, n: int) -> Q:
+        """`require n`: the rows the query answers, after `limit`, must
+        number `n`, or it is refused (412, `unmet`) and the batch it is in
+        put back, as a write's `require=n` is -- a checkout's guard on a
+        read: `.where(sku=sku, price=price).require(1)`."""
+        return self._with(require=_require_clause(n))
+
     # ---------------------------------------------------------- the text
 
     def to_fenecql(self) -> tuple[str, list]:
@@ -690,6 +698,8 @@ class _Builder:
                 raise _err(f"aggregates cannot be combined with {clash}")
             if not s["group"] and (order or s["limit"] is not None or s["offset"]):
                 raise _err("aggregates answer one row; group makes a row per value")
+            if not s["group"] and s["require"]:
+                raise _err("require counts the rows a query answers, and an aggregate answers one")
         if marks:
             what = "highlight" if marks[0]["words"] is None else "snippet"
             if not match:
@@ -732,7 +742,7 @@ class _Builder:
                     )
                 seen.append(level["collection"])
         if count:
-            extra = self._extra_clause()
+            extra = self._extra_clause() or ("require" if s["require"] else None)
             if extra:
                 raise _err(f"count cannot be used with `{extra}`")
         bind = _Binder()
@@ -781,6 +791,8 @@ class _Builder:
             sql += f" limit {s['limit']}"
         if s["offset"]:
             sql += f" offset {s['offset']}"
+        # Before a lookup, whose clauses are the children's.
+        sql += s["require"]
         if count:
             sql += " count"
         if facets:
@@ -849,6 +861,8 @@ class _Builder:
     # `near`, `order`, `limit` mean something only to a read; dropped from a
     # write, `.limit(1).delete()` would delete every row.
     def _assert_plain(self, verb: str) -> None:
+        if self._s["require"]:
+            raise _err(f"{verb} takes require as its option: {verb}(..., {{ require: n }})")
         extra = self._extra_clause()
         if extra:
             raise _err(f"{verb} cannot be used with `{extra}`")

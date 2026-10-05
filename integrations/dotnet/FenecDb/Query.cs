@@ -477,6 +477,7 @@ public sealed class Query
         public IReadOnlyList<(string Field, bool Asc, string? Collate)> Order { get; init; } = [];
         public long? Limit { get; init; }
         public long Offset { get; init; }
+        public string Require { get; init; } = "";
         public bool Count { get; init; }
         public IReadOnlyList<Level> Lookups { get; init; } = [];
         public IReadOnlyList<Mark> Marks { get; init; } = [];
@@ -661,6 +662,12 @@ public sealed class Query
     /// <summary>How many rows are passed over first.</summary>
     public Query Offset(long n) => new(_s with { Offset = Builder.Whole(n, "offset") });
 
+    /// <summary>
+    /// <c>require n</c> on a read: the rows it answers, after <see cref="Limit"/>, must number n, or it is refused
+    /// (412, unmet) and the batch it is in put back, as a write's <c>require</c> is -- a checkout's guard on a read.
+    /// </summary>
+    public Query Require(long n) => new(_s with { Require = RequireClause(n) });
+
     /// <summary>The statement and its parameters, as they would be sent.</summary>
     public (string Text, IReadOnlyList<object?> Parameters) ToFenecQL()
     {
@@ -675,6 +682,8 @@ public sealed class Query
             if (clash is not null) throw Builder.Refuse($"aggregates cannot be combined with {clash}");
             if (s.Group is null && (s.Order.Count > 0 || s.Limit is not null || s.Offset > 0))
                 throw Builder.Refuse("aggregates answer one row; group makes a row per value");
+            if (s.Group is null && s.Require.Length > 0)
+                throw Builder.Refuse("require counts the rows a query answers, and an aggregate answers one");
         }
         if (s.Marks.Count > 0)
         {
@@ -712,7 +721,8 @@ public sealed class Query
                 seen.Add(l.Collection);
             }
         }
-        if (s.Count && ExtraClause() is { } extra) throw Builder.Refuse($"count cannot be used with `{extra}`");
+        if (s.Count && (ExtraClause() ?? (s.Require.Length > 0 ? "require" : null)) is { } extra)
+            throw Builder.Refuse($"count cannot be used with `{extra}`");
 
         var bind = new Binder();
         var sql = new StringBuilder($"get {s.Collection}");
@@ -753,6 +763,8 @@ public sealed class Query
         AppendOrder(sql, s.Order);
         if (s.Limit is { } limit) sql.Append($" limit {limit}");
         if (s.Offset > 0) sql.Append($" offset {s.Offset}");
+        // Before a lookup, whose clauses are the children's.
+        sql.Append(s.Require);
         if (s.Count) sql.Append(" count");
         if (s.Facets.Count > 0)
             sql.Append(" facet ").Append(string.Join(", ",
@@ -801,6 +813,8 @@ public sealed class Query
     // delete every row.
     void AssertPlain(string verb)
     {
+        if (_s.Require.Length > 0)
+            throw Builder.Refuse($"{verb} takes require as its option: {verb}(..., {{ require: n }})");
         if (ExtraClause() is { } extra) throw Builder.Refuse($"{verb} cannot be used with `{extra}`");
         if (_s.Lookups.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `lookup`");
         if (_s.Facets.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `facet`");

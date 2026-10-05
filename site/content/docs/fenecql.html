@@ -42,6 +42,7 @@ select a, b from &lt;name&gt; [where ...]           -- the classic SQL order wor
 set &lt;name&gt; { field: value, path: value } [where &lt;expr&gt;]  -- a value may read the row: {n: n + 1}
 del &lt;name&gt; [where &lt;expr&gt;]
 &lt;put | insert | set | del ...&gt; require N    -- refused, and its batch put back, unless it wrote N rows
+get &lt;name&gt; ... require N [lookup ...]       -- refused, and its batch put back, unless it answered N rows
 
 collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 
@@ -59,8 +60,9 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     under the write lock — see <a href="#writes">Writes that read the
     row</a>.</li>
   <li><b><code>require N</code> makes a count a condition.</b> A write that
-    does not write exactly <code>N</code> rows is refused, and the batch it
-    is in is put back whole — see <a href="#require">Writes that must find
+    does not write exactly <code>N</code> rows, or a <code>get</code> that
+    does not answer exactly <code>N</code>, is refused, and the batch it is
+    in is put back whole — see <a href="#require">Writes that must find
     their rows</a>.</li>
   <li><b><code>alter collection</code> rewrites no document.</b> A field
     added reads <code>null</code> in the documents already there; a field's
@@ -1550,6 +1552,41 @@ put locks {name: "nightly", owner: $1} if absent require 1      -- refused while
   <li><b><code>require 0</code></b> asserts that nothing matches.</li>
 </ul>
 
+<h3 id="read-require">A read that must find its rows</h3>
+
+<p><code>require N</code> after a <code>get</code> guards a read the same
+way: unless the <code>get</code> answers exactly <code>N</code> rows it is
+refused (412, <code>"at"</code> naming it) and its batch put back. In a
+<code>/batch</code> it reads under the batch's write lock, after the
+statements before it and before those after, so what it saw is what the
+writes around it see: "the price is still 12", "the coupon is still
+good".</p>
+
+<pre data-lang="fenecql">get products where sku = $1 and price = $2 and stock &gt; 0 require 1
+get coupons where code = $1 and uses &lt; max_uses limit 1 require 1     -- one is enough
+get holds where order_ref = $1 and state = "held" require 0           -- none may be held
+</pre>
+
+<ul>
+  <li><b>It counts the rows the <code>get</code> answers</b>, after
+    <code>offset</code> and <code>limit</code>: <code>limit 1 require 1</code>
+    asks that one exists, and reads no further. A <code>lookup</code>'s
+    children are not counted, and <code>require</code> goes before the
+    <code>lookup</code>, whose clauses are the children's.</li>
+  <li><b>Not with <code>count</code></b> or an aggregate without
+    <code>group</code>, which answer one row whatever matched; over groups
+    it counts the groups. An inner <code>get</code> of <code>in (get
+    …)</code> takes none.</li>
+  <li><b>On its own</b> it is a read like any other, refused with 412 when
+    the count is not met. A scoped token's count is of the rows it may
+    read.</li>
+  <li><b>Every builder</b> has it as a step, <code>.require(1)</code>; a
+    write takes it as its option instead. A replica's sync refuses one in a
+    batch of synced writes: it would count the replica's rows, and the
+    server, which lands the batch, would never see it — send a guarded
+    batch to the server itself.</li>
+</ul>
+
 <h3 id="transfers">Transfers</h3>
 
 <p>Moving money between two accounts is a debit where the money is, a
@@ -1585,6 +1622,10 @@ curl -s -X POST localhost:8080/batch -H "Idempotency-Key: t1" --data-binary @-
   <li><b>Who may move what is the app's.</b> The credit is another user's
     row, which a scoped token may not write: transfers go through an app
     server holding the server's token.</li>
+  <li><b>A read can guard it too.</b> A client that showed a balance and
+    moves money only while it is still that puts <code>get accounts where
+    name = $1 and balance = $5 require 1</code> first; changed meanwhile, the
+    transfer stops there, 412 with <code>"at":0</code>.</li>
   <li><b>Held to it:</b> eight threads making 4 800 random transfers among
     six accounts in process, and eight clients making 2 400 as
     <code>/batch</code>es over HTTP, an eighth of them to an account that
@@ -1592,6 +1633,36 @@ curl -s -X POST localhost:8080/batch -H "Idempotency-Key: t1" --data-binary @-
     and a journal that accounts for every balance
     (<code>crates/fenec-core/tests/require.rs</code>,
     <code>crates/fenec-http/tests/require.rs</code>).</li>
+</ul>
+
+<h3 id="checkout">Checkout</h3>
+
+<p>An order is placed at the price the shopper saw, against stock that is
+there, with a coupon that is still good — or not at all. Each condition is
+a <code>require</code>: the price and the coupon read, the stock taken, the
+coupon's use counted and the order written, as one <code>/batch</code>.</p>
+
+<pre data-lang="fenecql">create collection products (sku text @unique, price int, stock int)
+create collection coupons (code text @unique, off int, uses int, max_uses int)
+create collection orders (ref text @unique, sku text @hash, paid int)
+
+get products where sku = $1 and price = $2 require 1
+get coupons where code = $3 and uses &lt; max_uses require 1
+set products {stock: stock - 1} where sku = $1 and stock &gt; 0 require 1
+set coupons {uses: uses + 1} where code = $3 require 1
+insert orders {ref: $4, sku: $1, paid: $2 - $5}
+</pre>
+
+<ul>
+  <li><b>A price that moved</b> stops the batch at its first line, 412 with
+    <code>"at":0</code>: the shopper is shown the new price, and nothing was
+    written.</li>
+  <li><b>A coupon used up</b> stops it at the second, <b>no stock</b> at the
+    third; the order's <code>@unique</code> <code>ref</code> refuses the
+    same checkout twice (409), and an <code>Idempotency-Key</code> answers a
+    retry what the first try did.</li>
+  <li><b>Under the write lock</b>, every line sees the ones before it: two
+    shoppers taking the last one cannot both pass the stock line.</li>
 </ul>
 
 <h2>Time</h2>

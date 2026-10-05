@@ -988,6 +988,12 @@ pub struct Select {
     pub marks: Vec<Mark>,
     /// `facet`: value counts over every matched row, beside the page.
     pub facets: Vec<Facet>,
+    /// `require <n>`: the rows the `get` answers -- after `offset` and
+    /// `limit`, not counting a `lookup`'s children -- must number `n`, or
+    /// it is refused as `Error::Unmet` and the block it is in put back, as
+    /// a write's `require` is: a checkout's "the price is still 12" or "the
+    /// coupon is still good", read under the block's lock.
+    pub require: Option<u64>,
 }
 
 impl Select {
@@ -1100,6 +1106,17 @@ impl Select {
             }
         }
         self.check_marks_and_facets()?;
+        // `count` and an aggregate answer one row whatever matched: a
+        // `require 1` over them would always hold, and say nothing.
+        if self.require.is_some()
+            && (self.count || (!self.aggregate.is_empty() && self.group.is_none()))
+        {
+            return Err(Error::Query(
+                "`require` counts the rows a `get` answers, and `count` or an aggregate answers \
+                 one: require the rows themselves, `limit 1 require 1` for one to exist"
+                    .into(),
+            ));
+        }
         if !self.aggregate.is_empty() || self.group.is_some() {
             self.check_aggregate()?;
         }
@@ -1304,6 +1321,11 @@ impl Select {
         if self.lookup.is_some() {
             return Err(Error::Query(
                 "`in (get ...)` takes one column, and a `lookup` attaches children to it".into(),
+            ));
+        }
+        if self.require.is_some() {
+            return Err(Error::Query(
+                "`in (get ...)` takes no `require`: the statement around it does".into(),
             ));
         }
         self.check()

@@ -1171,6 +1171,11 @@ export async function openFile(fenec, name = 'default.fenec', opts = {}) {
 /// store -- the right trade for a handful of pending rows.
 const TEMP_BASE = 2 ** 52;
 
+// A read's `require n` as the builder writes it: after its clauses, before
+// a `lookup`'s.
+const GUARDED_READ = /^get .* require \d+( |$)/;
+const GUARDED = "a `get ... require` counts the replica's rows and is not sent: a write guarded by a read goes to the server itself";
+
 /** Operator spellings in a REST filter. */
 const REST_OPS = {
   '=': 'eq', eq: 'eq',
@@ -1522,7 +1527,13 @@ export class FenecSync {
     return new SyncQuery({
       collection,
       context: this,
-      exec: (sql, params) => this.#local.query(sql, params),
+      exec: (sql, params) => {
+        // A read's `require` inside `batch()` would be the replica's count,
+        // and the server the batch lands on never sees it: refused as the
+        // native core refuses one beside a synced write.
+        if (this.#batch && GUARDED_READ.test(sql)) throw new FenecError(GUARDED);
+        return this.#local.query(sql, params);
+      },
       rel: declared.get(this)?.relations,
     });
   }

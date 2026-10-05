@@ -158,6 +158,53 @@ fn a_write_that_misses_its_count_is_412_and_a_batch_names_where_it_stopped() {
     assert_eq!(c.number("get journal count"), 2);
 }
 
+/// `get ... require <n>` guards a read in a `/batch`: a balance that is no
+/// longer what the client saw stops the batch at the read, 412 and `at`,
+/// and the writes after it never land. On its own it is a 412 as well.
+#[test]
+fn a_get_that_misses_its_count_stops_the_batch_at_the_read() {
+    let port = start();
+    let mut c = Conn::open(port);
+    let (status, body) = c.query("get accounts where name = \"nobody\" require 1");
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"`get accounts` answered 0 rows, and requires 1"}"#
+    );
+    let (status, body) = c.query("get accounts limit 1 require 1");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"a0\""), "{body}");
+
+    let guarded = |seen: i64| {
+        [
+            line(
+                "set accounts {balance: balance + 1} where name = \"a1\" require 1",
+                "",
+            ),
+            line(
+                "get accounts select balance where name = \"a0\" and balance = $1 require 1",
+                &format!("[{seen}]"),
+            ),
+            line("insert journal {tx: 9, account: \"a0\", amount: 1}", ""),
+        ]
+        .join("\n")
+    };
+    let (status, body) = c.post("/batch", &guarded(START - 1));
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"unmet: `get accounts` answered 0 rows, and requires 1","completed":0,"at":1}"#
+    );
+    assert_eq!(
+        c.number("get accounts select balance where name = \"a1\""),
+        START
+    );
+    assert_eq!(c.number("get journal count"), 0);
+    let (status, body) = c.post("/batch", &guarded(START));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(c.number("get journal count"), 1);
+}
+
 /// Eight clients sending transfers as `/batch`es at random among few
 /// accounts, overdrafts and missing accounts common: the sum stays, no
 /// balance goes below zero, and the journal accounts for every balance.
