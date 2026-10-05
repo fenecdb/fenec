@@ -1046,6 +1046,61 @@ test('a polled live query over HTTP runs again only after a write to what it rea
   }
 });
 
+/** An HS256 token for `claims`, signed with `secret`. */
+async function jwt(secret, claims) {
+  const { createHmac } = await import('node:crypto');
+  const b64 = (s) => Buffer.from(s).toString('base64url');
+  const body = `${b64('{"alg":"HS256","typ":"JWT"}')}.${b64(JSON.stringify(claims))}`;
+  return `${body}.${createHmac('sha256', secret).update(body).digest('base64url')}`;
+}
+
+// A live query under a scoped token: its stream's shape holds nothing, and
+// ANDed with the token's filter it heard nothing, so the query ran once.
+// It runs again at a write to a row the token may read, and not at another
+// user's -- by stream and by poll alike.
+test('a live query over HTTP follows the writes a scoped token may read, and no others', { skip: bin ? false : 'no fenec-server binary (cargo build)', concurrency: false }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'fenec-scoped-live-'));
+  const secret = 'web-tests-jwt-secret-of-32-bytes-or-more';
+  const policy = join(dir, 'policy.txt');
+  await (await import('node:fs/promises')).writeFile(policy, 'notes read,write where owner = $jwt.sub\n');
+  const s = await listening(bin, ['--http', '127.0.0.1:0', '--http-token', 'root', '--jwt-secret', secret, '--policy', policy], 'fenec-http');
+  try {
+    const root = client.connect(s.url, { token: 'root' });
+    await root.run('create collection notes (owner text @hash, title text)');
+    const exp = Math.floor(Date.now() / 1000) + 600;
+    const alice = client.connect(s.url, { token: await jwt(secret, { sub: 'alice', exp }) });
+    const bob = client.connect(s.url, { token: await jwt(secret, { sub: 'bob', exp }) });
+    const streamed = [];
+    const polled = [];
+    const statuses = [];
+    const counting = client.connect(s.url, {
+      token: await jwt(secret, { sub: 'alice', exp }),
+      fetch: (url, init) => fetch(url, init).then((r) => (statuses.push(r.status), r)),
+    });
+    const q = alice.from('notes').select('title').order('title');
+    const stops = [
+      alice.live(q, (rows) => streamed.push(rows.map((r) => r.title))),
+      counting.live(counting.from('notes').select('title').order('title'), (rows) => polled.push(rows.map((r) => r.title)), { poll: 100 }),
+    ];
+    try {
+      await until(() => streamed.length === 1 && polled.length === 1, 'the first rows');
+      await bob.from('notes').insert({ title: 'bob 1' });
+      await root.run('put notes {owner: "bob", title: "bob 2"}');
+      await until(() => statuses.filter((x) => x === 304).length >= 3, 'polls answered 304 after bob wrote');
+      assert.equal(streamed.length, 1, 'bob writing ran alice\'s stream');
+      assert.equal(polled.length, 1, 'bob writing ran alice\'s poll');
+      await alice.from('notes').insert({ title: 'alice 1' });
+      await until(() => streamed.at(-1)?.[0] === 'alice 1' && polled.at(-1)?.[0] === 'alice 1', 'her own write');
+      assert.deepEqual(streamed.at(-1), ['alice 1']);
+    } finally {
+      for (const stop of stops) stop();
+    }
+  } finally {
+    s.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // `/batch` and `Idempotency-Key` through the client: the shop's checkout
 // posted them with a `fetch` of its own.
 test('a batch over HTTP lands whole, once a key, and names the statement that stopped it', { skip: bin ? false : 'no fenec-server binary (cargo build)', concurrency: false }, async () => {

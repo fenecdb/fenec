@@ -1050,3 +1050,145 @@ data: {"error":"the token has expired","status":401}"#
     // And the token's own request is refused, as the stream was ended.
     assert_eq!(n.call(Some(&alice), "GET", "/notes", "").0, 401);
 }
+
+/// `FenecHttp.live` opens a stream of a shape that holds nothing
+/// (`select=id&where=false`) and runs its query again at each change. Under
+/// a scoped token that shape, ANDed with the token's filter, matched no row
+/// and the stream heard nothing, ever. It hears of the writes to rows the
+/// token may read now -- and of nothing else: not when another user writes,
+/// nor which ids.
+#[test]
+fn a_scoped_stream_of_no_rows_hears_the_writes_to_rows_it_may_read() {
+    let n = start();
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let bob = n.token(r#"{"sub":"bob"}"#);
+    let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    write!(
+        s,
+        "GET /notes/changes?select=id&where=false HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+    )
+    .unwrap();
+    let mut heard = String::new();
+    listen(
+        &mut s,
+        &mut heard,
+        &|h| h.contains("event: seed"),
+        Duration::from_secs(3),
+    );
+    assert!(heard.contains(r#""rows":[]"#), "{heard}");
+
+    // Bob writes and deletes: alice hears nothing of it.
+    assert_eq!(
+        n.call(Some(&bob), "POST", "/notes", r#"{"title":"b1"}"#).0,
+        201
+    );
+    assert_eq!(n.query(&bob, r#"del notes where title = "b1""#).0, 200);
+    let r = n.call(
+        Some(ROOT),
+        "POST",
+        "/notes",
+        r#"{"owner":"bob","title":"b2"}"#,
+    );
+    assert_eq!(r.0, 201, "{}", r.1);
+    listen(&mut s, &mut heard, &|_| false, Duration::from_millis(300));
+    assert!(!heard.contains("event: change"), "{heard}");
+
+    // Her own write is a change; so is her row leaving her, by another hand.
+    assert_eq!(
+        n.call(Some(&alice), "POST", "/notes", r#"{"title":"a1"}"#)
+            .0,
+        201
+    );
+    listen(
+        &mut s,
+        &mut heard,
+        &|h| count(h, "event: change") == 1,
+        Duration::from_secs(3),
+    );
+    let r = n.query(ROOT, r#"set notes {owner: "bob"} where title = "a1""#);
+    assert_eq!(r.0, 200, "{}", r.1);
+    listen(
+        &mut s,
+        &mut heard,
+        &|h| count(h, "event: change") == 2,
+        Duration::from_secs(3),
+    );
+    // Bob's again, after: nothing more.
+    assert_eq!(
+        n.call(Some(&bob), "POST", "/notes", r#"{"title":"b3"}"#).0,
+        201
+    );
+    listen(&mut s, &mut heard, &|_| false, Duration::from_millis(300));
+    assert_eq!(count(&heard, "event: change"), 2, "{heard}");
+    // No change names a row or an id.
+    for e in heard.split("event: change").skip(1) {
+        assert!(e.contains(r#""puts":[],"dels":[]"#), "{e}");
+    }
+}
+
+/// A polled live query sends the tag of its last answer, and is answered
+/// 304 while nothing it reads was written. A scoped token's tag was the
+/// database's change counter: 304 against 200 told it when anyone wrote to
+/// the collection, rows it may not read among them, and the tag how many
+/// writes there had been. Its tag is its answer's own now.
+#[test]
+fn a_scoped_poll_learns_nothing_of_writes_it_may_not_read() {
+    let n = start();
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let bob = n.token(r#"{"sub":"bob"}"#);
+    assert_eq!(
+        n.call(Some(&alice), "POST", "/notes", r#"{"title":"a1"}"#)
+            .0,
+        201
+    );
+    let ask = |token: &str, tag: &str| -> (u16, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let body = r#"{"query":"get notes select title"}"#;
+        write!(
+            s,
+            "POST /query HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+             If-None-Match: {tag}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let status = out[9..12].parse().unwrap();
+        let tag = out
+            .lines()
+            .find_map(|l| l.strip_prefix("ETag: "))
+            .unwrap_or_default()
+            .to_string();
+        (status, tag)
+    };
+    let (status, tag) = ask(&alice, "\"0\"");
+    assert_eq!(status, 200);
+    assert!(
+        tag.starts_with("\"c"),
+        "a tag of the answer, not the counter: {tag}"
+    );
+    assert_eq!(ask(&alice, &tag), (304, tag.clone()));
+    // Bob writes to the collection: the same answer, the same tag, 304.
+    for t in ["b1", "b2", "b3"] {
+        let body = format!(r#"{{"title":"{t}"}}"#);
+        assert_eq!(n.call(Some(&bob), "POST", "/notes", &body).0, 201);
+    }
+    assert_eq!(ask(&alice, &tag), (304, tag.clone()));
+    // Her own: another answer.
+    assert_eq!(
+        n.call(Some(&alice), "POST", "/notes", r#"{"title":"a2"}"#)
+            .0,
+        201
+    );
+    let (status, again) = ask(&alice, &tag);
+    assert_eq!(status, 200);
+    assert_ne!(again, tag);
+    // The server's token keeps the counter's tag, answered unrun.
+    let (status, root) = ask(ROOT, "\"0\"");
+    assert_eq!(status, 200);
+    assert!(!root.starts_with("\"c"), "{root}");
+    assert_eq!(ask(ROOT, &root).0, 304);
+}

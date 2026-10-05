@@ -1174,7 +1174,17 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         // Asked for only: a read that sends none is answered as it was, no
         // tag worked out (the first poll sends `"0"`).
         let asked = req.header("if-none-match");
-        let tag = asked.and_then(|_| etag(&guard, &stmt, body));
+        // A scoped token's tag is its answer's own ([`content_tag`]): the
+        // query runs every time, and 304 says only that its rows are the
+        // rows it had. Tagged by the change counter, 304 against 200 -- and
+        // the 304's speed -- told it when anyone wrote to what it reads,
+        // rows it may not see among them, and the tag how many writes the
+        // database had taken.
+        let by_content = asked.is_some() && who.scope().is_some();
+        let tag = match by_content {
+            true => None,
+            false => asked.and_then(|_| etag(&guard, &stmt, body)),
+        };
         if let (Some(t), Some(asked)) = (&tag, asked) {
             if unchanged(&guard, &stmt, asked) {
                 return Response::json(304, Vec::new()).header("ETag", t);
@@ -1189,6 +1199,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                 let mut resp = Response::json(200, body).versioned(fenec_core::VERSION);
                 if let Some(t) = &tag {
                     resp = resp.header("ETag", t);
+                }
+                if by_content {
+                    resp = same_answer(resp, asked);
                 }
                 timing::lap(timing::Phase::Render);
                 return resp;
@@ -1244,9 +1257,13 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             let resp = visible(who, resp);
             statements::rows(counted(&resp));
             let out = with_seq(api::render_any(&resp, fenec_core::VERSION), seq);
-            match &tagged {
+            let out = match &tagged {
                 Some(t) => out.header("ETag", t),
                 None => out,
+            };
+            match stmt.is_read_only() && who.scope().is_some() {
+                true => same_answer(out, req.header("if-none-match")),
+                false => out,
             }
         }
         Err(e) => error_response(&e),
@@ -1283,6 +1300,38 @@ fn etag(db: &Database, stmt: &Statement, text: &str) -> Option<String> {
         }
     }
     Some(format!("\"{}\"", db.change_seq()))
+}
+
+/// A scoped read's tag: a digest of its answer, so that it says nothing a
+/// token's rows do not -- not when, nor how often, a collection was
+/// written. Strong: the same bytes are the same answer.
+fn content_tag(body: &[u8]) -> String {
+    let d = crypto::sha256(body);
+    let mut t = String::with_capacity(36);
+    t.push_str("\"c");
+    for b in &d[..16] {
+        t.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
+        t.push(char::from_digit((b & 15) as u32, 16).unwrap_or('0'));
+    }
+    t.push('"');
+    t
+}
+
+/// A scoped read's answer, tagged by its content where a tag was asked
+/// for, and 304 with no body where it is the one `asked` names.
+fn same_answer(resp: Response, asked: Option<&str>) -> Response {
+    let Some(asked) = asked else {
+        return resp;
+    };
+    if resp.status != 200 {
+        return resp;
+    }
+    let tag = content_tag(&resp.body);
+    if asked.trim() == tag {
+        http::give_back(resp.body);
+        return Response::json(304, Vec::new()).header("ETag", &tag);
+    }
+    resp.header("ETag", &tag)
 }
 
 /// Whether no write since the change `asked` names -- an `ETag` [`etag`]

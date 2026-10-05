@@ -211,7 +211,8 @@ export class FenecHttp {
    * `lookup`. So each stream is of a shape that holds nothing
    * (`where=false`, `select=id`): its seed is empty and a write to the
    * collection is a change naming the ids written, which is what runs the
-   * query again; the writes of one burst run it once, after the run under
+   * query again -- under a scoped token, a change naming nothing, at a
+   * write to a row the token may read and at no other; the writes of one burst run it once, after the run under
    * way. A stream that ends is opened again (250 ms, doubling to 15 s), and
    * its seed runs the query, since writes may have come between.
    *

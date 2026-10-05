@@ -176,16 +176,32 @@ pub fn serve(
 
     // Parsing needs the schema, and the schema needs a read lock. The lock is
     // released immediately: held for the whole stream it would stop all writes.
+    //
+    // A scoped stream of a shape that holds nothing -- `where=false`, which
+    // `FenecHttp.live` opens to learn that what its query reads was
+    // written -- is told of the writes to rows its token may read, and of
+    // nothing else: it follows the token's own filter, its ids kept here and
+    // never sent, and a write to one of them, or one of them leaving, is a
+    // change holding no rows. ANDed with the token's filter, the shape
+    // matched no row, a scoped stream hears only of rows it was sent, and
+    // such a live query never ran again; told of every write, it would hand
+    // the token the moments of other users' writes.
     let sub = {
         let guard = crate::held::read(db);
         api::subscription(&guard, req).and_then(|mut sub| {
+            let mut quiet = false;
             if let Some(scope) = who.scope() {
-                sub.filter = scope.restrict(&sub.collection, sub.filter.take())?;
+                quiet = matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
+                let shape = if quiet { None } else { sub.filter.take() };
+                if quiet {
+                    sub.project = Some(vec!["id".to_string()]);
+                }
+                sub.filter = scope.restrict(&sub.collection, shape)?;
             }
-            Ok(sub)
+            Ok((sub, quiet))
         })
     };
-    let sub = match sub {
+    let (sub, quiet) = match sub {
         Ok(s) => s,
         Err(e) => {
             let _ = write_head(
@@ -221,7 +237,7 @@ pub fn serve(
         // holds are not known here, and without them no deletion could be
         // told apart from someone else's write.
         Some(n) if seen.is_none() => n,
-        _ => match seed(out, db, &sub, &mut seen) {
+        _ => match seed(out, db, &sub, &mut seen, quiet) {
             Ok(seq) => seq,
             Err(_) => return,
         },
@@ -267,7 +283,7 @@ pub fn serve(
                 let _ = event(out, "error", &error_json(&e));
                 return;
             }
-            Ok(Changes::Reseed) => match seed(out, db, &sub, &mut seen) {
+            Ok(Changes::Reseed) => match seed(out, db, &sub, &mut seen, quiet) {
                 Ok(seq) => cursor = seq,
                 Err(_) => return,
             },
@@ -283,6 +299,10 @@ pub fn serve(
                 // people's writes overflowed the ring. An empty batch is not
                 // sent, but the cursor is current.
                 let empty = b.puts.rows.is_empty() && b.dels.is_empty() && !b.schema_changed;
+                if quiet {
+                    b.puts.rows.clear();
+                    b.dels.clear();
+                }
                 if !empty && event(out, "change", &change_json(&b)).is_err() {
                     return;
                 }
@@ -313,6 +333,7 @@ fn seed(
     db: &Arc<RwLock<Database>>,
     sub: &api::Subscription,
     seen: &mut Option<std::collections::HashSet<DocId>>,
+    quiet: bool,
 ) -> std::io::Result<u64> {
     let (rows, seq) = {
         let guard = crate::held::read(db);
@@ -322,7 +343,11 @@ fn seed(
                 if let Some(seen) = seen {
                     *seen = rs.rows.iter().map(|r| r.id).collect();
                 }
-                (api::rows_json(&rs), guard.change_seq())
+                let rows = match quiet {
+                    true => String::from("[]"),
+                    false => api::rows_json(&rs),
+                };
+                (rows, guard.change_seq())
             }
             Ok(_) => (String::from("[]"), guard.change_seq()),
             Err(e) => {
