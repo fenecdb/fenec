@@ -37,6 +37,11 @@ fn start() -> Node {
 }
 
 fn start_with(policy: &str, setup: &[&str]) -> Node {
+    // The wait after a refusal is the process's, counted by address and
+    // doubled to 5 s: every test here asks from 127.0.0.1, so the refusals
+    // of the tests running at once held one's 401 past its read timeout.
+    // tests/audit.rs and fenec-shard's tests/refusals.rs hold the wait.
+    fenec_http::audit::set_delay(0);
     let access = Arc::new(Access::new(SECRET, policy).unwrap());
     let mut db = Database::new();
     for sql in setup {

@@ -101,6 +101,10 @@ pub struct Router {
     /// `upstream_timeout`, so a node that does not answer cannot hold up
     /// the others' renewals until theirs lapse too.
     leases: Option<(lease::Leases, Pool)>,
+    /// Each node's mark for what is forwarded to it
+    /// (`fenec_http::audit::router_mark`), by its admin token: an HMAC
+    /// worked out once, not a request.
+    marks: Mutex<std::collections::HashMap<String, Arc<str>>>,
 }
 
 /// An operation failure, shaped as an HTTP status and message.
@@ -125,6 +129,7 @@ impl Router {
             repl,
             pool: Pool::new(cfg.upstream_timeout),
             busy: Mutex::new(HashSet::new()),
+            marks: Mutex::new(Default::default()),
             live: AtomicUsize::new(0),
             leases: cfg
                 .auto_failover
@@ -314,6 +319,18 @@ impl Router {
         }
     }
 
+    /// The mark of what is forwarded to the node whose admin token is
+    /// `token`.
+    fn mark(&self, token: &str) -> Arc<str> {
+        let mut marks = self.marks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = marks.get(token) {
+            return Arc::clone(m);
+        }
+        let m: Arc<str> = fenec_http::audit::router_mark(token).into();
+        marks.insert(token.to_string(), Arc::clone(&m));
+        m
+    }
+
     fn read_dir(&self) -> std::sync::RwLockReadGuard<'_, Directory> {
         self.dir.read().unwrap_or_else(|e| e.into_inner())
     }
@@ -361,7 +378,7 @@ impl Router {
                 }
             }
             let keep = match req.segments().first() {
-                Some(&"t") => self.forward(&req, &mut out, arrived),
+                Some(&"t") => self.forward(&req, &mut out, arrived, peer),
                 Some(&"_replication") => {
                     let Some(repl) = self.repl.clone() else {
                         let _ = Response::error(404, "this router has no --replication-token")
@@ -403,7 +420,13 @@ impl Router {
 
     /// Forwards one request and copies the answer back, and counts it.
     /// Returns whether the client connection can carry another request.
-    fn forward(&self, req: &Request, out: &mut TcpStream, arrived: Instant) -> bool {
+    fn forward(
+        &self,
+        req: &Request,
+        out: &mut TcpStream,
+        arrived: Instant,
+        peer: Option<std::net::SocketAddr>,
+    ) -> bool {
         let head_only = req.method == Method::Head;
         let reply = |out: &mut TcpStream, resp: Response| {
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
@@ -414,9 +437,10 @@ impl Router {
         let tenant = segs.get(1).copied().unwrap_or("");
         let addr = {
             let dir = self.read_dir();
-            let node = dir
-                .placement(tenant)
-                .and_then(|p| dir.node(&p.node).map(|n| (p.node.clone(), n.addr.clone())));
+            let node = dir.placement(tenant).and_then(|p| {
+                dir.node(&p.node)
+                    .map(|n| (p.node.clone(), n.addr.clone(), self.mark(&n.token)))
+            });
             match node {
                 Some(n) => n,
                 // A standby whose maps have not come from the primary yet
@@ -437,14 +461,26 @@ impl Router {
                 }
             }
         };
-        let (node, addr) = addr;
+        let (node, addr, mark) = addr;
 
-        let headers: Vec<(String, String)> = req
+        // The node believes the client's address from the router alone:
+        // what a client sent under these names is dropped, and the router's
+        // own put in their place.
+        let mut headers: Vec<(String, String)> = req
             .headers
             .iter()
-            .filter(|(k, _)| !hop_by_hop(k) && !k.eq_ignore_ascii_case("host"))
+            .filter(|(k, _)| {
+                !hop_by_hop(k)
+                    && !k.eq_ignore_ascii_case("host")
+                    && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
+                    && !k.eq_ignore_ascii_case(fenec_http::audit::CLIENT_HEADER)
+            })
             .cloned()
             .collect();
+        if let Some(p) = peer {
+            headers.push((fenec_http::audit::ROUTER_HEADER.into(), mark.to_string()));
+            headers.push((fenec_http::audit::CLIENT_HEADER.into(), p.ip().to_string()));
+        }
         let sent = Instant::now();
         let answer =
             match self
@@ -465,6 +501,10 @@ impl Router {
             };
 
         let status = answer.status;
+        // A refusal waits here, by the client's address, before it is
+        // answered -- the node waits none for what the router forwards --
+        // and a token taken starts that address's count again, no other.
+        fenec_http::audit::http(req, status, peer);
         let mut head = format!("HTTP/1.1 {status} {}\r\n", http::reason(status));
         for (k, v) in &answer.headers {
             if !hop_by_hop(k) && !k.eq_ignore_ascii_case("content-length") {

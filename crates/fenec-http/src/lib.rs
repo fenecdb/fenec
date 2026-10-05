@@ -133,6 +133,11 @@ pub struct Config {
     /// Data footprint ceiling in bytes (0 = off): fenec-server's
     /// `--max-memory`, held on every write; see [`over_ceiling`].
     pub max_memory: usize,
+    /// What a router marks the requests it forwards with
+    /// ([`audit::router_mark`]): made from `admin_token` on a tenant node,
+    /// which a router reaches with it. A request bearing it is waited out
+    /// at the router after a refusal, keyed by the client it names.
+    pub router_mark: Option<String>,
 }
 
 impl Default for Config {
@@ -156,6 +161,7 @@ impl Default for Config {
             max_import: 1 << 30,
             access: None,
             max_memory: 0,
+            router_mark: None,
         }
     }
 }
@@ -224,7 +230,10 @@ impl Server {
 
     /// One database per tenant under `/t/<tenant>/`, plus `/_admin/`. Each
     /// tenant gets its own watcher as it is opened.
-    pub fn with_tenants(tenants: Arc<Tenants>, cfg: Config) -> Server {
+    pub fn with_tenants(tenants: Arc<Tenants>, mut cfg: Config) -> Server {
+        if cfg.router_mark.is_none() {
+            cfg.router_mark = cfg.admin_token.as_deref().map(audit::router_mark);
+        }
         if cfg.access.is_some() {
             tenants.check_scoped_writes();
         }
@@ -456,6 +465,9 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 return;
             }
         };
+        if cfg.router_mark.is_some() {
+            audit::request(&req, cfg.router_mark.as_deref());
+        }
         let keep_alive = req.keep_alive;
         let head_only = req.method == Method::Head;
         timing::lap(timing::Phase::Http);

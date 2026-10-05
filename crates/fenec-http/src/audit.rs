@@ -74,6 +74,48 @@ struct Who {
 thread_local! {
     // A connection is a thread: who it is stays with the thread.
     static WHO: RefCell<Who> = RefCell::new(Who::default());
+    // The request this thread serves came through the router, from this
+    // client: the router waits out its refusals, keyed by it.
+    static ROUTED: std::cell::Cell<Option<IpAddr>> = const { std::cell::Cell::new(None) };
+}
+
+/// The header a router marks what it forwards with ([`router_mark`]), and
+/// the one it names the client's address in beside it.
+pub const ROUTER_HEADER: &str = "fenec-router";
+pub const CLIENT_HEADER: &str = "fenec-client";
+
+/// What a router sends a node in [`ROUTER_HEADER`]: an HMAC of the node's
+/// admin token, which the router holds for each node already. Behind the
+/// router every request reaches a node from the router's address, so the
+/// node's wait after a refusal keyed every client's refusals to that one
+/// address -- four forged tokens in a row waited 101, 204, 402 and 803 ms
+/// and a fifth client's expired token would have waited 1.6 s -- and any
+/// good token from anyone started the attacker's count again. So the
+/// router waits out a refusal itself, keyed by its client's address, and a
+/// node waits none for a request carrying this mark: the client's address
+/// is believed from no one else. Derived rather than the token itself, so
+/// a mark seen on the wire reaches no `/_admin/`.
+pub fn router_mark(admin_token: &str) -> String {
+    crate::crypto::b64url_encode(&crate::crypto::hmac_sha256(
+        admin_token.as_bytes(),
+        b"fenec-router: a request forwarded, the client named beside it",
+    ))
+}
+
+/// Whether `req` came through the router `mark` names, and from whom: a
+/// node asks at each request. With no mark, or a header that is not it, the
+/// request is the connection's own -- a client sending the headers itself
+/// is believed in nothing.
+pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr> {
+    let client = mark.and_then(|mark| {
+        let given = req.header(ROUTER_HEADER)?;
+        if !crate::constant_eq(given.as_bytes(), mark.as_bytes()) {
+            return None;
+        }
+        req.header(CLIENT_HEADER)?.trim().parse::<IpAddr>().ok()
+    });
+    ROUTED.with(|r| r.set(client));
+    client
 }
 
 /// The connection this thread serves.
@@ -109,8 +151,16 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
         if !w.proto.is_empty() {
             text(&mut line, "proto", w.proto);
         }
-        if let Some(p) = w.peer {
-            text(&mut line, "peer", &p.to_string());
+        match (ROUTED.with(|r| r.get()), w.peer) {
+            // The client the router forwarded for, and the router.
+            (Some(client), router) => {
+                text(&mut line, "peer", &client.to_string());
+                if let Some(r) = router {
+                    text(&mut line, "via", &r.to_string());
+                }
+            }
+            (None, Some(p)) => text(&mut line, "peer", &p.to_string()),
+            (None, None) => {}
         }
     });
     for (k, v) in fields {
@@ -169,10 +219,15 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
                 ("path", Field::Text(path)),
             ],
         );
-        std::thread::sleep(failed(ip));
+        // Forwarded by the router, which waits it out by the client's
+        // address: counted here, by the router's, it would hold every
+        // client of the router to one count.
+        if ROUTED.with(|r| r.get()).is_none() {
+            std::thread::sleep(failed(ip));
+        }
         return;
     }
-    if req.header("authorization").is_some() {
+    if req.header("authorization").is_some() && ROUTED.with(|r| r.get()).is_none() {
         succeeded(ip);
     }
     let admin = path.starts_with("/_admin/") || path.starts_with("/_shard/");
