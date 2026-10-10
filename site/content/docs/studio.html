@@ -1,13 +1,15 @@
 <!--
 title: Studio — fenecdb
-description: fenec studio, the admin pages fenec-server serves with --studio: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser, with the token you paste and no authority of its own.
+description: fenec studio, the admin pages fenec-server serves with --studio: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser, with the token you paste and no authority of its own. The site's playground is the same studio over a database in your tab.
 -->
 
 <h1>Studio</h1>
 <p class="kicker">fenec studio is the server's own admin page: its collections,
 their rows and their schema in a browser, the edits you make there, a
 query editor, the rows as they change and the server's own numbers. Start
-the server with <code>--studio</code> and open <code>/_studio/</code>.</p>
+the server with <code>--studio</code> and open <code>/_studio/</code>, or
+try it on the <a href="../playground.html">Playground</a>, where it runs
+over a database in your own tab.</p>
 
 <h2>Turn it on</h2>
 
@@ -39,7 +41,7 @@ open http://127.0.0.1:8080/_studio/
 <code>studio/</code> folder, with the HTTP client and query builder of
 <code>@fenecdb/web/client</code> beside them — no framework and no build
 step. The server embeds the files, so the binary is all you deploy. Its
-first load is 59 KB of JavaScript and CSS, gzipped, its modules preloaded
+first load is 60 KB of JavaScript and CSS, gzipped, its modules preloaded
 together from the page; the query editor, the schema, the live rows and the
 admin view are fetched the first time each is opened, 7 to 19 KB more. The server sends the
 files as they are, uncompressed; a proxy in front may compress them.</p>
@@ -287,6 +289,46 @@ request. Through a router the tenants' list takes the router's
 token reads both.</p>
 </details>
 
+<h2 id="browser">In your browser</h2>
+
+<p>The site's <a href="../playground.html">Playground</a> is this studio —
+the same files the server embeds — over a database in your browser tab
+rather than a server's: fenecdb compiled to WebAssembly, on a worker of the
+tab, seeded with products, orders and a week of events. Nothing is sent
+anywhere. Rows, the query editor, the schema and the live rows work there as
+they do here; the query editor lists examples to run.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>On a server</th><th>In your browser</th></tr></thead>
+<tbody>
+<tr><td>A token pasted in, its subject and expiry in the top bar</td><td><b>Running in your browser.</b> in its place, and nothing to sign in to</td></tr>
+<tr><td>The tenant picker on a node or a router</td><td>none: one database</td></tr>
+<tr><td>The admin view, the file's sizes in the sidebar</td><td>none: those are a server's numbers</td></tr>
+<tr><td>Writes through <code>/batch</code> with an <code>Idempotency-Key</code></td><td>the same statements, one block each batch</td></tr>
+<tr><td>Live rows through a subscription</td><td>a live query over the module's change ring</td></tr>
+<tr><td>Kept in the server's file</td><td>kept nowhere unless asked: <b>Keep it in this browser</b> stores it in IndexedDB, and <b>Reset data</b> puts every collection back</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>Every view reads through one surface: <code>run</code>,
+<code>batch</code> and <code>subscribe</code> as <code>FenecHttp</code>
+has them, and <code>request</code> for an answer shown whole — the editor's
+status and change, the schema and its plan. Over a server that surface is
+HTTP (<code>studio/connect.js</code>); in the page it is the browser module
+in a dedicated worker (<code>studio/local.js</code>,
+<code>worker.js</code>), which answers each request as a server would:
+the same rows, the status a server refuses a statement with, the change a
+write leaves the database at, the schema as the engine describes it
+(<code>Fenec.describe</code>) and a batch as one block
+(<code>Fenec.batch</code>). <code>studio/test/transport.test.mjs</code>
+sends the same statements to a real <code>fenec-server</code> and to the
+module and holds every answer equal. A server's first load holds none of
+it: the page's own modules load only where a page asks for them.</p>
+</details>
+
 <h2>Keys</h2>
 
 <div class="tbl">
@@ -301,7 +343,7 @@ token reads both.</p>
 <tr><td><code>S</code></td><td>sort by the column, where its index orders it</td></tr>
 <tr><td><code>N</code>, <code>Delete</code></td><td>a new row; delete the row, once confirmed</td></tr>
 <tr><td><code>R</code>, <code>?</code></td><td>read the rows again; every key</td></tr>
-<tr><td><code>1</code> to <code>5</code></td><td>rows, query, schema, live, admin</td></tr>
+<tr><td><code>1</code> to <code>5</code></td><td>rows, query, schema, live, admin (<code>1</code> to <code>4</code> in your browser)</td></tr>
 <tr><td><code>Ctrl+Enter</code>, <code>⌘Enter</code></td><td>run the query, in the editor</td></tr>
 </tbody>
 </table>
