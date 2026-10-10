@@ -320,7 +320,32 @@ pub fn failed(peer: Option<IpAddr>) -> Duration {
     }
     e.0 = e.0.saturating_add(1);
     e.1 = now;
-    let doubled = base.saturating_mul(1u64 << (e.0 - 1).min(16));
+    wait(base, e.0)
+}
+
+/// What a refusal to `peer` would wait now, nothing counted. A test holds
+/// the wait to this, and a request's time only from below: the sleep is
+/// the system's to stretch. macOS gives the timers of a process whose QoS
+/// it clamps a leeway of hundreds of milliseconds -- under `taskpolicy -c
+/// background` a 50 ms wait slept 229 to 257 -- and a CI runner's refusal
+/// of a 50 ms wait took 256.6 ms, which a bound of 200 read as the count
+/// of another address.
+pub fn would_wait(peer: Option<IpAddr>) -> Duration {
+    let base = DELAY_MS.load(Ordering::Relaxed);
+    let Some(ip) = peer.filter(|_| base > 0) else {
+        return Duration::ZERO;
+    };
+    let map = failures().lock().unwrap_or_else(|e| e.into_inner());
+    let before = match map.get(&ip) {
+        Some(&(n, at)) if at.elapsed() <= WINDOW => n,
+        _ => 0,
+    };
+    wait(base, before.saturating_add(1))
+}
+
+/// The wait after the `n`th failure in a row, `base` after the first.
+fn wait(base: u64, n: u32) -> Duration {
+    let doubled = base.saturating_mul(1u64 << (n - 1).min(16));
     Duration::from_millis(doubled).min(MOST)
 }
 
@@ -340,10 +365,16 @@ mod tests {
     #[test]
     fn the_wait_doubles_to_its_ceiling_and_a_success_forgives() {
         let ip: Option<IpAddr> = Some("203.0.113.9".parse().unwrap());
+        assert_eq!(would_wait(ip).as_millis(), 100);
         let waits: Vec<u128> = (0..8).map(|_| failed(ip).as_millis()).collect();
         assert_eq!(waits, [100, 200, 400, 800, 1600, 3200, 5000, 5000]);
+        assert_eq!(would_wait(ip).as_millis(), 5000);
         succeeded(ip);
+        // Asked, the next wait is told and nothing is counted.
+        assert_eq!(would_wait(ip).as_millis(), 100);
+        assert_eq!(would_wait(ip).as_millis(), 100);
         assert_eq!(failed(ip).as_millis(), 100);
+        assert_eq!(would_wait(ip).as_millis(), 200);
         // Another address has a count of its own; no address waits none.
         assert_eq!(
             failed(Some("203.0.113.10".parse().unwrap())).as_millis(),

@@ -3171,7 +3171,11 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   helpers): every test asks from 127.0.0.1, and their refusals together
   held one test's 401 past its read timeout. `fenec-http`'s
   `tests/audit.rs` and `fenec-shard`'s `tests/refusals.rs` hold the wait,
-  each a `[[test]]` of its own.
+  each a `[[test]]` of its own: which count a refusal went to is read off
+  the count (`audit::would_wait`), and a request's time is bounded from
+  below only. macOS gives the timers of a process whose QoS it clamps
+  about 200 ms of leeway, and a runner's first refusal, a wait of 50 ms,
+  took 256.6 against a bound of 200.
 - A test that fails and passes on a rerun is a bug, the test's or the code's:
   it is reproduced -- in a loop, under load (`docker run --cpus=3` beside
   busy loops is GitHub's three-core runner) -- and fixed, never retried
