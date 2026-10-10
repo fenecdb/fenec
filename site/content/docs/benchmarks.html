@@ -962,8 +962,18 @@ transfer, and every request behind it, 120 to 137 ms in every run; four
 million puts one at a time waited 7, 19, 49, 109 and 235–267 ms at each
 doubling from 229 376 keys (<code>make growth-bench</code>). Past 114 688
 keys the table is now 256 that grow on their own, and the longest put is
-6.2 ms; a lookup in an index that large costs 25 to 50 ns more for it,
-and one under that size nothing. And the two writes still made under the lock —
+2.5 to 3.6 ms. Each key keeps its hash beside it, so a lookup hashes it
+once — 83 to 93 ns over four million keys against 121 to 144 in the
+shards before, 24 to 34 under that size against 33 to 42 — and a table
+grows without hashing a key again, for 8 bytes a key. A text index's terms grew the same way, 276 to
+324 ms at 3.7 million terms, and are 256 tables now too, the longest put
+5 ms. And a vector index's table of the vectors it holds, which finds one
+written again, was made again from every vector once half full: 242 to
+281 ms at a million vectors of 128 dimensions, 1.45 s at 524 288 of 768.
+It grows from what it holds now, a 256th at a time, and no put waits for
+it; the first write after an open still reads every vector once, on every
+core, 33 to 169 ms over 1.1 million of 128 dimensions against 275 to 441.
+And the two writes still made under the lock —
 the 1 MB buffer's once it is full, and a handover's — waited for the
 disk while the server's periodic fsync held it, 52 ms of macOS's
 <code>F_FULLFSYNC</code>; they are put off until it is done now. The rest
