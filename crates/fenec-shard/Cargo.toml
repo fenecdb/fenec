@@ -40,3 +40,8 @@ path = "tests/datadog.rs"
 [[test]]
 name = "request_id"
 path = "tests/request_id.rs"
+
+# Apart: tracing is turned on for the whole process.
+[[test]]
+name = "tracing"
+path = "tests/tracing.rs"

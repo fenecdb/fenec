@@ -261,5 +261,6 @@ pub fn counters(out: &mut Text) {
         "fenec_router_connections",
         &[],
         CONNECTIONS.load(Ordering::Relaxed),
-    );
+    ); // The exporter's, when the router traces (`--otlp-endpoint`).
+    fenec_http::trace::metrics(out);
 }

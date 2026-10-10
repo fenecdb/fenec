@@ -1,13 +1,14 @@
 <!--
 title: Datadog and other monitoring systems — fenecdb
-description: fenecdb under Datadog, New Relic, Elastic and Grafana Cloud: the OpenMetrics check for /_metrics, the JSON logs and their pipeline, a ready dashboard, and the request id that joins them.
+description: fenecdb under Datadog, New Relic, Elastic and Grafana Cloud: the OpenMetrics check for /_metrics, the JSON logs and their pipeline, a ready dashboard, the request id that joins them, and OpenTelemetry traces through the Agent's OTLP receiver.
 -->
 
 <h1>Datadog and other monitoring systems</h1>
-<p class="kicker">Everything a monitoring system needs from fenecdb is two
-things it already reads: <code>/_metrics</code> in Prometheus's format, and
-logs written as JSON lines. Datadog's check, pipeline and dashboard are ready
-in the repository.</p>
+<p class="kicker">Everything a monitoring system needs from fenecdb is
+three things it already reads: <code>/_metrics</code> in Prometheus's
+format, logs written as JSON lines, and traces sent over OTLP. Datadog's
+check, pipeline and dashboard are ready in the repository, and the Agent's
+OTLP receiver takes the traces (<a href="#tracing">Tracing</a>).</p>
 
 <h2 id="datadog">Datadog in three steps</h2>
 
@@ -272,8 +273,56 @@ metrics, and the JSON lines as logs.</p>
 
 <h2 id="tracing">Tracing</h2>
 
-<p>fenecdb emits no traces yet: there are no spans, and no
-<code>traceparent</code> is read or sent. OpenTelemetry is planned. Until
-then the request id is what joins a client's trace to fenecdb's logs: send
-the trace's id as <code>X-Request-Id</code>, and every line the request
-wrote carries it.</p>
+<p>fenec-server and fenec-shard send OpenTelemetry traces to an OTLP
+endpoint: a span a request, and under it the wait for the lock, the
+statement, the disk and the replicas (<a href="/docs/monitoring#tracing">the
+spans</a>). fenecdb speaks no TLS, so it sends them to an agent or collector
+on the same host, which forwards them over TLS. The Datadog Agent takes them
+on its OTLP receiver:</p>
+
+<pre data-lang="yaml"># datadog.yaml: the Agent's OTLP receiver, HTTP on loopback
+otlp_config:
+  receiver:
+    protocols:
+      http:
+        endpoint: localhost:4318
+# in a container: DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_HTTP_ENDPOINT=0.0.0.0:4318
+</pre>
+
+<pre data-lang="bash">sudo systemctl restart datadog-agent
+OTEL_SERVICE_NAME=orders-db \
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod \
+  fenec-server --file data.fenec --otlp-endpoint http://localhost:4318 --trace-sample 0.1
+</pre>
+
+<ul>
+  <li><b>APM</b> shows the service <code>orders-db</code>, its resources by
+    route (<code>POST /query</code>), and each trace's waits;
+    <code>db.query.text</code> is the statement's shape, with no value in
+    it.</li>
+  <li><b>Traces join logs</b> by <code>fenec.request_id</code>, the
+    <code>request_id</code> of every line the request wrote.</li>
+  <li><b>A client's trace continues:</b> a <code>traceparent</code> from an
+    instrumented app makes fenecdb's spans children of its call, and the
+    router hands it on to the node.</li>
+  <li><b>Grafana Tempo:</b> Alloy's <code>otelcol.receiver.otlp</code> with
+    <code>http { endpoint = "127.0.0.1:4318" }</code>, sent on by
+    <code>otelcol.exporter.otlp</code> to Tempo or Grafana Cloud.</li>
+  <li><b>Honeycomb:</b> an OpenTelemetry Collector on loopback whose
+    <code>otlphttp</code> exporter sends to <code>https://api.honeycomb.io</code>
+    with the <code>x-honeycomb-team</code> header.</li>
+  <li><b>New Relic and Elastic</b> take OTLP the same way, through a
+    collector's <code>otlphttp</code> exporter to <code>otlp.nr-data.net</code>
+    with an <code>api-key</code> header, or to an Elastic APM Server's OTLP
+    intake.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Spans go as OTLP over HTTP with JSON, port 4318; the Agent's gRPC port,
+4317, is not for them. A header a collector asks for goes with
+<code>--otlp-header k=v</code> or <code>OTEL_EXPORTER_OTLP_HEADERS</code>.
+With no endpoint, tracing is off and costs nothing; on, a request never
+waits for the Agent, and what the queue cannot hold is counted in
+<code>fenec_trace_spans_dropped_total</code>
+(<a href="/docs/monitoring#tracing">Monitoring</a>).</p>
+</details>

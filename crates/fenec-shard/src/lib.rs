@@ -352,6 +352,7 @@ impl Router {
         let _ = stream.set_read_timeout(self.cfg.idle_timeout);
         let peer = stream.peer_addr().ok();
         fenec_http::audit::connection("http", peer);
+        fenec_http::trace::connection(stream.local_addr().ok(), peer);
         let Ok(mut out) = stream.try_clone() else {
             return;
         };
@@ -445,13 +446,20 @@ impl Router {
         peer: Option<std::net::SocketAddr>,
     ) -> bool {
         let head_only = req.method == Method::Head;
+        // A forwarded request is traced, the rest of the router's are not:
+        // a scrape or a lease's grant would be most of the spans.
+        fenec_http::trace::begin(req);
         let reply = |out: &mut TcpStream, resp: Response| {
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
             metrics::request(Route::Tenant, resp.status, arrived.elapsed());
+            fenec_http::trace::end(resp.status);
             sent && req.keep_alive
         };
         let segs = req.segments();
         let tenant = segs.get(1).copied().unwrap_or("");
+        if fenec_http::trace::recording() {
+            fenec_http::trace::attr("fenec.tenant", tenant.to_string());
+        }
         let addr = {
             let dir = self.read_dir();
             let node = dir.placement(tenant).and_then(|p| {
@@ -479,6 +487,12 @@ impl Router {
             }
         };
         let (node, addr, mark) = addr;
+        if fenec_http::trace::recording() {
+            fenec_http::trace::attr("fenec.node", node.clone());
+        }
+        // The router's own context goes to the node in place of the
+        // client's (`Pool::send`), while it traces.
+        let traced = fenec_http::trace::propagating();
 
         // The node believes the client's address from the router alone:
         // what a client sent under this name is dropped, and the router's
@@ -495,6 +509,9 @@ impl Router {
                     && !k.eq_ignore_ascii_case("host")
                     && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
                     && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
+                    && !(traced
+                        && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
+                            || k.eq_ignore_ascii_case(fenec_http::trace::TRACESTATE)))
             })
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
@@ -502,6 +519,22 @@ impl Router {
             headers.push((fenec_http::audit::ROUTER_HEADER, named));
         }
         let sent = Instant::now();
+        // The forward, to the node's whole answer or a stream's head: the
+        // node's server span is its child.
+        let forwarding = fenec_http::trace::span_of("forward", fenec_http::trace::Kind::Client);
+        if fenec_http::trace::recording() {
+            forwarding.attr("http.request.method", req.method.name());
+            forwarding.attr("fenec.node", node.clone());
+            match addr.rsplit_once(':') {
+                Some((host, port)) => {
+                    forwarding.attr("server.address", host.to_string());
+                    if let Ok(p) = port.parse::<i64>() {
+                        forwarding.attr("server.port", p);
+                    }
+                }
+                None => forwarding.attr("server.address", addr.clone()),
+            }
+        }
         let answer =
             match self
                 .pool
@@ -509,6 +542,8 @@ impl Router {
             {
                 Ok(a) => a,
                 Err(e) => {
+                    forwarding.error(e.to_string());
+                    drop(forwarding);
                     metrics::unreachable(&node);
                     return reply(
                         out,
@@ -521,6 +556,10 @@ impl Router {
             };
 
         let status = answer.status;
+        forwarding.attr("http.response.status_code", status);
+        if status >= 500 {
+            forwarding.error(status.to_string());
+        }
         // A refusal waits here, by the client's address, before it is
         // answered -- the node waits none for what the router forwards --
         // and a token taken starts that address's count again, no other.
@@ -548,6 +587,8 @@ impl Router {
             let body = match answer.read_body(&self.pool, head_only) {
                 Ok(b) => b,
                 Err(e) => {
+                    forwarding.error(e.to_string());
+                    drop(forwarding);
                     metrics::unreachable(&node);
                     return reply(
                         out,
@@ -555,6 +596,7 @@ impl Router {
                     );
                 }
             };
+            drop(forwarding);
             metrics::upstream(sent.elapsed());
             // A HEAD answer states the length of the body it leaves out.
             head.push_str(&format!(
@@ -571,16 +613,19 @@ impl Router {
                 .and_then(|_| out.write_all(&body))
                 .and_then(|_| out.flush());
             metrics::request(Route::Tenant, status, arrived.elapsed());
+            fenec_http::trace::end(status);
             return written.is_ok() && req.keep_alive;
         }
 
         // No length: a stream. It is copied as it arrives until either side
         // closes, and the client connection ends with it; it is counted,
         // and timed to its head.
+        drop(forwarding);
         metrics::upstream(sent.elapsed());
         head.push_str("Connection: close\r\n\r\n");
         let written = out.write_all(head.as_bytes());
         metrics::request(Route::Tenant, status, arrived.elapsed());
+        fenec_http::trace::end(status);
         if written.is_err() {
             return false;
         }

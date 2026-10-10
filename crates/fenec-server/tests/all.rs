@@ -6,6 +6,8 @@
 mod crash;
 mod follow;
 mod logs;
+mod otlp;
 mod shutdown;
 mod studio;
 mod support;
+mod tracing;

@@ -78,6 +78,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--admin-token</code>, <code>--idle-close</code>, <code>--lease</code></td><td>A tenant node's (<a href="/docs/sharding">Tenants and sharding</a>).</td></tr>
 <tr><td><code>--follow &lt;postgres://...&gt;</code>, <code>--follow-*</code></td><td>Mirrors a PostgreSQL table into the file and serves it (<a href="import.html#serving">Import</a>).</td></tr>
 <tr><td><code>--metrics</code>, <code>--slow-ms</code>, <code>--audit</code>, <code>--auth-delay</code></td><td><a href="/docs/monitoring">Monitoring</a> and the audit log.</td></tr>
+<tr><td><code>--otlp-endpoint</code>, <code>--otlp-header</code>, <code>--trace-sample</code></td><td>OpenTelemetry traces to a collector; off unless an endpoint is given (<a href="/docs/monitoring#tracing">Tracing</a>).</td></tr>
 <tr><td><code>--studio</code>, <code>--studio-connect</code></td><td>fenec studio, the admin pages, at <code>/_studio/</code>; off unless given (<a href="/docs/studio">Studio</a>).</td></tr>
 <tr><td><code>--insecure</code></td><td>Allows a non-loopback address without a token.</td></tr>
 <tr><td><code>--ping</code></td><td>Asks the server whether it is up and exits (<a href="#limits">health checks</a>).</td></tr>

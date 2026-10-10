@@ -55,7 +55,19 @@ pub fn start(args: &[&str]) -> Server {
 /// [`start`], or what the server logged before it ended without
 /// listening.
 pub fn try_start(args: &[&str]) -> Result<Server, String> {
+    try_start_env(args, &[])
+}
+
+/// [`start`] with variables of its own in the server's environment.
+pub fn start_env(args: &[&str], env: &[(&str, &str)]) -> Server {
+    try_start_env(args, env)
+        .unwrap_or_else(|log| panic!("fenec-server ended before it listened:\n{log}"))
+}
+
+/// [`try_start`] with variables of its own in the server's environment.
+pub fn try_start_env(args: &[&str], env: &[(&str, &str)]) -> Result<Server, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fenec-server"));
+    cmd.envs(env.iter().copied());
     if !args.contains(&"--http") {
         cmd.args(["--http", "127.0.0.1:0"]);
     }

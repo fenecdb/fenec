@@ -1,6 +1,6 @@
 <!--
 title: Monitoring — fenecdb
-description: Prometheus metrics at /_metrics, a ready Grafana dashboard, a slow-statement log, per-statement counts, an audit log and a request id in every line.
+description: Prometheus metrics at /_metrics, a ready Grafana dashboard, a slow-statement log, per-statement counts, an audit log, a request id in every line, and OpenTelemetry traces.
 -->
 
 <h1>Monitoring</h1>
@@ -337,6 +337,112 @@ stream's head carry the id too. Making one and writing it cost a request
 nothing measurable (<code>make requests-bench</code>, in turns).</p>
 </details>
 
+<h2 id="tracing">Tracing</h2>
+
+<p>With <code>--otlp-endpoint</code>, fenec-server and fenec-shard send
+OpenTelemetry traces: a span a request, with its waits under it — the
+lock, the statement, the disk, the replicas. Any system that takes OTLP
+shows where a request's time went: Datadog, Grafana Tempo, Honeycomb, New
+Relic, Elastic.</p>
+
+<pre data-lang="bash"># an OpenTelemetry Collector, or the Datadog Agent, on this host
+fenec-server --file data.fenec --sync always \
+         --otlp-endpoint http://127.0.0.1:4318 --trace-sample 0.1
+
+OTEL_SERVICE_NAME=orders-db fenec-server --file data.fenec \
+         --otlp-endpoint http://127.0.0.1:4318
+</pre>
+
+<ul>
+  <li><b>A collector on loopback.</b> fenecdb speaks no TLS, so the endpoint
+    is a collector on the same host or network — the OpenTelemetry
+    Collector, the Datadog Agent's OTLP receiver, Grafana Alloy — which
+    forwards over TLS: <a href="/docs/datadog#tracing">their setup</a>.</li>
+  <li><b>W3C <code>traceparent</code>.</b> A request carrying one continues
+    the caller's trace; <code>fenec-shard</code> continues it and hands it to
+    the node, so the router's spans and the node's are one tree.</li>
+  <li><b>Off unless an endpoint is given</b>, and free when off. A ratio
+    samples the traces that start at fenecdb; a caller's sampled trace is
+    always followed.</li>
+</ul>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Span</th><th>Kind</th><th>What it times</th></tr></thead>
+<tbody>
+<tr><td><code>POST /query</code>, <code>GET /{collection}</code>, <code>POST /t/{tenant}/batch</code>…</td><td>server</td><td>the request, from its head read to its answer written: its method and route, never a value</td></tr>
+<tr><td><code>lock.wait</code></td><td>internal</td><td>the wait for the database's lock, <code>fenec.lock</code> <code>read</code> or <code>write</code>: a read waits out a write's block, a write every read</td></tr>
+<tr><td><code>execute</code></td><td>internal</td><td>the statement run, under the lock; a <code>/batch</code>'s statements together, <code>fenec.statements</code> of them, and a <code>create index</code> or <code>compact</code> beside the database with <code>fenec.beside</code></td></tr>
+<tr><td><code>durability</code></td><td>internal</td><td>a write's wait for the disk after the lock (<code>--sync always</code>); on a primary it holds <code>fsync</code> and <code>replication.wait_sent</code>, the wait for its replicas' streams to send the write</td></tr>
+<tr><td><code>fenec.wait_for_write</code></td><td>internal</td><td>a replica's wait for the write a <code>Fenec-After</code> names</td></tr>
+<tr><td><code>forward</code></td><td>client</td><td><code>fenec-shard</code>'s forward to the node, to its whole answer: the node's server span is its child</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>The server span carries OpenTelemetry's names where one fits:
+<code>http.request.method</code>, <code>http.route</code> (a template:
+<code>/t/{tenant}/{collection}/near</code>), <code>url.path</code>,
+<code>http.response.status_code</code>, <code>server.address</code> and
+<code>server.port</code>, <code>client.address</code>,
+<code>db.system</code> (<code>fenecdb</code>),
+<code>db.operation.name</code> (<code>get</code>, <code>put</code>,
+<code>create</code>…) and, for FenecQL, <code>db.query.text</code> — the
+statement's shape, each literal and parameter written <code>$n</code>, as
+<a href="#statements">the statements' counts</a> show it, so no value
+reaches a span. A REST request's target holds values in its query string,
+so it has its route alone. A <code>--dir</code> node's and the router's
+spans carry <code>fenec.tenant</code>, the router's <code>fenec.node</code>,
+and every server span <code>fenec.request_id</code>, the
+<a href="#request-id">request id</a> its log lines carry. A 5xx marks the
+server span an error; a 4xx is the client's and does not.</p>
+
+<p>A request's <code>traceparent</code> is read as the W3C spec writes it;
+one that does not parse starts a trace of its own, and
+<code>tracestate</code> goes on unchanged. A trace starting at fenecdb is
+kept when its id's low 56 bits fall under the ratio, OpenTelemetry's
+<code>TraceIdRatioBased</code>, so a router and its nodes sampling at one
+ratio keep the same traces. <code>--trace-sample</code> is 1 with an
+endpoint; a busy server wants less. Health checks, scrapes, preflights and
+the studio's files are no spans, and a subscription or a replication
+stream, which lasts as long as its client, has none.</p>
+
+<p>The endpoint is taken from <code>--otlp-endpoint</code>, then
+<code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code>, both used as given unless
+they name no path, then <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>, under
+which <code>/v1/traces</code> goes. <code>--otlp-header k=v</code> (and
+<code>OTEL_EXPORTER_OTLP_HEADERS</code>) adds a header to every post, an
+API key a collector asks for; <code>OTEL_SERVICE_NAME</code> names the
+service (<code>fenec-server</code>, <code>fenec-shard</code>) and
+<code>OTEL_RESOURCE_ATTRIBUTES</code> adds to it. Spans go as OTLP over
+HTTP with JSON, <code>POST /v1/traces</code> with
+<code>application/json</code>, the collector's port 4318: an
+<code>OTEL_EXPORTER_OTLP_PROTOCOL</code> of <code>grpc</code> is refused
+at the start rather than sent to a port that cannot read it, and an
+<code>https://</code> endpoint likewise.</p>
+
+<p>A finished request's spans go into a queue of
+<code>OTEL_BSP_MAX_QUEUE_SIZE</code> spans (2 048), and a thread of their
+own posts it every <code>OTEL_BSP_SCHEDULE_DELAY</code> (1 s), or as soon
+as <code>OTEL_BSP_MAX_EXPORT_BATCH_SIZE</code> (512) are in, a post at
+most that many, each bounded by <code>OTEL_EXPORTER_OTLP_TIMEOUT</code>
+(10 s) and kept alive between posts. A request never waits for the
+collector: with the queue full its spans are dropped and counted, and a
+post that fails drops its spans, logged once a minute at most. <code>fenec-server</code> posts the
+last second's spans as it shuts down.</p>
+</details>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Metric</th><th>Type</th><th>What it says</th></tr></thead>
+<tbody>
+<tr><td><code>fenec_trace_spans_exported_total</code></td><td>counter</td><td>spans the endpoint took</td></tr>
+<tr><td><code>fenec_trace_spans_dropped_total{reason}</code></td><td>counter</td><td>spans left out: <code>queue_full</code>, the collector not keeping up, or <code>export_failed</code>, a post refused or unanswered</td></tr>
+</tbody>
+</table>
+</div>
+
 <h2>What it costs</h2>
 
 <p>Counting is close to free: a few nanoseconds a statement, and counting
@@ -351,6 +457,18 @@ the same way, 13.3 ns with eight threads counting, beside the 17 µs it adds
 to the request (<code>make shard-bench</code>). A scrape reads the gauges
 under the database's shared lock, beside the readers and ahead of a writer
 for as long as a <code>count</code> would be.</p>
+
+<p>Tracing off is one relaxed atomic load at each hook: in
+<code>make requests-bench</code>, six runs in turns against the server
+without it, one client's round trip stayed 0.022, 0.033, 0.059 and 0.021
+ms at the median for a row by id, a filter, a <code>near</code> and a put,
+against 0.022, 0.034, 0.059 and 0.022, and eight clients' requests a second
+inside the runs' own spread. On, every request sampled, to a collector on
+the same machine: 0.022, 0.034, 0.060 and 0.024 ms, and eight clients 2 to 9%
+fewer requests a second — the exporter's thread writing 250 000 spans a
+second as JSON took a core of the eight the clients and the server shared.
+A sampled request's spans cost it their timestamps and a few allocations;
+the JSON and the post are the exporter's.</p>
 
 <p>Counting it by its shape is a pass over its text into a buffer the thread
 keeps, and an entry found in the thread's shard: 0.34 µs for a read of 87
