@@ -1,0 +1,812 @@
+{
+  "title": "fenecdb data",
+  "uid": "fenecdb-data",
+  "tags": [
+    "fenecdb"
+  ],
+  "description": "fenec-server's own rows, not its metrics: each panel is a POST /query through the Infinity data source, its FenecQL fixed and Grafana's time range, interval and symbol passed as parameters.",
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-7d/d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "sym",
+        "label": "Symbol",
+        "datasource": {
+          "type": "yesoreyeram-infinity-datasource",
+          "uid": "fenecdb-data"
+        },
+        "query": {
+          "queryType": "infinity",
+          "refId": "variable",
+          "infinityQuery": {
+            "refId": "variable",
+            "type": "json",
+            "source": "url",
+            "parser": "backend",
+            "format": "table",
+            "url": "/query",
+            "url_options": {
+              "method": "POST",
+              "body_type": "raw",
+              "body_content_type": "application/json",
+              "data": "{\n  \"query\": \"get ticks select sym, count(*) as trades group sym order sym\",\n  \"params\": []\n}"
+            },
+            "root_selector": "",
+            "columns": [
+              {
+                "selector": "sym",
+                "text": "sym",
+                "type": "string"
+              }
+            ],
+            "computed_columns": [],
+            "filters": []
+          }
+        },
+        "definition": "get ticks select sym, count(*) as trades group sym order sym",
+        "refresh": 1,
+        "sort": 0,
+        "includeAll": false,
+        "multi": false,
+        "hide": 0,
+        "current": {},
+        "options": []
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "fenecdb metrics",
+      "type": "link",
+      "url": "/d/fenecdb",
+      "icon": "dashboard"
+    }
+  ],
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Analytics: events",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "fenecdb-data"
+      },
+      "type": "stat",
+      "title": "Events, visitors and signups",
+      "description": "One statement over the time range: count(*), count(distinct user) and the signups finished.",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "fenecdb-data"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\n  \"query\": \"get events select count(*) as events, count(distinct user) as visitors, sum(case when name = \\\"signup_completed\\\" then 1 else 0 end) as signups where at >= $1 and at < $2\",\n  \"params\": [${__from}, ${__to}]\n}"
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "events",
+              "text": "Events",
+              "type": "number"
+            },
+            {
+              "selector": "visitors",
+              "text": "Visitors",
+              "type": "number"
+            },
+            {
+              "selector": "signups",
+              "text": "Signups",
+              "type": "number"
+            }
+          ],
+          "computed_columns": [],
+          "filters": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "orientation": "vertical"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Events": 0,
+              "Visitors": 1,
+              "Signups": 2
+            },
+            "excludeByName": {},
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "fenecdb-data"
+      },
+      "type": "timeseries",
+      "title": "Visitors over time",
+      "description": "Events and distinct visitors a bucket: bucket(at, $__interval_ms), the range and the interval passed as parameters.",
+      "gridPos": {
+        "h": 9,
+        "w": 15,
+        "x": 0,
+        "y": 5
+      },
+      "interval": "1m",
+      "maxDataPoints": 300,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "fenecdb-data"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\n  \"query\": \"get events select bucket(at, $3) as t, count(*) as events, count(distinct user) as visitors where at >= $1 and at < $2 group t order t\",\n  \"params\": [${__from}, ${__to}, $__interval_ms]\n}"
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "t",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "events",
+              "text": "Events",
+              "type": "number"
+            },
+            {
+              "selector": "visitors",
+              "text": "Visitors",
+              "type": "number"
+            }
+          ],
+          "computed_columns": [],
+          "filters": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Time": 0,
+              "Events": 1,
+              "Visitors": 2
+            },
+            "excludeByName": {},
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "fenecdb-data"
+      },
+      "type": "table",
+      "title": "Top pages",
+      "description": "Pageviews and distinct visitors a path over the range, the ten most viewed.",
+      "gridPos": {
+        "h": 9,
+        "w": 9,
+        "x": 15,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "fenecdb-data"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\n  \"query\": \"get events select path, count(*) as views, count(distinct user) as visitors where name = \\\"pageview\\\" and at >= $1 and at < $2 group path order views desc limit 10\",\n  \"params\": [${__from}, ${__to}]\n}"
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "path",
+              "text": "Page",
+              "type": "string"
+            },
+            {
+              "selector": "views",
+              "text": "Views",
+              "type": "number"
+            },
+            {
+              "selector": "visitors",
+              "text": "Visitors",
+              "type": "number"
+            }
+          ],
+          "computed_columns": [],
+          "filters": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "minWidth": 50,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Views"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-BlPu"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Visitors"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Page": 0,
+              "Views": 1,
+              "Visitors": 2
+            },
+            "excludeByName": {},
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "fenecdb-data"
+      },
+      "type": "barchart",
+      "title": "Distinct users per day (UTC)",
+      "description": "count(distinct user) by bucket(at, 1d): exact, up to a million values a query. approx_count_distinct(user) is the HyperLogLog estimate past that.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "fenecdb-data"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\n  \"query\": \"get events select bucket(at, 1d) as day, count(distinct user) as users where at >= $1 and at < $2 group day order day\",\n  \"params\": [${__from}, ${__to}]\n}"
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "day",
+              "text": "Day",
+              "type": "timestamp"
+            },
+            {
+              "selector": "users",
+              "text": "Users",
+              "type": "number"
+            }
+          ],
+          "computed_columns": [],
+          "filters": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "Day",
+        "orientation": "vertical",
+        "showValue": "always",
+        "barWidth": 0.7,
+        "groupWidth": 0.7,
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Day": 0,
+              "Users": 1
+            },
+            "excludeByName": {},
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 6,
+      "title": "Market data: ticks",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "panels": []
+    },
+    {
+      "id": 7,
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "fenecdb-data"
+      },
+      "type": "candlestick",
+      "title": "Candles: $sym",
+      "description": "Open, high, low, close and volume a bucket: first(px by at), max(px), min(px), last(px by at), sum(qty). The symbol is a parameter too, quoted by Grafana's doublequote format (its own quotes, none around it).",
+      "gridPos": {
+        "h": 11,
+        "w": 15,
+        "x": 0,
+        "y": 23
+      },
+      "interval": "1m",
+      "maxDataPoints": 120,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "fenecdb-data"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\n  \"query\": \"get ticks select bucket(at, $4) as t, first(px by at) as open, max(px) as high, min(px) as low, last(px by at) as close, sum(qty) as volume where sym = $3 and at >= $1 and at < $2 group t order t\",\n  \"params\": [${__from}, ${__to}, ${sym:doublequote}, $__interval_ms]\n}"
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "t",
+              "text": "Time",
+              "type": "timestamp"
+            },
+            {
+              "selector": "open",
+              "text": "open",
+              "type": "number"
+            },
+            {
+              "selector": "high",
+              "text": "high",
+              "type": "number"
+            },
+            {
+              "selector": "low",
+              "text": "low",
+              "type": "number"
+            },
+            {
+              "selector": "close",
+              "text": "close",
+              "type": "number"
+            },
+            {
+              "selector": "volume",
+              "text": "volume",
+              "type": "number"
+            }
+          ],
+          "computed_columns": [],
+          "filters": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "mode": "candles+volume",
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "colors": {
+          "up": "green",
+          "down": "red"
+        },
+        "includeAllFields": false,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Time": 0,
+              "open": 1,
+              "high": 2,
+              "low": 3,
+              "close": 4,
+              "volume": 5
+            },
+            "excludeByName": {},
+            "renameByName": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "fenecdb-data"
+      },
+      "type": "table",
+      "title": "Latest price per symbol",
+      "description": "Each symbol's last trade before the range's end, last(px by at), and its change since the first trade in the range.",
+      "gridPos": {
+        "h": 11,
+        "w": 9,
+        "x": 15,
+        "y": 23
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "fenecdb-data"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/query",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\n  \"query\": \"get ticks select sym, last(px by at) as price, (last(px by at) - first(px by at)) / first(px by at) * 100 as change, sum(qty) as volume where at >= $1 and at < $2 group sym order sym\",\n  \"params\": [${__from}, ${__to}]\n}"
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "sym",
+              "text": "Symbol",
+              "type": "string"
+            },
+            {
+              "selector": "price",
+              "text": "Price",
+              "type": "number"
+            },
+            {
+              "selector": "change",
+              "text": "Change",
+              "type": "number"
+            },
+            {
+              "selector": "volume",
+              "text": "Volume",
+              "type": "number"
+            }
+          ],
+          "computed_columns": [],
+          "filters": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "minWidth": 50,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Price"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Change"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Volume"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Symbol": 0,
+              "Price": 1,
+              "Change": 2,
+              "Volume": 3
+            },
+            "excludeByName": {},
+            "renameByName": {}
+          }
+        }
+      ]
+    }
+  ]
+}

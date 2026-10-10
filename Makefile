@@ -17,7 +17,7 @@ WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --fe
 .PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench ttl-bench growth-bench search-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
+	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
 	site site-serve site-deploy
 
 all: test wasm
@@ -516,6 +516,23 @@ docker-compact:
 
 docker-down:
 	-docker rm -f fenecdb
+
+## The "fenecdb data" Grafana dashboard end to end (Docker): monitoring/'s
+## compose with fenec-server built from this checkout, under a project and
+## on ports of its own so it runs beside a stack already up; every panel's
+## query and the variable's asked of Grafana's /api/ds/query and held to
+## fenec-server's own answer; then down with its volumes, whatever happened
+GRAFANA_CHECK = FENEC_HTTP_TOKEN=grafana-check FENEC_METRICS_TOKEN=grafana-check-scrape \
+	FENEC_JWT_SECRET=grafana-check-secret-of-32-bytes-at-least \
+	FENEC_PORT=18780 GRAFANA_PORT=13780 PROMETHEUS_PORT=19780 \
+	docker compose -p fenec-grafana-check -f monitoring/docker-compose.yml
+grafana-check:
+	@$(GRAFANA_CHECK) up -d --build && \
+	  GRAFANA_URL=http://127.0.0.1:13780 FENEC_URL=http://127.0.0.1:18780 \
+	    FENEC_HTTP_TOKEN=grafana-check node monitoring/grafana/check.mjs; \
+	  status=$$?; \
+	  if [ $$status -ne 0 ]; then $(GRAFANA_CHECK) logs --no-color --tail 60; fi; \
+	  $(GRAFANA_CHECK) down -v --remove-orphans; exit $$status
 
 ## A file under updates, compacted on its own or not: YCSB's 1 KB records,
 ## a field updated at a time while a thread reads whole records, the file's

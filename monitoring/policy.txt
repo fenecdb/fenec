@@ -1,0 +1,13 @@
+# What a JSON Web Token may do here (fenec-server --policy). The server's own
+# token (FENEC_HTTP_TOKEN) is no JWT and is held to none of this: the seed
+# writes with it.
+#
+# collection    access          rows   role
+
+# Grafana's data source reads the collections its dashboard shows and
+# writes nothing. Any viewer of a Grafana can send a data source any query
+# (POST /api/ds/query), so this line, not the dashboard, decides what a
+# Grafana user can read: no other collection exists for the token, and every
+# write, schema change, /_changes and /_metrics refuses it.
+events          read                   for grafana
+ticks           read                   for grafana
