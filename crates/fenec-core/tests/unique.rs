@@ -372,3 +372,57 @@ fn a_lookup_and_a_filter_take_a_unique_index_as_a_hash() {
     let plan = format!("{:?}", plan.rows().unwrap().rows);
     assert!(plan.contains("hash"), "{plan}");
 }
+
+/// Past 114 688 values a hash index's map is split into shards that grow
+/// one at a time (`maps::Sharded`): it still refuses a value any row
+/// holds, finds each row, lets go of a deleted row's value and counts a
+/// facet over every bucket -- in a database reopened over its file too,
+/// whose index is built from the documents and splits as it goes.
+#[test]
+fn a_unique_index_past_its_split_answers_as_one_map_did() {
+    const N: i64 = 119_000;
+    let tap = Tap::new();
+    let mut db = tap.database();
+    ok(
+        &mut db,
+        "create collection users (email text @unique, team int @hash)",
+    );
+    let put = fenec_ql::parse_one("put users {email: $1, team: $2}").unwrap();
+    for b in 0..N / 1000 {
+        let args: Vec<[Value; 2]> = (0..1000)
+            .map(|i| {
+                let n = b * 1000 + i;
+                [text(&format!("{n}@x")), Value::Int(n % 7)]
+            })
+            .collect();
+        let stmts: Vec<(&Statement, &[Value])> = args.iter().map(|a| (&put, &a[..])).collect();
+        db.execute_block(&stmts).unwrap();
+    }
+    for db in [&mut db, &mut tap.reopen()] {
+        duplicate(db, r#"put users {email: "69999@x", team: 1}"#);
+        duplicate(db, r#"insert users {email: "0@x", team: 1}"#);
+        for n in (0..N).step_by(997) {
+            let q = format!(r#"get users where email = "{n}@x" select team"#);
+            let r = db.query(&fenec_ql::parse_one(&q).unwrap(), &[]).unwrap();
+            assert_eq!(
+                r.rows().unwrap().rows[0].values[0],
+                Value::Int(n % 7),
+                "{q}"
+            );
+        }
+        let q = fenec_ql::parse_one("get users facet team limit 0").unwrap();
+        let r = db.query(&q, &[]).unwrap();
+        let facets = format!("{:?}", r.rows().unwrap().facets);
+        assert_eq!(facets.matches("17000").count(), 7, "{facets}");
+    }
+    ok(&mut db, r#"del users where email = "12345@x""#);
+    ok(&mut db, r#"put users {email: "12345@x", team: 3}"#);
+    duplicate(
+        &mut db,
+        r#"set users {email: "12345@x"} where email = "1@x""#,
+    );
+    let r = db
+        .query(&fenec_ql::parse_one("get users count").unwrap(), &[])
+        .unwrap();
+    assert_eq!(r.rows().unwrap().rows[0].values[0], Value::Int(N));
+}

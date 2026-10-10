@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench growth-bench search-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -548,6 +548,13 @@ ttl-bench:
 	./target/release/examples/expiry sweep 100000 1000
 	./target/release/examples/expiry hash 10000000 20000 1000
 	./target/release/examples/expiry writes 1000000
+
+## A @unique field's index as it grows: 4 000 000 puts one at a time, each
+## timed -- p50, p99, p99.99, the longest and every one past 5 ms, where a
+## table that outgrew itself moved every key -- then the index built after an
+## open, a read by it and a lookup in it (crates/fenec-core/examples/growth.rs).
+growth-bench:
+	$(CARGO) run --release -p fenec-core --example growth -- 4000000
 
 ## What opening a file costs, read into memory or mapped: a 1 GB file of
 ## 2.3 million rows, written once, then opened each way in a process of its

@@ -1099,10 +1099,11 @@ impl Sink for NullSink {
 /// grows the data -- reads a number rather than walking every bucket. A
 /// bucket its last document leaves goes with it: kept, the keys of values
 /// that come and go (a token, a session id) piled up until the file was
-/// opened again.
+/// opened again. Its table grows a shard at a time (`maps::Sharded`): a
+/// `@unique` field's grew whole, every key at once under the write lock.
 #[derive(Default)]
 pub struct HashIndex {
-    map: crate::maps::Map<Vec<u8>, Bucket>,
+    map: crate::maps::Sharded<Vec<u8>, Bucket>,
     heap: usize,
 }
 

@@ -74,6 +74,7 @@ make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M
+make growth-bench        # a @unique index over 4M puts one at a time: the longest (its table's growth), p50/p99.99, the build after an open, a lookup
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 ```
@@ -1385,6 +1386,29 @@ number is kept in are of the index's own type (`Bucket::one`): through
 `flatten` and a second map type the change was 1.3 KB brotli of the
 browser module. Its buckets stay one sorted list (the runs `cfg`'d out,
 a removal a `memmove` of the rest): 390 bytes, 0.4 KB brotli.
+
+**A hash index's table grows a 256th at a time** (`maps::Sharded`). A
+`HashMap` that is full moves every key into a table twice its size in the
+insert that found it full -- under the write lock, every request waiting
+-- and a `@unique` field holds a key a row: `make recon-bench`'s journal
+passing 1 835 008 entries held one transfer and everything behind it 120
+to 137 ms in every run, and `make growth-bench`'s 4 million puts one at a
+time took 7, 19, 49, 109 and 235-267 ms at each doubling from 229 376
+keys. Past `SPLIT_AT` (114 688 keys, a table of 2^17 buckets' worth) the
+map is 256 maps, a key's picked by the top byte of an `Fx` seeded at the
+split, each growing on its own: the longest put is the split's, 6.2 ms.
+Below it a map is the one table it was, the same to the nanosecond at
+100 000 keys. What it costs past the split is the pick: a lookup in a loop
+over a million keys 66 -> 93 ns, a lone put's p50 1.08 -> 1.12 us (1.12
+-> 1.17 at 4 million), an index built after an open 7-13% faster (the
+shards' tables grow in cache), 4 million puts the same 5.7 s. The pick's
+hash is the cost, not the tables: picked by a key's length, which put
+nearly every key in one shard, or by a constant, lookups were 66 ns, by
+the last 8 bytes 90, and the shards sharing one SipHash key changed
+nothing. Rejected: one table taken into a new one 4 096 keys at a time,
+looked up in both meanwhile -- lookups 163 ns, since a map that stops
+taking keys never finishes its steps, and builds a third slower. The
+browser module keeps the one map (`cfg`), byte for byte the size it was.
 
 **`in (get ...)` is answered before the query, as the list it is.**
 `Expr::InSelect` holds an inner `Select`; `Database::answered` (from
