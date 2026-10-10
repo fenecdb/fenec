@@ -701,6 +701,8 @@ type opts struct {
 	sort                             []sortOpt
 	top                              *int
 	require                          *int
+	returning                        []string
+	returningSet                     bool
 	ranges                           []float64
 	rangesSet, disjunctive           bool
 	// A mark's tags and a snippet's ellipsis, and whether each was given:
@@ -1409,7 +1411,7 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		}
 	}
 	if b.count {
-		extra := b.extraClause()
+		extra := b.extraClause(false)
 		if extra == "" && b.require != "" {
 			extra = "require"
 		}
@@ -1575,7 +1577,7 @@ func whereOf(cond []*node, bind *binder) (string, error) {
 	return render(root, bind, "")
 }
 
-func (b *Builder) extraClause() string {
+func (b *Builder) extraClause(picks bool) string {
 	switch {
 	case b.near != nil:
 		return "near"
@@ -1583,9 +1585,9 @@ func (b *Builder) extraClause() string {
 		return "match"
 	case b.rerank != nil:
 		return "rerank"
-	case len(b.order) > 0:
+	case len(b.order) > 0 && !picks:
 		return "order"
-	case b.hasLimit:
+	case b.hasLimit && !picks:
 		return "limit"
 	case b.offset > 0:
 		return "offset"
@@ -1595,8 +1597,9 @@ func (b *Builder) extraClause() string {
 	return ""
 }
 
-// Near, Order, Limit mean something only to a read; dropped from a write,
-// Limit(1).Delete would delete every row.
+// Near, Offset, Select mean something only to a read; dropped from a
+// write, Offset(1).Delete would delete from the first row. Order and Limit
+// pick the rows an update or a delete writes.
 func (b *Builder) assertPlain(verb string) error {
 	if b.err != nil {
 		return b.err
@@ -1604,7 +1607,7 @@ func (b *Builder) assertPlain(verb string) error {
 	if b.require != "" {
 		return refuse("%s takes require as its option: %s(..., { require: n })", verb, verb)
 	}
-	if extra := b.extraClause(); extra != "" {
+	if extra := b.extraClause(verb == "update" || verb == "delete"); extra != "" {
 		return refuse("%s cannot be used with `%s`", verb, extra)
 	}
 	if len(b.lookups) > 0 {
@@ -1626,10 +1629,48 @@ func (b *Builder) requireFilter(verb string, options []Opt, bind *binder) (strin
 	if err != nil || where != "" {
 		return " where " + where, err
 	}
-	if gather(options).all {
+	if gather(options).all || b.hasLimit {
 		return "", nil
 	}
 	return "", refuse("an unfiltered %s covers the whole collection; if you mean it, %s({ all: true })", verb, verb)
+}
+
+// pick is an update's or a delete's " order ... limit n returning ...":
+// the rows it picks, and whether it answers them.
+func (b *Builder) pick(o opts) (string, error) {
+	var sql strings.Builder
+	writeOrder(&sql, b.order)
+	if b.hasLimit {
+		fmt.Fprintf(&sql, " limit %d", b.limit)
+	}
+	if !o.returningSet {
+		return sql.String(), nil
+	}
+	if len(o.returning) == 0 {
+		return "", refuse("returning names the fields it answers, or * for every one")
+	}
+	for _, f := range o.returning {
+		if f == "*" {
+			if len(o.returning) > 1 {
+				return "", refuse("returning * answers every field: it takes no other")
+			}
+			sql.WriteString(" returning *")
+			return sql.String(), nil
+		}
+	}
+	for i, f := range o.returning {
+		p, err := fieldPath(f)
+		if err != nil {
+			return "", err
+		}
+		if i == 0 {
+			sql.WriteString(" returning ")
+		} else {
+			sql.WriteString(", ")
+		}
+		sql.WriteString(p)
+	}
+	return sql.String(), nil
 }
 
 // Doc is a document whose fields keep the order given, which is the
@@ -1899,6 +1940,18 @@ func IfAbsent() Opt { return func(o *opts) { o.ifAbsent = true } }
 // rows it is refused (412, CodeUnmet) and its batch put back.
 func Require(n int) Opt { return func(o *opts) { o.require = intp(n) } }
 
+// Returning, among Update's and Delete's options, is ... returning: the
+// rows written answered rather than counted, in Result.Rows -- an
+// update's as written, a delete's as they were -- under the fields named,
+// "*" for every one. With Order and Limit it is a job queue's claim:
+//
+//	db.From("jobs").WhereCond(Raw("run_at <= now()")).Order("run_at", "asc").
+//		Limit(10).Update(ctx, D("owner", me, "run_at", Expr("now() + ?", 30000),
+//		"attempts", Inc(1)), Returning("*"))
+func Returning(fields ...string) Opt {
+	return func(o *opts) { o.returning, o.returningSet = fields, true }
+}
+
 // requireClause is " require n" for Require: a whole number from 0 written
 // into the text -- not a parameter, as limit is not, so a statement keeps
 // its shape.
@@ -1955,7 +2008,9 @@ func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 }
 
 // ToUpdate is the set of the rows the filter names, not sent; with no
-// filter it is refused unless All is given.
+// filter it is refused unless All is given or a Limit bounds it. Order and
+// Limit before it pick the rows it writes -- the page a get with them
+// answers -- and Returning answers them as written.
 func (b *Builder) ToUpdate(patch any, options ...Opt) (string, []any, error) {
 	if err := b.assertPlain("update"); err != nil {
 		return "", nil, err
@@ -1969,11 +2024,16 @@ func (b *Builder) ToUpdate(patch any, options ...Opt) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	required, err := requireClause(gather(options))
+	o := gather(options)
+	pick, err := b.pick(o)
 	if err != nil {
 		return "", nil, err
 	}
-	return "set " + b.collection + " " + body + where + required, bind.params, nil
+	required, err := requireClause(o)
+	if err != nil {
+		return "", nil, err
+	}
+	return "set " + b.collection + " " + body + where + pick + required, bind.params, nil
 }
 
 // ToUpsert is put ... if absent else set {patch}, not sent: a document
@@ -2014,7 +2074,9 @@ func (b *Builder) ToUpsert(docs []any, patch any, options ...Opt) (string, []any
 }
 
 // ToDelete is the del of the rows the filter names, not sent; with no
-// filter it is refused unless All is given.
+// filter it is refused unless All is given or a Limit bounds it. Order,
+// Limit and Returning as ToUpdate's, the rows answered as they were: a
+// pop.
 func (b *Builder) ToDelete(options ...Opt) (string, []any, error) {
 	if err := b.assertPlain("delete"); err != nil {
 		return "", nil, err
@@ -2024,11 +2086,16 @@ func (b *Builder) ToDelete(options ...Opt) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	required, err := requireClause(gather(options))
+	o := gather(options)
+	pick, err := b.pick(o)
 	if err != nil {
 		return "", nil, err
 	}
-	return "del " + b.collection + where + required, bind.params, nil
+	required, err := requireClause(o)
+	if err != nil {
+		return "", nil, err
+	}
+	return "del " + b.collection + where + pick + required, bind.params, nil
 }
 
 // ------------------------------------------------------------- endpoints
@@ -2123,8 +2190,8 @@ func (b *Builder) exec(ctx context.Context, text string, params []any) (Result, 
 	if err != nil {
 		return Result{}, err
 	}
-	var r Result
-	if err := json.Unmarshal(raw, &r); err != nil {
+	r, err := resultOf(raw)
+	if err != nil {
 		return Result{}, fmt.Errorf("fenecdb: a write answered %q", raw)
 	}
 	r.Seq, r.Replayed = h.seq, h.replayed

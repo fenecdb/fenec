@@ -593,6 +593,14 @@ export class Query {
   }
 
   /**
+   * Whether `order` or `limit` was given: an update or a delete then picks
+   * the rows it writes, which a sync replica leaves to the server.
+   */
+  get picks() {
+    return this.#s.order.length > 0 || this.#s.limit !== undefined;
+  }
+
+  /**
    * The opaque context passed in with `bind`. The builder never interprets
    * it, it only carries it along the chain; subclasses keep their state here.
    */
@@ -1137,14 +1145,23 @@ export class Query {
     return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}${absent}${required}`, params];
   }
 
-  /** The `set` text. A value may be `inc(n)` or `expr(text, ...params)`. */
+  /**
+   * The `set` text. A value may be `inc(n)` or `expr(text, ...params)`.
+   * `order` and `limit` before it pick the rows it writes -- the page a
+   * `get` with them would answer -- and `{ returning }` answers them as
+   * written: `true` every field, or the fields named. A job queue's claim:
+   *
+   *   from('jobs').where(raw('run_at <= now()')).order('run_at').limit(10)
+   *     .update({ owner, run_at: expr('now() + ?', 30000), attempts: inc(1) },
+   *             { returning: true })
+   */
   toUpdate(patch, opts = {}) {
     this.#assertPlain('update');
     const params = [];
     const bind = binder(params);
     const body = renderDoc(patch, bind, 'update');
     const where = this.#requireFilter('update', opts, bind);
-    return [`set ${this.#s.collection} ${body}${where}${requireClause(opts)}`, params];
+    return [`set ${this.#s.collection} ${body}${where}${this.#pick(opts)}${requireClause(opts)}`, params];
   }
 
   /**
@@ -1172,13 +1189,16 @@ export class Query {
     return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`} if absent else set ${set}${required}`, params];
   }
 
-  /** The `del` text. */
+  /**
+   * The `del` text; `order`, `limit` and `{ returning }` as `toUpdate`'s,
+   * the rows answered as they were: a pop.
+   */
   toDelete(opts = {}) {
     this.#assertPlain('delete');
     const params = [];
     const bind = binder(params);
     const where = this.#requireFilter('delete', opts, bind);
-    return [`del ${this.#s.collection}${where}${requireClause(opts)}`, params];
+    return [`del ${this.#s.collection}${where}${this.#pick(opts)}${requireClause(opts)}`, params];
   }
 
   /**
@@ -1202,24 +1222,34 @@ export class Query {
     return (await this.#exec(...this.toUpsert(list, patch, opts))).count ?? 0;
   }
 
-  /** `set` -- updates the rows matching the filter. Returns: rows affected. */
+  /**
+   * `set` -- updates the rows matching the filter. Returns: rows affected,
+   * or with `{ returning }` the rows as written.
+   */
   async update(patch, opts = {}) {
-    return (await this.#exec(...this.toUpdate(patch, opts))).count ?? 0;
+    const r = await this.#exec(...this.toUpdate(patch, opts));
+    return opts?.returning ? rowsOf(r) : r.count ?? 0;
   }
 
-  /** `del` -- deletes the rows matching the filter. Returns: rows deleted. */
+  /**
+   * `del` -- deletes the rows matching the filter. Returns: rows deleted,
+   * or with `{ returning }` the rows as they were.
+   */
   async delete(opts = {}) {
-    return (await this.#exec(...this.toDelete(opts))).count ?? 0;
+    const r = await this.#exec(...this.toDelete(opts));
+    return opts?.returning ? rowsOf(r) : r.count ?? 0;
   }
 
-  // `near`/`order`/`limit` only mean something on the read path; silently
-  // ignoring them in a write statement would invite the "limit(1) deletes a
-  // single row" misconception.
+  // `near`, `offset` and `select` only mean something on the read path;
+  // silently ignoring them in a write statement would invite the
+  // "offset(1) deletes from the second row" misconception. `order` and
+  // `limit` pick the rows an update or a delete writes; an insert writes
+  // its documents, and takes neither.
   #assertPlain(verb) {
     if (this.#s.require) {
       throw new FenecError(`${verb} takes require as its option: ${verb}(..., { require: n })`);
     }
-    const extra = this.#extraClause();
+    const extra = this.#extraClause(verb === 'update' || verb === 'delete');
     if (extra) throw new FenecError(`${verb} cannot be used with \`${extra}\``);
     // Not among the read clauses `count` refuses, since a required lookup
     // decides what a count counts; a write has no use for one, and left
@@ -1239,24 +1269,36 @@ export class Query {
     if (extra) throw new FenecError(`count cannot be used with \`${extra}\``);
   }
 
-  #extraClause() {
+  #extraClause(picks = false) {
     const { near, match, rerank, order, limit, offset, project } = this.#s;
     return near ? 'near'
       : match ? 'match'
       : rerank ? 'rerank'
-      : order.length ? 'order'
-      : limit !== undefined ? 'limit'
+      : order.length && !picks ? 'order'
+      : limit !== undefined && !picks ? 'limit'
       : offset ? 'offset'
       : project ? 'select'
       : null;
   }
 
+  // An update's or a delete's ` order ... limit n returning ...`: the rows
+  // it picks, and whether it answers them.
+  #pick(opts) {
+    let sql = '';
+    for (const [i, o] of this.#s.order.entries()) {
+      sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
+    }
+    if (this.#s.limit !== undefined) sql += ` limit ${this.#s.limit}`;
+    return sql + returningClause(opts);
+  }
+
   // An unfiltered `update`/`delete` covers the whole collection. That is far
   // too easy to do by accident and impossible to undo: we want it spelled out.
+  // A `limit` bounds it: `del jobs order id limit 10` pops ten.
   #requireFilter(verb, opts, bind) {
     const where = this.#where(bind);
     if (where) return ` where ${where}`;
-    if (opts && opts.all === true) return '';
+    if ((opts && opts.all === true) || this.#s.limit !== undefined) return '';
     throw new FenecError(
       `an unfiltered ${verb} covers the whole collection; if you mean it, ` +
         `${verb}({ all: true })`,
@@ -1324,6 +1366,22 @@ function requireClause(opts) {
     throw new FenecError(`require takes a count of rows, a whole number from 0 (got ${String(n)})`);
   }
   return ` require ${n}`;
+}
+
+// ` returning ...` for a write's `{ returning }`: `true` or `['*']` every
+// field, or the fields named, each a field or a path.
+function returningClause(opts) {
+  const r = opts?.returning;
+  if (r === undefined || r === null || r === false) return '';
+  if (r === true) return ' returning *';
+  if (!Array.isArray(r) || r.length === 0) {
+    throw new FenecError('returning names the fields it answers, or * for every one');
+  }
+  if (r.includes('*')) {
+    if (r.length > 1) throw new FenecError('returning * answers every field: it takes no other');
+    return ' returning *';
+  }
+  return ` returning ${r.map(path).join(', ')}`;
 }
 
 function renderDoc(doc, bind, write) {

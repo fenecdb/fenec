@@ -323,6 +323,15 @@ func options(o object) []fenecdb.Opt {
 			}
 		case "require":
 			out = append(out, fenecdb.Require(v.(int)))
+		case "returning":
+			// JavaScript's true is every field, "*" here.
+			if b, ok := v.(bool); ok {
+				if b {
+					out = append(out, fenecdb.Returning("*"))
+				}
+			} else {
+				out = append(out, fenecdb.Returning(strs(v)...))
+			}
 		case "on":
 			out = append(out, fenecdb.On(v.(string)))
 		case "parentKey":

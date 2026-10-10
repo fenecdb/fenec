@@ -954,7 +954,7 @@ public struct Query: Sendable {
                 seen.append(l.collection)
             }
         }
-        if count, let extra = extraClause ?? (requirement.isEmpty ? nil : "require") {
+        if count, let extra = extraClause() ?? (requirement.isEmpty ? nil : "require") {
             throw FenecError.builder("count cannot be used with `\(extra)`")
         }
 
@@ -1036,24 +1036,27 @@ public struct Query: Sendable {
         return try Builder.render(root, bind)
     }
 
-    private var extraClause: String? {
+    private func extraClause(picks: Bool = false) -> String? {
         near != nil ? "near"
             : match != nil ? "match"
             : rerank != nil ? "rerank"
-            : !order.isEmpty ? "order"
-            : limit != nil ? "limit"
+            : !order.isEmpty && !picks ? "order"
+            : limit != nil && !picks ? "limit"
             : offset > 0 ? "offset"
             : project != nil ? "select"
             : nil
     }
 
-    // Near, order, limit mean something only to a read; dropped from a
-    // write, `limit(1).delete()` would delete every row.
+    // Near, offset, select mean something only to a read; dropped from a
+    // write, `offset(1).delete()` would delete from the first row. `order`
+    // and `limit` pick the rows an update or a delete writes.
     private func assertPlain(_ verb: String) throws {
         if !requirement.isEmpty {
             throw FenecError.builder("\(verb) takes require as its option: \(verb)(..., { require: n })")
         }
-        if let extra = extraClause { throw FenecError.builder("\(verb) cannot be used with `\(extra)`") }
+        if let extra = extraClause(picks: verb == "update" || verb == "delete") {
+            throw FenecError.builder("\(verb) cannot be used with `\(extra)`")
+        }
         if !lookups.isEmpty { throw FenecError.builder("\(verb) cannot be used with `lookup`") }
         if !facets.isEmpty { throw FenecError.builder("\(verb) cannot be used with `facet`") }
         if verb == "insert" || verb == "upsert", !cond.isEmpty { throw FenecError.builder("\(verb) cannot be used with `where`") }
@@ -1061,9 +1064,10 @@ public struct Query: Sendable {
 
     // An update or delete of every row is too easy to do by accident and
     // cannot be undone: it has to be asked for, with `all`.
+    // A `limit` bounds it.
     private func requireFilter(_ verb: String, _ all: Bool, _ bind: Binder) throws -> String {
         if let w = try whereOf(cond, bind) { return " where \(w)" }
-        if all { return "" }
+        if all || limit != nil { return "" }
         throw FenecError.builder(
             "an unfiltered \(verb) covers the whole collection; if you mean it, \(verb)({ all: true })")
     }
@@ -1074,6 +1078,21 @@ public struct Query: Sendable {
         guard let n else { return "" }
         if n < 0 { throw FenecError.builder("require takes a count of rows, a whole number from 0 (got \(n))") }
         return " require \(n)"
+    }
+
+    // An update's or a delete's ` order ... limit n returning ...`: the rows
+    // it picks, and whether it answers them, under the fields named -- `*`
+    // for every one.
+    private func pick(_ returning: [String]?) throws -> String {
+        var out = Query.orderText(order)
+        if let limit { out += " limit \(limit)" }
+        guard let returning else { return out }
+        if returning.isEmpty { throw FenecError.builder("returning names the fields it answers, or * for every one") }
+        if returning.contains("*") {
+            if returning.count > 1 { throw FenecError.builder("returning * answers every field: it takes no other") }
+            return out + " returning *"
+        }
+        return out + " returning " + (try returning.map { try Builder.path($0) }).joined(separator: ", ")
     }
 
     private static func docs(_ v: Value) -> [Value] {
@@ -1099,14 +1118,17 @@ public struct Query: Sendable {
     }
 
     /// The `set` of the rows the filter names, not run; with no filter it is
-    /// refused unless `all`; with `require`, refused unless it set exactly
-    /// that many rows.
-    public func toUpdate(_ patch: any FenecValue, all: Bool = false, require: Int? = nil) throws -> (text: String, params: [Value]) {
+    /// refused unless `all` or a `limit` bounds it; with `require`, refused
+    /// unless it set exactly that many rows. `order` and `limit` before it
+    /// pick the rows it writes -- the page a `get` with them answers -- and
+    /// `returning` answers them as written, the fields named or `["*"]`
+    /// for every one: a job queue's claim (`updateReturning`).
+    public func toUpdate(_ patch: any FenecValue, all: Bool = false, require: Int? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("update")
         let bind = Binder()
         let body = try Builder.renderDoc(try patch.fenecValue(), bind)
         let filter = try requireFilter("update", all, bind)
-        return ("set \(collection) \(body)\(filter)\(try Query.requireClause(require))", bind.params)
+        return ("set \(collection) \(body)\(filter)\(try pick(returning))\(try Query.requireClause(require))", bind.params)
     }
 
     /// The upsert, `put ... if absent else set {patch}`, not run: a document
@@ -1126,13 +1148,14 @@ public struct Query: Sendable {
     }
 
     /// The `del` of the rows the filter names, not run; with no filter it is
-    /// refused unless `all`; with `require`, refused unless it deleted
-    /// exactly that many rows.
-    public func toDelete(all: Bool = false, require: Int? = nil) throws -> (text: String, params: [Value]) {
+    /// refused unless `all` or a `limit` bounds it; with `require`, refused
+    /// unless it deleted exactly that many rows. `order`, `limit` and
+    /// `returning` as `toUpdate`'s, the rows answered as they were: a pop.
+    public func toDelete(all: Bool = false, require: Int? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("delete")
         let bind = Binder()
         let filter = try requireFilter("delete", all, bind)
-        return ("del \(collection)\(filter)\(try Query.requireClause(require))", bind.params)
+        return ("del \(collection)\(filter)\(try pick(returning))\(try Query.requireClause(require))", bind.params)
     }
 
     // -------------------------------------------------------------- running
@@ -1208,5 +1231,21 @@ public struct Query: Sendable {
     @discardableResult
     public func delete(all: Bool = false, require: Int? = nil) async throws -> Int {
         try await run(toDelete(all: all, require: require)).affected
+    }
+
+    /// `update` that answers the rows it set, as written, under the fields
+    /// named -- `["*"]` every one. With `order` and `limit` a job queue's
+    /// claim: `from("jobs").where(.raw("run_at <= now()")).order("run_at")
+    /// .limit(10).updateReturning(["owner": me, "run_at": .expr("now() + ?",
+    /// 30000), "attempts": .inc(1)])`.
+    @discardableResult
+    public func updateReturning(_ patch: any FenecValue, returning: [String] = ["*"], all: Bool = false, require: Int? = nil) async throws -> [Row] {
+        try await run(toUpdate(patch, all: all, require: require, returning: returning)).rows
+    }
+
+    /// `delete` that answers the rows it deleted, as they were: a pop.
+    @discardableResult
+    public func deleteReturning(returning: [String] = ["*"], all: Bool = false, require: Int? = nil) async throws -> [Row] {
+        try await run(toDelete(all: all, require: require, returning: returning)).rows
     }
 }

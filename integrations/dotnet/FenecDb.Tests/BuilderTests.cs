@@ -75,6 +75,15 @@ public sealed class BuilderTests(Servers servers)
 
     static long? Long(JsonElement? e) => e?.GetInt64();
 
+    // JavaScript's returning: true is every field, "*" here.
+    static IReadOnlyList<string>? Returning(JsonElement? e) => e switch
+    {
+        null => null,
+        { ValueKind: JsonValueKind.True } => ["*"],
+        { ValueKind: JsonValueKind.False } => null,
+        { } list => list.EnumerateArray().Select(f => f.GetString()!).ToList(),
+    };
+
     static IEnumerable<SortKey>? Order(JsonElement? e) => e switch
     {
         null => null,
@@ -175,9 +184,9 @@ public sealed class BuilderTests(Servers servers)
                 {
                     "toFenecQL" => q.ToFenecQL(),
                     "toInsert" => q.ToInsert(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
-                    "toUpdate" => q.ToUpdate(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "toUpdate" => q.ToUpdate(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Returning(Opt(a, 1, "returning"))),
                     "toUpsert" => q.ToUpsert(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require"))),
-                    "toDelete" => q.ToDelete(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require"))),
+                    "toDelete" => q.ToDelete(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require")), Returning(Opt(a, 0, "returning"))),
                     _ => null,
                 };
                 if (text is var (t, ps))
@@ -194,9 +203,9 @@ public sealed class BuilderTests(Servers servers)
                     "count" => q.CountAsync(),
                     "explain" => q.ExplainAsync(),
                     "insert" => q.InsertAsync(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
-                    "update" => q.UpdateAsync(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "update" => q.UpdateAsync(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Returning(Opt(a, 1, "returning"))),
                     "upsert" => q.UpsertAsync(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require"))),
-                    "delete" => q.DeleteAsync(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require"))),
+                    "delete" => q.DeleteAsync(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require")), Returning(Opt(a, 0, "returning"))),
                     _ => null,
                 };
                 if (sent is not null)

@@ -204,6 +204,10 @@ func (f *Facets) UnmarshalJSON(raw []byte) error {
 type Result struct {
 	Affected int64  `json:"affected"`
 	Message  string `json:"message"`
+	// Rows are what a write with returning answered: the rows it wrote, an
+	// update's as written and a delete's as they were, Affected their
+	// number. Nil for any other write.
+	Rows []Row `json:"-"`
 	// Seq is the change the write left the database at (Fenec-Seq): what
 	// After takes on a replica. 0 for an answer replayed for its key.
 	Seq uint64 `json:"-"`
@@ -218,13 +222,32 @@ func (c *Client) Exec(ctx context.Context, text string, params ...any) (Result, 
 	if err != nil {
 		return Result{}, err
 	}
-	var r Result
-	if err := json.Unmarshal(raw, &r); err != nil {
+	r, err := resultOf(raw)
+	if err != nil {
 		return Result{}, fmt.Errorf("fenecdb: a statement answered rows, not a write: use Query")
 	}
 	r.Seq = h.seq
 	r.Replayed = h.replayed
 	return r, nil
+}
+
+// resultOf reads a write's answer: {"affected": n}, {"message": ...}, or
+// the rows a write with returning answered, a bare array.
+func resultOf(raw []byte) (Result, error) {
+	var r Result
+	if t := bytes.TrimSpace(raw); len(t) > 0 && t[0] == '[' {
+		rows, err := rowsOf(raw)
+		if err != nil {
+			return r, err
+		}
+		if rows == nil {
+			rows = []Row{}
+		}
+		r.Rows, r.Affected = rows, int64(len(rows))
+		return r, nil
+	}
+	err := json.Unmarshal(raw, &r)
+	return r, err
 }
 
 // Statement is one line of a Batch.

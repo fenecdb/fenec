@@ -850,32 +850,33 @@ class Query private constructor(private val s: State) {
 
     private fun whereOf(cond: List<Node>, bind: Binder): String? = Builder.prune(Node.And(cond))?.let { Builder.render(it, bind) }
 
-    private fun extraClause(): String? = when {
+    private fun extraClause(picks: Boolean = false): String? = when {
         s.near != null -> "near"
         s.match != null -> "match"
         s.rerank != null -> "rerank"
-        s.order.isNotEmpty() -> "order"
-        s.limit != null -> "limit"
+        s.order.isNotEmpty() && !picks -> "order"
+        s.limit != null && !picks -> "limit"
         s.offset > 0 -> "offset"
         s.project != null -> "select"
         else -> null
     }
 
-    // Near, order, limit mean something only to a read; dropped from a write,
-    // limit(1).delete() would delete every row.
+    // Near, offset, select mean something only to a read; dropped from a
+    // write, offset(1).delete() would delete from the first row. Order and
+    // limit pick the rows an update or a delete writes.
     private fun assertPlain(verb: String) {
         if (s.require.isNotEmpty()) throw refuse("$verb takes require as its option: $verb(..., { require: n })")
-        extraClause()?.let { throw refuse("$verb cannot be used with `$it`") }
+        extraClause(verb == "update" || verb == "delete")?.let { throw refuse("$verb cannot be used with `$it`") }
         if (s.lookups.isNotEmpty()) throw refuse("$verb cannot be used with `lookup`")
         if (s.facets.isNotEmpty()) throw refuse("$verb cannot be used with `facet`")
         if ((verb == "insert" || verb == "upsert") && s.cond.isNotEmpty()) throw refuse("$verb cannot be used with `where`")
     }
 
     // An update or delete of every row is too easy to do by accident and
-    // cannot be undone: it has to be asked for, with all.
+    // cannot be undone: it has to be asked for, with all. A limit bounds it.
     private fun requireFilter(verb: String, all: Boolean, bind: Binder): String {
         whereOf(s.cond, bind)?.let { return " where $it" }
-        if (all) return ""
+        if (all || s.limit != null) return ""
         throw refuse("an unfiltered $verb covers the whole collection; if you mean it, $verb({ all: true })")
     }
 
@@ -885,6 +886,22 @@ class Query private constructor(private val s: State) {
         if (n == null) return ""
         if (n < 0) throw refuse("require takes a count of rows, a whole number from 0 (got $n)")
         return " require $n"
+    }
+
+    // An update's or a delete's ` order ... limit n returning ...`: the rows
+    // it picks, and whether it answers them, under the fields named -- `*`
+    // for every one.
+    private fun pick(returning: List<String>?): String {
+        val sql = StringBuilder()
+        appendOrder(sql, s.order)
+        s.limit?.let { sql.append(" limit ").append(it) }
+        if (returning == null) return sql.toString()
+        if (returning.isEmpty()) throw refuse("returning names the fields it answers, or * for every one")
+        if ("*" in returning) {
+            if (returning.size > 1) throw refuse("returning * answers every field: it takes no other")
+            return sql.append(" returning *").toString()
+        }
+        return sql.append(" returning ").append(returning.joinToString(", ") { Builder.path(it) }).toString()
     }
 
     private fun docsOf(docs: Any?): List<Any?> = when (docs) {
@@ -914,15 +931,19 @@ class Query private constructor(private val s: State) {
 
     /**
      * The `set` of the rows the filter names, not run; with no filter it is
-     * refused unless [all]; with [require], refused unless it set exactly that many rows.
+     * refused unless [all] or a limit bounds it; with [require], refused
+     * unless it set exactly that many rows. [order] and [limit] before it
+     * pick the rows it writes -- the page a `get` with them answers -- and
+     * [returning] answers them as written, the fields named or `*` for every
+     * one: a job queue's claim ([updateReturning]).
      */
     @JvmOverloads
-    fun toUpdate(patch: Any?, all: Boolean = false, require: Long? = null): Statement {
+    fun toUpdate(patch: Any?, all: Boolean = false, require: Long? = null, returning: List<String>? = null): Statement {
         assertPlain("update")
         val bind = Binder()
         val body = Builder.renderDoc(patch, bind)
         val filter = requireFilter("update", all, bind)
-        return Statement("set ${s.collection} $body$filter${requireClause(require)}", bind.params)
+        return Statement("set ${s.collection} $body$filter${pick(returning)}${requireClause(require)}", bind.params)
     }
 
     /**
@@ -946,14 +967,16 @@ class Query private constructor(private val s: State) {
 
     /**
      * The `del` of the rows the filter names, not run; with no filter it is
-     * refused unless [all]; with [require], refused unless it deleted exactly that many rows.
+     * refused unless [all] or a limit bounds it; with [require], refused
+     * unless it deleted exactly that many rows. [order], [limit] and
+     * [returning] as [toUpdate]'s, the rows answered as they were: a pop.
      */
     @JvmOverloads
-    fun toDelete(all: Boolean = false, require: Long? = null): Statement {
+    fun toDelete(all: Boolean = false, require: Long? = null, returning: List<String>? = null): Statement {
         assertPlain("delete")
         val bind = Binder()
         val filter = requireFilter("delete", all, bind)
-        return Statement("del ${s.collection}$filter${requireClause(require)}", bind.params)
+        return Statement("del ${s.collection}$filter${pick(returning)}${requireClause(require)}", bind.params)
     }
 
     // ---------------------------------------------------------------- running
@@ -1019,6 +1042,24 @@ class Query private constructor(private val s: State) {
      */
     suspend fun delete(all: Boolean = false, require: Long? = null): Long = run(toDelete(all, require)).affected
 
+    /**
+     * [update] that answers the rows it set, as written, under the fields
+     * named -- `*` every one. With [order] and [limit] a job queue's claim:
+     * `from("jobs").where(Cond.raw("run_at <= now()")).order("run_at").limit(10)
+     * .updateReturning(mapOf("owner" to me, "run_at" to Computed.expr("now() + ?", 30000),
+     * "attempts" to Computed.inc(1)))`.
+     */
+    suspend fun updateReturning(
+        patch: Any?,
+        returning: List<String> = listOf("*"),
+        all: Boolean = false,
+        require: Long? = null,
+    ): Rows = run(toUpdate(patch, all, require, returning)).page
+
+    /** [delete] that answers the rows it deleted, as they were: a pop. */
+    suspend fun deleteReturning(returning: List<String> = listOf("*"), all: Boolean = false, require: Long? = null): Rows =
+        run(toDelete(all, require, returning)).page
+
     /** [rows] on the calling thread, for Java. */
     fun rowsBlocking(): Rows = kotlinx.coroutines.runBlocking { rows() }
 
@@ -1047,4 +1088,18 @@ class Query private constructor(private val s: State) {
     @JvmOverloads
     fun deleteBlocking(all: Boolean = false, require: Long? = null): Long =
         kotlinx.coroutines.runBlocking { delete(all, require) }
+
+    /** [updateReturning] on the calling thread, for Java. */
+    @JvmOverloads
+    fun updateReturningBlocking(
+        patch: Any?,
+        returning: List<String> = listOf("*"),
+        all: Boolean = false,
+        require: Long? = null,
+    ): Rows = kotlinx.coroutines.runBlocking { updateReturning(patch, returning, all, require) }
+
+    /** [deleteReturning] on the calling thread, for Java. */
+    @JvmOverloads
+    fun deleteReturningBlocking(returning: List<String> = listOf("*"), all: Boolean = false, require: Long? = null): Rows =
+        kotlinx.coroutines.runBlocking { deleteReturning(returning, all, require) }
 }

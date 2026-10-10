@@ -146,12 +146,19 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
       bool all(int at) => opt(a, at, 'all') as bool? ?? false;
       bool absent() => opt(a, 1, 'ifAbsent') as bool? ?? false;
       int? require(int at) => opt(a, at, 'require') as int?;
+      // JavaScript's `returning: true` is every field, `*` here.
+      List<String>? returning(int at) => switch (opt(a, at, 'returning')) {
+            null || false => null,
+            true => const ['*'],
+            final List r => r.cast<String>(),
+            final r => throw StateError('returning: $r'),
+          };
       final made = switch (op) {
         'toFenecQL' => q.toFenecQL(),
         'toInsert' => q.toInsert(value(a[0])!, ifAbsent: absent(), require: require(1)),
-        'toUpdate' => q.toUpdate(value(a[0])!, all: all(1), require: require(1)),
+        'toUpdate' => q.toUpdate(value(a[0])!, all: all(1), require: require(1), returning: returning(1)),
         'toUpsert' => q.toUpsert(value(a[0])!, value(a[1])!, require: require(2)),
-        'toDelete' => q.toDelete(all: all(0), require: require(0)),
+        'toDelete' => q.toDelete(all: all(0), require: require(0), returning: returning(0)),
         _ => null,
       };
       if (made != null) return (made.text, made.params, null);
@@ -161,9 +168,13 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
         'count' => q.count(),
         'explain' => q.explain(),
         'insert' => q.insert(value(a[0])!, ifAbsent: absent(), require: require(1)),
-        'update' => q.update(value(a[0])!, all: all(1), require: require(1)),
+        'update' => returning(1) == null
+            ? q.update(value(a[0])!, all: all(1), require: require(1))
+            : q.updateReturning(value(a[0])!, returning: returning(1)!, all: all(1), require: require(1)),
         'upsert' => q.upsert(value(a[0])!, value(a[1])!, require: require(2)),
-        'delete' => q.delete(all: all(0), require: require(0)),
+        'delete' => returning(0) == null
+            ? q.delete(all: all(0), require: require(0))
+            : q.deleteReturning(returning: returning(0)!, all: all(0), require: require(0)),
         _ => null,
       };
       if (ran != null) {
@@ -207,6 +218,36 @@ void main() {
       expect(same(got, c['params']), isTrue, reason: 'params $got, want ${c['params']}');
     });
   }
+
+  // A job queue's claim through the engine: order and limit pick the rows,
+  // updateReturning answers them as written, deleteReturning as they were.
+  test('a claim answers the rows it took', () async {
+    final db = await Fenec.memory();
+    await db.execute('create collection jobs (n int, run_at timestamp @sorted, owner text, attempts int)');
+    final jobs = db.from('jobs');
+    await jobs.insert([
+      for (var n = 1; n <= 3; n++) {'n': n, 'run_at': n, 'attempts': 0}
+    ]);
+    Future<Rows> claim(String owner) =>
+        jobs.where(Cond.raw('run_at <= now()')).order('run_at').limit(2).updateReturning({
+          'owner': owner,
+          'run_at': Computed.expr('now() + ?', [60000]),
+          'attempts': Computed.inc(1),
+        }, returning: [
+          'id',
+          'n',
+          'attempts'
+        ]);
+    final first = await claim('w1');
+    expect([for (final r in first) r['n']], [1, 2]);
+    expect(first.first['attempts'], 1);
+    expect([for (final r in await claim('w2')) r['n']], [3]);
+    expect(await claim('w3'), isEmpty);
+    final popped = await jobs.order('n', 'desc').limit(1).deleteReturning();
+    expect(popped.single['owner'], 'w2');
+    await expectLater(jobs.where('n', 1).where('owner', 'w2').delete(require: 1), throwsA(isA<FenecException>()));
+    expect(await jobs.where('n', 1).where('owner', 'w1').delete(require: 1), 1);
+  });
 
   test('the builder answers as the text', () async {
     final db = await Fenec.memory();

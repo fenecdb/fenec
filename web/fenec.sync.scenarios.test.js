@@ -212,8 +212,10 @@ class Run {
       });
     }
     const t = on ?? this.db;
-    // `"require": n`: the builders' `{ require: n }`.
+    // `"require": n` and `"returning"`: the builders' `{ require: n }` and
+    // `{ returning }`.
     const opts = w.require === undefined ? {} : { require: w.require };
+    if (w.returning !== undefined) opts.returning = w.returning;
     if (w.insert) {
       w.docs.forEach((d, i) => sorted(d, `docs[${i}]`));
       return t.from(w.insert).insert(w.docs, opts);
@@ -239,6 +241,9 @@ class Run {
     let q = t.from(c);
     sorted(w.where ?? {}, 'where');
     for (const [k, v] of Object.entries(w.where ?? {})) q = q.where(k, v);
+    // `"order": f` and `"limit": n`: the builders' `.order(f)` and `.limit(n)`.
+    if (w.order) q = q.order(w.order);
+    if (w.limit !== undefined) q = q.limit(w.limit);
     // A read in a batch: the builders' `.require(n)`.
     if (w.get) return (w.require === undefined ? q : q.require(w.require)).rows();
     if (w.update) return q.update(patch(w.set), opts);

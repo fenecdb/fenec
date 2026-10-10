@@ -906,15 +906,15 @@ class Query {
     return root == null ? null : _render(root, bind);
   }
 
-  String? _extraClause() => _near != null
+  String? _extraClause({bool picks = false}) => _near != null
       ? 'near'
       : _match != null
           ? 'match'
           : _rerank != null
               ? 'rerank'
-              : _order.isNotEmpty
+              : _order.isNotEmpty && !picks
                   ? 'order'
-                  : _limit != null
+                  : _limit != null && !picks
                       ? 'limit'
                       : _offset > 0
                           ? 'offset'
@@ -922,11 +922,12 @@ class Query {
                               ? 'select'
                               : null;
 
-  // Near, order, limit mean something only to a read; dropped from a write,
-  // limit(1).delete() would delete every row.
+  // Near, offset, select mean something only to a read; dropped from a
+  // write, offset(1).delete() would delete from the first row. Order and
+  // limit pick the rows an update or a delete writes.
   void _assertPlain(String verb) {
     if (_require.isNotEmpty) throw _refuse('$verb takes require as its option: $verb(..., { require: n })');
-    final extra = _extraClause();
+    final extra = _extraClause(picks: verb == 'update' || verb == 'delete');
     if (extra != null) throw _refuse('$verb cannot be used with `$extra`');
     if (_lookups.isNotEmpty) throw _refuse('$verb cannot be used with `lookup`');
     if (_facets.isNotEmpty) throw _refuse('$verb cannot be used with `facet`');
@@ -934,11 +935,11 @@ class Query {
   }
 
   // An update or delete of every row is too easy to do by accident and
-  // cannot be undone: it has to be asked for, with all.
+  // cannot be undone: it has to be asked for, with all. A limit bounds it.
   String _requireFilter(String verb, bool all, String Function(Object?) bind) {
     final w = _whereOf(_cond, bind);
     if (w != null) return ' where $w';
-    if (all) return '';
+    if (all || _limit != null) return '';
     throw _refuse('an unfiltered $verb covers the whole collection; if you mean it, $verb({ all: true })');
   }
 
@@ -948,6 +949,22 @@ class Query {
     if (n == null) return '';
     if (n < 0) throw _refuse('require takes a count of rows, a whole number from 0 (got $n)');
     return ' require $n';
+  }
+
+  // An update's or a delete's ` order ... limit n returning ...`: the rows
+  // it picks, and whether it answers them, under the fields named -- `*`
+  // for every one.
+  String _pick(List<String>? returning) {
+    final sql = StringBuffer();
+    _orderText(sql, _order);
+    if (_limit != null) sql.write(' limit $_limit');
+    if (returning == null) return sql.toString();
+    if (returning.isEmpty) throw _refuse('returning names the fields it answers, or * for every one');
+    if (returning.contains('*')) {
+      if (returning.length > 1) throw _refuse('returning * answers every field: it takes no other');
+      return (sql..write(' returning *')).toString();
+    }
+    return (sql..write(' returning ${returning.map(_pathOf).join(', ')}')).toString();
   }
 
   static String _renderDoc(Object? doc, String Function(Object?) bind, {bool insert = false}) {
@@ -987,14 +1004,18 @@ class Query {
   }
 
   /// The `set` of the rows the filter names, not run; with no filter it is
-  /// refused unless [all]; with [require], refused unless it set exactly that many rows.
-  Statement toUpdate(Object patch, {bool all = false, int? require}) {
+  /// refused unless [all] or a limit bounds it; with [require], refused
+  /// unless it set exactly that many rows. [order] and [limit] before it pick
+  /// the rows it writes -- the page a `get` with them answers -- and
+  /// [returning] answers them as written, the fields named or `*` for every
+  /// one: a job queue's claim ([updateReturning]).
+  Statement toUpdate(Object patch, {bool all = false, int? require, List<String>? returning}) {
     _assertPlain('update');
     final params = <Object?>[];
     final bind = _binder(params);
     final body = _renderDoc(patch, bind);
     final filter = _requireFilter('update', all, bind);
-    return (text: 'set $collection $body$filter${_requireClause(require)}', params: params);
+    return (text: 'set $collection $body$filter${_pick(returning)}${_requireClause(require)}', params: params);
   }
 
   /// The upsert, `put ... if absent else set {patch}`, not run: a document
@@ -1018,12 +1039,14 @@ class Query {
   }
 
   /// The `del` of the rows the filter names, not run; with no filter it is
-  /// refused unless [all]; with [require], refused unless it deleted exactly that many rows.
-  Statement toDelete({bool all = false, int? require}) {
+  /// refused unless [all] or a limit bounds it; with [require], refused
+  /// unless it deleted exactly that many rows. [order], [limit] and
+  /// [returning] as [toUpdate]'s, the rows answered as they were: a pop.
+  Statement toDelete({bool all = false, int? require, List<String>? returning}) {
     _assertPlain('delete');
     final params = <Object?>[];
     final filter = _requireFilter('delete', all, _binder(params));
-    return (text: 'del $collection$filter${_requireClause(require)}', params: params);
+    return (text: 'del $collection$filter${_pick(returning)}${_requireClause(require)}', params: params);
   }
 
   // ------------------------------------------------------------- running
@@ -1092,4 +1115,17 @@ class Query {
   /// exactly that many.
   Future<int> delete({bool all = false, int? require}) async =>
       (await _run(toDelete(all: all, require: require))).affected;
+
+  /// [update] that answers the rows it set, as written, under the fields
+  /// named -- `*` every one. With [order] and [limit] a job queue's claim:
+  /// `from('jobs').where(Cond.raw('run_at <= now()')).order('run_at').limit(10)
+  /// .updateReturning({'owner': me, 'run_at': Computed.expr('now() + ?', [30000]),
+  /// 'attempts': Computed.inc(1)})`.
+  Future<Rows> updateReturning(Object patch,
+          {List<String> returning = const ['*'], bool all = false, int? require}) async =>
+      (await _run(toUpdate(patch, all: all, require: require, returning: returning))).rows;
+
+  /// [delete] that answers the rows it deleted, as they were: a pop.
+  Future<Rows> deleteReturning({List<String> returning = const ['*'], bool all = false, int? require}) async =>
+      (await _run(toDelete(all: all, require: require, returning: returning))).rows;
 }

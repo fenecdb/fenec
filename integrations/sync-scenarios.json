@@ -484,6 +484,26 @@
       ]
     },
     {
+      "name": "a claim -- a write that picks its rows or answers them -- is the server's, refused on a replica",
+      "covers": "fenecql.html#pick: order, limit and returning pick and answer the rows where the write runs, and a replica's rows are not the server's",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "mine"}, "order": "id", "limit": 1}, "expect": {
+          "error": "a synced write that picks its rows with `order` or `limit`, or answers them with `returning`, would pick and answer the replica's", "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"delete": "tasks", "where": {"id": 1}, "returning": true}, "expect": {
+          "error": "a synced write that picks its rows with `order` or `limit`, or answers them with `returning`, would pick and answer the replica's", "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"batch": [{"update": "tasks", "set": {"title": "Y"}, "where": {"id": 1}}, {"delete": "tasks", "where": {"id": 2}, "limit": 1}]}, "expect": {
+          "error": "a synced write that picks its rows with `order` or `limit`, or answers them with `returning`, would pick and answer the replica's", "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "Y"}, "where": {"id": 1}}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [{"query": "set tasks {title: $1} where id = $2", "params": ["Y", 1]}]}], "pending": 1,
+          "rows": {"tasks": [{"id": 1, "title": "Y"}, {"id": 2, "title": "two"}]}}}
+      ]
+    },
+    {
       "name": "every other 4xx refuses, and the writes behind it go on",
       "covers": "mobile.html#sync: only 401, 408 and 429 of the 4xx are not refusals",
       "steps": [

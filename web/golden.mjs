@@ -397,9 +397,9 @@ c('delete with a filter', docs, ['where', 'year', '<', 2000], ['delete']);
 c('delete with or', docs, ['where', { $or: [{ a: 1 }, { b: { in: [2, 3] } }] }], ['toDelete']);
 c('delete of every row says so', docs, ['delete', { all: true }]);
 c('an unfiltered delete is refused', docs, ['delete']);
-c('delete takes no limit', docs, ['limit', 1], ['delete', { all: true }]);
+c('delete with a limit picks its rows', docs, ['limit', 1], ['delete', { all: true }]);
 c('delete takes no near', docs, ['near', 'embed', [1]], ['delete', { all: true }]);
-c('delete takes no order', docs, ['where', 'a', 1], ['order', 'a'], ['toDelete']);
+c('delete with an order writes in it', docs, ['where', 'a', 1], ['order', 'a'], ['toDelete']);
 c('delete takes no offset', docs, ['where', 'a', 1], ['offset', 2], ['toDelete']);
 c('delete takes no match', docs, ['match', 'body', 'x'], ['toDelete', { all: true }]);
 c('delete takes no lookup', docs, ['where', 'a', 1], ['lookup', 'notes', { on: 'doc_id', required: true }], ['delete']);
@@ -460,6 +460,27 @@ c('get require takes no negative', docs, ['require', -1], Q);
 c('count takes no require', docs, ['where', 'a', 1], ['require', 1], ['count']);
 c('a whole-collection aggregate takes no require', ['from', 'orders'], ['select', 'count(*)'], ['require', 1], Q);
 c('a write takes require as its option', docs, ['where', 'id', 1], ['require', 1], ['delete']);
+
+// `order` and `limit` pick the rows an update or a delete writes, and
+// `{ returning }` answers them: a job queue's claim, ack and pop.
+const jobs = ['from', 'jobs'];
+const ready = ['where', { $raw: ['run_at <= now()'] }];
+const claim = { owner: 'w1', run_at: { $expr: ['now() + ?', 30000] }, attempts: { $inc: 1 } };
+c('a claim picks the oldest ready rows and answers them', jobs, ready, ['order', 'run_at'], ['limit', 10], ['toUpdate', claim, { returning: true }]);
+c('a claim through the endpoint', jobs, ready, ['order', 'run_at'], ['limit', 10], ['update', claim, { returning: true }]);
+c('a claim by priority, then age', jobs, ready, ['order', 'priority', 'desc'], ['order', 'run_at'], ['limit', 5], ['toUpdate', { owner: 'w2' }, { returning: ['id', 'payload.to', 'attempts'] }]);
+c('a claim of one or none', jobs, ready, ['order', 'run_at'], ['limit', 1], ['toUpdate', { owner: 'w3' }, { returning: ['*'], require: 1 }]);
+c('an ack names the owner it was claimed by', jobs, ['where', 'id', 7], ['where', 'owner', 'w1'], ['delete', { require: 1 }]);
+c('a pop takes no filter: its limit bounds it', jobs, ['order', 'id'], ['limit', 5], ['toDelete', { returning: true }]);
+c('a pop through the endpoint', jobs, ['order', 'run_at', 'desc'], ['limit', 2], ['delete', { returning: ['id'] }]);
+c('an order alone does not bound a write', jobs, ['order', 'id'], ['toUpdate', { a: 1 }]);
+c('returning without a pick', jobs, ['where', 'id', 3], ['toUpdate', { owner: null }, { returning: ['owner', 'run_at'] }]);
+c('returning takes the fields to answer', jobs, ['where', 'id', 3], ['toDelete', { returning: [] }]);
+c('returning star takes no other field', jobs, ['where', 'id', 3], ['toDelete', { returning: ['*', 'id'] }]);
+c('returning takes field names', jobs, ['where', 'id', 3], ['toDelete', { returning: ['a b'] }]);
+c('insert takes no order', jobs, ['order', 'run_at'], ['toInsert', { a: 1 }]);
+c('upsert takes no limit', jobs, ['limit', 1], ['toUpsert', { id: 1 }, { a: 1 }]);
+c('a write still takes no offset', jobs, ['where', 'a', 1], ['order', 'id'], ['limit', 2], ['offset', 1], ['toUpdate', { a: 1 }]);
 
 // ------------------------------------------------------------------ writing
 
