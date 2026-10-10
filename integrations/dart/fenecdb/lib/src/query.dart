@@ -95,8 +95,7 @@ class Computed {
   /// `distance(field, point)`: the metres from a point, `[lon, lat]`, to the
   /// row's -- `Computed.distance('loc', [13.4, 52.5]).as('m')`, what Redis's
   /// `GEOSEARCH ... WITHDIST` answers with.
-  static Computed distance(String field, Object? point) =>
-      Computed._(null, 'distance(${_pathOf(field)}, ?)', [point]);
+  static Computed distance(String field, Object? point) => Computed._(null, 'distance(${_pathOf(field)}, ?)', [point]);
 
   /// `first(field)`, or `first(field by key)`: the value of the row least by
   /// [by] -- by the order the rows were written without one -- that has a
