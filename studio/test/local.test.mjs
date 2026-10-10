@@ -301,7 +301,9 @@ test('on a phone: the studio takes the width, every view one tap away', { skip: 
   // The frame fills the screen under the header and the line above it.
   const frameBox = await page.$eval('.pg-window', (e) => e.getBoundingClientRect().toJSON());
   assert.ok(frameBox.bottom >= 844 - 1 && frameBox.bottom <= 844 + 1, JSON.stringify(frameBox));
-  assert.equal(frameBox.width, 390);
+  // The width the page lays out in: a phone's scrollbars take none, a
+  // desktop Linux Chrome's classic one takes its own off the 390.
+  assert.equal(frameBox.width, await page.evaluate(() => document.documentElement.clientWidth));
   // The collections in their drawer.
   await frame.click('.side-toggle');
   await frame.waitForSelector('.side-open .coll[data-name="orders"]');
