@@ -359,7 +359,8 @@ export function mount(host, ctx) {
         { class: 'plan-steps' },
         rows.map((r) => {
           const line = String(r.plan ?? JSON.stringify(r));
-          const m = /^([a-z]+):\s*(.*)$/s.exec(line);
+          // A step's kind, and a facet's its field too: `facet owner: ...`.
+          const m = /^([a-z]+(?: [\p{L}\p{N}_.]+)?):\s*(.*)$/su.exec(line);
           return h('li', {}, m ? [h('span', { class: 'plan-kind' }, m[1]), h('span', { class: 'plan-what' }, m[2])] : line);
         }),
       ),

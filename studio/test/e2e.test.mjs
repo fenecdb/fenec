@@ -339,13 +339,19 @@ test('the query editor: parameters, the plan, a batch refused at its statement',
   await p.click('.ed-tab[data-tab="json"]');
   assert.deepEqual(JSON.parse(await p.$eval('.ed-json', (e) => e.textContent)), want);
 
-  // The plan: explain asked of the same text, with the same parameters.
+  // The plan: explain asked of the same text, with the same parameters,
+  // each step under its kind -- a facet's with its field.
+  const counted = 'get orders where owner = $1 and total > $2 order placed desc limit 20 facet status';
+  await runQuery(p, counted, '["carol", 500]');
+  // The JSON tab stays open: the answer holds its counts beside the rows.
+  await p.waitForFunction(() => /"facets"/.test(document.querySelector('.ed-json')?.textContent ?? ''), { timeout: 10_000 });
   await p.click('.ed-tab[data-tab="plan"]');
   await p.waitForSelector('.plan-steps li', { timeout: 10_000 });
-  const plan = await p.$$eval('.plan-steps li', (ls) => ls.map((l) => [l.querySelector('.plan-kind').textContent, l.querySelector('.plan-what').textContent]));
-  const explained = await query(server.url, 'explain get orders where owner = $1 and total > $2 order placed desc limit 20', ['carol', 500]);
-  assert.deepEqual(plan, explained.map((r) => /^([a-z]+):\s*(.*)$/s.exec(r.plan).slice(1)));
+  const plan = await p.$$eval('.plan-steps li', (ls) => ls.map((l) => [l.querySelector('.plan-kind')?.textContent, l.querySelector('.plan-what')?.textContent]));
+  const explained = await query(server.url, `explain ${counted}`, ['carol', 500]);
+  assert.deepEqual(plan, explained.map((r) => /^([a-z]+(?: \w+)?):\s*(.*)$/s.exec(r.plan).slice(1)));
   assert.match(plan.flat().join(' '), /hash index on owner/);
+  assert.ok(plan.some(([kind]) => kind === 'facet status'), JSON.stringify(plan));
 
   // A write: its Fenec-Seq beside the answer.
   await runQuery(p, 'set odd {ölçü: $1} where limit = 2', '[3.25]');
