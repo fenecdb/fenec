@@ -284,17 +284,69 @@ lock: 252 -> 516 writes/s from 1 to 16 writers, SQLite's 248 -> 258. Two process
 it, which is why everything that writes one -- the HTTP endpoint, a
 replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
 of `fenec-server`, never a binary of its own. A `/batch` whose every
-statement reads (`read_batch`) takes the read lock once for all of them,
-as the native library's `fenec_abi::query` does: a snapshot at the one
-change `Fenec-Seq` names, a `require` stopping it with 412 and `at`. It
-took the write lock as every batch did, and held out readers too; writers
-still wait for it, since a read lock is the only snapshot there is
-(`make recon-bench`, a ledger's reconciliation over a million journal
-entries, 150 to 220 ms: transfers' longest wait 199 -> 224 ms, the same;
-reads by id with no transfer waiting, 18 waits past 50 ms -> 2). Where
-a writer waits, the std lock holds new readers behind it on macOS and
-Linux alike, so a read beside a snapshot and a busy writer waits as
-before.
+statement reads (`read_batch`) is one snapshot, as the native library's
+`fenec_abi::query` is: every read at the one change `Fenec-Seq` names, a
+`require` stopping it with 412 and `at`. It took the write lock as every
+batch did, then the read lock once for all of them (reads by id with no
+transfer waiting, 18 waits past 50 ms -> 2), and a long one is pinned now
+(below). Where a writer waits, the std lock holds new readers behind it on
+macOS and Linux alike, so a read under the lock beside a busy writer waits
+as before.
+
+**A long read is pinned, and read with no lock held** (`engine/pinned.rs`,
+`Database::pin`). Under the read lock a write waited for every read, so a
+long one held them all: a ledger's reconciliation (a read-only `/batch`
+of three aggregates over a million entries, 140-200 ms) held transfers up
+to 187-512 ms, 36 past 50 ms in ten seconds (`make recon-bench`), and an
+aggregate of 50 000 groups over a million events four writers' puts --
+and every read by id behind a waiting one -- for its 0.8 s (`make
+concurrency-bench long`). `pin`, under the read lock, takes what a read
+of the documents alone needs into a `Database` of its own: each
+collection's schema and its store as `Store::pinned` takes it -- the
+segments and the mapped file shared, the id index copied, 12 bytes a row,
+the stretches left out (an image's, which a read never writes) -- and the
+read runs on that with no lock held, the database as it stood at the pin.
+Nothing a write changes in place is shared: an append to a segment the pin
+holds copies it first (`Arc::make_mut`, 8 MB at most, once a pin), a
+handover or a compact lets go of its own hold only, and a checkpoint or a
+compact renames its file over the one the pin maps, which the mapping
+keeps. The pin took 0.26 to 0.87 ms over a million rows, and the read as
+long as it took under the lock (151.9 ms against 151.4, 664 against
+668); the writes beside it waited at most 2.5-10.8 ms, what they wait
+beside no long read (handovers, the segment's copy), against 118-854 ms,
+and the reconciliation's transfers 5.4-29 ms and none past 50 in three
+runs of four (the fourth met a 385 ms stall of the kind both servers meet
+in the bench's round with no reconciliation, 118-162 ms). The indexes are
+not taken: a hash index's map, an ordered index's chunks, a text index's
+postings change in place, and a copy under the lock costs what the read
+spares -- a shared one, copied by the first write to touch it, would have
+that write wait instead, a ledger's `@unique` over its entries a million
+keys -- while a read an index answers is short anyway. So `pin` declines a read an index would answer --
+an equality or `in` over a `@hash` field, a range or a one-key `order`
+over a `@sorted` one, a facet the buckets or the ranges count, an inner
+`get` on a hashed field, `expired()`, `match`, `near`, `lookup` -- and one
+reading fewer than `PIN_AT` (10 000) rows by its shape (a page with no
+`order`, a read by id, a `count` of everything, a statement alone let go
+before its filter is walked), which run under the lock as before; every
+index of a pinned collection is there by name and refuses (`PINNED_OUT`),
+so a read let through by mistake is answered `None` by `Pinned` and run
+again under the lock, the whole batch, never planned without the index
+(`a_read_that_reaches_for_an_index_is_answered_none`). Readers taking the
+lock in slices were not an option: a slice's end lets a write change the
+answer. Copy-on-write indexes and a chunked id index would make the pin
+O(chunks) and let an index read be pinned, for a pointer more on every
+lookup and a copy of a chunk on the first write to each a pin holds; the
+pin's copy is a hundredth of the scan it spares, so it stays the flat
+copy. A database's pins hold `PIN_BUDGET` (256 MB) of id indexes at most,
+past which a read runs under the lock. The server pins a lone read
+(`/query`, its JSON path too) and a read-only `/batch`, and asks every
+read: a short one declined costs 25 to 40 ns, a read by id 573 in process
+and 17 to 24 us over HTTP (`make requests-bench` the same in turns); `tests/pinned.rs`
+holds every pinned answer to the lock's at the pin, past deletes, updates
+of indexed fields, an alter, a drop, a compact under the lock and beside,
+a checkpoint, a handover a write, and three writers and a compactor
+beside three readers. The browser module has one thread and none of it:
+not a byte of it changed.
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
