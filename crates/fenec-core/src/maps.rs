@@ -9,6 +9,7 @@
 //! against 8.0, a hash index 3.12 against 3.45, for 69 bytes brotli. A
 //! server keeps SipHash, keyed at random, against keys written to collide.
 
+use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -79,12 +80,15 @@ impl<K, V> Default for Sharded<K, V> {
     }
 }
 
-// Keys are taken as `&K`, the type the map holds, as the maps' own callers
-// take them: a borrowed form would compile the search a second time.
+// A key is looked up as whatever form of it the caller holds -- the hash
+// index's `&Vec<u8>`, the text index's `&str` -- and each form a caller
+// passes is a copy of the search: the hash index takes its keys as the
+// `Vec<u8>` the map holds for that reason, one copy rather than two. The
+// shard is picked by the form's hash, which `Borrow` makes the key's.
 impl<K: Hash + Eq, V> Sharded<K, V> {
     /// The map `key` is in, or would go in.
     #[inline]
-    fn of(&self, key: &K) -> &Map<K, V> {
+    fn of<Q: Hash + ?Sized>(&self, key: &Q) -> &Map<K, V> {
         #[cfg(not(target_arch = "wasm32"))]
         if !self.shards.is_empty() {
             return &self.shards[shard_of(self.seed, key)];
@@ -94,7 +98,7 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
     }
 
     #[inline]
-    fn of_mut(&mut self, key: &K) -> &mut Map<K, V> {
+    fn of_mut<Q: Hash + ?Sized>(&mut self, key: &Q) -> &mut Map<K, V> {
         #[cfg(not(target_arch = "wasm32"))]
         if !self.shards.is_empty() {
             return &mut self.shards[shard_of(self.seed, key)];
@@ -104,28 +108,61 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
     }
 
     #[inline]
-    pub fn get(&self, key: &K) -> Option<&V> {
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.of(key).get(key)
     }
 
     #[inline]
-    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.of_mut(key).get_mut(key)
     }
 
-    /// `key`'s entry, the one map split first once it holds [`SPLIT_AT`]
-    /// keys.
+    /// The one map split once it holds [`SPLIT_AT`] keys, before a key
+    /// goes in.
     #[inline]
-    pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
+    fn room(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         if self.shards.is_empty() && self.one.len() >= SPLIT_AT {
             self.split();
         }
+    }
+
+    /// `key`'s entry.
+    #[inline]
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
+        self.room();
         self.of_mut(&key).entry(key)
     }
 
     #[inline]
-    pub fn remove_entry(&mut self, key: &K) -> Option<(K, V)> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.room();
+        self.of_mut(&key).insert(key, value)
+    }
+
+    #[inline]
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.of_mut(key).remove(key)
+    }
+
+    #[inline]
+    pub fn remove_entry<Q>(&mut self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.of_mut(key).remove_entry(key)
     }
 
@@ -169,6 +206,48 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
         self.one.iter()
     }
 
+    /// Every key and its value, in no order.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.one
+            .iter_mut()
+            .chain(self.shards.iter_mut().flat_map(|m| m.iter_mut()))
+    }
+
+    /// Every key and its value, in no order.
+    #[cfg(target_arch = "wasm32")]
+    #[inline]
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.one.iter_mut()
+    }
+
+    /// Every value, in no order.
+    #[inline]
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, v)| v)
+    }
+
+    /// Each table no larger than its keys need.
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        self.one.shrink_to_fit();
+        #[cfg(not(target_arch = "wasm32"))]
+        for m in &mut self.shards {
+            m.shrink_to_fit();
+        }
+    }
+
+    /// Every key gone, and the one map again.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.one.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.shards = Vec::new();
+        }
+    }
+
     /// The one map's keys moved into the shards, each with room for twice
     /// its share, as the one map would have grown.
     #[cfg(not(target_arch = "wasm32"))]
@@ -193,7 +272,7 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
 /// multiply -- the low bytes hear only the low bits of what was multiplied.
 #[cfg(not(target_arch = "wasm32"))]
 #[inline]
-fn shard_of<K: Hash>(seed: u64, key: &K) -> usize {
+fn shard_of<K: Hash + ?Sized>(seed: u64, key: &K) -> usize {
     let mut h = Fx(seed);
     key.hash(&mut h);
     (h.0 >> (64 - SHARDS.trailing_zeros())) as usize
