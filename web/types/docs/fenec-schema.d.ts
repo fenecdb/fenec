@@ -6,6 +6,8 @@
 export type Timestamp = string & { readonly __fenec: 'timestamp' };
 /** `vector<N>`: an array of numbers in JSON. */
 export type Vector = number[] & { readonly __fenec: 'vector' };
+/** `geo`: a point, its longitude and latitude in degrees. */
+export type Point = [lon: number, lat: number];
 /** `json`: any value JSON holds; a path reads into it, `'meta.lang'`. */
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -113,5 +115,14 @@ export type FenecSchema = {
     item: string | null;
     /** int */
     quantity: number | null;
+  };
+
+  places: {
+    /** text */
+    name: string | null;
+    /** text @hash */
+    kind: string | null;
+    /** geo @geo */
+    loc: Point | null;
   };
 };

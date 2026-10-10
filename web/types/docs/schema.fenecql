@@ -12,3 +12,4 @@ create collection reviews (product_id int @hash, stars int, text text, created t
 create collection shops (name text)
 create collection orders (shop_id int @hash, code text)
 create collection lines (order_id int @hash, item text, quantity int)
+create collection places (name text, kind text @hash, loc geo @geo)
