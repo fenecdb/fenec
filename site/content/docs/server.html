@@ -260,12 +260,18 @@ compact writes the live records once for as many bytes of updates.</p>
 <p>What it costs, measured with <code>make compact-bench</code>: a million
 1 KB records, five million updates of a field at keys drawn at random from
 one thread, buffered, while another reads whole records. With
-auto-compaction the file went from 1.03 GB to between 2.4 and 3.2 GB and
-back to 1.2 to 1.4 GB three times; each compact took 6 to 11 s with no lock
-held and held the write lock 6.4 to 12.5 ms to put its file in place. The
-reads while a compact ran had a p99 of 4.4 ms and took 34 ms at the most,
-against 0.9 and 57 ms beside the updates when none ran; the updates slowed
-from about 150 000 a second to 30 000-60 000 while it wrote. Once the updates
+auto-compaction the file went from 1.03 GB to between 2.1 and 3.0 GB and
+back to 1.1 to 1.6 GB three or four times; each compact took 8 s at the
+median with no lock held and held the write lock 6.1 to 12.6 ms to put its
+file in place. The reads while a compact ran had a p99 of 1.3 to 5.3 ms.
+The updates ran at about 30 000 a second through a compact, against 110 000
+to 170 000 while the file was smaller: on this 8 GB machine, beside its
+other programs, the page cache holds about 2 GB of the file, the size at
+which a compact comes due, and past it an update reads its row from the disk
+whether a compact runs or not -- 28 000 to 46 000 a second with
+auto-compaction off. At 250 000 records, whose file fits, the updates ran at
+153 000 a second through a compact of 0.3 s, and at no less than 83 000 in
+its worst tenth of a second, against 180 000 with none. Once the updates
 were done the reads ran at 435 000 a second, p99 2.2 µs, from the first
 second. Without it the file ended at 6.2 GB, and the reads after the updates
 started at 19 000 a second and took 25 s to reach 400 000, their p99 0.11 ms
@@ -278,13 +284,16 @@ and the reads ran alike, p99 2.2 µs.</p>
 
 <p>The compact copies what it reads under the read lock, writes the live
 records into a side file with no lock held, and copies the writes made
-meanwhile in rounds, a few thousand documents under the read lock at a
-time, until a round finds fewer than a thousand; it touches every page of
-the new file before the swap, so no reader waits for one after it. The write
-lock is then held for the last of those writes, the side file's fsync and
-the rename. A replica compacts its own file the same way: a compact changes
-no document, and an image its primary sends meanwhile fails the compact
-rather than be written over. <code>/_metrics</code> has the file's size,
+meanwhile in rounds -- a few thousand documents looked up under the read
+lock at a time and copied once it is let go -- until a round finds fewer
+than a thousand; it reads every page of the new file in before the swap,
+asking for them ahead in large reads, so no reader waits for one after it.
+The write lock is then held for the last of those writes, the side file's
+fsync and the rename. The server looks for a compact due every 5 s, and a
+look waits for a write under way rather than pass a compact over. A replica
+compacts its own file the same way: a compact changes no document, and an
+image its primary sends meanwhile fails the compact rather than be written
+over. <code>/_metrics</code> has the file's size,
 what a compact would give back of it and the compacts run
 (<a href="/docs/monitoring">Monitoring</a>), and each is logged with the
 file before and after and how long it held the lock.</p>
