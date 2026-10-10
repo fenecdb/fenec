@@ -1119,6 +1119,22 @@ export declare class Fenec<S extends AnySchema<S> = Schema, Rel extends Relation
   checkSchema(description: SchemaDescription | string, mode?: 'plan' | 'apply'): SchemaOutcome;
 
   /**
+   * The database's schema as the engine describes a server's (`GET
+   * /_schema`): a description, or with `'fenecql'` the statements that
+   * make it (`?as=fenecql`). The database's own collections are left out.
+   */
+  describe(): SchemaDescription & { collections: CollectionDescription[] };
+  describe(as: 'fenecql'): { format: 1; fenecql: string };
+
+  /**
+   * `FenecHttp.batch` in the page: the same statements and answers, one
+   * block, each statement with its own parameters. A refusal is a
+   * `FenecError` naming the statement (`at`) and how many stayed applied
+   * (`completed`): none, but for a batch holding a `compact`.
+   */
+  batch(statements: readonly BatchStatement[]): Promise<BatchResult>;
+
+  /**
    * Live query: `cb` is handed the rows now, and again after every write
    * to a collection the query reads (a `load`, `restore` or `openFile`:
    * every live query). The writes of one task run it once, in a microtask

@@ -35,6 +35,7 @@ import {
   isSpec,
   nameOf,
   rowsOf,
+  statementOf,
   whole,
 } from './builder.js';
 import { FenecHttp, connect, sseEvents } from './http.js';
@@ -55,6 +56,9 @@ const dec = new TextDecoder();
  */
 const untouched = new WeakMap();
 const replaceable = (f) => untouched.get(f) === f.changeSeq;
+
+/** A `compact`, which `batch` cannot put back: a batch holding one runs each statement on its own. */
+const COMPACT = /^(?:\s|--[^\n]*|#[^\n]*)*compact\b/i;
 
 /** A second database over a database's module (`Fenec`'s static block). */
 let sibling;
@@ -368,6 +372,66 @@ export class Fenec {
       kept.get(this)?.flush();
     }
     return out;
+  }
+
+  /**
+   * The database's schema as the engine describes a server's (`GET
+   * /_schema`): a description, or with `'fenecql'` `{format, fenecql}`,
+   * the statements that make it.
+   */
+  describe(as = 'json') {
+    const out = JSON.parse(this.#readString(this.#wasm.fenec_schema(this.#handle, 0, 0, as === 'fenecql' ? 4 : 3, this.now())));
+    if (out.kind === 'error') throw new FenecError(out.message);
+    return out;
+  }
+
+  /**
+   * `FenecHttp.batch` in the page: the same items and answers, one block,
+   * each statement with its own parameters. A refusal names its statement
+   * (`at`) and how many stayed applied (`completed`): none, but for a
+   * batch holding a `compact`, whose statements run on their own.
+   */
+  async batch(items) {
+    if (!Array.isArray(items) || items.length === 0) throw new FenecError('batch takes a list of statements');
+    const list = items.map(statementOf);
+    const whole = !list.some(([sql]) => COMPACT.test(sql));
+    for (;;) {
+      try {
+        return this.#batch(list, whole);
+      } catch (e) {
+        if (!e.collation || e.completed || !(await this.#fetched(e.collation))) throw e;
+      }
+    }
+  }
+
+  /** The statements in this task -- nothing comes between them -- in a block (`fenec_block`) unless `whole` is false. */
+  #batch(list, whole) {
+    const block = (op) => {
+      const out = JSON.parse(this.#readString(this.#wasm.fenec_block(this.#handle, op)));
+      if (out.kind === 'error') throw new FenecError(out.message);
+    };
+    if (whole) block(0);
+    const results = [];
+    try {
+      list.forEach(([sql, params], i) => {
+        let r;
+        try {
+          r = this.#run(sql, params, null, true);
+        } catch (e) {
+          throw Object.assign(e, { at: i, completed: whole ? 0 : i });
+        }
+        const { kind, rows, facets, count, collections, message } = r;
+        results.push(rows ? (facets ? { rows, facets } : { rows }) : kind === 'affected' ? { affected: count } : collections ? { collections } : { message });
+      });
+      if (whole) block(1);
+    } catch (e) {
+      if (whole) block(2);
+      throw e;
+    } finally {
+      if (this.#lives?.size) this.#touch();
+      kept.get(this)?.flush();
+    }
+    return { results, seq: this.changeSeq, replayed: false };
   }
 
   /**

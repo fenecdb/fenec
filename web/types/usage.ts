@@ -291,6 +291,14 @@ export async function remote() {
   }
   // @ts-expect-error -- a statement is a query, a text or [text, params]
   void http.batch([42]);
+  // The same batch over a database in the page, and its schema described.
+  const local = await Fenec.open<Schema>('./fenec.wasm');
+  const inPage = await local.batch([local.from('articles').toInsert({ title: 'a' }), ['get articles where year > $1', [2020]]]);
+  expect<number | null>(inPage.seq);
+  expect<string>(local.describe('fenecql').fenecql);
+  expect<string>(local.describe().collections[0].name);
+  // @ts-expect-error -- a statement is a query, a text or [text, params]
+  void local.batch([42]);
   await http.run('put articles {title: $1}', ['a'], { idempotencyKey: 'k2' });
   expect<FenecHttp<Schema>>(http.withIdempotencyKey('k3'));
   expect<number | null>(http.seq);

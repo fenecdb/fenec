@@ -7,17 +7,26 @@ import { h } from './dom.js';
 import { tokens } from './highlight.js';
 
 /**
- * One request with the page's token, to the database the studio has open
- * (`base`) or, `root: true`, to the server itself -- a router's own paths.
- * Answers `{status, ok, ms, json, text, seq, requestId}`; the network
- * failing throws, a refusal does not.
+ * One request, as the database the studio has open answers it: a server
+ * (connect.js, `fetched` below) or the one in the page (local.js), which
+ * answers as a server would. `{status, ok, ms, json, text, seq,
+ * requestId}`; the network failing throws, a refusal does not.
  */
-export async function call(ctx, path, { method = 'GET', body = null, type = 'application/json', root = false } = {}) {
+export function call(ctx, path, opts) {
+  return ctx.state.db.request(path, opts);
+}
+
+/**
+ * A request to a server with the page's token, to the database the
+ * studio has open (`base`) or, `root: true`, to the server itself -- a
+ * router's own paths.
+ */
+export async function fetched({ server, base, token }, path, { method = 'GET', body = null, type = 'application/json', root = false } = {}) {
   const headers = {};
-  if (ctx.state.token) headers.authorization = `Bearer ${ctx.state.token}`;
+  if (token) headers.authorization = `Bearer ${token}`;
   if (body !== null) headers['content-type'] = type;
   const started = performance.now();
-  const res = await fetch(`${root ? ctx.state.server : ctx.state.base}${path}`, { method, headers, body });
+  const res = await fetch(`${root ? server : base}${path}`, { method, headers, body });
   const text = await res.text();
   const ms = performance.now() - started;
   let json = null;

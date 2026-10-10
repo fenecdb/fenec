@@ -59,6 +59,27 @@ export function mount(host, ctx) {
   const gridHost = h('div', { class: 'grid-host ed-grid', hidden: true });
   const out = h('div', { class: 'ed-out' });
   const savedList = h('ul', { class: 'ed-list', 'aria-label': 'Saved queries' });
+  // A database in the page offers queries to try (the site's playground):
+  // each opens in the editor, where it runs as typed.
+  const examples = ctx.state.examples ?? [];
+  const exampleList = examples.length
+    ? h(
+        'ul',
+        { class: 'ed-list ed-examples', 'aria-label': 'Examples' },
+        examples.map((x) =>
+          h(
+            'li',
+            {},
+            h(
+              'button',
+              { type: 'button', class: 'ed-item', title: x.text, onclick: () => (load(x.text, x.params ?? '[]', true), area.focus()) },
+              h('span', { class: 'ed-item-name' }, x.name),
+              fenecql(x.text.split('\n').find((l) => l.trim() && !l.trim().startsWith('--')) ?? '', 'q ed-item-text'),
+            ),
+          ),
+        ),
+      )
+    : null;
   const historyList = h('ul', { class: 'ed-list', 'aria-label': 'History' });
   const clear = h('button', { type: 'button', class: 'btn ghost small', onclick: () => (kept.set(HISTORY, []), drawLists()) }, 'Clear');
 
@@ -74,7 +95,13 @@ export function mount(host, ctx) {
           'div',
           { class: 'ed-bar' },
           h('h1', { class: 'view-title' }, 'Query'),
-          h('p', { class: 'ed-note', id: 'query-note' }, 'Runs what you type, as you typed it, with your token: it may do what the token may, and nothing more.'),
+          h(
+            'p',
+            { class: 'ed-note', id: 'query-note' },
+            ctx.state.db.local
+              ? 'Runs what you type, as you typed it, on the database in this tab.'
+              : 'Runs what you type, as you typed it, with your token: it may do what the token may, and nothing more.',
+          ),
           h('div', { class: 'ed-actions' }, h('span', { class: 'ed-key', 'aria-hidden': 'true' }, h('kbd', {}, navigator.platform?.startsWith('Mac') ? '⌘↵' : 'Ctrl+↵')), saveBtn, runBtn),
         ),
         h(
@@ -95,7 +122,8 @@ export function mount(host, ctx) {
       ),
       h(
         'aside',
-        { class: 'ed-side', 'aria-label': 'Saved and past queries' },
+        { class: 'ed-side', 'aria-label': examples.length ? 'Examples, saved and past queries' : 'Saved and past queries' },
+        exampleList ? [h('h2', {}, 'Examples'), exampleList] : null,
         h('h2', {}, 'Saved'),
         savedList,
         h('div', { class: 'ed-side-head' }, h('h2', {}, 'History'), clear),
@@ -137,6 +165,15 @@ export function mount(host, ctx) {
     area.value = text;
     redraw();
   };
+
+  /** `text` and its parameters in the editor, run there when `go`. */
+  function load(text, p = '[]', go = false) {
+    set(text);
+    params.value = p;
+    // The example opened, marked in the list as the cell and the tab are.
+    exampleList?.querySelectorAll('.ed-item').forEach((b, i) => (examples[i].text === text ? b.setAttribute('aria-current', 'true') : b.removeAttribute('aria-current')));
+    if (go) run();
+  }
 
   // ------------------------------------------------------------- running
 
@@ -331,7 +368,7 @@ export function mount(host, ctx) {
     const asked = explained({ text, params: paramsOf(pick) });
     const key = pick;
     if (!plans.has(key)) {
-      fill(out, h('p', { class: 'ed-said' }, 'Asking the server how it ran…'));
+      fill(out, h('p', { class: 'ed-said' }, 'Asking how it ran…'));
       plans.set(
         key,
         call(ctx, '/query', { method: 'POST', body: JSON.stringify({ query: asked.text, params: asked.params }) }).then((r) => {
@@ -353,7 +390,7 @@ export function mount(host, ctx) {
     return h(
       'div',
       { class: 'ed-plan' },
-      h('p', { class: 'hint' }, 'The path the server took, a step a line, in the order the steps ran. ', h('span', { class: 'ed-label' }, 'Asked as'), ' ', fenecql(asked.split('\n')[0].slice(0, 120))),
+      h('p', { class: 'hint' }, 'The path the engine took, a step a line, in the order the steps ran. ', h('span', { class: 'ed-label' }, 'Asked as'), ' ', fenecql(asked.split('\n')[0].slice(0, 120))),
       h(
         'ol',
         { class: 'plan-steps' },
@@ -512,8 +549,8 @@ export function mount(host, ctx) {
       }
       area.focus();
     },
-    load(text) {
-      set(text);
+    load(text, p, go) {
+      load(text, p, go);
       area.focus();
     },
     focus: () => area.focus(),

@@ -1,0 +1,31 @@
+/* fenec studio over a database in the page -- the site's playground --
+   beside app.css: what that page shows where a server's shows a token, and
+   the dialog that keeps or resets the database. A stylesheet of its own,
+   which only that page links (site/build.py), so fenec-server's first load
+   carries none of it. The same tokens as app.css: the oasis's green dot is
+   an answer that came back, the sun's amber where you are. */
+
+.here-dot { align-self: center; width: 7px; height: 7px; border-radius: 50%; background: var(--oasis); flex: none; }
+.here-server { color: var(--muted); font-size: 12px; white-space: nowrap; margin: 0 6px 0 4px; }
+.here-server code { font-size: 11.5px; color: var(--ink-2); }
+.here-short { display: none; }
+.here-keep { display: flex; align-items: center; gap: 8px; margin: 14px 0 2px; font-weight: 500; }
+.dialog a { color: var(--sun); text-underline-offset: 2px; }
+
+/* Before the database is open, and if it cannot be. */
+#app.booting, #app.failed { display: grid; place-items: center; height: 100vh; height: 100dvh; padding: 24px; color: var(--muted); text-align: center; }
+#app.failed { color: var(--ember); }
+
+@media (max-width: 860px) {
+  .here-server, .here-reset, .here-long { display: none; }
+  .here-short { display: inline; }
+  /* A phone keeps the tabs: the page around says what runs here, and the
+     theme follows the system's. */
+  .local .brand, .local .theme { display: none; }
+}
+/* The narrowest phones: the line is its dot alone, and says itself to a
+   screen reader (its label); the page around it says the rest. */
+@media (max-width: 430px) {
+  .here .here-short { display: none; }
+  .who.here { justify-content: center; width: 36px; height: 36px; padding: 0; border-radius: 18px; }
+}

@@ -1,5 +1,7 @@
 // fenec studio: a browser's view of a fenecdb server -- its collections,
 // their rows, a row's whole value -- and the writes a person makes there.
+// Every view reads through `state.db`: a server's (connect.js), or the
+// site playground's database in the page (local.js, `local` below).
 //
 // It holds no authority of its own. Every read and write is a statement
 // sent over the server's HTTP surface with the token pasted in, as any
@@ -15,7 +17,7 @@ import { Grid, sortable } from './grid.js';
 import { Sidebar } from './sidebar.js';
 import { tree, readInput } from './values.js';
 import { explain, confirmDelete, insertForm, help } from './edit.js';
-import { saved, save, forget, here, claimsOf, probe, clientFor, whoamiAt, metrics, ConnectError } from './connect.js';
+import { saved, save, forget, here, claimsOf, probe, clientFor, whoamiAt, ConnectError } from './connect.js';
 
 const root = document.getElementById('app');
 const state = {
@@ -32,6 +34,9 @@ const state = {
   current: null,
   view: { where: '', params: '[]', quick: {}, order: null },
   total: 0,
+  /** A database in the page: its Examples, and what opens first. */
+  examples: [],
+  first: null,
 };
 
 // ------------------------------------------------------------------ theme
@@ -206,7 +211,7 @@ function layout() {
   }, 'Collections');
   const themeBtn = h('button', {
     type: 'button',
-    class: 'btn ghost',
+    class: 'btn ghost theme',
     onclick: () => {
       theme(dark() ? 'light' : 'dark');
       themeBtn.textContent = dark() ? 'Light' : 'Dark';
@@ -214,6 +219,8 @@ function layout() {
     title: 'Switch the theme',
   }, dark() ? 'Light' : 'Dark');
   const out = h('button', { type: 'button', class: 'btn ghost', onclick: () => signOut() }, 'Sign out');
+  // A database in the page has no server, tenant or token to name.
+  const local = state.db.local;
   const tabs = h(
     'nav',
     { class: 'views', 'aria-label': 'Views' },
@@ -226,9 +233,9 @@ function layout() {
     { class: 'top' },
     menu,
     h('div', { class: 'brand' }, mark(), h('span', { class: 'brand-name' }, 'fenec studio')),
-    h('div', { class: 'where-at' }, h('span', { class: 'server-host', title: state.server }, new URL(state.server).host), tenantPick),
+    local ? null : h('div', { class: 'where-at' }, h('span', { class: 'server-host', title: state.server }, new URL(state.server).host), tenantPick),
     tabs,
-    h('div', { class: 'top-end' }, whoBtn, themeBtn, out),
+    h('div', { class: 'top-end' }, local ? [state.db.controls(ctx), themeBtn] : [whoBtn, themeBtn, out]),
   );
   const views = h('div', { class: 'view-host' });
   const main = h(
@@ -239,7 +246,7 @@ function layout() {
     gridHost,
     status,
   );
-  fill(root, h('div', { class: 'app' }, top, h('div', { class: 'horizon', 'aria-hidden': 'true' }, horizon), h('div', { class: 'body', dataset: { view: 'rows' } }, sideHost, main, views, inspector), toasts));
+  fill(root, h('div', { class: local ? 'app local' : 'app' }, top, h('div', { class: 'horizon', 'aria-hidden': 'true' }, horizon), h('div', { class: 'body', dataset: { view: 'rows' } }, sideHost, main, views, inspector), toasts));
   parts = { where, params, title, total, newRow, facets, status, inspector, whoBtn, horizon, tabs, views };
   closeViews();
   view = 'rows';
@@ -263,11 +270,13 @@ function layout() {
     onActive: (row) => inspect(row),
     onError: (err) => say(explain(err), 'error'),
   });
-  tick();
+  // The line under the bar is a token's life.
+  if (local) horizon.style.transform = 'scaleX(0)';
+  else tick();
 }
 
 function tenantControl() {
-  if (state.mode === 'single') return null;
+  if (state.mode === 'single' || state.mode === 'local') return null;
   const go = (t) => openTenant(t).then(() => save({ server: state.server, token: state.token, tenant: t })).catch((e) => say(explain(e), 'error'));
   if (state.tenants?.length) {
     const sel = h(
@@ -418,7 +427,7 @@ async function listCollections() {
     }
   }
   const full = state.who?.kind !== 'scoped';
-  const stats = full && state.mode === 'single' ? await metrics(state.base, state.token) : null;
+  const stats = full && state.mode !== 'tenants' && state.mode !== 'router' ? await state.db.stats() : null;
   sidebar.show({ collections: state.collections, counts, stats });
   if (state.current) {
     state.current = state.collections.find((c) => c.name === state.current.name) ?? null;
@@ -430,14 +439,19 @@ async function loadCollections() {
   state.current = null;
   await listCollections();
   const hash = new URLSearchParams(location.hash.slice(1));
-  const wanted = hash.get('c');
+  // An address naming none opens what the page asks for first.
+  const opening = hash.has('c') || hash.has('v') ? null : state.first;
+  const wanted = hash.get('c') ?? opening?.collection;
   const first = state.collections.find((c) => c.name === wanted) ?? state.collections[0];
-  const v = VIEWS.some(([x]) => x === hash.get('v')) ? hash.get('v') : 'rows';
+  const asked = hash.get('v') ?? opening?.view;
+  const v = VIEWS.some(([x]) => x === asked) ? asked : 'rows';
   if (first) {
     if (v === 'rows') await openCollection(first.name);
     else {
       choose(first.name);
       await showView(v);
+      const ex = opening?.example === undefined ? null : state.examples[opening.example];
+      if (v === 'query' && ex) mounted.query?.view?.load?.(ex.text, ex.params ?? '[]', true);
     }
   } else {
     fill(parts.title, 'No collections');
@@ -512,9 +526,9 @@ let view = 'rows';
 let mounted = {};
 let styled = null;
 
-/** Whether the admin view is shown: to the server's own token, or a server with none. */
+/** Whether the admin view is shown: to a server's own token, or a server with none. */
 function adminAllowed() {
-  return state.who?.kind === 'full' || state.who?.kind === 'open';
+  return !state.db?.local && (state.who?.kind === 'full' || state.who?.kind === 'open');
 }
 
 /** The views' stylesheet, linked once, resolved once it applies. */
@@ -540,10 +554,22 @@ const ctx = {
   fieldsOf: (c) => fieldsOf(c),
   /** The collections listed again, after a schema change. */
   refresh: () => listCollections(),
-  /** The query editor opened on `text`. */
-  query: async (text) => {
+  /** The query editor opened on `text`, with `params`; `run` runs it there. */
+  query: async (text, params = '[]', run = false) => {
     await showView('query');
-    mounted.query?.view?.load?.(text);
+    mounted.query?.view?.load?.(text, params, run);
+  },
+  /** The collections and the view open read again: the database was replaced. */
+  reload: async () => {
+    shownRows = null;
+    await listCollections();
+    if (!state.current && state.collections[0]) choose(state.collections[0].name);
+    if (view === 'rows') {
+      if (state.current) await openCollection(state.current.name);
+    } else {
+      mounted[view]?.view?.reload?.();
+      mounted[view]?.view?.open?.(state.current?.name ?? null, { picked: false });
+    }
   },
 };
 
@@ -831,7 +857,7 @@ addEventListener('keydown', (e) => {
     '/': rows && (() => parts.where.focus()),
     n: rows && (() => insert()),
     r: rows && (() => reload()),
-    '?': () => help(),
+    '?': () => help(adminAllowed()),
   }[e.key];
   if (act) {
     e.preventDefault();
@@ -841,9 +867,24 @@ addEventListener('keydown', (e) => {
 
 // ------------------------------------------------------------------ start
 
-const last = saved();
-if (last) {
-  connectTo(last.server, last.token, last.tenant).catch((e) => signIn(e instanceof ConnectError ? e.message : explain(e)));
-} else {
-  signIn();
+/**
+ * The studio over a database in the page (local.js), as the site's
+ * playground opens it: `examples` in the editor's list, `first` --
+ * `{view, collection, example}` -- what opens when the address names none.
+ */
+export async function local(db, { examples = [], first = null } = {}) {
+  Object.assign(state, { server: location.origin, token: '', tenant: null, mode: 'local', who: { kind: 'open', node: 'single' }, claims: null, db, base: null, examples, first });
+  db.onError = (e) => say(explain(e), 'error');
+  layout();
+  await loadCollections();
+}
+
+// A page with a database of its own (`data-mode="local"`) calls `local`.
+if (root.dataset.mode !== 'local') {
+  const last = saved();
+  if (last) {
+    connectTo(last.server, last.token, last.tenant).catch((e) => signIn(e instanceof ConnectError ? e.message : explain(e)));
+  } else {
+    signIn();
+  }
 }

@@ -126,7 +126,50 @@ async function tenantList(server, token, who, path) {
 /** The client for one database: the server's, or a tenant's under it. */
 export function clientFor(server, token, tenant) {
   const base = tenant ? `${server}/t/${encodeURIComponent(tenant)}` : server;
-  return { base, db: connect(base, { token: token || null }) };
+  return { base, db: new Remote(server, base, token) };
+}
+
+/**
+ * A database on a server, as the studio reads one: `FenecHttp`'s `run`,
+ * `batch` and `subscribe`, a view's whole answer (`request`, whose code
+ * comes with the views, kit.js) and the file's sizes. local.js's database
+ * in the page has the same surface.
+ */
+export class Remote {
+  local = false;
+
+  constructor(server, base, token) {
+    this.at = { server, base, token };
+    this.http = connect(base, { token: token || null });
+  }
+
+  get seq() {
+    return this.http.seq;
+  }
+
+  set onError(f) {
+    this.http.onError = f;
+  }
+
+  run(text, params) {
+    return this.http.run(text, params);
+  }
+
+  batch(items, opts) {
+    return this.http.batch(items, opts);
+  }
+
+  subscribe(collection, shape, onEvent, opts) {
+    return this.http.subscribe(collection, shape, onEvent, opts);
+  }
+
+  request(path, opts) {
+    return import('./kit.js').then((k) => k.fetched(this.at, path, opts));
+  }
+
+  stats() {
+    return metrics(this.at.base, this.at.token);
+  }
 }
 
 /** `/_whoami` for a tenant, through the router or on its node. */

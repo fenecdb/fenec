@@ -180,6 +180,57 @@ export async function startServer({ studio = true, tenants = false, extra = [] }
   };
 }
 
+const SITE = join(ROOT, 'site', 'dist');
+const TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2',
+  '.webp': 'image/webp',
+  '.png': 'image/png',
+  '.json': 'application/json',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+/**
+ * The built site (`python3 site/build.py`, site/dist) served as Cloudflare
+ * serves it: `/docs/x` is `docs/x.html`, a directory its `index.html`.
+ * `null` when the site is not built. `slow` delays each answer by its
+ * milliseconds, as a network would.
+ */
+export async function startSite({ slow = 0 } = {}) {
+  if (!existsSync(join(SITE, 'playground.html'))) return null;
+  const { createServer: http } = await import('node:http');
+  const { readFile, stat } = await import('node:fs/promises');
+  const { extname, normalize } = await import('node:path');
+  const server = http(async (req, res) => {
+    let path = normalize(decodeURIComponent(new URL(req.url, 'http://x').pathname)).replace(/^(\.\.[/\\])+/, '');
+    let file = join(SITE, path);
+    try {
+      if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
+    } catch {
+      file += '.html';
+    }
+    try {
+      const body = await readFile(file);
+      if (slow) await new Promise((r) => setTimeout(r, slow));
+      res.writeHead(200, { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store' });
+      res.end(body);
+    } catch {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+    }
+  });
+  const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
+  return {
+    url: `http://127.0.0.1:${port}`,
+    stop: () => new Promise((r) => server.close(r)),
+  };
+}
+
 /** One statement over HTTP, with the server's token unless given another. */
 export async function query(url, text, params = [], token = TOKEN) {
   const r = await fetch(`${url}/query`, {

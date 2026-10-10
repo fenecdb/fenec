@@ -70,6 +70,19 @@ export function rowsOf(res) {
   return rows;
 }
 
+/**
+ * A `batch` item as `[text, params]`: a builder query, a FenecQL text, or
+ * `[text, params]` -- what `FenecHttp.batch` and `Fenec.batch` take.
+ */
+export function statementOf(item, i) {
+  if (item instanceof Query) return item.toFenecQL();
+  if (typeof item === 'string') return [item, []];
+  if (Array.isArray(item) && typeof item[0] === 'string' && (item[1] === undefined || Array.isArray(item[1]))) {
+    return [item[0], item[1] ?? []];
+  }
+  throw new FenecError(`batch statement ${i}: a query, a FenecQL text or [text, params]`);
+}
+
 // ----------------------------------------------------------- query builder
 //
 // Why it exists: every interface with conditional filters forced manual

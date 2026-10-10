@@ -137,7 +137,7 @@ case, as the standard library's, without its code), `time` (calendar arithmetic)
 `std-fs` feature), `off` (what stands in for an index a build is made
 without).
 
-The browser client is `web/fenec.js` — WASM glue (~480 lines), persistence and
+The browser client is `web/fenec.js` — WASM glue (~545 lines), persistence and
 the sync layer -- with the query builder (`web/builder.js`) and the HTTP client
 (`web/http.js`) in dependency-free ES modules of their own, which it imports
 and re-exports, and `web/client.js` the two alone (`@fenecdb/web/client`).
@@ -613,7 +613,7 @@ rules that apply to it, the filter as the policy writes it
 (`Scope::summary_into`). The grid reads 100 rows a block, the block after
 one in id order by `id > $last`, a jump or an order by offset, and draws
 only the rows in view: a scroll down 100 000 rows and back took no long task,
-the longest frame 18.7 ms in headless Chrome. Its first load is 59 KB of JS
+the longest frame 18.7 ms in headless Chrome. Its first load is 60 KB of JS
 and CSS gzipped (`site/build.py` holds the docs to it), served uncompressed.
 The query editor, the schema, the live rows and the admin view are modules
 fetched the first time each opens (`app.js`'s `LOAD`, their stylesheet
@@ -633,11 +633,45 @@ asks the plan again, which held the apply button back. The live view is a
 subscription of the typed shape, refused past 10 000 rows since its seed
 holds them all; the admin view, for the server's token, reads
 `/_stats/statements`, `/_metrics` and on a router `/_shard/tenants?bytes`
-(each node's `/_admin/sizes`).
+(each node's `/_admin/sizes`). The site's playground is the same studio
+over a database in the page: every view reads through `state.db`, one
+surface -- `run`, `batch` and `subscribe` as `FenecHttp` has them,
+`request(path)` for an answer shown whole, `stats()` -- which
+`connect.js`'s `Remote` answers over HTTP (its `request` the views'
+`kit.js` code, fetched with them) and `local.js`'s `Local` from the
+browser module in a dedicated worker (`worker.js`), as a server would
+(`engine.js`): `/query`, `/batch` as one block over calls
+(`Fenec.batch`, the module's `fenec_block`), `/_schema` and
+`?as=fenecql` (`Fenec.describe`, `fenec_schema` modes 3 and 4),
+`/_schema/plan` (the JSON description written as FenecQL, which alone
+the module reads), every refusal with the status `api::status_of` gives
+-- a parse's message kept whole, as a server keeps it -- and a
+subscription as a `Fenec.live` of the shape whose differences are the
+change. The token, the tenant, the admin view and the file's sizes are
+left out rather than faked, "Running in your browser." where the token
+was, with Keep it in this browser (`persist`, off by default) and Reset
+data. `studio/test/transport.test.mjs` sends the same statements, batches,
+schema requests and a subscription's writes to a debug fenec-server and to
+the module and holds every answer equal; a server's change also names as
+deleted a written row its shape never held, which a view passes over, and
+the test drops those. `site/build.py` serves the studio's own files in
+`dist/studio/`, minified and named by their hash with every import
+rewritten, the page `studio/index.html` with `data-mode="local"`, which
+`app.js` takes to wait for `site/playground.js` to call `local(db,
+{examples, first})`, and `local.css`; the playground frames it between the
+site's header and footer, since both stylesheets name `.top`, `.btn` and
+`--sun`, and `_headers` lets the site alone frame `/studio/*`. A
+server's first load names none of it (`statements.test.mjs`) and grew
+1.1 KB gzipped for `Remote` and the branches; the module 3.4 KB, 1.0 KB
+brotli, `describe` 1.5 KB of it. The playground's studio is 72 KB of JS
+and CSS gzipped beside the module's 200 KB brotli, its first answer
+150 ms after the page is asked for with the cache off on this machine and
+1.6 s over a throttled 4G, Lighthouse 98, 100, 100 on a phone.
 `make studio-test` runs it in Chrome (puppeteer-core, `studio/`'s one dev
 dependency) against a debug server, a tenant node and a router; on macOS
 Chrome 148's new headless mode never answered puppeteer's clicks, so the
-harness prefers the headless shell. The router run's one timeout did not
+harness prefers the headless shell, and it builds the site and drives the
+playground as well (`local.test.mjs`). The router run's one timeout did not
 come back in twelve runs at a load of 27 (busy loops on every core, three
 suites at once); a run filtered by name charges its first test with the
 `before` hook's 100 000-row seed, about 10 s, which is the hook's and not

@@ -2,9 +2,10 @@
    being typed. The rules are not written here -- build.py writes its own
    patterns and keyword lists in place of the marker below, so a statement
    cannot be coloured two ways, and `site/test_highlight.py` holds the two to
-   the same HTML. Loaded by the playground, and by fenec studio's query
-   editor, which serves the file build.py writes (`studio/highlight.js`,
-   which the same test holds to it byte for byte). */
+   the same HTML. Loaded by fenec studio's query editor -- on a server,
+   and on the site's playground -- from the file build.py writes
+   (`studio/highlight.js`, which the same test holds to it byte for
+   byte). */
 
 const RULES = {"types":["bool","int","float","text","bytes","timestamp","vector","f16","cosine","l2","dot","Fenec","FenecSync","Database","Collection","Value","Error","String","Vec","Option","Result"],"langs":{"fenecql":{"pattern":"(?<comment>--[^\\n]*)|(?<string>\\\"(?:[^\\\"\\\\\\n]|\\\\.)*\\\"|'(?:[^'\\\\\\n]|\\\\.)*')|(?<param>\\$\\d+)|(?<anno>@[A-Za-z_][\\w]*)|(?<word>[A-Za-z_][\\w]*)|(?<num>\\b\\d[\\d_]*(?:\\.\\d+)?\\b)","kw":["create","drop","collection","index","if","not","exists","get","put","set","del","select","from","where","near","order","limit","offset","count","ef","exact","asc","desc","and","or","in","has","is","null","true","false","collections","describe","compact","begin","commit","on","match","fuse","lookup","group","insert","set","del","rerank","absent"]}}};
 
@@ -110,13 +111,4 @@ export function overlay(area, lang = 'fenecql') {
   box.classList.add('on');
   // A value set from script (an example picked) fires no input event.
   return later;
-}
-
-/* An error's message with what it quotes of a statement -- `match`,
-   `@hnsw(cosine)` -- coloured as the statement is. */
-export function quoted(message, lang = 'fenecql') {
-  const parts = message.split('`');
-  if (parts.length % 2 === 0) return esc(message);   // a backtick left open
-  return parts.map((part, i) => (i % 2
-    ? `<code class="hl-q">${highlight(part, lang)}</code>` : esc(part))).join('');
 }

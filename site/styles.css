@@ -510,13 +510,6 @@ html:not(.js) .search-open-btn { display: none; }
 }
 .btn-line:hover { border-color: var(--sun); background: rgba(244,169,60,.12); }
 
-/* The playground's busy light. */
-@keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(244,169,60,.7); }
-  70%  { box-shadow: 0 0 0 9px rgba(244,169,60,0); }
-  100% { box-shadow: 0 0 0 0 rgba(244,169,60,0); }
-}
-
 /* ================================================================ sections */
 
 .band { position: relative; padding: clamp(78px, 10vw, 140px) var(--gutter); }
@@ -866,122 +859,61 @@ tbody tr:last-child td { border-bottom: 0; }
 
 /* =============================================================== playground */
 
-.pg-band { padding-top: clamp(30px, 4vw, 54px); }
-.pg-title {
-  margin: 0 0 12px; font: 700 clamp(34px, 4.6vw, 52px)/1.04 var(--sans);
-  letter-spacing: -.038em;
-  background: linear-gradient(160deg, var(--star), var(--sun-hot));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-
+/* The playground is fenec studio, framed: its own page (dist/studio/,
+   build.py) between the header and the footer, filling the screen under
+   the header with a line of what it is above it. A frame, because the
+   studio's stylesheet and this one name the same classes and tokens. The
+   studio keeps its own look -- light or dark as the reader's system is --
+   set in the night like a window, the sun's light along its top edge. */
 .pg {
-  display: grid; grid-template-columns: 232px minmax(0, 1fr);
-  gap: 18px; margin-top: 34px; align-items: start;
+  position: relative; z-index: 1;
+  display: grid; grid-template-rows: auto minmax(0, 1fr);
+  height: calc(100vh - 66px); height: calc(100dvh - 66px); min-height: 520px;
+  padding: 0 var(--gutter) clamp(14px, 2vw, 24px);
 }
-@media (max-width: 880px) { .pg { grid-template-columns: 1fr; } }
-
-.pg-side { display: grid; gap: 14px; }
-.pg-block {
-  border: 1px solid var(--rule); border-radius: 10px; padding: 14px 15px;
-  background: linear-gradient(160deg, rgba(29,20,48,.8), rgba(12,8,25,.55));
+.pg-head {
+  display: flex; align-items: baseline; gap: 6px 22px; flex-wrap: wrap;
+  padding: clamp(14px, 2.2vw, 22px) 2px clamp(12px, 1.6vw, 16px);
 }
-.pg-h {
-  margin: 0 0 10px; display: flex; align-items: center; gap: 8px;
-  font: 600 12.5px/1 var(--sans); color: var(--sun); letter-spacing: .05em;
+.pg-title {
+  margin: 0; font: 700 clamp(24px, 2.4vw, 30px)/1.1 var(--sans);
+  letter-spacing: -.03em; color: var(--star);
 }
-.pg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sand-dim); }
-.pg[data-state="ready"] .pg-dot { background: var(--oasis); box-shadow: 0 0 10px rgba(79,224,196,.8); }
-.pg[data-state="busy"] .pg-dot { background: var(--sun); animation: pulse 1.3s infinite; }
-.pg[data-state="failed"] .pg-dot { background: var(--ember); }
-
-.pg-muted { margin: 0; color: var(--sand-dim); font-size: 13.5px; }
-.pg-schema { display: grid; gap: 11px; }
-.pg-coll { font: 500 13.5px/1.4 var(--mono); color: var(--sand); }
-.pg-fields { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 2px; }
-.pg-fields li {
-  font: 400 12.5px/1.5 var(--mono); color: var(--sand-dim);
-  display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline;
-}
-.pg-fields b { color: var(--sand-2); font-weight: 400; }
-.pg-fields i { font-style: normal; color: #C79BF2; word-break: break-all; }
-
-.pg-egs { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
-.pg-egs button {
-  width: 100%; text-align: left; cursor: pointer;
-  background: rgba(244,169,60,.06); border: 1px solid var(--rule);
-  border-radius: 6px; padding: 8px 10px;
-  font: 400 12.5px/1.45 var(--mono); color: var(--sand-2);
-}
-.pg-egs button:hover { border-color: var(--rule-hot); color: var(--sand); background: rgba(244,169,60,.13); }
-
-.pg-main { display: grid; gap: 14px; min-width: 0; }
-.pg-editor {
+.pg-say { margin: 0; flex: 1 1 32em; max-width: 46em; color: var(--sand-2); font-size: 15.5px; line-height: 1.5; }
+.pg-docs { font-size: 15px; white-space: nowrap; }
+.pg-window {
+  position: relative; min-height: 0;
   border: 1px solid var(--rule-hot); border-radius: 10px; overflow: hidden;
-  background: linear-gradient(160deg, #150F26, #0C0819);
+  /* The studio's ground before its page paints, light or dark as it will be. */
+  background: #eef0f4;
+  box-shadow: 0 -1px 0 rgba(255,206,115,.45), 0 0 0 1px rgba(7,10,24,.6), 0 30px 80px -30px rgba(0,0,0,.85),
+    0 -18px 60px -30px rgba(244,169,60,.45);
 }
-.pg-editor textarea {
-  display: block; width: 100%; resize: vertical; border: 0; outline: 0;
-  padding: 16px 18px; background: transparent; color: var(--sand);
-  font: 400 14px/1.7 var(--mono); tab-size: 2; min-height: 130px;
-}
-.pg-editor textarea::placeholder { color: var(--sand-dim); }
+@media (prefers-color-scheme: dark) { .pg-window { background: #0d0e15; } }
+.pg-frame { display: block; width: 100%; height: 100%; border: 0; }
 
-/* The editor coloured as it is typed (highlight.js): the textarea's text
-   drawn transparent over a mirror of it in the docs' token colours. The two
-   share every metric that places a character -- font, padding, tab size,
-   wrapping and the scrollbar's gutter -- or the caret drifts off its glyph.
-   The textarea stays the control and is painted on top; until the module
-   comes, and in forced colours, it is plain text and the mirror is not drawn. */
-.hl { position: relative; }
-.hl > textarea, .hl-mirror {
-  font: 400 14px/1.7 var(--mono); tab-size: 2; letter-spacing: 0;
-  white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
-  scrollbar-gutter: stable;
+.pg-more { position: relative; z-index: 1; padding: clamp(40px, 6vw, 80px) var(--gutter) clamp(30px, 5vw, 60px); }
+.pg-more-in {
+  max-width: 1180px; margin: 0 auto;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 56px;
 }
-.hl > textarea { position: relative; }
-.hl-mirror {
-  position: absolute; inset: 0; margin: 0; padding: 16px 18px;
-  overflow: hidden; pointer-events: none; color: var(--sand);
-  visibility: hidden;
-}
-.hl.on .hl-mirror { visibility: visible; }
-.hl.on > textarea { color: transparent; caret-color: var(--sand); }
-.hl.on > textarea::selection { color: transparent; background: rgba(79,224,196,.28); }
-@media (forced-colors: active) {
-  .hl.on .hl-mirror { display: none; }
-  .hl.on > textarea { color: CanvasText; caret-color: auto; }
-  .hl.on > textarea::selection { color: HighlightText; background: Highlight; }
-}
-.pg-err .hl-q { white-space: pre-wrap; }
-.pg-bar {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 11px 14px; border-top: 1px solid var(--rule); background: rgba(0,0,0,.3);
-}
-.pg-run { height: 38px; padding: 0 20px; font-size: 14.5px; }
-.pg-run[disabled] { opacity: .45; cursor: not-allowed; }
-.pg-hint { font: 400 12px/1 var(--mono); color: var(--sand-dim); }
-.pg-status { margin-left: auto; font: 400 12.5px/1.4 var(--mono); color: var(--sand-dim); text-align: right; }
-.pg-status.err { color: var(--ember); }
-.pg-status.ok { color: var(--oasis); }
+.pg-more h2 { margin: 0 0 10px; font: 650 21px/1.25 var(--sans); color: var(--star); letter-spacing: -.01em; }
+.pg-more p { margin: 0 0 14px; max-width: var(--measure); color: var(--sand-2); font-size: 16px; }
+.pg-more .code { margin: 4px 0 16px; }
+.pg-list { margin: 0 0 14px; padding-left: 1.2em; max-width: var(--measure); color: var(--sand-2); font-size: 16px; }
+.pg-list li { margin: 0 0 4px; }
 
-.pg-out {
-  border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px;
-  background: linear-gradient(160deg, rgba(29,20,48,.7), rgba(12,8,25,.5));
-  overflow-x: auto; min-height: 120px;
+/* On a phone the studio takes the width: its own layout folds the
+   collections into a drawer, and a border and a gutter would cost it
+   columns. The line above it stays one line where it can. */
+@media (max-width: 640px) {
+  .pg { padding: 0; min-height: 480px; }
+  .pg-head { padding: 10px 16px 9px; gap: 2px 12px; }
+  .pg-title { font-size: 20px; }
+  .pg-say { flex-basis: 100%; font-size: 13.5px; }
+  .pg-docs { display: none; }
+  .pg-window { border-radius: 0; border-width: 1px 0 0; }
 }
-.pg-out table { font-size: 13.5px; }
-.pg-out th { font: 500 12.5px/1 var(--mono); color: var(--sun); padding-bottom: 9px; white-space: nowrap; }
-.pg-out td {
-  font: 400 13px/1.5 var(--mono); color: var(--sand-2);
-  padding: 7px 18px 7px 0; border-bottom: 1px solid var(--rule);
-  max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.pg-out td.num { text-align: right; font-variant-numeric: tabular-nums; }
-.pg-out td.vec { color: var(--sand-dim); }
-.pg-out tbody tr:last-child td { border-bottom: 0; }
-.pg-err { margin: 0; font: 400 13.5px/1.6 var(--mono); color: var(--ember); white-space: pre-wrap; }
-.pg-note { margin: 0; font: 400 13.5px/1.6 var(--mono); color: var(--oasis); }
-.pg-foot { margin: 26px 0 0; max-width: var(--measure); color: var(--sand-dim); font-size: 15px; }
 
 /* ============================================================== the redesign
    The home page's hero is the fennec hearing everything: the mark's lines

@@ -124,7 +124,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends brotli
           npm install -g esbuild@0.28.2
           python3 site/build.py
-          # The playground's live highlighter is written from build.py's rules
+          # The studio editor's live highlighter is written from build.py's rules
           # and must colour every statement as the docs do.
           python3 site/test_highlight.py
 
@@ -136,7 +136,9 @@ jobs:
       # fenec studio (`--studio`) in the runner's Chrome against the debug
       # fenec-server `make test` built: signed in with the server's token
       # and as one user of a policy, a scroll through 100 000 rows held to
-      # no long task. About 40 s, puppeteer-core and no browser download.
+      # no long task; then the site's playground, the same studio over a
+      # database in the page, from the site it builds. About 50 s,
+      # puppeteer-core and no browser download.
       - name: fenec studio end to end
         if: matrix.os == 'ubuntu-latest'
         run: CHROME_PATH="$(command -v google-chrome)" make studio-test

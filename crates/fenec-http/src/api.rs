@@ -1063,8 +1063,15 @@ pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
         if line.trim().is_empty() {
             continue;
         }
-        let (stmt, params) =
-            parse_query(line).map_err(|e| Error::Query(format!("batch line {}: {e}", i + 1)))?;
+        let (stmt, params) = parse_query(line).map_err(|e| {
+            // The parse's own words: `{e}` said their kind again,
+            // `query error: query error: position 11: ...`.
+            let why = match e {
+                Error::Query(m) => m,
+                e => e.to_string(),
+            };
+            Error::Query(format!("batch line {}: {why}", i + 1))
+        })?;
         out.push((Arc::unwrap_or_clone(stmt), params));
     }
     if out.is_empty() {

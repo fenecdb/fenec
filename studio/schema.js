@@ -282,7 +282,7 @@ export function mount(host, ctx) {
       if (need) fill(confirmRow.firstChild, 'Type ', h('code', {}, need), ' to confirm');
       clearTimeout(timer);
       const mine = ++asked;
-      fill(plan, h('p', { class: 'hint' }, 'Asking the server…'));
+      fill(plan, h('p', { class: 'hint' }, 'Asking for the plan…'));
       timer = setTimeout(async () => {
         let r;
         try {

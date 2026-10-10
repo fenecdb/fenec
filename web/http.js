@@ -3,7 +3,7 @@
 // whose queries run on a server loads this and not the module
 // (`@fenecdb/web/client`).
 
-import { FenecError, Query, checked, declared, ident, nameOf, normalize, rowsOf, whole } from './builder.js';
+import { FenecError, Query, checked, declared, ident, nameOf, normalize, rowsOf, statementOf, whole } from './builder.js';
 
 // ----------------------------------------------------------- HTTP endpoint
 //
@@ -457,16 +457,6 @@ function streamError(data) {
 
 /** The option a copy of a client is handed its original's `seq` under. */
 const LAST = Symbol('last');
-
-/** A `batch` item as `[text, params]`. */
-function statementOf(item, i) {
-  if (item instanceof Query) return item.toFenecQL();
-  if (typeof item === 'string') return [item, []];
-  if (Array.isArray(item) && typeof item[0] === 'string' && (item[1] === undefined || Array.isArray(item[1]))) {
-    return [item[0], item[1] ?? []];
-  }
-  throw new FenecError(`batch statement ${i}: a query, a FenecQL text or [text, params]`);
-}
 
 /**
  * Connects to a remote fenecdb HTTP endpoint (`fenec-server --http`). With

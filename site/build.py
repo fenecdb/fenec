@@ -1170,26 +1170,11 @@ def build():
             for n in names:
                 shutil.copy(os.path.join(chunks, n), os.path.join(OUT, d, n))
 
-    worker = open(os.path.join(ROOT, "engine-worker.js"), encoding="utf-8").read()
-    # Point the worker at the immutable copies. The exact quoted paths are
-    # matched, so the `booting fenec.wasm` log line is left alone.
-    if "fenec.js" in engine:
-        worker = worker.replace("from './fenec.js'", f"from './{engine['fenec.js']}'")
-    if "fenec.wasm" in engine:
-        collation = ""
-        if "collate/" in engine:
-            collation = f", {{ collation: new URL('./{engine['collate/']}', self.location.href) }}"
-        worker = worker.replace("Fenec.open('./fenec.wasm')",
-                                f"Fenec.open('./{engine['fenec.wasm']}'{collation})")
-    worker_name = emit("engine-worker.js", worker)
-
     # The mark's table, then the scenes that import it, then the page
     # script that imports them: each named by its hash, inside out.
     mark_js = emit("fennec.js", open(os.path.join(ROOT, "fennec.js"), encoding="utf-8").read())
     motion = open(os.path.join(ROOT, "motion.js"), encoding="utf-8").read()
     motion_js = emit("motion.js", motion.replace("'./fennec.js'", f"'./{mark_js}'"))
-    # The editor's highlighter, imported by the playground alone.
-    highlight_name = emit("highlight.js", highlight_js())
 
     pages = []
     for dirpath, _, files in os.walk(os.path.join(ROOT, "content")):
@@ -1232,10 +1217,8 @@ def build():
     search_js = emit("search.js", search)
 
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
-    script = script.replace("./engine-worker.js", "./" + worker_name)
     script = script.replace("'./motion.js'", f"'./{motion_js}'")
     script = script.replace("'./search.js'", f"'./{search_js}'")
-    script = script.replace("'./highlight.js'", f"'./{highlight_name}'")
     emit("site.js", script)
 
     shutil.copy(os.path.join(ROOT, "mark.svg"), os.path.join(OUT, "favicon.svg"))
@@ -1254,6 +1237,8 @@ def build():
         assets[f"fonts/{name}"] = hashed
         styles = styles.replace(f"url(fonts/{name})", f"url({hashed})")
     emit("styles.css", styles)
+
+    studio = build_studio(engine, assets)
 
     # Screenshots the docs show (images/), named by their hash as the fonts
     # are: a page names `images/<name>`, rewritten below to the hashed name.
@@ -1328,7 +1313,13 @@ def build():
              "  Referrer-Policy: strict-origin-when-cross-origin",
              "  X-Frame-Options: DENY",
              ""]
-    for hashed in sorted(list(assets.values()) + list(engine.values())):
+    # The playground frames the studio's page, which every other page's
+    # DENY would refuse: framed by the site alone.
+    rules += ["/studio/*",
+              "  ! X-Frame-Options",
+              "  Content-Security-Policy: frame-ancestors 'self'",
+              ""]
+    for hashed in sorted(list(assets.values()) + list(engine.values()) + studio):
         if hashed.endswith("/"):
             hashed += "*"
         rules += [f"/{hashed}", "  Cache-Control: public, max-age=31536000, immutable", ""]
@@ -1353,6 +1344,107 @@ def build():
 
 
 STUDIO_HIGHLIGHT = os.path.join(REPO, "studio", "highlight.js")
+
+# ------------------------------------------------------------------ the studio
+#
+# The playground is fenec studio -- the files fenec-server embeds with
+# `--studio`, not a copy of them -- over a database in the page. Its page is
+# `dist/studio/`, which the playground frames between the site's header and
+# footer: the studio's stylesheet and the site's name the same classes and
+# tokens (`.top`, `.side`, `.btn`, `--sun`), and a frame keeps each to its
+# own. Every module is copied, minified and named by its hash, as the site's
+# are, each import rewritten to the name it got, so the page can be cached
+# for good and a deploy never pairs a new module with an old one. The
+# playground's own modules come from site/: its boot and its data.
+STUDIO = os.path.join(REPO, "studio")
+STUDIO_SITE = ("playground.js", "playground-data.js")
+# A name a module, a stylesheet or the page writes in quotes: `'./grid.js'`,
+# `import('./editor.js')`, `new URL('./worker.js', ...)`, `'views.css'`.
+STUDIO_REF = re.compile(r"""(['"])(?:\./)?([\w-]+\.(?:js|css))\1""")
+
+
+def build_studio(engine, assets):
+    """dist/studio/: the studio's page in local mode and every module and
+    stylesheet it reaches, each named by its hash. Returns the hashed paths
+    (`studio/<name>`), which `_headers` caches for good."""
+    out = os.path.join(OUT, "studio")
+    os.makedirs(out, exist_ok=True)
+    sources = {n: os.path.join(STUDIO, n) for n in os.listdir(STUDIO) if n.endswith((".js", ".css"))}
+    sources.update({n: os.path.join(ROOT, n) for n in STUDIO_SITE})
+    # The web client and the module are the site's own hashed copies, a
+    # directory up; a font and the mark too.
+    up = {n: f"../{engine[n]}" for n in CLIENT_MODULES + ("fenec.wasm", "collate/") if n in engine}
+    for weight in ("400", "500"):
+        up[f"plex-mono-{weight}.woff2"] = f"../{assets[f'fonts/plex-mono-{weight}-latin.woff2']}"
+    named = {}
+
+    def hashed(name, through=()):
+        if name in named:
+            return named[name]
+        if name in through:
+            raise SystemExit(f"  the studio's modules import each other in a circle: {' -> '.join(through + (name,))}")
+        body = open(sources[name], encoding="utf-8").read()
+
+        def ref(m):
+            q, n = m.group(1), m.group(2)
+            if n in sources and n != name:
+                return f"{q}./{hashed(n, through + (name,))}{q}"
+            if n in up:
+                return f"{q}{up[n]}{q}"
+            return m.group(0)
+
+        body = STUDIO_REF.sub(ref, body)
+        for plain in ("../fenec.wasm", "../collate/"):
+            target = plain[3:]
+            if f"'{plain}'" in body:
+                if target not in up:
+                    raise SystemExit(f"  studio/{name} names {plain}, which the build has not got: make wasm")
+                body = body.replace(f"'{plain}'", f"'{up[target]}'")
+        for font, target in up.items():
+            if font.endswith(".woff2"):
+                body = body.replace(f"url({font})", f"url({target})")
+        stem, ext = os.path.splitext(name)
+        blob = minify(body, ext).encode("utf-8")
+        named[name] = f"{stem}.{hashlib.sha256(blob).hexdigest()[:10]}{ext}"
+        open(os.path.join(out, named[name]), "wb").write(blob)
+        return named[name]
+
+    entry = hashed("playground.js")
+    # Every module app.js may fetch later, and the views' stylesheet, made
+    # whether or not the entry reached them: an unused one is a few bytes.
+    for n in sorted(sources):
+        hashed(n)
+
+    page = open(os.path.join(STUDIO, "index.html"), encoding="utf-8").read()
+
+    def must(old, new):
+        nonlocal page
+        if old not in page:
+            raise SystemExit(f"  studio/index.html lost `{old}`: the playground's page is made from it")
+        page = page.replace(old, new)
+
+    must('<script type="module" src="app.js"></script>',
+         "\n".join(f'<link rel="modulepreload" href="{n}">' for n in ("local.js", "playground-data.js"))
+         + f'\n<link rel="preload" href="{up["fenec.wasm"]}" as="fetch" crossorigin>'
+         + '\n<script type="module" src="playground.js"></script>')
+    must('<div id="app" class="booting">', '<div id="app" class="booting" data-mode="local">')
+    must('<title>fenec studio</title>',
+         '<title>fenec studio, in this tab</title>\n<meta name="robots" content="noindex">\n'
+         '<meta name="description" content="fenec studio over a fenecdb database in this tab: the playground.">')
+    must('href="mark.svg"', 'href="../favicon.svg"')
+    must('<link rel="stylesheet" href="app.css">', '<link rel="stylesheet" href="app.css">\n<link rel="stylesheet" href="local.css">')
+
+    def attr(m):
+        n = m.group(2)
+        if n in sources:
+            return f'{m.group(1)}{hashed(n)}"'
+        return f'{m.group(1)}{up.get(n, n)}"'
+
+    page = re.sub(r'((?:href|src)=")([\w.-]+)"', attr, page)
+    open(os.path.join(out, "index.html"), "w", encoding="utf-8").write(page)
+    total = sum(os.path.getsize(os.path.join(out, f)) for f in named.values())
+    print(f"  studio: {len(named)} modules and stylesheets, {total / 1024:.1f} KB, entry {entry}")
+    return [f"studio/{n}" for n in named.values()]
 
 
 def studio_highlight():

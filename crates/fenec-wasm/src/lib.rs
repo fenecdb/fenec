@@ -339,6 +339,10 @@ fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
 /// module carries no comparison it would not apply.
 /// Returns `{"kind":"schema", ...}` (`fenec_abi::Outcome`) or an error,
 /// naming the collation data a migration needs as `fenec_query`'s do.
+/// Modes 3 and 4 take no request and describe the database: 3 as a
+/// description, the native library's `FENEC_SCHEMA_DESCRIBE` and a server's
+/// `GET /_schema`, 4 as the FenecQL that makes it, `?as=fenecql` -- what
+/// fenec studio shows of a database in the page.
 ///
 /// # Safety
 /// `ptr` must be valid and `len` bytes long.
@@ -356,17 +360,46 @@ pub unsafe extern "C" fn fenec_schema(
     collate::take_missing();
     let out = with_db(handle, |db| {
         db.set_clock(now);
-        if mode > 1 {
-            return Err(Error::Query(
-                "the schema modes are 0, a plan, and 1, an apply".into(),
-            ));
+        match mode {
+            0 | 1 => fenec_abi::schema(db, &request, mode == 1, now).map(|o| o.json()),
+            3 | 4 => Ok(fenec_abi::describe(db, mode == 4)),
+            _ => Err(Error::Query(
+                "the schema modes are 0, a plan, 1, an apply, 3 and 4, the database described"
+                    .into(),
+            )),
         }
-        fenec_abi::schema(db, &request, mode == 1, now)
     });
     let out = match out {
         None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
-        Some(Ok(o)) => o.json(),
+        Some(Ok(o)) => o,
         Some(Err(e)) => fenec_abi::refused(&e, 0, None),
+    };
+    boxed(out.as_bytes())
+}
+
+// ------------------------------------------------------------- blocks
+
+/// Opens (0), lands (1) or puts back (2) a block of writes over several
+/// calls of `fenec_query`: `Fenec.batch`, which has each statement answered
+/// with its own parameters and the writes land whole or not at all, as a
+/// server's `/batch`. Within one text the module opens a block of its own
+/// (`fenec_abi::execute`); this is for statements handed over one by one,
+/// none of which another call comes between. A statement that fails in the
+/// block leaves it to be put back. Returns `{"kind":"ok",..}` or an error.
+#[no_mangle]
+pub extern "C" fn fenec_block(handle: u32, op: u32) -> *mut u8 {
+    let r = with_db(handle, |db| match op {
+        0 => db.begin(),
+        1 => db.commit(),
+        _ => {
+            db.rollback();
+            Ok(())
+        }
+    });
+    let out = match r {
+        None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
+        Some(Ok(())) => String::from("{\"kind\":\"ok\"}"),
+        Some(Err(e)) => json::error_to_string(&e),
     };
     boxed(out.as_bytes())
 }

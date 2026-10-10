@@ -24,6 +24,15 @@ make site-deploy   # build, then wrangler deploy
 All three depend on `make wasm`: the playground runs the real engine, so
 `build.py` copies `web/fenec.js` and `web/fenec.wasm` into the output.
 
+The playground is fenec studio -- the `studio/` folder fenec-server embeds
+with `--studio`, not a copy of it -- over a database in the page.
+`build.py` writes its page to `dist/studio/` from `studio/index.html`, every
+module and stylesheet minified and named by its hash with each import
+rewritten, and the playground page frames it between the site's header and
+footer: the two stylesheets name the same classes and tokens (`.top`,
+`.btn`, `--sun`), and a frame keeps each to its own. `_headers` lets the
+site alone frame `/studio/*`, where every other page is `DENY`.
+
 Because it has the module in hand, `build.py` also checks the numbers the prose
 puts on it. The module's size is written into eight files and had drifted by
 13 KB across all of them before this existed; `CLAIMS` at the top of the
@@ -77,13 +86,14 @@ site/
   build.py        the generator
   template.html   the page shell; {{placeholders}} are filled per page
   styles.css      the whole design system
-  site.js         the sky, the scenes, the language sessions, the playground, docs navigation
+  site.js         the sky, the scenes, the language sessions, docs navigation
   fennec.js       the mark: one table of points and edges
   motion.js       each section's scenes, drawn from their time alone
   mark.svg        the mark, written by `node site/fennec.js`: the favicon
   mark-detail.svg the same with its running light: header and footer
-  engine-worker.js  the engine off the main thread, for the playground
-  highlight.js    the playground editor's colours; build.py writes its rules in
+  playground.js   the playground's boot: fenec studio over a database in the page
+  playground-data.js  what that database is seeded with, and the editor's examples
+  highlight.js    the studio editor's colours; build.py writes its rules in
   test_highlight.py holds highlight.js to build.py's highlighter (needs node)
   search.js       the search dialog, loaded when it is opened
   search-query.js what the search asks the database, shared with its test
@@ -298,7 +308,8 @@ fonts lack is set by the system's font throughout, so it never swaps.
 Measured in headless Chrome, 20 loads a page and width, cache off: the
 quickstart's CLS at 1280 px was 0.0106 on every load, the docs index's and
 the server page's 0.0021, FenecQL's 0.0037 and the home page's 0.0054, all
-of it the fonts, and the playground's 0.0084, 0.0034 of it. It is 0 on those
-pages, and the playground's 0.005 left is its engine filling in the schema. With the fonts
+of it the fonts, and the old playground's 0.0084, 0.0034 of it. It is 0 on
+those pages. The playground is now the studio in a frame of a fixed size,
+which moves nothing around it as it loads. With the fonts
 held back 600 ms the swap moves nothing but one text run of FenecQL's page
 at 390 px (0.0004), where a line breaks at another word.

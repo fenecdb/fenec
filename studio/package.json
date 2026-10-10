@@ -2,10 +2,10 @@
   "name": "fenec-studio",
   "private": true,
   "type": "module",
-  "description": "fenec studio, the admin pages fenec-server --studio serves: plain ES modules and CSS, no build step. This file holds its tests' tools alone.",
+  "description": "fenec studio, the admin pages fenec-server --studio serves and the site's playground runs over a database in the page: plain ES modules and CSS, no build step. This file holds its tests' tools alone.",
   "scripts": {
-    "test": "node --test --test-reporter=spec test/statements.test.mjs",
-    "e2e": "node --test --test-reporter=spec --test-concurrency=1 test/e2e.test.mjs"
+    "test": "node --test --test-reporter=spec test/statements.test.mjs test/transport.test.mjs",
+    "e2e": "node --test --test-reporter=spec --test-concurrency=1 test/e2e.test.mjs test/local.test.mjs"
   },
   "devDependencies": {
     "puppeteer-core": "25.12.0"
