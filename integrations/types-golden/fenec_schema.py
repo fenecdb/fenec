@@ -16,6 +16,7 @@ class Articles(TypedDict):
     published: Optional[str]  # timestamp @ttl(30d)
     cover: Optional[list[int]]  # bytes
     meta: Any  # json
+    loc: Optional[list[float]]  # geo @geo
     embed: Optional[list[float]]  # vector<384> @hnsw(cosine, m=8, ef_construction=200, ef_search=100)
     small: Optional[list[float]]  # vector<4, f16> @hnsw(l2, m=16, ef_construction=200, ef_search=100, quant=int8)
     splade: Optional[str]  # sparse<30522> @inverted

@@ -786,6 +786,47 @@ fn a_scoped_match_scores_nothing_of_rows_the_token_cannot_read() {
     );
 }
 
+/// A radius, a box and `near` over a point read only the token's rows: its
+/// filter is ANDed in beside the point's conditions, and the point index
+/// narrows to rows the filter then holds to the token.
+#[test]
+fn a_scoped_token_finds_only_its_own_points() {
+    let n = start_with(
+        "spots  read,write  where owner = $jwt.sub\n",
+        &["create collection spots (owner text @hash, name text, loc geo @geo)"],
+    );
+    let (alice, bob) = (n.token(r#"{"sub":"alice"}"#), n.token(r#"{"sub":"bob"}"#));
+    for (who, name, lon) in [
+        (&alice, "a1", 13.40),
+        (&bob, "b1", 13.401),
+        (&alice, "a2", 13.45),
+    ] {
+        let doc = format!(r#"{{"name":"{name}","loc":[{lon},52.52]}}"#);
+        assert_eq!(n.call(Some(who), "POST", "/spots", &doc).0, 201);
+    }
+    for (ask, want) in [
+        (
+            "get spots select name where distance(loc, [13.4, 52.52]) <= 500",
+            "a1",
+        ),
+        (
+            "get spots select name where within(loc, [13.3, 52.5, 13.5, 52.6])",
+            "a1",
+        ),
+        (
+            "get spots select name near loc [13.401, 52.52] limit 1",
+            "a1",
+        ),
+    ] {
+        let (status, body) = n.query(&alice, ask);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(want) && !body.contains("b1"), "{ask}: {body}");
+    }
+    let (_, body) = n.query(&bob, "get spots near loc [13.45, 52.52]");
+    assert_eq!(count(&body, "\"name\""), 1, "{body}");
+    assert!(body.contains("b1"), "{body}");
+}
+
 const REAPER: &str = "\
 holds  read,insert,delete,expired              for app
 holds  read                       where owner = $jwt.sub

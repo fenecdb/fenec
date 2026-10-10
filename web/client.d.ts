@@ -4,7 +4,7 @@
 // the other.
 
 export {
-  FenecError, FenecHttp, Query, and, bucket, connect, countDistinct, expr, first, from, inc, last, not, or, raw, sseEvents,
+  FenecError, FenecHttp, Query, and, bucket, connect, countDistinct, distance, expr, first, from, inc, last, not, or, raw, sseEvents,
 } from './fenec.js';
 export type {
   Aggregate,
@@ -14,6 +14,7 @@ export type {
   Bytes,
   Collation,
   Cond,
+  DistanceSpec,
   Exec,
   FacetCount,
   Facets,
@@ -27,6 +28,7 @@ export type {
   LookupOptions,
   Migration,
   Op,
+  Point,
   Relations,
   RelationRef,
   Row,

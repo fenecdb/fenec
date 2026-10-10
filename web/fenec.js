@@ -41,7 +41,7 @@ import {
 import { FenecHttp, connect, sseEvents } from './http.js';
 
 export {
-  FenecError, Query, from, or, and, not, raw, inc, expr, bucket, countDistinct, first, last,
+  FenecError, Query, from, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last,
 } from './builder.js';
 export { FenecHttp, connect, sseEvents } from './http.js';
 

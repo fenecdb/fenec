@@ -19,6 +19,8 @@ class Articles {
   final List<int>? cover;
   /// json
   final Object? meta;
+  /// geo @geo
+  final List<double>? loc;
   /// vector<384> @hnsw(cosine, m=8, ef_construction=200, ef_search=100)
   final List<double>? embed;
   /// vector<4, f16> @hnsw(l2, m=16, ef_construction=200, ef_search=100, quant=int8)
@@ -32,7 +34,7 @@ class Articles {
   /// text @unique
   final String? slug;
 
-  const Articles({required this.id, required this.title, this.year, this.score, required this.draft, this.published, this.cover, this.meta, this.embed, this.small, this.splade, this.tags, required this.counts, this.slug});
+  const Articles({required this.id, required this.title, this.year, this.score, required this.draft, this.published, this.cover, this.meta, this.loc, this.embed, this.small, this.splade, this.tags, required this.counts, this.slug});
 
   /// The row as JSON reads it.
   factory Articles.fromJson(Map<String, Object?> j) => Articles(
@@ -44,6 +46,7 @@ class Articles {
         published: switch (j['published']) { null => null, final v => v as String },
         cover: switch (j['cover']) { null => null, final v => [for (final e in v as List) e as int] },
         meta: switch (j['meta']) { null => null, final v => v },
+        loc: switch (j['loc']) { null => null, final v => [for (final e in v as List) (e as num).toDouble()] },
         embed: switch (j['embed']) { null => null, final v => [for (final e in v as List) (e as num).toDouble()] },
         small: switch (j['small']) { null => null, final v => [for (final e in v as List) (e as num).toDouble()] },
         splade: switch (j['splade']) { null => null, final v => v as String },

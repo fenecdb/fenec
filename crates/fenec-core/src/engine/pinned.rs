@@ -278,6 +278,12 @@ impl Database {
             if ranges.iter().any(|r| ordered(r.0)) {
                 return None;
             }
+            // A radius or a box the point index narrows.
+            let mut shapes = Vec::new();
+            crate::geo::conjunct_shapes(f, params, &mut shapes);
+            if shapes.iter().any(|s| c.geo.iter().any(|(n, _)| n == s.0)) {
+                return None;
+            }
             // Each inner `get` is answered first, as an `in` list the hash
             // index on its left side would answer, and reads its own
             // collection.
@@ -318,6 +324,7 @@ impl Collection {
             texts: Fields(out(self.texts.keys().cloned())),
             sorted: out(self.sorted.iter().map(|(n, _)| n.clone())),
             sparse: out(self.sparse.iter().map(|(n, _)| n.clone())),
+            geo: out(self.geo.iter().map(|(n, _)| n.clone())),
         }
     }
 }

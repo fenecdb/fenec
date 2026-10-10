@@ -380,6 +380,7 @@ pub fn response_to_string(r: &Response) -> String {
                                 format!("ttl({})", crate::schema::ttl_text(*ms))
                             }
                             crate::schema::IndexKind::Inverted => "inverted".to_string(),
+                            crate::schema::IndexKind::Geo => "geo".to_string(),
                             crate::schema::IndexKind::Vector(spec) => {
                                 format!(
                                     "hnsw({}, m={}{})",

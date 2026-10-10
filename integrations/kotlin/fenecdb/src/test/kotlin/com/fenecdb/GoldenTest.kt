@@ -34,6 +34,7 @@ class GoldenTest {
                 v.containsKey("\$expr") -> v.list("\$expr")!!.let { Computed.expr(it[0] as String, *it.drop(1).map(::value).toTypedArray()) }
                 v.containsKey("\$bucket") -> v.list("\$bucket")!!.let { Computed.bucket(it[0] as String, it[1] as String) }
                 v.containsKey("\$countDistinct") -> Computed.countDistinct(v.string("\$countDistinct")!!)
+                v.containsKey("\$distance") -> v.list("\$distance")!!.let { Computed.distance(it[0] as String, value(it[1])) }
                 v.containsKey("\$first") -> v.list("\$first")!!.let { Computed.first(it[0] as String, it.getOrNull(1) as String?) }
                 v.containsKey("\$last") -> v.list("\$last")!!.let { Computed.last(it[0] as String, it.getOrNull(1) as String?) }
                 v.containsKey("\$as") -> v.list("\$as")!!.let { (value(it[0]) as Computed).alias(it[1] as String) }

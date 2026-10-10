@@ -169,6 +169,20 @@ export const vector = (opts) => new Column(`vector<${dimensions(opts, 'vector')}
 export const halfvec = (opts) => new Column(`vector<${dimensions(opts, 'halfvec')}, f16>`, 'vector');
 /** `sparse<N>`, pgvector's `sparsevec`. */
 export const sparsevec = (opts) => new Column(`sparse<${dimensions(opts, 'sparsevec')}>`, 'sparse');
+/** `geo`: a point, `[lon, lat]` in degrees. */
+export const geo = column('geo');
+/**
+ * `geo`, as Drizzle declares a PostGIS point: `geometry({ type: 'point' })`,
+ * its `mode` `'tuple'` and its `srid` 4326 if given -- a point read as
+ * `[lon, lat]`, in degrees.
+ */
+export const geometry = (opts) => {
+  const { type, mode = 'tuple', srid = 4326, ...rest } = opts ?? {};
+  if (type !== 'point' || mode !== 'tuple' || srid !== 4326 || Object.keys(rest).length) {
+    throw new FenecError("a geo column holds points, [lon, lat] in degrees: geometry({ type: 'point' })");
+  }
+  return new Column('geo', 'geo');
+};
 
 // ----------------------------------------------------------------- indexes
 
@@ -176,8 +190,9 @@ export const sparsevec = (opts) => new Column(`sparse<${dimensions(opts, 'sparse
  * An index, Drizzle's way: `index('name').on(t.col)` is `@sorted` (a btree
  * in PostgreSQL), `.using('hash', t.col)` `@hash`, `.using('hnsw',
  * t.embed.op('vector_cosine_ops'))` `@hnsw`, and fenecdb's own
- * `.using('bm25', t.body)` `@text` and `.using('inverted', t.splade)`
- * `@inverted`; `.with({...})` takes their options and `.ttl('30d')` makes an
+ * `.using('bm25', t.body)` `@text`, `.using('inverted', t.splade)`
+ * `@inverted` and `.using('gist', t.loc)` `@geo`, PostGIS's index of a point;
+ * `.with({...})` takes their options and `.ttl('30d')` makes an
  * ordered index's rows expire. fenecdb does not name its indexes: a name is
  * checked to be the table's one of it, and kept nowhere.
  */
@@ -196,8 +211,8 @@ class Index {
     return copy(this, { method: this.unique ? 'hash' : 'btree', target: targets[0] });
   }
   using(method, ...targets) {
-    if (!['btree', 'hash', 'hnsw', 'bm25', 'inverted'].includes(method)) {
-      throw new FenecError(`unknown index method ${JSON.stringify(method)}: btree, hash, hnsw, bm25 or inverted`);
+    if (!['btree', 'hash', 'hnsw', 'bm25', 'inverted', 'gist'].includes(method)) {
+      throw new FenecError(`unknown index method ${JSON.stringify(method)}: btree, hash, hnsw, bm25, inverted or gist`);
     }
     if (targets.length !== 1) throw new FenecError('a fenecdb index is on one field');
     if (this.unique && method !== 'hash' && method !== 'btree') throw new FenecError('a unique index is a hash');
@@ -228,6 +243,7 @@ class Index {
     else if (this.method === 'btree') index = this.expiry ? { kind: 'ttl', ms: this.expiry } : { kind: 'sorted' };
     else if (this.method === 'hash') index = { kind: 'hash' };
     else if (this.method === 'inverted') index = { kind: 'inverted' };
+    else if (this.method === 'gist') index = { kind: 'geo' };
     else if (this.method === 'hnsw') {
       index = { kind: 'hnsw', metric: t.metric ?? 'cosine' };
       for (const k of allowed) if (this.options[k] !== undefined) index[k] = this.options[k];
@@ -237,7 +253,7 @@ class Index {
     }
     if (this.expiry && index.kind !== 'ttl') throw new FenecError('ttl() expires the rows of an ordered index: index().on(t.at).ttl(...)');
     // What each method indexes, as the engine has it: refused here, where it is declared.
-    const takes = { ttl: ['timestamp'], hnsw: ['vector'], text: ['text'], inverted: ['sparse'] }[index.kind];
+    const takes = { ttl: ['timestamp'], hnsw: ['vector'], text: ['text'], inverted: ['sparse'], geo: ['geo'] }[index.kind];
     if (path === null && takes && !takes.includes(col.kind)) {
       throw new FenecError(`${col.table}.${col.name} is ${col.type}: ${this.expiry ? 'ttl() expires a timestamp' : `${this.method} indexes ${takes[0]}`}`);
     }

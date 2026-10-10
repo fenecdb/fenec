@@ -48,6 +48,12 @@ pub const TAG_OBJECT: u8 = 13;
 /// the tags above. A version that knows no `json` meets an unknown type tag
 /// and refuses the schema, and with it the file, before it reads a value.
 pub const TAG_JSON: u8 = 14;
+/// A point, as a `geo` field's type and as its value: the value is the
+/// longitude and the latitude as `f64`s, little-endian, 16 bytes with no
+/// length. One number for both, as `TAG_VECTOR` is: a version that knows
+/// no point meets an unknown type tag in the schema and refuses the file
+/// before it reads a value.
+pub const TAG_GEO: u8 = 15;
 
 // ------------------------------------------------------- half precision
 //
@@ -166,18 +172,34 @@ pub(crate) fn unzigzag(v: u64) -> i64 {
 
 // ---------------------------------------------------------------- values
 
-/// Schema-aware encoding. `vector<N, f16>` fields are written halved;
-/// for everything else this is identical to `encode_value`.
+/// Schema-aware encoding. `vector<N, f16>` fields are written halved, and
+/// a `geo` field's point -- `[lon, lat]`, two floats once coerced -- as its
+/// two `f64`s under [`TAG_GEO`]; for everything else this is identical to
+/// `encode_value`.
 pub fn encode_value_as(out: &mut Vec<u8>, v: &Value, ty: Option<&DataType>) {
-    if let (Value::Vector(vals), Some(DataType::Vector(_, VecPrec::F16))) = (v, ty) {
-        out.push(TAG_VECTOR_F16);
-        put_uvarint(out, vals.len() as u64);
-        for f in vals {
-            out.extend_from_slice(&f16_from_f32(*f).to_le_bytes());
+    match (v, ty) {
+        (Value::Vector(vals), Some(DataType::Vector(_, VecPrec::F16))) => {
+            out.push(TAG_VECTOR_F16);
+            put_uvarint(out, vals.len() as u64);
+            for f in vals {
+                out.extend_from_slice(&f16_from_f32(*f).to_le_bytes());
+            }
         }
-        return;
+        (Value::List(p), Some(DataType::Geo)) => match p.as_slice() {
+            [Value::Float(lon), Value::Float(lat)] => {
+                out.push(TAG_GEO);
+                out.extend_from_slice(&lon.to_le_bytes());
+                out.extend_from_slice(&lat.to_le_bytes());
+            }
+            _ => encode_value(out, v),
+        },
+        _ => encode_value(out, v),
     }
-    encode_value(out, v);
+}
+
+/// A point as a `geo` field holds it once read: `[lon, lat]`.
+pub fn geo_value((lon, lat): (f64, f64)) -> Value {
+    Value::List(vec![Value::Float(lon), Value::Float(lat)])
 }
 
 pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
@@ -270,6 +292,7 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
             let raw = take(buf, pos, 8)?;
             Ok(Value::Float(f64::from_le_bytes(raw.try_into().unwrap())))
         }
+        TAG_GEO => Ok(geo_value(geo_at(take(buf, pos, 16)?))),
         TAG_TEXT => {
             let n = get_uvarint(buf, pos)? as usize;
             let raw = take(buf, pos, n)?;
@@ -377,6 +400,10 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
         }
         TAG_FLOAT => {
             take(buf, pos, 8)?;
+            Ok(())
+        }
+        TAG_GEO => {
+            take(buf, pos, 16)?;
             Ok(())
         }
         TAG_TEXT | TAG_BYTES => {
@@ -517,7 +544,15 @@ pub fn encode_type(out: &mut Vec<u8>, ty: &DataType) {
             put_uvarint(out, *d as u64);
         }
         DataType::Json => out.push(TAG_JSON),
+        DataType::Geo => out.push(TAG_GEO),
     }
+}
+
+/// A point's two `f64`s, from the 16 bytes after its tag.
+#[inline]
+pub fn geo_at(raw: &[u8]) -> (f64, f64) {
+    let (words, _) = raw.as_chunks::<8>();
+    (f64::from_le_bytes(words[0]), f64::from_le_bytes(words[1]))
 }
 
 pub fn decode_type(buf: &[u8], pos: &mut usize) -> Result<DataType> {
@@ -537,6 +572,7 @@ pub fn decode_type(buf: &[u8], pos: &mut usize) -> Result<DataType> {
         TAG_LIST => DataType::List(Box::new(decode_type(buf, pos)?)),
         TAG_SPARSE => DataType::Sparse(get_uvarint(buf, pos)? as usize),
         TAG_JSON => DataType::Json,
+        TAG_GEO => DataType::Geo,
         other => return Err(Error::Corrupt(format!("unknown type tag {other}"))),
     })
 }
@@ -602,6 +638,17 @@ mod tests {
         for v in &vals {
             encode_value(&mut buf, v);
         }
+        // A point, written by its field's type.
+        let points = [
+            geo_value((13.404954, 52.520008)),
+            geo_value((-180.0, -90.0)),
+        ];
+        for p in &points {
+            let at = buf.len();
+            encode_value_as(&mut buf, p, Some(&DataType::Geo));
+            assert_eq!((buf[at], buf.len() - at), (TAG_GEO, 17));
+        }
+        let vals: Vec<Value> = vals.into_iter().chain(points).collect();
         let mut pos = 0;
         for v in &vals {
             assert_eq!(&decode_value(&buf, &mut pos).unwrap(), v);
@@ -678,11 +725,15 @@ mod tests {
             TAG_DROPPED,
             TAG_OBJECT,
             TAG_JSON,
+            TAG_GEO,
         ];
         tags.sort();
         tags.dedup();
-        assert_eq!(tags.len(), 15);
-        assert!(decode_value(&[15], &mut 0).is_err());
+        assert_eq!(tags.len(), 16);
+        assert!(decode_value(&[16], &mut 0).is_err());
+        assert_eq!(decode_type(&[TAG_GEO], &mut 0).unwrap(), DataType::Geo);
+        // A point cut short is damage, never a point of fewer bytes.
+        assert!(decode_value(&[TAG_GEO, 0, 0, 0], &mut 0).is_err());
         assert!(decode_type(&[TAG_OBJECT], &mut 0).is_err());
         assert!(decode_value(&[TAG_JSON], &mut 0).is_err());
         assert_eq!(decode_type(&[TAG_JSON], &mut 0).unwrap(), DataType::Json);

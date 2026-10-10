@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { from, or, not, raw, inc, expr, Query, FenecError } from './fenec.js';
+import { from, or, not, raw, inc, expr, distance, Query, FenecError } from './fenec.js';
 
 const q = () => from('articles');
 
@@ -522,6 +522,38 @@ test('an insert if absent says whether it wrote, in the module', { skip: wasm ? 
   assert.equal((await locks.first()).owner, 'a');
 });
 
+test('points in the module: kept as written, a radius, a box and the nearest', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection places (name text, loc geo @geo)');
+  const places = db.from('places');
+  // A point handed as an array goes as JSON where a vector would go as
+  // f32s: 179.999999999 is 180 as an f32.
+  await places.insert([
+    { name: 'brandenburg', loc: [13.377704, 52.516275] },
+    { name: 'alex', loc: [13.413215, 52.521918] },
+    { name: 'date line', loc: [179.999999999, -17.7] },
+    { name: 'nowhere' },
+  ]);
+  db.run('put places {name: "text", loc: [-179.999999999, -17.7]}');
+  assert.deepEqual((await places.where('name', 'date line').first()).loc, [179.999999999, -17.7]);
+  assert.deepEqual(db.rows('get places select loc where name = "text"')[0].loc, [-179.999999999, -17.7]);
+  const near = await places
+    .select('name', distance('loc', [13.4, 52.52]).as('m'))
+    .where({ loc: { distance: { from: [13.4, 52.52], lte: 2000 } } })
+    .near('loc', [13.4, 52.52])
+    .rows();
+  assert.deepEqual(near.map((r) => r.name), ['alex', 'brandenburg']);
+  // The score is the distance as an f32, written as the shortest text of one.
+  for (const r of near) assert.equal(Math.fround(r._score), Math.fround(r.m));
+  const crossing = await places.where({ loc: { within: [179.9, -18, -179.9, -17] } }).order('name').rows();
+  assert.deepEqual(crossing.map((r) => r.name), ['date line', 'text']);
+  // The two points either side of the antimeridian are 0.2 mm apart.
+  const [{ m }] = db.rows('get places select distance(loc, [179.999999999, -17.7]) as m where name = "text"');
+  assert.ok(m > 0 && m < 0.001, `${m}`);
+  db.close();
+});
+
 test('a write that misses its require puts its run back, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);
@@ -825,6 +857,43 @@ test('the module made without indexes and the full one open each other\'s files'
   fromTail.load(cat(image, written.bytes, tail.bytes));
   assert.deepEqual(answers(fromTail), want);
   for (const db of [full, small, fromImage, fromTail]) db.close();
+});
+
+// The module without the point index answers a radius, a box and `near`
+// over a point by measuring every row: what the full one's index answers,
+// row for row and score for score.
+test('the module without indexes answers points as the full one does', {
+  skip: wasm && lite ? false : 'no web/fenec.wasm and web/fenec-lite.wasm (make wasm wasm-lite)',
+}, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const full = await Fenec.open(wasm);
+  full.run('create collection p (n int, loc geo @geo)');
+  let x = 0x9e3779b9;
+  const rand = () => ((x = (x * 1103515245 + 12345) >>> 0) / 2 ** 32);
+  const docs = [];
+  for (let n = 0; n < 2000; n++) {
+    const city = n % 3 === 0;
+    docs.push({
+      n,
+      loc: n % 17 === 0 ? null : city
+        ? [13.4 + (rand() - 0.5) * 0.2, 52.5 + (rand() - 0.5) * 0.2]
+        : [rand() * 360 - 180, rand() * 180 - 90],
+    });
+  }
+  await full.from('p').insert(docs);
+  const small = await Fenec.open(lite);
+  small.load(full.snapshot());
+  for (const [sql, params] of [
+    ['get p select n where distance(loc, $1) <= $2', [[13.4, 52.5], 5000]],
+    ['get p where distance(loc, $1) < $2 and n > 100 count', [[13.4, 52.5], 2e6]],
+    ['get p select n where within(loc, $1)', [[170, -60, -170, 60]]],
+    ['get p select n near loc $1 limit 25', [[13.41, 52.49]]],
+    ['get p select n where n < 1000 near loc $1 limit 10 offset 5', [[-75, 40]]],
+  ]) {
+    assert.deepEqual(small.run(sql, params), full.run(sql, params), sql);
+  }
+  full.close();
+  small.close();
 });
 
 // `near` without the graph -- the module without indexes' -- is the full

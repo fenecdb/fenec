@@ -106,9 +106,9 @@ const CHUNK: usize = 512;
 /// code; on chunks the whole feature is 31 KB (7.6 KB brotli). Chunks cost a
 /// binary search and a `Vec` shift of at most one chunk per write, and a range
 /// is a run of slices.
-struct Chunked<T> {
+pub(crate) struct Chunked<T> {
     chunks: Vec<Vec<T>>,
-    len: usize,
+    pub(crate) len: usize,
     /// The order of a text field's collation (`collate tr`), where the
     /// entries' own is their bytes'.
     coll: Option<Collation>,
@@ -139,7 +139,7 @@ impl Entry for (Box<str>, DocId) {
 }
 
 impl<T: Entry> Chunked<T> {
-    fn new(coll: Option<Collation>) -> Self {
+    pub(crate) fn new(coll: Option<Collation>) -> Self {
         Chunked {
             chunks: Vec::new(),
             len: 0,
@@ -152,7 +152,7 @@ impl<T: Entry> Chunked<T> {
     }
 
     /// From entries already sorted and unique.
-    fn from_sorted(v: Vec<T>, coll: Option<Collation>) -> Self {
+    pub(crate) fn from_sorted(v: Vec<T>, coll: Option<Collation>) -> Self {
         let len = v.len();
         let mut chunks = Vec::with_capacity(len / CHUNK + 1);
         let mut it = v.into_iter();
@@ -174,7 +174,7 @@ impl<T: Entry> Chunked<T> {
             .saturating_sub(1)
     }
 
-    fn insert(&mut self, x: T) -> bool {
+    pub(crate) fn insert(&mut self, x: T) -> bool {
         // A key that grows with time lands past the last entry: no search,
         // and the full chunk it passes stays full instead of being split in
         // half and never written again. A million creation times went in
@@ -212,7 +212,7 @@ impl<T: Entry> Chunked<T> {
         true
     }
 
-    fn remove(&mut self, x: &T) -> bool {
+    pub(crate) fn remove(&mut self, x: &T) -> bool {
         if self.chunks.is_empty() {
             return false;
         }
@@ -253,7 +253,11 @@ impl<T: Entry> Chunked<T> {
     }
 
     /// The entries within the bounds, in order, both ways.
-    fn range(&self, lo: &Bound<T>, hi: &Bound<T>) -> impl DoubleEndedIterator<Item = &T> {
+    pub(crate) fn range(
+        &self,
+        lo: &Bound<T>,
+        hi: &Bound<T>,
+    ) -> impl DoubleEndedIterator<Item = &T> {
         let start = match lo {
             Bound::Included(x) => self.seek(x, false),
             Bound::Excluded(x) => self.seek(x, true),
@@ -283,7 +287,7 @@ impl<T: Entry> Chunked<T> {
     /// How many entries lie from `lo` (included) to `hi` (excluded): two
     /// searches and the lengths of the chunks between, not a walk over the
     /// entries.
-    fn count(&self, lo: &T, hi: &T) -> usize {
+    pub(crate) fn count(&self, lo: &T, hi: &T) -> usize {
         let (a, b) = (self.seek(lo, false), self.seek(hi, false));
         if (a.0, a.1) >= (b.0, b.1) {
             return 0;
@@ -913,7 +917,7 @@ where
 ///
 /// Not `sort_unstable` itself: its copy for this pair type was 4.5 KB of
 /// the browser module, and this is the only place that sorts it.
-fn radix_sort(v: &mut Vec<(u64, DocId)>) {
+pub(crate) fn radix_sort(v: &mut Vec<(u64, DocId)>) {
     if v.is_sorted() {
         return;
     }

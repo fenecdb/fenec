@@ -399,6 +399,7 @@ fn print_response(r: &Response, took: std::time::Duration) {
                             format!("  @text({})", sp.args())
                         }
                         IndexKind::Inverted => "  @inverted".into(),
+                        IndexKind::Geo => "  @geo".into(),
                     };
                     let ty = match f.collate {
                         Some(c) => format!("{} collate {}", f.ty.name(), c.name()),

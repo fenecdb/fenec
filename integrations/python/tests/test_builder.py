@@ -22,6 +22,7 @@ from fenecdb import (
     bucket,
     collection,
     count_distinct,
+    distance,
     expr,
     first,
     inc,
@@ -56,6 +57,8 @@ def arg(x):
         return expr(x["$expr"][0], *[arg(p) for p in x["$expr"][1:]])
     if "$bucket" in x:
         return bucket(*x["$bucket"])
+    if "$distance" in x:
+        return distance(*x["$distance"])
     if "$countDistinct" in x:
         return count_distinct(x["$countDistinct"])
     if "$first" in x:

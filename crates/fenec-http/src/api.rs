@@ -564,6 +564,12 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
                 "`{name}` is a vector: it cannot be filtered in the query string, use `POST /<collection>/near`"
             )))
         }
+        DataType::Geo => {
+            return Err(Error::Query(format!(
+                "`{name}` is a point: filter it with `where=distance({name}, [lon, lat]) <= metres` \
+                 or `where=within({name}, [west, south, east, north])`"
+            )))
+        }
         // A json value has no type to read the text by: a number, `true`,
         // `false`, `null` or a quoted string as JSON reads it, and any other
         // text as itself -- `?meta.lang=tr`, `?meta.rank=gte.2`.
@@ -597,11 +603,11 @@ fn body_str(req: &Request) -> Result<&str> {
     std::str::from_utf8(&req.body).map_err(|_| Error::Query("the body is not UTF-8".into()))
 }
 
-/// The collection's json fields, whose members a body's reader keeps every
-/// number of (`json::parse_documents_json`).
+/// The collection's json fields and points, whose members a body's reader
+/// keeps every number of (`json::parse_documents_json`).
 fn json_fields(schema: &Schema) -> Vec<&str> {
     (schema.fields.iter())
-        .filter(|f| f.ty == DataType::Json)
+        .filter(|f| f.ty.keeps_numbers())
         .map(|f| f.name.as_str())
         .collect()
 }
@@ -657,27 +663,33 @@ fn check_fields(schema: &Schema, doc: Vec<(String, Value)>) -> Result<Vec<(Strin
 // ------------------------------------------------------------------ near
 
 fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
-    let body = json::parse_object(body_str(req)?)?;
-    let get = |name: &str| body.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-
-    let field_name = match get("field") {
+    let quick = json::parse_object(body_str(req)?)?;
+    let field_name = match quick.iter().find(|(k, _)| k == "field").map(|(_, v)| v) {
         Some(Value::Text(s)) => s.clone(),
         Some(_) => return Err(Error::Query("`field` must be text".into())),
         None => default_vector_field(schema)?,
     };
-    let sparse = match field(schema, &field_name)? {
-        DataType::Vector(..) => false,
-        DataType::Sparse(_) => true,
+    let (sparse, point) = match field(schema, &field_name)? {
+        DataType::Vector(..) => (false, false),
+        DataType::Sparse(_) => (true, false),
+        DataType::Geo => (false, true),
         other => {
             return Err(Error::Query(format!(
-                "`{field_name}` is not a vector ({})",
+                "`{field_name}` is not a vector or a point ({})",
                 other.name()
             )))
         }
     };
+    // A point's degrees are read as written, not as a vector's `f32`s.
+    let body = match point {
+        true => json::parse_documents_json(body_str(req)?, &["vector"])?.remove(0),
+        false => quick,
+    };
+    let get = |name: &str| body.iter().find(|(k, _)| k == name).map(|(_, v)| v);
 
     let vector = match get("vector") {
         Some(Value::Vector(v)) if !sparse => Value::Vector(v.clone()),
+        Some(v @ Value::List(_)) if point => v.clone(),
         // A sparse field's is pgvector's text form: `{1:0.5,3:0.25}/30522`.
         Some(Value::Text(t)) if sparse => Value::Text(t.clone()),
         Some(Value::List(items)) if items.is_empty() => {
@@ -1288,6 +1300,7 @@ fn schemas_json(list: &[Schema]) -> String {
                     json::escape_into(&mut out, &format!("text({})", spec.args()))
                 }
                 IndexKind::Inverted => json::escape_into(&mut out, "inverted"),
+                IndexKind::Geo => json::escape_into(&mut out, "geo"),
             }
             out.push_str(",\"required\":");
             out.push_str(if f.required { "true" } else { "false" });

@@ -503,6 +503,80 @@ fn near_is_a_post_endpoint() {
     assert!(r.body.contains("near"), "{}", r.body);
 }
 
+/// Points over REST: a body's `[lon, lat]` kept as written, a radius and a
+/// box in `where=`, the nearest from `POST /<name>/near`, a parameter read
+/// as written through `/query`, and the query string pointed elsewhere.
+#[test]
+fn points_over_http() {
+    let mut db = Database::new();
+    db.execute(&fenec_ql::parse_one("create collection places (name text, loc geo @geo)").unwrap())
+        .unwrap();
+    let h = start_with(Config::default(), db);
+    let r = call(
+        h.port,
+        "POST",
+        "/places",
+        Some(
+            r#"[{"name":"brandenburg","loc":[13.377704,52.516275]},
+                {"name":"alex","loc":[13.413215,52.521918]},
+                {"name":"date line","loc":[179.999999999,-17.7]}]"#,
+        ),
+    );
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = get(h.port, "/places?select=loc&name=eq.date%20line");
+    assert_eq!(r.body.trim(), r#"[{"loc":[179.999999999,-17.7]}]"#);
+    let r = get(
+        h.port,
+        "/places?select=name&where=distance(loc,%20[13.4,%2052.52])%20%3C%3D%202000",
+    );
+    assert_eq!(rows(&r.body), 2, "{}", r.body);
+    let r = get(
+        h.port,
+        "/places?select=name&where=within(loc,%20[179.9,%20-18,%20-179.9,%20-17])",
+    );
+    assert!(
+        r.body.contains("date line") && rows(&r.body) == 1,
+        "{}",
+        r.body
+    );
+
+    let r = call(
+        h.port,
+        "POST",
+        "/places/near",
+        Some(r#"{"field":"loc","vector":[13.377704,52.516275],"limit":2,"select":["name"]}"#),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        r.body.starts_with(r#"[{"name":"brandenburg","_score":0}"#),
+        "{}",
+        r.body
+    );
+    assert_eq!(rows(&r.body), 2);
+
+    // A parameter's degrees as written: read the quick way, the f32 of
+    // 179.999999999 is 180.
+    let r = call(
+        h.port,
+        "POST",
+        "/query",
+        Some(
+            r#"{"query":"get places select name where distance(loc, $1) = 0","params":[[179.999999999,-17.7]]}"#,
+        ),
+    );
+    assert!(r.body.contains("date line"), "{}", r.body);
+
+    let r = get(h.port, "/places?loc=eq.1");
+    assert_eq!(r.status, 400);
+    assert!(r.body.contains("distance("), "{}", r.body);
+    let r = get(h.port, "/collections");
+    assert!(
+        r.body.contains(r#""type":"geo","index":"geo""#),
+        "{}",
+        r.body
+    );
+}
+
 // ---------------------------------------------------------------- writing
 
 #[test]

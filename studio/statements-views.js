@@ -114,14 +114,14 @@ const SCALAR = ['int', 'float', 'text', 'bool', 'timestamp'];
 /** A field's type as `alter collection ... add field` writes it, or refused. */
 export function typeText(type) {
   const t = String(type).trim();
-  if (['int', 'float', 'text', 'bool', 'timestamp', 'json', 'bytes'].includes(t)) return t;
+  if (['int', 'float', 'text', 'bool', 'timestamp', 'json', 'bytes', 'geo'].includes(t)) return t;
   const list = /^\[(\w+)\]$/.exec(t);
   if (list && SCALAR.includes(list[1])) return t;
   const v = /^vector<(\d{1,5})(, f16)?>$/.exec(t);
   if (v && Number(v[1]) > 0) return t;
   const s = /^sparse<(\d{1,7})>$/.exec(t);
   if (s && Number(s[1]) > 0) return t;
-  throw new StatementError(`${JSON.stringify(t)} is not a type: int, float, text, bool, timestamp, json, bytes, vector<N>, sparse<N> or [text]`);
+  throw new StatementError(`${JSON.stringify(t)} is not a type: int, float, text, bool, timestamp, json, bytes, geo, vector<N>, sparse<N> or [text]`);
 }
 
 /** The indexes a field of `type` can carry, by the name its `@` takes. */
@@ -136,6 +136,7 @@ export function indexKinds(type) {
       bool: ['hash'],
       vector: ['hnsw'],
       sparse: ['inverted'],
+      geo: ['geo'],
     }[kind] ?? []
   );
 }

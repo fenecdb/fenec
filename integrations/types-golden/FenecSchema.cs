@@ -18,6 +18,7 @@ public sealed record Articles(
     /* timestamp @ttl(30d) */ [property: JsonPropertyName("published")] string? Published,
     /* bytes */ [property: JsonPropertyName("cover")] int[]? Cover,
     /* json */ [property: JsonPropertyName("meta")] JsonElement? Meta,
+    /* geo @geo */ [property: JsonPropertyName("loc")] double[]? Loc,
     /* vector<384> @hnsw(cosine, m=8, ef_construction=200, ef_search=100) */ [property: JsonPropertyName("embed")] float[]? Embed,
     /* vector<4, f16> @hnsw(l2, m=16, ef_construction=200, ef_search=100, quant=int8) */ [property: JsonPropertyName("small")] float[]? Small,
     /* sparse<30522> @inverted */ [property: JsonPropertyName("splade")] string? Splade,

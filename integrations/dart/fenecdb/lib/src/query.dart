@@ -92,6 +92,12 @@ class Computed {
   /// `count(distinct field)`: how many distinct values the rows hold.
   static Computed countDistinct(String field) => Computed._(null, 'count(distinct ${_pathOf(field)})', const []);
 
+  /// `distance(field, point)`: the metres from a point, `[lon, lat]`, to the
+  /// row's -- `Computed.distance('loc', [13.4, 52.5]).as('m')`, what Redis's
+  /// `GEOSEARCH ... WITHDIST` answers with.
+  static Computed distance(String field, Object? point) =>
+      Computed._(null, 'distance(${_pathOf(field)}, ?)', [point]);
+
   /// `first(field)`, or `first(field by key)`: the value of the row least by
   /// [by] -- by the order the rows were written without one -- that has a
   /// value; a bar's open is `Computed.first('px', 'at')`.
@@ -120,7 +126,7 @@ class SortKey {
 }
 
 class Node {
-  final String t; // and, or, not, null, in, cmp, raw
+  final String t; // and, or, not, null, in, cmp, within, dist, raw
   final List<Node> items;
   final String field;
   final String op;
@@ -308,11 +314,45 @@ Node _fieldCond(String field, Object? spec) {
           : Node('not', items: [_fieldCond(field, e.value)]));
       continue;
     }
+    // A point's: in the box `[west, south, east, north]`, and the metres
+    // from a point, compared.
+    if (k == 'within') {
+      items.add(Node('within', field: field, value: e.value));
+      continue;
+    }
+    if (k == 'distance') {
+      items.add(_distanceCond(field, e.value));
+      continue;
+    }
     final op = _ops[k] ?? (throw _refuse('unknown operator `$k` (field: $field)'));
     items.add(op == 'in' ? _inCond(field, e.value) : _cmp(field, op, e.value));
   }
   return switch (items.length) {
     0 => throw _refuse('empty condition object (field: $field)'),
+    1 => items[0],
+    _ => Node('and', items: items),
+  };
+}
+
+/// `{'from': [lon, lat], 'lte': 500}`: a point's distance, compared --
+/// `distance(loc, $1) <= $2`, each comparison given its own.
+Node _distanceCond(String field, Object? spec) {
+  final from = spec is Map ? spec['from'] : null;
+  if (spec is! Map || from is! List || from is TypedData) {
+    throw _refuse('distance takes { from: [lon, lat], <op>: metres } (field: $field)');
+  }
+  final items = <Node>[];
+  for (final e in spec.entries) {
+    final k = e.key.toString();
+    if (k == 'from') continue;
+    final op = _ops[k];
+    if (op == null || op == 'in' || op == 'has' || op == '~' || e.value is! num) {
+      throw _refuse('distance compares metres with lt, lte, gt, gte, eq or ne: $k (field: $field)');
+    }
+    items.add(Node('dist', field: field, op: op, value: e.value, values: [from]));
+  }
+  return switch (items.length) {
+    0 => throw _refuse('distance needs a comparison, as lte: metres (field: $field)'),
     1 => items[0],
     _ => Node('and', items: items),
   };
@@ -364,6 +404,11 @@ String _render(Node c, String Function(Object?) bind, [String? parent]) {
       return '${c.field} in [${c.values.map(bind).join(', ')}]';
     case 'cmp':
       return '${c.field} ${c.op} ${bind(c.value)}';
+    case 'within':
+      return 'within(${c.field}, ${bind(c.value)})';
+    case 'dist':
+      final point = bind(c.values[0]);
+      return 'distance(${c.field}, $point) ${c.op} ${bind(c.value)}';
   }
   final pieces = c.sql.split('?');
   final out = StringBuffer();

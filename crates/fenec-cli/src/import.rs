@@ -523,6 +523,7 @@ fn index_name(kind: &IndexKind) -> String {
         ),
         IndexKind::Text(s) => format!("@text({})", s.args()),
         IndexKind::Inverted => "@inverted".into(),
+        IndexKind::Geo => "@geo".into(),
         IndexKind::None => String::new(),
     }
 }

@@ -89,7 +89,11 @@ impl Registry {
     pub fn register_fn(&mut self, name: &str, f: Arc<dyn ScalarFn>) -> Result<()> {
         // The name as given against the lowered ones, as the map's
         // `contains_key` compared it: `Lower` replaces `lower`.
-        if self.functions.iter().any(|(n, _)| n == name) {
+        // A point's two are the engine's own beside the registry's: a
+        // filter binds them, and `@geo` answers them, as the builtins work
+        // them out -- replaced, a row's answer and the index's would part.
+        let taken = crate::geo::is_geo_call(name) && self.function(name).is_some();
+        if taken || self.functions.iter().any(|(n, _)| n == name) {
             return Err(Error::Exists(format!(
                 "function `{name}` is already registered"
             )));
@@ -350,6 +354,22 @@ pub mod builtins {
                     }
                 })
             }
+        );
+        reg!(
+            r,
+            "distance",
+            2,
+            Some(2),
+            "the metres between two points [lon, lat], as Redis's GEODIST",
+            crate::geo::distance_fn
+        );
+        reg!(
+            r,
+            "within",
+            2,
+            Some(2),
+            "whether a point lies in a box [west, south, east, north]",
+            crate::geo::within_fn
         );
         reg!(r, "norm", 1, Some(1), "vector length (L2 norm)", |a| {
             Ok(Value::Float(vector::norm(&vec_arg(&a[0])?) as f64))

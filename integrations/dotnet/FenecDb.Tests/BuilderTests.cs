@@ -43,6 +43,7 @@ public sealed class BuilderTests(Servers servers)
             Computed.Expr(x[0].GetString()!, x.EnumerateArray().Skip(1).Select(Value).ToArray()),
         _ when e.TryGetProperty("$bucket", out var b) => Computed.Bucket(b[0].GetString()!, b[1].GetString()!),
         _ when e.TryGetProperty("$countDistinct", out var f) => Computed.CountDistinct(f.GetString()!),
+        _ when e.TryGetProperty("$distance", out var g) => Computed.Distance(g[0].GetString()!, Value(g[1])),
         _ when e.TryGetProperty("$first", out var f) => Computed.First(f[0].GetString()!, f.GetArrayLength() > 1 ? f[1].GetString() : null),
         _ when e.TryGetProperty("$last", out var f) => Computed.Last(f[0].GetString()!, f.GetArrayLength() > 1 ? f[1].GetString() : null),
         _ when e.TryGetProperty("$as", out var x) => ((Computed)Value(x[0])!).As(x[1].GetString()!),

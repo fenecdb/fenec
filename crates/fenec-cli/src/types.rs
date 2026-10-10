@@ -200,6 +200,14 @@ fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
              export type Vector = number[] & { readonly __fenec: 'vector' };\n",
         );
     }
+    if used(|t| {
+        matches!(t, DataType::Geo) || matches!(t, DataType::List(i) if **i == DataType::Geo)
+    }) {
+        out.push_str(
+            "/** `geo`: a point, its longitude and latitude in degrees. */\n\
+             export type Point = [lon: number, lat: number];\n",
+        );
+    }
     if used(|t| matches!(t, DataType::Json)) {
         out.push_str(
             "/** `json`: any value JSON holds; a path reads into it, `'meta.lang'`. */\n\
@@ -444,6 +452,7 @@ fn column(t: &DataType, used: &mut Vec<&'static str>) -> String {
         DataType::Vector(n, VecPrec::F32) => ("vector", format!("{{ dimensions: {n} }}")),
         DataType::Vector(n, VecPrec::F16) => ("halfvec", format!("{{ dimensions: {n} }}")),
         DataType::Sparse(n) => ("sparsevec", format!("{{ dimensions: {n} }}")),
+        DataType::Geo => ("geometry", "{ type: 'point' }".into()),
         DataType::List(inner) => return format!("{}.array()", column(inner, used)),
     };
     if !used.contains(&b) {
@@ -489,6 +498,11 @@ fn index_code(
         IndexKind::Inverted => {
             use_("index");
             format!("index('{name}').using('inverted', {target})")
+        }
+        // PostGIS's spatial index, as Drizzle declares one over a point.
+        IndexKind::Geo => {
+            use_("index");
+            format!("index('{name}').using('gist', {target})")
         }
         IndexKind::Vector(spec) => {
             use_("index");
@@ -574,6 +588,8 @@ fn ts_type(t: &DataType) -> String {
         // Any value JSON holds: an object, a list, a number, text, a
         // boolean or null.
         DataType::Json => "Json".into(),
+        // `[lon, lat]`, as a point is written and read.
+        DataType::Geo => "Point".into(),
     }
 }
 
@@ -595,6 +611,7 @@ fn index_note(k: &IndexKind) -> Option<String> {
         )),
         IndexKind::Text(spec) => Some(format!(" @text({})", spec.args())),
         IndexKind::Inverted => Some(" @inverted".into()),
+        IndexKind::Geo => Some(" @geo".into()),
     }
 }
 

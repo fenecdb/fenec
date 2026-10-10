@@ -32,6 +32,8 @@ export type Sparse = string & { readonly __fenec: 'sparse' };
 export type Bytes = number[] & { readonly __fenec: 'bytes' };
 /** A `json` field: any value JSON holds. A path reads into it, `'meta.lang'`. */
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+/** A `geo` field: a point, its longitude and latitude in degrees. */
+export type Point = [lon: number, lat: number];
 
 /**
  * A path into one of `F`'s json fields, `'meta.lang'` or
@@ -288,12 +290,12 @@ export type Writable<T> = T extends Timestamp
 type Elem<T> = T extends readonly (infer U)[] ? U : never;
 
 /**
- * Fields of type `vector<N>` or `sparse<N>` -- the only ones `near` accepts.
+ * Fields of type `vector<N>`, `sparse<N>` or `geo` -- the only ones `near` accepts.
  * An optional field is generated as `Vector | null`, so `null` is peeled off
  * first.
  */
 export type VectorKey<F extends Fields> = {
-  [K in keyof F]: NonNullable<F[K]> extends Vector | Sparse ? K : never;
+  [K in keyof F]: NonNullable<F[K]> extends Vector | Sparse | Point ? K : never;
 }[keyof F] &
   string;
 
@@ -340,6 +342,29 @@ export interface Spec<T> {
    */
   in?: Writable<T>[] | Query<any, any, any, any, any, any>;
   not?: Writable<T> | null | Spec<T>;
+  /** A point's: in the box `[west, south, east, north]` (`within(loc, $1)`). */
+  within?: NonNullable<T> extends Point ? [number, number, number, number] : never;
+  /** A point's: the metres from `from`, compared (`distance(loc, $1) <= $2`). */
+  distance?: NonNullable<T> extends Point ? DistanceSpec : never;
+}
+
+/** `{ distance: { from: [lon, lat], lte: 500 } }`: metres from a point, compared. */
+export interface DistanceSpec {
+  from: Point;
+  '<'?: number;
+  lt?: number;
+  '<='?: number;
+  lte?: number;
+  le?: number;
+  '>'?: number;
+  gt?: number;
+  '>='?: number;
+  gte?: number;
+  ge?: number;
+  '='?: number;
+  eq?: number;
+  '!='?: number;
+  ne?: number;
 }
 
 // `F` is not inferred: the object inside `or({...})` is checked against the
@@ -427,6 +452,12 @@ export function bucket(field: string, interval: Interval): Expression;
 
 /** `count(distinct field)`: how many distinct values the rows hold. */
 export function countDistinct(field: string): Expression;
+
+/**
+ * `distance(field, point)`: the metres from `point` to a row's point, on
+ * Redis's sphere -- `distance('loc', [13.4, 52.5]).as('m')`.
+ */
+export function distance(field: string, point: Point): Expression;
 
 /**
  * `first(field [by key])`: the value of the row least by `key` -- by the
@@ -681,7 +712,9 @@ export declare class Query<
 
   /**
    * Vector search; `_score` is added to the result. Over a `sparse<N>` field
-   * the vector is its text form and the score its dot product.
+   * the vector is its text form and the score its dot product; over a
+   * `geo` field the vector is a point, `[lon, lat]`, and the score the
+   * distance in metres, nearest first.
    */
   near(
     field: VectorKey<F>,

@@ -49,12 +49,13 @@ import Testing
     }
 
     /// A select item or a group key: a name as itself, `$expr`, `$bucket`,
-    /// `$countDistinct`, `$first`, `$last` as `Column`'s, `$as` naming one.
+    /// `$countDistinct`, `$distance`, `$first`, `$last` as `Column`'s, `$as` naming one.
     static func column(_ v: Value) throws -> Column {
         if let name = v.string { return Column(name) }
         if let e = v["$expr"]?.array { return .expr(e[0].string!, e.dropFirst().map(value)) }
         if let b = v["$bucket"]?.array { return try .bucket(b[0].string!, b[1].string!) }
         if let f = v["$countDistinct"]?.string { return try .countDistinct(f) }
+        if let d = v["$distance"]?.array { return try .distance(d[0].string!, value(d[1])) }
         if let f = v["$first"]?.array { return try .first(f[0].string!, by: f.count > 1 ? f[1].string! : nil) }
         if let f = v["$last"]?.array { return try .last(f[0].string!, by: f.count > 1 ? f[1].string! : nil) }
         if let a = v["$as"]?.array { return try column(a[0]).as(a[1].string!) }

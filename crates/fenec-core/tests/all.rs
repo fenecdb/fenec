@@ -21,6 +21,7 @@ mod explain;
 mod facets;
 mod filtered;
 mod fuse;
+mod geo;
 mod handover;
 mod having;
 mod highlight;

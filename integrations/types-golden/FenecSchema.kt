@@ -16,6 +16,7 @@ data class Articles(
     val published: String?, // timestamp @ttl(30d)
     val cover: List<Int>?, // bytes
     val meta: Any?, // json
+    val loc: List<Double>?, // geo @geo
     val embed: List<Float>?, // vector<384> @hnsw(cosine, m=8, ef_construction=200, ef_search=100)
     val small: List<Float>?, // vector<4, f16> @hnsw(l2, m=16, ef_construction=200, ef_search=100, quant=int8)
     val splade: String?, // sparse<30522> @inverted
@@ -34,6 +35,7 @@ data class Articles(
             published = row["published"]?.let { v -> (v as String) },
             cover = row["cover"]?.let { v -> (v as List<*>).map { (it as Number).toInt() } },
             meta = row["meta"]?.let { v -> v },
+            loc = row["loc"]?.let { v -> (v as List<*>).map { (it as Number).toDouble() } },
             embed = row["embed"]?.let { v -> (v as List<*>).map { (it as Number).toFloat() } },
             small = row["small"]?.let { v -> (v as List<*>).map { (it as Number).toFloat() } },
             splade = row["splade"]?.let { v -> (v as String) },

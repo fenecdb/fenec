@@ -996,6 +996,16 @@ impl Store {
                     pos += 1;
                     crate::codec::decode_text_into(buf, &mut pos, s)?;
                 }
+                // A point into the two floats its slot held, as a text:
+                // decoded anew it was a list allocated and freed a row.
+                (Some(&crate::codec::TAG_GEO), Some(Value::List(p))) if p.len() == 2 => {
+                    let raw = buf
+                        .get(pos + 1..pos + 17)
+                        .ok_or_else(|| Error::Corrupt("point outside the segment".into()))?;
+                    let (lon, lat) = crate::codec::geo_at(raw);
+                    (p[0], p[1]) = (Value::Float(lon), Value::Float(lat));
+                    pos += 17;
+                }
                 (None, Some(slot)) => *slot = Value::Null,
                 (None, None) => out.push(Value::Null),
                 (_, Some(slot)) => *slot = decode_value(buf, &mut pos)?,
@@ -1032,6 +1042,22 @@ impl Store {
             self.field_at(id, field_pos)?.and_then(|b| b.first()),
             Some(&(crate::codec::TAG_VECTOR | crate::codec::TAG_VECTOR_F16))
         ))
+    }
+
+    /// The point the stored document holds at `field_pos`, its 16 bytes read
+    /// where they lie; `None` for a document that holds none there, or
+    /// none at all.
+    pub fn read_point(&self, id: DocId, field_pos: usize) -> Result<Option<(f64, f64)>> {
+        let Some(buf) = self.field_at(id, field_pos)? else {
+            return Ok(None);
+        };
+        match (buf.first(), buf.get(1..17)) {
+            (Some(&crate::codec::TAG_GEO), Some(raw)) => Ok(Some(crate::codec::geo_at(raw))),
+            (Some(&crate::codec::TAG_GEO), None) => {
+                Err(Error::Corrupt("point outside the segment".into()))
+            }
+            _ => Ok(None),
+        }
     }
 
     pub fn read_vector_into(

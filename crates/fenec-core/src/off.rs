@@ -255,6 +255,41 @@ impl SparseIndex {
     }
 }
 
+/// The `@geo` index, which the `sorted` feature carries with the ordered
+/// index whose chunks it keeps its keys in: without it a point's
+/// conditions and `near` over one are the scan's, the same answers.
+pub enum GeoIndex {}
+
+impl GeoIndex {
+    pub fn new() -> GeoIndex {
+        absent("sorted")
+    }
+    pub fn build(rows: &mut dyn Iterator<Item = (DocId, (f64, f64))>) -> GeoIndex {
+        absent("sorted")
+    }
+    pub fn insert(&mut self, id: DocId, v: Option<&Value>) {
+        match *self {}
+    }
+    pub fn remove(&mut self, id: DocId, v: Option<&Value>) {
+        match *self {}
+    }
+    pub fn memory_bytes(&self) -> usize {
+        match *self {}
+    }
+    pub fn candidates(&self, shape: &crate::geo::Shape, cap: usize) -> Option<Vec<DocId>> {
+        match *self {}
+    }
+    pub fn nearest(
+        &self,
+        from: (f64, f64),
+        max: f64,
+        point_at: &mut dyn FnMut(DocId) -> Result<Option<(f64, f64)>>,
+        visit: &mut dyn FnMut(DocId, f64) -> Result<bool>,
+    ) -> Result<()> {
+        match *self {}
+    }
+}
+
 pub enum SortedIndex {}
 
 impl SortedIndex {

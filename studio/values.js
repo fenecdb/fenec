@@ -28,9 +28,19 @@ export function cellText(value, type) {
   if (value === null || value === undefined) return null;
   const { kind } = kindOf(type);
   if (kind === 'vector' && Array.isArray(value)) return vectorSummary(value);
+  if (kind === 'geo' && Array.isArray(value)) return pointText(value);
   if (kind === 'bytes' && Array.isArray(value)) return `${value.length} B  ${value.slice(0, 8).map((b) => b.toString(16).padStart(2, '0')).join(' ')}${value.length > 8 ? ' …' : ''}`;
   if (typeof value === 'object') return compact(value);
   return String(value);
+}
+
+/**
+ * A point as people read one: the latitude first, each with its hemisphere
+ * -- `52.520008° N, 13.404954° E` -- where the value is `[lon, lat]`, the
+ * order a reader most often gets the wrong way round.
+ */
+export function pointText([lon, lat]) {
+  return `${Math.abs(lat)}° ${lat < 0 ? 'S' : 'N'}, ${Math.abs(lon)}° ${lon < 0 ? 'W' : 'E'}`;
 }
 
 /** JSON in one line, cut once it is longer than a cell can show. */
@@ -75,7 +85,7 @@ function leaf(v) {
 export function editText(value, type) {
   if (value === null || value === undefined) return '';
   const { kind } = kindOf(type);
-  if (['json', 'vector', 'list', 'bytes'].includes(kind) || typeof value === 'object') return JSON.stringify(value);
+  if (['json', 'vector', 'list', 'bytes', 'geo'].includes(kind) || typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
 
@@ -132,6 +142,13 @@ export function readInput(text, type, field) {
     case 'list': {
       const v = json();
       if (!Array.isArray(v)) throw new StatementError(`${field} holds a list, as ["a", "b"]`);
+      return v;
+    }
+    case 'geo': {
+      const v = json();
+      if (!Array.isArray(v) || v.length !== 2 || !v.every(Number.isFinite)) {
+        throw new StatementError(`${field} holds a point, [lon, lat], as [13.404954, 52.520008]`);
+      }
       return v;
     }
     case 'json':
