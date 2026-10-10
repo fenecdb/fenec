@@ -27,6 +27,10 @@ mod garbage;
 #[cfg(not(target_arch = "wasm32"))]
 mod handover;
 mod maintenance;
+#[cfg(not(target_arch = "wasm32"))]
+mod pinned;
+#[cfg(not(target_arch = "wasm32"))]
+pub use pinned::{Pinned, PIN_AT, PIN_BUDGET};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use garbage::{
@@ -2567,6 +2571,15 @@ pub struct Database {
     /// place: what every read and write waited out at most.
     #[cfg(not(target_arch = "wasm32"))]
     swap_held: std::time::Duration,
+    /// The rows a read reads at least to be pinned ([`Self::pin`]), and
+    /// the bytes this database's pins may hold together, beside what they
+    /// hold now: [`pinned::PIN_AT`] and [`pinned::PIN_BUDGET`] unless set.
+    #[cfg(not(target_arch = "wasm32"))]
+    pin_at: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    pin_budget: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    pins: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -2651,6 +2664,12 @@ impl Database {
             compactions: 0,
             #[cfg(not(target_arch = "wasm32"))]
             swap_held: std::time::Duration::ZERO,
+            #[cfg(not(target_arch = "wasm32"))]
+            pin_at: pinned::PIN_AT,
+            #[cfg(not(target_arch = "wasm32"))]
+            pin_budget: pinned::PIN_BUDGET,
+            #[cfg(not(target_arch = "wasm32"))]
+            pins: Arc::default(),
         }
     }
 

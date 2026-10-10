@@ -1342,58 +1342,95 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     // A read's `ETag` ([`etag`]).
     let mut tagged = None;
     let result = if stmt.is_read_only() {
-        // A plain `get` is written out as JSON from the stored documents,
-        // under the read lock; anything else is answered as rows and
-        // rendered after it.
-        let guard = held::read(db);
-        // `If-None-Match` with the tag of an answer whose collections no
-        // write has touched since: 304, the query not run (`poll`).
-        // Asked for only: a read that sends none is answered as it was, no
-        // tag worked out (the first poll sends `"0"`).
-        let asked = req.header("if-none-match");
-        // A scoped token's tag is its answer's own ([`content_tag`]): the
-        // query runs every time, and 304 says only that its rows are the
-        // rows it had. Tagged by the change counter, 304 against 200 -- and
-        // the 304's speed -- told it when anyone wrote to what it reads,
-        // rows it may not see among them, and the tag how many writes the
-        // database had taken.
-        let by_content = asked.is_some() && who.scope().is_some();
-        let tag = match by_content {
-            true => None,
-            false => asked.and_then(|_| etag(&guard, &stmt, body)),
-        };
-        if let (Some(t), Some(asked)) = (&tag, asked) {
-            if unchanged(&guard, &stmt, asked) {
-                return Response::json(304, Vec::new()).header("ETag", t);
-            }
-        }
-        let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
-        let running = trace::span("execute");
-        match guard.query_json(&stmt, &params, &mut body) {
-            Ok(Some(n)) => {
-                drop(guard);
-                drop(running);
-                timing::lap(timing::Phase::Execute);
-                statements::rows(n as u64);
-                let mut resp = Response::json(200, body).versioned(fenec_core::VERSION);
-                if let Some(t) = &tag {
-                    resp = resp.header("ETag", t);
+        // A long read is pinned under the read lock and run with none held
+        // ([`Database::pin`]), so a writer waits for the pin rather than
+        // the read. One that reached for an index the pin left out runs
+        // again under the lock, as every read did before.
+        let mut pin = true;
+        loop {
+            // A plain `get` is written out as JSON from the stored
+            // documents, under the read lock; anything else is answered as
+            // rows and rendered after it.
+            let guard = held::read(db);
+            // `If-None-Match` with the tag of an answer whose collections
+            // no write has touched since: 304, the query not run (`poll`).
+            // Asked for only: a read that sends none is answered as it
+            // was, no tag worked out (the first poll sends `"0"`).
+            let asked = req.header("if-none-match");
+            // A scoped token's tag is its answer's own ([`content_tag`]):
+            // the query runs every time, and 304 says only that its rows
+            // are the rows it had. Tagged by the change counter, 304
+            // against 200 -- and the 304's speed -- told it when anyone
+            // wrote to what it reads, rows it may not see among them, and
+            // the tag how many writes the database had taken.
+            let by_content = asked.is_some() && who.scope().is_some();
+            let tag = match by_content {
+                true => None,
+                false => asked.and_then(|_| etag(&guard, &stmt, body)),
+            };
+            if let (Some(t), Some(asked)) = (&tag, asked) {
+                if unchanged(&guard, &stmt, asked) {
+                    return Response::json(304, Vec::new()).header("ETag", t);
                 }
-                if by_content {
-                    resp = same_answer(resp, asked);
-                }
-                timing::lap(timing::Phase::Render);
-                return resp;
             }
-            Ok(None) => http::give_back(body.into_bytes()),
-            Err(e) => return error_response(&e),
+            let pinned = match pin {
+                true => guard.pin(&[(&*stmt, &params[..])]),
+                false => None,
+            };
+            let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
+            let running = trace::span("execute");
+            let (json, guard) = match &pinned {
+                Some(p) => {
+                    drop(guard);
+                    running.attr("fenec.pinned", true);
+                    (p.query_json(&stmt, &params, &mut body), None)
+                }
+                None => (
+                    Some(guard.query_json(&stmt, &params, &mut body)),
+                    Some(guard),
+                ),
+            };
+            match json {
+                Some(Ok(Some(n))) => {
+                    drop(guard);
+                    drop(running);
+                    timing::lap(timing::Phase::Execute);
+                    statements::rows(n as u64);
+                    let mut resp = Response::json(200, body).versioned(fenec_core::VERSION);
+                    if let Some(t) = &tag {
+                        resp = resp.header("ETag", t);
+                    }
+                    if by_content {
+                        resp = same_answer(resp, asked);
+                    }
+                    timing::lap(timing::Phase::Render);
+                    return resp;
+                }
+                Some(Ok(None)) => http::give_back(body.into_bytes()),
+                Some(Err(e)) => return error_response(&e),
+                None => {
+                    http::give_back(body.into_bytes());
+                    running.forget();
+                    pin = false;
+                    continue;
+                }
+            }
+            let r = match (&pinned, &guard) {
+                (Some(p), _) => p.query(&stmt, &params),
+                (None, Some(g)) => Some(g.query(&stmt, &params)),
+                (None, None) => unreachable!("a read runs pinned or under the lock"),
+            };
+            drop(guard);
+            let Some(r) = r else {
+                running.forget();
+                pin = false;
+                continue;
+            };
+            drop(running);
+            timing::lap(timing::Phase::Execute);
+            tagged = tag;
+            break r;
         }
-        let r = guard.query(&stmt, &params);
-        drop(guard);
-        drop(running);
-        timing::lap(timing::Phase::Execute);
-        tagged = tag;
-        r
     } else if let Some(built) = {
         let running = trace::span("execute");
         running.attr("fenec.beside", true);
@@ -1730,45 +1767,89 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     )
 }
 
-/// A `/batch` whose every statement only reads, under one read lock: the
-/// snapshot a reconciliation takes -- every read at the one change
-/// `Fenec-Seq` names, no write landing between the first and the last --
-/// with readers going on beside it and writers waiting only as they wait
-/// for any read. Under the write lock, as every batch was, a ledger's
-/// four reads over a million entries held each transfer up to 350 ms, as
-/// long as the snapshot took. A `require` on a read stops it with 412 and
-/// `at`, as in a block: nothing to put back.
+/// A `/batch` whose every statement only reads, as one snapshot: what a
+/// reconciliation takes -- every read at the one change `Fenec-Seq` names,
+/// no write landing between the first and the last. Under the write lock,
+/// as every batch was, a ledger's four reads over a million entries held
+/// each transfer up to 350 ms, as long as the snapshot took; under one read
+/// lock, readers went on beside it but transfers still waited as long, up
+/// to 252 ms. Now the batch is pinned ([`Database::pin`]) and read with no
+/// lock held, and a transfer waits for the pin alone; a batch the pin
+/// cannot answer -- short, or answered by an index -- runs under one read
+/// lock as before. A `require` on a read stops it with 412 and `at`, as in
+/// a block: nothing to put back.
 fn read_batch(
     db: &Arc<RwLock<Database>>,
     stmts: &[(Statement, Vec<Value>)],
     who: &Who,
 ) -> Response {
+    let pairs: Vec<(&Statement, &[Value])> = stmts.iter().map(|(s, p)| (s, &p[..])).collect();
     let guard = held::read(db);
-    let mut results = Vec::with_capacity(stmts.len());
+    if let Some(p) = guard.pin(&pairs) {
+        drop(guard);
+        let running = trace::span("execute");
+        running.attr("fenec.statements", stmts.len() as i64);
+        running.attr("fenec.pinned", true);
+        if let Some(resp) = answer_reads(&pairs, who, p.change_seq(), |s, ps| p.query(s, ps)) {
+            return resp;
+        }
+        // A statement reached for an index the pin left out: the whole
+        // batch again under the lock, at the one change that holds then.
+        running.forget();
+        let guard = held::read(db);
+        return locked_reads(&guard, &pairs, who);
+    }
+    locked_reads(&guard, &pairs, who)
+}
+
+/// A read-only batch under the read lock `guard` is.
+fn locked_reads(guard: &Database, pairs: &[(&Statement, &[Value])], who: &Who) -> Response {
     let running = trace::span("execute");
-    running.attr("fenec.statements", stmts.len() as i64);
-    for (at, (stmt, params)) in stmts.iter().enumerate() {
-        match guard.query(stmt, params) {
-            Ok(r) => {
-                let r = visible(who, r);
-                statements::rows(counted(&r));
-                results.push(r)
-            }
+    running.attr("fenec.statements", pairs.len() as i64);
+    let seq = guard.change_seq();
+    answer_reads(pairs, who, seq, |s, ps| Some(guard.query(s, ps)))
+        .expect("a read under the lock answers")
+}
+
+/// A read-only batch's answer, each statement run by `run` -- `None` where
+/// one of them answered `None`, a pin's refusal to reach past what it
+/// holds, before any was counted. Stopped at the first error, as a block.
+fn answer_reads(
+    pairs: &[(&Statement, &[Value])],
+    who: &Who,
+    seq: u64,
+    run: impl Fn(
+        &Statement,
+        &[Value],
+    ) -> Option<fenec_core::error::Result<fenec_core::prelude::Response>>,
+) -> Option<Response> {
+    let mut results = Vec::with_capacity(pairs.len());
+    let count = |results: &[fenec_core::prelude::Response]| {
+        for r in results {
+            statements::rows(counted(r));
+        }
+    };
+    for (at, (stmt, params)) in pairs.iter().enumerate() {
+        match run(stmt, params)? {
+            Ok(r) => results.push(visible(who, r)),
             Err(e) => {
+                count(&results);
                 let why = e.to_string();
-                return api::render_batch_stop(
+                return Some(api::render_batch_stop(
                     api::status_of(&e),
                     &why,
                     0,
                     at,
                     fenec_core::VERSION,
-                );
+                ));
             }
         }
     }
-    let seq = Some(guard.change_seq());
-    drop(guard);
-    with_seq(api::render_batch(&results, fenec_core::VERSION), seq)
+    count(&results);
+    Some(with_seq(
+        api::render_batch(&results, fenec_core::VERSION),
+        Some(seq),
+    ))
 }
 
 /// Why the data ceiling `max` (bytes, 0 = off) refuses `stmt`, if it does.

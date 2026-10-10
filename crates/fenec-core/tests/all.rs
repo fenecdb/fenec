@@ -31,6 +31,7 @@ mod mapped;
 mod memory;
 mod paging;
 mod persist;
+mod pinned;
 mod quant;
 mod query_json;
 mod redis_docs;

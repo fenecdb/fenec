@@ -22,6 +22,16 @@
 //! SQLite threads each hold a connection with a 30 s busy timeout, the
 //! usual answer to `SQLITE_BUSY`; fenecdb's share one database behind a
 //! `RwLock`, taken as `fenec-server` takes it.
+//!
+//! Then fenecdb alone, writers beside long reads: four threads putting a
+//! row at a time into a million events, two reading one by id, each at
+//! most every half a millisecond, and a long read every second -- a
+//! read-only batch of three aggregates (a ledger's reconciliation's shape,
+//! about 150 ms), an aggregate of 50 000 groups (about 0.7 s), a full scan
+//! (about 60 ms) -- under the read lock throughout, and pinned
+//! (`Database::pin`), in turns. Each write's and each read's time, the
+//! lock's wait in it: p50, p99, the longest, and how many waited past
+//! 50 ms. `long` runs that part alone, `long lock` or `long pin` one way.
 
 use fenec_core::prelude::*;
 use rusqlite::{params, Connection};
@@ -242,10 +252,256 @@ fn reads(v: &mut [f64]) -> String {
     )
 }
 
+// ------------------------------------------------- beside long reads
+
+/// The events the long reads read.
+const EVENTS: i64 = 1_000_000;
+/// How long each long read's turn lasts, a long read a second.
+const LONG_RUN: Duration = Duration::from_secs(10);
+/// Each writer's and reader's pace beside them: one at most every half a
+/// millisecond, so the events grow by about as much in every turn and the
+/// times are of the waits rather than of a queue of writers flat out.
+const PACE: Duration = Duration::from_micros(500);
+const NAMES: [&str; 8] = [
+    "view", "click", "signup", "cart", "buy", "share", "search", "logout",
+];
+const COUNTRIES: [&str; 5] = ["TR", "US", "DE", "FR", "JP"];
+
+fn event(seed: &mut u64) -> [Value; 5] {
+    let r = next(seed);
+    [
+        Value::Int((r % 50_000) as i64),
+        Value::Text(NAMES[(r >> 16) as usize % 8].into()),
+        Value::Timestamp(1_700_000_000_000 + (r >> 20) as i64 % (7 * 86_400_000)),
+        Value::Text(COUNTRIES[(r >> 40) as usize % 5].into()),
+        Value::Int((r >> 48) as i64 % 1000),
+    ]
+}
+
+const PUT_EVENT: &str = "put events {user: $1, name: $2, at: $3, country: $4, n: $5}";
+
+fn events_open(path: &Path) -> Arc<RwLock<Database>> {
+    let _ = std::fs::remove_file(path);
+    let mut db = fenec_core::fs::open(path).unwrap();
+    db.execute(&stmt(
+        "create collection events (user int @hash, name text @hash, at timestamp, \
+         country text, n int)",
+    ))
+    .unwrap();
+    let put = stmt(PUT_EVENT);
+    let mut seed = 7;
+    for _ in 0..EVENTS / 10_000 {
+        let args: Vec<[Value; 5]> = (0..10_000).map(|_| event(&mut seed)).collect();
+        let stmts: Vec<(&Statement, &[Value])> = args.iter().map(|a| (&put, &a[..])).collect();
+        db.execute_block(&stmts).unwrap();
+    }
+    db.checkpoint().unwrap();
+    Arc::new(RwLock::new(db))
+}
+
+/// The long reads, each a list of statements read as one.
+fn long_reads() -> Vec<(&'static str, Vec<Statement>)> {
+    vec![
+        (
+            "a read-only batch of three",
+            vec![
+                stmt("get events select name, sum(n) group name"),
+                stmt("get events select country, count(*), min(at), max(at) group country"),
+                stmt("get events count"),
+            ],
+        ),
+        (
+            "an aggregate of 50 000 groups",
+            vec![stmt(
+                "get events select user, min(case when name = 'signup' then at end) as a, \
+                 min(case when name = 'buy' then at end) as b, count(distinct country) as c, \
+                 count(distinct name) as d, max(n) as m, min(at) as f, sum(n) as s group user having b >= a count",
+            )],
+        ),
+        (
+            "a full scan",
+            vec![stmt("get events where country ~ \"R\" and n > 500 count")],
+        ),
+    ]
+}
+
+/// One long read, every statement at the one change: pinned under the
+/// read lock and read with none held when `pin` -- what a server's
+/// read-only batch does -- or under the read lock throughout. How long the
+/// lock was held, in milliseconds.
+fn long_read(db: &RwLock<Database>, stmts: &[Statement], pin: bool) -> f64 {
+    let t = Instant::now();
+    let g = db.read().unwrap();
+    if pin {
+        let pairs: Vec<(&Statement, &[Value])> = stmts.iter().map(|s| (s, &[][..])).collect();
+        if let Some(p) = g.pin(&pairs) {
+            drop(g);
+            let held = t.elapsed().as_secs_f64() * 1e3;
+            for s in stmts {
+                let r = p.query(s, &[]).expect("a read a pin answers");
+                std::hint::black_box(r.unwrap());
+            }
+            return held;
+        }
+    }
+    for s in stmts {
+        std::hint::black_box(g.query(s, &[]).unwrap());
+    }
+    drop(g);
+    t.elapsed().as_secs_f64() * 1e3
+}
+
+/// Four writers putting events and two readers reading one by id for
+/// [`LONG_RUN`], a long read of `stmts` every second beside them when
+/// there are any: the writes' times, the reads', the long reads' and how
+/// long each held the lock.
+fn beside_long(db: &Arc<RwLock<Database>>, stmts: &[Statement], pin: bool) -> [Vec<f64>; 4] {
+    let stop = AtomicBool::new(false);
+    let (mut writes, mut reads) = (Vec::new(), Vec::new());
+    let (mut longs, mut held) = (Vec::new(), Vec::new());
+    std::thread::scope(|s| {
+        let clients: Vec<_> = (0..6u64)
+            .map(|c| {
+                let (db, stop) = (Arc::clone(db), &stop);
+                s.spawn(move || {
+                    let (put, get) = (stmt(PUT_EVENT), stmt("get events where id = $1"));
+                    let (mut seed, mut times) = (c + 100, Vec::new());
+                    while !stop.load(Ordering::Relaxed) {
+                        let t = Instant::now();
+                        let due = t + PACE;
+                        match c < 4 {
+                            true => {
+                                let args = event(&mut seed);
+                                db.write().unwrap().execute_with(&put, &args).unwrap();
+                            }
+                            false => {
+                                let id = (next(&mut seed) % EVENTS as u64) as i64 + 1;
+                                let r = db.read().unwrap().query(&get, &[Value::Int(id)]);
+                                std::hint::black_box(r.unwrap());
+                            }
+                        }
+                        times.push(t.elapsed().as_secs_f64() * 1e3);
+                        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                    }
+                    (c < 4, times)
+                })
+            })
+            .collect();
+        let end = Instant::now() + LONG_RUN;
+        while !stmts.is_empty() && Instant::now() + Duration::from_secs(1) <= end {
+            let next = Instant::now() + Duration::from_secs(1);
+            let t = Instant::now();
+            held.push(long_read(db, stmts, pin));
+            longs.push(t.elapsed().as_secs_f64() * 1e3);
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        }
+        std::thread::sleep(end.saturating_duration_since(Instant::now()));
+        stop.store(true, Ordering::Relaxed);
+        for c in clients {
+            match c.join().unwrap() {
+                (true, t) => writes.extend(t),
+                (false, t) => reads.extend(t),
+            }
+        }
+    });
+    [writes, reads, longs, held]
+}
+
+/// The rate, p50, p99 and the longest of `v`, in milliseconds, and how
+/// many waited past 50 ms.
+fn waits(v: &mut [f64]) -> String {
+    let over = v.iter().filter(|&&t| t > 50.0).count();
+    format!(
+        "{:>9.0} {:>8.3} {:>8.2} {:>8.1} {:>9}",
+        v.len() as f64 / LONG_RUN.as_secs_f64(),
+        pct(v, 0.5),
+        pct(v, 0.99),
+        pct(v, 1.0),
+        over
+    )
+}
+
+fn long(dir: &Path) {
+    let path = dir.join("events.fenec");
+    let t = Instant::now();
+    let db = events_open(&path);
+    println!(
+        "\nfenecdb: writers beside long reads, {EVENTS} events ({:.1} s to make), \
+         four writers and two readers by id",
+        t.elapsed().as_secs_f64()
+    );
+    // The indexes built and the pages in, before anything is timed; then
+    // each read alone, under the lock and pinned, the best of five.
+    for (name, stmts) in long_reads() {
+        long_read(&db, &stmts, false);
+        for pin in [false, true] {
+            let (mut best, mut held) = (f64::MAX, f64::MAX);
+            for _ in 0..5 {
+                let t = Instant::now();
+                held = held.min(long_read(&db, &stmts, pin));
+                best = best.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            match pin {
+                false => println!("  {name}, alone, under the lock: {best:.1} ms"),
+                true => println!("  {name}, alone, pinned: {best:.1} ms, the pin {held:.2} ms"),
+            }
+        }
+    }
+    println!(
+        "{:<56} {:>9} {:>8} {:>8} {:>8} {:>9}",
+        "", "a second", "p50 ms", "p99 ms", "max ms", "over 50ms"
+    );
+    let mut cases = vec![("no long read", Vec::new())];
+    cases.extend(long_reads());
+    // `lock` or `pin` runs one way alone, a binary from before the pins
+    // the first.
+    let only = std::env::args().nth(2);
+    let ways: Vec<bool> = match only.as_deref() {
+        Some("lock") => vec![false],
+        Some("pin") => vec![true],
+        _ => vec![false, true],
+    };
+    for (name, stmts) in cases {
+        for &pin in &ways {
+            if stmts.is_empty() && pin {
+                continue;
+            }
+            let how = match (stmts.is_empty(), pin) {
+                (true, _) => String::new(),
+                (false, false) => ", under the lock".to_string(),
+                (false, true) => ", pinned".to_string(),
+            };
+            let [mut w, mut r, mut l, mut h] = beside_long(&db, &stmts, pin);
+            println!("{:<56} {}", format!("writes, {name}{how}"), waits(&mut w));
+            println!(
+                "{:<56} {}",
+                format!("reads by id, {name}{how}"),
+                waits(&mut r)
+            );
+            if !l.is_empty() {
+                println!(
+                    "  the long read took {:.0} to {:.0} ms, the lock held {:.2} to {:.2} ms",
+                    pct(&mut l, 0.0),
+                    pct(&mut l, 1.0),
+                    pct(&mut h, 0.0),
+                    pct(&mut h, 1.0)
+                );
+            }
+        }
+    }
+    drop(db);
+    let _ = std::fs::remove_file(&path);
+}
+
 fn main() {
     let dir: PathBuf =
         std::env::temp_dir().join(format!("fenec-concurrency-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    if std::env::args().nth(1).as_deref() == Some("long") {
+        long(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
     let (fpath, spath) = (dir.join("bench.fenec"), dir.join("bench.sqlite"));
     println!(
         "fenecdb {} against SQLite {}, in one process, {} threads of this machine\n",
@@ -323,5 +579,6 @@ fn main() {
         reads(&mut s),
     );
     drop(db);
+    long(&dir);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1445,6 +1445,33 @@ impl Store {
         Some(moved)
     }
 
+    /// The store as it stands, for a long read to run on once the lock is
+    /// let go ([`crate::engine::Pinned`]): the id index copied, the
+    /// segments and the mapped file shared -- a write copies the open
+    /// segment the first time it appends to it while a pin holds it, and a
+    /// handover or a compact lets go of what the pin still reads -- and the
+    /// stretches left out. They say where the records are for an image to
+    /// write them, which a read never does, and a tail of single writes
+    /// held 16 bytes of them a write.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pinned(&self) -> Store {
+        Store {
+            segments: self.segments.clone(),
+            base: self.base.as_ref().map(|(b, _)| (b.clone(), Vec::new())),
+            index: self.index.clone(),
+            next_id: self.next_id,
+            dead_bytes: self.dead_bytes,
+            total_bytes: self.total_bytes,
+            dropped: self.dropped.clone(),
+        }
+    }
+
+    /// What [`Self::pinned`] copies: the id index.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pinned_bytes(&self) -> usize {
+        self.index.bytes()
+    }
+
     /// A store the rewrite wrote no data record for: nothing live, and no
     /// hold on the file it read from.
     pub fn let_go(&mut self) {

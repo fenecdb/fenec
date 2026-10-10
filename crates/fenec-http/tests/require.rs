@@ -267,6 +267,99 @@ fn a_batch_of_reads_reads_beside_other_readers() {
     assert_eq!(c.seq, Some(written + 1));
 }
 
+/// A long read is pinned and read with no lock held: a write lands while
+/// it reads, and the read answers as at the pin, `Fenec-Seq` the change it
+/// stood at. The read is held mid-way by a function of its own (`hold`),
+/// which lets go once the test has seen the write answered -- under the
+/// read lock the write would wait for the read, and the read for the write.
+/// A `require` in a pinned batch stops it with 412 and `at`, as before.
+#[test]
+fn a_write_lands_beside_a_pinned_read() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (port, db) = start_with_db();
+    let (entered, release) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    {
+        let mut db = db.write().unwrap();
+        db.set_pin_at(0);
+        let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+        let hold = move |args: &[Value]| {
+            entered.store(true, Ordering::SeqCst);
+            while !release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(args[0].clone())
+        };
+        db.registry_mut()
+            .register_fn("hold", Arc::new(hold))
+            .unwrap();
+    }
+    let mut c = Conn::open(port);
+    let (status, body) = c.post("/batch", &transfer("a0", "a1", 10, 1));
+    assert_eq!(status, 200, "{body}");
+    // Two entries a transfer: the journal holds `entries` at each pin.
+    let mut entries = 2;
+    for (tx, path) in [(2, "/batch"), (4, "/query")] {
+        let pinned_at = c.seq.expect("a write's Fenec-Seq");
+        let reads = match path {
+            "/batch" => [
+                line("get accounts select sum(hold(balance)) as s", ""),
+                line("get journal count", ""),
+            ]
+            .join("\n"),
+            _ => line(
+                "get journal select count(*) as n, sum(hold(amount)) as s",
+                "",
+            ),
+        };
+        entered.store(false, Ordering::SeqCst);
+        release.store(false, Ordering::SeqCst);
+        let reader = std::thread::spawn(move || {
+            let mut c = Conn::open(port);
+            let answer = c.post(path, &reads);
+            (answer, c.seq)
+        });
+        while !entered.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // The read is under way, holding no lock: the write is answered.
+        let (status, body) = c.post("/batch", &transfer("a1", "a2", 1, tx));
+        assert_eq!(status, 200, "{body}");
+        assert!(c.seq > Some(pinned_at), "{path}");
+        release.store(true, Ordering::SeqCst);
+        let ((status, body), seq) = reader.join().unwrap();
+        assert_eq!(status, 200, "{body}");
+        // As at the pin: the transfer made meanwhile not counted.
+        match path {
+            "/batch" => {
+                assert_eq!(seq, Some(pinned_at), "the change the pin stood at");
+                let want = format!(
+                    "{{\"ok\":2,\"results\":[{{\"rows\":[{{\"s\":{}}}]}},\
+                     {{\"rows\":[{{\"count\":{entries}}}]}}]}}",
+                    ACCOUNTS * START
+                );
+                assert_eq!(body, want);
+            }
+            _ => assert_eq!(body, format!("[{{\"n\":{entries},\"s\":0}}]")),
+        }
+        entries += 2;
+    }
+    let stopped = [
+        line("get journal select account, sum(amount) group account", ""),
+        line("get accounts where balance = -1 limit 1 require 1", ""),
+    ]
+    .join("\n");
+    release.store(true, Ordering::SeqCst);
+    let (status, body) = c.post("/batch", &stopped);
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"unmet: `get accounts` answered 0 rows, and requires 1","completed":0,"at":1}"#
+    );
+}
+
 /// Eight clients sending transfers as `/batch`es at random among few
 /// accounts, overdrafts and missing accounts common: the sum stays, no
 /// balance goes below zero, and the journal accounts for every balance.
