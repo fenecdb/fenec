@@ -1,0 +1,27 @@
+# fenec-server's own data, through the Infinity plugin: every panel of
+# fenecdb-data.json is a POST /query, its FenecQL in the body with Grafana's
+# time range and variables as parameters.
+#
+# The token is the seed's (seed/seed.mjs), read from the file only Grafana
+# mounts into the data source's secure settings: Grafana keeps it encrypted
+# in its database, sends it as `Authorization: Bearer`, and shows it in no
+# dashboard, query or inspector. policy.txt lets it read `events` and
+# `ticks` and nothing else.
+apiVersion: 1
+datasources:
+  - name: fenecdb data
+    type: yesoreyeram-infinity-datasource
+    uid: fenecdb-data
+    url: http://fenecdb:8080
+    access: proxy
+    editable: false
+    jsonData:
+      auth_method: bearerToken
+      # A query's URL is held to this prefix, host and path both: a viewer
+      # can send a data source any query (POST /api/ds/query), and this one
+      # reaches POST /query and nothing else of the server.
+      allowedHosts:
+        - http://fenecdb:8080/query
+      timeoutInSeconds: 30
+    secureJsonData:
+      bearerToken: $__file{/run/fenec/grafana.jwt}

@@ -139,12 +139,17 @@ export interface SiteProfile {
  * day's events, in time order.
  */
 export class Traffic {
+  // A field and an assignment rather than a parameter property: Node runs
+  // this file with its types stripped -- monitoring/seed/seed.mjs imports it
+  // with no build step -- and stripping takes only syntax it can erase.
+  readonly profile: SiteProfile;
   readonly #r: () => number;
   readonly #visitors: Visitor[] = [];
   #n = 0;
   #e = 0;
 
-  constructor(readonly profile: SiteProfile) {
+  constructor(profile: SiteProfile) {
+    this.profile = profile;
     this.#r = rng(profile.seed);
   }
 

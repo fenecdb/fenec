@@ -1,6 +1,6 @@
 <!--
 title: Monitoring — fenecdb
-description: Prometheus metrics at /_metrics, a ready Grafana dashboard, a slow-statement log, per-statement counts, an audit log, a request id in every line, and OpenTelemetry traces.
+description: Prometheus metrics at /_metrics, ready Grafana dashboards of the metrics and of the data, a slow-statement log, per-statement counts, an audit log, a request id in every line, and OpenTelemetry traces.
 -->
 
 <h1>Monitoring</h1>
@@ -99,20 +99,34 @@ per process, and start again at zero with it, which <code>rate()</code> takes
 in its stride.</p>
 </details>
 
-<h2>The dashboard</h2>
+<h2 id="grafana">Grafana</h2>
 
 <p>The repository's <code>monitoring/</code> folder runs fenec-server with
-Prometheus and Grafana, the dashboard already loaded.</p>
+Prometheus and Grafana and two dashboards already loaded: the server's
+metrics, and the database's own rows through the Infinity plugin.</p>
 
-<pre data-lang="bash">FENEC_METRICS_TOKEN=scrape \
+<pre data-lang="bash">FENEC_HTTP_TOKEN=secret FENEC_METRICS_TOKEN=scrape \
+FENEC_JWT_SECRET=$(openssl rand -hex 32) \
   docker compose -f monitoring/docker-compose.yml up -d
-# Grafana: http://127.0.0.1:3000/d/fenecdb     Prometheus: http://127.0.0.1:9090
+# metrics: http://127.0.0.1:3000/d/fenecdb     data: http://127.0.0.1:3000/d/fenecdb-data
+# Prometheus: http://127.0.0.1:9090
 </pre>
+
+<ul>
+  <li><b>The metrics</b> go fenec-server → Prometheus → Grafana, behind the
+    admin token: the dashboard is <code>grafana/fenecdb.json</code>.</li>
+  <li><b>The data</b> goes Grafana → Infinity → <code>POST /query</code>,
+    each panel a FenecQL statement with the time range as its parameters,
+    under a token that reads two collections and writes nothing:
+    <a href="/docs/grafana">Grafana</a>.</li>
+</ul>
 
 <details class="deep"><summary>Details</summary>
 <p><code>monitoring/</code> in the repository holds a Grafana dashboard
 (<code>grafana/fenecdb.json</code>), a Prometheus configuration and a compose
-file that runs fenec-server with both, the dashboard already loaded.</p>
+file that runs fenec-server with both, the dashboard already loaded. The
+same compose seeds a site's events and a week of trades and loads the data
+dashboard (<code>grafana/fenecdb-data.json</code>) beside it.</p>
 
 <p>It opens on the figures that decide whether anything needs doing — the
 version and uptime, whether the disk has refused a write, statements and

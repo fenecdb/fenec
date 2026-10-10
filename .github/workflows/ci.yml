@@ -434,6 +434,25 @@ jobs:
           ANALYTICS_FENEC_SERVER="$PWD/target/release/fenec-server" ANALYTICS_LIGHTHOUSE=1 \
             CHROME_PATH="$(command -v google-chrome)" examples/run-tests.sh analytics
 
+  # monitoring/'s compose as a user starts it -- fenec-server's image built
+  # from this checkout, the seed, Grafana with the Infinity plugin -- and
+  # every panel of the "fenecdb data" dashboard asked of Grafana and held
+  # to fenec-server's own answer, then what the data source must refuse.
+  # A job of its own: the image's Rust build is most of its time.
+  grafana:
+    name: monitoring (Grafana)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: The data dashboard end to end
+        run: make grafana-check
+
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest
