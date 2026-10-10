@@ -146,20 +146,26 @@ fn checkpoint_on_exit_writes_the_graph() {
 }
 
 /// `--ping` asks `GET /_health` at the `--http` address: 0 while a server
-/// answers there, 1 once none does.
+/// answers there, 1 once none does -- whatever the environment it inherits
+/// from the server's container would configure, which a probe never names
+/// the rest of on its command line.
 #[test]
 fn ping_asks_the_http_listener() {
     let server = start(&[]);
     let addr = format!("127.0.0.1:{}", server.port);
-    let ping = || {
+    let ping = |env: &[(&str, &str)]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_fenec-server"))
             .args(["--ping", "--http", &addr])
+            .envs(env.iter().copied())
             .stderr(std::process::Stdio::null())
             .status()
             .unwrap()
             .code()
     };
-    assert_eq!(ping(), Some(0));
+    let secret = [("FENEC_JWT_SECRET", "a secret of at least thirty-two bytes")];
+    assert_eq!(ping(&[]), Some(0));
+    assert_eq!(ping(&secret), Some(0), "a JWT secret with no --policy failed the probe");
     let _ = server.terminate();
-    assert_eq!(ping(), Some(1));
+    assert_eq!(ping(&[]), Some(1));
+    assert_eq!(ping(&secret), Some(1));
 }
