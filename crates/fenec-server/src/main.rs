@@ -515,6 +515,14 @@ fn main() {
         i += 1;
     }
 
+    // Before any check of how a server would be configured: a probe runs in
+    // the server's container and inherits its environment, so behind the
+    // checks a `FENEC_JWT_SECRET` with no `--policy` on the probe's command
+    // line failed it (2), and the container never turned healthy.
+    if ping {
+        std::process::exit(health_check(&http_cfg.addr));
+    }
+
     let access = |policy: &str| {
         match (&jwt_secret, &jwt_keys) {
             (Some(_), Some(_)) => {
@@ -561,13 +569,7 @@ fn main() {
         (false, None) => {}
     }
 
-    if !ping {
-        start_tracing(tracing, "fenec-server");
-    }
-
-    if ping {
-        std::process::exit(health_check(&http_cfg.addr));
-    }
+    start_tracing(tracing, "fenec-server");
 
     let replicating = replication_token.as_deref().is_some_and(|t| !t.is_empty());
     if replica_of.is_some() && !replicating {

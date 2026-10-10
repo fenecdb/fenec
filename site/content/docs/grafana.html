@@ -68,10 +68,8 @@ source is read. The first start downloaded it in 14 s.</p>
 
 <p>The JWT secret goes to the server as a file
 (<code>--jwt-secret-file</code>, from a compose secret) and not as
-<code>FENEC_JWT_SECRET</code>: the image's health probe,
-<code>fenec-server --ping</code>, runs in the same environment without the
-server's <code>--policy</code>, and with a secret and no policy it refuses
-to start, so the container stayed unhealthy. <code>FENEC_PORT</code>,
+<code>FENEC_JWT_SECRET</code>, which every process in the container would
+see; the seed reads the same file to mint Grafana's token. <code>FENEC_PORT</code>,
 <code>GRAFANA_PORT</code> and <code>PROMETHEUS_PORT</code> move the ports
 published on loopback.</p>
 
