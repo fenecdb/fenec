@@ -1148,7 +1148,7 @@ impl HashIndex {
 
     fn add(&mut self, key: Vec<u8>, id: DocId) {
         let key_bytes = key.capacity();
-        let bucket = self.map.entry(key).or_default();
+        let bucket = self.map.or_default(key);
         if bucket.is_empty() {
             self.heap += key_bytes;
         }
@@ -1171,7 +1171,7 @@ impl HashIndex {
 
     /// The table, the keys and the buckets as they sit in memory.
     pub fn memory_bytes(&self) -> usize {
-        self.map.capacity() * (std::mem::size_of::<(Vec<u8>, Bucket)>() + 1) + self.heap
+        self.map.table_bytes() + self.heap
     }
 
     /// A value two documents or more hold, `null` aside, and two of them:

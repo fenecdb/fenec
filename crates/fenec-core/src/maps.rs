@@ -10,7 +10,6 @@
 //! server keeps SipHash, keyed at random, against keys written to collide.
 
 use std::borrow::Borrow;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
@@ -32,79 +31,199 @@ pub type Map<K, V> = HashMap<K, V, Keys>;
 /// `@hash` or `@unique` field of a value a row -- an email, an order's
 /// reference, an idempotency key -- does that at every doubling, each
 /// twice as long as the last: 7, 19, 49, 108 and 240 ms from 229 376 keys
-/// to 3.7 million. So natively a map past [`SPLIT_AT`] keys is split into
-/// [`SHARDS`] maps, a key's taken by a hash of its own, and each grows on
-/// its own: a 256th of the keys at a time, the longest put over 4 million
-/// 3 to 6 ms, the one the split took.
+/// to 3.7 million; a text index's terms 9-10, 23-25, 55-59, 125-132 and
+/// 276-324 ms over the same doublings. So natively a map past [`SPLIT_AT`] keys
+/// is split into [`SHARDS`] maps, and each grows on its own: a 256th of
+/// the keys at a time.
 ///
-/// What it costs is the shard's hash: a lookup over a million keys 66 ns
-/// in one table and 93 split, the same with shards picked by a key's length
-/// (67) and by its last 8 bytes (90), and a put's p50 1.08 -> 1.12 us. Kept
-/// whole, the table was taken step by step from the old one into a new one
-/// instead -- a lookup looking in both until the steps were done, which a
-/// map that stops taking keys never finishes -- and lookups were 163 ns
-/// and the build a third slower. The browser's has one thread, a page's
-/// data, and the one map it had.
+/// Natively each key is kept beside its hash ([`Hashed`]), which its table
+/// takes as it is ([`Pass`]): a lookup hashes the key once, with the map's
+/// own random SipHash keys, and its shard is bits of that hash. Picked by
+/// an `Fx` of the key, each shard then hashing it again with keys of its
+/// own -- read from the shard, after the pick -- a lookup over a million
+/// keys took 94 to 135 ns, over four million 121 to 144, against 68 to 87
+/// and 83 to 93 now, under the split 33 to 42 against 24 to 34; the
+/// index's build after an open is 15 to 25% quicker, and a table grows and
+/// the split moves its keys with no key hashed again (the split's put 6 to
+/// 8 ms -> 2.5 to 3.6). What it costs is 8 bytes a key's slot: 48 -> 56 a
+/// hash index's, 80 -> 88 a text index's. Kept whole, the table was taken
+/// step by step from the old one into a new one instead -- a lookup looking
+/// in both until the steps were done, which a map that stops taking keys
+/// never finishes -- and lookups were 163 ns and the build a third slower.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Sharded<K, V> {
-    one: Map<K, V>,
+    /// What every key of this map is hashed with, drawn as it is made.
+    keys: Keys,
+    one: Stored<K, V>,
     /// Empty until the one map is split; then every key is in one of them.
-    #[cfg(not(target_arch = "wasm32"))]
-    shards: Vec<Map<K, V>>,
-    /// What picks a key's shard, drawn at the split: keys written to fall
-    /// in one shard would bring back the pause the shards take apart.
-    #[cfg(not(target_arch = "wasm32"))]
-    seed: u64,
+    shards: Vec<Stored<K, V>>,
 }
 
+/// The browser's has one thread, a page's data, and the one map it had.
+#[cfg(target_arch = "wasm32")]
+pub struct Sharded<K, V> {
+    one: Map<K, V>,
+}
+
+/// A native [`Sharded`]'s tables: each key beside its hash.
+#[cfg(not(target_arch = "wasm32"))]
+type Stored<K, V> = HashMap<Hashed<K>, V, std::hash::BuildHasherDefault<Pass>>;
+
 /// Keys at which a [`Sharded`] map is split: as many as a table of 2^17
-/// buckets holds, moved once into the shards in 6 ms, where a table's
-/// growth took 7 at twice the size. Below it a map is the one table it
-/// was, read as fast; split at 57 344 keys the longest pause was 3 ms, and
-/// maps of half the size paid the shard's hash.
+/// buckets holds, moved once into the shards in 2.5 to 3.6 ms, 4.9 to 5.3
+/// a text index's. Split at 57 344 keys the longest pause was half, and
+/// maps of half the size paid the shard's pick.
 #[cfg(not(target_arch = "wasm32"))]
 const SPLIT_AT: usize = 114_688;
 
-/// How many maps a split one becomes, picked by a hash's top byte.
+/// How many maps a split one becomes.
 #[cfg(not(target_arch = "wasm32"))]
 const SHARDS: usize = 256;
+
+/// The shard of [`SHARDS`] a hash's key is in: the byte below the seven
+/// bits a table tags its buckets with -- picked by the top byte, every key
+/// of a shard had one tag, and each probe read every key it passed.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn shard(hash: u64) -> usize {
+    (hash >> 49) as usize & (SHARDS - 1)
+}
 
 impl<K, V> Default for Sharded<K, V> {
     fn default() -> Self {
         Sharded {
-            one: Map::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            keys: Keys::default(),
+            one: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             shards: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            seed: 0,
         }
+    }
+}
+
+/// A key and its hash, as a native [`Sharded`] keeps them.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Hashed<K> {
+    hash: u64,
+    key: K,
+}
+
+/// What a key is looked up by: its hash and a form of it -- a `Hashed`
+/// key, or the hash beside the form a caller holds (`&str` for a `String`).
+#[cfg(not(target_arch = "wasm32"))]
+trait Probe<Q: ?Sized> {
+    fn hash(&self) -> u64;
+    fn key(&self) -> &Q;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<K: Borrow<Q>, Q: ?Sized> Probe<Q> for Hashed<K> {
+    fn hash(&self) -> u64 {
+        self.hash
+    }
+    fn key(&self) -> &Q {
+        self.key.borrow()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<Q: ?Sized> Probe<Q> for (u64, &Q) {
+    fn hash(&self) -> u64 {
+        self.0
+    }
+    fn key(&self) -> &Q {
+        self.1
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a, K: Borrow<Q> + 'a, Q: ?Sized + 'a> Borrow<dyn Probe<Q> + 'a> for Hashed<K> {
+    fn borrow(&self) -> &(dyn Probe<Q> + 'a) {
+        self
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<Q: ?Sized + Eq> PartialEq for dyn Probe<Q> + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash() == other.hash() && self.key() == other.key()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<Q: ?Sized + Eq> Eq for dyn Probe<Q> + '_ {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<Q: ?Sized> Hash for dyn Probe<Q> + '_ {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        h.write_u64(self.hash())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<K: Eq> PartialEq for Hashed<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.key == other.key
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<K: Eq> Eq for Hashed<K> {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<K> Hash for Hashed<K> {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        h.write_u64(self.hash)
+    }
+}
+
+/// A hash taken as it was written: a [`Hashed`] key's.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub struct Pass(u64);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Hasher for Pass {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ b as u64;
+        }
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
+    }
+    fn finish(&self) -> u64 {
+        self.0
     }
 }
 
 // A key is looked up as whatever form of it the caller holds -- the hash
 // index's `&Vec<u8>`, the text index's `&str` -- and each form a caller
 // passes is a copy of the search: the hash index takes its keys as the
-// `Vec<u8>` the map holds for that reason, one copy rather than two. The
-// shard is picked by the form's hash, which `Borrow` makes the key's.
+// `Vec<u8>` the map holds for that reason, one copy rather than two.
+#[cfg(not(target_arch = "wasm32"))]
 impl<K: Hash + Eq, V> Sharded<K, V> {
-    /// The map `key` is in, or would go in.
     #[inline]
-    fn of<Q: Hash + ?Sized>(&self, key: &Q) -> &Map<K, V> {
-        #[cfg(not(target_arch = "wasm32"))]
-        if !self.shards.is_empty() {
-            return &self.shards[shard_of(self.seed, key)];
+    fn hash<Q: Hash + ?Sized>(&self, key: &Q) -> u64 {
+        use std::hash::BuildHasher;
+        self.keys.hash_one(key)
+    }
+
+    /// The map a hash's key is in, or would go in.
+    #[inline]
+    fn of(&self, hash: u64) -> &Stored<K, V> {
+        match self.shards.is_empty() {
+            true => &self.one,
+            false => &self.shards[shard(hash)],
         }
-        let _ = key;
-        &self.one
     }
 
     #[inline]
-    fn of_mut<Q: Hash + ?Sized>(&mut self, key: &Q) -> &mut Map<K, V> {
-        #[cfg(not(target_arch = "wasm32"))]
-        if !self.shards.is_empty() {
-            return &mut self.shards[shard_of(self.seed, key)];
+    fn of_mut(&mut self, hash: u64) -> &mut Stored<K, V> {
+        match self.shards.is_empty() {
+            true => &mut self.one,
+            false => &mut self.shards[shard(hash)],
         }
-        let _ = key;
-        &mut self.one
     }
 
     #[inline]
@@ -113,7 +232,8 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.of(key).get(key)
+        let hash = self.hash(key);
+        self.of(hash).get(&(hash, key) as &dyn Probe<Q>)
     }
 
     #[inline]
@@ -122,30 +242,27 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.of_mut(key).get_mut(key)
+        let hash = self.hash(key);
+        self.of_mut(hash).get_mut(&(hash, key) as &dyn Probe<Q>)
     }
 
-    /// The one map split once it holds [`SPLIT_AT`] keys, before a key
-    /// goes in.
+    /// `key`'s value, made where it has none; the one map split first once
+    /// it holds [`SPLIT_AT`] keys.
     #[inline]
-    fn room(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.shards.is_empty() && self.one.len() >= SPLIT_AT {
-            self.split();
-        }
-    }
-
-    /// `key`'s entry.
-    #[inline]
-    pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
+    pub fn or_default(&mut self, key: K) -> &mut V
+    where
+        V: Default,
+    {
         self.room();
-        self.of_mut(&key).entry(key)
+        let hash = self.hash(&key);
+        self.of_mut(hash).entry(Hashed { hash, key }).or_default()
     }
 
     #[inline]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.room();
-        self.of_mut(&key).insert(key, value)
+        let hash = self.hash(&key);
+        self.of_mut(hash).insert(Hashed { hash, key }, value)
     }
 
     #[inline]
@@ -154,7 +271,8 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.of_mut(key).remove(key)
+        let hash = self.hash(key);
+        self.of_mut(hash).remove(&(hash, key) as &dyn Probe<Q>)
     }
 
     #[inline]
@@ -163,16 +281,23 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.of_mut(key).remove_entry(key)
+        let hash = self.hash(key);
+        let (k, v) = self
+            .of_mut(hash)
+            .remove_entry(&(hash, key) as &dyn Probe<Q>)?;
+        Some((k.key, v))
+    }
+
+    #[inline]
+    fn room(&mut self) {
+        if self.shards.is_empty() && self.one.len() >= SPLIT_AT {
+            self.split();
+        }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        #[cfg(not(target_arch = "wasm32"))]
-        if !self.shards.is_empty() {
-            return self.shards.iter().map(Map::len).sum();
-        }
-        self.one.len()
+        self.one.len() + self.shards.iter().map(HashMap::len).sum::<usize>()
     }
 
     #[inline]
@@ -183,43 +308,29 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
     /// The keys the tables have room for.
     #[inline]
     pub fn capacity(&self) -> usize {
-        #[cfg(not(target_arch = "wasm32"))]
-        if !self.shards.is_empty() {
-            return self.shards.iter().map(Map::capacity).sum();
-        }
-        self.one.capacity()
+        self.one.capacity() + self.shards.iter().map(HashMap::capacity).sum::<usize>()
+    }
+
+    /// What the tables hold in memory: a slot each key they have room for,
+    /// its hash beside it, and a byte of the table's own.
+    pub fn table_bytes(&self) -> usize {
+        self.capacity() * (std::mem::size_of::<(Hashed<K>, V)>() + 1)
     }
 
     /// Every key and its value, in no order.
-    #[cfg(not(target_arch = "wasm32"))]
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.one
-            .iter()
+        (self.one.iter())
             .chain(self.shards.iter().flat_map(|m| m.iter()))
+            .map(|(k, v)| (&k.key, v))
     }
 
     /// Every key and its value, in no order.
-    #[cfg(target_arch = "wasm32")]
-    #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.one.iter()
-    }
-
-    /// Every key and its value, in no order.
-    #[cfg(not(target_arch = "wasm32"))]
     #[inline]
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
-        self.one
-            .iter_mut()
+        (self.one.iter_mut())
             .chain(self.shards.iter_mut().flat_map(|m| m.iter_mut()))
-    }
-
-    /// Every key and its value, in no order.
-    #[cfg(target_arch = "wasm32")]
-    #[inline]
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
-        self.one.iter_mut()
+            .map(|(k, v)| (&k.key, v))
     }
 
     /// Every value, in no order.
@@ -229,53 +340,129 @@ impl<K: Hash + Eq, V> Sharded<K, V> {
     }
 
     /// Each table no larger than its keys need.
-    #[inline]
     pub fn shrink_to_fit(&mut self) {
         self.one.shrink_to_fit();
-        #[cfg(not(target_arch = "wasm32"))]
         for m in &mut self.shards {
             m.shrink_to_fit();
         }
     }
 
     /// Every key gone, and the one map again.
-    #[inline]
     pub fn clear(&mut self) {
         self.one.clear();
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.shards = Vec::new();
-        }
+        self.shards = Vec::new();
     }
 
     /// The one map's keys moved into the shards, each with room for twice
-    /// its share, as the one map would have grown.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// its share, as the one map would have grown -- by the hashes they
+    /// hold, none taken again.
     #[cold]
     fn split(&mut self) {
-        use std::hash::BuildHasher;
-        let seed = Keys::default().hash_one(self.one.len());
         let room = 2 * self.one.len() / SHARDS;
-        let mut shards: Vec<Map<K, V>> = (0..SHARDS)
-            .map(|_| Map::with_capacity_and_hasher(room, Keys::default()))
+        let mut shards: Vec<Stored<K, V>> = (0..SHARDS)
+            .map(|_| HashMap::with_capacity_and_hasher(room, Default::default()))
             .collect();
         for (k, v) in std::mem::take(&mut self.one) {
-            shards[shard_of(seed, &k)].insert(k, v);
+            shards[shard(k.hash)].insert(k, v);
         }
         self.shards = shards;
-        self.seed = seed;
     }
 }
 
-/// The shard of [`SHARDS`] that `key` goes in: the top byte of [`Fx`] run
-/// from `seed`, which every bit of the key reaches through the last
-/// multiply -- the low bytes hear only the low bits of what was multiplied.
-#[cfg(not(target_arch = "wasm32"))]
-#[inline]
-fn shard_of<K: Hash + ?Sized>(seed: u64, key: &K) -> usize {
-    let mut h = Fx(seed);
-    key.hash(&mut h);
-    (h.0 >> (64 - SHARDS.trailing_zeros())) as usize
+#[cfg(target_arch = "wasm32")]
+impl<K: Hash + Eq, V> Sharded<K, V> {
+    #[inline]
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.one.get(key)
+    }
+
+    #[inline]
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.one.get_mut(key)
+    }
+
+    #[inline]
+    pub fn or_default(&mut self, key: K) -> &mut V
+    where
+        V: Default,
+    {
+        self.one.entry(key).or_default()
+    }
+
+    #[inline]
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.one.insert(key, value)
+    }
+
+    #[inline]
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.one.remove(key)
+    }
+
+    #[inline]
+    pub fn remove_entry<Q>(&mut self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.one.remove_entry(key)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.one.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.one.is_empty()
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.one.capacity()
+    }
+
+    pub fn table_bytes(&self) -> usize {
+        self.capacity() * (std::mem::size_of::<(K, V)>() + 1)
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.one.iter()
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.one.iter_mut()
+    }
+
+    #[inline]
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.one.values()
+    }
+
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        self.one.shrink_to_fit();
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.one.clear();
+    }
 }
 
 /// A word at a time: the running hash turned five bits, the word mixed in,
@@ -375,7 +562,7 @@ mod tests {
         let (mut most, mut most_one) = (0, 0);
         for i in 0..N {
             let (before, before_one) = (m.capacity(), one.capacity());
-            *m.entry(key(i)).or_default() = i;
+            *m.or_default(key(i)) = i;
             one.insert(key(i), i);
             // The split moves what the one map held, 114 688 keys, once.
             if m.len() > SPLIT_AT + 1 {
@@ -413,7 +600,7 @@ mod tests {
                     }
                 }
                 _ => {
-                    *m.entry(key(j)).or_default() += 2;
+                    *m.or_default(key(j)) += 2;
                     *one.entry(key(j)).or_default() += 2;
                 }
             }
@@ -428,7 +615,7 @@ mod tests {
         for i in N..N + N / 2 {
             let gone = m.iter().next().map(|(k, _)| k.clone()).unwrap();
             assert!(m.remove_entry(&gone).is_some());
-            *m.entry(key(i)).or_default() = i;
+            *m.or_default(key(i)) = i;
         }
         assert_eq!(m.len(), one.len());
         assert!(m.capacity() < 4 * m.len(), "{} {}", m.capacity(), m.len());
