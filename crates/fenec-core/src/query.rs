@@ -206,6 +206,63 @@ impl Expr {
         }
     }
 
+    /// Whether it calls `now()`, outside an inner `get`: a filter that does
+    /// has the time worked out before it is planned ([`Self::fold_now`]).
+    /// A match of its own rather than through `each_child`: asked of every
+    /// write's filter, the walk through `dyn` was most of a lock's release
+    /// coming out 2-4% slower.
+    pub fn calls_now(&self) -> bool {
+        match self {
+            Expr::Call(name, args) => {
+                (args.is_empty() && name.eq_ignore_ascii_case("now"))
+                    || args.iter().any(Expr::calls_now)
+            }
+            Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => false,
+            Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::Like(a, b)
+            | Expr::Has(a, b)
+            | Expr::Arith(_, a, b) => a.calls_now() || b.calls_now(),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => a.calls_now(),
+            Expr::In(a, items) => a.calls_now() || items.iter().any(Expr::calls_now),
+        }
+    }
+
+    /// Each `now()` in it, outside an inner `get`, made the time `now`,
+    /// and each `+ - * /` over what is then literals and parameters alone
+    /// worked out: so `run_at <= now()` and `at >= now() - 3600000` are
+    /// ranges an ordered index answers, as `at >= $1` is. Left a call, a
+    /// job queue's claim (`where run_at <= now() order run_at limit 10`)
+    /// walked the index past the ready jobs into the leased and the
+    /// delayed ones, testing each, and once the queue held fewer ready
+    /// than the page it gave up past an eighth of the collection and
+    /// scanned it. What does not work out -- a type error -- stays as
+    /// written, for the first row to meet as it did.
+    pub fn fold_now(&mut self, now: &Value, params: &[Value]) {
+        if let Expr::Call(name, args) = self {
+            if args.is_empty() && name.eq_ignore_ascii_case("now") {
+                *self = Expr::Lit(now.clone());
+                return;
+            }
+        }
+        self.each_child_mut(&mut |c| c.fold_now(now, params));
+        if let Expr::Arith(op, a, b) = self {
+            fn side<'a>(e: &'a Expr, params: &'a [Value]) -> Option<&'a Value> {
+                match e {
+                    Expr::Lit(v) => Some(v),
+                    Expr::Param(i) => params.get(*i),
+                    _ => None,
+                }
+            }
+            if let (Some(l), Some(r)) = (side(a, params), side(b, params)) {
+                if let Ok(v) = arith(*op, l, r) {
+                    *self = Expr::Lit(v);
+                }
+            }
+        }
+    }
+
     /// Whether it asks `expired()` -- the rows past their `@ttl`, which
     /// every read otherwise leaves out -- outside an inner `get`, whose
     /// collection is its own to ask of.
@@ -1304,6 +1361,44 @@ impl Sort {
     }
 }
 
+/// `order`, `limit` and `returning` on a `set` or a `del`: which of the
+/// rows its filter matches it writes, and what it answers. A job queue's
+/// claim is one statement --
+///
+/// ```text
+/// set jobs {owner: $1, run_at: now() + 30000, attempts: attempts + 1}
+///   where run_at <= now() order run_at limit 10 returning *
+/// ```
+///
+/// -- the ten oldest ready jobs found and written under the one writer's
+/// lock, and handed back as written: PostgreSQL's `UPDATE ... WHERE id IN
+/// (SELECT ... ORDER BY ... LIMIT 10 FOR UPDATE SKIP LOCKED) RETURNING *`,
+/// with the single writer standing in for the row locks. Read first and
+/// written after, by a client, two workers take the same rows, and one of
+/// them finds it lost only when its compare-and-set answers 0.
+///
+/// The rows are picked as a `get` with the same `where`, `order` and
+/// `limit` would answer them (`Database::page_ids`), so `order` over an
+/// `@sorted` field walks the index and stops at the page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Pick {
+    pub order: Vec<Sort>,
+    pub limit: Option<usize>,
+    /// `returning`: the rows answered rather than counted -- a `set`'s as
+    /// it wrote them, a `del`'s as they were -- in the order they were
+    /// picked, under the columns a `get`'s `select` names: `None` every
+    /// field after the id (`returning *`), or those listed.
+    pub returning: Option<Option<Vec<String>>>,
+}
+
+impl Pick {
+    /// Whether it picks rather than writes every match: an `order` or a
+    /// `limit`.
+    pub fn picks(&self) -> bool {
+        !self.order.is_empty() || self.limit.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Select {
     pub collection: String,
@@ -1695,6 +1790,19 @@ impl Select {
                 .is_some_and(|l| l.chain().any(|s| opt(&s.filter)))
     }
 
+    /// Whether a filter of its own or of a `lookup` level calls `now()`
+    /// ([`Expr::fold_now`]); an inner `get`'s is asked where it is
+    /// answered.
+    pub fn calls_now(&self) -> bool {
+        let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::calls_now);
+        opt(&self.filter)
+            || self.facets.iter().any(|f| f.rest.as_ref().is_some_and(opt))
+            || self
+                .lookup
+                .as_ref()
+                .is_some_and(|l| l.chain().any(|s| opt(&s.filter)))
+    }
+
     /// Calls `f` on each filter it holds, its own and each `lookup`
     /// level's, with the collection the filter is over.
     pub fn each_filter_mut(
@@ -2045,12 +2153,17 @@ pub enum Statement {
         filter: Option<Expr>,
         /// As `Put`'s: the rows it changed must be exactly this many.
         require: Option<u64>,
+        /// `order`, `limit`, `returning`: boxed, since every other `set`
+        /// has none and a `Statement` is as large as its largest variant.
+        pick: Option<Box<Pick>>,
     },
     Delete {
         collection: String,
         filter: Option<Expr>,
         /// As `Put`'s: the rows it deleted must be exactly this many.
         require: Option<u64>,
+        /// As `Update`'s.
+        pick: Option<Box<Pick>>,
     },
     ListCollections,
     Describe(String),
@@ -2236,10 +2349,18 @@ impl Statement {
         }
     }
 
-    /// Whether it will return rows. Needed to know that `NoData` is sent
-    /// instead of `RowDescription` in the `Describe` response.
+    /// Whether it will return rows: a read, or a write with `returning`.
     pub fn returns_rows(&self) -> bool {
-        self.is_read_only()
+        self.is_read_only() || self.pick().is_some_and(|p| p.returning.is_some())
+    }
+
+    /// A `set`'s or a `del`'s `order`, `limit` and `returning`, if it has
+    /// any.
+    pub fn pick(&self) -> Option<&Pick> {
+        match self {
+            Statement::Update { pick, .. } | Statement::Delete { pick, .. } => pick.as_deref(),
+            _ => None,
+        }
     }
 }
 

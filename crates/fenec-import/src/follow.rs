@@ -1229,6 +1229,7 @@ impl<'a> Mirror<'a> {
                         collection: collection.clone(),
                         filter: Some(Expr::In(Box::new(Expr::Field("id".into())), ids)),
                         require: None,
+                        pick: None,
                     }
                 }
                 Op::Truncate => {
@@ -1237,6 +1238,7 @@ impl<'a> Mirror<'a> {
                         collection: collection.clone(),
                         filter: None,
                         require: None,
+                        pick: None,
                     }
                 }
             };

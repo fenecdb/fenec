@@ -112,6 +112,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                     set,
                     filter,
                     require: None,
+                    pick: None,
                 },
                 shape: Shape::Affected("updated", 200),
             })
@@ -125,6 +126,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                     collection: name.to_string(),
                     filter,
                     require: None,
+                    pick: None,
                 },
                 shape: Shape::Affected("deleted", 200),
             })

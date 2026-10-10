@@ -238,6 +238,20 @@ impl Database {
         let filters =
             std::iter::once(&sel.filter).chain((sel.facets.iter()).filter_map(|f| f.rest.as_ref()));
         for f in filters.flatten() {
+            // A comparison with `now()` is a range once the time is worked
+            // out, as the read will work it out (`answer_filter`): judged
+            // as written, `at >= now() - 3600000` was pinned, met the index
+            // the read then took, and ran again under the lock.
+            let folded;
+            let f = match f.calls_now().then(|| self.now_value(params)).flatten() {
+                Some(now) => {
+                    let mut g = f.clone();
+                    g.fold_now(&now, params);
+                    folded = g;
+                    &folded
+                }
+                None => f,
+            };
             // A row by id, or a few: what the id index names, and short --
             // a server's read by id is asked no more than this.
             if let Some(("id", _)) = f.equality_key(params) {

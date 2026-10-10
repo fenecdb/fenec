@@ -181,16 +181,24 @@ const FIELD_TTL: u8 = 4;
 /// debit (`set ... where id = $from and balance >= $amt`) that matched no
 /// row answered `affected 0`, the `/batch` went on to the credit, and money
 /// was made.
+///
+/// A write with `returning` answers the rows it wrote, which it counts the
+/// same: `limit 1 require 1` is "one job claimed, or none and refused".
 fn required(
     verb: &str,
     collection: &str,
     require: Option<u64>,
     out: Result<Response>,
 ) -> Result<Response> {
-    match (require, &out) {
-        (Some(want), Ok(Response::Affected(n))) if *n as u64 != want => Err(Error::Unmet(format!(
+    let n = match (require, &out) {
+        (Some(_), Ok(Response::Affected(n))) => *n,
+        (Some(_), Ok(Response::Rows(rs))) => rs.rows.len(),
+        _ => return out,
+    };
+    match require {
+        Some(want) if n as u64 != want => Err(Error::Unmet(format!(
             "`{verb} {collection}` wrote {n} {}, and requires {want}",
-            if *n == 1 { "row" } else { "rows" }
+            if n == 1 { "row" } else { "rows" }
         ))),
         _ => out,
     }
@@ -5239,21 +5247,23 @@ impl Database {
                 set,
                 filter,
                 require,
+                pick,
             } => required(
                 "set",
                 collection,
                 *require,
-                self.update(collection, set, filter, params),
+                self.update(collection, set, filter, pick.as_deref(), params),
             ),
             Statement::Delete {
                 collection,
                 filter,
                 require,
+                pick,
             } => required(
                 "del",
                 collection,
                 *require,
-                self.delete(collection, filter, params),
+                self.delete(collection, filter, pick.as_deref(), params),
             ),
             Statement::ListCollections => Ok(Response::Schemas(
                 self.order
@@ -5297,7 +5307,10 @@ impl Database {
             } => (collection, filter),
             _ => return Ok(Cow::Borrowed(stmt)),
         };
-        if !filter.as_ref().is_some_and(Expr::has_subquery) && self.ttl_of(collection).is_none() {
+        // The walk first: the collection looked up by name for every write
+        // took a `set` by id 1.09 -> 1.14 us.
+        let asks = |f: &Expr| f.has_subquery() || (f.calls_now() && self.ordered(collection));
+        if !filter.as_ref().is_some_and(asks) && self.ttl_of(collection).is_none() {
             return Ok(Cow::Borrowed(stmt));
         }
         let mut filter = filter.clone();
@@ -5306,16 +5319,20 @@ impl Database {
         // Made anew rather than the statement cloned whole: `Statement`'s
         // clone was its every variant's, a schema's among them.
         Ok(Cow::Owned(match stmt {
-            Statement::Update { set, require, .. } => Statement::Update {
+            Statement::Update {
+                set, require, pick, ..
+            } => Statement::Update {
                 collection,
                 set: set.clone(),
                 filter,
                 require: *require,
+                pick: pick.clone(),
             },
-            Statement::Delete { require, .. } => Statement::Delete {
+            Statement::Delete { require, pick, .. } => Statement::Delete {
                 collection,
                 filter,
                 require: *require,
+                pick: pick.clone(),
             },
             _ => unreachable!("only a set or a del has a filter to answer"),
         }))
@@ -5337,13 +5354,40 @@ impl Database {
         // A select built in code, not parsed, has its disjunctive facets
         // split here, before the expiry is ANDed in.
         let unsplit = sel.facets.iter().any(|f| f.disjunctive && f.rest.is_none());
-        if !expiring && !sel.has_subquery() && !unsplit {
+        let timed = || {
+            sel.calls_now()
+                && (self.ordered(&sel.collection)
+                    || (sel.lookup.as_ref())
+                        .is_some_and(|l| l.chain().any(|s| self.ordered(&s.collection))))
+        };
+        if !expiring && !sel.has_subquery() && !unsplit && !timed() {
             return Ok(std::borrow::Cow::Borrowed(sel));
         }
         let mut sel = sel.clone();
         sel.split_facets()?;
         sel.each_filter_mut(&mut |collection, f| self.answer_filter(collection, f, params, depth))?;
         Ok(std::borrow::Cow::Owned(sel))
+    }
+
+    /// Whether `collection` has an ordered index: what a time worked out
+    /// before the plan can be a range of.
+    fn ordered(&self, collection: &str) -> bool {
+        self.collections
+            .get(collection)
+            .is_some_and(|c| !c.sorted.is_empty())
+    }
+
+    /// What `now()` answers in a statement run now: the database's clock,
+    /// or the system's -- `None` where there is none, a browser module not
+    /// handed one.
+    #[inline(never)]
+    fn now_value(&self, params: &[Value]) -> Option<Value> {
+        let ctx = EvalCtx {
+            params,
+            registry: &self.registry,
+            clock: self.clock,
+        };
+        eval(&Expr::Call("now".into(), Vec::new()), &mut NoRow, &ctx).ok()
     }
 
     /// A filter over `collection` as it runs ([`Self::answered`]).
@@ -5356,6 +5400,13 @@ impl Database {
     ) -> Result<()> {
         if let Some(f) = filter {
             f.each_subquery_mut(&mut |e| self.answer_subquery(e, params, depth))?;
+            // Only an ordered index plans by a time; a module with no clock
+            // handed it leaves the call for the row to meet, and refuse, as
+            // it did.
+            let folds = f.calls_now() && self.ordered(collection);
+            if let Some(now) = folds.then(|| self.now_value(params)).flatten() {
+                f.fold_now(&now, params);
+            }
         }
         if let Some(Expr::Not(past)) = self.alive(collection)? {
             // `expired()`: the rows past their time, which a reaper reads to
@@ -5593,7 +5644,7 @@ impl Database {
         }
         let collection = collection.to_string();
         self.open_block();
-        match self.delete(&collection, &filter, &[]) {
+        match self.delete(&collection, &filter, None, &[]) {
             Ok(Response::Affected(n)) => self.commit().map(|_| n),
             Ok(_) => self.commit().map(|_| 0),
             Err(e) => {
@@ -8389,26 +8440,125 @@ impl Database {
         collection: &str,
         set: &[(String, Expr)],
         filter: &Option<Expr>,
+        pick: Option<&Pick>,
         params: &[Value],
     ) -> Result<Response> {
-        let ids = self.matching_ids(collection, filter, params)?;
+        let ids = self.picked_ids(collection, filter, pick, params)?;
         // Taken out for the statement, so that the expressions can call its
         // functions while each row is written through `&mut self`, and put
         // back whatever the rows came to.
         let registry = std::mem::take(&mut self.registry);
-        let out = self.update_rows(collection, set, ids, &registry, params);
+        let out = self.update_rows(collection, set, &ids, &registry, params);
         self.registry = registry;
-        out
+        match (out, pick.and_then(|p| p.returning.as_ref())) {
+            (Ok(_), Some(list)) => Ok(Response::Rows(self.returned(collection, list, &ids)?)),
+            (out, _) => out.map(Response::Affected),
+        }
     }
 
+    /// The rows a `set` or a `del` writes: every match of its filter, or,
+    /// with an `order` or a `limit`, those a `get` with the same clauses
+    /// answers -- an `@sorted` field's index walked to the page -- in that
+    /// order.
+    fn picked_ids(
+        &self,
+        collection: &str,
+        filter: &Option<Expr>,
+        pick: Option<&Pick>,
+        params: &[Value],
+    ) -> Result<Vec<DocId>> {
+        match pick.filter(|p| p.picks()) {
+            None => self.matching_ids(collection, filter, params),
+            Some(p) => self.page_of(collection, filter, p, params),
+        }
+    }
+
+    /// [`Self::picked_ids`] of a write with an `order` or a `limit`: out
+    /// of line, as [`Self::returned`] is, so a `set` or a `del` that picks
+    /// nothing keeps the code it had.
+    #[inline(never)]
+    fn page_of(
+        &self,
+        collection: &str,
+        filter: &Option<Expr>,
+        p: &Pick,
+        params: &[Value],
+    ) -> Result<Vec<DocId>> {
+        let c = self.collection(collection)?;
+        let ctx = EvalCtx {
+            params,
+            registry: &self.registry,
+            clock: self.clock,
+        };
+        let sel = Select {
+            collection: collection.to_string(),
+            filter: filter.clone(),
+            order: p.order.clone(),
+            limit: p.limit,
+            ..Default::default()
+        };
+        Ok(self.page_ids(c, &sel, params, &ctx, false, false, false)?.0)
+    }
+
+    /// What a write's `returning` answers: each of `ids` read out of the
+    /// store as it stands -- a `set`'s rows as written, a `del`'s before
+    /// they go -- under the columns `select` names in a `get`, `list`
+    /// every field after the id when `None`.
+    #[inline(never)]
+    fn returned(
+        &self,
+        collection: &str,
+        list: &Option<Vec<String>>,
+        ids: &[DocId],
+    ) -> Result<ResultSet> {
+        let c = self.collection(collection)?;
+        let columns = projection_columns(&c.schema, list);
+        // Refused by name, over no rows too.
+        for col in columns.iter().filter(|c| *c != "id") {
+            source_or_err(&c.schema, col, "")?;
+        }
+        // Each row decoded whole, once: a page of them, where `select`'s
+        // reading by places (`one_pass`) was 1.4 KB more of the browser
+        // module, and took `one_pass` out of line from `select`.
+        let mut rows = Vec::with_capacity(ids.len());
+        for &id in ids {
+            // A row the write did not find is not answered: the count and
+            // the rows agree.
+            let Some(doc) = c.store.read(&c.schema, id)? else {
+                continue;
+            };
+            // A loop rather than a `map` and `collect`: a copy of the
+            // adapter of its own, 249 bytes of the browser module.
+            let mut values = Vec::with_capacity(columns.len());
+            for col in &columns {
+                values.push(match col.as_str() {
+                    "id" => Value::Int(id as i64),
+                    path => doc.at(path).cloned().unwrap_or(Value::Null),
+                });
+            }
+            rows.push(Row {
+                id,
+                values,
+                score: None,
+            });
+        }
+        Ok(ResultSet {
+            columns,
+            rows,
+            nested: None,
+            facets: Vec::new(),
+        })
+    }
+
+    /// Each of `ids` set by `set`: how many there were.
     fn update_rows(
         &mut self,
         collection: &str,
         set: &[(String, Expr)],
-        ids: Vec<DocId>,
+        ids: &[DocId],
         registry: &Registry,
         params: &[Value],
-    ) -> Result<Response> {
+    ) -> Result<usize> {
         let schema = self.collection(collection)?.schema.clone();
         let cid = self.collection(collection)?.id;
         let hooks: Vec<_> = registry.hooks().to_vec();
@@ -8425,7 +8575,6 @@ impl Database {
                 calc: Calc::bind(&schema, e, &ctx),
             })
             .collect();
-        let mut n = 0;
         // What the filter compared without, and what the new values would:
         // worked out in a pass of their own, since a write that stopped
         // half way could not be run again.
@@ -8433,7 +8582,7 @@ impl Database {
             let mut missing = collate::take_missing();
             if schema.fields.iter().any(|f| f.collate.is_some()) {
                 let c = self.collection(collection)?;
-                for &id in &ids {
+                for &id in ids {
                     if let Some(doc) = c.store.read(&schema, id)? {
                         let doc = updated(&schema, &doc, &assigns, &ctx, None)?;
                         missing |= collation_missing(&schema, &doc) | collate::take_missing();
@@ -8443,12 +8592,13 @@ impl Database {
             collate::refuse(missing)?;
         }
 
-        for id in ids {
+        let mut n = 0;
+        for &id in ids {
             if self.set_row(collection, &schema, cid, id, &assigns, &ctx, &hooks, None)? {
                 n += 1;
             }
         }
-        Ok(Response::Affected(n))
+        Ok(n)
     }
 
     /// Row `id` set by `assigns`, each over the row as it was -- and over
@@ -8500,20 +8650,28 @@ impl Database {
         &mut self,
         collection: &str,
         filter: &Option<Expr>,
+        pick: Option<&Pick>,
         params: &[Value],
     ) -> Result<Response> {
-        let ids = self.matching_ids(collection, filter, params)?;
+        let ids = self.picked_ids(collection, filter, pick, params)?;
         if collate::PARTIAL {
             collate::refuse(collate::take_missing())?;
         }
+        // Read before they go: what a pop hands back.
+        let rows = match pick.and_then(|p| p.returning.as_ref()) {
+            Some(list) => Some(self.returned(collection, list, &ids)?),
+            None => None,
+        };
         let schema = self.collection(collection)?.schema.clone();
         let hooks: Vec<_> = self.registry.hooks().to_vec();
-        let mut n = 0;
+        let n = ids.len();
         for id in ids {
             self.erase(collection, &schema, id, &hooks)?;
-            n += 1;
         }
-        Ok(Response::Affected(n))
+        Ok(match rows {
+            Some(rs) => Response::Rows(rs),
+            None => Response::Affected(n),
+        })
     }
 
     /// Deletes the document `id` of `collection`: what a `del` does to each

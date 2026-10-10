@@ -219,6 +219,43 @@ fn an_index_read_is_not_pinned_and_short_reads_are_not_either() {
     assert!(db.pin(&pairs(&batch)).is_none());
 }
 
+/// A range written with the time -- `at >= now() - 500` -- is a range of
+/// the ordered index once the time is worked out, as the read works it
+/// out before its plan: declined as `at >= 2000` is, where judged as
+/// written it was pinned and, meeting the index, ran again under the lock.
+#[test]
+fn a_range_of_the_time_is_not_pinned() {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection tick (at timestamp @sorted, n int)",
+    );
+    db.begin().unwrap();
+    for i in 0..3000 {
+        exec(
+            &mut db,
+            &format!("put tick {{at: {}, n: {}}}", 1_000 + i, i % 7),
+        );
+    }
+    db.commit().unwrap();
+    db.set_pin_at(100);
+    db.set_clock(Some(2_500));
+    for sql in [
+        "get tick where at >= now() - 500 count",
+        "get tick where at >= 2000 count",
+    ] {
+        let s = stmt(sql);
+        assert!(db.pin(&[(&s, &[][..])]).is_none(), "{sql}");
+    }
+    // A long read beside it is still pinned, and answers as the lock does.
+    let s = stmt("get tick select n, count(*) where n >= 3 group n");
+    let p = db.pin(&[(&s, &[][..])]).expect("a long read");
+    assert_eq!(
+        answered(&p, std::slice::from_ref(&s)),
+        vec![db.query(&s, &[])]
+    );
+}
+
 /// A read `pin` would have declined, run on a pin all the same -- every
 /// collection taken, the shape not asked -- meets an index that refuses
 /// and is answered `None`, never planned without the index; one that reads

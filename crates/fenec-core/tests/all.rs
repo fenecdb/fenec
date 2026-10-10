@@ -13,6 +13,7 @@ mod autocompact;
 mod blocks;
 mod buckets;
 mod changes;
+mod claims;
 mod collate;
 mod crash;
 mod derived;
