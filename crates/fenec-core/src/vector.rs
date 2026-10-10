@@ -2930,10 +2930,26 @@ pub struct VectorIndex {
 /// half of the vector's hash, which is tested before the vectors are: with
 /// the node alone, every slot a probe passed read a vector, and a build of
 /// 10 000 x 128 in the browser took 5% longer. 8 bytes a slot, 16 to 32 a
-/// node -- 3 to 6% of a 128-dim f32 arena, under 1% of a 768-dim one. Made the first time a vector is placed, from the arena:
-/// made at an open, it would read every vector again for a database that
-/// may only be read. A node that became a tombstone stays in it, passed
-/// over, until it grows.
+/// node -- 3 to 6% of a 128-dim f32 arena, under 1% of a 768-dim one. Made
+/// the first time a vector is placed, from the arena: made at an open, it
+/// would read every vector again for a database that may only be read.
+///
+/// In the browser one table, made again from the arena twice the size once
+/// it is half full, and a node that became a tombstone stays in it, passed
+/// over, until it grows. Natively that reading was the write that found it
+/// full: every vector hashed again, a doubling at a time -- 118-132 and
+/// 242-281 ms at 2^19 and 2^20 nodes of 128 dimensions, 376 ms at 2^18 of
+/// 768 and 1.45 s at 2^19, every write and read waiting for it. So natively
+/// a slot's place is its own half of the hash, and a table grows from its
+/// slots alone, leaving its tombstones behind; past [`SAME_SPLIT`] slots it
+/// is [`SAME_SHARDS`] tables, a slot's picked by the top byte of its half,
+/// each growing on its own: no put at a doubling past 10 ms over 1.1
+/// million of 128 dimensions or 300 000 of 768. The place taken from the
+/// half leaves fewer of its bits to tell two vectors apart -- another
+/// vector's slot at the same place passes the test once in 2^(24 - k) in a
+/// shard of 2^k slots -- a vector compared for nothing about once in 4 000
+/// puts at a million nodes.
+#[cfg(target_family = "wasm")]
 #[derive(Default)]
 struct Same {
     slots: Vec<u64>,
@@ -2941,9 +2957,176 @@ struct Same {
     built: bool,
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[derive(Default)]
+struct Same {
+    /// Every slot, until the table is split; empty after.
+    one: SameTable,
+    /// Empty until the table is split; then every slot is in one of them.
+    shards: Vec<SameTable>,
+    built: bool,
+}
+
+/// One open-addressed table of [`Same`]: a slot is the top half of a
+/// vector's hash over `node + 1`, 0 none, and its place the low bits of
+/// that half -- so the table is made again from its slots.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Default)]
+struct SameTable {
+    slots: Vec<u64>,
+    used: usize,
+}
+
+/// Slots past which [`Same`]'s one table is split rather than grown: its
+/// 32 768 nodes moved into the shards in 0.72 to 0.80 ms, where the table
+/// grew at half the size in 0.3 and a shard at 2 million nodes in 0.15.
+/// Below it an index holds one table, as small as before -- a tenant's, a
+/// page's.
+#[cfg(not(target_family = "wasm"))]
+const SAME_SPLIT: usize = 1 << 16;
+
+/// The tables [`Same`] is split into, by the top byte of a slot's half.
+#[cfg(not(target_family = "wasm"))]
+const SAME_SHARDS: usize = 256;
+
+/// Nodes a thread hashes at a time when [`Same`] is made from the arena.
+#[cfg(not(target_family = "wasm"))]
+const SAME_SHARE: usize = 4096;
+
+#[cfg(not(target_family = "wasm"))]
+impl SameTable {
+    /// A table with room for `n` slots, two to four places each.
+    fn sized(n: usize) -> SameTable {
+        SameTable {
+            slots: vec![0; (n.max(4) * 2).next_power_of_two()],
+            used: 0,
+        }
+    }
+
+    fn full(&self) -> bool {
+        (self.used + 1) * 2 > self.slots.len()
+    }
+
+    /// `slot` into the first free place from its own.
+    fn insert(&mut self, slot: u64) {
+        let mask = self.slots.len() - 1;
+        let mut i = (slot >> 32) as usize & mask;
+        while self.slots[i] != 0 {
+            i = (i + 1) & mask;
+        }
+        self.slots[i] = slot;
+        self.used += 1;
+    }
+
+    /// The table made again from its slots, a tombstone's left out, with
+    /// room for twice the rest.
+    #[cold]
+    fn regrow(&mut self, dead: &[bool]) {
+        let live = |s: &&u64| **s != 0 && !dead[(**s as u32 - 1) as usize];
+        let mut next = SameTable::sized(self.slots.iter().filter(live).count() + 1);
+        for &s in self.slots.iter().filter(live) {
+            next.insert(s);
+        }
+        *self = next;
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Same {
+    /// The table a hash's slot is in, and where its probe starts.
+    #[inline]
+    fn home(&self, hash: u64) -> (&[u64], usize) {
+        let half = (hash >> 32) as usize;
+        let table = match self.shards.is_empty() {
+            true => &self.one,
+            false => &self.shards[half >> 24],
+        };
+        (&table.slots, half & (table.slots.len() - 1))
+    }
+
+    /// `node`'s slot put in, its table grown -- or the one split -- first
+    /// where it is full.
+    fn put(&mut self, node: u32, hash: u64, dead: &[bool]) {
+        let slot = (hash >> 32) << 32 | (node as u64 + 1);
+        if self.shards.is_empty() {
+            if !self.one.full() {
+                return self.one.insert(slot);
+            }
+            if self.one.slots.len() < SAME_SPLIT {
+                self.one.regrow(dead);
+                return self.one.insert(slot);
+            }
+            let slots = std::mem::take(&mut self.one).slots;
+            self.shards = Same::spread(slots.iter().copied().filter(|&s| s != 0), dead);
+        }
+        let table = &mut self.shards[(slot >> 56) as usize];
+        if table.full() {
+            table.regrow(dead);
+        }
+        table.insert(slot);
+    }
+
+    /// `slots` in [`SAME_SHARDS`] tables, each with room for twice its
+    /// share, a tombstone's left out.
+    #[cold]
+    fn spread(slots: impl Iterator<Item = u64> + Clone, dead: &[bool]) -> Vec<SameTable> {
+        let slots = slots.filter(|&s| !dead[(s as u32 - 1) as usize]);
+        let mut counts = vec![0usize; SAME_SHARDS];
+        for s in slots.clone() {
+            counts[(s >> 56) as usize] += 1;
+        }
+        let mut shards: Vec<SameTable> = counts.iter().map(|&n| SameTable::sized(n + 1)).collect();
+        for s in slots {
+            shards[(s >> 56) as usize].insert(s);
+        }
+        shards
+    }
+
+    /// Made from every live node's hash, in node order. Put in on threads,
+    /// a group of shards each taking the hashes that fell in them, it took
+    /// 200 000 nodes 1.9 ms against 1.4 in turn.
+    fn made(hashes: &[u64], dead: &[bool]) -> Same {
+        let slots = hashes
+            .iter()
+            .enumerate()
+            .filter(|&(node, _)| !dead[node])
+            .map(|(node, &h)| (h >> 32) << 32 | (node as u64 + 1));
+        let live = dead.iter().filter(|&&d| !d).count();
+        let mut same = Same {
+            built: true,
+            ..Same::default()
+        };
+        if (live + 1) * 2 <= SAME_SPLIT {
+            same.one = SameTable::sized(live + 1);
+            slots.for_each(|s| same.one.insert(s));
+        } else {
+            same.shards = Same::spread(slots, dead);
+        }
+        same
+    }
+
+    fn bytes(&self) -> usize {
+        let shards = self
+            .shards
+            .iter()
+            .map(|t| t.slots.capacity() * 8)
+            .sum::<usize>();
+        self.one.slots.capacity() * 8 + shards + self.shards.capacity() * 32
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl Same {
+    #[inline]
+    fn bytes(&self) -> usize {
+        self.slots.capacity() * 8
+    }
+}
+
 /// A hash of a vector as the arena stores it (`Arena::write_stored`), four
 /// bytes at a time -- so an f32 arena's is its floats' bits, taken with no
 /// bytes written ([`hash_words`]).
+#[cfg(target_family = "wasm")]
 fn hash_stored(bytes: &[u8]) -> u64 {
     let (words, rest) = bytes.as_chunks::<4>();
     let words = words.iter().map(|w| u32::from_le_bytes(*w));
@@ -2951,6 +3134,7 @@ fn hash_stored(bytes: &[u8]) -> u64 {
 }
 
 /// A multiply and a rotate a word.
+#[cfg(any(target_family = "wasm", not(feature = "vector")))]
 fn hash_words(words: impl Iterator<Item = u32>) -> u64 {
     let mut h: u64 = 0x243F_6A88_85A3_08D3;
     for w in words {
@@ -2959,6 +3143,68 @@ fn hash_words(words: impl Iterator<Item = u32>) -> u64 {
             .rotate_left(29);
     }
     h ^ (h >> 32)
+}
+
+/// [`hash_words`] natively: two words a step into each of four chains,
+/// folded together and finished, so that every bit of the top half -- a
+/// slot's place and its shard -- hears every word. One chain waited on its
+/// multiply a word: a 768-dim vector in cache took 1.18 us against 0.17, a
+/// 128-dim one 0.16 against 0.02, which leaves [`Same`]'s making from the
+/// arena to the memory's speed.
+#[cfg(not(target_family = "wasm"))]
+#[inline]
+fn hash_lanes<T: Copy>(words: &[T], bits: impl Fn(T) -> u32, rest: &[u8]) -> u64 {
+    const K: u64 = 0x9E37_79B9_7F4A_7C15;
+    let step = |h: u64, w: u64| (h ^ w).wrapping_mul(K).rotate_left(29);
+    let mut h: [u64; 4] = [
+        0x243F_6A88_85A3_08D3,
+        0x1319_8A2E_0370_7344,
+        0xA409_3822_299F_31D0,
+        0x082E_FA98_EC4E_6C89,
+    ];
+    let (chunks, tail) = words.as_chunks::<8>();
+    for c in chunks {
+        for (l, h) in h.iter_mut().enumerate() {
+            *h = step(
+                *h,
+                bits(c[2 * l]) as u64 | (bits(c[2 * l + 1]) as u64) << 32,
+            );
+        }
+    }
+    let mut x = (words.len() + rest.len()) as u64;
+    for l in h {
+        x = step(x, l);
+    }
+    for &w in tail {
+        x = step(x, bits(w) as u64);
+    }
+    for &b in rest {
+        x = step(x, b as u64);
+    }
+    // MurmurHash3's finish.
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    x ^ (x >> 33)
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[inline]
+fn hash_stored(bytes: &[u8]) -> u64 {
+    let (words, rest) = bytes.as_chunks::<4>();
+    hash_lanes(words, u32::from_le_bytes, rest)
+}
+
+/// A float arena's hash of `raw` as `Arena::push` would store it, each
+/// component times `inv` where that is not 1.
+#[cfg(not(target_family = "wasm"))]
+#[inline]
+fn hash_scaled(raw: &[f32], inv: f32) -> u64 {
+    match inv != 1.0 {
+        true => hash_lanes(raw, |x| (x * inv).to_bits(), &[]),
+        false => hash_lanes(raw, f32::to_bits, &[]),
+    }
 }
 
 thread_local! {
@@ -3130,7 +3376,7 @@ impl VectorIndex {
             + self.upper.capacity() * size_of::<Vec<Vec<u32>>>()
             + self.pending.capacity() * 4
             + self.aliases.capacity() * size_of::<(u32, DocId)>()
-            + self.same.slots.capacity() * 8
+            + self.same.bytes()
     }
 
     /// Nodes that no link reaches yet ([`Self::defer_batch`]), tombstones
@@ -3465,10 +3711,14 @@ impl VectorIndex {
                     true => unit_scale(flat_sq(raw)),
                     false => 1.0,
                 };
-                (
-                    hash_words(raw.iter().map(|&x| scaled(x, inv).to_bits())),
-                    Some(inv),
-                )
+                // The browser's hash takes the closure the comparison
+                // below takes: through a function of its own, 21 bytes of
+                // its module more.
+                #[cfg(target_family = "wasm")]
+                let hash = hash_words(raw.iter().map(|&x| scaled(x, inv).to_bits()));
+                #[cfg(not(target_family = "wasm"))]
+                let hash = hash_scaled(raw, inv);
+                (hash, Some(inv))
             }
             _ => {
                 let mut stored = std::mem::take(&mut self.stored_buf);
@@ -3478,10 +3728,18 @@ impl VectorIndex {
                 (hash, None)
             }
         };
-        let mask = self.same.slots.len() - 1;
+        // The browser's probe reads its one table as it did: through the
+        // slice `home` gives, 21 bytes of its module more.
+        #[cfg(target_family = "wasm")]
+        let (slots, mask) = (&self.same.slots, self.same.slots.len() - 1);
+        #[cfg(target_family = "wasm")]
         let mut i = hash as usize & mask;
+        #[cfg(not(target_family = "wasm"))]
+        let (slots, mut i) = self.same.home(hash);
+        #[cfg(not(target_family = "wasm"))]
+        let mask = slots.len() - 1;
         loop {
-            let slot = self.same.slots[i];
+            let slot = slots[i];
             let Some(node) = (slot as u32).checked_sub(1) else {
                 return (hash, None);
             };
@@ -3510,6 +3768,7 @@ impl VectorIndex {
 
     /// Makes [`Same`] from the arena, two to four slots a live node: more
     /// than half full it is made again twice the size.
+    #[cfg(target_family = "wasm")]
     fn same_build(&mut self) {
         let live = self.doc_ids.len() - self.deleted_count;
         self.same.slots = vec![0; (live.max(8) * 2).next_power_of_two()];
@@ -3528,6 +3787,7 @@ impl VectorIndex {
         }
     }
 
+    #[cfg(target_family = "wasm")]
     fn same_put(&mut self, node: u32, hash: u64) {
         if (self.same.used + 1) * 2 > self.same.slots.len() {
             // Made again, `node` among the rest: it is in the arena.
@@ -3540,6 +3800,55 @@ impl VectorIndex {
         }
         self.same.slots[i] = (hash >> 32) << 32 | (node as u64 + 1);
         self.same.used += 1;
+    }
+
+    /// Makes [`Same`] from the arena, every node's vector hashed -- a share
+    /// of [`SAME_SHARE`] nodes at a time by whichever thread is free, where
+    /// there are more than one -- and the live ones put in in node order.
+    /// The one time it reads every vector: a vector at a time down one
+    /// chain of multiplies, it took the first put after an open 275-441 ms
+    /// over 1.1 million of 128 dimensions, now 33-169, and 444-741 over
+    /// 300 000 of 768, now 24-175.
+    #[cfg(not(target_family = "wasm"))]
+    fn same_build(&mut self) {
+        let (n, dim) = (self.doc_ids.len(), self.dim);
+        let data = &self.data;
+        let hash = |node: usize, buf: &mut Vec<u8>| match data {
+            Arena::F32(d) => hash_lanes(d.row(node, dim), f32::to_bits, &[]),
+            _ => {
+                buf.clear();
+                data.write_stored(node as u32, dim, buf);
+                hash_stored(buf)
+            }
+        };
+        let threads = match n * dim > SAME_SHARE * 64 {
+            true => Self::threads(),
+            false => 1,
+        };
+        let mut hashes = vec![0u64; n];
+        if threads < 2 {
+            let mut buf = Vec::new();
+            for (node, h) in hashes.iter_mut().enumerate() {
+                *h = hash(node, &mut buf);
+            }
+        } else {
+            let shares: Vec<Mutex<&mut [u64]>> =
+                hashes.chunks_mut(SAME_SHARE).map(Mutex::new).collect();
+            let mut bufs: Vec<Vec<u8>> = vec![Vec::new(); threads.min(shares.len())];
+            spread(shares.len(), &mut bufs, |buf, i| {
+                let mut share = shares[i].lock().unwrap_or_else(|e| e.into_inner());
+                for (j, h) in share.iter_mut().enumerate() {
+                    *h = hash(i * SAME_SHARE + j, buf);
+                }
+            });
+        }
+        self.same = Same::made(&hashes, &self.deleted);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[inline]
+    fn same_put(&mut self, node: u32, hash: u64) {
+        self.same.put(node, hash, &self.deleted);
     }
 
     /// The documents holding `node`'s vector but its own.
@@ -5722,6 +6031,129 @@ mod tests {
             .map(|x| x.0)
             .collect();
         assert_eq!(exact, [9, 10]);
+    }
+
+    /// Natively the table that finds a vector written again grows from its
+    /// own slots: past the split a 256th at a time -- no put makes room for
+    /// more than a few shares of the nodes, where the one table made room
+    /// for all of them at once -- each slot found where it went, and a
+    /// tombstone's left behind as its table grows.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn the_copies_table_grows_a_share_at_a_time() {
+        const N: usize = 400_000;
+        let hash = |node: usize| {
+            let mut x = (node as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+            x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            x ^ (x >> 31)
+        };
+        let find = |same: &Same, node: usize| {
+            let (slots, mut i) = same.home(hash(node));
+            loop {
+                match slots[i] {
+                    0 => return false,
+                    s if s == (hash(node) >> 32) << 32 | (node as u64 + 1) => return true,
+                    _ => i = (i + 1) & (slots.len() - 1),
+                }
+            }
+        };
+        let mut dead = vec![false; N];
+        let mut same = Same::made(&[], &[]);
+        let mut most = 0;
+        for node in 0..N {
+            let before = same.bytes();
+            same.put(node as u32, hash(node), &dead);
+            if node > SAME_SPLIT {
+                most = most.max(same.bytes().saturating_sub(before));
+            }
+        }
+        assert!(!same.shards.is_empty());
+        assert!(most < 4 * 4 * 8 * N / SAME_SHARDS, "{most}");
+        assert!((0..N).all(|node| find(&same, node)));
+        // Nine in ten nodes become tombstones, and as many nodes again come:
+        // the tables grow past none of them.
+        for d in dead.iter_mut().skip(1).step_by(10) {
+            *d = true;
+        }
+        dead.iter_mut().for_each(|d| *d = !*d);
+        dead.resize(2 * N, false);
+        for node in N..2 * N {
+            same.put(node as u32, hash(node), &dead);
+        }
+        let live = dead.iter().filter(|&&d| !d).count();
+        assert!(same.bytes() < 40 * live, "{} for {live}", same.bytes());
+        assert!((0..2 * N)
+            .filter(|&n| !dead[n])
+            .all(|node| find(&same, node)));
+        // Made from the hashes, as the arena's first put makes it.
+        let hashes: Vec<u64> = (0..2 * N).map(hash).collect();
+        let made = Same::made(&hashes, &dead);
+        assert!((0..2 * N)
+            .filter(|&n| !dead[n])
+            .all(|node| find(&made, node)));
+        assert!((0..2 * N)
+            .filter(|&n| dead[n])
+            .all(|node| !find(&made, node)));
+    }
+
+    /// Past the split, a vector written again still joins its node -- over
+    /// floats and over codes -- and one whose node became a tombstone makes
+    /// a node again, which its copies then join: as one table found them.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn copies_find_their_node_past_the_split() {
+        let quick = VectorIndexSpec {
+            m: 4,
+            ef_construction: 8,
+            ..spec()
+        };
+        for prec in [VecPrec::F32, VecPrec::F16] {
+            let mut rng = Rng(11);
+            let n = SAME_SPLIT / 2 + 3_000;
+            let items: Vec<(u64, Vec<f32>)> = (0..n as u64)
+                .map(|i| (i, (0..3).map(|_| rng.next_f32() - 0.5).collect()))
+                .collect();
+            let mut ix = VectorIndex::with_precision(3, quick, prec);
+            ix.insert_batch(&items);
+            assert!(!ix.same.shards.is_empty());
+            assert_eq!(ix.doc_ids.len(), n);
+            // A copy of every 7th, one at a time and as a batch.
+            let copies: Vec<(u64, Vec<f32>)> = items
+                .iter()
+                .step_by(7)
+                .map(|(d, v)| (d + 1_000_000, v.clone()))
+                .collect();
+            let (one, rest) = copies.split_at(100);
+            for (d, v) in one {
+                ix.insert(*d, v);
+            }
+            ix.insert_batch(rest);
+            assert_eq!(ix.doc_ids.len(), n, "a node a vector");
+            assert_eq!(ix.len(), n + copies.len());
+            // Every 11th's documents go: a tombstone each, and the vector
+            // written again is a node of its own, which a copy joins.
+            let gone: Vec<&(u64, Vec<f32>)> = items.iter().skip(3).step_by(11).collect();
+            for (d, _) in &gone {
+                ix.remove(*d);
+                ix.remove(*d + 1_000_000);
+            }
+            let dead = ix.dead();
+            assert!(dead > 0);
+            for (d, v) in &gone {
+                ix.insert(d + 2_000_000, v);
+                ix.insert(d + 3_000_000, v);
+            }
+            assert_eq!(ix.doc_ids.len(), n + gone.len());
+            for (d, v) in &gone {
+                let found: Vec<u64> = ix
+                    .search(v, 2, None, |_| true)
+                    .iter()
+                    .map(|x| x.0)
+                    .collect();
+                assert_eq!(found, [d + 2_000_000, d + 3_000_000]);
+            }
+        }
     }
 
     /// The documents holding another's vector travel in the graph record,

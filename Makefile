@@ -557,12 +557,22 @@ ttl-bench:
 	./target/release/examples/expiry hash 10000000 20000 1000
 	./target/release/examples/expiry writes 1000000
 
-## A @unique field's index as it grows: 4 000 000 puts one at a time, each
-## timed -- p50, p99, p99.99, the longest and every one past 5 ms, where a
-## table that outgrew itself moved every key -- then the index built after an
-## open, a read by it and a lookup in it (crates/fenec-core/examples/growth.rs).
+## Indexes as they grow, a put at a time, each timed -- p50, p99, p99.99,
+## the longest and every one past a bound, where a table that outgrew itself
+## moved every key (crates/fenec-core/examples/growth.rs): a @unique field's
+## 4 000 000 entries, then the index built after an open, a read by it and a
+## lookup in it; a @text field taking 4 new terms a row to 4 million terms,
+## then its build and `match`; and vectors under @hnsw, 1.1 million of 128
+## dimensions and 300 000 of 768, then the first put after an open and
+## `near` (GROWTH=unique, text or vector for one; the vectors take about ten
+## minutes, and 600 000 of 768 outgrew an 8 GB machine's memory).
+GROWTH ?= unique text vector
 growth-bench:
-	$(CARGO) run --release -p fenec-core --example growth -- 4000000
+	$(CARGO) build --release -p fenec-core --example growth
+	$(if $(filter unique,$(GROWTH)),./target/release/examples/growth unique 4000000)
+	$(if $(filter text,$(GROWTH)),./target/release/examples/growth text 1000000 4)
+	$(if $(filter vector,$(GROWTH)),./target/release/examples/growth vector 128 1100000)
+	$(if $(filter vector,$(GROWTH)),./target/release/examples/growth vector 768 300000)
 
 ## What opening a file costs, read into memory or mapped: a 1 GB file of
 ## 2.3 million rows, written once, then opened each way in a process of its

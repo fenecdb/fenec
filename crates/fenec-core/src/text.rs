@@ -25,7 +25,7 @@
 // tokenizer stays, for what else splits text.
 #![cfg_attr(not(feature = "text"), allow(dead_code, unused_imports))]
 
-use crate::maps::Map;
+use crate::maps::{Map, Sharded};
 use crate::schema::TextIndexSpec;
 #[cfg(feature = "text")]
 use crate::store::DocMap;
@@ -338,8 +338,11 @@ impl Postings {
 pub struct TextIndex {
     pub spec: TextIndexSpec,
     /// term -> postings, kept ascending by document id so `search` can merge
-    /// them without sorting.
-    postings: Map<String, Postings>,
+    /// them without sorting. Its table grows a shard at a time
+    /// (`maps::Sharded`): a field whose rows bring terms of their own -- an
+    /// id, a code, a name -- took its doublings whole under the write lock,
+    /// 125-132 ms at 1.8 million terms and 276-324 at 3.7 million.
+    postings: Sharded<String, Postings>,
     /// document -> term count, for the length normalisation.
     /// Each document's number of terms: none is indexed without one, so
     /// 0 is none.
@@ -356,7 +359,7 @@ impl TextIndex {
     pub fn new(spec: TextIndexSpec) -> TextIndex {
         TextIndex {
             spec,
-            postings: Map::default(),
+            postings: Sharded::default(),
             lengths: DocMap::default(),
             total_terms: 0,
             heap: 0,
@@ -1134,6 +1137,36 @@ mod tests {
         assert_eq!(ix.total_terms, 0);
     }
 
+    /// A dictionary past the split -- its terms in shards -- answers as the
+    /// one map did: each term's documents, a term gone with its last one,
+    /// the same ranking through a shrink, and empty again once cleared.
+    #[test]
+    fn a_dictionary_in_shards_answers_as_one_did() {
+        let text = |d: u64| format!("t{d}a t{d}b t{}c shared", d / 2);
+        let mut ix = TextIndex::new(spec());
+        let n = 60_000u64;
+        for d in 0..n {
+            ix.insert(d, &text(d));
+        }
+        assert_eq!(ix.terms(), 2 * n as usize + n as usize / 2 + 1);
+        for d in (0..n).step_by(97) {
+            assert_eq!(ix.matching(&format!("t{d}a")), [d]);
+            assert_eq!(ix.matching(&format!("t{}c", d / 2)), [d & !1, d | 1]);
+        }
+        for d in (0..n).step_by(3) {
+            ix.remove(d, &text(d));
+        }
+        assert_eq!(ix.matching("t3a t4a t6b"), [4]);
+        let pair = ix.search("t5c t9b", 10, |_| true);
+        ix.shrink_to_fit();
+        assert_eq!(ix.search("t5c t9b", 10, |_| true), pair);
+        assert_eq!(ix.postings_count(), 4 * ix.len());
+        ix.clear();
+        assert_eq!((ix.terms(), ix.len()), (0, 0));
+        ix.insert(1, "alpha");
+        assert_eq!(ix.matching("alpha"), [1]);
+    }
+
     /// The count `memory_bytes` reads is the sum over every term it
     /// replaced, through inserts, updates, removals and a shrink.
     #[test]
@@ -1221,7 +1254,7 @@ mod tests {
         for id in [9u64, 3, 7, 1, 5] {
             ix.insert(id, "term");
         }
-        let list = &ix.postings["term"];
+        let list = ix.postings.get("term").unwrap();
         assert!(list.docs.windows(2).all(|w| w[0] < w[1]), "{:?}", list.docs);
     }
 

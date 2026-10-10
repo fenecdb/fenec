@@ -74,7 +74,7 @@ make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M
-make growth-bench        # a @unique index over 4M puts one at a time: the longest (its table's growth), p50/p99.99, the build after an open, a lookup
+make growth-bench        # indexes growing a put at a time, the longest (a table's growth), p50/p99.99: @unique to 4M keys, @text to 4M terms, @hnsw to 1.1M x 128 and 300k x 768; then builds, lookups, match, near, the first put after an open (GROWTH=unique|text|vector)
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set
@@ -1451,28 +1451,38 @@ number is kept in are of the index's own type (`Bucket::one`): through
 browser module. Its buckets stay one sorted list (the runs `cfg`'d out,
 a removal a `memmove` of the rest): 390 bytes, 0.4 KB brotli.
 
-**A hash index's table grows a 256th at a time** (`maps::Sharded`). A
-`HashMap` that is full moves every key into a table twice its size in the
-insert that found it full -- under the write lock, every request waiting
--- and a `@unique` field holds a key a row: `make recon-bench`'s journal
-passing 1 835 008 entries held one transfer and everything behind it 120
-to 137 ms in every run, and `make growth-bench`'s 4 million puts one at a
-time took 7, 19, 49, 109 and 235-267 ms at each doubling from 229 376
-keys. Past `SPLIT_AT` (114 688 keys, a table of 2^17 buckets' worth) the
-map is 256 maps, a key's picked by the top byte of an `Fx` seeded at the
-split, each growing on its own: the longest put is the split's, 6.2 ms.
-Below it a map is the one table it was, the same to the nanosecond at
-100 000 keys. What it costs past the split is the pick: a lookup in a loop
-over a million keys 66 -> 93 ns, a lone put's p50 1.08 -> 1.12 us (1.12
--> 1.17 at 4 million), an index built after an open 7-13% faster (the
-shards' tables grow in cache), 4 million puts the same 5.7 s. The pick's
-hash is the cost, not the tables: picked by a key's length, which put
-nearly every key in one shard, or by a constant, lookups were 66 ns, by
-the last 8 bytes 90, and the shards sharing one SipHash key changed
-nothing. Rejected: one table taken into a new one 4 096 keys at a time,
-looked up in both meanwhile -- lookups 163 ns, since a map that stops
-taking keys never finishes its steps, and builds a third slower. The
-browser module keeps the one map (`cfg`), byte for byte the size it was.
+**A hash index's table grows a 256th at a time, and a text index's
+terms too** (`maps::Sharded`). A `HashMap` that is full moves every key
+into a table twice its size in the insert that found it full -- under the
+write lock, every request waiting -- and a `@unique` field holds a key a
+row: `make recon-bench`'s journal passing 1 835 008 entries held one
+transfer and everything behind it 120 to 137 ms in every run, and `make
+growth-bench`'s 4 million puts one at a time took 7, 19, 49, 109 and
+235-267 ms at each doubling from 229 376 keys. A `@text` index's terms are
+the same map, and a field whose rows bring terms of their own -- an id, a
+code, a name -- doubled it as often: 9-10, 23-25, 55-59, 125-132 and
+276-324 ms over the same doublings (`growth-bench`'s `text`, four new terms
+a row to 4 million). Past `SPLIT_AT` (114 688 keys, a table of 2^17
+buckets' worth) the map is 256 maps, each growing on its own: the longest
+put is the split's, 2.5-3.6 ms for a hash index's keys and 4.9-5.3 for a
+text index's terms, against 6.2-8.2 and 8.5-10.6 while the split hashed
+every key again. Each key is kept beside its hash (`Hashed`), which its
+table takes as it is (`Pass`): a lookup is one SipHash under the map's own
+random keys, and the shard is bits 49 to 56 of it -- below the seven a
+table tags its buckets with: by the top byte, every key of a shard had one
+tag and a probe read every key it passed. Picked by an `Fx` of the key, the
+shard then hashing it again with keys of its own read from the shard, a
+lookup in a loop over a million keys took 94-135 ns and over four million
+121-144, against 68-87 and 83-93 now, and 33-42 -> 24-34 under the split;
+an index built after an open is 15-25% faster, its tables growing with no
+key hashed again. The cost is 8 bytes a slot: 48 -> 56 a hash index's, 80
+-> 88 a text index's. A put's p50 is as it was (1.08-1.29 us), and so is
+`match` (a new term 1.05-1.29 us against 1.09-1.37, three 1.37-1.65 against
+1.41-1.72). Rejected:
+one table taken into a new one 4 096 keys at a time, looked up in both
+meanwhile -- lookups 163 ns, since a map that stops taking keys never
+finishes its steps, and builds a third slower. The browser module keeps
+the one map and its `Fx` (`cfg`), byte for byte the size it was.
 
 **`in (get ...)` is answered before the query, as the list it is.**
 `Expr::InSelect` holds an inner `Select`; `Database::answered` (from
@@ -1671,6 +1681,39 @@ restore checks each alias's document holds the node's vector. Tests whose
 data repeated vectors (`i % 13`) to count nodes and tombstones now write a
 vector a row. The browser module 2.2 KB brotli; builds, searches and
 opens as fast.
+
+**Natively the table that finds a copy grows from its own slots**
+(`Same`, `SameTable`). In the browser `Same` is one table, made again from
+the arena once it is half full; natively that was the write that found it
+full hashing every live vector again under the write lock -- 118-132 and
+242-281 ms at 2^19 and 2^20 nodes of 128 dimensions, 166-169 and 376-377
+ms at 2^17 and 2^18 of 768 and 1.45 s at 2^19 (`make growth-bench`'s
+`vector`). A slot's place is the low bits of the half of the hash it
+holds, so a table made twice the size reads its slots and no vector,
+leaving the tombstones' behind, and past `SAME_SPLIT` (2^16 slots, an
+index of 32 768 nodes) the table is 256, by that half's top byte, each
+growing on its own: the split moves its slots in 0.72-0.80 ms and a shard
+at 2 million nodes grows in 0.15, and over 1.1 million 128-dim puts one at
+a time and 300 000 768-dim ones no put at a doubling took 10 ms. A place
+taken from the half leaves fewer of its bits to tell two vectors apart --
+a slot of another vector at the same place passes the half's test once in
+2^(24 - k) for a shard of 2^k slots, a vector compared for nothing about
+once in 4 000 puts at a million nodes. The first put after an open still
+makes the table from the arena, every vector hashed -- made at the open it
+would cost a database that only reads, and under `--warm` a read-only
+server 16 to 32 bytes a node -- now on every core, `SAME_SHARE` nodes at a
+time, through four chains of multiplies and MurmurHash3's finish
+(`hash_lanes`) where one chain waited on its multiply a word (a 768-dim
+vector in cache 1.18 us against 0.17): 275-441 ->
+33-169 ms at 1.1 million x 128, 444-741 -> 24-175 ms at 300 000 x 768, and
+1.18-1.37 -> 0.31-0.59 s at 600 000 x 768, where on this 8 GB machine the
+arena and the file outgrew memory. An open whose tail holds vectors makes
+it there: `make reopen-bench`'s deferred open of 100 000 x 768 never
+linked 0.59-0.75 -> 0.35 s, the linked one 16.2-17.3 -> 14.9-16.3 s. A
+put's p50, a batch's build (100 000 x 128 in 3.63-3.74 s against
+3.72-3.85), `near` and an open of a checkpointed file are as they were.
+The browser module keeps its table and its hash (`cfg`): 618 010 bytes as
+on main, every function the size it was.
 
 **An archive and a backup can be sealed** (`seal.rs`, `fenec key`,
 `--key-file`). A copy in a bucket is out of reach of the disk's
@@ -2321,7 +2364,8 @@ builds an inverted index from the documents the first time a statement reads it
 after an open — 16 µs per document against the HNSW graph's ~34 µs. Nothing
 about it reaches the file, so there is no validation path and no stale-index
 case to handle. It is shrunk to fit where it is known complete (its build,
-`create index`); live ingest keeps `Vec` growth slack.
+`create index`); live ingest keeps `Vec` growth slack. Its term map grows a
+256th at a time, as a hash index's does (`maps::Sharded`, above).
 
 **An open builds no hash, text, ordered or sparse index.** Each is a
 `Derived` -- a `OnceLock` of the index or of the error its build met -- which
