@@ -83,7 +83,8 @@ export class FenecHttp {
       opts.idempotencyKey ?? this.#key,
     );
     // The endpoint returns rows as a plain array; the builder expects `{rows}`.
-    if (Array.isArray(body)) return { rows: body };
+    // A write's (`returning`) says the change it left the database at too.
+    if (Array.isArray(body)) return seq === null ? { rows: body } : { rows: body, seq, replayed };
     if (body && typeof body.affected === 'number') {
       return { kind: 'affected', count: body.affected, seq, replayed };
     }

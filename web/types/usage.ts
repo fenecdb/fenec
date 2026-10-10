@@ -206,6 +206,25 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   expect<number>((await db.from('articles').where('year', 2024).limit(1).require(1).rows()).length);
   // @ts-expect-error -- a read's require is a count too
   db.from('articles').require('1');
+  // A claim: the oldest rows picked and answered as written; a pop.
+  const claimed = await db
+    .from('articles')
+    .where(raw('year <= ?', 2024))
+    .order('year')
+    .limit(10)
+    .update({ title: 'taken', year: inc(1) }, { returning: true });
+  expect<number>(claimed[0].id);
+  expect<string>(claimed[0].title);
+  const some = await db.from('articles').where('id', 1).update({ title: 'x' }, { returning: ['id', 'year'] });
+  expect<number | null>(some[0].year);
+  // @ts-expect-error -- only the fields named come back
+  some[0].title;
+  const popped = await db.from('articles').order('id').limit(2).delete({ returning: true });
+  expect<string>(popped[0].title);
+  expect<number>(await db.from('articles').order('id').limit(2).delete());
+  db.from('articles').order('year', 'desc').limit(1).toDelete({ returning: ['id'], require: 1 });
+  // @ts-expect-error -- returning is true or the fields
+  db.from('articles').where('id', 1).toDelete({ returning: 'id' });
 
   const [sql, params] = db.from('articles').where('year', 2024).toFenecQL();
   expect<string>(sql);

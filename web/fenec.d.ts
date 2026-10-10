@@ -791,6 +791,11 @@ export declare class Query<
 
   /** The text of the write statements, without running them. The write side of `toFenecQL`. */
   toInsert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): [sql: string, params: unknown[]];
+  /**
+   * The `set` text. `order` and `limit` before it pick the rows it writes
+   * -- the page a `get` with them answers -- and `{ returning }` answers
+   * them as written.
+   */
   toUpdate(patch: Insert<F>, opts?: WriteOptions): [sql: string, params: unknown[]];
   toUpsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: RequireOptions): [sql: string, params: unknown[]];
   toDelete(opts?: WriteOptions): [sql: string, params: unknown[]];
@@ -803,6 +808,11 @@ export declare class Query<
    * runs again when one of them is written.
    */
   readonly reads: string[] | null;
+  /**
+   * Whether `order` or `limit` was given: an update or a delete then picks
+   * the rows it writes, which a sync replica leaves to the server.
+   */
+  readonly picks: boolean;
   /** The opaque context carried by `bind` (for subclasses). */
   readonly context: unknown;
   /** The same body as a plain `Query`: bypasses subclass behaviour. */
@@ -829,6 +839,18 @@ export declare class Query<
    * lock taken (1) or not (0).
    */
   insert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): Promise<number>;
+  /**
+   * `set`: the rows it changed, or with `{ returning }` the rows as
+   * written. With `order` and `limit` before it, a job queue's claim:
+   * `.where(raw('run_at <= now()')).order('run_at').limit(10)
+   * .update({ owner, run_at: expr('now() + ?', 30000), attempts: inc(1) },
+   * { returning: true })`.
+   */
+  update(patch: Insert<F>, opts: WriteOptions & { returning: true | readonly ['*'] }): Promise<Row<F>[]>;
+  update<K extends keyof Row<F> & string>(
+    patch: Insert<F>,
+    opts: WriteOptions & { returning: readonly K[] },
+  ): Promise<Pick<Row<F>, K>[]>;
   update(patch: Insert<F>, opts?: WriteOptions): Promise<number>;
   /**
    * `put ... if absent else set {patch}`: each document inserted, or,
@@ -839,6 +861,9 @@ export declare class Query<
    * rows set and made together.
    */
   upsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: RequireOptions): Promise<number>;
+  /** `del`: the rows it deleted, or with `{ returning }` the rows as they were -- a pop. */
+  delete(opts: WriteOptions & { returning: true | readonly ['*'] }): Promise<Row<F>[]>;
+  delete<K extends keyof Row<F> & string>(opts: WriteOptions & { returning: readonly K[] }): Promise<Pick<Row<F>, K>[]>;
   delete(opts?: WriteOptions): Promise<number>;
 }
 
@@ -851,9 +876,14 @@ export interface RequireOptions {
   require?: number;
 }
 
-/** An update's or a delete's options: `all` covers every row, on purpose. */
+/**
+ * An update's or a delete's options: `all` covers every row, on purpose --
+ * a `limit` bounds it without -- and `returning` answers the rows written
+ * rather than their count: `true` or `['*']` every field, or those named.
+ */
 export interface WriteOptions extends RequireOptions {
   all?: boolean;
+  returning?: true | readonly string[];
 }
 
 /** An insert's options: `ifAbsent` passes over a document whose id or `@unique` value is held. */

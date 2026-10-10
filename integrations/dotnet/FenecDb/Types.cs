@@ -4,8 +4,11 @@ namespace FenecDb;
 
 /// <summary>What a write answers: how many documents it touched, a create's message, the change it left the
 /// database at (<c>Fenec-Seq</c>, what <see cref="FenecClient.After"/> takes on a replica; 0 for an answer
-/// replayed for its key), and whether the answer is the one kept for its idempotency key.</summary>
-public sealed record ExecResult(long Affected, string? Message, long Seq, bool Replayed);
+/// replayed for its key), and whether the answer is the one kept for its idempotency key. A write with
+/// <c>returning</c> hands back its rows too -- an update's as written, a delete's as they were -- and
+/// <c>Affected</c> is their number; null for any other write.</summary>
+public sealed record ExecResult(long Affected, string? Message, long Seq, bool Replayed,
+    IReadOnlyList<JsonElement>? Rows = null);
 
 /// <summary>One value a <c>facet</c> counted and how many of the rows the query matched hold it. The value is any
 /// JSON value a field holds -- null too, for the rows whose field is null.</summary>

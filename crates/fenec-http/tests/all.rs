@@ -9,6 +9,7 @@ mod api;
 mod archive;
 mod cdc;
 mod changes;
+mod claims;
 mod idempotency;
 mod replication;
 mod require;

@@ -985,34 +985,35 @@ public sealed class Query
     static string? WhereOf(IReadOnlyList<Node> cond, Binder bind) =>
         Builder.Prune(new Node("and") { Items = [.. cond] }) is { } root ? Builder.Render(root, bind) : null;
 
-    string? ExtraClause() =>
+    string? ExtraClause(bool picks = false) =>
         _s.Near is not null ? "near"
         : _s.Match is not null ? "match"
         : _s.Rerank is not null ? "rerank"
-        : _s.Order.Count > 0 ? "order"
-        : _s.Limit is not null ? "limit"
+        : _s.Order.Count > 0 && !picks ? "order"
+        : _s.Limit is not null && !picks ? "limit"
         : _s.Offset > 0 ? "offset"
         : _s.Project is not null ? "select"
         : null;
 
-    // Near, Order, Limit mean something only to a read; dropped from a write, Limit(1).DeleteAsync() would
-    // delete every row.
+    // Near, Offset, Select mean something only to a read; dropped from a write, Offset(1).DeleteAsync() would
+    // delete from the first row. Order and Limit pick the rows an update or a delete writes.
     void AssertPlain(string verb)
     {
         if (_s.Require.Length > 0)
             throw Builder.Refuse($"{verb} takes require as its option: {verb}(..., {{ require: n }})");
-        if (ExtraClause() is { } extra) throw Builder.Refuse($"{verb} cannot be used with `{extra}`");
+        if (ExtraClause(verb is "update" or "delete") is { } extra)
+            throw Builder.Refuse($"{verb} cannot be used with `{extra}`");
         if (_s.Lookups.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `lookup`");
         if (_s.Facets.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `facet`");
         if (verb is "insert" or "upsert" && _s.Cond.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `where`");
     }
 
     // An update or delete of every row is too easy to do by accident and cannot be undone: it has to be asked
-    // for, with all.
+    // for, with all. A Limit bounds it.
     string RequireFilter(string verb, bool all, Binder bind)
     {
         if (WhereOf(_s.Cond, bind) is { } where) return $" where {where}";
-        if (all) return "";
+        if (all || _s.Limit is not null) return "";
         throw Builder.Refuse($"an unfiltered {verb} covers the whole collection; if you mean it, {verb}({{ all: true }})");
     }
 
@@ -1024,6 +1025,24 @@ public sealed class Query
         < 0 => throw Builder.Refuse($"require takes a count of rows, a whole number from 0 (got {n})"),
         _ => $" require {n}",
     };
+
+    // An update's or a delete's " order ... limit n returning ...": the rows it picks, and whether it answers
+    // them, under the fields named -- "*" for every one.
+    string Pick(IReadOnlyList<string>? returning)
+    {
+        var sql = new StringBuilder();
+        AppendOrder(sql, _s.Order);
+        if (_s.Limit is { } n) sql.Append($" limit {n}");
+        if (returning is null) return sql.ToString();
+        if (returning.Count == 0) throw Builder.Refuse("returning names the fields it answers, or * for every one");
+        if (returning.Contains("*"))
+        {
+            if (returning.Count > 1) throw Builder.Refuse("returning * answers every field: it takes no other");
+            return sql.Append(" returning *").ToString();
+        }
+        sql.Append(" returning ").Append(string.Join(", ", returning.Select(Builder.FieldPath)));
+        return sql.ToString();
+    }
 
     static List<object?> DocsOf(object? docs) =>
         docs is IEnumerable list and not IDictionary and not string ? list.Cast<object?>().ToList() : [docs];
@@ -1045,14 +1064,18 @@ public sealed class Query
     }
 
     /// <summary>The <c>set</c> of the rows the filter names, not sent; with no filter it is refused unless
-    /// <paramref name="all"/>.</summary>
-    public (string Text, IReadOnlyList<object?> Parameters) ToUpdate(object patch, bool all = false, long? require = null)
+    /// <paramref name="all"/> or a <c>Limit</c> bounds it. <c>Order</c> and <c>Limit</c> before it pick the rows it
+    /// writes -- the page a <c>get</c> with them answers -- and <paramref name="returning"/> answers them as
+    /// written, the fields named or <c>"*"</c> for every one: a job queue's claim,
+    /// <c>Where(Cond.Raw("run_at &lt;= now()")).Order("run_at").Limit(10).UpdateAsync(patch, returning: ["*"])</c>.</summary>
+    public (string Text, IReadOnlyList<object?> Parameters) ToUpdate(object patch, bool all = false, long? require = null,
+        IReadOnlyList<string>? returning = null)
     {
         AssertPlain("update");
         var bind = new Binder();
         var body = Builder.RenderDoc(patch, bind, "update");
         var where = RequireFilter("update", all, bind);
-        return ($"set {_s.Collection} {body}{where}{RequireClause(require)}", bind.Params);
+        return ($"set {_s.Collection} {body}{where}{Pick(returning)}{RequireClause(require)}", bind.Params);
     }
 
     /// <summary>The upsert, <c>put ... if absent else set {patch}</c>, not sent: a document whose id or first
@@ -1071,13 +1094,15 @@ public sealed class Query
     }
 
     /// <summary>The <c>del</c> of the rows the filter names, not sent; with no filter it is refused unless
-    /// <paramref name="all"/>.</summary>
-    public (string Text, IReadOnlyList<object?> Parameters) ToDelete(bool all = false, long? require = null)
+    /// <paramref name="all"/> or a <c>Limit</c> bounds it. <c>Order</c>, <c>Limit</c> and
+    /// <paramref name="returning"/> as <see cref="ToUpdate"/>'s, the rows answered as they were: a pop.</summary>
+    public (string Text, IReadOnlyList<object?> Parameters) ToDelete(bool all = false, long? require = null,
+        IReadOnlyList<string>? returning = null)
     {
         AssertPlain("delete");
         var bind = new Binder();
         var where = RequireFilter("delete", all, bind);
-        return ($"del {_s.Collection}{where}{RequireClause(require)}", bind.Params);
+        return ($"del {_s.Collection}{where}{Pick(returning)}{RequireClause(require)}", bind.Params);
     }
 
     FenecClient Client => _s.Client ?? throw Builder.Refuse(
@@ -1160,13 +1185,16 @@ public sealed class Query
             : ExecAsync(ToUpsert(docs, patch, require), cancellationToken);
 
     /// <summary>Sets the patch's fields on the rows the filter names; with no filter it is refused unless
-    /// <paramref name="all"/>.</summary>
+    /// <paramref name="all"/> or a <c>Limit</c> bounds it. With <paramref name="returning"/> the result's
+    /// <c>Rows</c> are the rows as written.</summary>
     public Task<ExecResult> UpdateAsync(object patch, bool all = false, long? require = null,
-        CancellationToken cancellationToken = default) =>
-        ExecAsync(ToUpdate(patch, all, require), cancellationToken);
+        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
+        ExecAsync(ToUpdate(patch, all, require, returning), cancellationToken);
 
-    /// <summary>Deletes the rows the filter names; with no filter it is refused unless <paramref name="all"/>.</summary>
+    /// <summary>Deletes the rows the filter names; with no filter it is refused unless <paramref name="all"/> or a
+    /// <c>Limit</c> bounds it. With <paramref name="returning"/> the result's <c>Rows</c> are the rows as they
+    /// were.</summary>
     public Task<ExecResult> DeleteAsync(bool all = false, long? require = null,
-        CancellationToken cancellationToken = default) =>
-        ExecAsync(ToDelete(all, require), cancellationToken);
+        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
+        ExecAsync(ToDelete(all, require, returning), cancellationToken);
 }

@@ -374,6 +374,7 @@ fn del_ids(collection: &str, ids: &[DocId]) -> Statement {
                 .collect(),
         )),
         require: None,
+        pick: None,
     }
 }
 
@@ -523,6 +524,15 @@ const UPSERT_KEY: &str = "an upsert into a synced collection names each document
 
 const REQUIRE_UNANSWERED: &str =
     "a write with `require` cannot reach a row whose insert the server has not answered yet";
+
+/// A synced `set` or `del` with `order`, `limit` or `returning`: a job
+/// queue's claim. The replica would pick its own rows and answer them, and
+/// the server -- sent the text -- would pick its own: two workers' replicas
+/// each told they hold the same job. Refused before anything is applied,
+/// as the browser's sync refuses it (`integrations/sync-scenarios.json`).
+const PICKED: &str = "a synced write that picks its rows with `order` or `limit`, or answers \
+                      them with `returning`, would pick and answer the replica's: it goes to \
+                      the server itself";
 
 /// What [`Sync::write`] made of one statement.
 struct Applied {
@@ -1639,6 +1649,7 @@ impl Sync {
                 )));
             }
             match (self.synced(c), write) {
+                (true, true) if s.pick().is_some() => return Err(Error::Query(PICKED.into())),
                 (true, true) => synced += 1,
                 (true, false) => {
                     return Err(Error::ReadOnly(format!(

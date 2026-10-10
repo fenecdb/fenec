@@ -197,7 +197,10 @@ Parameters stay parameters.</p>
   <li><b>The answer is the rows</b>, a JSON array — or, when the query asks
     for <a href="/docs/fenecql#facets">facets</a>,
     <code>{"rows": [...], "facets": {"brand": [{"value": "acme", "count":
-    12}, ...]}}</code>.</li>
+    12}, ...]}}</code>. A write answers <code>{"affected": n}</code>, and
+    one with <a href="/docs/fenecql#pick"><code>returning</code></a> the
+    rows it wrote, as a read does, with its <code>Fenec-Seq</code>: a job
+    queue's claim (<a href="/docs/queues">Job queues</a>).</li>
   <li><b>From Python:</b> <code>pip install fenecdb</code> gives a client
     with no dependencies.</li>
 </ul>

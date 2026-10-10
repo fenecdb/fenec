@@ -39,13 +39,23 @@ fn every_recipe_runs_and_answers_what_the_page_says() {
 
 /// Runs every statement of a page's blocks, in order, over one database
 /// whose clock is 2026-05-03T09:20Z: how many it ran and how many answers
-/// it checked. `analytics_docs.rs` runs its page through it too.
+/// it checked. `analytics_docs.rs` and `queues_docs.rs` run their pages
+/// through it too. A line of a comment alone is passed over, and one
+/// saying `-- 20 s later` moves the clock on: a lease that lapses.
 pub(crate) fn run_page(page: &str) -> (usize, usize) {
     let mut db = Database::new();
-    db.set_clock(Some(1_777_800_000_000));
+    let mut now = 1_777_800_000_000;
+    db.set_clock(Some(now));
     let (mut statements, mut checked) = (0, 0);
     for block in blocks(page) {
         for line in block.lines().filter(|l| !l.trim().is_empty()) {
+            if let Some(comment) = line.trim().strip_prefix("--") {
+                if let Some(s) = comment.trim().strip_suffix(" s later") {
+                    now += s.parse::<i64>().expect("`-- <n> s later`") * 1000;
+                    db.set_clock(Some(now));
+                }
+                continue;
+            }
             let (code, expect) = match line.split_once("-- →") {
                 Some((code, rest)) => (code, Some(rest.trim())),
                 None => (line, None),

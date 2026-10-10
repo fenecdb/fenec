@@ -356,10 +356,23 @@ test('an unfiltered delete is rejected, all: true lets it through', async () => 
   assert.equal(seen[0], 'del articles');
 });
 
-test('write statements do not accept limit/near', async () => {
+test('write statements do not accept near/offset; an update and a delete pick with order/limit', async () => {
   const exec = () => ({ count: 0 });
-  await assert.rejects(() => q().limit(1).bind(exec).delete({ all: true }), FenecError);
+  await assert.rejects(() => q().near('embed', [1]).bind(exec).delete({ all: true }), FenecError);
+  await assert.rejects(() => q().where('a', 1).offset(1).bind(exec).delete(), FenecError);
   await assert.rejects(() => q().where('a', 1).bind(exec).insert({ a: 1 }), FenecError);
+  await assert.rejects(() => q().limit(1).bind(exec).insert({ a: 1 }), FenecError);
+  const seen = [];
+  const answered = { columns: ['id'], rows: [{ id: 4 }] };
+  const db = (sql) => (seen.push(sql), sql.includes(' returning ') ? answered : { count: 1 });
+  assert.equal(await q().order('year').limit(1).bind(db).delete(), 1);
+  assert.deepEqual(await q().order('year', 'desc').limit(1).bind(db).delete({ returning: true }), [{ id: 4 }]);
+  assert.deepEqual(await q().where('id', 4).bind(db).update({ a: 1 }, { returning: ['id'] }), [{ id: 4 }]);
+  assert.deepEqual(seen, [
+    'del articles order year asc limit 1',
+    'del articles order year desc limit 1 returning *',
+    'set articles {a: $1} where id = $2 returning id',
+  ]);
 });
 
 // --------------------------------------------------------------- execution
@@ -526,6 +539,30 @@ test('a write that misses its require puts its run back, in the module', { skip:
   assert.equal(await db.from('accounts').where('name', 'b').update({ balance: inc(30) }, { require: 1 }), 1);
   await assert.rejects(db.from('accounts').where('name', 'nobody').delete({ require: 1 }), /unmet/);
   assert.throws(() => db.from('accounts').where('name', 'a').toDelete({ require: -1 }), /whole number from 0/);
+});
+
+test('a claim picks the oldest ready rows and answers them, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  let now = 1_800_000_000_000;
+  db.now = () => now;
+  db.run('create collection jobs (run_at timestamp @sorted, owner text, attempts int)');
+  for (let i = 0; i < 5; i++) db.run('put jobs {run_at: $1, attempts: 0}', [new Date(now - (5 - i) * 1000)]);
+  const claim = (owner, n) =>
+    db.from('jobs').where(raw('run_at <= now()')).order('run_at').limit(n)
+      .update({ owner, run_at: expr('now() + ?', 30000), attempts: inc(1) }, { returning: ['id', 'owner', 'attempts'] });
+  assert.deepEqual(await claim('w1', 2), [{ id: 1, owner: 'w1', attempts: 1 }, { id: 2, owner: 'w1', attempts: 1 }]);
+  assert.deepEqual((await claim('w2', 10)).map((r) => r.id), [3, 4, 5]);
+  assert.deepEqual(await claim('w3', 10), []);
+  // An ack by a worker whose lease lapsed and whose job was claimed again.
+  now += 30_001;
+  assert.deepEqual((await claim('w3', 1)).map((r) => r.id), [1]);
+  await assert.rejects(db.from('jobs').where('id', 1).where('owner', 'w1').delete({ require: 1 }), /unmet/);
+  assert.equal(await db.from('jobs').where('id', 1).where('owner', 'w3').delete({ require: 1 }), 1);
+  // A pop, the text as the module answers it.
+  const popped = db.run('del jobs order run_at desc limit 1 returning id');
+  assert.deepEqual(popped.columns, ['id']);
+  assert.equal(popped.rows.length, 1);
 });
 
 test('a run of several says which statement stopped it, as a /batch does', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

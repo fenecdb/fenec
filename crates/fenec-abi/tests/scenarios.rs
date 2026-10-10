@@ -97,6 +97,23 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
         Some(Value::Int(n)) => format!(" require {n}"),
         _ => String::new(),
     };
+    // `"order": f`, `"limit": n` and `"returning"`: the builders' `.order(f)`,
+    // `.limit(n)` and `{ returning }`, before the `require`.
+    let mut pick = String::new();
+    if let Some(Value::Text(f)) = member(w, "order") {
+        pick += &format!(" order {f} asc");
+    }
+    if let Some(Value::Int(n)) = member(w, "limit") {
+        pick += &format!(" limit {n}");
+    }
+    match member(w, "returning") {
+        Some(Value::Bool(true)) => pick += " returning *",
+        Some(Value::List(fields)) => {
+            let names: Vec<String> = fields.iter().map(|f| text(Some(f))).collect();
+            pick += &format!(" returning {}", names.join(", "));
+        }
+        _ => {}
+    }
     if let Some(Value::Text(c)) = member(w, "insert") {
         let Some(Value::List(docs)) = member(w, "docs") else {
             panic!("an insert has docs")
@@ -130,11 +147,11 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
             &mut bind,
         );
         let wh = filter(member(w, "where"), params, &mut bind);
-        return format!("set {c} {set}{wh}{required}");
+        return format!("set {c} {set}{wh}{pick}{required}");
     }
     if let Some(Value::Text(c)) = member(w, "delete") {
         let wh = filter(member(w, "where"), params, &mut bind);
-        return format!("del {c}{wh}{required}");
+        return format!("del {c}{wh}{pick}{required}");
     }
     // A read in a batch: the builders' `.require(n)`.
     if let Some(Value::Text(c)) = member(w, "get") {

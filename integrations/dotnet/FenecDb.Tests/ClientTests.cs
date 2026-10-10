@@ -147,6 +147,42 @@ public sealed class ClientTests(Servers servers)
         Assert.Equal([5L], rows.Select(r => r.GetProperty("balance").GetInt64()));
     }
 
+    // A job queue's claim: Order and Limit pick the rows UpdateAsync writes, and returning hands them back in
+    // ExecResult.Rows; an ack by another owner is 412.
+    [Fact]
+    public async Task AClaimAnswersTheRowsItTook()
+    {
+        using var db = Root();
+        var name = Fresh("jobs");
+        await db.ExecAsync($"create collection {name} (n int, run_at timestamp @sorted, owner text, attempts int)");
+        var jobs = db.From(name);
+        for (var n = 1; n <= 3; n++)
+            await jobs.InsertAsync(new Dictionary<string, object?> { ["n"] = n, ["run_at"] = n, ["attempts"] = 0 });
+        Task<ExecResult> Claim(string owner, int limit) =>
+            jobs.Where(Cond.Raw("run_at <= now()")).Order("run_at").Limit(limit).UpdateAsync(
+                new Dictionary<string, object?>
+                {
+                    ["owner"] = owner,
+                    ["run_at"] = Computed.Expr("now() + ?", 60000),
+                    ["attempts"] = Computed.Inc(1),
+                },
+                returning: ["id", "n", "attempts"]);
+        var first = await Claim("w1", 2);
+        Assert.Equal(2, first.Affected);
+        Assert.Equal([1L, 2L], first.Rows!.Select(r => r.GetProperty("n").GetInt64()));
+        Assert.Equal(1L, first.Rows![0].GetProperty("attempts").GetInt64());
+        Assert.True(first.Seq > 0);
+        Assert.Equal([3L], (await Claim("w2", 2)).Rows!.Select(r => r.GetProperty("n").GetInt64()));
+        Assert.Empty((await Claim("w3", 2)).Rows!);
+        var e = await Assert.ThrowsAsync<FenecException>(() =>
+            jobs.Where("n", "=", 1).Where("owner", "=", "w2").DeleteAsync(require: 1));
+        Assert.Equal((412, "unmet"), (e.Status, e.Code));
+        var popped = await jobs.Order("n", "desc").Limit(1).DeleteAsync(returning: ["*"]);
+        Assert.Equal("w2", popped.Rows!.Single().GetProperty("owner").GetString());
+        // A write's answer without returning holds no rows.
+        Assert.Null((await jobs.Where("n", "=", 1).UpdateAsync(new { owner = (string?)null })).Rows);
+    }
+
     [Fact]
     public async Task ABatchLandsWholeOrNotAtAll()
     {

@@ -1246,6 +1246,9 @@ const GUARDED_READ = /^get .* require \d+( |$)/;
 const GUARDED = "a `get ... require` counts the replica's rows and is not sent: a write guarded by a read goes to the server itself";
 // The native core refuses the same in the same words.
 const UPSERT_KEY = "an upsert into a synced collection names each document's key or id: the replica finds the row by it, and the server's copy is matched by it";
+// A job queue's claim: the replica would pick its own rows and answer
+// them, and the server its own -- two workers each told they hold a job.
+const PICKED = "a synced write that picks its rows with `order` or `limit`, or answers them with `returning`, would pick and answer the replica's: it goes to the server itself";
 
 /** Operator spellings in a REST filter. */
 const REST_OPS = {
@@ -1728,6 +1731,9 @@ export class FenecSync {
     const shape = this.#shapes.get(c);
     const base = q.plain();
     const key = shape.key;
+    if ((verb === 'update' || verb === 'delete') && (q.picks || opts?.returning)) {
+      throw new FenecError(PICKED);
+    }
     if (verb === 'insert') {
       const list = Array.isArray(arg) ? arg : [arg];
       if (list.length === 0) return null;

@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench growth-bench search-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench small bench sweep collate-bench subquery-bench ttl-bench growth-bench search-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -261,6 +261,14 @@ concurrency-bench:
 counters-bench:
 	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-bench --bin counters
+
+## A job queue's claim over a million jobs (JOBS=200000 for fewer): one
+## worker's claim of ten through @sorted and through a scan, 16 threads
+## and 16 HTTP clients claiming and acking every job, and the read,
+## compare-and-set and read back a client sends without `returning`.
+queue-bench:
+	$(CARGO) build --release -p fenec-server
+	$(CARGO) run --release -p fenec-bench --bin queue
 
 ## A ledger's reconciliation beside its transfers: four clients sending
 ## transfer batches for 10 s, alone and beside a /batch of reads a second

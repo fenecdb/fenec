@@ -121,20 +121,38 @@ class GoldenTest {
                     val a = s.list("args") ?: emptyList()
                     val all = { at: Int -> opt(a, at, "all") as Boolean? ?: false }
                     val require = { at: Int -> (opt(a, at, "require") as Number?)?.toLong() }
+                    // JavaScript's `returning: true` is every field, `*` here.
+                    val returning = { at: Int ->
+                        when (val r = opt(a, at, "returning")) {
+                            null, false -> null
+                            true -> listOf("*")
+                            else -> (r as List<*>).map { it as String }
+                        }
+                    }
                     val made: Statement? = when (op) {
                         "toFenecQL" -> q.toFenecQL()
                         "toInsert" -> q.toInsert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1))
-                        "toUpdate" -> q.toUpdate(value(a[0]), all(1), require(1))
+                        "toUpdate" -> q.toUpdate(value(a[0]), all(1), require(1), returning(1))
                         "toUpsert" -> q.toUpsert(value(a[0]), value(a[1]), require(2))
-                        "toDelete" -> q.toDelete(all(0), require(0))
+                        "toDelete" -> q.toDelete(all(0), require(0), returning(0))
                         "rows" -> null.also { q.rows() }
                         "first" -> null.also { q.first() }
                         "count" -> null.also { q.count() }
                         "explain" -> null.also { q.explain() }
                         "insert" -> null.also { q.insert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1)) }
-                        "update" -> null.also { q.update(value(a[0]), all(1), require(1)) }
+                        "update" -> null.also {
+                            when (val r = returning(1)) {
+                                null -> q.update(value(a[0]), all(1), require(1))
+                                else -> q.updateReturning(value(a[0]), r, all(1), require(1))
+                            }
+                        }
                         "upsert" -> null.also { q.upsert(value(a[0]), value(a[1]), require(2)) }
-                        "delete" -> null.also { q.delete(all(0), require(0)) }
+                        "delete" -> null.also {
+                            when (val r = returning(0)) {
+                                null -> q.delete(all(0), require(0))
+                                else -> q.deleteReturning(r, all(0), require(0))
+                            }
+                        }
                         else -> {
                             q = step(q, op, a)
                             continue

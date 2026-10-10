@@ -7,7 +7,7 @@
    (`studio/highlight.js`, which the same test holds to it byte for
    byte). */
 
-const RULES = {"types":["bool","int","float","text","bytes","timestamp","vector","f16","cosine","l2","dot","Fenec","FenecSync","Database","Collection","Value","Error","String","Vec","Option","Result"],"langs":{"fenecql":{"pattern":"(?<comment>--[^\\n]*)|(?<string>\\\"(?:[^\\\"\\\\\\n]|\\\\.)*\\\"|'(?:[^'\\\\\\n]|\\\\.)*')|(?<param>\\$\\d+)|(?<anno>@[A-Za-z_][\\w]*)|(?<word>[A-Za-z_][\\w]*)|(?<num>\\b\\d[\\d_]*(?:\\.\\d+)?\\b)","kw":["create","drop","collection","index","if","not","exists","get","put","set","del","select","from","where","near","order","limit","offset","count","ef","exact","asc","desc","and","or","in","has","is","null","true","false","collections","describe","compact","begin","commit","on","match","fuse","lookup","group","insert","set","del","rerank","absent"]}}};
+const RULES = {"types":["bool","int","float","text","bytes","timestamp","vector","f16","cosine","l2","dot","Fenec","FenecSync","Database","Collection","Value","Error","String","Vec","Option","Result"],"langs":{"fenecql":{"pattern":"(?<comment>--[^\\n]*)|(?<string>\\\"(?:[^\\\"\\\\\\n]|\\\\.)*\\\"|'(?:[^'\\\\\\n]|\\\\.)*')|(?<param>\\$\\d+)|(?<anno>@[A-Za-z_][\\w]*)|(?<word>[A-Za-z_][\\w]*)|(?<num>\\b\\d[\\d_]*(?:\\.\\d+)?\\b)","kw":["create","drop","collection","index","if","not","exists","get","put","set","del","select","from","where","near","order","limit","offset","count","ef","exact","asc","desc","and","or","in","has","is","null","true","false","collections","describe","compact","begin","commit","on","match","fuse","lookup","group","insert","set","del","rerank","absent","returning"]}}};
 
 const types = new Set(RULES.types);
 const langs = {};

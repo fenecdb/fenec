@@ -1274,3 +1274,68 @@ fn a_scoped_token_puts_a_parameter_s_documents_and_upserts_its_own_rows() {
         "{theirs}"
     );
 }
+
+const QUEUES: &str = "\
+jobs  read                               where queue = $jwt.queue and hidden = false
+jobs  update(owner, run_at, attempts)    where queue = $jwt.queue          for worker
+jobs  delete                             where queue = $jwt.queue          for worker
+jobs  update                             where queue = $jwt.queue          for admin
+";
+
+/// A job queue's claim through a worker's token: it picks only among the
+/// rows its rules let it update -- its own queue's -- and, answering them
+/// (`returning`), among those it may read; a claim that changes a field the
+/// grant does not name, or leaves a row its rules do not admit (`WITH
+/// CHECK`), is refused whole, and nothing is claimed.
+#[test]
+fn a_worker_token_claims_through_its_rules() {
+    let n = start_with(
+        QUEUES,
+        &[
+            "create collection jobs (queue text, hidden bool, run_at timestamp @sorted, owner text, attempts int)",
+            "put jobs [{queue: \"image\", hidden: false, run_at: 1, attempts: 0}, \
+             {queue: \"mail\", hidden: true, run_at: 2, attempts: 0}, \
+             {queue: \"mail\", hidden: false, run_at: 3, attempts: 0}, \
+             {queue: \"mail\", hidden: false, run_at: 4, attempts: 0}]",
+        ],
+    );
+    let mail = n.token(r#"{"sub":"w1","role":"worker","queue":"mail"}"#);
+    let claim = "set jobs {owner: $1, run_at: now() + 60000, attempts: attempts + 1} \
+                 where run_at <= now() order run_at limit 1 returning id, queue";
+    // The oldest job is another queue's, the next one this worker may not
+    // read: the claim answers the third.
+    let (status, body) = n.query_with(&mail, claim, r#"["w1"]"#);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"id":3,"queue":"mail"}]"#);
+    // A field the grant does not name: refused, and the job left as it was.
+    let (status, body) = n.query(
+        &mail,
+        "set jobs {owner: \"w1\", queue: \"image\"} where run_at <= now() order run_at \
+         limit 1 returning id",
+    );
+    assert_eq!(status, 403, "{body}");
+    // A row its rules would not admit after the write: refused as well.
+    let admin = n.token(r#"{"sub":"a","role":"admin","queue":"mail"}"#);
+    let (status, body) = n.query(
+        &admin,
+        "set jobs {queue: \"image\"} where run_at <= now() and hidden = false order run_at \
+         limit 1 returning id",
+    );
+    assert_eq!(status, 403, "{body}");
+    let (_, left) = n.query(ROOT, "get jobs select id where owner is null order id");
+    assert_eq!(left, r#"[{"id":1},{"id":2},{"id":4}]"#);
+    // The ack: its own job, and not another queue's.
+    let ack = "del jobs where id = $1 and owner = $2 require 1";
+    assert_eq!(n.query_with(&mail, ack, r#"[3, "w1"]"#).0, 200);
+    let (status, body) = n.query_with(&mail, ack, r#"[1, null]"#);
+    assert_eq!(status, 412, "{body}");
+    // The image queue's worker takes the image job alone.
+    let image = n.token(r#"{"sub":"w2","role":"worker","queue":"image"}"#);
+    let (status, body) = n.query_with(
+        &image,
+        "set jobs {owner: $1} where run_at <= now() order run_at limit 10 returning id",
+        r#"["w2"]"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"id":1}]"#);
+}

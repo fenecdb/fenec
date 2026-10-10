@@ -155,21 +155,37 @@ import Testing
                 let all = { (at: Int) in opt(a, at, "all")?.bool ?? false }
                 let absent = { opt(a, 1, "ifAbsent")?.bool ?? false }
                 let require = { (at: Int) in opt(a, at, "require")?.int }
+                // JavaScript's `returning: true` is every field, `["*"]` here.
+                let returning = { (at: Int) -> [String]? in
+                    guard let r = opt(a, at, "returning") else { return nil }
+                    if let b = r.bool { return b ? ["*"] : nil }
+                    return r.array?.map { $0.string! }
+                }
                 var made: (text: String, params: [Value])?
                 switch op {
                 case "toFenecQL": made = try q.toFenecQL()
                 case "toInsert": made = try q.toInsert(docs(), ifAbsent: absent(), require: require(1))
-                case "toUpdate": made = try q.toUpdate(docs(), all: all(1), require: require(1))
+                case "toUpdate": made = try q.toUpdate(docs(), all: all(1), require: require(1), returning: returning(1))
                 case "toUpsert": made = try q.toUpsert(docs(), value(a[1]), require: require(2))
-                case "toDelete": made = try q.toDelete(all: all(0), require: require(0))
+                case "toDelete": made = try q.toDelete(all: all(0), require: require(0), returning: returning(0))
                 case "rows": _ = try await q.rows()
                 case "first": _ = try await q.first()
                 case "count": _ = try await q.count()
                 case "explain": _ = try await q.explain()
                 case "insert": _ = try await q.insert(docs(), ifAbsent: absent(), require: require(1))
-                case "update": _ = try await q.update(docs(), all: all(1), require: require(1))
+                case "update":
+                    if let r = returning(1) {
+                        _ = try await q.updateReturning(docs(), returning: r, all: all(1), require: require(1))
+                    } else {
+                        _ = try await q.update(docs(), all: all(1), require: require(1))
+                    }
                 case "upsert": _ = try await q.upsert(docs(), value(a[1]), require: require(2))
-                case "delete": _ = try await q.delete(all: all(0), require: require(0))
+                case "delete":
+                    if let r = returning(0) {
+                        _ = try await q.deleteReturning(returning: r, all: all(0), require: require(0))
+                    } else {
+                        _ = try await q.delete(all: all(0), require: require(0))
+                    }
                 default:
                     q = try step(q, op, a)
                     continue
@@ -245,6 +261,36 @@ import Testing
         #expect(try await shelf.where("year", "<", 2022).delete() == 1)
         #expect(try await shelf.delete(all: true) == 2)
         #expect(try await shelf.count() == 0)
+        try await db.close()
+    }
+
+    // A job queue's claim through the engine: order and limit pick the
+    // rows, updateReturning answers them as written, deleteReturning as
+    // they were.
+    @Test func aClaimAnswersTheRowsItTook() async throws {
+        let db = try Fenec.memory()
+        try await db.execute("create collection jobs (n int, run_at timestamp @sorted, owner text, attempts int)")
+        let jobs = try db.from("jobs")
+        try await jobs.insert([
+            ["n": 1, "run_at": 1, "attempts": 0] as Value, ["n": 2, "run_at": 2, "attempts": 0],
+            ["n": 3, "run_at": 3, "attempts": 0],
+        ] as Value)
+        func claim(_ owner: String) async throws -> [Row] {
+            try await jobs.where(.raw("run_at <= now()")).order("run_at").limit(2).updateReturning(
+                ["owner": .string(owner), "run_at": .expr("now() + ?", 60000), "attempts": .inc(1)] as Value,
+                returning: ["id", "n", "attempts"])
+        }
+        let first = try await claim("w1")
+        #expect(first.map { $0["n"]?.int } == [1, 2])
+        #expect(first.first?["attempts"]?.int == 1)
+        #expect(try await claim("w2").map { $0["n"]?.int } == [3])
+        #expect(try await claim("w3").isEmpty)
+        let popped = try await jobs.order("n", "desc").limit(1).deleteReturning()
+        #expect(popped.first?["owner"] == "w2")
+        await #expect(throws: FenecError.self) {
+            try await jobs.where("n", 1).where("owner", "w2").delete(require: 1)
+        }
+        #expect(try await jobs.where("n", 1).where("owner", "w1").delete(require: 1) == 1)
         try await db.close()
     }
 

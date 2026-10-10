@@ -133,6 +133,12 @@ public sealed partial class FenecClient : IDisposable
     {
         var (body, head) = await RunAsync(query, parameters, cancellationToken).ConfigureAwait(false);
         using var doc = JsonDocument.Parse(body);
+        // A write with returning answers the rows it wrote.
+        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            var rows = AnswerOf(body).Rows;
+            return new ExecResult(rows.Count, null, head.Seq, head.Replayed, rows);
+        }
         if (doc.RootElement.ValueKind != JsonValueKind.Object)
             throw new InvalidOperationException("the statement answered rows, not a write: use QueryAsync");
         var r = doc.RootElement;

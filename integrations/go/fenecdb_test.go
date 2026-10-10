@@ -298,6 +298,45 @@ func TestAWriteThatMissesItsCountIsRefusedAndPutBack(t *testing.T) {
 	}
 }
 
+// A job queue's claim: Order and Limit pick the rows Update writes, and
+// Returning hands them back in Result.Rows; an ack by another owner is 412.
+func TestAClaimAnswersTheRowsItTook(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	name := fresh("jobs")
+	must(db.Exec(ctx, "create collection "+name+" (n int, run_at timestamp @sorted, owner text, attempts int)")).of(t)
+	jobs := db.From(name)
+	for n := 1; n <= 3; n++ {
+		must(jobs.Insert(ctx, fenecdb.D("n", n, "run_at", n, "attempts", 0))).of(t)
+	}
+	claim := func(owner string, limit int) fenecdb.Result {
+		return must(jobs.WhereCond(fenecdb.Raw("run_at <= now()")).Order("run_at", "asc").Limit(limit).Update(ctx,
+			fenecdb.D("owner", owner, "run_at", fenecdb.Expr("now() + ?", 60000), "attempts", fenecdb.Inc(1)),
+			fenecdb.Returning("id", "n", "attempts"))).of(t)
+	}
+	r := claim("w1", 2)
+	if r.Affected != 2 || len(r.Rows) != 2 || r.Rows[0]["n"] != 1.0 || r.Rows[1]["n"] != 2.0 || r.Rows[0]["attempts"] != 1.0 || r.Seq == 0 {
+		t.Fatalf("the first claim: %+v", r)
+	}
+	if r := claim("w2", 2); len(r.Rows) != 1 || r.Rows[0]["n"] != 3.0 {
+		t.Fatalf("the second claim: %+v", r)
+	}
+	if r := claim("w3", 2); r.Rows == nil || len(r.Rows) != 0 || r.Affected != 0 {
+		t.Fatalf("a claim of an empty queue: %+v", r)
+	}
+	_, err := jobs.Where("n", "=", 1).Where("owner", "=", "w2").Delete(ctx, fenecdb.Require(1))
+	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet {
+		t.Fatalf("an ack by another owner: %+v", e)
+	}
+	popped := must(jobs.Order("n", "desc").Limit(1).Delete(ctx, fenecdb.Returning("*"))).of(t)
+	if len(popped.Rows) != 1 || popped.Rows[0]["owner"] != "w2" {
+		t.Fatalf("a pop: %+v", popped)
+	}
+	if r := must(db.Exec(ctx, "set "+name+" {owner: null} where n = 1 returning n")).of(t); len(r.Rows) != 1 || r.Affected != 1 {
+		t.Fatalf("Exec of a write with returning: %+v", r)
+	}
+}
+
 func TestAnIdempotencyKeyIsReplayed(t *testing.T) {
 	ctx := context.Background()
 	db := root()

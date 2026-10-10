@@ -81,7 +81,7 @@
 
 use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, RsaKey};
 use fenec_core::prelude::*;
-use fenec_core::query::{eval, truthy, CmpOp, EvalCtx, RowAccess};
+use fenec_core::query::{eval, truthy, CmpOp, EvalCtx, Pick, RowAccess};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1134,6 +1134,23 @@ impl Scope {
             .ok_or_else(|| self.refused(collection, verb))
     }
 
+    /// A write's filter, with the read rules' ANDed in when it answers its
+    /// rows (`returning`): what a write hands back is a read, as
+    /// PostgreSQL's `RETURNING` is held to the `SELECT` policies. `writable`
+    /// asked that a read rule exists; an update rule wider than the read
+    /// one would otherwise answer rows the token cannot `get`.
+    fn returning(
+        &self,
+        collection: &str,
+        pick: &Option<Box<Pick>>,
+        f: Option<Expr>,
+    ) -> Option<Expr> {
+        match pick.as_ref().filter(|p| p.returning.is_some()) {
+            Some(_) => and(f, self.filter(collection, READ).flatten()),
+            None => f,
+        }
+    }
+
     /// The statement as this token may run it, or why it may not.
     pub fn rewrite(&self, stmt: Statement) -> Result<Statement> {
         Ok(match stmt {
@@ -1191,35 +1208,41 @@ impl Scope {
                     require,
                 }
             }
-            // `require` counts the rows the token's filter let it write.
+            // `require` counts the rows the token's filter let it write, and
+            // `order` and `limit` pick among those alone: a worker's token
+            // claims only the jobs its rules let it update.
             Statement::Update {
                 collection,
                 set,
                 mut filter,
                 require,
+                pick,
             } => {
                 let f = self.writable(&collection, UPDATE)?;
                 self.inner(&mut filter)?;
                 let filter = self.reaping(&collection, filter)?;
                 Statement::Update {
+                    filter: self.returning(&collection, &pick, and(filter, f)),
                     collection,
                     set,
-                    filter: and(filter, f),
                     require,
+                    pick,
                 }
             }
             Statement::Delete {
                 collection,
                 mut filter,
                 require,
+                pick,
             } => {
                 let f = self.writable(&collection, DELETE)?;
                 self.inner(&mut filter)?;
                 let filter = self.reaping(&collection, filter)?;
                 Statement::Delete {
+                    filter: self.returning(&collection, &pick, and(filter, f)),
                     collection,
-                    filter: and(filter, f),
                     require,
+                    pick,
                 }
             }
             Statement::ListCollections => Statement::ListCollections,

@@ -46,6 +46,7 @@ explain get &lt;name&gt; ...                         -- the path the query took
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
 set &lt;name&gt; { field: value, path: value } [where &lt;expr&gt;]  -- a value may read the row: {n: n + 1}
 del &lt;name&gt; [where &lt;expr&gt;]
+&lt;set | del ...&gt; [order &lt;field&gt; [desc], ...] [limit N] [returning * | a, b]   -- the page a get answers, written and answered
 &lt;put | insert | set | del ...&gt; require N    -- refused, and its batch put back, unless it wrote N rows
 get &lt;name&gt; ... require N [lookup ...]       -- refused, and its batch put back, unless it answered N rows
 
@@ -66,6 +67,11 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     <code>set hits {n: n + 1} where key = "ip1"</code> is an increment, made
     under the write lock — see <a href="#writes">Writes that read the
     row</a>.</li>
+  <li><b>A <code>set</code> or a <code>del</code> can pick its rows and answer
+    them.</b> <code>order</code> and <code>limit</code> write the page a
+    <code>get</code> with them would answer, and <code>returning</code> hands
+    it back: a job queue's claim in one statement — see
+    <a href="#pick">Writes that pick their rows</a>.</li>
   <li><b><code>require N</code> makes a count a condition.</b> A write that
     does not write exactly <code>N</code> rows, or a <code>get</code> that
     does not answer exactly <code>N</code>, is refused, and the batch it is
@@ -105,6 +111,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL</td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>greatest</code> <code>least</code> <code>now</code> <code>expired</code> (<a href="#reaper">rows past their <code>@ttl</code></a>) <code>timestamp</code> <code>bucket(at, 15m)</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, <code>case when … then … else … end</code>, plus plugins — see <a href="#functions">Functions over a row</a></td></tr>
 <tr><td><b>Ordering</b></td><td><code>order year desc, title asc</code> — a tie on the first key is decided by the second; <code>id</code> can be ordered too; <code>order name collate und</code> puts text in Unicode's order for every language and <code>collate tr</code> in Turkish order, and a field declared <code>name text collate und</code> is in it wherever it compares — see <a href="#collation">Collation</a></td></tr>
+<tr><td><b>Picking</b></td><td><code>set … order run_at limit 10 returning *</code> writes the rows a <code>get</code> with the clauses answers and hands them back, as written; <code>del … returning</code> as they were — see <a href="#pick">Writes that pick their rows</a></td></tr>
 <tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
 <tr><td><b>Highlights</b></td><td><code>highlight(body)</code> and <code>snippet(body, 20)</code> in the select list mark the words a <code>match</code> found, as UTF-16 offsets or between tags you pass — see <a href="#highlights">Highlights and snippets</a></td></tr>
 <tr><td><b>Facets</b></td><td><code>facet brand, color top 10</code> counts each value over every row the query matches, beside the page — see <a href="#facets">Facets</a></td></tr>
@@ -1000,6 +1007,12 @@ allowed set of a filtered <code>near</code>.</p>
 </table>
 </div>
 
+<p>A comparison with <code>now()</code> — <code>run_at &lt;= now()</code>,
+<code>at &gt;= now() - 3600000</code> — is a range of the index as one with a
+literal is: the time is worked out once, before the query is planned, and
+is the statement's one time. Left a call, a queue's claim walked past its
+ready jobs into the leased and delayed ones after them, testing each.</p>
+
 <p>The planner prefers a smaller set when it has one: an equality over a
 <code>@hash</code> field, or a narrow range on another <code>@sorted</code>
 field, names fewer rows than the walk would pass, so those are sorted instead.
@@ -1888,6 +1901,54 @@ insert orders {ref: $4, sku: $1, paid: $2 - $5}
     retry what the first try did.</li>
   <li><b>Under the write lock</b>, every line sees the ones before it: two
     shoppers taking the last one cannot both pass the stock line.</li>
+</ul>
+
+<h2 id="pick">Writes that pick their rows</h2>
+
+<p><code>order</code> and <code>limit</code> after a <code>set</code> or a
+<code>del</code> pick the rows it writes: the page a <code>get</code> with
+the same <code>where</code>, <code>order</code> and <code>limit</code> would
+answer, found and written under the one writer's lock.
+<code>returning</code> answers them rather than their count — a
+<code>set</code>'s rows as it wrote them, a <code>del</code>'s as they were,
+in the order they were picked. A job queue's claim is one statement:</p>
+
+<pre data-lang="fenecql">create collection jobs (payload json, run_at timestamp @sorted, owner text, attempts int)
+put jobs [{payload: {"to": "ada"}, run_at: now(), attempts: 0}, {payload: {"to": "bo"}, run_at: now(), attempts: 0}]
+set jobs {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 10 returning *
+del jobs where id = 1 and owner = "w1" require 1
+del jobs where run_at &lt;= now() order run_at limit 10 returning id, payload.to
+</pre>
+
+<ul>
+  <li><b>The page is a <code>get</code>'s.</b> <code>order</code> over an
+    <code>@sorted</code> field walks its index and stops at the page;
+    <code>limit</code> without <code>order</code> takes the first matches by
+    <code>id</code>; <code>order</code> without <code>limit</code> writes
+    every match, in that order. <code>offset</code> is a read's
+    alone.</li>
+  <li><b>Two writers never pick the same row.</b> The rows are found and
+    written under the write lock, where PostgreSQL's <code>UPDATE … WHERE id
+    IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING *</code> locks rows and
+    skips those another holds. A client that reads the page and then writes
+    it loses the race whenever another read the same page.</li>
+  <li><b><code>returning *</code></b> answers the id and every field, as
+    <code>select *</code> does; a list answers those named, paths among
+    them. Over HTTP the answer is the rows, as a <code>get</code>'s.</li>
+  <li><b><code>require N</code></b> counts the rows answered: <code>limit 1
+    require 1</code> is one row or a refusal.</li>
+  <li><b>A scoped token</b> picks among the rows its rules let it update or
+    delete, and what it answers is held to its read rules as well; every
+    row it writes is held to them after the write, its fields to an
+    <code>update(…)</code> grant's.</li>
+  <li><b>A sync replica refuses one</b> on a synced collection: it would
+    pick and answer the replica's rows, and the server, sent the text, its
+    own.</li>
+  <li><b>Every builder</b> writes it: <code>order</code> and
+    <code>limit</code> before an <code>update</code> or a
+    <code>delete</code>, and <code>{ returning: true }</code> — or the
+    fields — as its option. See <a href="/docs/queues">Job queues</a> for
+    the whole queue: ack, extend, backoff, dead letters, priorities.</li>
 </ul>
 
 <h2>Time</h2>

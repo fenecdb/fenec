@@ -991,14 +991,25 @@ class _Builder:
         return f"put {self.collection} {many}{absent}{required}", bind.params
 
     def to_update(
-        self, patch: Mapping, *, all: bool = False, require: int | None = None
+        self,
+        patch: Mapping,
+        *,
+        all: bool = False,
+        require: int | None = None,
+        returning: Any = None,
     ) -> tuple[str, list]:
-        """The `set` of the rows the filter names, not sent."""
+        """The `set` of the rows the filter names, not sent. `order` and
+        `limit` before it pick the rows it writes -- the page a `get` with
+        them answers -- and `returning=True`, or a list of fields, answers
+        them as written: a job queue's claim,
+        `q.where(raw("run_at <= now()")).order("run_at").limit(10)
+        .update({...}, returning=True)`."""
         self._assert_plain("update")
         bind = _Binder()
         body = _render_doc(patch, bind, "update")
         where = self._require_filter("update", all, bind)
-        return f"set {self.collection} {body}{where}{_require_clause(require)}", bind.params
+        tail = f"{self._pick(returning)}{_require_clause(require)}"
+        return f"set {self.collection} {body}{where}{tail}", bind.params
 
     def to_upsert(
         self,
@@ -1024,19 +1035,25 @@ class _Builder:
         many = body if len(items) == 1 else f"[{body}]"
         return f"put {self.collection} {many} if absent else set {patched}{required}", bind.params
 
-    def to_delete(self, *, all: bool = False, require: int | None = None) -> tuple[str, list]:
-        """The `del` of the rows the filter names, not sent."""
+    def to_delete(
+        self, *, all: bool = False, require: int | None = None, returning: Any = None
+    ) -> tuple[str, list]:
+        """The `del` of the rows the filter names, not sent; `order`,
+        `limit` and `returning` as `to_update`'s, the rows answered as they
+        were: a pop."""
         self._assert_plain("delete")
         bind = _Binder()
         where = self._require_filter("delete", all, bind)
-        return f"del {self.collection}{where}{_require_clause(require)}", bind.params
+        tail = f"{self._pick(returning)}{_require_clause(require)}"
+        return f"del {self.collection}{where}{tail}", bind.params
 
-    # `near`, `order`, `limit` mean something only to a read; dropped from a
-    # write, `.limit(1).delete()` would delete every row.
+    # `near`, `offset`, `select` mean something only to a read; dropped from
+    # a write, `.offset(1).delete()` would delete from the first row. `order`
+    # and `limit` pick the rows an update or a delete writes.
     def _assert_plain(self, verb: str) -> None:
         if self._s["require"]:
             raise _err(f"{verb} takes require as its option: {verb}(..., {{ require: n }})")
-        extra = self._extra_clause()
+        extra = self._extra_clause(verb in ("update", "delete"))
         if extra:
             raise _err(f"{verb} cannot be used with `{extra}`")
         if self._s["lookups"]:
@@ -1046,26 +1063,35 @@ class _Builder:
         if verb in ("insert", "upsert") and self._s["cond"]:
             raise _err(f"{verb} cannot be used with `where`")
 
-    def _extra_clause(self) -> str | None:
+    def _extra_clause(self, picks: bool = False) -> str | None:
         s = self._s
         return (
             "near" if s["near"]
             else "match" if s["match"]
             else "rerank" if s["rerank"]
-            else "order" if s["order"]
-            else "limit" if s["limit"] is not None
+            else "order" if s["order"] and not picks
+            else "limit" if s["limit"] is not None and not picks
             else "offset" if s["offset"]
             else "select" if s["project"]
             else None
         )  # fmt: skip
 
+    # An update's or a delete's ` order ... limit n returning ...`.
+    def _pick(self, returning: Any) -> str:
+        sql = ""
+        for i, k in enumerate(self._s["order"]):
+            sql += f"{' order ' if i == 0 else ', '}{_sort_key(k)}"
+        if self._s["limit"] is not None:
+            sql += f" limit {self._s['limit']}"
+        return sql + _returning_clause(returning)
+
     # An update or delete of every row is too easy to do by accident and
-    # cannot be undone: it has to be asked for.
+    # cannot be undone: it has to be asked for. A `limit` bounds it.
     def _require_filter(self, verb: str, everything: bool, bind: _Binder) -> str:
         where = self._where(bind)
         if where:
             return f" where {where}"
-        if everything is True:
+        if everything is True or self._s["limit"] is not None:
             return ""
         raise _err(
             f"an unfiltered {verb} covers the whole collection; if you mean it, "
@@ -1138,6 +1164,29 @@ def _affected(answer: Any) -> int:
     return answer.get("affected", 0) if isinstance(answer, dict) else 0
 
 
+def _written(answer: Any, returning: Any) -> Any:
+    """A write's answer: its count, or with `returning` its rows."""
+    if returning is None or returning is False:
+        return _affected(answer)
+    return _rows(answer)
+
+
+def _returning_clause(returning: Any) -> str:
+    """` returning ...` for a write's `returning`: `True` or `["*"]` every
+    field, or the fields named, each a field or a path."""
+    if returning is None or returning is False:
+        return ""
+    if returning is True:
+        return " returning *"
+    if isinstance(returning, str) or not isinstance(returning, (list, tuple)) or not returning:
+        raise _err("returning names the fields it answers, or * for every one")
+    if "*" in returning:
+        if len(returning) > 1:
+            raise _err("returning * answers every field: it takes no other")
+        return " returning *"
+    return " returning " + ", ".join(_path(f) for f in returning)
+
+
 def _count(answer: Any) -> int:
     rows = _rows(answer)
     return rows[0].get("count", 0) if rows and isinstance(rows[0], dict) else 0
@@ -1200,15 +1249,28 @@ class Query(_Builder):
             return 0
         return _affected(self._client().query(*self.to_upsert(docs, patch, require=require)))
 
-    def update(self, patch: Mapping, *, all: bool = False, require: int | None = None) -> int:
-        """`set` over the rows the filter names: how many it changed. With
-        no filter it is refused unless `all=True`."""
-        return _affected(self._client().query(*self.to_update(patch, all=all, require=require)))
+    def update(
+        self,
+        patch: Mapping,
+        *,
+        all: bool = False,
+        require: int | None = None,
+        returning: Any = None,
+    ) -> Any:
+        """`set` over the rows the filter names: how many it changed, or
+        with `returning` the rows as written. With no filter it is refused
+        unless `all=True` or a `limit` bounds it."""
+        text = self.to_update(patch, all=all, require=require, returning=returning)
+        return _written(self._client().query(*text), returning)
 
-    def delete(self, *, all: bool = False, require: int | None = None) -> int:
-        """`del` of the rows the filter names: how many it deleted. With no
-        filter it is refused unless `all=True`."""
-        return _affected(self._client().query(*self.to_delete(all=all, require=require)))
+    def delete(
+        self, *, all: bool = False, require: int | None = None, returning: Any = None
+    ) -> Any:
+        """`del` of the rows the filter names: how many it deleted, or with
+        `returning` the rows as they were. With no filter it is refused
+        unless `all=True` or a `limit` bounds it."""
+        text = self.to_delete(all=all, require=require, returning=returning)
+        return _written(self._client().query(*text), returning)
 
 
 class AsyncQuery(_Builder):
@@ -1254,11 +1316,22 @@ class AsyncQuery(_Builder):
             return 0
         return _affected(await self._client().query(*self.to_upsert(docs, patch, require=require)))
 
-    async def update(self, patch: Mapping, *, all: bool = False, require: int | None = None) -> int:
-        return _affected(await self._client().query(*self.to_update(patch, all=all, require=require)))
+    async def update(
+        self,
+        patch: Mapping,
+        *,
+        all: bool = False,
+        require: int | None = None,
+        returning: Any = None,
+    ) -> Any:
+        text = self.to_update(patch, all=all, require=require, returning=returning)
+        return _written(await self._client().query(*text), returning)
 
-    async def delete(self, *, all: bool = False, require: int | None = None) -> int:
-        return _affected(await self._client().query(*self.to_delete(all=all, require=require)))
+    async def delete(
+        self, *, all: bool = False, require: int | None = None, returning: Any = None
+    ) -> Any:
+        text = self.to_delete(all=all, require=require, returning=returning)
+        return _written(await self._client().query(*text), returning)
 
 
 # ` require n` for a write's `require=n`: the rows it must write, a whole

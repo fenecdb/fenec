@@ -31,6 +31,8 @@
 //! set    <name> { k: v, ... } [where <expr>] -- v may read the row: {n: n + 1, at: now()}
 //! <expr> + - * / <expr>                  -- numbers, or a timestamp and milliseconds
 //! del    <name> [where <expr>]
+//! set | del ... [order <field> [desc], ...] [limit N] [returning * | a, b]
+//!                                        -- the rows a get would page to, answered as written
 //! collections | describe <name> | compact [<name>]
 //! ```
 
@@ -1395,16 +1397,13 @@ impl Parser {
         let collection = self.ident()?;
         self.eat_kw("set");
         let set = self.object()?;
-        let filter = if self.eat_kw("where") {
-            Some(self.expr()?)
-        } else {
-            None
-        };
+        let (filter, require, pick) = self.write_clauses()?;
         Ok(Statement::Update {
             collection,
             set,
             filter,
-            require: self.require()?,
+            require,
+            pick,
         })
     }
 
@@ -1412,16 +1411,49 @@ impl Parser {
         self.next(); // del / delete
         self.eat_kw("from");
         let collection = self.ident()?;
-        let filter = if self.eat_kw("where") {
-            Some(self.expr()?)
-        } else {
-            None
-        };
+        let (filter, require, pick) = self.write_clauses()?;
         Ok(Statement::Delete {
             collection,
             filter,
-            require: self.require()?,
+            require,
+            pick,
         })
+    }
+
+    /// The clauses of a `set` after its object and of a `del` after its
+    /// collection, in any order as a `get`'s are: `where`, `require`, and
+    /// the `order`, `limit` and `returning` that make it pick its rows and
+    /// answer them -- a job queue's claim,
+    /// `set jobs {owner: $1, run_at: now() + 30000} where run_at <= now()
+    /// order run_at limit 10 returning *`.
+    #[allow(clippy::type_complexity)]
+    fn write_clauses(&mut self) -> Result<(Option<Expr>, Option<u64>, Option<Box<Pick>>)> {
+        let (mut filter, mut require, mut pick) = (None, None, Pick::default());
+        loop {
+            if self.eat_kw("where") {
+                filter = Some(self.expr()?);
+                continue;
+            }
+            if self.eat_kw("order") {
+                self.order_list(&mut pick.order)?;
+                continue;
+            }
+            if self.eat_kw("limit") {
+                pick.limit = Some(self.int()?.max(0) as usize);
+                continue;
+            }
+            if self.eat_kw("returning") {
+                pick.returning = Some(self.projection_list()?);
+                continue;
+            }
+            if self.peek_kw("require") {
+                require = self.require()?;
+                continue;
+            }
+            break;
+        }
+        let picks = pick.picks() || pick.returning.is_some();
+        Ok((filter, require, picks.then(|| Box::new(pick))))
     }
 
     // -------------------------------------------------------- expression grammar

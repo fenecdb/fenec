@@ -88,6 +88,9 @@ fn require_parses_after_each_write_and_nowhere_else() {
         "put a {n: 1} require 1",
         "insert a [{n: 1}, {n: 2}] require 2",
         "insert a {n: 1} if absent require 1",
+        // A write's clauses come in any order, as a `get`'s do.
+        "del a require 1 where id = 2",
+        "set a {n: 1} require 1 where id = 1 order id limit 1",
     ] {
         let s = parse(sql);
         let require = match &s {
@@ -106,7 +109,7 @@ fn require_parses_after_each_write_and_nowhere_else() {
         "set a {n: 1} require",
         "set a {n: 1} require -1",
         "set a {n: 1} require $1",
-        "del a require 1 where id = 2",
+        "del a require 1 require",
         "get a require",
         "get a require $1",
         "get a count require 1",
