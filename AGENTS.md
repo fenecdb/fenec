@@ -215,7 +215,10 @@ MB of rows of a text and an int were 930 000 of them, the write lock held
 16 to 17.5 ms), `Database::hand_over` has the sink
 write what is pending (`Sink::written_through`) and each store point the
 documents it holds at their places in the file and let its segments go
-(`Store::hand_over`): 820 MB after that load. Where each record went is
+(`Store::hand_over`): 820 MB after that load. One due while a durability
+fsyncs the file is put off to the first write landing after it, up to
+twice the bounds (`Sink::syncing`): it writes into the file, and waited
+out the fsync with the write lock held (below). Where each record went is
 noted as it lands (`handover::Landed`: a data record's body, each of a
 block record's), so nothing of the file is read, and a store takes its runs
 in only when they account for every frame its segments hold, in order --
@@ -397,7 +400,13 @@ never retried -- the kernel may already have dropped the pages -- and
 had not yet sent. That fsync runs *outside* the exclusive lock: under it a
 write only calls `Database::flush`, which hands back a `Durability` to run once
 the lock is released, and `FileSink` writes the bytes there as well (a `write`
-under the lock waited out concurrent fsyncs on macOS). A durability whose bytes
+under the lock waited out concurrent fsyncs on macOS). The writes the lock
+still makes -- the 1 MB buffer's once it is full, a handover's -- take the
+sink's disk, which a durability holds through its fsync, so both are put
+off while one does (`Sink::syncing`, a `try_lock`): the buffer up to
+`WRITE_HELD` (8 MB), a handover to twice its bounds. A ledger's transfer
+landing a handover waited out the syncer's `F_FULLFSYNC` of a quarter
+second's writes, 52 ms, every request behind it. A durability whose bytes
 an earlier fsync already covered runs none, which is the group commit: 268 ->
 1 156 durable writes/s over eight clients. A failed one is reported back with
 `Database::fail` so the engine stops taking writes. The syncer of `--sync

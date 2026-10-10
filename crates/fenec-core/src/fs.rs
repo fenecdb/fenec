@@ -15,6 +15,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// document; that was the dominant cost during bulk loading.
 const WRITE_BUF: usize = 1 << 20;
 
+/// What the buffer holds at most while a durability fsyncs the file: past
+/// [`WRITE_BUF`] an append writes it unless the disk is busy, and past this
+/// whether or not. A 60 ms fsync of a ledger's writes left 0.5 MB.
+const WRITE_HELD: usize = 8 << 20;
+
 /// Appends collect in memory and reach the file only in `sync`, in the
 /// durability `flush` hands out, or when they outgrow `WRITE_BUF`.
 ///
@@ -418,13 +423,26 @@ impl Sink for FileSink {
         if bytes.len() >= WRITE_BUF {
             return lock(&self.disk).write_through(&self.pending, bytes);
         }
-        let full = {
+        let held = {
             let mut pending = lock(&self.pending);
             pending.extend_from_slice(bytes);
-            pending.len() >= WRITE_BUF
+            pending.len()
         };
-        if full {
-            lock(&self.disk).write_pending(&self.pending)?;
+        if held >= WRITE_BUF {
+            // Not while a durability fsyncs the file, whose writes wait for
+            // it: this runs under the database's lock, and every request
+            // would wait out the fsync too. The first append past the
+            // buffer once it is done writes them, or the next durability;
+            // past `WRITE_HELD` they wait it out here.
+            let disk = match self.disk.try_lock() {
+                Ok(disk) => Some(disk),
+                Err(std::sync::TryLockError::WouldBlock) if held < WRITE_HELD => None,
+                Err(std::sync::TryLockError::WouldBlock) => Some(lock(&self.disk)),
+                Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            };
+            if let Some(mut disk) = disk {
+                disk.write_pending(&self.pending)?;
+            }
         }
         Ok(())
     }
@@ -528,6 +546,17 @@ impl Sink for FileSink {
         let m = Arc::new(Mapping::with_room(&disk.file, len)?);
         self.mapping = Some(m.clone());
         Ok(Some(m))
+    }
+
+    /// The disk is held by whoever writes or fsyncs the file, and nothing
+    /// but a durability takes it without the database's lock: held, one is
+    /// under way.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn syncing(&self) -> bool {
+        matches!(
+            self.disk.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 
     /// Pushes the whole file to disk, the bytes an earlier process wrote
@@ -1136,6 +1165,63 @@ mod tests {
 
         sink.append(&big).unwrap();
         assert_eq!(len(&path), on_disk.len() + big.len());
+
+        drop(sink);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// An append past the buffer does not wait for a durability that holds
+    /// the disk -- it runs under the database's lock, and the fsync would
+    /// hold every request -- but keeps the bytes until it is done, up to
+    /// `WRITE_HELD`, past which it waits; the bytes reach the file in the
+    /// order they came. The disk is held here as an fsync holds it, and let
+    /// go once the buffer is past `WRITE_HELD`, an event, not a time.
+    #[test]
+    fn an_append_past_the_buffer_does_not_wait_out_an_fsync() {
+        let dir = std::env::temp_dir().join(format!("fenecdb-fs-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("busy.fenec");
+        let _ = std::fs::remove_file(&path);
+        let (mut sink, _) = FileSink::open(&path).unwrap();
+        let len = |p: &Path| std::fs::metadata(p).unwrap().len() as usize;
+        let start = len(&path);
+        assert!(!sink.syncing());
+
+        let (disk, pending) = (Arc::clone(&sink.disk), Arc::clone(&sink.pending));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let guard = lock(&disk);
+            held_tx.send(()).unwrap();
+            while lock(&pending).len() < WRITE_HELD {
+                std::thread::yield_now();
+            }
+            drop(guard);
+        });
+        held_rx.recv().unwrap();
+        assert!(sink.syncing());
+        let chunk = vec![1u8; WRITE_BUF / 4];
+        let mut sent = Vec::new();
+        for i in 0..8 {
+            let chunk: Vec<u8> = chunk.iter().map(|b| b + i).collect();
+            sink.append(&chunk).unwrap();
+            sent.extend_from_slice(&chunk);
+        }
+        // Twice the buffer, and nothing written while the disk is held.
+        assert_eq!(len(&path), start);
+        while sent.len() < WRITE_HELD {
+            sink.append(&chunk).unwrap();
+            sent.extend_from_slice(&chunk);
+        }
+        // Past `WRITE_HELD` the append waited for the disk and wrote.
+        holder.join().unwrap();
+        assert_eq!(len(&path), start + sent.len());
+        assert!(!sink.syncing());
+        sink.append(b"tail").unwrap();
+        sink.sync().unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(&on_disk[start..start + sent.len()], &sent[..]);
+        assert!(on_disk.ends_with(b"tail"));
 
         drop(sink);
         let _ = std::fs::remove_file(&path);

@@ -986,6 +986,13 @@ pub trait Sink: Send {
     fn written_through(&mut self) -> Result<Option<crate::store::Base>> {
         Ok(None)
     }
+    /// Whether a durability is fsyncing the file this moment, so that a
+    /// write into it would wait for the disk: what a handover, which is
+    /// free to come a little later, is put off for ([`Database::hand_over`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn syncing(&self) -> bool {
+        false
+    }
     /// Appends a block that spilled as it lands ([`Database::spill`]):
     /// `record` is its land, naming the spills the file holds already, and
     /// `spilled` their bodies, for a sink that passes writes on -- a
