@@ -7,11 +7,15 @@ on:
     branches: [main]
     paths:
       - 'site/**'
+      # The playground is fenec studio's files, served from the site.
+      - 'studio/**'
       - 'web/fenec.js'
       - 'web/builder.js'
       - 'web/http.js'
+      - 'web/client.js'
       - 'wrangler.jsonc'
       - 'crates/fenec-wasm/**'
+      - 'crates/fenec-abi/**'
       - 'crates/fenec-core/**'
       - 'crates/fenec-ql/**'
       - '.github/workflows/site.yml'

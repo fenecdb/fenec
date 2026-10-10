@@ -344,3 +344,30 @@ test('the first load is under 120 KB gzipped', () => {
   const total = files.reduce((sum, f) => sum + gzipSync(readFileSync(f), { level: 9 }).length, 0);
   assert.ok(total < 120_000, `${total} bytes gzipped`);
 });
+
+// fenec-server's page never reaches the database in the page: the
+// modules its first load names, and every module they import statically,
+// hold no local transport, no worker and no module glue -- those load only
+// where a page asks for them (the site's playground, `data-mode="local"`).
+test('the server\'s first load holds nothing of the database in the page', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const where = (f) => (['client.js', 'builder.js', 'http.js', 'fenec.js'].includes(f) ? join(here, '..', '..', 'web', f) : join(here, '..', f));
+  const page = readFileSync(join(here, '..', 'index.html'), 'utf8');
+  const seen = new Set();
+  const walk = (f) => {
+    if (seen.has(f)) return;
+    seen.add(f);
+    const src = readFileSync(where(f), 'utf8');
+    // Static imports alone: `import(...)` is a view fetched when it opens.
+    for (const [, dep] of src.matchAll(/^(?:import|export)\s[^;]*?from\s+'\.\/([\w-]+\.js)'/gm)) walk(dep);
+  };
+  for (const [, f] of page.matchAll(/(?:src|href)="([\w-]+\.js)"/g)) walk(f);
+  for (const local of ['local.js', 'engine.js', 'worker.js', 'fenec.js', 'playground.js', 'playground-data.js']) {
+    assert.ok(!seen.has(local), `${local} is on fenec-server's first load`);
+  }
+  assert.ok(seen.has('app.js') && seen.has('connect.js') && seen.has('client.js'), [...seen].join(', '));
+  assert.ok(!page.includes('local.css'), 'the playground\'s stylesheet is on fenec-server\'s first load');
+  // Nor is the local transport embedded in the server: its files are the site's.
+  const embedded = readFileSync(join(here, '..', '..', 'crates', 'fenec-http', 'src', 'studio.rs'), 'utf8');
+  for (const local of ['local.js', 'local.css', 'engine.js', 'worker.js']) assert.ok(!embedded.includes(`"studio/${local}"`), local);
+});

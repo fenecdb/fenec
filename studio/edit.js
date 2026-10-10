@@ -174,10 +174,10 @@ function placeholder(kind, f) {
   );
 }
 
-/** The keys, written out. */
-export function help() {
+/** The keys, written out; `admin` whether the admin view is there to open. */
+export function help(admin = true) {
   const keys = [
-    ['1 to 5', 'Rows, query, schema, live, admin'],
+    admin ? ['1 to 5', 'Rows, query, schema, live, admin'] : ['1 to 4', 'Rows, query, schema, live'],
     ['/', 'Filter with a where clause'],
     ['Alt+1, Alt+2', 'Collections, the view'],
     ['Ctrl+Enter, ⌘Enter', 'Run the query (in the editor)'],

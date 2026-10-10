@@ -38,6 +38,9 @@ class Page(html.parser.HTMLParser):
             # whose absence the build itself would have shown.
             if k == "href" and tag == "a" and v is not None:
                 self.hrefs.append((v, self.getpos()[0]))
+            # A frame is a page the reader sees: the playground's studio.
+            if k == "src" and tag == "iframe" and v is not None:
+                self.hrefs.append((v, self.getpos()[0]))
 
 
 def resolve(dist, page, href):

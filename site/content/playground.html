@@ -1,53 +1,54 @@
 <!--
 title: Playground — fenecdb
-description: Run FenecQL against a real fenecdb instance in your own browser. Nothing is uploaded; the database lives in this tab and disappears when you close it.
+description: fenec studio over a fenecdb database in your own browser tab: browse, filter and edit rows, run FenecQL and see its plan, watch rows change. Nothing is uploaded; the database lives in this tab.
 -->
 
-{{scarp}}
+<section class="pg" aria-labelledby="pg-title">
+  <div class="pg-head">
+    <h1 class="pg-title" id="pg-title">Playground</h1>
+    <p class="pg-say">fenec studio on a database in this tab. Nothing you
+      type leaves your browser.</p>
+    <a class="pg-docs" href="docs/studio.html">The studio on your server</a>
+  </div>
+  <div class="pg-window">
+    <iframe class="pg-frame" src="studio/" title="fenec studio, over a database in this tab"></iframe>
+  </div>
+</section>
 
-<section class="band pg-band">
-  <div class="band-in">
-    <h1 class="pg-title">Playground</h1>
-    <p class="lede">A real fenecdb instance, running in this tab. The engine is
-      the same WebAssembly module the rest of the site uses (240 KB
-      gzipped), on a worker
-      thread. Nothing is uploaded and nothing is stored — close the tab and the
-      database is gone.</p>
-
-    <div class="pg" id="pg" data-state="booting">
-      <aside class="pg-side">
-        <div class="pg-block">
-          <p class="pg-h">Schema<span class="pg-dot" aria-hidden="true"></span></p>
-          <div class="pg-schema" id="pg-schema"><p class="pg-muted">booting…</p></div>
-        </div>
-        <div class="pg-block">
-          <p class="pg-h">Try one</p>
-          <ul class="pg-egs" id="pg-egs"></ul>
-        </div>
-      </aside>
-
-      <div class="pg-main">
-        <div class="pg-editor">
-          <div class="hl"><pre class="hl-mirror" aria-hidden="true" data-bare></pre><textarea
-                    id="pg-sql" spellcheck="false" aria-label="FenecQL"
-                    rows="7">get notes select body, topic, year
-  where year >= 2023 and topic = "vectors"
-  limit 10</textarea></div>
-          <div class="pg-bar">
-            <button class="btn btn-fill pg-run" id="pg-run" type="button" disabled>Run</button>
-            <span class="pg-hint">⌘↵ / Ctrl↵</span>
-            <span class="pg-status" id="pg-status">starting the engine…</span>
-          </div>
-        </div>
-        <div class="pg-out" id="pg-out"><p class="pg-muted">Results appear here.</p></div>
-      </div>
+<section class="pg-more" aria-label="About the playground">
+  <div class="pg-more-in">
+    <div>
+      <h2>What runs here</h2>
+      <p>fenecdb itself, compiled to WebAssembly (241 KB gzipped) and run
+        on a worker of this tab: the engine <code>fenec-server</code> runs,
+        answering the studio as a server would. It holds three collections,
+        made as the page opens:</p>
+      <ul class="pg-list">
+        <li><code>products</code>, searched by the words of their
+          description (<code>@text</code>) and by meaning, with a vector of
+          eight (<code>@hnsw</code>);</li>
+        <li><code>orders</code>, which name a product and come back beside
+          it with <code>lookup</code>;</li>
+        <li>a week of a shop's <code>events</code>, counted by the hour
+          with <code>bucket</code>, <code>having</code> and
+          <code>approx_count_distinct</code>.</li>
+      </ul>
+      <p>Write whatever you like, <code>create collection</code> and
+        <code>create index</code> too: <b>Reset data</b> puts every
+        collection back. The database lives in this tab's memory and goes
+        with it, unless you keep it in this browser. The language is in
+        <a href="docs/fenecql.html">the FenecQL reference</a>.</p>
     </div>
-
-    <p class="pg-foot">The collection is seeded with 400 short notes across eight
-      topics, each carrying a 64-dimension vector, indexed with
-      <code>@hnsw(cosine)</code>. Write whatever you like — <code>create
-      collection</code>, <code>put</code>, <code>del</code>, <code>compact</code>
-      all work. The full language is in
-      <a href="docs/fenecql.html">the FenecQL reference</a>.</p>
+    <div>
+      <h2>On your server</h2>
+      <p>The same studio, served by the server to its operators, over its
+        own data and with its token:</p>
+<pre data-lang="bash">fenec-server --file data.fenec \
+  --http-token "$TOKEN" --studio
+open http://127.0.0.1:8080/_studio/</pre>
+      <p>There it signs in, holds a scoped token to the rows its policy
+        allows, and adds the server's own numbers.
+        <a href="docs/studio.html">How the studio works</a>.</p>
+    </div>
   </div>
 </section>

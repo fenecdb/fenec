@@ -116,6 +116,7 @@
 .ed-item { all: unset; box-sizing: border-box; display: grid; flex: 1; min-width: 0; padding: 4px 12px; cursor: pointer; border-left: 2px solid transparent; }
 .ed-item:hover { background: var(--surface-3); }
 .ed-item:focus-visible { outline: 2px solid var(--sun-ring); outline-offset: -2px; }
+.ed-item[aria-current] { border-left-color: var(--sun-line); background: var(--sun-wash); }
 .ed-item-name { font-weight: 500; font-size: 12px; }
 .ed-item-text { font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .ed-none { padding: 2px 12px 6px; color: var(--muted); font-size: 12px; }
@@ -218,6 +219,8 @@
   .ed-inputs { grid-template-columns: minmax(0, 1fr); }
   .ed-params { border-left: 0; border-top: 1px solid var(--rule); grid-template-rows: auto auto; }
   .ed-params .hint { display: none; }
+  .ed-text { height: 128px; }
+  .ed-params-text { min-height: 34px; height: 34px; }
   .ed-note { display: none; }
   .ed-meta .ed-fact:nth-child(n + 4) { display: none; }
   .lv-body { grid-template-columns: minmax(0, 1fr); }

@@ -56,10 +56,14 @@ test:
 ##                     engine, and its live queries over a scripted server
 ##   studio/test/statements.test.mjs  fenec studio's statements: every value a
 ##                     parameter, every name one FenecQL writes, its first load
-##                     under 120 KB gzipped
+##                     under 120 KB gzipped and holding nothing of the playground's
+##   studio/test/transport.test.mjs  the studio's two ways to a database answer
+##                     alike: a real fenec-server and the module in the page (the
+##                     playground's), statement for statement; skipped when
+##                     `web/fenec.wasm` or the binary is missing
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test --test-reporter=spec web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js studio/test/statements.test.mjs; \
+		node --test --test-reporter=spec web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -80,10 +84,12 @@ builder-golden:
 ## fenec studio in a headless Chrome (puppeteer-core, studio/'s one dev
 ## dependency) against the debug fenec-server: the server token's browse,
 ## sort, filter, edit, insert and delete, one user's rows alone, and a scroll
-## through 100 000 rows with no long task. Chrome is CHROME_PATH, else the
-## one puppeteer keeps in ~/.cache/puppeteer
-studio-test:
-	$(CARGO) build -p fenec-server
+## through 100 000 rows with no long task; then the site's playground, the
+## studio over a database in the page, from site/dist as this builds it.
+## Chrome is CHROME_PATH, else the one puppeteer keeps in ~/.cache/puppeteer
+studio-test: wasm
+	$(CARGO) build -p fenec-server -p fenec-shard
+	python3 site/build.py
 	cd studio && npm ci --no-audit --no-fund --loglevel=error && npm run e2e
 
 ## studio/highlight.js written again: site/highlight.js with build.py's
