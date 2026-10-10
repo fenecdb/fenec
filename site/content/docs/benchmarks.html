@@ -951,7 +951,25 @@ recon-bench</code>), four runs each in turns: the transfers' longest wait
 went from 187–512 ms, 36 of them past 50 ms in every run, to 5.4–29 ms and
 none in three runs; the fourth met one stall of 385 ms, four transfers past
 50 ms, of the kind both servers met in the round with no reconciliation at
-all (118–162 ms).</p>
+all (118–223 ms). Those had two causes, both gone: in three runs since, the
+transfers' longest wait was 1.9–10.4 ms, none past 50.</p>
+
+<p><b>A write waits for no index's growth and no fsync.</b> A
+<code>@unique</code> index holds a key a row, and its table grew whole: the
+write that found it full moved every key into one twice its size, under the
+write lock. The ledger's journal passing 1.8 million entries held one
+transfer, and every request behind it, 120 to 137 ms in every run; four
+million puts one at a time waited 7, 19, 49, 109 and 235–267 ms at each
+doubling from 229 376 keys (<code>make growth-bench</code>). Past 114 688
+keys the table is now 256 that grow on their own, and the longest put is
+6.2 ms; a lookup in an index that large costs 25 to 50 ns more for it,
+and one under that size nothing. And the two writes still made under the lock —
+the 1 MB buffer's once it is full, and a handover's — waited for the
+disk while the server's periodic fsync held it, 52 ms of macOS's
+<code>F_FULLFSYNC</code>; they are put off until it is done now. The rest
+of those first-round stalls was the bench's own: <code>--warm</code> built
+an index its warm-up had not read just as the round began, and it reads
+that one too now.</p>
 </details>
 
 <h2 id="requests">A request over HTTP</h2>

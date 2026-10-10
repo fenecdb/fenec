@@ -149,14 +149,27 @@ impl Database {
     }
 
     /// [`Self::hand_over`], once what is noted amounts to `handover_at`
-    /// bytes or [`HANDOVER_RUNS`] runs. A failure is the sink's, and the
-    /// database's from then on: the next write, and the durability of the
-    /// ones before, report it.
+    /// bytes or [`HANDOVER_RUNS`] runs -- put off while a durability is
+    /// fsyncing the file ([`Sink::syncing`]), until twice that. A failure
+    /// is the sink's, and the database's from then on: the next write, and
+    /// the durability of the ones before, report it.
+    ///
+    /// The handover writes what is pending into the file, which waits for
+    /// a durability's fsync under way: the sink holds its disk through the
+    /// fsync, and on macOS a write waits for one anyway. Under the write
+    /// lock, a handover that met the syncer's took what the fsync had left,
+    /// every request waiting: macOS's `F_FULLFSYNC` of a quarter second's
+    /// writes takes 10 to 60 ms, and a ledger's transfers met one of 52.
+    /// Put off, it runs at the first write landing after the fsync, a few
+    /// thousand writes later; put off to twice its bounds, as writes under
+    /// `--sync always` would keep it, it waits the fsync out.
     pub(super) fn hand_over_when_due(&mut self) {
-        if self.landed_bytes >= self.handover_at
-            || self.landed.len() >= HANDOVER_RUNS
-            || (self.landed_writes >= HANDOVER_DOCS && self.handover_at != u64::MAX)
-        {
+        let past = |n: u64| {
+            self.landed_bytes >= self.handover_at.saturating_mul(n)
+                || self.landed.len() as u64 >= HANDOVER_RUNS as u64 * n
+                || (self.landed_writes >= HANDOVER_DOCS * n && self.handover_at != u64::MAX)
+        };
+        if past(1) && (past(2) || !self.sink_mut().syncing()) {
             let _ = self.hand_over();
         }
     }

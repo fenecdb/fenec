@@ -11,9 +11,10 @@
 #![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 
 use fenec_core::engine::writes_in;
-use fenec_core::fs::{open_in_memory, open_mapped};
+use fenec_core::fs::{open_in_memory, open_mapped, open_with};
 use fenec_core::prelude::*;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 fn run(db: &mut Database, sql: &str) {
@@ -315,6 +316,93 @@ fn a_handover_waits_for_its_threshold_and_for_the_block() {
     exec(&mut db, "put c {n: 2000, body: $1}", &[body]);
     assert_eq!(db.hand_over().unwrap(), 0);
     assert!(held(&db) > 200_000);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The file's sink, saying a durability is fsyncing it while told to.
+struct Syncing {
+    file: Box<dyn Sink>,
+    busy: Arc<AtomicBool>,
+}
+
+impl Sink for Syncing {
+    fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
+        self.file.append(bytes)
+    }
+    fn rewrite(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
+        self.file.rewrite(bytes)
+    }
+    fn remapped(&mut self) -> Option<fenec_core::store::Base> {
+        self.file.remapped()
+    }
+    fn written_through(&mut self) -> fenec_core::error::Result<Option<fenec_core::store::Base>> {
+        self.file.written_through()
+    }
+    fn syncing(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+    fn sync(&mut self) -> fenec_core::error::Result<()> {
+        self.file.sync()
+    }
+}
+
+/// A handover due while a durability fsyncs the file is put off -- it
+/// writes into the file, which would wait out the fsync with the write lock
+/// held -- until twice its threshold, past which it runs and waits; and as
+/// soon as the fsync is done, at the next write.
+#[test]
+fn a_handover_is_put_off_while_the_file_is_fsynced() {
+    let path = tmp("syncing");
+    let busy = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&busy);
+    let mut db = open_with(
+        &path,
+        true,
+        Box::new(move |file| Ok(Box::new(Syncing { file, busy: flag }) as Box<dyn Sink>)),
+    )
+    .unwrap();
+    run(&mut db, "create collection c (n int, body text)");
+    let body = Value::Text("y".repeat(1000));
+    db.set_handover(64 * 1024);
+    let put = |db: &mut Database, n: i64| {
+        exec(
+            db,
+            "put c {n: $1, body: $2}",
+            &[Value::Int(n), body.clone()],
+        );
+    };
+    busy.store(true, Ordering::SeqCst);
+    let mut most = 0;
+    for n in 0..200 {
+        put(&mut db, n);
+        most = most.max(held(&db));
+        assert!(held(&db) < 128 * 1024 + 1100, "{}", held(&db));
+    }
+    // Held past the threshold, and handed over at twice it.
+    assert!(most > 120 * 1024, "{most}");
+    let mut n = 200;
+    while held(&db) < 80 * 1024 {
+        put(&mut db, n);
+        n += 1;
+    }
+    // The fsync done, the next write hands over what is held.
+    busy.store(false, Ordering::SeqCst);
+    put(&mut db, n);
+    assert_eq!(held(&db), 0);
+    for n in n + 1..400 {
+        put(&mut db, n);
+        assert!(held(&db) < 64 * 1024 + 1100, "{}", held(&db));
+    }
+    assert_eq!(
+        answer(&db, "get c count").rows[0].values[0],
+        Value::Int(400)
+    );
+    drop(db);
+    let db = open_mapped(&path).unwrap();
+    assert_eq!(
+        answer(&db, "get c where n >= 200 count").rows[0].values[0],
+        Value::Int(200)
+    );
     let _ = std::fs::remove_file(&path);
 }
 

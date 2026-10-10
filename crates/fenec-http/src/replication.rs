@@ -529,6 +529,10 @@ impl Sink for Tee {
     fn written_through(&mut self) -> fenec_core::error::Result<Option<fenec_core::store::Base>> {
         self.file.written_through()
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn syncing(&self) -> bool {
+        self.file.syncing()
+    }
     /// Passed on, so a primary's `compact` writes its file beside the
     /// database as a server without replicas does.
     #[cfg(not(target_arch = "wasm32"))]

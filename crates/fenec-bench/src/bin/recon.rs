@@ -221,7 +221,11 @@ fn main() {
     // The indexes a snapshot reads, and the `@unique` one a transfer's
     // entries are asked against, built before anything is timed: the
     // first write over a million entries builds that one under the write
-    // lock, 300 ms.
+    // lock, 300 ms. And the `@hash` on the journal's account, which no
+    // statement here reads but `--warm` builds beside the first ones,
+    // under the read lock: built as the first round began, it held every
+    // transfer and every read behind them 100 to 150 ms. A read of it
+    // waits for the warm thread's build, or builds it.
     let mut h = http::Http::connect(&addr);
     h.post("/batch", "application/x-ndjson", snapshot().as_bytes());
     h.post(
@@ -229,6 +233,7 @@ fn main() {
         "application/x-ndjson",
         transfer(0, 1, 1 << 43).as_bytes(),
     );
+    h.query("get journal where account = $1 count", "\"a0\"");
     println!(
         "{:<52} {:>9} {:>8} {:>8} {:>8} {:>9}",
         "", "a second", "p50 ms", "p99 ms", "max ms", "over 50ms"

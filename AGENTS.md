@@ -74,6 +74,7 @@ make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M
+make growth-bench        # a @unique index over 4M puts one at a time: the longest (its table's growth), p50/p99.99, the build after an open, a lookup
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 ```
@@ -214,7 +215,10 @@ MB of rows of a text and an int were 930 000 of them, the write lock held
 16 to 17.5 ms), `Database::hand_over` has the sink
 write what is pending (`Sink::written_through`) and each store point the
 documents it holds at their places in the file and let its segments go
-(`Store::hand_over`): 820 MB after that load. Where each record went is
+(`Store::hand_over`): 820 MB after that load. One due while a durability
+fsyncs the file is put off to the first write landing after it, up to
+twice the bounds (`Sink::syncing`): it writes into the file, and waited
+out the fsync with the write lock held (below). Where each record went is
 noted as it lands (`handover::Landed`: a data record's body, each of a
 block record's), so nothing of the file is read, and a store takes its runs
 in only when they account for every frame its segments hold, in order --
@@ -315,8 +319,12 @@ long as it took under the lock (151.9 ms against 151.4, 664 against
 668); the writes beside it waited at most 2.5-10.8 ms, what they wait
 beside no long read (handovers, the segment's copy), against 118-854 ms,
 and the reconciliation's transfers 5.4-29 ms and none past 50 in three
-runs of four (the fourth met a 385 ms stall of the kind both servers meet
-in the bench's round with no reconciliation, 118-162 ms). The indexes are
+runs of four. The fourth met a 385 ms stall, of the kind both servers met
+in the bench's first round, which runs no reconciliation (118-223 ms):
+the journal's `@unique` index growing its table whole as it passed 1.8
+million entries, and `--warm` building an index the bench's warm-up had
+not read as the round began (both below). With those gone, three runs:
+1.9-10.4 ms, none past 50. The indexes are
 not taken: a hash index's map, an ordered index's chunks, a text index's
 postings change in place, and a copy under the lock costs what the read
 spares -- a shared one, copied by the first write to touch it, would have
@@ -396,7 +404,13 @@ never retried -- the kernel may already have dropped the pages -- and
 had not yet sent. That fsync runs *outside* the exclusive lock: under it a
 write only calls `Database::flush`, which hands back a `Durability` to run once
 the lock is released, and `FileSink` writes the bytes there as well (a `write`
-under the lock waited out concurrent fsyncs on macOS). A durability whose bytes
+under the lock waited out concurrent fsyncs on macOS). The writes the lock
+still makes -- the 1 MB buffer's once it is full, a handover's -- take the
+sink's disk, which a durability holds through its fsync, so both are put
+off while one does (`Sink::syncing`, a `try_lock`): the buffer up to
+`WRITE_HELD` (8 MB), a handover to twice its bounds. A ledger's transfer
+landing a handover waited out the syncer's `F_FULLFSYNC` of a quarter
+second's writes, 52 ms, every request behind it. A durability whose bytes
 an earlier fsync already covered runs none, which is the group commit: 268 ->
 1 156 durable writes/s over eight clients. A failed one is reported back with
 `Database::fail` so the engine stops taking writes. The syncer of `--sync
@@ -1386,6 +1400,29 @@ number is kept in are of the index's own type (`Bucket::one`): through
 browser module. Its buckets stay one sorted list (the runs `cfg`'d out,
 a removal a `memmove` of the rest): 390 bytes, 0.4 KB brotli.
 
+**A hash index's table grows a 256th at a time** (`maps::Sharded`). A
+`HashMap` that is full moves every key into a table twice its size in the
+insert that found it full -- under the write lock, every request waiting
+-- and a `@unique` field holds a key a row: `make recon-bench`'s journal
+passing 1 835 008 entries held one transfer and everything behind it 120
+to 137 ms in every run, and `make growth-bench`'s 4 million puts one at a
+time took 7, 19, 49, 109 and 235-267 ms at each doubling from 229 376
+keys. Past `SPLIT_AT` (114 688 keys, a table of 2^17 buckets' worth) the
+map is 256 maps, a key's picked by the top byte of an `Fx` seeded at the
+split, each growing on its own: the longest put is the split's, 6.2 ms.
+Below it a map is the one table it was, the same to the nanosecond at
+100 000 keys. What it costs past the split is the pick: a lookup in a loop
+over a million keys 66 -> 93 ns, a lone put's p50 1.08 -> 1.12 us (1.12
+-> 1.17 at 4 million), an index built after an open 7-13% faster (the
+shards' tables grow in cache), 4 million puts the same 5.7 s. The pick's
+hash is the cost, not the tables: picked by a key's length, which put
+nearly every key in one shard, or by a constant, lookups were 66 ns, by
+the last 8 bytes 90, and the shards sharing one SipHash key changed
+nothing. Rejected: one table taken into a new one 4 096 keys at a time,
+looked up in both meanwhile -- lookups 163 ns, since a map that stops
+taking keys never finishes its steps, and builds a third slower. The
+browser module keeps the one map (`cfg`), byte for byte the size it was.
+
 **`in (get ...)` is answered before the query, as the list it is.**
 `Expr::InSelect` holds an inner `Select`; `Database::answered` (from
 `query` and `execute_inner`, and `explain` inside its plan) runs each
@@ -2259,7 +2296,12 @@ largest paint against 1.40 warm. `Database::unbuilt_indexes` lists the
 derived indexes nothing has built, `warm_index` builds one as its first read
 would, and a thread of the server's builds them one at a time, each under
 the read lock on its own -- reads go on, one needing the index waits for
-that build, a write waits out one index at most. The thread starts once the
+that build, a write waits out one index at most. So a bench times nothing
+until its warm-up has read every index the writes keep up: `make
+recon-bench`'s read all but the journal's `@hash` on its account, which no
+statement there reads, and `--warm` built it -- 100 to 150 ms over a million
+entries -- as the first round began, every transfer and every read behind
+them waiting; a read of it waits for that build, or makes it. The thread starts once the
 HTTP endpoint is up: `Server::new` takes the write lock for its watcher,
 and a build's read lock held the listener back by its 141 ms. Over 100 000
 products with a text, two hash and an ordered index the first answer came
@@ -2677,7 +2719,9 @@ and an app get the same bytes; out of the module's crate the optimizer at
 `#[inline(always)]` left the module 161 bytes larger and 216 smaller in
 brotli. A handle is a number into a table of `Arc`s, never a pointer: a use
 after close finds nothing, and a call holds its database while it runs. A
-read takes the shared lock, a write the exclusive one, a lone `create
+read takes the shared lock -- a long one only to pin what it reads, and
+reads with none held, as a server's does (`Database::pin`; a text of
+several reads is one pin) -- a write the exclusive one, a lone `create
 index` or `compact` runs beside the database (`Database::maintain`), and a
 write's fsync runs once the lock is let go (`Database::flush`'s
 `Durability`, a failure to `Database::fail`), as a server's do. Every call

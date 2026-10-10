@@ -591,8 +591,10 @@ builds those collections' and fields' alone (Kotlin
 
 <p>One database is safe to use from every thread, task or coroutine at
 once: a read runs beside other reads, a write takes the database to itself,
-and a lone <code>create index</code> or <code>compact</code> is built beside
-the database while reads and writes go on. Every binding makes its calls
+a long read — an aggregate, a scan, a text of several reads — pins what it
+reads and lets writes land beside it, as a server's does, and a lone
+<code>create index</code> or <code>compact</code> is built beside the
+database while reads and writes go on. Every binding makes its calls
 off the main thread, since any of them may wait -- for the lock, an fsync, a
 whole open.</p>
 
