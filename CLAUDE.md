@@ -319,8 +319,12 @@ long as it took under the lock (151.9 ms against 151.4, 664 against
 668); the writes beside it waited at most 2.5-10.8 ms, what they wait
 beside no long read (handovers, the segment's copy), against 118-854 ms,
 and the reconciliation's transfers 5.4-29 ms and none past 50 in three
-runs of four (the fourth met a 385 ms stall of the kind both servers meet
-in the bench's round with no reconciliation, 118-162 ms). The indexes are
+runs of four. The fourth met a 385 ms stall, of the kind both servers met
+in the bench's first round, which runs no reconciliation (118-223 ms):
+the journal's `@unique` index growing its table whole as it passed 1.8
+million entries, and `--warm` building an index the bench's warm-up had
+not read as the round began (both below). With those gone, three runs:
+1.9-10.4 ms, none past 50. The indexes are
 not taken: a hash index's map, an ordered index's chunks, a text index's
 postings change in place, and a copy under the lock costs what the read
 spares -- a shared one, copied by the first write to touch it, would have
