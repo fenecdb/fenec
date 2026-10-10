@@ -13,6 +13,7 @@ import math
 import os
 import pathlib
 import sys
+import time
 from datetime import datetime, timezone
 
 from fenecdb import Client
@@ -118,10 +119,17 @@ def smoke(db):
     check("match", notes.match("body", "release docs").first()["title"] == "Release checklist")
     check("near", notes.near("embed", embed("flights to Istanbul")).first()["title"] == "Book flights")
     check("fuse", search(db, "desert fox")["fuse"][0]["title"] == "Book club")
+    # "From now" is the last write on disk, and the seeds may not be there
+    # yet: an answer can hold those and not the note, so read on, from where
+    # each answer ended, until the note comes or 5 s have passed.
     since = db.changes().next
     add(db, "Call mom", "Ask about the weekend.", ["home"])
-    seen = db.changes(since, wait=5).writes
-    check("change stream", any((w.get("doc") or {}).get("title") == "Call mom" for w in seen))
+    deadline, seen = time.monotonic() + 5, False
+    while not seen and time.monotonic() < deadline:
+        got = db.changes(since, wait=max(0.1, deadline - time.monotonic()))
+        since = got.next
+        seen = any((w.get("doc") or {}).get("title") == "Call mom" for w in got.writes)
+    check("change stream", seen)
     notes.where("title", "Groceries").update({"done": True})
     check("done", len(listed(db, open_only=True)) == 3)
 
