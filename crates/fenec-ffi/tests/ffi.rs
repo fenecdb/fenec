@@ -431,6 +431,69 @@ fn a_handle_is_used_from_several_threads_at_once() {
     by_handle(fenec_close, h);
 }
 
+/// A long read is pinned and read with no lock held, as a server reads
+/// one: a write lands while it reads, and it answers as at the pin -- a
+/// text of several reads all at the one change. The read is held mid-way
+/// by a function of its own (`hold`), let go once the write is answered:
+/// under the read lock the write would wait for the read and the read for
+/// the write, until `hold` gives up, which is the failure.
+#[test]
+fn a_write_lands_beside_a_pinned_read() {
+    use fenec_core::prelude::Value;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    let h = memory();
+    query(h, "create collection t (n int)", "");
+    query(h, "put t [{n: 1}, {n: 2}, {n: 3}]", "");
+    let flag = || Arc::new(AtomicBool::new(false));
+    let (entered, release, gave_up) = (flag(), flag(), flag());
+    {
+        let db = fenec_ffi::database(h).unwrap();
+        let mut db = db.write().unwrap();
+        // Every read it can answer is pinned, these three rows too.
+        db.set_pin_at(0);
+        let (entered, release, gave_up) = (entered.clone(), release.clone(), gave_up.clone());
+        let hold = move |args: &[Value]| {
+            entered.store(true, SeqCst);
+            let t = Instant::now();
+            while !release.load(SeqCst) {
+                if t.elapsed() > Duration::from_secs(20) {
+                    gave_up.store(true, SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(args[0].clone())
+        };
+        db.registry_mut()
+            .register_fn("hold", Arc::new(hold))
+            .unwrap();
+    }
+    for (text, want) in [
+        ("get t select sum(hold(n)) as s", r#"[{"s":6}]"#),
+        (
+            "get t select sum(hold(n)) as s; get t select count(*) as c",
+            r#"[{"c":4}]"#,
+        ),
+    ] {
+        entered.store(false, SeqCst);
+        release.store(false, SeqCst);
+        let reader = std::thread::spawn(move || query(h, text, ""));
+        while !entered.load(SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // The read is under way, holding no lock: the write is answered.
+        query(h, "put t {n: 10}", "");
+        release.store(true, SeqCst);
+        let r = reader.join().unwrap();
+        assert!(!gave_up.load(SeqCst), "the write waited for the read");
+        assert!(r.contains(want), "{text}: {r}");
+    }
+    assert!(query(h, "get t select sum(n) as s", "").contains(r#"[{"s":26}]"#));
+    by_handle(fenec_close, h);
+}
+
 #[test]
 fn an_index_built_beside_the_database_lands_in_the_file() {
     let path = scratch("maintain");

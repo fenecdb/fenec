@@ -23,7 +23,9 @@
 //! that takes one may wait:
 //!
 //! - `fenec_query` waits for the lock: a read for a write under way, a
-//!   write for the reads and the write under way. A lone `create index` or
+//!   write for the reads and the write under way. A long read is pinned
+//!   under the lock and read with none held (`Database::pin`), so a write
+//!   waits for the pin rather than the read. A lone `create index` or
 //!   `compact` is built beside the database (`Database::maintain`), reads
 //!   and writes going on, and the caller waits for the build.
 //! - A write on a handle opened to sync (the default) waits for its fsync
@@ -138,6 +140,13 @@ pub fn garbage(handle: u64) -> Option<fenec_core::engine::Garbage> {
     let n = native(handle).ok()?;
     let db = n.db.read().unwrap_or_else(|e| e.into_inner());
     Some(db.garbage())
+}
+
+/// The database open under `handle`, for a test to set what the C ABI does
+/// not -- a function of its own, the rows a read is pinned from.
+#[doc(hidden)]
+pub fn database(handle: u64) -> Option<Arc<RwLock<Database>>> {
+    native(handle).ok().map(|n| Arc::clone(&n.db))
 }
 
 /// An open database.
@@ -697,10 +706,37 @@ fn run(
     params: &str,
     vectors: &[u8],
 ) -> Result<Response, Stop> {
-    // A read beside the other reads.
+    // A read beside the other reads, and a long one beside the writes too:
+    // pinned under the read lock and read with no lock held, as a server
+    // reads one (`Database::pin`) -- a text of several reads as one, at the
+    // one change the pin stood at. Under the lock an aggregate over a
+    // million rows held every write for as long as it ran.
     if fenec_abi::read_only(p) {
         let db = n.read()?;
         fenec_abi::exact(&db, p, sql, params, vectors)?;
+        // One statement, the read every call of an app's makes, with
+        // nothing allocated to ask: a short one is declined in 25 to 40 ns.
+        let one;
+        let several: Vec<_>;
+        let pairs: &[(&Statement, &[Value])] = match p.stmts.as_slice() {
+            [s] => {
+                one = [(s, &p.params[..])];
+                &one
+            }
+            all => {
+                several = all.iter().map(|s| (s, &p.params[..])).collect();
+                &several
+            }
+        };
+        if let Some(pin) = db.pin(pairs) {
+            drop(db);
+            if let Some(r) = pinned(&pin, p) {
+                return Ok(r?);
+            }
+            // One reached for an index the pin left out: every statement
+            // again under the lock.
+            return Ok(fenec_abi::query(&*n.read()?, p)?);
+        }
         return Ok(fenec_abi::query(&db, p)?);
     }
     // A write to a synced collection is the sync's: applied at once, and
@@ -752,6 +788,20 @@ fn run(
     drop(db);
     n.durable(durability)?;
     Ok(r?)
+}
+
+/// [`fenec_abi::query`] over a pin: `None` where a statement reached for an
+/// index the pin left out, for the caller to run them all under the lock.
+fn pinned(pin: &Pinned, p: &fenec_abi::Prepared) -> Option<Result<Response, Refused>> {
+    let several = p.stmts.len() > 1;
+    let mut last = Response::Ok(String::from("empty"));
+    for (ran, s) in p.stmts.iter().enumerate() {
+        match pin.query(s, &p.params)? {
+            Ok(r) => last = r,
+            Err(e) => return Some(Err(Refused::Error(e, ran, several.then_some(ran)))),
+        }
+    }
+    Some(Ok(last))
 }
 
 // ---------------------------------------------------------------- changes

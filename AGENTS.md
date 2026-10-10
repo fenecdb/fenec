@@ -2715,7 +2715,9 @@ and an app get the same bytes; out of the module's crate the optimizer at
 `#[inline(always)]` left the module 161 bytes larger and 216 smaller in
 brotli. A handle is a number into a table of `Arc`s, never a pointer: a use
 after close finds nothing, and a call holds its database while it runs. A
-read takes the shared lock, a write the exclusive one, a lone `create
+read takes the shared lock -- a long one only to pin what it reads, and
+reads with none held, as a server's does (`Database::pin`; a text of
+several reads is one pin) -- a write the exclusive one, a lone `create
 index` or `compact` runs beside the database (`Database::maintain`), and a
 write's fsync runs once the lock is let go (`Database::flush`'s
 `Durability`, a failure to `Database::fail`), as a server's do. Every call
