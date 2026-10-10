@@ -2654,11 +2654,15 @@ under) is answered with no trigonometry, so a scan by a radius over a
 million rows went 136 -> 22 ms, and `near ... exact`'s page of ten, kept
 in order as the rows come rather than put in order by `order_rows`, 147 ->
 6.1 ms; the test is out of `Filter::test`'s line (`geo_test`), which it
-grew by a quarter. `tests/geo.rs` holds every filter, order, page and
-nearest to a twin collection without the index over 2 000 rows round both
-poles, the antimeridian and a city, radius 0 to past half the earth,
-through writes, an index made later and a block put back, and Redis's own
-`GEOSEARCH` examples. Over a million points round 48 cities (`make
+grew by a quarter. The browser module's scans run 3% slower than main's
+(`make wasm-speed`'s filter 1.71 -> 1.75 ms) with no point anywhere in
+their path -- the read, the test and the binding taken out, the same -- as
+main's own did with 26 KB of float formatting that nothing calls: where
+the code lands, not what it does. `tests/geo.rs` holds every filter,
+order, page and nearest to a twin collection without the index over 2 000
+rows round both poles, the antimeridian and a city, radius 0 to past half
+the earth, through writes, an index made later and a block put back, and
+Redis's own `GEOSEARCH` examples. Over a million points round 48 cities (`make
 geo-bench`: fenecdb in process; PostGIS 3.5 and Redis 7 in Docker, each
 server's own mean time read from `pg_stat_statements`, planning included,
 and `INFO commandstats`): the index builds in 34 ms and holds 20 MB

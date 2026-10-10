@@ -10541,7 +10541,10 @@ impl<'q> Filter<'q> {
 
 /// A point's test, out of `Filter::test`'s line so that the test every
 /// scan runs stays the size it was: in it, `test` grew by 367 bytes of the
-/// browser module, a quarter, and V8 tiers a function up by its size.
+/// browser module, a quarter. The module's scans measured the same either
+/// way, and with no point in the scan's path at all: 3% slower than main's
+/// (a count over 20 000 rows 1.20 -> 1.23 ms), as main's own were with 26
+/// KB of float formatting that nothing calls -- where the code lands.
 ///
 /// A row whose latitude alone puts it past a number compares as its
 /// distance would, with no trigonometry (`geo::past`): a scan of a million
