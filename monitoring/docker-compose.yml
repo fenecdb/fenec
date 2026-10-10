@@ -38,11 +38,9 @@ services:
       - --slow-ms
       - "100"
       # JSON Web Tokens are held to these rules: Grafana's reads `events`
-      # and `ticks` and writes nothing. The secret comes from a file, not
-      # FENEC_JWT_SECRET: the image's health probe (`fenec-server --ping`)
-      # shares the container's environment, and with a secret there and no
-      # --policy on its own command line it refuses to run, which left the
-      # container unhealthy for good.
+      # and `ticks` and writes nothing. The secret comes from a file, which
+      # the seed reads to mint Grafana's token, rather than from
+      # FENEC_JWT_SECRET, which every process in the container would see.
       - --jwt-secret-file
       - /run/secrets/fenec_jwt_secret
       - --policy

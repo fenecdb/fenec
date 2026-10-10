@@ -164,7 +164,11 @@ fn ping_asks_the_http_listener() {
     };
     let secret = [("FENEC_JWT_SECRET", "a secret of at least thirty-two bytes")];
     assert_eq!(ping(&[]), Some(0));
-    assert_eq!(ping(&secret), Some(0), "a JWT secret with no --policy failed the probe");
+    assert_eq!(
+        ping(&secret),
+        Some(0),
+        "a JWT secret with no --policy failed the probe"
+    );
     let _ = server.terminate();
     assert_eq!(ping(&[]), Some(1));
     assert_eq!(ping(&secret), Some(1));
