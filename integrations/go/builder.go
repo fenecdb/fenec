@@ -397,7 +397,7 @@ func normalize(v any) any {
 // ------------------------------------------------------------ conditions
 
 type node struct {
-	t       string // and, or, not, null, in, cmp, raw
+	t       string // and, or, not, null, in, cmp, within, dist, raw
 	items   []*node
 	field   string
 	op      string
@@ -547,6 +547,11 @@ func fieldCond(field string, spec any) Cond {
 			} else if c = fieldCond(field, v); c.err == nil {
 				c = Cond{n: &node{t: "not", items: []*node{c.n}}}
 			}
+		} else if k == "within" {
+			// A point's: in the box [west, south, east, north].
+			c = Cond{n: &node{t: "within", field: field, value: v}}
+		} else if k == "distance" {
+			c = distanceCond(field, v)
 		} else if op, ok := ops[k]; !ok {
 			return Cond{err: refuse("unknown operator `%s` (field: %s)", k, field)}
 		} else if op == "in" {
@@ -566,6 +571,65 @@ func fieldCond(field string, spec any) Cond {
 		return Cond{n: items[0]}
 	}
 	return Cond{n: &node{t: "and", items: items}}
+}
+
+// distanceCond is a point's distance, compared -- Ops("from", []float64{lon,
+// lat}, "lte", 500) -- distance(loc, $1) <= $2, each comparison given its
+// own.
+func distanceCond(field string, spec any) Cond {
+	var pairs []any
+	switch s := spec.(type) {
+	case OpMap:
+		pairs = s.pairs
+	case map[string]any:
+		keys := make([]string, 0, len(s))
+		for k := range s {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			pairs = append(pairs, k, s[k])
+		}
+	}
+	var from any
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if fmt.Sprint(pairs[i]) == "from" {
+			from = pairs[i+1]
+		}
+	}
+	if rv := reflect.ValueOf(from); from == nil || (rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array) {
+		return Cond{err: refuse("distance takes { from: [lon, lat], <op>: metres } (field: %s)", field)}
+	}
+	var items []*node
+	for i := 0; i+1 < len(pairs); i += 2 {
+		k, v := fmt.Sprint(pairs[i]), pairs[i+1]
+		if k == "from" {
+			continue
+		}
+		op, ok := ops[k]
+		if !ok || op == "in" || op == "has" || op == "~" || !isNumber(v) {
+			return Cond{err: refuse("distance compares metres with lt, lte, gt, gte, eq or ne: %s (field: %s)", k, field)}
+		}
+		items = append(items, &node{t: "dist", field: field, op: op, value: v, values: []any{from}})
+	}
+	switch len(items) {
+	case 0:
+		return Cond{err: refuse("distance needs a comparison, as lte: metres (field: %s)", field)}
+	case 1:
+		return Cond{n: items[0]}
+	}
+	return Cond{n: &node{t: "and", items: items}}
+}
+
+// isNumber is whether v is an int, a uint or a float of any width.
+func isNumber(v any) bool {
+	switch reflect.ValueOf(v).Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	return false
 }
 
 func inCond(field string, values any) Cond {
@@ -664,6 +728,11 @@ func render(c *node, b *binder, parent string) (string, error) {
 		return c.field + " in [" + strings.Join(parts, ", ") + "]", nil
 	case "cmp":
 		return c.field + " " + c.op + " " + b.bind(c.value), nil
+	case "within":
+		return "within(" + c.field + ", " + b.bind(c.value) + ")", nil
+	case "dist":
+		point := b.bind(c.values[0])
+		return "distance(" + c.field + ", " + point + ") " + c.op + " " + b.bind(c.value), nil
 	}
 	pieces := strings.Split(c.sql, "?")
 	var out strings.Builder
@@ -1815,6 +1884,14 @@ func Bucket(field, every string) Computed {
 func CountDistinct(field string) Computed {
 	f, err := fieldPath(field)
 	return Computed{kind: "expr", sql: "count(distinct " + f + ")", err: err}
+}
+
+// Distance is distance(field, point): the metres from a point, [lon, lat],
+// to the row's, for Select -- Distance("loc", []float64{13.4, 52.5}).As("m"),
+// what Redis's GEOSEARCH ... WITHDIST answers with.
+func Distance(field string, point any) Computed {
+	f, err := fieldPath(field)
+	return Computed{kind: "expr", sql: "distance(" + f + ", ?)", params: []any{point}, err: err}
 }
 
 // First is first(field), or first(field by key): the value of the row

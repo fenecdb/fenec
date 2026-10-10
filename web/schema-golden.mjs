@@ -69,6 +69,10 @@ d('bm25, its options', `fenecTable('t', { body: text() }, (t) => [
   index('t_body').using('bm25', t.body).with({ k1: 1.2, b: 0.75, prefix: 6, prefix_min: 4, chars: true }),
 ])`);
 d('an inverted index', `fenecTable('t', { s: sparsevec({ dimensions: 100 }) }, (t) => [index('t_s').using('inverted', t.s)])`);
+d('a point and its index', `fenecTable('places', { loc: geometry({ type: 'point' }), route: geo().array() }, (t) => [index('places_loc').using('gist', t.loc)])`);
+d('a point of another srid', `fenecTable('t', { loc: geometry({ type: 'point', srid: 3857 }) })`);
+d('a polygon', `fenecTable('t', { area: geometry({ type: 'polygon' }) })`);
+d('a gist over a number', `fenecTable('t', { n: integer() }, (t) => [index().using('gist', t.n)])`);
 d('indexes on paths', `fenecTable('docs', { meta: json() }, (t) => [
   index('docs_lang').using('hash', t.meta.path('lang')),
   uniqueIndex('docs_slug').on(t.meta.path('slug')),
@@ -101,7 +105,8 @@ const texts = [];
 const x = (name, fenecql) => texts.push({ name, fenecql });
 x('a collection', 'create collection t (a text required, b int @hash)');
 x('every index, options defaulted', `create collection t (
-  a text @text, b int @sorted, c text @unique, d timestamp @ttl(1h), e vector<3> @hnsw(dot), f sparse<9> @inverted, g json
+  a text @text, b int @sorted, c text @unique, d timestamp @ttl(1h), e vector<3> @hnsw(dot), f sparse<9> @inverted, g json,
+  h geo @geo
 )
 create index on t (g.lang) @hash`);
 x('two collections, comments between', `-- the schema

@@ -4,6 +4,7 @@ use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
 use crate::collate::{self, Collation};
 use crate::error::{Error, Result};
+use crate::geo::GeoIndex;
 use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
@@ -685,6 +686,7 @@ struct Taken {
     text: Option<Derived<TextIndex>>,
     sorted: Option<Derived<SortedIndex>>,
     sparse: Option<Derived<SparseIndex>>,
+    geo: Option<Derived<GeoIndex>>,
 }
 
 /// Puts `ix` among a collection's ordered or sparse indexes where `field`
@@ -1349,6 +1351,13 @@ pub struct Collection {
     /// field name -> inverted index over a sparse vector, in schema order,
     /// a `Vec` for the reason `sorted` is one.
     pub sparse: Vec<(String, Derived<SparseIndex>)>,
+    /// field name -> a point's index (`@geo`), a `Vec` for the same reason.
+    /// Apart from `sorted`, whose chunks it keeps its keys in: a range or
+    /// an order over it is no question of a point's. In the order the
+    /// indexes were made: one point index is asked of a field's own
+    /// conditions alone, and kept in the schema's order through
+    /// `in_schema_order` its copy of that was 0.4 KB of the browser module.
+    pub geo: Vec<(String, Derived<GeoIndex>)>,
 }
 
 impl Collection {
@@ -1367,6 +1376,7 @@ impl Collection {
         let mut texts = Fields::default();
         let mut sorted = Vec::new();
         let mut sparse = Vec::new();
+        let mut geo = Vec::new();
         for f in schema.fields.iter().chain(&schema.paths) {
             match (&f.index, &f.ty) {
                 #[cfg(feature = "vector")]
@@ -1392,6 +1402,10 @@ impl Collection {
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     sparse.push((f.name.clone(), Derived::new(SparseIndex::new())));
                 }
+                #[cfg(feature = "sorted")]
+                (IndexKind::Geo, DataType::Geo) => {
+                    geo.push((f.name.clone(), Derived::new(GeoIndex::new())));
+                }
                 _ => {}
             }
         }
@@ -1406,6 +1420,7 @@ impl Collection {
             texts,
             sorted,
             sparse,
+            geo,
         }
     }
 
@@ -1424,6 +1439,7 @@ impl Collection {
         self.texts.clear();
         self.sorted.clear();
         self.sparse.clear();
+        self.geo.clear();
         for f in self.schema.fields.iter().chain(&self.schema.paths) {
             match (&f.index, &f.ty) {
                 #[cfg(feature = "vector")]
@@ -1448,6 +1464,10 @@ impl Collection {
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     self.sparse.push((f.name.clone(), Derived::unbuilt()));
                 }
+                #[cfg(feature = "sorted")]
+                (IndexKind::Geo, DataType::Geo) => {
+                    self.geo.push((f.name.clone(), Derived::unbuilt()));
+                }
                 _ => {}
             }
         }
@@ -1467,12 +1487,14 @@ impl Collection {
     fn take_indexes(&mut self, field: &str) -> Taken {
         let sorted = self.sorted.iter().position(|(n, _)| n == field);
         let sparse = self.sparse.iter().position(|(n, _)| n == field);
+        let geo = self.geo.iter().position(|(n, _)| n == field);
         Taken {
             vector: self.vectors.remove(field),
             hash: self.hashes.remove(field),
             text: self.texts.remove(field),
             sorted: sorted.map(|i| self.sorted.remove(i).1),
             sparse: sparse.map(|i| self.sparse.remove(i).1),
+            geo: geo.map(|i| self.geo.remove(i).1),
         }
     }
 
@@ -1493,6 +1515,9 @@ impl Collection {
         }
         if let Some(ix) = t.sparse {
             in_schema_order(&mut self.sparse, &self.schema, field, ix);
+        }
+        if let Some(ix) = t.geo {
+            self.geo.push((field.to_string(), ix));
         }
     }
 
@@ -1632,6 +1657,11 @@ impl Collection {
                 out.push(name.clone());
             }
         }
+        for (name, d) in &self.geo {
+            if d.0.get().is_none() {
+                out.push(name.clone());
+            }
+        }
         out
     }
 
@@ -1641,7 +1671,19 @@ impl Collection {
         self.text(field)?;
         self.sorted_index(field)?;
         self.sparse_index(field)?;
+        self.geo_index(field)?;
         Ok(())
+    }
+
+    /// The point index on `field`, built as [`Self::hash`] is.
+    pub fn geo_index(&self, field: &str) -> Result<Option<&GeoIndex>> {
+        let Some((_, d)) = self.geo.iter().find(|(name, _)| name == field) else {
+            return Ok(None);
+        };
+        let Some(pos) = self.schema.field_pos(field) else {
+            return Ok(None);
+        };
+        d.or_build(|| geo_of(&self.store, pos)).map(Some)
     }
 
     /// The full-text index on `field`, built as [`Self::hash`] is.
@@ -1723,6 +1765,12 @@ impl Collection {
                 ix.insert(doc.id, e);
             }
         }
+        for (name, ix) in self.geo.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
+            if !kept(name) {
+                ix.insert(doc.id, doc.get(name));
+            }
+        }
     }
 
     /// Bulk-inserts every vector in a batch, field by field.
@@ -1800,6 +1848,12 @@ impl Collection {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(doc.id, e);
+            }
+        }
+        for (name, ix) in self.geo.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
+            if !kept(name) {
+                ix.remove(doc.id, doc.get(name));
             }
         }
     }
@@ -2144,7 +2198,7 @@ fn missing_feature(kind: &IndexKind) -> Option<&'static str> {
         IndexKind::Vector(_) if !cfg!(feature = "vector") => Some("vector"),
         IndexKind::Text(_) if !cfg!(feature = "text") => Some("text"),
         IndexKind::Inverted if !cfg!(feature = "sparse") => Some("sparse"),
-        IndexKind::Sorted { .. } if !cfg!(feature = "sorted") => Some("sorted"),
+        IndexKind::Sorted { .. } | IndexKind::Geo if !cfg!(feature = "sorted") => Some("sorted"),
         _ => None,
     }
 }
@@ -3027,6 +3081,11 @@ impl Database {
                         .map(|ix| ix.memory_bytes())
                         .sum::<usize>()
                     + c.sparse
+                        .iter()
+                        .filter_map(|(_, ix)| ix.built())
+                        .map(|ix| ix.memory_bytes())
+                        .sum::<usize>()
+                    + c.geo
                         .iter()
                         .filter_map(|(_, ix)| ix.built())
                         .map(|ix| ix.memory_bytes())
@@ -4024,6 +4083,9 @@ impl Database {
                 *d = Derived::unbuilt();
             }
             for (_, d) in c.sparse.iter_mut() {
+                *d = Derived::unbuilt();
+            }
+            for (_, d) in c.geo.iter_mut() {
                 *d = Derived::unbuilt();
             }
             let collated = |f: &str| c.schema.field(f).is_some_and(|f| f.collate.is_some());
@@ -6431,6 +6493,37 @@ impl Database {
             }
         }
 
+        // A radius or a box over a point index narrows to the rows whose
+        // key lies in its bounding box, under the same rule as a range:
+        // while it stays smaller than what is in hand and than the scan.
+        // Never the answer itself: each row's own point is tested.
+        if cfg!(feature = "sorted") && !c.geo.is_empty() {
+            let mut shapes = Vec::new();
+            crate::geo::conjunct_shapes(f, params, &mut shapes);
+            let n = c.store.len();
+            for (field, shape) in shapes {
+                let Some(ix) = c.geo_index(field)? else {
+                    continue;
+                };
+                let mut cap = candidates.as_ref().map_or(n / 2, |b| b.len()).min(n / 2);
+                if want != usize::MAX {
+                    cap = cap.min(want.saturating_mul(64).max(4096));
+                }
+                if let Some(ids) = ix.candidates(&shape, cap) {
+                    candidates = Some(ids);
+                    source = ("the point index on", field);
+                    (bare_range, bare_in) = (false, false);
+                } else {
+                    plan(|| {
+                        format!(
+                            "filter: the point index on {field} not used, \
+                             its box holds more than {cap} rows"
+                        )
+                    });
+                }
+            }
+        }
+
         Ok(candidates.map(|mut b| {
             b.sort_unstable();
             b.retain(|id| c.store.contains(*id));
@@ -6886,8 +6979,12 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
-        if let Some(DataType::Sparse(dim)) = c.schema.field(&near.field).map(|f| &f.ty) {
-            return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
+        match c.schema.field(&near.field).map(|f| &f.ty) {
+            Some(DataType::Sparse(dim)) => {
+                return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
+            }
+            Some(DataType::Geo) => return self.run_geo_near(c, sel, near, want, params, ctx),
+            _ => {}
         }
         #[cfg(not(feature = "vector"))]
         if let Some(f) = c.schema.field(&near.field) {
@@ -7033,6 +7130,163 @@ impl Database {
         }
         let read = &mut |id, out: &mut Vec<f32>| c.store.read_vector_into(id, pos, out);
         crate::vector::search_stored(spec.metric, prec, &qv, want, &ids, read)
+    }
+
+    /// `near` over a `geo` field: the rows nearest the point first, in the
+    /// order of `(distance(<their point>, <the point>), id)`, each scored
+    /// by its distance in metres -- Redis's `GEOSEARCH ... ASC COUNT n
+    /// WITHDIST`. The filter's rows only, and a row with no point never.
+    /// Through the point index where it answers ([`Self::walk_geo_near`]),
+    /// otherwise -- with `exact`, without the index, past what a walk is
+    /// worth -- every row the filter passes measured: the same rows in the
+    /// same order either way.
+    #[allow(clippy::too_many_arguments)]
+    fn run_geo_near(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        near: &Near,
+        want: usize,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, f32)>> {
+        if near.ef.is_some() {
+            return Err(Error::Query(
+                "`ef` widens a vector search's beam, and `near` over a point is exact".into(),
+            ));
+        }
+        let Some(from) = crate::geo::point_of(&eval(&near.vector, &mut NoRow, ctx)?)? else {
+            return Err(Error::Type(
+                "`near` over a point takes a point, [lon, lat], and was given null".into(),
+            ));
+        };
+        let pos = c
+            .schema
+            .field_pos(&near.field)
+            .expect("a declared field is in the schema");
+        if !near.exact {
+            if let Some(hits) = self.walk_geo_near(c, sel, near, from, want, params, ctx)? {
+                return Ok(hits);
+            }
+        }
+        let ids = match &sel.filter {
+            Some(_) => self.matching_ids(&sel.collection, &sel.filter, params)?,
+            None => c.store.ids(),
+        };
+        plan(|| format!("near: every point measured, {} rows", ids.len()));
+        nearest_of(&c.store, pos, from, &ids, want)
+    }
+
+    /// [`Self::run_geo_near`] through the point index, `None` where it does
+    /// not answer. A filter a hash index names few rows for -- a bucket,
+    /// the buckets of an `in` -- has those measured (or the fewer a radius
+    /// or a range names among them). Otherwise the index is walked nearest
+    /// first ([`GeoIndex::nearest`]), each row tested against the filter as it
+    /// comes, stopping at the page or past a radius the filter puts on the
+    /// same point; a filter that passes almost nothing would have the walk
+    /// test the whole collection out of order, so past an eighth of it the
+    /// walk gives up, and every row the filter passes is measured instead.
+    #[cfg(feature = "sorted")]
+    #[allow(clippy::too_many_arguments)]
+    fn walk_geo_near(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        near: &Near,
+        from: (f64, f64),
+        want: usize,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Option<Vec<(DocId, f32)>>> {
+        let field = &near.field;
+        let Some(ix) = c.geo_index(field)? else {
+            return Ok(None);
+        };
+        let pos = c
+            .schema
+            .field_pos(field)
+            .expect("a declared field is in the schema");
+        let test = sel.filter.as_ref().map(|f| Filter::new(c, f, ctx));
+        let passes = |id: DocId| match &test {
+            Some(t) => t.matches(id, ctx),
+            None => Ok(true),
+        };
+        // The farthest a row may lie: a radius the filter's `and` chain
+        // puts on this field about the same point.
+        let mut max = f64::INFINITY;
+        if let Some(f) = &sel.filter {
+            let mut shapes = Vec::new();
+            crate::geo::conjunct_shapes(f, params, &mut shapes);
+            for (name, s) in shapes {
+                if let (true, crate::geo::Shape::Circle(p, r)) = (name == field, s) {
+                    if p == from {
+                        max = max.min(r);
+                    }
+                }
+            }
+            // A set an equality or an `in` names through a hash index, if
+            // it is small: measured whole. Not a radius's own box: about
+            // the same point the walk stops at the radius, and over 100 000
+            // rows round cities a 50 km box held thousands of rows to
+            // measure where the walk read a few dozen -- 440 us against 32.
+            if self
+                .indexed_size(c, f, params)?
+                .is_some_and(|n| n <= GEO_SET)
+            {
+                if let Some((rows, exact)) = self.filter_candidates(c, f, params, usize::MAX)? {
+                    let mut kept = Vec::with_capacity(rows.len());
+                    for id in rows {
+                        if exact || passes(id)? {
+                            kept.push(id);
+                        }
+                    }
+                    plan(|| format!("near: {} rows the index named, each measured", kept.len()));
+                    return nearest_of(&c.store, pos, from, &kept, want).map(Some);
+                }
+            }
+        }
+        let budget = (c.store.len() / 8).max(want);
+        let (mut out, mut met) = (Vec::new(), 0usize);
+        ix.nearest(
+            from,
+            max,
+            &mut |id| c.store.read_point(id, pos),
+            &mut |id, d| {
+                met += 1;
+                if test.is_some() && met > budget {
+                    return Ok(false);
+                }
+                if passes(id)? {
+                    out.push((id, d as f32));
+                }
+                Ok(out.len() < want)
+            },
+        )?;
+        let gave_up = met > budget;
+        plan(|| {
+            let then = if gave_up { ", gave up" } else { "" };
+            format!(
+                "near: walked the point index on {field}, {met} rows met, {} kept{then}",
+                out.len()
+            )
+        });
+        Ok((!gave_up).then_some(out))
+    }
+
+    /// A build without ordered indexes has no point index to walk.
+    #[cfg(not(feature = "sorted"))]
+    #[allow(clippy::too_many_arguments)]
+    fn walk_geo_near(
+        &self,
+        _: &Collection,
+        _: &Select,
+        _: &Near,
+        _: (f64, f64),
+        _: usize,
+        _: &[Value],
+        _: &EvalCtx,
+    ) -> Result<Option<Vec<(DocId, f32)>>> {
+        Ok(None)
     }
 
     /// `near` over a `sparse<N>` field: the documents with the largest dot
@@ -8954,9 +9208,35 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
                 None => c.sparse.push((field, ix)),
             }
         }
+        IndexKind::Geo => {
+            let ix = Derived::new(geo_of(&c.store, pos)?);
+            match c.geo.iter_mut().find(|(n, _)| *n == field) {
+                Some(slot) => slot.1 = ix,
+                None => c.geo.push((field, ix)),
+            }
+        }
         IndexKind::None => {}
     }
     Ok(())
+}
+
+/// The point index of the field at `pos`, as [`sorted_of`]: sorted once
+/// from its keys, each row's point read straight off its 16 bytes.
+#[cfg(feature = "sorted")]
+fn geo_of(store: &Store, pos: usize) -> Result<GeoIndex> {
+    let mut rows = Vec::with_capacity(store.len());
+    for id in store.ids() {
+        if let Some(p) = store.read_point(id, pos)? {
+            rows.push((id, p));
+        }
+    }
+    Ok(GeoIndex::build(&mut rows.into_iter()))
+}
+
+/// A build without ordered indexes holds no point index either.
+#[cfg(not(feature = "sorted"))]
+fn geo_of(_: &Store, _: usize) -> Result<GeoIndex> {
+    Err(not_built("the index", "sorted"))
 }
 
 /// Builds the index the schema declares on the path `path` into a json
@@ -9033,8 +9313,9 @@ impl Database {
         match need.text || param {
             false => Ok(()),
             true => Err(Error::Query(
-                "a json field keeps a list of numbers as written, and this one was read into \
-                 a vector's f32s: read the text with fenec_ql::parse_for, a parameter as JSON"
+                "a json field or a point keeps a list of numbers as written, and this one was \
+                 read into a vector's f32s: read the text with fenec_ql::parse_for, a parameter \
+                 as JSON"
                     .into(),
             )),
         }
@@ -9072,10 +9353,13 @@ fn stmt_collection(stmt: &Statement) -> &str {
 }
 
 /// What of `stmt`, a statement over a collection of `schema`, a json field
-/// needs read as written ([`Exactly`]).
+/// or a point needs read as written ([`Exactly`]): what a json or `geo`
+/// field is given or compared with, a point or a box given to `distance`
+/// or `within` anywhere, and the point of a `near` over a `geo` field.
 pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
     let mut out = Exactly::default();
-    if !schema.fields.iter().any(|f| f.ty == DataType::Json) {
+    geo_needs(schema, stmt, &mut out);
+    if !schema.fields.iter().any(|f| f.ty.keeps_numbers()) {
         return out;
     }
     // The value first: a key is looked up only for a list of numbers or a
@@ -9101,16 +9385,66 @@ pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
         _ => None,
     };
     if let Some(f) = filter {
-        filter_needs(schema, f, &mut out);
+        json_needs(schema, f, &mut out);
     }
     out
 }
 
-/// Whether `name` is a json field of `schema` or a path into one.
+/// Whether `name` is a json field of `schema` or a path into one, or a
+/// point -- a field that keeps a list of numbers as written.
 fn names_json(schema: &Schema, name: &str) -> bool {
     // A path's field is a json one, or the path is refused where it is read.
     let field = name.split_once('.').map_or(name, |(f, _)| f);
-    schema.field(field).is_some_and(|f| f.ty == DataType::Json)
+    schema.field(field).is_some_and(|f| f.ty.keeps_numbers())
+}
+
+/// What the points and boxes of `stmt` need: each argument of a
+/// `distance` or `within` call, wherever one is -- a filter, an item of
+/// the select list, a value set -- and the point of a `near` over a point
+/// field. Asked of a statement only once a list of numbers is in it.
+fn geo_needs(schema: &Schema, stmt: &Statement, out: &mut Exactly) {
+    let mut each = |e: &Expr| geo_args(e, &mut |a| given(a, out));
+    match stmt {
+        Statement::Put { docs, else_set, .. } => {
+            for (_, e) in docs.iter().flatten().chain(else_set.iter().flatten()) {
+                each(e);
+            }
+        }
+        Statement::Update { set, filter, .. } => {
+            set.iter().for_each(|(_, e)| each(e));
+            filter.iter().for_each(&mut each);
+        }
+        Statement::Delete { filter, .. } => filter.iter().for_each(&mut each),
+        Statement::Select(s) | Statement::Explain(s) => {
+            // Loops rather than a chain of the lists: each `Chain` was a
+            // copy of its own in the browser module.
+            s.filter.iter().for_each(&mut each);
+            s.having.iter().for_each(&mut each);
+            s.group.iter().for_each(&mut each);
+            for c in s.aggregate.iter().chain(&s.computed) {
+                each(&c.expr);
+            }
+            if let Some(n) = &s.near {
+                if schema
+                    .field(&n.field)
+                    .is_some_and(|f| f.ty == DataType::Geo)
+                {
+                    given(&n.vector, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Calls `given` on each argument of each `distance` and `within` in `e`.
+fn geo_args(e: &Expr, given: &mut dyn FnMut(&Expr)) {
+    if let Expr::Call(name, args) = e {
+        if crate::geo::is_geo_call(name) {
+            args.iter().for_each(&mut *given);
+        }
+    }
+    e.each_child(&mut |c| geo_args(c, given));
 }
 
 /// What a value given a json field, or compared with one, needs.
@@ -9121,10 +9455,18 @@ fn given(e: &Expr, out: &mut Exactly) {
     }
 }
 
-/// What a filter over a collection of `schema` needs ([`Exactly`]): each
-/// value compared with a json field or a path into one.
+/// What a `lookup` level's filter over a collection of `schema` needs
+/// ([`Exactly`]): each argument of a `distance` or `within`, and what
+/// [`json_needs`] names.
 fn filter_needs(schema: &Schema, filter: &Expr, out: &mut Exactly) {
-    if !schema.fields.iter().any(|f| f.ty == DataType::Json) {
+    geo_args(filter, &mut |a| given(a, out));
+    json_needs(schema, filter, out);
+}
+
+/// What a filter over a collection of `schema` needs for its json fields
+/// and points: each value compared with one, or with a path into one.
+fn json_needs(schema: &Schema, filter: &Expr, out: &mut Exactly) {
+    if !schema.fields.iter().any(|f| f.ty.keeps_numbers()) {
         return;
     }
     let json = |name: &str| names_json(schema, name);
@@ -9409,6 +9751,67 @@ fn ranked_rows(sel: &Select, clause: &str, ceiling: usize) -> Result<usize> {
         )));
     }
     Ok(bound.unwrap_or(ceiling).max(1))
+}
+
+/// The most rows `near` over a point measures, every one, when an index
+/// names them for its filter, rather than walk the point index: a few
+/// thousand distances are a fraction of a millisecond.
+#[cfg(feature = "sorted")]
+const GEO_SET: usize = 4096;
+
+/// The `want` of `ids` -- ascending -- nearest `from`, in the order of
+/// `(distance, id)`, each with its distance in metres: what `near` over a
+/// point answers wherever no walk of its index does. Put in order by
+/// `order_rows`, which an `order` over documents and groups shares, each
+/// distance a key and a tie left in the order the ids came: a sort of its
+/// own for the pairs was 1.2 KB of the browser module.
+fn nearest_of(
+    store: &Store,
+    pos: usize,
+    from: (f64, f64),
+    ids: &[DocId],
+    want: usize,
+) -> Result<Vec<(DocId, f32)>> {
+    // A page of a few: the nearest held in order as the rows come, a row
+    // whose latitude alone puts it past the last of them passed over with
+    // no trigonometry (`geo::past`), and a row as near as the last after it
+    // in the order, its id higher. Over a million rows the ten nearest took
+    // 147 ms put in order by `order_rows`.
+    if want <= 64 {
+        let mut kept: Vec<(f64, DocId)> = Vec::with_capacity(want + 1);
+        for &id in ids {
+            let Some(p) = store.read_point(id, pos)? else {
+                continue;
+            };
+            let last = kept.last().map(|k| k.0).filter(|_| kept.len() == want);
+            if last.is_some_and(|r| crate::geo::past(p, from, r).is_some()) {
+                continue;
+            }
+            let d = crate::geo::distance(p, from);
+            if last.is_some_and(|r| d >= r) {
+                continue;
+            }
+            let at = kept.partition_point(|k| k.0 <= d);
+            kept.insert(at, (d, id));
+            kept.truncate(want);
+        }
+        return Ok(kept.into_iter().map(|(d, id)| (id, d as f32)).collect());
+    }
+    let (mut keys, mut held) = (Vec::with_capacity(ids.len()), Vec::with_capacity(ids.len()));
+    for &id in ids {
+        if let Some(p) = store.read_point(id, pos)? {
+            keys.push(Value::Float(crate::geo::distance(p, from)));
+            held.push(id);
+        }
+    }
+    let by: [OrderKey; 1] = [(None, true, None, None)];
+    let mut out = Vec::with_capacity(want.min(held.len()));
+    for i in order_rows(&keys, 1, held.len(), &by, want) {
+        if let Value::Float(d) = keys[i] {
+            out.push((held[i], d as f32));
+        }
+    }
+    Ok(out)
 }
 
 /// A ranking as the rows carry it. One conversion for `match`, `near` and
@@ -9817,6 +10220,21 @@ enum Test<'q> {
     InSet(Slot, Vec<Value>, std::cell::OnceCell<Option<HashIndex>>),
     Like(Slot, Value),
     Has(Slot, Value),
+    /// `distance(<a point field>, <point>) <op> <value>`, the call and its
+    /// arguments either way round: the distance worked out as the call
+    /// works it out, the row's point first when `field_first`, and
+    /// compared as a `Cmp` compares it, the call on the left when
+    /// `call_first` -- so the answer is `eval`'s, null point and all.
+    Distance {
+        slot: Slot,
+        to: (f64, f64),
+        field_first: bool,
+        op: CmpOp,
+        value: Value,
+        call_first: bool,
+    },
+    /// `within(<a point field>, <box>)`.
+    Within(Slot, crate::geo::GeoBox),
     Eval(&'q Expr),
 }
 
@@ -9886,6 +10304,9 @@ impl<'q> Filter<'q> {
             Slot::At(p) => c.schema.fields[p].collate,
             Slot::Id | Slot::Path(_) => None,
         };
+        if let Some(t) = Filter::bind_geo(c, e, &value, &mut slot) {
+            return t;
+        }
         match e {
             Expr::And(a, b) => Test::And(
                 Box::new(Filter::bind(c, a, ctx, used, paths)),
@@ -9942,6 +10363,73 @@ impl<'q> Filter<'q> {
                 _ => Test::Eval(e),
             },
             _ => Test::Eval(e),
+        }
+    }
+
+    /// `distance(<point field>, <point>) <op> <value>` -- the call's
+    /// arguments either way round, the call on either side -- and
+    /// `within(<point field>, <box>)`, the point, the box and the value
+    /// constants: bound as [`Test::Distance`] and [`Test::Within`], a row's
+    /// point read off its bytes with the rest of its fields where `eval`
+    /// would look the field up by name and the function by its, and
+    /// allocate the call's arguments. `None` for anything else.
+    fn bind_geo(
+        c: &Collection,
+        e: &'q Expr,
+        value: &dyn Fn(&Expr) -> Option<Value>,
+        slot: &mut dyn FnMut(&'q Expr) -> Option<Slot>,
+    ) -> Option<Test<'q>> {
+        let point = |e: &Expr| match e {
+            Expr::Field(name) => c.schema.field(name).is_some_and(|f| f.ty == DataType::Geo),
+            _ => false,
+        };
+        // `distance(<point field>, <point>)` either way round: the field,
+        // the point, and whether the field is the first argument.
+        let distance = |e: &'q Expr| -> Option<(&'q Expr, (f64, f64), bool)> {
+            let Expr::Call(name, args) = e else {
+                return None;
+            };
+            let ([a, b], true) = (
+                args.as_slice(),
+                name.eq_ignore_ascii_case(crate::geo::DISTANCE),
+            ) else {
+                return None;
+            };
+            let (field, other, first) = match (point(a), point(b)) {
+                (true, _) => (a, b, true),
+                (false, true) => (b, a, false),
+                _ => return None,
+            };
+            let to = crate::geo::point_of(&value(other)?).ok()??;
+            Some((field, to, first))
+        };
+        match e {
+            Expr::Cmp(op, a, b) => {
+                let ((field, to, field_first), other, call_first) = match distance(a) {
+                    Some(d) => (d, b, true),
+                    None => (distance(b)?, a, false),
+                };
+                let value = value(other)?;
+                Some(Test::Distance {
+                    slot: slot(field)?,
+                    to,
+                    field_first,
+                    op: *op,
+                    value,
+                    call_first,
+                })
+            }
+            Expr::Call(name, args) if name.eq_ignore_ascii_case(crate::geo::WITHIN) => {
+                let [f, b] = args.as_slice() else {
+                    return None;
+                };
+                let bx = crate::geo::box_of(&value(b)?).ok()??;
+                match point(f) {
+                    true => Some(Test::Within(slot(f)?, bx)),
+                    false => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -10038,6 +10526,7 @@ impl<'q> Filter<'q> {
                 Value::List(items) => items.iter().any(|i| i.cmp_value(v) == Ordering::Equal),
                 _ => false,
             },
+            Test::Distance { slot, .. } | Test::Within(slot, _) => geo_test(t, get(*slot)),
             Test::Eval(e) => {
                 let mut row = StoreRow {
                     store: &self.c.store,
@@ -10047,6 +10536,49 @@ impl<'q> Filter<'q> {
                 truthy(&eval(e, &mut row, ctx)?)
             }
         })
+    }
+}
+
+/// A point's test, out of `Filter::test`'s line so that the test every
+/// scan runs stays the size it was: in it, `test` grew by 367 bytes of the
+/// browser module, a quarter. The module's scans measured the same either
+/// way, and with no point in the scan's path at all: 3% slower than main's
+/// (a count over 20 000 rows 1.20 -> 1.23 ms), as main's own were with 26
+/// KB of float formatting that nothing calls -- where the code lands.
+///
+/// A row whose latitude alone puts it past a number compares as its
+/// distance would, with no trigonometry (`geo::past`): a scan of a million
+/// rows by a radius went 136 -> 22 ms.
+#[inline(never)]
+fn geo_test(t: &Test, v: &Value) -> bool {
+    match t {
+        Test::Distance {
+            to,
+            field_first,
+            op,
+            value,
+            call_first,
+            ..
+        } => {
+            let d = match crate::geo::point_in(v) {
+                Some(p) => Value::Float(
+                    match value.as_f64().and_then(|r| crate::geo::past(p, *to, r)) {
+                        Some(floor) => floor,
+                        None if *field_first => crate::geo::distance(p, *to),
+                        None => crate::geo::distance(*to, p),
+                    },
+                ),
+                None => Value::Null,
+            };
+            let (l, r) = if *call_first {
+                (&d, value)
+            } else {
+                (value, &d)
+            };
+            compare(*op, l, r, &|| None)
+        }
+        Test::Within(_, b) => crate::geo::point_in(v).is_some_and(|p| b.holds(p)),
+        _ => false,
     }
 }
 

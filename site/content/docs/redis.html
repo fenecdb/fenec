@@ -230,6 +230,18 @@ curl 'http://127.0.0.1:8080/_changes?consumer=mailer&amp;wait=10000'
     up to date — does not promise.</li>
 </ul>
 
+<h2 id="geo">Places near a point</h2>
+
+<p><code>GEOADD</code> and <code>GEOSEARCH</code> are a <code>geo</code>
+field with <code>@geo</code>: the metres between two points, the rows
+within a radius or a box, the nearest first — see
+<a href="/docs/geo">Points and distances</a>.</p>
+
+<pre data-lang="fenecql">create collection sicily (name text, loc geo @geo)
+put sicily [{name: "Palermo", loc: [13.361389, 38.115556]}, {name: "Catania", loc: [15.087269, 37.502669]}]   -- → 2
+get sicily select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 37] limit 10   -- → "Catania"
+</pre>
+
 <h2 id="not-covered">What this does not cover</h2>
 
 <ul>

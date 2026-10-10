@@ -3,7 +3,7 @@
 -- The schema as FenecQL: an open with it (`schema`) checks the database
 -- against it, and `fenec types schema.fenecql` writes its types.
 
-create collection articles (title text required collate tr @text(k1=0.9, b=0.4, prefix=6, chars), year int @hash, score float @sorted, draft bool required, published timestamp @ttl(30d), cover bytes, meta json, embed vector<384> @hnsw(cosine, m=8, ef_construction=200, ef_search=100), small vector<4, f16> @hnsw(l2, m=16, ef_construction=200, ef_search=100, quant=int8), splade sparse<30522> @inverted, tags [text] @hash, counts [int] required, slug text @unique)
+create collection articles (title text required collate tr @text(k1=0.9, b=0.4, prefix=6, chars), year int @hash, score float @sorted, draft bool required, published timestamp @ttl(30d), cover bytes, meta json, loc geo @geo, embed vector<384> @hnsw(cosine, m=8, ef_construction=200, ef_search=100), small vector<4, f16> @hnsw(l2, m=16, ef_construction=200, ef_search=100, quant=int8), splade sparse<30522> @inverted, tags [text] @hash, counts [int] required, slug text @unique)
 create index on articles (meta.lang) @hash
 create index on articles (meta.source.rank) @sorted
 create collection product_reviews (product_id int required @hash, stars int, notes text collate und)

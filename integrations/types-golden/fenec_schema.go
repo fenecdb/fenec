@@ -16,6 +16,7 @@ type Articles struct {
 	Published *string         `json:"published"` // timestamp @ttl(30d)
 	Cover     []int           `json:"cover"`     // bytes
 	Meta      json.RawMessage `json:"meta"`      // json
+	Loc       *[2]float64     `json:"loc"`       // geo @geo
 	Embed     []float32       `json:"embed"`     // vector<384> @hnsw(cosine, m=8, ef_construction=200, ef_search=100)
 	Small     []float32       `json:"small"`     // vector<4, f16> @hnsw(l2, m=16, ef_construction=200, ef_search=100, quant=int8)
 	Splade    *string         `json:"splade"`    // sparse<30522> @inverted

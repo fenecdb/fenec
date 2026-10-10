@@ -69,6 +69,7 @@ NAV = [
         ("docs/sync", "Sync"),
         ("docs/redis", "Instead of Redis"),
         ("docs/queues", "Job queues"),
+        ("docs/geo", "Points and distances"),
         ("docs/analytics", "Analytics and market data"),
         ("docs/integrations", "Integrations"),
     ]),

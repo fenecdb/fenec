@@ -89,7 +89,7 @@ export function kindOf(type) {
   if (v) return { kind: 'vector', dim: Number(v[1]) };
   const s = /^sparse<(\d+)>/.exec(t);
   if (s) return { kind: 'sparse', dim: Number(s[1]) };
-  if (['int', 'float', 'text', 'bool', 'timestamp', 'json', 'bytes'].includes(t)) return { kind: t };
+  if (['int', 'float', 'text', 'bool', 'timestamp', 'json', 'bytes', 'geo'].includes(t)) return { kind: t };
   return { kind: 'other' };
 }
 

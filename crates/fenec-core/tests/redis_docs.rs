@@ -39,9 +39,9 @@ fn every_recipe_runs_and_answers_what_the_page_says() {
 
 /// Runs every statement of a page's blocks, in order, over one database
 /// whose clock is 2026-05-03T09:20Z: how many it ran and how many answers
-/// it checked. `analytics_docs.rs` and `queues_docs.rs` run their pages
-/// through it too. A line of a comment alone is passed over, and one
-/// saying `-- 20 s later` moves the clock on: a lease that lapses.
+/// it checked. `analytics_docs.rs`, `queues_docs.rs` and `geo_docs.rs` run
+/// their pages through it too. A line of a comment alone is passed over,
+/// and one saying `-- 20 s later` moves the clock on: a lease that lapses.
 pub(crate) fn run_page(page: &str) -> (usize, usize) {
     let mut db = Database::new();
     let mut now = 1_777_800_000_000;
@@ -60,7 +60,9 @@ pub(crate) fn run_page(page: &str) -> (usize, usize) {
                 Some((code, rest)) => (code, Some(rest.trim())),
                 None => (line, None),
             };
-            let st = fenec_ql::parse_one(code)
+            // Parsed against the database, as a server parses a text, so a
+            // point's list of numbers is read as written (`geo_docs.rs`).
+            let st = fenec_ql::parse_one_for(&db, code)
                 .unwrap_or_else(|e| panic!("`{code}` does not parse: {e}"));
             // `-- → refused`: a write whose `require` the page says is not met.
             if expect.is_some_and(|e| e.starts_with("refused")) {

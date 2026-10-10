@@ -35,6 +35,10 @@ Object? value(Object? v) {
       return Computed.bucket(b[0] as String, b[1] as String);
     }
     if (v.containsKey(r'$countDistinct')) return Computed.countDistinct(v[r'$countDistinct'] as String);
+    if (v.containsKey(r'$distance')) {
+      final d = v[r'$distance'] as List;
+      return Computed.distance(d[0] as String, value(d[1]));
+    }
     for (final (key, pick) in [(r'$first', Computed.first), (r'$last', Computed.last)]) {
       if (v.containsKey(key)) {
         final f = v[key] as List;

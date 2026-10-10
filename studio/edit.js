@@ -170,6 +170,7 @@ function placeholder(kind, f) {
       list: '["a", "b"]',
       bytes: '[104, 105]',
       sparse: '{1:0.5,3:0.25}/100',
+      geo: '[13.404954, 52.520008]',
     }[kind] ?? ''
   );
 }

@@ -101,6 +101,7 @@ match are refused until you say what to do with <code>--cast</code>.</p>
 <tr><td><code>int[]</code> <code>float[]</code> <code>text[]</code></td><td><code>[int]</code> <code>[float]</code> <code>[text]</code></td></tr>
 <tr><td><code>vector(N)</code> <code>halfvec(N)</code></td><td><code>vector&lt;N&gt;</code> <code>vector&lt;N, f16&gt;</code></td></tr>
 <tr><td><code>sparsevec(N)</code></td><td><code>sparse&lt;N&gt;</code>, read in the same text form</td></tr>
+<tr><td><code>geometry(Point, 4326)</code> <code>geography(Point)</code> <code>point</code></td><td><code>geo</code>, <code>[lon, lat]</code>; another SRID or shape refused (<a href="geo.html#postgis">Points</a>)</td></tr>
 <tr><td><code>uuid</code></td><td><code>text</code></td></tr>
 <tr><td><b><code>numeric</code> <code>decimal</code></b></td><td>no equivalent — <code>--cast</code> required</td></tr>
 <tr><td><b><code>json</code> <code>jsonb</code></b></td><td><code>json</code>, its numbers as written; a path reads into it (<a href="fenecql.html#json">Objects and paths</a>)</td></tr>

@@ -296,6 +296,9 @@ pub enum IndexKind {
     /// Inverted index over a sparse vector's dimensions, behind `near` on a
     /// `sparse<N>` field (see [`crate::sparse`]).
     Inverted,
+    /// A point's index (`@geo`), behind `distance(loc, $1) <= r`,
+    /// `within(loc, $1)` and `near` on a `geo` field (see [`crate::geo`]).
+    Geo,
 }
 
 impl IndexKind {
@@ -383,6 +386,16 @@ impl IndexKind {
                     "field `{field}` is not sparse<N>, no inverted index can be built \
                      (a text field's is @text)"
                 )));
+            }
+            IndexKind::Geo if *ty != DataType::Geo => {
+                return Err(Error::Type(format!(
+                    "field `{field}` is not geo, no @geo index can be built"
+                )));
+            }
+            // A point's equality and order are its two numbers', which no
+            // question about where it lies asks: its index is `@geo`.
+            IndexKind::Hash { .. } if *ty == DataType::Geo => {
+                return Err(Error::Type(format!("`{field}` is a point: it takes @geo")));
             }
             _ => {}
         }
@@ -858,6 +871,7 @@ fn encode_index(out: &mut Vec<u8>, index: &IndexKind) {
             put_uvarint(out, *ms);
         }
         IndexKind::Inverted => out.push(6),
+        IndexKind::Geo => out.push(10),
     }
 }
 
@@ -899,6 +913,7 @@ fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
             ttl: Some(get_uvarint(buf, pos)?),
         },
         6 => IndexKind::Inverted,
+        10 => IndexKind::Geo,
         o => return Err(Error::Corrupt(format!("unknown index kind {o}"))),
     })
 }

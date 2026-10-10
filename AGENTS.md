@@ -77,6 +77,7 @@ make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 10
 make growth-bench        # indexes growing a put at a time, the longest (a table's growth), p50/p99.99: @unique to 4M keys, @text to 4M terms, @hnsw to 1.1M x 128 and 300k x 768; then builds, lookups, match, near, the first put after an open (GROWTH=unique|text|vector)
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
+make geo-bench           # a million points: radii, the nearest, through @geo and by the scan, against PostGIS and Redis in Docker (GEO_ARGS)
 make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set
 ```
 
@@ -2607,6 +2608,74 @@ queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut texts
 themselves: transformers.js drops the closing [SEP] when it truncates, SPLADE
 without it took SciFact to 0.23, and the dense vectors (`embed.mjs`) moved by
 up to 0.003.
+
+**A point is two `f64`s on Redis's sphere, and `@geo` is Morton keys in the
+ordered index's chunks** (`geo.rs`). A `geo` field (type tag 15) holds
+`[lon, lat]` in degrees as written, 16 bytes behind value tag 15, refused
+past 180 or 90 degrees rather than wrapped, and once read is a
+`Value::List` of two floats: a `Value::Geo` of its own broke `Value`'s
+niche, 16 -> 24 bytes on wasm32 and 6 KB more of the browser module.
+`distance(a, b)` is the haversine on Redis's radius (6 372 797.56 m), so it
+is `GEODIST`: over 2 000 pairs within 0.05 mm of Redis's answer from the
+points it keeps (`GEOPOS`, its 52-bit geohash's cells) and 0.54 m from the
+points as written; PostGIS's sphere is the mean radius, 0.03% less. Its
+`sin`, `cos` and `asin` are series of `geo.rs`'s own, held to the standard
+library's within a few units in the last place: the platform's libm rounds
+its last bit its own way, so a point on a radius's edge could be in on a
+server and out in a page, and in the browser module it brought libm's range
+reduction and tables. A list of numbers going to a `geo` field, a
+`distance`, a `within` or a `near` over one is read again as written
+(`DataType::keeps_numbers`, `exactly_for`'s `geo_needs`), as a json
+field's is: read the quick way into `f32`s, a point moved by up to 1.7 m at
+the antimeridian. `within(p, [w, s, e, n])` holds the box's edges, a west
+east of its east crossing the antimeridian; `near loc p` orders by
+`(distance, id)`, `_score` the metres as an `f32`, `ef` refused; a build
+without `sorted` answers every one of them by the scan. `@geo` (index kind
+10) is derived, built at the first read as `@sorted` is: each row's key --
+its longitude and latitude cut to 32 bits each, monotonely, and interleaved
+-- in a `Chunked<(u64, DocId)>`, the ordered index's own chunks. A
+radius's bounding box (padded 1e-7; every longitude over a pole; two boxes
+across the antimeridian) or a box is covered by at most 32 cells of the
+quadtree over the keys, each a range of them, each key's own cut
+coordinates tested against the box with no margin, the ids left tested by
+the filter; `filter_candidates` takes it by the rule a range is taken by,
+while it names fewer rows than what is in hand. `near` walks the cells
+best first by the nearest a cell's points can lie (`cell_floor`, a metre
+and 1e-7 under), a cell ahead of a point as near so ties come out by id,
+and stops at the page or at a radius the filter puts on the same point; a
+hash bucket of 4 096 rows or fewer (`GEO_SET`) is measured whole instead,
+and past an eighth of the collection tested the walk gives up for the
+filter's set. Not a radius's own box: over 100 000 rows round cities a 50
+km box held thousands of rows where the walk met a few dozen, 440 us
+against 32. A row whose
+latitudes alone put it past a radius (`geo::past`: the meridian arc
+between them, less a metre and 1e-9 of it, which the haversine is never
+under) is answered with no trigonometry, so a scan by a radius over a
+million rows went 136 -> 22 ms, and `near ... exact`'s page of ten, kept
+in order as the rows come rather than put in order by `order_rows`, 147 ->
+6.1 ms; the test is out of `Filter::test`'s line (`geo_test`), which it
+grew by a quarter. The browser module's scans run 3% slower than main's
+(`make wasm-speed`'s filter 1.71 -> 1.75 ms) with no point anywhere in
+their path -- the read, the test and the binding taken out, the same -- as
+main's own did with 26 KB of float formatting that nothing calls: where
+the code lands, not what it does. `tests/geo.rs` holds every filter,
+order, page and nearest to a twin collection without the index over 2 000
+rows round both poles, the antimeridian and a city, radius 0 to past half
+the earth, through writes, an index made later and a block put back, and
+Redis's own `GEOSEARCH` examples. Over a million points round 48 cities (`make
+geo-bench`: fenecdb in process; PostGIS 3.5 and Redis 7 in Docker, each
+server's own mean time read from `pg_stat_statements`, planning included,
+and `INFO commandstats`): the index builds in 34 ms and holds 20 MB
+(PostGIS's GiST 5.4 s and 82 MB, Redis's sorted set 86 MB); within 100 m
+7.2 us p50 against Redis's 12.6 and PostGIS's 1 262 (its plan read 132
+pages of the GiST); 1 km 12.6 against 34 and 1 310; 10 km, 2 543 rows,
+0.56 ms against 1.73 and 4.84; 100 km, 36 341 rows, 5.9 ms against 7.6 and
+32.2, the scan 22-28 ms; the ten nearest 33 us anywhere and 38 within 50
+km, against Redis's 198 ms and 6.0 ms (its search sorts every member of
+the cells it reads) and PostGIS's KNN 1.75 and 1.77 ms. A put with `@geo`
+costs 1.19 us against 0.62 without and a `@sorted` float's 0.98. The
+browser module grew 23.1 KB, 8.0 KB brotli -- the index's cover and walk
+4.4 KB of the 23.1 -- and the one without indexes 11.3 KB, 4.2 brotli.
 
 **`--follow` confirms nothing that is not on disk.** `fenec import --follow`
 reads a logical replication slot through `pgoutput` and applies every change

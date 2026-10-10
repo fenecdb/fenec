@@ -333,7 +333,7 @@ fn ids(src: &str) -> Result<Vec<DocId>> {
     }
 }
 
-/// The json fields of a collection, which a document's JSON keeps as
+/// The json fields and points of a collection, which a document's JSON keeps as
 /// written.
 fn json_fields(db: &Database, collection: &str) -> Vec<String> {
     db.collection(collection)
@@ -341,7 +341,7 @@ fn json_fields(db: &Database, collection: &str) -> Vec<String> {
             c.schema
                 .fields
                 .iter()
-                .filter(|f| f.ty == DataType::Json)
+                .filter(|f| f.ty.keeps_numbers())
                 .map(|f| f.name.clone())
                 .collect()
         })

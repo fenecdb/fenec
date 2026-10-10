@@ -16,6 +16,6 @@
 // `web/fenec.client.test.js` fails if anything here reaches the engine.
 
 export {
-  FenecError, Query, from, or, and, not, raw, inc, expr, bucket, countDistinct, first, last,
+  FenecError, Query, from, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last,
 } from './builder.js';
 export { FenecHttp, connect, sseEvents } from './http.js';

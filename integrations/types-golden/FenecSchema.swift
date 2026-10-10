@@ -41,6 +41,7 @@ public struct Articles: Codable, Sendable, Equatable {
     public var published: String?  // timestamp @ttl(30d)
     public var cover: [UInt8]?  // bytes
     public var meta: JSON?  // json
+    public var loc: [Double]?  // geo @geo
     public var embed: [Float]?  // vector<384> @hnsw(cosine, m=8, ef_construction=200, ef_search=100)
     public var small: [Float]?  // vector<4, f16> @hnsw(l2, m=16, ef_construction=200, ef_search=100, quant=int8)
     public var splade: String?  // sparse<30522> @inverted

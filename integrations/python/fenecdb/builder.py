@@ -42,6 +42,7 @@ __all__ = [
     "bucket",
     "collection",
     "count_distinct",
+    "distance",
     "expr",
     "first",
     "inc",
@@ -379,6 +380,13 @@ def count_distinct(field: str) -> Computed:
     return Computed("expr", sql=f"count(distinct {_path(field)})")
 
 
+def distance(field: str, point: Sequence[float]) -> Computed:
+    """`distance(field, point)`: the metres from a point, `[lon, lat]`, to
+    the row's, for a select list -- `distance("loc", [13.4, 52.5]).as_("m")`,
+    what Redis's `GEOSEARCH ... WITHDIST` answers with."""
+    return Computed("expr", sql=f"distance({_path(field)}, ?)", params=(point,))
+
+
 def first(field: str, by: str | None = None) -> Computed:
     """`first(field)`, or `first(field by key)`: the value of the row least
     by `key` -- by the order the rows were written without one -- that has
@@ -444,12 +452,42 @@ def _field_cond(field: str, spec: Any) -> Cond:
                 else Cond("not", items=[_field_cond(field, v)])
             )
             continue
+        # A point's: `{"loc": {"within": [w, s, e, n]}}` and `{"loc":
+        # {"distance": {"from": [lon, lat], "lte": 500}}}`.
+        if k == "within":
+            items.append(Cond("within", field=field, value=v))
+            continue
+        if k == "distance":
+            items.append(_distance_cond(field, v))
+            continue
         op = _OPS.get(k) if isinstance(k, str) else None
         if not op:
             raise _err(f"unknown operator `{k}` (field: {field})")
         items.append(_in_cond(field, v) if op == "in" else _cmp(field, op, v))
     if not items:
         raise _err(f"empty condition object (field: {field})")
+    return items[0] if len(items) == 1 else Cond("and", items=items)
+
+
+def _distance_cond(field: str, spec: Any) -> Cond:
+    """`{"distance": {"from": [lon, lat], "lte": 500}}`: the metres from a
+    point, compared -- `distance(loc, $1) <= $2`, each comparison given its
+    own."""
+    if not isinstance(spec, Mapping) or not isinstance(spec.get("from"), (list, tuple)):
+        raise _err(f"distance takes {{ from: [lon, lat], <op>: metres }} (field: {field})")
+    items = []
+    for k, v in spec.items():
+        if k == "from":
+            continue
+        op = _OPS.get(k) if isinstance(k, str) else None
+        number = isinstance(v, (int, float)) and not isinstance(v, bool)
+        if not op or op in ("in", "has", "~") or not number:
+            raise _err(
+                f"distance compares metres with lt, lte, gt, gte, eq or ne: {k} (field: {field})"
+            )
+        items.append(Cond("dist", field=field, op=op, value=(spec["from"], v)))
+    if not items:
+        raise _err(f"distance needs a comparison, as lte: metres (field: {field})")
     return items[0] if len(items) == 1 else Cond("and", items=items)
 
 
@@ -522,6 +560,11 @@ def _render(c: Cond, bind: _Binder, parent: str | None = None) -> str:
         return f"{c.field} in [{', '.join(bind(v, c.field) for v in c.items)}]"
     if c.t == "cmp":
         return f"{c.field} {c.op} {bind(c.value, c.field)}"
+    if c.t == "within":
+        return f"within({c.field}, {bind(c.value, c.field)})"
+    if c.t == "dist":
+        point, metres = c.value
+        return f"distance({c.field}, {bind(point, c.field)}) {c.op} {bind(metres, c.field)}"
     # raw
     out, i = [], 0
     for part in c.sql.split("?")[:-1]:

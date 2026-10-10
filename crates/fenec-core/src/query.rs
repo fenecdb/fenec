@@ -1768,11 +1768,18 @@ impl Select {
     }
 
     /// Whether a literal in its filters holds a vector
-    /// ([`Expr::reads_vectors`]).
+    /// ([`Expr::reads_vectors`]) -- or in what else may be handed a point:
+    /// `near`'s, and the items of its select list.
     pub fn reads_vectors(&self) -> bool {
         let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::reads_vectors);
         let mut level = self.lookup.as_ref();
-        let mut any = opt(&self.filter);
+        let item = |c: &Column| c.expr.reads_vectors();
+        let mut any = opt(&self.filter)
+            || opt(&self.having)
+            || self.near.as_ref().is_some_and(|n| n.vector.reads_vectors())
+            || self.group.iter().any(Expr::reads_vectors)
+            || self.aggregate.iter().any(item)
+            || self.computed.iter().any(item);
         while let (false, Some(l)) = (any, level) {
             any = opt(&l.filter);
             level = l.next.as_deref();

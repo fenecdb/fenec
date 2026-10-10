@@ -287,7 +287,7 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
     let o = object(v, "an index")?;
     let keys: &[&str] = match member(o, "kind") {
         Some(Value::Text(k)) => match k.as_str() {
-            "hash" | "unique" | "sorted" | "inverted" => &["kind"],
+            "hash" | "unique" | "sorted" | "inverted" | "geo" => &["kind"],
             "ttl" => &["kind", "ms"],
             "text" => &["kind", "k1", "b", "prefix", "prefix_min", "chars"],
             "hnsw" => &[
@@ -305,7 +305,7 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
     let Some(Value::Text(kind)) = member(o, "kind").filter(|_| !keys.is_empty()) else {
         return Err(bad(
             at,
-            "has an index of no kind there is: hash, unique, sorted, ttl, text, hnsw or inverted",
+            "has an index of no kind there is: hash, unique, sorted, ttl, text, hnsw, inverted or geo",
         ));
     };
     only(o, keys, at)?;
@@ -314,6 +314,7 @@ fn index(v: &Value, at: &str) -> Result<IndexKind> {
         "unique" => IndexKind::UNIQUE,
         "sorted" => IndexKind::SORTED,
         "inverted" => IndexKind::Inverted,
+        "geo" => IndexKind::Geo,
         "ttl" => match whole(o, "ms", at)? {
             Some(ms) if ms > 0 => IndexKind::Sorted {
                 ttl: Some(ms as u64),
@@ -419,6 +420,7 @@ pub fn type_named(s: &str) -> Option<DataType> {
         "bytes" => DataType::Bytes,
         "timestamp" => DataType::Timestamp,
         "json" => DataType::Json,
+        "geo" => DataType::Geo,
         _ => return None,
     })
 }
@@ -577,6 +579,7 @@ fn index_json(out: &mut String, k: &IndexKind) {
             out.push_str(&format!("{{\"kind\":\"ttl\",\"ms\":{ms}}}"))
         }
         IndexKind::Inverted => out.push_str("{\"kind\":\"inverted\"}"),
+        IndexKind::Geo => out.push_str("{\"kind\":\"geo\"}"),
         IndexKind::Vector(s) => {
             out.push_str(&format!(
                 "{{\"kind\":\"hnsw\",\"metric\":\"{}\",\"m\":{},\"ef_construction\":{},\"ef_search\":{}",
@@ -649,6 +652,7 @@ pub fn index_text(k: &IndexKind) -> Option<String> {
         IndexKind::Sorted { ttl: None } => "@sorted".into(),
         IndexKind::Sorted { ttl: Some(ms) } => format!("@ttl({})", ttl_text(*ms)),
         IndexKind::Inverted => "@inverted".into(),
+        IndexKind::Geo => "@geo".into(),
         IndexKind::Vector(s) => format!(
             "@hnsw({}, m={}, ef_construction={}, ef_search={}{})",
             s.metric.name(),

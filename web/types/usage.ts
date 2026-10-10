@@ -11,6 +11,7 @@ import {
   bucket,
   connect,
   countDistinct,
+  distance,
   expr,
   first,
   from,
@@ -24,6 +25,7 @@ import {
   restore,
   sync,
   type Json,
+  type Point,
   type Row,
   type Sparse,
   type Timestamp,
@@ -44,7 +46,8 @@ type Article = {
   meta: Json | null;
 };
 type Review = { product_id: number; stars: number; text: string };
-type Schema = { articles: Article; reviews: Review };
+type Place = { name: string; loc: Point | null };
+type Schema = { articles: Article; reviews: Review; places: Place };
 
 const expect = <T>(value: T): T => value;
 
@@ -66,6 +69,22 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   await db.from('articles').near('splade', '{1:0.5}/30522').rows();
   // @ts-expect-error -- `near` takes a vector field
   db.from('articles').near('title', [1, 2, 3]);
+
+  // A point: a radius, a box, the nearest and its distance as a column.
+  const places = await db
+    .from('places')
+    .select('name', distance('loc', [13.4, 52.5]).as('m'))
+    .where({ loc: { distance: { from: [13.4, 52.5], lte: 2000 } } })
+    .near('loc', [13.4, 52.5])
+    .limit(10)
+    .rows();
+  expect<{ name: string; _score: number }[]>(places);
+  await db.from('places').where({ loc: { within: [13.3, 52.4, 13.5, 52.6] } }).count();
+  await db.from('places').insert({ name: 'alex', loc: [13.413215, 52.521918] });
+  // @ts-expect-error -- a box is four numbers
+  db.from('places').where({ loc: { within: [13.3, 52.4] } });
+  // @ts-expect-error -- a text field has no distance
+  db.from('places').where({ name: { distance: { from: [1, 2], lte: 3 } } });
 
   await db.from('articles').match('body', 'rust wasm').rerank('embed', [0.1, 0.2]).rows();
   await db.from('articles').match('body', 'rust').near('embed', [0.1]).fuse({ candidates: 40 }).rows();

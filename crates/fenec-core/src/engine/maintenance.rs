@@ -86,6 +86,8 @@ enum Built {
     #[cfg_attr(not(feature = "sorted"), allow(dead_code))]
     Sorted(SortedIndex),
     Sparse(SparseIndex),
+    #[cfg_attr(not(feature = "sorted"), allow(dead_code))]
+    Geo(GeoIndex),
 }
 
 /// The index built from the copy, and the copy: taking a write back out of
@@ -464,6 +466,15 @@ impl Database {
                     }
                 }
                 c.sparse.push((copy.field.clone(), Derived::new(ix)));
+            }
+            Built::Geo(mut ix) => {
+                for id in ids {
+                    ix.remove(id, old(id));
+                    if let Some(v) = c.store.read_field(id, pos)? {
+                        ix.insert(id, Some(&v));
+                    }
+                }
+                c.geo.push((copy.field.clone(), Derived::new(ix)));
             }
         }
         c.schema.fields[pos].index = copy.kind;
@@ -1066,6 +1077,14 @@ impl IndexCopy {
                 }
                 ix.shrink_to_fit();
                 Built::Sparse(ix)
+            }
+            #[cfg(not(feature = "sorted"))]
+            IndexKind::Geo => unreachable!("`create index` refuses what the build lacks"),
+            #[cfg(feature = "sorted")]
+            IndexKind::Geo => {
+                Built::Geo(GeoIndex::build(&mut self.values.iter().filter_map(
+                    |(id, v)| Some((*id, crate::geo::point_in(v.as_ref()?)?)),
+                )))
             }
             IndexKind::None => unreachable!("a create index names its kind"),
         };

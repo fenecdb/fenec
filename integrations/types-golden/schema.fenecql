@@ -12,6 +12,7 @@ create collection articles (
   published timestamp @ttl(30d),
   cover bytes,
   meta json,
+  loc geo @geo,
   embed vector<384> @hnsw(cosine, m=8),
   small vector<4, f16> @hnsw(l2, quant=int8),
   splade sparse<30522> @inverted,

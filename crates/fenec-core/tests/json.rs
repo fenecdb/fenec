@@ -836,7 +836,7 @@ fn the_file_holds_tags_a_binary_from_before_refuses() {
     // A json field's type is tag 14 and an object's tag 13 -- neither 11
     // nor 12, which a schema writes for a collation and a dropped place --
     // and a binary from before refuses a tag it does not know rather than
-    // read on: here, this one meeting tag 15.
+    // read on: here, this one meeting tag 16, the first after a point's.
     let tap = Tap::new();
     let mut db = tap.database();
     indexed(&mut db);
@@ -855,7 +855,7 @@ fn the_file_holds_tags_a_binary_from_before_refuses() {
         .unwrap()
         + 4;
     let mut damaged = file.clone();
-    damaged[at] = 15;
+    damaged[at] = 16;
     let e = Database::new().load(&damaged).unwrap_err();
     assert!(matches!(e, Error::Corrupt(_)), "{e}");
 }

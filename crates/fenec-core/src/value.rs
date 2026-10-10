@@ -44,6 +44,11 @@ pub enum DataType {
     /// boolean or null -- untyped inside: `meta json`. A path reads into it
     /// (`meta.source.rank`), and `@hash` and `@sorted` take one.
     Json,
+    /// A point on the earth, its longitude and latitude in degrees: `loc
+    /// geo`. Written and read as `[lon, lat]`, GeoJSON's order and Redis's
+    /// (`GEOADD key lon lat`); `distance`, `within`, `near` and `@geo` take
+    /// one (see [`crate::geo`]).
+    Geo,
 }
 
 impl DataType {
@@ -60,6 +65,19 @@ impl DataType {
             DataType::Sparse(d) => format!("sparse<{d}>"),
             DataType::List(inner) => format!("[{}]", inner.name()),
             DataType::Json => "json".into(),
+            DataType::Geo => "geo".into(),
+        }
+    }
+
+    /// Whether a field of the type keeps a list of numbers as written: a
+    /// json field, and a point, whose degrees are `f64`s -- where a reader
+    /// with no schema reads such a list into a vector's `f32`s, which would
+    /// move a point by up to 1.7 m (`Database::exactly`).
+    pub fn keeps_numbers(&self) -> bool {
+        match self {
+            DataType::Json | DataType::Geo => true,
+            DataType::List(t) => t.keeps_numbers(),
+            _ => false,
         }
     }
 }
@@ -93,6 +111,16 @@ pub enum Value {
     /// as one.
     Object(Vec<(String, Value)>),
 }
+
+// What a `Value` takes, held: 16 bytes in the browser module -- the tag in
+// a niche of the sparse vector's `Vec` -- and 32 natively. A variant of two
+// `f64`s for a point took the niche away there, 16 -> 24 bytes a value and
+// 6 KB of the module, so a point is a list of two floats once read
+// (`DataType::Geo`).
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(std::mem::size_of::<Value>() == 16);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Value>() == 32);
 
 /// How deep a `json` value nests: an object or a list in one, 64 levels
 /// down. A limit on the stack rather than on the data -- the codec, the
@@ -334,6 +362,12 @@ impl Value {
                 Ok(Value::List(out))
             }
             (DataType::Json, v) => json_value(v, 0),
+            // A point is `[lon, lat]` once read, a list of two floats: a
+            // variant of its own grew every `Value` of the browser module.
+            (DataType::Geo, v) => match crate::geo::point_of(&v)? {
+                Some(p) => Ok(crate::codec::geo_value(p)),
+                None => Ok(Value::Null),
+            },
             (t, v) => Err(Error::Type(format!(
                 "expected {}, found {}",
                 t.name(),

@@ -21,6 +21,8 @@ mod explain;
 mod facets;
 mod filtered;
 mod fuse;
+mod geo;
+mod geo_docs;
 mod handover;
 mod having;
 mod highlight;

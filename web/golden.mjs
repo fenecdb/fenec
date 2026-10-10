@@ -21,6 +21,7 @@
 //   {"$expr": [text, param, ...]}                         expr(), a value or a column
 //   {"$bucket": [field, interval]}                        bucket(field, interval)
 //   {"$countDistinct": field}                             countDistinct(field)
+//   {"$distance": [field, [lon, lat]]}                    distance(field, point)
 //   {"$first": [field]}, {"$first": [field, by]}          first(field [, by]); "$last" too
 //   {"$as": [column, name]}                               column.as(name)
 //   {"$date": "2026-09-19T12:34:56.000Z"}                 a date
@@ -37,7 +38,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
-  from, or, and, not, raw, inc, expr, bucket, countDistinct, first, last, FenecError,
+  from, or, and, not, raw, inc, expr, bucket, countDistinct, distance, first, last, FenecError,
 } from './fenec.js';
 
 export const GOLDEN = fileURLToPath(new URL('../integrations/builder-golden.json', import.meta.url));
@@ -56,6 +57,7 @@ function arg(x) {
   if ('$expr' in x) return expr(x.$expr[0], ...x.$expr.slice(1).map(arg));
   if ('$bucket' in x) return bucket(...x.$bucket);
   if ('$countDistinct' in x) return countDistinct(x.$countDistinct);
+  if ('$distance' in x) return distance(...x.$distance);
   if ('$first' in x) return first(...x.$first);
   if ('$last' in x) return last(...x.$last);
   if ('$as' in x) return arg(x.$as[0]).as(x.$as[1]);
@@ -242,6 +244,17 @@ c('near exact false says nothing', docs, ['near', 'embed', [1, 0], { exact: fals
 c('a negative ef is refused', docs, ['near', 'embed', [1], { ef: -3 }], Q);
 c('near with where, order, limit and offset', docs, ['select', 'title'], ['where', 'year', '>=', 2024], ['near', 'embed', [1, 2], { ef: 64 }], ['order', 'year', 'desc'], ['limit', 10], ['offset', 10], Q);
 c('a later near replaces the earlier', docs, ['near', 'a', [1]], ['near', 'b', [2]], Q);
+// Points: a radius, a ring, a box, the nearest, and a distance as a column.
+const places = ['from', 'places'];
+c('a radius over a point', places, ['where', { loc: { distance: { from: [13.4, 52.5], lte: 500 } } }], Q);
+c('a ring: two comparisons of one distance', places, ['where', { loc: { distance: { from: [13.4, 52.5], gt: 100, '<': 1000 } } }], Q);
+c('a box over a point', places, ['where', { loc: { within: [13.3, 52.4, 13.5, 52.6] } }], Q);
+c('a box beside other conditions', places, ['where', { kind: 'cafe', loc: { within: [170, -20, -170, -10] } }], Q);
+c('the nearest, the distance a column', places, ['select', 'name', { $as: [{ $distance: ['loc', [13.4, 52.5]] }, 'm'] }], ['where', { loc: { distance: { from: [13.4, 52.5], lte: 2000 } } }], ['near', 'loc', [13.4, 52.5]], ['limit', 10], Q);
+c('a distance takes a from', places, ['where', { loc: { distance: { lte: 500 } } }], Q);
+c('a distance compares metres', places, ['where', { loc: { distance: { from: [1, 2], has: 3 } } }], Q);
+c('a distance needs a comparison', places, ['where', { loc: { distance: { from: [1, 2] } } }], Q);
+c('a distance field is a field', places, ['select', { $distance: ['loc; del places', [1, 2]] }], Q);
 c('match', docs, ['match', 'body', 'business trip'], ['limit', 10], Q);
 c('match with a filter', docs, ['select', 'title'], ['where', 'year', '>=', 2023], ['match', 'body', 'rust'], Q);
 c('match and near need fuse', docs, ['match', 'body', 'x'], ['near', 'embed', [1]], Q);

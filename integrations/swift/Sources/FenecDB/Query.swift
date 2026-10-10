@@ -133,6 +133,13 @@ public struct Column: Sendable, ExpressibleByStringLiteral {
         expr("count(distinct \(try Builder.path(field)))", [])
     }
 
+    /// `distance(field, point)`: the metres from a point, `[lon, lat]`, to
+    /// the row's -- `.distance("loc", [13.4, 52.5]).as("m")`, what Redis's
+    /// `GEOSEARCH ... WITHDIST` answers with.
+    public static func distance(_ field: String, _ point: Value) throws -> Column {
+        expr("distance(\(try Builder.path(field)), ?)", [point])
+    }
+
     /// `first(field)`, or `first(field by key)`: the value of the row least
     /// by `by` -- by the order the rows were written without one -- that has
     /// a value; a bar's open is `.first("px", by: "at")`.
@@ -179,6 +186,8 @@ indirect enum Node: Sendable {
     case null(String, negated: Bool)
     case `in`(String, [Value])
     case cmp(String, String, Value)
+    case within(String, Value)
+    case distance(String, Value, String, Value)
     case raw(String, [Value])
 }
 
@@ -419,11 +428,46 @@ enum Builder {
                 items.append(v.isNull ? .null(field, negated: true) : .not(try fieldCond(field, v)))
                 continue
             }
+            // A point's: in the box `[west, south, east, north]`, and the
+            // metres from a point, compared.
+            if k == "within" {
+                items.append(.within(field, v))
+                continue
+            }
+            if k == "distance" {
+                items.append(try distanceCond(field, v))
+                continue
+            }
             guard let op = ops[k] else { throw FenecError.builder("unknown operator `\(k)` (field: \(field))") }
             items.append(op == "in" ? try inCond(field, v) : try cmp(field, op, v))
         }
         switch items.count {
         case 0: throw FenecError.builder("empty condition object (field: \(field))")
+        case 1: return items[0]
+        default: return .and(items)
+        }
+    }
+
+    /// `["distance": ["from": [lon, lat], "lte": 500]]`: a point's distance,
+    /// compared -- `distance(loc, $1) <= $2`, each comparison given its own.
+    static func distanceCond(_ field: String, _ spec: Value) throws -> Node {
+        guard case .object(let opsMap) = spec, let from = opsMap["from"], case .array = from else {
+            throw FenecError.builder("distance takes { from: [lon, lat], <op>: metres } (field: \(field))")
+        }
+        var items: [Node] = []
+        for (k, v) in opsMap where k != "from" {
+            let number: Bool
+            switch v {
+            case .int, .double: number = true
+            default: number = false
+            }
+            guard let op = ops[k], !["in", "has", "~"].contains(op), number else {
+                throw FenecError.builder("distance compares metres with lt, lte, gt, gte, eq or ne: \(k) (field: \(field))")
+            }
+            items.append(.distance(field, from, op, v))
+        }
+        switch items.count {
+        case 0: throw FenecError.builder("distance needs a comparison, as lte: metres (field: \(field))")
         case 1: return items[0]
         default: return .and(items)
         }
@@ -476,6 +520,10 @@ enum Builder {
         case .null(let field, let negated): return "\(field) is \(negated ? "not " : "")null"
         case .in(let field, let values): return "\(field) in [\(values.map(bind.bind).joined(separator: ", "))]"
         case .cmp(let field, let op, let value): return "\(field) \(op) \(bind.bind(value))"
+        case .within(let field, let box): return "within(\(field), \(bind.bind(box)))"
+        case .distance(let field, let from, let op, let metres):
+            let point = bind.bind(from)
+            return "distance(\(field), \(point)) \(op) \(bind.bind(metres))"
         case .raw(let sql, let params):
             let pieces = sql.split(separator: "?", omittingEmptySubsequences: false)
             var out = ""

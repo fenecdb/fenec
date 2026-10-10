@@ -8,6 +8,8 @@ export type Timestamp = string & { readonly __fenec: 'timestamp' };
 export type Sparse = string & { readonly __fenec: 'sparse' };
 /** `vector<N>`: an array of numbers in JSON. */
 export type Vector = number[] & { readonly __fenec: 'vector' };
+/** `geo`: a point, its longitude and latitude in degrees. */
+export type Point = [lon: number, lat: number];
 /** `json`: any value JSON holds; a path reads into it, `'meta.lang'`. */
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 /** `bytes`: an array of bytes in JSON. */
@@ -29,6 +31,8 @@ export type FenecSchema = {
     cover: Bytes | null;
     /** json */
     meta: Json | null;
+    /** geo @geo */
+    loc: Point | null;
     /** vector<384> @hnsw(cosine, m=8, ef_search=100) */
     embed: Vector | null;
     /** vector<4, f16> @hnsw(l2, m=16, ef_search=100, quant=int8) */

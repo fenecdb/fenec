@@ -41,12 +41,17 @@ const INT8_ARRAY: i32 = 1016;
 const FLOAT4_ARRAY: i32 = 1021;
 const FLOAT8_ARRAY: i32 = 1022;
 
-/// The OIDs of the pgvector types in this database.
+const POINT: i32 = 600;
+
+/// The OIDs of the pgvector and PostGIS types in this database: an
+/// extension's types are numbered as it is installed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VectorOids {
     pub vector: Option<i32>,
     pub halfvec: Option<i32>,
     pub sparsevec: Option<i32>,
+    pub geometry: Option<i32>,
+    pub geography: Option<i32>,
 }
 
 /// How a column is decoded from COPY text.
@@ -67,6 +72,12 @@ pub(crate) enum Kind {
     /// `json` and `jsonb`: their text, read as JSON, every number as
     /// written.
     Json,
+    /// PostgreSQL's own `point`, `(x,y)`: taken as `[lon, lat]`.
+    Point,
+    /// A PostGIS `geometry` or `geography` point, which COPY writes as
+    /// hex EWKB: its byte order, its type -- a point, with or without an
+    /// SRID, a Z or an M -- and its x and y.
+    Ewkb,
 }
 
 /// The fenecdb type and decoder for an OID.
@@ -130,7 +141,38 @@ pub(crate) fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
         };
     }
 
+    // A PostGIS column is a point field when its typmod says it holds
+    // points -- or says nothing, each row's own EWKB then checked -- in
+    // longitude and latitude: SRID 4326, or none declared. Points of
+    // another reference system are metres or feet on a plane, not degrees.
+    if Some(f.oid) == oids.geometry || Some(f.oid) == oids.geography {
+        let tyname = match Some(f.oid) == oids.geometry {
+            true => "geometry",
+            false => "geography",
+        };
+        // liblwgeom's TYPMOD_GET_TYPE and TYPMOD_GET_SRID.
+        let (shape, srid) = match f.typmod {
+            -1 => (0, 0),
+            t => (
+                (t & 0xFC) >> 2,
+                ((t & 0x0FFF_FF00) - (t & 0x1000_0000)) >> 8,
+            ),
+        };
+        let unsupported = |why: &str| (Column::unsupported(name, tyname, why), Kind::Ewkb);
+        return match (shape, srid) {
+            (0 | 1, 0 | 4326) => (col(DataType::Geo, tyname), Kind::Ewkb),
+            (0 | 1, _) => unsupported(&format!(
+                "SRID {srid} is not longitude and latitude; `ST_Transform(.., 4326)` it first"
+            )),
+            _ => unsupported("a `geo` field holds points, and this column other shapes"),
+        };
+    }
+
     match f.oid {
+        POINT => (
+            col(DataType::Geo, "point").note("point (x,y) taken as [lon, lat]"),
+            Kind::Point,
+        ),
         BOOL => (col(DataType::Bool, "bool"), Kind::Bool),
         INT2 => (col(DataType::Int, "int2"), Kind::Int),
         INT4 => (col(DataType::Int, "int4"), Kind::Int),
@@ -289,6 +331,22 @@ pub(crate) fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value>
         }
         Kind::Text => Value::Text(text(raw)),
         Kind::Json => fenec_core::json::parse_json(&text(raw)).map_err(|_| bad("JSON"))?,
+        Kind::Point => {
+            let s = text(raw);
+            let (x, y) = s
+                .trim()
+                .strip_prefix('(')
+                .and_then(|r| r.strip_suffix(')'))
+                .and_then(|r| r.split_once(','))
+                .ok_or_else(|| bad("a point"))?;
+            let n = |t: &str| fenec_core::num::parse_f64(t.trim()).ok_or_else(|| bad("a point"));
+            fenec_core::codec::geo_value((n(x)?, n(y)?))
+        }
+        Kind::Ewkb => match ewkb_point(raw) {
+            Some(Some(p)) => fenec_core::codec::geo_value(p),
+            Some(None) => Value::Null,
+            None => return Err(bad("a point in longitude and latitude (SRID 4326)")),
+        },
         Kind::Bytea => Value::Bytes(hex_bytea(raw).ok_or_else(|| bad("a bytea"))?),
         Kind::Vector => {
             let s = text(raw);
@@ -323,6 +381,52 @@ pub(crate) fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value>
             Value::List(out)
         }
     })
+}
+
+/// A point out of hex EWKB, as COPY writes a PostGIS value: `Some(None)`
+/// for an empty point, `None` for anything that is not a point in
+/// longitude and latitude -- another shape, an SRID other than 4326.
+/// Both the extended form (an SRID, Z and M as flags of the type) and
+/// ISO's (Z and M as thousands of it) are read; a Z or an M is passed
+/// over.
+fn ewkb_point(raw: &[u8]) -> Option<Option<(f64, f64)>> {
+    let mut b = Vec::with_capacity(raw.len() / 2);
+    for [hi, lo] in raw.as_chunks::<2>().0 {
+        let hi = (*hi as char).to_digit(16)?;
+        let lo = (*lo as char).to_digit(16)?;
+        b.push((hi * 16 + lo) as u8);
+    }
+    let little = *b.first()? == 1;
+    let word = |at: usize| -> Option<u32> {
+        let w: [u8; 4] = b.get(at..at + 4)?.try_into().ok()?;
+        Some(if little {
+            u32::from_le_bytes(w)
+        } else {
+            u32::from_be_bytes(w)
+        })
+    };
+    let float = |at: usize| -> Option<f64> {
+        let w: [u8; 8] = b.get(at..at + 8)?.try_into().ok()?;
+        Some(if little {
+            f64::from_le_bytes(w)
+        } else {
+            f64::from_be_bytes(w)
+        })
+    };
+    let ty = word(1)?;
+    if (ty & 0x0FFF_FFFF) % 1000 != 1 {
+        return None;
+    }
+    let mut at = 5;
+    if ty & 0x2000_0000 != 0 {
+        if !matches!(word(at)?, 0 | 4326) {
+            return None;
+        }
+        at += 4;
+    }
+    let (x, y) = (float(at)?, float(at + 8)?);
+    // An empty point is written as two NaNs.
+    Some((!x.is_nan() || !y.is_nan()).then_some((x, y)))
 }
 
 /// `\x48656c6c6f` -> bytes. This has been the default format since PostgreSQL 9.0.
@@ -514,7 +618,8 @@ pub fn count_rows(url: &Url, query: &Query) -> Result<u64> {
 /// Learns the OIDs of the pgvector types when the extension is installed.
 pub fn vector_oids(client: &mut Client) -> Result<VectorOids> {
     let r = client.query(
-        "select typname, oid from pg_type where typname in ('vector', 'halfvec', 'sparsevec')",
+        "select typname, oid from pg_type where typname in \
+         ('vector', 'halfvec', 'sparsevec', 'geometry', 'geography')",
     )?;
     let mut out = VectorOids::default();
     for row in &r.rows {
@@ -528,6 +633,8 @@ pub fn vector_oids(client: &mut Client) -> Result<VectorOids> {
             Some("vector") => out.vector = Some(oid),
             Some("halfvec") => out.halfvec = Some(oid),
             Some("sparsevec") => out.sparsevec = Some(oid),
+            Some("geometry") => out.geometry = Some(oid),
+            Some("geography") => out.geography = Some(oid),
             _ => {}
         }
     }
@@ -605,6 +712,74 @@ mod tests {
         assert_eq!(ty(9999), None);
     }
 
+    /// A PostGIS point column, and PostgreSQL's own `point`, are a `geo`
+    /// field; a point's hex EWKB, either byte order, with or without an
+    /// SRID or a Z, is `[lon, lat]`; another shape or reference system is
+    /// refused.
+    #[test]
+    fn postgis_points_are_geo_fields() {
+        let o = VectorOids {
+            geometry: Some(20_000),
+            geography: Some(20_100),
+            ..VectorOids::default()
+        };
+        // `geometry(Point, 4326)`: type 1 in bits 2-7, the SRID from bit 8.
+        let point_4326 = (4326 << 8) | (1 << 2);
+        for (oid, typmod) in [(20_000, point_4326), (20_100, -1), (20_000, 1 << 2)] {
+            let (c, k) = map_oid(&f("loc", oid, typmod), &o);
+            assert_eq!((c.ty, k), (Some(DataType::Geo), Kind::Ewkb), "{typmod}");
+        }
+        // Web Mercator is metres; a polygon is no point.
+        assert_eq!(
+            map_oid(&f("loc", 20_000, (3857 << 8) | (1 << 2)), &o).0.ty,
+            None
+        );
+        assert_eq!(
+            map_oid(&f("loc", 20_000, (4326 << 8) | (3 << 2)), &o).0.ty,
+            None
+        );
+        assert_eq!(map_oid(&f("p", POINT, -1), &o).0.ty, Some(DataType::Geo));
+
+        let hex = |bytes: &[u8]| -> Vec<u8> {
+            bytes
+                .iter()
+                .flat_map(|b| format!("{b:02X}").into_bytes())
+                .collect()
+        };
+        let (lon, lat) = (13.404954f64, 52.520008f64);
+        let mut srid = vec![1, 1, 0, 0, 0x20, 0xE6, 0x10, 0, 0];
+        srid.extend(lon.to_le_bytes());
+        srid.extend(lat.to_le_bytes());
+        let mut big = vec![0, 0, 0, 0, 1];
+        big.extend(lon.to_be_bytes());
+        big.extend(lat.to_be_bytes());
+        let mut z = vec![1, 0xE9, 0x03, 0, 0];
+        z.extend(lon.to_le_bytes());
+        z.extend(lat.to_le_bytes());
+        z.extend(7.0f64.to_le_bytes());
+        let want = fenec_core::codec::geo_value((lon, lat));
+        for wkb in [&srid, &big, &z] {
+            assert_eq!(parse_cell(&hex(wkb), &Kind::Ewkb, "loc").unwrap(), want);
+        }
+        let mut mercator = srid.clone();
+        mercator[5..9].copy_from_slice(&3857u32.to_le_bytes());
+        assert!(parse_cell(&hex(&mercator), &Kind::Ewkb, "loc").is_err());
+        let mut line = srid.clone();
+        line[1] = 2;
+        assert!(parse_cell(&hex(&line), &Kind::Ewkb, "loc").is_err());
+        let mut empty = vec![1, 1, 0, 0, 0];
+        empty.extend(f64::NAN.to_le_bytes());
+        empty.extend(f64::NAN.to_le_bytes());
+        assert_eq!(
+            parse_cell(&hex(&empty), &Kind::Ewkb, "loc").unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            parse_cell(b"(13.404954,52.520008)", &Kind::Point, "p").unwrap(),
+            want
+        );
+    }
+
     /// pgvector's OID is not fixed; the dimension comes from typmod.
     #[test]
     fn pgvector_dimension_comes_from_typmod() {
@@ -612,6 +787,7 @@ mod tests {
             vector: Some(16385),
             halfvec: Some(16390),
             sparsevec: Some(16395),
+            ..VectorOids::default()
         };
         let (c, k) = map_oid(&f("embed", 16385, 384), &o);
         assert_eq!(c.ty, Some(DataType::Vector(384, VecPrec::F32)));

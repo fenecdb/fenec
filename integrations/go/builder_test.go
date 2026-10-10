@@ -182,6 +182,10 @@ func value(x any) any {
 		if f, ok := v.get("$countDistinct"); ok {
 			return fenecdb.CountDistinct(f.(string))
 		}
+		if d, ok := v.get("$distance"); ok {
+			list := d.([]any)
+			return fenecdb.Distance(list[0].(string), value(list[1]))
+		}
 		if f, ok := v.get("$first"); ok {
 			list := strs(f)
 			return fenecdb.First(list[0], list[1:]...)
@@ -270,7 +274,8 @@ func spec(x any) any {
 	}
 	pairs := make([]any, 0, 2*len(o.keys))
 	for i, k := range o.keys {
-		if k == "not" {
+		// A distance's comparisons are an operator object too, in order.
+		if k == "not" || k == "distance" {
 			pairs = append(pairs, k, spec(o.vals[i]))
 		} else {
 			pairs = append(pairs, k, value(o.vals[i]))

@@ -463,6 +463,7 @@ impl Parser {
             "hnsw" | "vector" => IndexKind::Vector(self.hnsw_args()?),
             "text" | "bm25" => IndexKind::Text(self.text_args()?),
             "inverted" => IndexKind::Inverted,
+            "geo" => IndexKind::Geo,
             other => return self.err(format!("unknown index `{other}`")),
         };
         Ok(Statement::CreateIndex {
@@ -511,6 +512,7 @@ impl Parser {
                         field = field.indexed(IndexKind::Text(spec));
                     }
                     "inverted" => field = field.indexed(IndexKind::Inverted),
+                    "geo" => field = field.indexed(IndexKind::Geo),
                     other => return self.err(format!("unknown index `{other}`")),
                 }
                 continue;
@@ -682,6 +684,7 @@ impl Parser {
             "bytes" | "blob" => DataType::Bytes,
             "timestamp" | "timestamptz" => DataType::Timestamp,
             "json" | "jsonb" => DataType::Json,
+            "geo" => DataType::Geo,
             "vector" | "vec" => {
                 self.expect(Tok::Lt)?;
                 let dim = self.int()?;

@@ -128,6 +128,7 @@ fn py_type(t: &DataType) -> String {
         DataType::Bytes => "list[int]".into(),
         DataType::Vector(..) => "list[float]".into(),
         DataType::Json => "Any".into(),
+        DataType::Geo => "list[float]".into(),
         DataType::List(inner) => format!("list[{}]", py_type(inner)),
     }
 }
@@ -191,6 +192,8 @@ fn go_type(t: &DataType, json: &mut bool) -> String {
             *json = true;
             "json.RawMessage".into()
         }
+        // `[lon, lat]`, which `encoding/json` reads into an array of two.
+        DataType::Geo => "[2]float64".into(),
         DataType::List(inner) => format!("[]{}", go_type(inner, json)),
     }
 }
@@ -266,6 +269,7 @@ fn cs_type(t: &DataType) -> String {
         DataType::Bytes => "int[]".into(),
         DataType::Vector(..) => "float[]".into(),
         DataType::Json => "JsonElement".into(),
+        DataType::Geo => "double[]".into(),
         DataType::List(inner) => format!("{}[]", cs_type(inner)),
     }
 }
@@ -357,6 +361,7 @@ fn swift_type(t: &DataType, json: &mut bool) -> String {
             *json = true;
             "JSON".into()
         }
+        DataType::Geo => "[Double]".into(),
         DataType::List(inner) => format!("[{}]", swift_type(inner, json)),
     }
 }
@@ -483,6 +488,10 @@ fn kotlin_type(t: &DataType) -> (String, String) {
             "(v as List<*>).map { (it as Number).toFloat() }".into(),
         ),
         DataType::Json => ("Any".into(), "v".into()),
+        DataType::Geo => (
+            "List<Double>".into(),
+            "(v as List<*>).map { (it as Number).toDouble() }".into(),
+        ),
         DataType::List(inner) => {
             let (t, read) = kotlin_type(inner);
             (
@@ -577,6 +586,10 @@ fn dart_type(t: &DataType) -> (String, String) {
             "[for (final e in v as List) (e as num).toDouble()]".into(),
         ),
         DataType::Json => ("Object".into(), "v".into()),
+        DataType::Geo => (
+            "List<double>".into(),
+            "[for (final e in v as List) (e as num).toDouble()]".into(),
+        ),
         DataType::List(inner) => {
             let (t, read) = dart_type(inner);
             (

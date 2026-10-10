@@ -364,6 +364,15 @@ export function bucket(field, interval) {
   return new Computed(`bucket(${path(field)}, ${interval})`, []);
 }
 
+/**
+ * `distance(field, point)`: the metres from a point to the row's, for a
+ * select list -- `distance('loc', [13.4, 52.5]).as('m')`, what Redis's
+ * `GEOSEARCH ... WITHDIST` answers with.
+ */
+export function distance(field, point) {
+  return new Computed(`distance(${path(field)}, ?)`, [point]);
+}
+
 /** `count(distinct field)`: how many distinct values the rows hold. */
 export function countDistinct(field) {
   return new Computed(`count(distinct ${path(field)})`, []);
@@ -435,6 +444,16 @@ function fieldCond(field, spec) {
         : { t: 'not', item: fieldCond(field, v) });
       continue;
     }
+    // A point's: `{ loc: { within: [w, s, e, n] } }` and `{ loc: {
+    // distance: { from: [lon, lat], lte: 500 } } }`.
+    if (k === 'within') {
+      items.push({ t: 'within', field, box: v });
+      continue;
+    }
+    if (k === 'distance') {
+      items.push(distanceCond(field, v));
+      continue;
+    }
     const op = OPS[k];
     if (!op) {
       throw new FenecError(`unknown operator \`${k}\` (field: ${field})`);
@@ -443,6 +462,29 @@ function fieldCond(field, spec) {
   }
   if (items.length === 0) {
     throw new FenecError(`empty condition object (field: ${field})`);
+  }
+  return items.length === 1 ? items[0] : { t: 'and', items };
+}
+
+/**
+ * `{ distance: { from: [lon, lat], lte: 500 } }`: the metres from a point,
+ * compared -- `distance(loc, $1) <= $2`, each comparison given its own.
+ */
+function distanceCond(field, spec) {
+  if (!isSpec(spec) || !Array.isArray(spec.from)) {
+    throw new FenecError(`distance takes { from: [lon, lat], <op>: metres } (field: ${field})`);
+  }
+  const items = [];
+  for (const [k, v] of Object.entries(spec)) {
+    if (k === 'from') continue;
+    const op = OPS[k];
+    if (!op || op === 'in' || op === 'has' || op === '~' || typeof v !== 'number') {
+      throw new FenecError(`distance compares metres with lt, lte, gt, gte, eq or ne: ${k} (field: ${field})`);
+    }
+    items.push({ t: 'dist', field, from: spec.from, op, value: v });
+  }
+  if (items.length === 0) {
+    throw new FenecError(`distance needs a comparison, as lte: metres (field: ${field})`);
   }
   return items.length === 1 ? items[0] : { t: 'and', items };
 }
@@ -512,6 +554,10 @@ export function render(c, bind, parent = null) {
       return `${c.field} in (${c.query[INNER](bind)})`;
     case 'cmp':
       return `${c.field} ${c.op} ${bind(c.value, c.field)}`;
+    case 'within':
+      return `within(${c.field}, ${bind(c.box, c.field)})`;
+    case 'dist':
+      return `distance(${c.field}, ${bind(c.from, c.field)}) ${c.op} ${bind(c.value, c.field)}`;
     case 'raw': {
       let i = 0;
       const out = c.sql.replace(/\?/g, () => {

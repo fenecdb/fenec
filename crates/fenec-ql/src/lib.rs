@@ -170,6 +170,38 @@ mod tests {
         assert!(parse_one("alter table orders add field x int").is_err());
     }
 
+    /// A point field and its index, written out and read back as the same
+    /// schema.
+    #[test]
+    fn a_point_field_takes_geo() {
+        let stmt = parse_one("create collection p (name text, loc geo @geo)").unwrap();
+        let Statement::CreateCollection { schema, .. } = stmt else {
+            panic!()
+        };
+        assert_eq!(schema.fields[1].ty, DataType::Geo);
+        assert_eq!(schema.fields[1].index, IndexKind::Geo);
+        let text = fenec_core::declared::fenecql(&[&schema]);
+        assert!(text.contains("loc geo @geo"), "{text}");
+        assert_eq!(schema_text(&text).unwrap(), vec![schema]);
+        let Statement::CreateIndex { kind, .. } =
+            parse_one("create index on p (loc) @geo").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(kind, IndexKind::Geo);
+        assert!(parse_one("create collection p (loc geo @hash)").is_err());
+        assert!(parse_one("create collection p (n int @geo)").is_err());
+        // The functions are calls, and `near` takes a point as it takes a
+        // vector.
+        let Statement::Select(s) =
+            parse_one("get p where distance(loc, $1) <= 500 near loc $1 limit 10").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(s.near.unwrap().field, "loc");
+        assert!(matches!(s.filter, Some(Expr::Cmp(CmpOp::Le, ..))));
+    }
+
     #[test]
     fn put_batch() {
         let s = parse_one(r#"put docs [ {title: "a"}, {title: "b", embed: [0.1, 0.2]} ]"#).unwrap();

@@ -1,0 +1,312 @@
+<!--
+title: Points and distances — fenecdb
+description: Redis's GEOADD and GEOSEARCH in a collection: a geo field, distances in metres, rows within a radius or a box, the nearest first, positions that expire — each a statement, with what it costs over a million points against PostGIS and Redis.
+-->
+
+<h1>Points and distances</h1>
+<p class="kicker">Places on the earth in a collection: the metres between
+two, every row within a radius or a box, the nearest first — what an app
+adds Redis's <code>GEOADD</code> and <code>GEOSEARCH</code> or PostGIS
+for.</p>
+
+<p>A <code>geo</code> field holds a point, <code>[lon, lat]</code> in
+degrees. <code>distance(loc, p)</code> is the metres between two points,
+<code>within(loc, [west, south, east, north])</code> whether one lies in a
+box, and <code>near loc p</code> puts rows in order nearest first.
+<code>@geo</code> indexes the field, so a radius, a box and the nearest
+read the rows near the point rather than every row. Every answer is the one
+a scan of every row gives, row for row.</p>
+
+<p>Every FenecQL block on this page is run, statement by statement, by a
+test (<code>crates/fenec-core/tests/geo_docs.rs</code>), and each
+<code>-- → x</code> is the answer it checks: a write's count, or the first
+value of the first row it answered. The costs are <code>make
+geo-bench</code> on an M1 Air, over a million points.</p>
+
+<h2 id="points">Points</h2>
+
+<p>A point is written as a list of two numbers, its longitude first —
+GeoJSON's order, and the order Redis and PostGIS take them in.</p>
+
+<pre data-lang="fenecql">create collection places (name text, kind text @hash, loc geo @geo)
+put places [{name: "Palermo", kind: "city", loc: [13.361389, 38.115556]}, {name: "Catania", kind: "city", loc: [15.087269, 37.502669]}]   -- → 2
+get places select loc where name = "Catania"   -- → [15.087269,37.502669]
+</pre>
+
+<ul>
+  <li><b>Redis:</b> <code>GEOADD Sicily 13.361389 38.115556 "Palermo"
+    15.087269 37.502669 "Catania"</code>.</li>
+  <li><b>Kept as written.</b> The two numbers are <code>f64</code>s and
+    come back as they went in. Redis keeps a 52-bit geohash, which moves a
+    point to the centre of a cell 0.6 m by 0.3 m at the equator: its
+    <code>GEOPOS</code> answers
+    <code>15.08726745843887329</code> for the <code>15.087269</code> it
+    was given.</li>
+  <li><b>A longitude from -180 to 180 and a latitude from -90 to 90,</b>
+    or the write is refused: a latitude of 91 is most often the two given
+    the other way round. Redis takes latitudes to 85.05 only.</li>
+  <li><b><code>null</code> is no point.</b> A row without one is in no
+    radius and no box, and <code>near</code> answers only rows that hold
+    one.</li>
+</ul>
+
+<h2 id="distance">Distance</h2>
+
+<p><code>distance(a, b)</code> is the metres between two points, on a
+sphere of Redis's radius (6 372 797.56 m) — so it is
+<code>GEODIST</code>'s answer.</p>
+
+<pre data-lang="fenecql">get places select distance(loc, [15.087269, 37.502669]) as m where name = "Palermo"   -- → 166274.2577914073
+</pre>
+
+<ul>
+  <li><b>Redis:</b> <code>GEODIST Sicily Palermo Catania</code> answers
+    <code>166274.1516</code>, between the points it keeps: 0.11 m off,
+    since it moved each to its cell. Over 2 000 pairs of points, crowded
+    and spread over the earth, the two agree to 0.05 mm from the points
+    Redis keeps (<code>GEOPOS</code>), and to 0.54 m from the points as
+    written.</li>
+  <li><b>PostGIS:</b> <code>ST_Distance(a, b, false)</code> over
+    <code>geography</code> is on a sphere of the earth's mean radius,
+    6 371 008.8 m, so its metres are 0.03% fewer: Palermo to Catania is
+    166 227.6 m. Its default, the WGS84 ellipsoid, differs from a sphere by
+    up to 0.5%: 166 506.2 m.</li>
+  <li><b>The same bits everywhere.</b> The trigonometry is fenecdb's own,
+    not the platform's: a point on a radius's edge is in or out alike on a
+    server, a phone and a page.</li>
+</ul>
+
+<h2 id="radius">Within a radius</h2>
+
+<pre data-lang="fenecql">get places select name where distance(loc, [15, 37]) &lt;= 200000   -- → "Palermo": in id order
+get places select name where distance(loc, [15, 37]) &lt;= 100000   -- → "Catania"
+get places where distance(loc, [15, 37]) &lt;= 200000 count         -- → 2
+</pre>
+
+<ul>
+  <li><b>Redis:</b> <code>GEOSEARCH Sicily FROMLONLAT 15 37 BYRADIUS 200
+    km</code>.</li>
+  <li><b>A radius reaches the index</b> written <code>distance(loc, p)
+    &lt;= r</code> or <code>&lt; r</code>, either way round, in an
+    <code>and</code> chain, the point and the radius each a literal or a
+    parameter. A ring — <code>distance(loc, p) &gt; 1000</code> beside it —
+    is tested on the rows the radius found.</li>
+  <li><b>Any radius:</b> 0 is the point itself, and one past half the
+    earth's circumference is every row. A radius over a pole takes every
+    longitude, and one across the antimeridian both sides of it.</li>
+</ul>
+
+<h2 id="nearest">Nearest first</h2>
+
+<p><code>near loc p</code> orders the rows by their distance from
+<code>p</code>, a tie by id, and <code>_score</code> is the distance in
+metres:</p>
+
+<pre data-lang="fenecql">get places select name, distance(loc, [15, 37]) as m near loc [15, 37] limit 1   -- → "Catania"
+get places select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 37] limit 10   -- → "Catania": then Palermo
+</pre>
+
+<ul>
+  <li><b>Redis:</b> <code>GEOSEARCH Sicily FROMLONLAT 15 37 BYRADIUS 200
+    km ASC COUNT 10 WITHDIST</code>. Redis needs a radius to search in;
+    <code>near</code> needs none.</li>
+  <li><b>The index is walked nearest first</b> and stops at the page:
+    the ten nearest of a million points took 33 to 38 us, whether they were a
+    street or an ocean away.</li>
+  <li><b><code>_score</code> is an <code>f32</code>,</b> as every score
+    is: to the metre out to 16 777 km, and 2 m past it. Select
+    <code>distance(loc, p)</code> for the <code>f64</code>.</li>
+  <li><b><code>near loc p exact</code></b> measures every row, as the
+    collection without the index does: the same answer.</li>
+</ul>
+
+<h2 id="box">In a box</h2>
+
+<p><code>within(loc, [west, south, east, north])</code> holds a point
+inside the box or on its edge. A box whose west is east of its east crosses
+the antimeridian:</p>
+
+<pre data-lang="fenecql">get places where within(loc, [12, 37, 16, 39]) count   -- → 2
+put places [{name: "Suva", kind: "city", loc: [178.4419, -18.1248]}, {name: "Apia", kind: "city", loc: [-171.7513, -13.8333]}, {name: "Nuku'alofa", kind: "city", loc: [-175.2018, -21.1394]}]   -- → 3
+get places where within(loc, [170, -25, -170, -10]) count   -- → 3
+get places select name near loc [180, -15] limit 1   -- → "Suva"
+</pre>
+
+<ul>
+  <li><b>Redis's <code>BYBOX</code></b> is a width and a height in metres
+    around a centre; <code>within</code> takes the corners, as a map's
+    visible area gives them. The rows of a map's view are
+    <code>within(loc, $bounds)</code> with <code>limit</code>.</li>
+  <li><b>PostGIS:</b> <code>loc &amp;&amp; ST_MakeEnvelope(w, s, e, n,
+    4326)</code>, whose box does not wrap: one across the antimeridian is
+    two.</li>
+</ul>
+
+<h2 id="filters">With the rest of a query</h2>
+
+<p>A radius or a box is one condition of an <code>and</code> chain, so the
+rest of the query goes with it: other conditions, an order, a count, a
+facet, a <code>lookup</code>.</p>
+
+<pre data-lang="fenecql">put places [{name: "Cafe A", kind: "cafe", loc: [15.0912, 37.5047]}, {name: "Cafe B", kind: "cafe", loc: [15.0855, 37.5076]}, {name: "Fish market", kind: "market", loc: [15.0868, 37.5005]}]   -- → 3
+get places select name where kind = "cafe" and distance(loc, [15.087269, 37.502669]) &lt;= 1000 near loc [15.087269, 37.502669] limit 5   -- → "Cafe A"
+get places where kind = "cafe" and distance(loc, [15.087269, 37.502669]) &lt;= 1000 count   -- → 2
+get places select name where distance(loc, [15.087269, 37.502669]) &lt;= 1000 facet kind
+</pre>
+
+<ul>
+  <li><b>Whichever index names fewer rows is read,</b> and the other
+    condition tested on each: a <code>@hash</code> bucket of a few dozen
+    cafes, or the rows of a radius narrower than the bucket. A
+    <code>near</code> over a set of a few thousand rows measures it whole
+    rather than walk the points.</li>
+  <li><b>A scoped token</b> finds only the points its rules let it read:
+    its filter is ANDed in as it is into every statement
+    (<a href="/docs/server#security">Security</a>).</li>
+  <li><b><code>or</code> reads every row,</b> as it does for any index.
+    Two radii are two statements, or one statement each in a
+    <code>/batch</code>.</li>
+</ul>
+
+<h2 id="expiring">Positions that expire</h2>
+
+<p>Couriers, drivers, a user's last known place: each one's position
+written over as it moves, and gone when it stops being sent.
+<code>@ttl</code> takes a row out of every read once its time is
+past.</p>
+
+<pre data-lang="fenecql">create collection couriers (name text @unique, loc geo @geo, seen timestamp @ttl(30s))
+put couriers {name: "ada", loc: [15.0901, 37.5031], seen: now()} if absent else set {loc: new.loc, seen: new.seen}   -- → 1
+put couriers {name: "bo", loc: [15.0702, 37.5120], seen: now()} if absent else set {loc: new.loc, seen: new.seen}    -- → 1
+get couriers select name near loc [15.087269, 37.502669] limit 1   -- → "ada"
+-- 20 s later
+put couriers {name: "bo", loc: [15.0880, 37.5030], seen: now()} if absent else set {loc: new.loc, seen: new.seen}    -- → 1: bo moved
+get couriers select name near loc [15.087269, 37.502669] limit 1   -- → "bo"
+-- 20 s later
+get couriers select name near loc [15.0901, 37.5031] limit 1       -- → "bo": ada's position is 40 s old
+get couriers count   -- → 1
+</pre>
+
+<ul>
+  <li><b>An upsert a position:</b> the row made the first time, its point
+    and time set after, one statement whichever it is.</li>
+  <li><b>Gone at once:</b> a row past its <code>@ttl</code> is out of every
+    read the moment it is, and the server's sweeper deletes it within the
+    minute after (<a href="/docs/fenecql#ttl">Rows that expire</a>).</li>
+</ul>
+
+<h2 id="clients">From a client</h2>
+
+<p>Over HTTP a point is a JSON array, and a filter is FenecQL's:</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/places -d '{"name": "Catania", "loc": [15.087269, 37.502669]}'
+curl 'http://127.0.0.1:8080/places?select=name&amp;where=distance(loc,%5B15,37%5D)%3C%3D200000'
+curl -X POST http://127.0.0.1:8080/places/near -d '{"field": "loc", "vector": [15, 37], "limit": 10}'
+curl -X POST http://127.0.0.1:8080/query \
+  -d '{"query": "get places select name near loc $1 limit 10", "params": [[15, 37]]}'
+</pre>
+
+<p>The builders write it as an object condition:</p>
+
+<pre data-lang="ts">import { connect, distance, type Point } from '@fenecdb/web/client';
+import type { FenecSchema } from './fenec-schema.js';   // fenec types app.fenec
+
+const db = connect&lt;FenecSchema&gt;('http://127.0.0.1:8080');
+const here: Point = [15.087269, 37.502669];
+const cafes = await db.from('places')
+  .select('name', distance('loc', here).as('m'))
+  .where({ kind: 'cafe', loc: { distance: { from: here, lte: 1000 } } })
+  .near('loc', here)
+  .limit(10)
+  .rows();
+const inView = await db.from('places').where({ loc: { within: [12, 37, 16, 39] } }).rows();
+</pre>
+
+<p>Python's, Go's, .NET's, Swift's, Kotlin's and Dart's builders take the
+same <code>within</code> and <code>distance</code> conditions and render the
+same text. <code>fenec types</code> writes a <code>geo</code> field as each
+language's pair of doubles, and a Drizzle table's
+<code>geometry('loc', { type: 'point' })</code> with a GiST index is a
+<code>geo</code> field with <code>@geo</code>.</p>
+
+<ul>
+  <li><b>The degrees as written.</b> Every reader without a schema — a
+    query's parameters, a JSON body, the browser module — reads a list of
+    numbers as a vector's <code>f32</code>s, which would move a point by up
+    to 1.7 m at the antimeridian. A list going to a <code>geo</code> field
+    or a <code>distance</code>, <code>within</code> or <code>near</code>
+    over one is read again as written.</li>
+  <li><b>In the page.</b> The browser module answers the same statements
+    over a database in the page or a synced replica, its index and all.</li>
+</ul>
+
+<h2 id="postgis">From PostGIS</h2>
+
+<p><code>fenec import</code> takes a <code>geometry(Point, 4326)</code> or
+<code>geography(Point)</code> column, or PostgreSQL's own
+<code>point</code>, as a <code>geo</code> field:</p>
+
+<pre data-lang="bash">fenec import postgres://app@db:5432/app --table stores --into stores --index "loc@geo"
+</pre>
+
+<p>A column of other shapes — lines, polygons — or of another SRID is
+refused naming it; <code>--follow</code> mirrors the table as it changes
+(<a href="/docs/import">Import</a>).</p>
+
+<h2 id="costs">What it costs</h2>
+
+<p>A million points crowded round 48 cities, as a shop's or a courier's lie,
+<code>make geo-bench</code>: fenecdb in process; PostGIS 3.5 (a
+<code>geography(Point)</code> column, GiST, <code>ST_DWithin(…, false)</code>
+and <code>&lt;-&gt;</code>) and Redis 7 (<code>GEOSEARCH</code>) in Docker,
+each server's own mean time of the query from
+<code>pg_stat_statements</code>, planning included, and <code>INFO
+commandstats</code> — the network's 0.3 ms left out. The median of a
+thousand queries near a point of the data:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>a million points</th><th class="n">rows</th><th class="n">fenecdb <code>@geo</code></th><th class="n">no index: the scan</th><th class="n">Redis</th><th class="n">PostGIS</th></tr></thead>
+<tbody>
+<tr><td>within 100 m</td><td class="n">0.3</td><td class="n"><b>7.2 us</b></td><td class="n">21.7 ms</td><td class="n">12.6 us</td><td class="n">1.26 ms</td></tr>
+<tr><td>within 1 km</td><td class="n">27</td><td class="n"><b>12.6 us</b></td><td class="n">21.9 ms</td><td class="n">34.3 us</td><td class="n">1.31 ms</td></tr>
+<tr><td>within 10 km</td><td class="n">2 543</td><td class="n"><b>0.56 ms</b></td><td class="n">22.8 ms</td><td class="n">1.73 ms</td><td class="n">4.84 ms</td></tr>
+<tr><td>within 100 km</td><td class="n">36 341</td><td class="n"><b>5.9 ms</b></td><td class="n">28.2 ms</td><td class="n">7.6 ms</td><td class="n">32.2 ms</td></tr>
+<tr><td>the ten nearest within 50 km</td><td class="n">10</td><td class="n"><b>38 us</b></td><td class="n">—</td><td class="n">6.0 ms</td><td class="n">1.77 ms</td></tr>
+<tr><td>the ten nearest</td><td class="n">10</td><td class="n"><b>33 us</b></td><td class="n">6.1 ms</td><td class="n">198 ms</td><td class="n">1.75 ms</td></tr>
+<tr><td>the index's build, its memory</td><td class="n"></td><td class="n">34 ms, 20 MB</td><td class="n">—</td><td class="n">86 MB</td><td class="n">5.4 s, 82 MB</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>A put</b> with <code>@geo</code> costs 1.19 us, against 0.62
+    without an index and 0.98 with <code>@sorted</code> on a float.</li>
+  <li><b>Spread evenly</b> over the earth, a million points are about 20 km
+    apart: a radius of up to 10 km took 5 to 10 us, 100 km 24 us, the ten
+    nearest 35 us.</li>
+  <li><b>Redis</b> sorts every member of the cells round the point by
+    distance: the ten nearest anywhere is a search past half the earth,
+    every member measured. <b>PostGIS</b> plans each statement again,
+    half a millisecond of its time, and its GiST over
+    <code>geography</code> read 132 pages for a radius of 100 m.</li>
+  <li><b>Over HTTP</b> a request adds its round trip, as it does to
+    PostgreSQL's and Redis's: 0.3 ms through Docker's network here.</li>
+</ul>
+
+<h2 id="not-covered">What this does not cover</h2>
+
+<ul>
+  <li><b>Shapes other than points:</b> no lines, polygons or a point in a
+    polygon. A box is the one area a query takes; a polygon's bounding box
+    narrows, and the app tests the rest.</li>
+  <li><b>The ellipsoid.</b> Distances are on the sphere, as Redis's are:
+    within 0.5% of WGS84's, which PostGIS's <code>geography</code> takes by
+    default.</li>
+  <li><b>A distance between two rows</b> in one statement: the other
+    row's point is read first and passed as a parameter.</li>
+  <li><b><code>GEOHASH</code> strings and <code>STORE</code></b>: a
+    search's rows are answered, not written to another key.</li>
+  <li><b><code>order distance(...)</code></b>: an order takes fields, so
+    the nearest first is <code>near</code>.</li>
+</ul>

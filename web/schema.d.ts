@@ -12,6 +12,7 @@ import type {
   InsertRow,
   Json,
   Migration,
+  Point,
   RelationRef,
   Row,
   SchemaDescription,
@@ -29,7 +30,7 @@ export declare const FORMAT: 1;
 
 // ----------------------------------------------------------------- columns
 
-type Kind = 'text' | 'int' | 'float' | 'bool' | 'timestamp' | 'bytes' | 'json' | 'vector' | 'sparse' | 'array';
+type Kind = 'text' | 'int' | 'float' | 'bool' | 'timestamp' | 'bytes' | 'json' | 'vector' | 'sparse' | 'geo' | 'array';
 
 /**
  * A column: what a field reads as (`T`), whether `.notNull()` made it
@@ -120,6 +121,10 @@ export function vector(opts: { dimensions: number }): Col<Vector, false, 'vector
 export function halfvec(opts: { dimensions: number }): Col<Vector, false, 'vector'>;
 /** `sparse<N>`, pgvector's `sparsevec`. */
 export function sparsevec(opts: { dimensions: number }): Col<Sparse, false, 'sparse'>;
+/** `geo`: a point, `[lon, lat]` in degrees. */
+export function geo(): Col<Point, false, 'geo'>;
+/** `geo`, as Drizzle declares a PostGIS point: read as `[lon, lat]` in degrees. */
+export function geometry(opts: { type: 'point'; mode?: 'tuple'; srid?: 4326 }): Col<Point, false, 'geo'>;
 
 // ----------------------------------------------------------------- indexes
 
@@ -170,6 +175,8 @@ export interface IndexBuilder {
   using(method: 'bm25', target: TextColumn): IndexDef<Bm25Options>;
   /** `@inverted`: a sparse vector's dot product (fenecdb's own). */
   using(method: 'inverted', target: Column<Sparse, boolean, 'sparse'>): IndexDef;
+  /** `@geo`: a point's radius, box and nearest, PostGIS's spatial index. */
+  using(method: 'gist', target: Column<Point, boolean, 'geo'>): IndexDef;
 }
 export interface UniqueIndexBuilder {
   /** `@unique`: a hash refusing a value held twice. */

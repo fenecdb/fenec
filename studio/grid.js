@@ -23,7 +23,7 @@ const PARALLEL = 4;
 
 const WIDTH = {
   id: 84, int: 112, float: 120, bool: 76, timestamp: 200, text: 220, json: 240,
-  vector: 300, list: 200, bytes: 180, sparse: 200, other: 160,
+  vector: 300, list: 200, bytes: 180, sparse: 200, geo: 210, other: 160,
 };
 
 /** What a quick filter box suggests, by the field's type. */

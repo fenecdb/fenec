@@ -20,7 +20,7 @@ use fenec_core::prelude::*;
 
 fn run(db: &mut Database, sql: &str) -> Result<Response> {
     let mut last = Response::Affected(0);
-    for s in fenec_ql::parse(sql).expect("parse") {
+    for s in fenec_ql::parse_for(db, sql).expect("parse") {
         last = db.execute_with(&s, &[])?;
     }
     Ok(last)
@@ -151,6 +151,41 @@ fn a_path_declaring_an_ordered_index_is_scanned() {
         assert_eq!(ints(&r, 0), [1, 3]);
     }
     let e = run(&mut back, "create index on j (meta.m) @sorted")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("`sorted`"), "{e}");
+}
+
+/// A point field declaring `@geo`, which the `sorted` feature carries: a
+/// build without it opens the file, answers a radius, a box and `near` by
+/// measuring every point -- what the index's answers are held to -- and
+/// refuses to make one.
+#[test]
+fn a_point_index_declared_is_answered_by_the_scan() {
+    let mut db = Database::new();
+    run(&mut db, "create collection p (n int, loc geo @geo)").unwrap();
+    run(
+        &mut db,
+        "put p [{n: 1, loc: [13.4, 52.5]}, {n: 2, loc: [13.41, 52.5]}, \
+         {n: 3, loc: [2.35, 48.86]}, {n: 4}, {n: 5, loc: [179.99, 0]}]",
+    )
+    .unwrap();
+    let mut back = Database::new();
+    back.load(&db.snapshot()).expect("the image opens");
+    for d in [&mut db, &mut back] {
+        let r = run(
+            d,
+            "get p select n where distance(loc, [13.4, 52.5]) <= 1000",
+        )
+        .unwrap();
+        assert_eq!(ints(&r, 0), [1, 2]);
+        let r = run(d, "get p select n where within(loc, [170, -1, -170, 1])").unwrap();
+        assert_eq!(ints(&r, 0), [5]);
+        let r = run(d, "get p select n near loc [2.0, 48.0] limit 3").unwrap();
+        assert_eq!(ints(&r, 0), [3, 1, 2]);
+    }
+    run(&mut back, "alter collection p add field other geo").unwrap();
+    let e = run(&mut back, "create index on p (other) @geo")
         .unwrap_err()
         .to_string();
     assert!(e.contains("`sorted`"), "{e}");

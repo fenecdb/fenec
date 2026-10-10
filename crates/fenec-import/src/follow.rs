@@ -1386,6 +1386,7 @@ mod tests {
             vector: Some(90_000),
             halfvec: None,
             sparsevec: None,
+            ..VectorOids::default()
         };
         let desc = |name: &str, oid: i32, typmod: i32| FieldDesc {
             name: name.into(),

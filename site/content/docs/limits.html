@@ -113,6 +113,7 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td>gap in an externally given <code>id</code></td><td class="n">4096</td><td>a larger jump falls into a sparse map rather than a dense array</td></tr>
 <tr><td><code>timestamp</code></td><td class="n">1 ms, i64</td><td>±2.9×10<sup>8</sup> years; microseconds truncated, always UTC</td></tr>
 <tr><td><code>vector&lt;N, f16&gt;</code></td><td class="n">±65 504</td><td>~3 decimal digits; outside it, values silently become <code>inf</code> or 0</td></tr>
+<tr><td><code>geo</code> point</td><td class="n">±180°, ±90°</td><td>two <code>f64</code>s kept as written; past either range a write is refused, never wrapped</td></tr>
 <tr><td><code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's; the weights are <code>f32</code>, finite, and a zero is dropped</td></tr>
 
 <tr><td>change ring</td><td class="n"><b>4096 entries</b></td><td><code>--changes</code>; how far behind a subscriber may fall, 24 bytes each</td></tr>

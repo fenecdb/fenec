@@ -176,7 +176,7 @@ export function mount(host, ctx) {
         if (!can.length) rows.push(h('p', { class: 'hint' }, 'Every field that takes an index has one.'));
       } else if (op === 'add') {
         rows.push(box('sc-name', 'Name', (v.nameEl = h('input', { id: 'sc-name', type: 'text', value: v.name ?? '', spellcheck: 'false', autocomplete: 'off' }))));
-        const types = h('datalist', { id: 'sc-types' }, ['text', 'int', 'float', 'bool', 'timestamp', 'json', 'bytes', '[text]', 'vector<768>', 'sparse<30522>'].map((t) => h('option', { value: t })));
+        const types = h('datalist', { id: 'sc-types' }, ['text', 'int', 'float', 'bool', 'timestamp', 'json', 'bytes', '[text]', 'vector<768>', 'sparse<30522>', 'geo'].map((t) => h('option', { value: t })));
         rows.push(box('sc-type', 'Type', h('div', {}, (v.typeEl = h('input', { id: 'sc-type', type: 'text', value: v.type ?? 'text', list: 'sc-types', spellcheck: 'false', autocomplete: 'off' })), types)));
         let kinds = [];
         try {

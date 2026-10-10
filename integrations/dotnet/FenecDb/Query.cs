@@ -115,6 +115,12 @@ public sealed class Computed
     public static Computed CountDistinct(string field) =>
         new("expr", null, $"count(distinct {Builder.FieldPath(field)})", []);
 
+    /// <summary><c>distance(field, point)</c>: the metres from a point, <c>[lon, lat]</c>, to the row's, for a
+    /// select list -- <c>Computed.Distance("loc", new[] { 13.4, 52.5 }).As("m")</c>, what Redis's
+    /// <c>GEOSEARCH ... WITHDIST</c> answers with.</summary>
+    public static Computed Distance(string field, object? point) =>
+        new("expr", null, $"distance({Builder.FieldPath(field)}, ?)", [point]);
+
     /// <summary><c>first(field)</c>, or <c>first(field by key)</c>: the value of the row least by
     /// <paramref name="by"/> -- by the order the rows were written without one -- that has a value; a bar's open is
     /// <c>Computed.First("px", "at")</c>.</summary>
@@ -169,7 +175,7 @@ public sealed class Computed
 
 internal sealed class Node(string t)
 {
-    public string T { get; } = t; // and, or, not, null, in, cmp, raw
+    public string T { get; } = t; // and, or, not, null, in, cmp, within, dist, raw
     public List<Node> Items { get; init; } = [];
     public string Field { get; init; } = "";
     public string Op { get; init; } = "";
@@ -433,12 +439,48 @@ internal static class Builder
                     : new Node("not") { Items = [FieldCond(field, e.Value)] });
                 continue;
             }
+            // A point's: in the box [west, south, east, north], and the metres from a point, compared.
+            if (k == "within")
+            {
+                items.Add(new Node("within") { Field = field, Value = e.Value });
+                continue;
+            }
+            if (k == "distance")
+            {
+                items.Add(DistanceCond(field, e.Value));
+                continue;
+            }
             if (!Ops.TryGetValue(k, out var op)) throw Refuse($"unknown operator `{k}` (field: {field})");
             items.Add(op == "in" ? InCond(field, e.Value) : CmpNode(field, op, e.Value));
         }
         return items.Count switch
         {
             0 => throw Refuse($"empty condition object (field: {field})"),
+            1 => items[0],
+            _ => new Node("and") { Items = items },
+        };
+    }
+
+    // `{ ["from"] = [lon, lat], ["lte"] = 500 }`: a point's distance, compared -- distance(loc, $1) <= $2, each
+    // comparison given its own.
+    static Node DistanceCond(string field, object? spec)
+    {
+        var from = spec is IDictionary d && d.Contains("from") ? d["from"] : null;
+        if (spec is not IDictionary ops || from is null or string or IDictionary || from is not IEnumerable)
+            throw Refuse($"distance takes {{ from: [lon, lat], <op>: metres }} (field: {field})");
+        var items = new List<Node>();
+        foreach (DictionaryEntry e in ops)
+        {
+            var k = Convert.ToString(e.Key, CultureInfo.InvariantCulture) ?? "";
+            if (k == "from") continue;
+            var number = e.Value is sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal;
+            if (!Ops.TryGetValue(k, out var op) || op is "in" or "has" or "~" || !number)
+                throw Refuse($"distance compares metres with lt, lte, gt, gte, eq or ne: {k} (field: {field})");
+            items.Add(new Node("dist") { Field = field, Op = op, Value = e.Value, Values = [from] });
+        }
+        return items.Count switch
+        {
+            0 => throw Refuse($"distance needs a comparison, as lte: metres (field: {field})"),
             1 => items[0],
             _ => new Node("and") { Items = items },
         };
@@ -493,6 +535,11 @@ internal static class Builder
                 return $"{c.Field} in [{string.Join(", ", c.Values.Select(bind.Bind))}]";
             case "cmp":
                 return $"{c.Field} {c.Op} {bind.Bind(c.Value)}";
+            case "within":
+                return $"within({c.Field}, {bind.Bind(c.Value)})";
+            case "dist":
+                var point = bind.Bind(c.Values[0]);
+                return $"distance({c.Field}, {point}) {c.Op} {bind.Bind(c.Value)}";
         }
         var pieces = c.Sql.Split('?');
         var out_ = new StringBuilder();

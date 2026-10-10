@@ -117,6 +117,14 @@ class Computed private constructor(
             Computed(null, "count(distinct ${Builder.path(field)})", emptyList())
 
         /**
+         * `distance(field, point)`: the metres from a point, `[lon, lat]`, to
+         * the row's -- `Computed.distance("loc", listOf(13.4, 52.5)).alias("m")`,
+         * what Redis's `GEOSEARCH ... WITHDIST` answers with.
+         */
+        @JvmStatic fun distance(field: String, point: Any?): Computed =
+            Computed(null, "distance(${Builder.path(field)}, ?)", listOf(point))
+
+        /**
          * `first(field)`, or `first(field by key)`: the value of the row
          * least by [by] -- by the order the rows were written without one --
          * that has a value; a bar's open is `Computed.first("px", "at")`.
@@ -144,6 +152,8 @@ internal sealed class Node {
     class Null(val field: String, val negated: Boolean) : Node()
     class In(val field: String, val values: List<Any?>) : Node()
     class Cmp(val field: String, val op: String, val value: Any?) : Node()
+    class Within(val field: String, val box: Any?) : Node()
+    class Distance(val field: String, val from: Any?, val op: String, val metres: Any?) : Node()
     class Raw(val sql: String, val params: List<Any?>) : Node()
 }
 
@@ -336,11 +346,44 @@ internal object Builder {
                 items.add(if (v == null) Node.Null(field, true) else Node.Not(fieldCond(field, v)))
                 continue
             }
+            // A point's: in the box `[west, south, east, north]`, and the
+            // metres from a point, compared.
+            if (k == "within") {
+                items.add(Node.Within(field, v))
+                continue
+            }
+            if (k == "distance") {
+                items.add(distanceCond(field, v))
+                continue
+            }
             val op = ops[k] ?: throw refuse("unknown operator `$k` (field: $field)")
             items.add(if (op == "in") inCond(field, v) else cmp(field, op, v))
         }
         return when (items.size) {
             0 -> throw refuse("empty condition object (field: $field)")
+            1 -> items[0]
+            else -> Node.And(items)
+        }
+    }
+
+    /** `mapOf("from" to listOf(lon, lat), "lte" to 500)`: a point's distance, compared, each comparison its own. */
+    private fun distanceCond(field: String, spec: Any?): Node {
+        val from = (spec as? Map<*, *>)?.get("from")
+        if (spec !is Map<*, *> || (from !is List<*> && from !is Array<*>)) {
+            throw refuse("distance takes { from: [lon, lat], <op>: metres } (field: $field)")
+        }
+        val items = ArrayList<Node>()
+        for ((key, v) in spec) {
+            val k = key.toString()
+            if (k == "from") continue
+            val op = ops[k]
+            if (op == null || op == "in" || op == "has" || op == "~" || v !is Number) {
+                throw refuse("distance compares metres with lt, lte, gt, gte, eq or ne: $k (field: $field)")
+            }
+            items.add(Node.Distance(field, from, op, v))
+        }
+        return when (items.size) {
+            0 -> throw refuse("distance needs a comparison, as lte: metres (field: $field)")
             1 -> items[0]
             else -> Node.And(items)
         }
@@ -384,6 +427,11 @@ internal object Builder {
         is Node.Null -> "${c.field} is ${if (c.negated) "not " else ""}null"
         is Node.In -> "${c.field} in [${c.values.joinToString(", ") { bind.bind(it) }}]"
         is Node.Cmp -> "${c.field} ${c.op} ${bind.bind(c.value)}"
+        is Node.Within -> "within(${c.field}, ${bind.bind(c.box)})"
+        is Node.Distance -> {
+            val point = bind.bind(c.from)
+            "distance(${c.field}, $point) ${c.op} ${bind.bind(c.metres)}"
+        }
         is Node.Raw -> {
             val pieces = c.sql.split('?')
             val out = StringBuilder()
