@@ -773,8 +773,11 @@ again) -- a sum over the collections, nothing added to the write
 path: a lone put, put over and del measured 570/700/532 ns in memory either
 way, and 666/797/595 against 660/785/593 over a mapped file, inside the base
 build's own spread. `CompactPolicy` is the one rule (half the file dead and
-64 MB, `compact_due`), `compact_when_due` a look under `try_read` and a
-compact beside the database, `Compactor` a thread that looks every 5 s.
+64 MB, `compact_due`), `compact_when_due` a look under the read lock and a
+compact beside the database, `Compactor` a thread that looks every 5 s. The
+look waits for a write under way: under `try_read` 10 looks in 12 runs of
+`make compact-bench` found the lock taken and put a due compact off 5 s,
+the file growing 100-160 MB a second meanwhile.
 `fenec_http::link` runs one thread over every database the process serves
 (`--auto-compact <ratio>|off`, default 0.5), apart from the graph keeper so
 its graphs do not wait out a compact of a gigabyte; the native library
@@ -787,24 +790,43 @@ compact put back what it copied before the image. The browser has no thread:
 them, and its memory keeps them until it reloads. The swap was the cost:
 the writes made during a 4-6 s compact of a 1 GB file, 200 000 records, were
 copied under the write lock (409-811 ms); they are copied in rounds before
-it, the ids drained from the tails at once and their documents 4 096 under
-the read lock at a time (one round of 408 708 held the readers 592 ms behind
-the waiting writer -- the lock is fair to writers), the pages a chunk reads
-touched first with no lock (`Store::places`, `fs::touch_at`: waiting on the
-disk under the lock, 291 ms), until a round finds fewer than 1 000. The
-rounds' frames are handed over to the side file before the swap
-(`Beside::hand_over`; left to the first write after it, 400 MB under the
-write lock, 158 ms), every page of the new file is touched before it
-(`fs::touch`, 1.3 GB in 2.8 s; left to the readers, the read p50 went 2 ->
-100 us for two seconds), and the stores it replaces are dropped after the
+it, the ids drained from the tails at once and their documents looked up
+4 096 at a time under the read lock and copied after it (`Store::snapshot`:
+a payload in the file by its place, which an append never moves, one in
+memory copied out; 95-245 us held at the median, 3.1 ms at most) -- copied
+under it, one round of 408 708 held the readers 592 ms behind the waiting
+writer, and with its pages touched first a writer at 170-180k updates a
+second ran at 1.5-37k through the worst 100 ms of a 1.2 GB file's compact,
+83-144k now -- until a round finds fewer than 1 000. The rounds' frames are
+handed over to the side file before the swap (`Beside::hand_over`; left to
+the first write after it, 400 MB under the write lock, 158 ms), every page
+of the new file is asked for 16 MB at a time ahead of its reads and read in
+before it (`fs::touch`, `MADV_WILLNEED`: a fault at a time a 1.2 GB file
+took 3.0-3.3 s on this 8 GB Mac, the writer beside it at 11-15k, and its
+pages were out of memory again by the swap, the 2 s after it at 21-39k;
+asked for, 0.6-0.8 s and 90-150k; left to the readers, the read p50 went 2
+-> 100 us for two seconds), and the stores it replaces are dropped after the
 lock (their unmapping was 10-15 ms of it). Under the lock: the last few ids,
-the side file's fsync and the rename, 6.4-12.5 ms over a 1 GB file and
-13.7-14.8 durable (`make compact-bench`: 5M updates of a field over a
-million 1 KB records from one writer at about 150k/s, buffered, the file
-1.03 -> 2.4-3.2 -> 1.2-1.4 GB three times where it reached 6.2 GB without,
-the reads during a compact p99 4.4 ms and 34 at the most against 0.9 and 57
-beside the updates, and after them 435k reads/s from the first second where
-the 6.2 GB file started at 19k and took 25 s to 400k). A database read into
+the side file's fsync and the rename, 6.1-12.6 ms over a 1 GB file and
+13.7-15.7 durable (`make compact-bench`: 5M updates of a field over a
+million 1 KB records from one writer, buffered, the file 1.03 -> 2.1-3.0 ->
+1.1-1.6 GB three or four times where it reached 6.2 GB without, and after
+the updates 435k reads/s from the first second where the 6.2 GB file
+started at 19k and took 25 s to 400k). What a compact still costs that
+writer is the page cache's, not its own: beside this Mac's apps the cache
+holds about 2 GB of the file, the size at which a compact comes due, and
+past it the updates read most rows from the disk whether one runs or not --
+28-46k a second at 2.25-2.75 GB with the compactor off, 24-32k while a
+compact writes its image. Over nine runs each in turns, the median 100 ms
+of a compact went 27.1k -> 30.6k, its worst 1.1k -> 3.6k, a compact 10.9 ->
+7.8 s, the reads during it p99 2.3-6.5 -> 1.3-5.3 ms; at 250 000 records,
+whose file fits, 143k -> 153k, the worst 16.9k -> 129k against 180k with
+none, a compact 1.0 -> 0.3 s, the reads p99 0.5-1.3 -> 0.14-0.35 ms and 52
+-> 18 ms at most. Paced to half and to a quarter of its speed a compact
+left the writer where it was (30-35k) and took 56 and 95 s against 10; at
+utility QoS its reads were throttled behind the writer's and it took 138
+s; with its side file uncached (`F_NOCACHE`), or at utility QoS for the CPU
+alone, nothing moved. A database read into
 memory compacts beside itself too, the live records copied into fresh
 segments with no lock held; it used to copy them under the read lock and
 build every index again, though the indexes are keyed by id.

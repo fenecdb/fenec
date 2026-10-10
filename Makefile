@@ -503,8 +503,10 @@ docker-down:
 ## A file under updates, compacted on its own or not: YCSB's 1 KB records,
 ## a field updated at a time while a thread reads whole records, the file's
 ## size, the reads' latency during and after each compact and how long its
-## swap held the write lock, a line a second. COMPACT_ARGS, e.g.
-## "--updates 5000000 --mode durable --writers 16 --auto off".
+## swap held the write lock, a line a second; at the end the update rate in
+## 100 ms buckets while a compact ran, its median and its worst. COMPACT_ARGS,
+## e.g. "--updates 5000000 --mode durable --writers 16 --auto off", or
+## "--series <file>" for every bucket, the writers' lock waits beside it.
 COMPACT_ARGS ?= --records 1000000 --updates 5000000
 compact-bench:
 	$(CARGO) build --release -p fenec-core --example compaction

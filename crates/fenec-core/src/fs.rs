@@ -653,7 +653,17 @@ unsafe impl Sync for Mapping {}
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }
+
+/// `madvise`'s "the pages will be needed": the kernel reads them in ahead
+/// of the faults. 3 on Linux and on macOS.
+#[cfg(all(unix, target_pointer_width = "64"))]
+const MADV_WILLNEED: i32 = 3;
+
+/// How much of a file [`touch`] asks for at a time.
+#[cfg(all(unix, target_pointer_width = "64"))]
+const TOUCH_STEP: usize = 16 << 20;
 
 #[cfg(all(unix, target_pointer_width = "64"))]
 impl Mapping {
@@ -708,27 +718,35 @@ impl Mapping {
     }
 }
 
-/// Reads a byte of every page of `m`, so that its pages are in memory
-/// before anything waits on one.
+/// Brings every page of `m` into memory before anything waits on one: a
+/// step of it at a time asked for ahead ([`MADV_WILLNEED`]), then a byte of
+/// each of its pages read. Read a fault at a time, the pages came in a few
+/// at a time, and on this 8 GB Mac a compact's new 1.2 GB file took 3.0 to
+/// 3.3 s at about 400 MB/s -- the writer beside it at 11-15k updates a
+/// second, the file's old pages it read pushed out meanwhile, and the new
+/// ones gone again by the swap: the 2 s after it ran at 21-39k. Asked for
+/// first, the kernel reads a step in large requests: 0.6 to 0.8 s, and
+/// 90-150k a second after the swap (`make compact-bench`).
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub fn touch(m: &crate::store::Base) {
     let bytes: &[u8] = (**m).as_ref();
     let mut sum = 0u8;
-    for at in (0..bytes.len()).step_by(4096) {
-        // Volatile, or the compiler drops reads whose result is unused.
-        sum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(at)) };
-    }
-    std::hint::black_box(sum);
-}
-
-/// Reads the byte at each of `at` in `m`: the pages those places are on,
-/// brought into memory.
-#[cfg(all(unix, target_pointer_width = "64"))]
-pub fn touch_at(m: &crate::store::Base, at: &[usize]) {
-    let bytes: &[u8] = (**m).as_ref();
-    let mut sum = 0u8;
-    for &a in at.iter().filter(|&&a| a < bytes.len()) {
-        sum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(a)) };
+    // A step starts a whole number of steps into the mapping, which starts
+    // on a page: what `madvise` asks of an address.
+    for from in (0..bytes.len()).step_by(TOUCH_STEP) {
+        let to = (from + TOUCH_STEP).min(bytes.len());
+        // Advice: a refusal leaves the reads below to fault the pages in.
+        unsafe {
+            madvise(
+                bytes.as_ptr().add(from) as *mut u8,
+                to - from,
+                MADV_WILLNEED,
+            )
+        };
+        for at in (from..to).step_by(4096) {
+            // Volatile, or the compiler drops reads whose result is unused.
+            sum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(at)) };
+        }
     }
     std::hint::black_box(sum);
 }

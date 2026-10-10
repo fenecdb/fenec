@@ -754,19 +754,14 @@ impl Database {
         }
         // What was written since the last round of catching up: the rest of
         // the image.
+        let mut docs = crate::store::Snapshot::default();
         for (p, t) in b.parts.iter_mut().zip(tails) {
             let live = &self.collections[&p.name];
             let mut ids = t.unwrap().ids;
             ids.sort_unstable();
             ids.dedup();
-            copy_writes(
-                live,
-                p,
-                &ids,
-                &mut b.side,
-                &mut b.landed,
-                &mut b.landed_bytes,
-            )?;
+            live.store.snapshot(&ids, &mut docs)?;
+            copy_writes(p, &docs, &mut b.side, &mut b.landed, &mut b.landed_bytes)?;
             // An id handed out and deleted meanwhile left no record; it must
             // not come back.
             let next = live.store.next_id();
@@ -828,12 +823,15 @@ impl Database {
 
 /// Copies into a rewrite written beside the database the writes made since
 /// it was taken, or since the last round: the ids drained from the tails at
-/// once, their documents copied a few thousand at a time under the read
-/// lock, which keeps the writers out -- and the readers behind a writer
-/// waiting for it, the lock being fair to writers: one round of 408 708
-/// ids held it 592 ms. A document written again after its copy is in the
-/// tail again, for the next round. How many ids it copied; the next round
-/// takes those written meanwhile, and the write lock only the last few.
+/// once, and their documents a few thousand at a time -- looked up under the
+/// read lock and copied after it ([`Store::snapshot`]). Copied under it, a
+/// round held the writers out for as long as its reads of the file took:
+/// one of 408 708 ids held it 592 ms, and with the pages first brought in
+/// outside it a writer at 170k updates a second still ran at 910 through
+/// the worst 100 ms of a 1 GB file's first round. A document written again
+/// after its copy is in the tail again, for the next round. How many ids it
+/// copied; the next round takes those written meanwhile, and the write lock
+/// only the last few.
 #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 fn catch_up(db: &RwLock<Database>, b: &mut Beside) -> Result<usize> {
     let drained: Vec<Option<Vec<DocId>>> = {
@@ -843,6 +841,7 @@ fn catch_up(db: &RwLock<Database>, b: &mut Beside) -> Result<usize> {
         b.parts.iter().map(|p| tails.drain(p.token)).collect()
     };
     let mut copied = 0;
+    let mut docs = crate::store::Snapshot::default();
     for (p, ids) in b.parts.iter_mut().zip(drained) {
         // A schema change, or a collection gone: the finish refuses it.
         let Some(mut ids) = ids else {
@@ -852,57 +851,41 @@ fn catch_up(db: &RwLock<Database>, b: &mut Beside) -> Result<usize> {
         ids.dedup();
         copied += ids.len();
         for chunk in ids.chunks(CATCH_UP_CHUNK) {
-            // The pages the chunk reads, brought in with no lock held: read
-            // under it, each a wait on the disk, a chunk of 4 096 held the
-            // read lock up to 291 ms, and the readers waited behind the
-            // writer waiting for it.
-            let places = read(db)
-                .collections
-                .get(&p.name)
-                .and_then(|c| c.store.places(chunk));
-            if let Some((base, at)) = places {
-                crate::fs::touch_at(&base, &at);
+            {
+                let g = read(db);
+                let Some(live) = g.collections.get(&p.name).filter(|c| c.id == p.cid) else {
+                    return Ok(0);
+                };
+                live.store.snapshot(chunk, &mut docs)?;
             }
-            let g = read(db);
-            let Some(live) = g.collections.get(&p.name).filter(|c| c.id == p.cid) else {
-                return Ok(0);
-            };
-            copy_writes(
-                live,
-                p,
-                chunk,
-                &mut b.side,
-                &mut b.landed,
-                &mut b.landed_bytes,
-            )?;
+            copy_writes(p, &docs, &mut b.side, &mut b.landed, &mut b.landed_bytes)?;
         }
     }
     Ok(copied)
 }
 
-/// Each document of `ids` (ascending, once each) takes the state it has
-/// now in `live`, over the
-/// one the image holds, in a data record appended to the side file: inside
-/// the image, where the counter's header says it stands. The store holds
-/// those frames alone in memory, and hands them over as the ones of a
-/// record appended later ([`Database::hand_over`]).
+/// Each of `docs` (ascending, once each) takes the state it had when they
+/// were looked up, over the one the image holds, in a data record appended
+/// to the side file: inside the image, where the counter's header says it
+/// stands. The store holds those frames alone in memory, and hands them
+/// over as the ones of a record appended later ([`Database::hand_over`]).
 #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 fn copy_writes(
-    live: &Collection,
     p: &mut BesidePart,
-    ids: &[DocId],
+    docs: &crate::store::Snapshot,
     side: &mut crate::fs::SideFile,
     landed: &mut Vec<super::handover::Landed>,
     landed_bytes: &mut u64,
 ) -> Result<()> {
     let mut frames = Vec::new();
-    for &id in ids {
-        match live.store.raw(id)? {
+    docs.each(|id, payload| {
+        match payload {
             Some(payload) => frames.extend(p.store.append(OP_PUT, id, payload)),
             None if p.store.contains(id) => frames.extend(p.store.append(OP_DEL, id, &[])),
             None => {}
         }
-    }
+        Ok(())
+    })?;
     if !frames.is_empty() {
         side.write(&record_head(REC_DATA, p.cid, frames.len()))?;
         let at = side.at();
@@ -1009,7 +992,8 @@ impl Beside {
         // Every page of the new file is touched here, with no lock held: left
         // to the readers, the first read of each after the swap waited on its
         // fault, the read p50 went from 2 to 100 us for two seconds and the
-        // updates from 150k to 4k a second. Touched here, 1.3 GB in 2.8 s.
+        // updates from 150k to 4k a second. Touched here a fault at a time,
+        // 1.2 GB took 3 s; asked for ahead ([`crate::fs::touch`]), 0.7.
         if self.mapped {
             crate::fs::touch(&base);
         }
@@ -1177,8 +1161,10 @@ fn compact_online(
 const CATCH_UP_ROUNDS: usize = 16;
 #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 const CATCH_UP_DONE: usize = 1_000;
-/// The documents a catch-up copies under one hold of the read lock: 4 096
-/// of 1 KB, about 6 ms.
+/// The documents a catch-up looks up under one hold of the read lock, and
+/// copies after it: 4 096, held 95 to 245 us at the median and 3.1 ms at
+/// the most, where copied under it they held it about 6 ms, and up to 291
+/// with their pages read from the disk.
 #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 const CATCH_UP_CHUNK: usize = 4_096;
 
@@ -1209,11 +1195,12 @@ fn rewrite_beside(
             };
             during();
             b.write()?;
-            // The writes made while the image was written are copied in under
-            // the read lock, a round at a time, and the side file synced with
-            // no lock held, until a round finds few: taken under the write
-            // lock all at once, the 200 000 updates a 4 s compact of a 1 GB
-            // file met held every reader 409 to 811 ms.
+            // The writes made while the image was written are copied in a
+            // round at a time -- looked up under the read lock, copied after
+            // it -- and the side file synced with no lock held, until a round
+            // finds few: taken under the write lock all at once, the 200 000
+            // updates a 4 s compact of a 1 GB file met held every reader 409
+            // to 811 ms.
             for _ in 0..CATCH_UP_ROUNDS {
                 let copied = catch_up(db, &mut b)?;
                 b.side.sync()?;

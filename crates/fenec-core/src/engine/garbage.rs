@@ -180,21 +180,26 @@ impl Database {
 }
 
 /// Runs a compact of `db` beside it if `policy` says one is due: looked at
-/// under the read lock, passed over while the lock is taken -- the next
-/// look finds it -- and run as `compact` runs on a server, the live records
-/// written into a side file with no lock held and the write lock taken only
-/// to add the writes made meanwhile and put the file in place
+/// under the read lock and run as `compact` runs on a server, the live
+/// records written into a side file with no lock held and the write lock
+/// taken only to add the writes made meanwhile and put the file in place
 /// ([`Database::maintain`]). `None` when nothing was due.
+///
+/// The look waits for a write under way. Passed over while the lock was
+/// taken (`try_read`), a due compact waited for the next look, 5 s later:
+/// under one writer updating a million 1 KB records, 10 looks in 12 runs
+/// of `make compact-bench` found the lock taken, each putting a compact
+/// off while the file grew 100 to 160 MB a second -- the runs that had
+/// them began compacts at up to 3.0 GB, the others at up to 2.7.
 ///
 /// A host that embeds the engine calls this from a thread of its own every
 /// few seconds, or starts a [`Compactor`]; the browser module has neither
 /// threads nor a file to write beside, and compacts when its page says so.
 pub fn compact_when_due(db: &RwLock<Database>, policy: &CompactPolicy) -> Option<Result<Response>> {
-    let due = match db.try_read() {
-        Ok(g) => g.compact_due(policy),
-        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().compact_due(policy),
-        Err(std::sync::TryLockError::WouldBlock) => false,
-    };
+    let due = db
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .compact_due(policy);
     if !due {
         return None;
     }

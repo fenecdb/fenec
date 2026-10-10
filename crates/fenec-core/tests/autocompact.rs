@@ -368,3 +368,88 @@ fn what_a_compact_beside_the_writes_leaves_dead_is_counted_dead() {
         assert_eq!(rows(&again, &format!("get t where n = {last}")).len(), 100);
     }
 }
+
+/// A look at a compact that is due, made while a write holds the lock,
+/// waits for it rather than pass the compact over until the next look:
+/// under a steady writer the lock is taken at many a look, and a compact
+/// passed over waited 5 s more while the file grew.
+#[test]
+fn a_look_made_while_a_write_holds_the_lock_waits_for_it() {
+    let path = tmp("look-waits");
+    let mut db = fenec_core::fs::open(&path).unwrap();
+    seed(&mut db, 100);
+    let db = Arc::new(RwLock::new(db));
+    let g = {
+        let mut g = db.write().unwrap();
+        let mut rng = Rng(5);
+        for _ in 0..3_000 {
+            let w = write(&mut rng, 100);
+            exec(&mut g, &w);
+        }
+        assert!(g.compact_due(&small()));
+        g
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let looking = Arc::clone(&db);
+    let look = std::thread::spawn(move || {
+        let r = compact_when_due(&looking, &small()).map(|r| r.map(|_| ()));
+        tx.send(()).unwrap();
+        r
+    });
+    // The look cannot end while the lock is held: one that ended meanwhile
+    // passed the compact over. Held a while, then let go.
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the look passed over a due compact while a write held the lock"
+    );
+    drop(g);
+    assert!(matches!(look.join().unwrap(), Some(Ok(()))));
+    assert_eq!(db.read().unwrap().compactions(), 1);
+    assert!(!small().due(db.read().unwrap().garbage()));
+}
+
+/// A writer that never pauses: each compact still runs and ends -- its
+/// catch-up copies the writes made meanwhile while the writer goes on, and
+/// takes the write lock only for the last few -- and the file comes back to
+/// what it holds each time rather than grow with every write.
+#[test]
+fn compacts_keep_up_with_a_writer_that_never_pauses() {
+    for mapped in [true, false] {
+        let path = tmp(&format!("steady-{mapped}"));
+        let mut db = fenec_core::fs::open_with(&path, mapped, Box::new(Ok)).unwrap();
+        let mut twin = Database::new();
+        seed(&mut db, 300);
+        seed(&mut twin, 300);
+        let db = Arc::new(RwLock::new(db));
+        let compactor = Compactor::start_every(&db, small(), Duration::from_millis(2)).unwrap();
+        let mut rng = Rng(77);
+        let (mut writes, mut most) = (0, 0f64);
+        // Until five compacts have run, each statement parsed before the
+        // lock is taken, as a server's are; bounded, should they never run.
+        while db.read().unwrap().compactions() < 5 {
+            assert!(writes < 500_000, "{writes} writes and no five compacts");
+            let w = write(&mut rng, 300);
+            let stmt = fenec_ql::parse_one(&w).unwrap();
+            {
+                let mut g = db.write().unwrap();
+                g.execute(&stmt).unwrap();
+                if writes % 100 == 0 {
+                    let g = g.garbage();
+                    most = most.max(g.file as f64 / (g.live + g.kept).max(1) as f64);
+                }
+            }
+            twin.execute(&stmt).unwrap();
+            writes += 1;
+        }
+        drop(compactor);
+        // Never long past twice what it holds: 2.5 to 2.8x here, beside ten
+        // busy loops on an 8-core machine as well.
+        assert!(most < 4.0, "mapped {mapped}: the file reached {most:.2}x");
+        while let Some(r) = compact_when_due(&db, &small()) {
+            r.unwrap();
+        }
+        let g = db.read().unwrap().garbage();
+        assert!(!small().due(g), "mapped {mapped}: {g:?}");
+        same(&db.read().unwrap(), &twin);
+    }
+}

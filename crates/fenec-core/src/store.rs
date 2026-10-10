@@ -98,6 +98,44 @@ pub type Base = std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>;
 #[cfg(target_arch = "wasm32")]
 pub type Base = std::sync::Arc<Vec<u8>>;
 
+/// Documents looked up under a lock and read after it
+/// ([`Store::snapshot`]): each one's place in the mapped file, or its
+/// payload copied out of memory, or nothing for one deleted.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub struct Snapshot {
+    base: Option<Base>,
+    held: Vec<u8>,
+    docs: Vec<(DocId, Place)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum Place {
+    File(u64, u32),
+    Held(usize, u32),
+    Gone,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Snapshot {
+    /// Each document in the order it was asked for, its payload or `None`.
+    pub fn each(&self, mut f: impl FnMut(DocId, Option<&[u8]>) -> Result<()>) -> Result<()> {
+        let file: &[u8] = self.base.as_ref().map_or(&[], |b| (**b).as_ref());
+        for (id, place) in &self.docs {
+            let payload = match *place {
+                Place::File(at, len) => Some(
+                    file.get(at as usize..at as usize + len as usize)
+                        .ok_or_else(|| Error::Corrupt("offset outside the mapped file".into()))?,
+                ),
+                Place::Held(from, len) => Some(&self.held[from..from + len as usize]),
+                Place::Gone => None,
+            };
+            f(*id, payload)?;
+        }
+        Ok(())
+    }
+}
+
 /// Document id -> location mapping.
 ///
 /// Ids are produced consecutively from 1 by `allocate_id`, so a dense array
@@ -821,19 +859,32 @@ impl Store {
         }
     }
 
-    /// The mapped file and where in it the payloads of `ids` are, those of
-    /// them read from it: what a reader may touch with no lock held, so
-    /// that the pages are in memory before it reads them under one.
+    /// The documents of `ids` as they stand, to be copied once the lock
+    /// they were looked up under is let go: a payload in the mapped file by
+    /// its place -- the file is only appended to, so the bytes there stay
+    /// what they are -- and one held in memory copied out, since a write
+    /// may change its segment. Copied under the read lock, a catch-up's
+    /// page faults on the file held the writers out with it.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn places(&self, ids: &[DocId]) -> Option<(Base, Vec<usize>)> {
-        let (base, _) = self.base.as_ref()?;
-        let at = ids
-            .iter()
-            .filter_map(|&id| self.index.get(id))
-            .filter(|l| l.seg & MAPPED != 0)
-            .map(|l| (((l.seg & !MAPPED) as u64) << 32 | l.off as u64) as usize)
-            .collect();
-        Some((base.clone(), at))
+    pub fn snapshot(&self, ids: &[DocId], into: &mut Snapshot) -> Result<()> {
+        into.docs.clear();
+        into.held.clear();
+        into.base = self.base.as_ref().map(|(b, _)| b.clone());
+        for &id in ids {
+            let place = match self.index.get(id) {
+                None => Place::Gone,
+                Some(l) if l.seg & MAPPED != 0 && into.base.is_some() => {
+                    Place::File(((l.seg & !MAPPED) as u64) << 32 | l.off as u64, l.len)
+                }
+                Some(l) => {
+                    let from = into.held.len();
+                    into.held.extend_from_slice(self.payload(l)?);
+                    Place::Held(from, l.len)
+                }
+            };
+            into.docs.push((id, place));
+        }
+        Ok(())
     }
 
     /// Decodes the whole document: a dropped place passed over, and a
