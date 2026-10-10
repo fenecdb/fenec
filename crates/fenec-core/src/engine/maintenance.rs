@@ -992,7 +992,8 @@ impl Beside {
         // Every page of the new file is touched here, with no lock held: left
         // to the readers, the first read of each after the swap waited on its
         // fault, the read p50 went from 2 to 100 us for two seconds and the
-        // updates from 150k to 4k a second. Touched here, 1.3 GB in 2.8 s.
+        // updates from 150k to 4k a second. Touched here a fault at a time,
+        // 1.2 GB took 3 s; asked for ahead ([`crate::fs::touch`]), 0.7.
         if self.mapped {
             crate::fs::touch(&base);
         }
