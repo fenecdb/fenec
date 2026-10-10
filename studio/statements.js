@@ -1,4 +1,6 @@
-// Every statement the studio sends, written here and nowhere else.
+// Every statement the studio sends, written here and nowhere else -- the
+// rows' here, and those of the views past them, which load later, in
+// `statements-views.js` under the same rules.
 //
 // A value is never spliced into a statement's text: it goes as a
 // parameter, `$n`, which the server binds. A name cannot be a parameter --

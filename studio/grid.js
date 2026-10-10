@@ -98,14 +98,24 @@ export class Grid {
    * A new view: its fields, how many rows it has, how a block is read and
    * the order. Every block read before is let go of.
    */
-  show({ fields, total, source, order, quick, readOnly }) {
+  show({ fields, total, source, order, quick, readOnly, rows = null, plain = false, empty = null, mark = null }) {
     this.epoch++;
     this.fields = fields;
-    this.total = total;
+    // `rows`: every row held already -- a query's answer, a live shape --
+    // drawn as a collection's are, with nothing to read. `plain` leaves out
+    // the quick filters and the sorting, which are statements of the
+    // collection's; `mark(row)` names a row's state (`data-mark`), which
+    // the live view colours as it changes.
+    this.local = rows;
+    this.plain = plain;
+    this.mark = mark;
+    this.emptyText = empty;
+    this.total = rows ? rows.length : total;
+    total = this.total;
     this.source = source;
     this.order = order;
     this.quick = { ...quick };
-    this.readOnly = readOnly;
+    this.readOnly = readOnly || !!rows;
     this.blocks.clear();
     this.loading.clear();
     this.queue = [];
@@ -119,13 +129,28 @@ export class Grid {
     for (const r of this.pool) r.el.remove();
     this.pool = [];
     this.empty.hidden = total > 0;
-    fill(this.empty, total > 0 ? '' : 'No rows match. Clear a filter, or add a row with N.');
+    fill(this.empty, total > 0 ? '' : (this.emptyText ?? 'No rows match. Clear a filter, or add a row with N.'));
     this.scroller.scrollTop = 0;
+    this.draw();
+  }
+
+  /**
+   * The rows held in memory, again: the view keeps its scroll and its
+   * active cell, and every row in view is drawn anew, its mark with it.
+   */
+  setRows(rows) {
+    this.local = rows;
+    this.total = rows.length;
+    this.el.setAttribute('aria-rowcount', String(this.total + 2));
+    this.empty.hidden = this.total > 0;
+    fill(this.empty, this.total > 0 ? '' : (this.emptyText ?? ''));
+    for (const slot of this.pool) slot.at = -1;
     this.draw();
   }
 
   /** The row at `i` where it is held. */
   row(i) {
+    if (this.local) return this.local[i];
     const b = this.blocks.get(Math.floor(i / BLOCK));
     return Array.isArray(b) ? b[i % BLOCK] : undefined;
   }
@@ -145,7 +170,7 @@ export class Grid {
 
   #header() {
     const cells = this.fields.map((f, c) => {
-      const s = sortable(f);
+      const s = !this.plain && sortable(f);
       const dir = this.order?.field === f.name ? (this.order.desc ? 'descending' : 'ascending') : s ? 'none' : null;
       const label = [h('span', { class: 'col-name' }, f.name), h('span', { class: 'col-type' }, f.type)];
       return h(
@@ -194,6 +219,7 @@ export class Grid {
       return h('div', { class: 'cell', role: 'gridcell', 'aria-colindex': String(c + 1) }, input);
     });
     fill(this.quickRow, inputs);
+    this.quickRow.hidden = this.plain;
     this.quickRow.style.gridTemplateColumns = this.template;
     const width = `${this.widths.reduce((a, b) => a + b, 0)}px`;
     this.head.style.width = width;
@@ -263,7 +289,7 @@ export class Grid {
       if (slot.at !== i || slot.row !== row) this.#paintRow(slot, i, row);
     }
     this.#paintActive();
-    if (this.total > 0) this.#want(Math.floor(first / BLOCK), Math.floor(last / BLOCK));
+    if (this.total > 0 && !this.local) this.#want(Math.floor(first / BLOCK), Math.floor(last / BLOCK));
   }
 
   #paintRow(slot, i, row) {
@@ -271,6 +297,7 @@ export class Grid {
     slot.row = row;
     slot.el.setAttribute('aria-rowindex', String(i + 3));
     slot.el.classList.toggle('pending', row === undefined);
+    if (this.mark) slot.el.dataset.mark = (row && this.mark(row)) || '';
     if (slot.cells.length !== this.fields.length) {
       slot.cells = this.fields.map((f, c) => h('div', { class: 'cell', role: 'gridcell', 'aria-colindex': String(c + 1) }));
       slot.el.replaceChildren(...slot.cells);
@@ -423,7 +450,7 @@ export class Grid {
         e.preventDefault();
         this.hooks.onCopy(this.activeRow);
       }
-    } else if (!mod && e.key === 's') {
+    } else if (!mod && e.key === 's' && !this.plain) {
       const f = this.fields[col];
       if (f && sortable(f)) this.hooks.onSort(f.name);
     }

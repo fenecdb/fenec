@@ -1104,6 +1104,16 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
     let outcome = match (req.method, req.segments().as_slice()) {
         (Method::Get | Method::Head, ["_schema"]) => {
             let schemas = visible(&held::read(db));
+            // `?as=fenecql`: the same description with its collections as
+            // the statements that make them -- what the studio shows a
+            // collection as, written by the engine rather than again in
+            // the page, and a body `/_schema/plan` takes back as it is.
+            if req.query.iter().any(|(k, v)| k == "as" && v == "fenecql") {
+                let mut out = String::from("{\"format\":1,\"fenecql\":");
+                fenec_core::json::escape_into(&mut out, &fenec_core::declared::fenecql(&schemas));
+                out.push('}');
+                return Response::json(200, out);
+            }
             return Response::json(200, fenec_core::declared::describe(&schemas));
         }
         (Method::Post, ["_schema", "plan"]) if follow => {
@@ -1785,14 +1795,17 @@ fn cors(resp: Response, cfg: &Config) -> Response {
             // and reads the `Fenec-Seq` of its answer, which tells it when a
             // stream is past the write: refused and unread across origins
             // before, its retries made a row twice and an insert the shape
-            // did not hold kept its temporary row until the next seed.
+            // did not hold kept its temporary row until the next seed. The
+            // request id goes out too: the studio's query editor, served by
+            // a node and asking a router (`--studio-connect`), shows it
+            // beside an answer so a person can find its lines in the logs.
             .header(
                 "Access-Control-Allow-Headers",
                 "content-type, authorization, idempotency-key, fenec-after, fenec-wait, if-none-match",
             )
             .header(
                 "Access-Control-Expose-Headers",
-                "fenec-seq, fenec-next, idempotent-replayed, etag",
+                "fenec-seq, fenec-next, idempotent-replayed, etag, x-request-id",
             )
             .header("Access-Control-Max-Age", "600")
             .header("Vary", "Origin"),

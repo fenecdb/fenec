@@ -177,8 +177,10 @@ function placeholder(kind, f) {
 /** The keys, written out. */
 export function help() {
   const keys = [
+    ['1 to 5', 'Rows, query, schema, live, admin'],
     ['/', 'Filter with a where clause'],
-    ['Alt+1, Alt+2', 'Collections, rows'],
+    ['Alt+1, Alt+2', 'Collections, the view'],
+    ['Ctrl+Enter, ⌘Enter', 'Run the query (in the editor)'],
     ['Arrows, Page Up, Page Down', 'Move between cells'],
     ['Ctrl+Home, Ctrl+End', 'First row, last row'],
     ['Enter or F2', 'Edit the cell'],

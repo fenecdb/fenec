@@ -214,14 +214,23 @@ function layout() {
     title: 'Switch the theme',
   }, dark() ? 'Light' : 'Dark');
   const out = h('button', { type: 'button', class: 'btn ghost', onclick: () => signOut() }, 'Sign out');
+  const tabs = h(
+    'nav',
+    { class: 'views', 'aria-label': 'Views' },
+    VIEWS.filter(([v]) => v !== 'admin' || adminAllowed()).map(([v, label, key]) =>
+      h('button', { type: 'button', class: 'view-tab', dataset: { view: v }, title: `${label} (${key})`, onclick: () => showView(v) }, label),
+    ),
+  );
   const top = h(
     'header',
     { class: 'top' },
     menu,
     h('div', { class: 'brand' }, mark(), h('span', { class: 'brand-name' }, 'fenec studio')),
     h('div', { class: 'where-at' }, h('span', { class: 'server-host', title: state.server }, new URL(state.server).host), tenantPick),
+    tabs,
     h('div', { class: 'top-end' }, whoBtn, themeBtn, out),
   );
+  const views = h('div', { class: 'view-host' });
   const main = h(
     'main',
     { class: 'main', id: 'main' },
@@ -230,11 +239,13 @@ function layout() {
     gridHost,
     status,
   );
-  fill(root, h('div', { class: 'app' }, top, h('div', { class: 'horizon', 'aria-hidden': 'true' }, horizon), h('div', { class: 'body' }, sideHost, main, inspector), toasts));
-  parts = { where, params, title, total, newRow, facets, status, inspector, whoBtn, horizon };
+  fill(root, h('div', { class: 'app' }, top, h('div', { class: 'horizon', 'aria-hidden': 'true' }, horizon), h('div', { class: 'body', dataset: { view: 'rows' } }, sideHost, main, views, inspector), toasts));
+  parts = { where, params, title, total, newRow, facets, status, inspector, whoBtn, horizon, tabs, views };
+  closeViews();
+  view = 'rows';
   sidebar = new Sidebar(sideHost, (name) => {
     document.body.classList.remove('side-open');
-    openCollection(name);
+    pick(name);
   });
   grid = new Grid(gridHost, {
     onSort: (field) => sortBy(field),
@@ -371,7 +382,14 @@ function identity() {
   d.showModal();
 }
 
+/** Every view opened let go of: a live view's stream ends with it. */
+function closeViews() {
+  for (const m of Object.values(mounted)) m.view?.close?.();
+  mounted = {};
+}
+
 function signOut() {
+  closeViews();
   forget();
   clearInterval(ticking);
   Object.assign(state, { token: '', who: null, claims: null, db: null });
@@ -382,7 +400,8 @@ function signOut() {
 
 // ------------------------------------------------------------------ collections
 
-async function loadCollections() {
+/** The collections the token reads, their counts and the file's sizes, into the sidebar. */
+async function listCollections() {
   const db = state.db;
   const list = await db.run('collections');
   state.collections = (list.rows ?? list).filter((c) => c && typeof c.name === 'string');
@@ -401,29 +420,166 @@ async function loadCollections() {
   const full = state.who?.kind !== 'scoped';
   const stats = full && state.mode === 'single' ? await metrics(state.base, state.token) : null;
   sidebar.show({ collections: state.collections, counts, stats });
-  const wanted = new URLSearchParams(location.hash.slice(1)).get('c');
-  const first = state.collections.find((c) => c.name === wanted) ?? state.collections[0];
-  if (first) await openCollection(first.name);
-  else {
-    fill(parts.title, 'No collections');
-    fill(parts.status, 'This token reads no collection here.');
+  if (state.current) {
+    state.current = state.collections.find((c) => c.name === state.current.name) ?? null;
+    if (state.current) sidebar.select(state.current.name);
   }
 }
 
-async function openCollection(name) {
+async function loadCollections() {
+  state.current = null;
+  await listCollections();
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const wanted = hash.get('c');
+  const first = state.collections.find((c) => c.name === wanted) ?? state.collections[0];
+  const v = VIEWS.some(([x]) => x === hash.get('v')) ? hash.get('v') : 'rows';
+  if (first) {
+    if (v === 'rows') await openCollection(first.name);
+    else {
+      choose(first.name);
+      await showView(v);
+    }
+  } else {
+    fill(parts.title, 'No collections');
+    fill(parts.status, 'This token reads no collection here.');
+    if (v !== 'rows') await showView(v);
+  }
+}
+
+/** `name` the current collection: the sidebar, the title and the address say so. */
+function choose(name) {
   const c = state.collections.find((x) => x.name === name);
-  if (!c) return;
+  if (!c) return null;
   state.current = c;
+  document.title = `${c.name} · fenec studio`;
+  sidebar.select(name);
+  remember();
+  return c;
+}
+
+/** The view and the collection in the address, so a reload comes back to them. */
+function remember() {
+  const q = new URLSearchParams();
+  if (view !== 'rows') q.set('v', view);
+  if (state.current) q.set('c', state.current.name);
+  history.replaceState(null, '', `#${q}`);
+}
+
+/** A collection picked in the sidebar: its rows, or the view open now shows it. */
+function pick(name) {
+  if (view === 'rows') return openCollection(name);
+  if (!choose(name)) return;
+  mounted[view]?.view?.open?.(name, { picked: true });
+}
+
+let shownRows = null;
+async function openCollection(name) {
+  const c = choose(name);
+  if (!c) return;
+  shownRows = name;
   state.view = { where: '', params: '[]', quick: {}, order: null };
   parts.where.value = '';
   parts.params.value = '[]';
   parts.newRow.hidden = !may('insert', c.name);
-  document.title = `${c.name} · fenec studio`;
-  history.replaceState(null, '', `#c=${encodeURIComponent(c.name)}`);
-  sidebar.select(name);
   fill(parts.title, c.name);
   await reload();
   grid.el.focus({ preventScroll: true });
+}
+
+// ------------------------------------------------------------------ views
+//
+// The rows are the first load. The query editor, the schema, the live view
+// and the admin page are modules of their own, fetched the first time each
+// is opened, with their stylesheet: a person who only browses rows never
+// downloads them. Each is `mount(host, ctx)`, answering `{open(name,
+// {picked}), close()}`; it reads and writes through `ctx`, with the token
+// the rows use and no other.
+
+const VIEWS = [
+  ['rows', 'Rows', 1],
+  ['query', 'Query', 2],
+  ['schema', 'Schema', 3],
+  ['live', 'Live', 4],
+  ['admin', 'Admin', 5],
+];
+const LOAD = {
+  query: () => import('./editor.js'),
+  schema: () => import('./schema.js'),
+  live: () => import('./live.js'),
+  admin: () => import('./admin.js'),
+};
+let view = 'rows';
+let mounted = {};
+let styled = null;
+
+/** Whether the admin view is shown: to the server's own token, or a server with none. */
+function adminAllowed() {
+  return state.who?.kind === 'full' || state.who?.kind === 'open';
+}
+
+/** The views' stylesheet, linked once, resolved once it applies. */
+function styles() {
+  styled ??= new Promise((resolve, reject) => {
+    const link = h('link', { rel: 'stylesheet', href: 'views.css' });
+    link.addEventListener('load', resolve);
+    link.addEventListener('error', () => {
+      styled = null;
+      link.remove();
+      reject(new Error('the views’ stylesheet did not load'));
+    });
+    document.head.append(link);
+  });
+  return styled;
+}
+
+const ctx = {
+  state,
+  say: (text, kind) => say(text, kind),
+  explain: (e) => explain(e),
+  may: (op, c) => may(op, c),
+  fieldsOf: (c) => fieldsOf(c),
+  /** The collections listed again, after a schema change. */
+  refresh: () => listCollections(),
+  /** The query editor opened on `text`. */
+  query: async (text) => {
+    await showView('query');
+    mounted.query?.view?.load?.(text);
+  },
+};
+
+async function showView(name) {
+  if (!VIEWS.some(([v]) => v === name) || (name === 'admin' && !adminAllowed())) name = 'rows';
+  const was = view;
+  view = name;
+  for (const b of parts.tabs.children) {
+    if (b.dataset.view === name) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  }
+  root.querySelector('.body').dataset.view = name;
+  for (const [k, m] of Object.entries(mounted)) m.host.hidden = k !== name;
+  if (was !== name) mounted[was]?.view?.hide?.();
+  remember();
+  if (name === 'rows') {
+    if (state.current && shownRows !== state.current.name) await openCollection(state.current.name);
+    else grid.el.focus({ preventScroll: true });
+    return;
+  }
+  if (!mounted[name]) {
+    const label = VIEWS.find(([v]) => v === name)[1];
+    const host = h('section', { class: 'view', 'aria-label': label }, h('p', { class: 'view-loading' }, `Opening ${label.toLowerCase()}…`));
+    parts.views.append(host);
+    mounted[name] = { host, view: null, ready: Promise.all([styles(), LOAD[name]()]).then(([, mod]) => mod.mount(host, ctx)) };
+  }
+  const m = mounted[name];
+  m.host.hidden = false;
+  try {
+    m.view = await m.ready;
+  } catch (e) {
+    fill(m.host, h('p', { class: 'view-loading' }, `This view did not load: ${e.message}. Reload the page to try again.`));
+    delete mounted[name];
+    return;
+  }
+  if (view === name) m.view.open?.(state.current?.name ?? null, { picked: false });
 }
 
 function fieldsOf(c) {
@@ -657,15 +813,24 @@ addEventListener('keydown', (e) => {
   }
   if (e.altKey && e.key === '2') {
     e.preventDefault();
-    grid.el.focus();
+    if (view === 'rows') grid.el.focus();
+    else mounted[view]?.view?.focus?.();
     return;
   }
   const typing = e.target.closest?.('input, textarea, select');
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  // A view by its number, as the tabs are in the top bar.
+  const to = VIEWS.find(([v, , key]) => String(key) === e.key && (v !== 'admin' || adminAllowed()));
+  if (to) {
+    e.preventDefault();
+    showView(to[0]);
+    return;
+  }
+  const rows = view === 'rows';
   const act = {
-    '/': () => parts.where.focus(),
-    n: () => insert(),
-    r: () => reload(),
+    '/': rows && (() => parts.where.focus()),
+    n: rows && (() => insert()),
+    r: rows && (() => reload()),
     '?': () => help(),
   }[e.key];
   if (act) {

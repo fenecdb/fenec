@@ -247,6 +247,33 @@ fn placement_picks_the_node_with_the_least_on_disk() {
 }
 
 #[test]
+fn the_tenants_are_listed_with_their_bytes_on_disk() {
+    let c = cluster("sizes", 2, None);
+    c.create("acme", Some("n1"));
+    c.create("globex", Some("n2"));
+    c.query("acme", "create collection notes (title text)");
+    c.call("POST", "/t/acme/notes", r#"{"title":"hello"}"#, None);
+    c.nodes[0].tenants.sync_dirty();
+    let r = c.call("GET", "/_shard/tenants?bytes", "", None);
+    assert_eq!(r.0, 200, "{}", r.1);
+    // Each tenant's file on its node, as the node measures it: the studio's
+    // list of tenants shows these.
+    let on = |i: usize, t: &str| c.nodes[i].tenants.disk(t);
+    assert!(on(0, "acme") > 0);
+    assert_eq!(
+        body(&r),
+        format!(
+            r#"[{{"name":"acme","node":"n1","state":"active","bytes":{}}},{{"name":"globex","node":"n2","state":"active","bytes":{}}}]"#,
+            on(0, "acme"),
+            on(1, "globex")
+        )
+    );
+    // Without `?bytes` no node is asked.
+    let r = c.call("GET", "/_shard/tenants", "", None);
+    assert!(!r.1.contains("bytes"), "{}", r.1);
+}
+
+#[test]
 fn a_client_connection_is_kept_alive_across_forwarded_requests() {
     let c = cluster("alive", 1, None);
     c.create("acme", None);

@@ -155,6 +155,7 @@ image:</p>
 <tr><td><code>GET /_admin/stats</code></td><td>tenant count, bytes on disk, memory of the open ones</td></tr>
 <tr><td><code>GET /_admin/open</code></td><td>the open tenants: name, memory, frozen</td></tr>
 <tr><td><code>GET /_admin/tenants</code></td><td>names on disk</td></tr>
+<tr><td><code>GET /_admin/sizes</code></td><td>each tenant's bytes on disk, which the router's <code>GET /_shard/tenants?bytes</code> joins into its list</td></tr>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;</code></td><td>create an empty tenant (409 if it exists)</td></tr>
 <tr><td><code>DELETE /_admin/tenants/&lt;t&gt;</code></td><td>end its streams, close it, remove the file</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/schema</code></td><td>a schema description, applied as <code>/_schema/apply</code> applies it: what the router sends for a tenant created with a schema</td></tr>
@@ -207,7 +208,7 @@ does not return them.</p>
 <tr><td><code>GET /_shard/nodes</code></td><td>name and address of each node</td></tr>
 <tr><td><code>PUT /_shard/nodes/&lt;n&gt;</code></td><td><code>{addr, token}</code>; checked against the node before it is recorded</td></tr>
 <tr><td><code>DELETE /_shard/nodes/&lt;n&gt;</code></td><td>refused while the node holds a tenant</td></tr>
-<tr><td><code>GET /_shard/tenants</code></td><td>name, node and state of each tenant</td></tr>
+<tr><td><code>GET /_shard/tenants</code></td><td>name, node and state of each tenant; with <code>?bytes</code>, its bytes on disk, asked of each node</td></tr>
 <tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{node}</code> to choose, otherwise the node with the fewest bytes on disk; <code>{schema}</code>, FenecQL <code>create collection</code> text, applied there before the tenant is answered (below)</td></tr>
 <tr><td><code>DELETE /_shard/tenants/&lt;t&gt;</code></td><td>delete on the node, then forget</td></tr>
 <tr><td><code>POST /_shard/tenants/&lt;t&gt;/move</code></td><td><code>{to}</code>; see below</td></tr>
