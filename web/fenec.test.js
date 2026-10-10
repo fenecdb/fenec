@@ -560,6 +560,54 @@ test('a run of several says which statement stopped it, as a /batch does', { ski
   assert.deepEqual((await db.from('accounts').order('name').rows()).map((r) => r.balance), [100, 0]);
 });
 
+test('a batch in the page: each statement its parameters and its answer, one block', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection accounts (name text @unique, balance int, tags [text])');
+  const seen = [];
+  const stopLive = db.live('get accounts select name order name', (rows) => seen.push(rows.map((r) => r.name)), { collections: ['accounts'] });
+  const before = db.changeSeq;
+  // The same items FenecHttp.batch takes, answered as a server's /batch is.
+  const got = await db.batch([
+    ['insert accounts {name: $1, balance: $2}', ['a', 100]],
+    db.from('accounts').toInsert({ name: 'b', balance: 0, tags: ['x'] }),
+    'get accounts select name, balance order name',
+    ['get accounts where balance > $1 limit 0 facet tags', [-1]],
+  ]);
+  assert.deepEqual(got.results.slice(0, 3), [
+    { affected: 1 },
+    { affected: 1 },
+    { rows: [{ name: 'a', balance: 100 }, { name: 'b', balance: 0 }] },
+  ]);
+  assert.deepEqual(got.results[3].facets, { tags: [{ value: null, count: 1 }, { value: 'x', count: 1 }] });
+  assert.equal(got.seq, before + 2);
+  assert.equal(got.replayed, false);
+  // One refused: the statement named, nothing of the batch landed.
+  const refused = await db.batch([['set accounts {balance: 50} where name = $1', ['a']], ['insert accounts {name: $1}', ['b']]]).catch((e) => e);
+  assert.equal(refused.at, 1);
+  assert.equal(refused.completed, 0);
+  assert.match(refused.message, /duplicate/);
+  assert.deepEqual(db.rows('get accounts select balance where name = "a"'), [{ balance: 100 }]);
+  // Nothing is left open: a write after it lands on its own.
+  db.run('put accounts {name: "c"}');
+  assert.equal(db.changeSeq, before + 3);
+  // A compact runs each statement on its own: those before it stay.
+  const compacted = await db.batch([['put accounts {name: $1}', ['d']], 'compact', 'get nope']).catch((e) => e);
+  assert.equal(compacted.completed, 2);
+  assert.equal(db.rows('get accounts where name = "d" count')[0].count, 1);
+  // A live query looks once after a batch, as after any task that wrote.
+  await new Promise((r) => setTimeout(r, 0));
+  stopLive();
+  assert.deepEqual(seen.at(-1), ['a', 'b', 'c', 'd']);
+  // The schema as a server describes its own, and as the FenecQL that makes it.
+  assert.deepEqual(db.describe().collections[0].fields.map((f) => [f.name, f.type, f.index?.kind ?? null]), [
+    ['name', 'text', 'unique'],
+    ['balance', 'int', null],
+    ['tags', '[text]', null],
+  ]);
+  assert.equal(db.describe('fenecql').fenecql, 'create collection accounts (name text @unique, balance int, tags [text])\n');
+});
+
 test('a read that misses its require puts its run back, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

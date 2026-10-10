@@ -812,15 +812,7 @@ pub unsafe extern "C" fn fenec_schema(
         let n = native(handle)?;
         let request = text(text_ptr, text_len, "the description")?;
         let outcome = match mode {
-            FENEC_SCHEMA_DESCRIBE => {
-                let db = n.read()?;
-                let schemas: Vec<_> = db
-                    .collection_names()
-                    .iter()
-                    .filter_map(|c| db.collection(c).ok().map(|c| c.schema.clone()))
-                    .collect();
-                return Ok(Some(fenec_core::declared::describe(&schemas)));
-            }
+            FENEC_SCHEMA_DESCRIBE => return Ok(Some(fenec_abi::describe(&*n.read()?, false))),
             FENEC_SCHEMA_FOLLOW => fenec_abi::follow(&*n.read()?, request),
             FENEC_SCHEMA_PLAN | FENEC_SCHEMA_APPLY => {
                 let now = std::time::SystemTime::now()

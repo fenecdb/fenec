@@ -34,6 +34,8 @@
 //! `_migrations` by whoever applies the plan (`fenec-abi`), since running a
 //! statement takes the parser, which this crate does not have.
 
+use std::borrow::Borrow;
+
 use crate::collate::Collation;
 use crate::error::{Error, Result};
 use crate::json;
@@ -505,9 +507,18 @@ fn whole(o: &[(String, Value)], key: &str, at: &str) -> Result<Option<i64>> {
 /// collections whose names start with `_` are the database's own --
 /// `_migrations`, a server's `_idempotency` and `_consumers` -- and are left
 /// out.
-pub fn describe(schemas: &[Schema]) -> String {
+///
+/// Over schemas or borrowed ones: a server describes the clones it took
+/// under its lock, the browser module the database's own -- cloned there,
+/// they were 3 KB of the module.
+pub fn describe<S: Borrow<Schema>>(schemas: &[S]) -> String {
     let mut out = format!("{{\"format\":{FORMAT},\"collections\":[");
-    for (i, s) in schemas.iter().filter(|s| !own(&s.name)).enumerate() {
+    for (i, s) in schemas
+        .iter()
+        .map(Borrow::borrow)
+        .filter(|s| !own(&s.name))
+        .enumerate()
+    {
         if i > 0 {
             out.push(',');
         }
@@ -612,9 +623,9 @@ fn paths_of<'a>(s: &'a Schema, field: &'a str) -> impl Iterator<Item = (&'a str,
 /// collection's `create collection` and the `create index` of each path,
 /// every option written. Read back by `fenec_ql::schema_text`, it is the
 /// same schemas, and so the same description.
-pub fn fenecql(schemas: &[Schema]) -> String {
+pub fn fenecql<S: Borrow<Schema>>(schemas: &[S]) -> String {
     let mut out = String::new();
-    for s in schemas.iter().filter(|s| !own(&s.name)) {
+    for s in schemas.iter().map(Borrow::borrow).filter(|s| !own(&s.name)) {
         for statement in create(s) {
             out.push_str(&statement);
             out.push('\n');

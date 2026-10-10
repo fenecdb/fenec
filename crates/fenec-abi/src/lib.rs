@@ -453,6 +453,22 @@ pub fn schema(db: &mut Database, request: &str, apply: bool, now: Option<i64>) -
     })
 }
 
+/// The database's schema as a description -- what a server answers
+/// `GET /_schema` with -- or, `fenecql`, as the statements that make it,
+/// `{"format":1,"fenecql":".."}` as `?as=fenecql` answers: fenec studio
+/// over a database in the page shows a collection by these, written by the
+/// engine as a server writes them, rather than again in the page.
+pub fn describe(db: &Database, fenecql: bool) -> String {
+    let schemas = schemas(db);
+    if !fenecql {
+        return declared::describe(&schemas);
+    }
+    let mut out = String::from("{\"format\":1,\"fenecql\":");
+    json::escape_into(&mut out, &declared::fenecql(&schemas));
+    out.push('}');
+    out
+}
+
 /// The database compared with a description as another's: everything the
 /// code declares must be there as declared, what is there beside it is its
 /// owner's, nothing runs -- and the migrations are not read, since only the
