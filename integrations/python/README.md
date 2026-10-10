@@ -70,6 +70,19 @@ db.with_idempotency_key(order_id).collection("orders").insert({"item": 1})
 db.seq                                        # the change the last write left the database at
 ```
 
+A job queue's claim is one statement: `order` and `limit` before
+`update` pick the rows it writes, and `returning=True` (or a list of
+fields) answers them as written, where a count is answered otherwise:
+
+```python
+from fenecdb import expr, inc, raw
+
+claimed = (
+    db.collection("jobs").where(raw("run_at <= now()")).order("run_at").limit(10)
+    .update({"owner": me, "run_at": expr("now() + ?", 30000), "attempts": inc(1)}, returning=True)
+)
+```
+
 To see the text and parameters a chain builds, for logging or a test,
 `to_fenecql()` returns them and runs nothing:
 `docs.select("title").limit(5).to_fenecql()` is

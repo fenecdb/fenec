@@ -35,6 +35,7 @@ mod persist;
 mod pinned;
 mod quant;
 mod query_json;
+mod queues_docs;
 mod redis_docs;
 mod replica;
 mod require;

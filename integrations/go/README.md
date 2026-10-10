@@ -52,6 +52,10 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
 - `Highlight(field, Tags(pre, post))` and `Snippet(field, words, Ellipsis("…"))` answer a `match`'s marks under
   `highlight(field)` and `snippet(field)`; `Facet(field, Top(n))` counts values over every matched row, which
   `q.Answer(ctx)` (or `db.QueryAnswer`, a `BatchItem`'s `Facets`) hands back beside the rows, `Facets.Of(field)`.
+- `Order` and `Limit` before `Update` or `Delete` pick the rows it writes, and `Returning("*")` (or the fields)
+  answers them in `Result.Rows`: a job queue's claim is
+  `From("jobs").WhereCond(fenecdb.Raw("run_at <= now()")).Order("run_at", "asc").Limit(10).Update(ctx,
+  fenecdb.D("owner", me, "run_at", fenecdb.Expr("now() + ?", 30000)), fenecdb.Returning("*"))`.
 - To see the text and parameters a chain builds, for logging or a test, `q.ToFenecQL()` returns them and runs
   nothing; a query needs no call to it before it runs.
 

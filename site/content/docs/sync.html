@@ -413,6 +413,12 @@ expect.</p>
     token with scoped access.</li>
   <li><b><code>bytes</code> fields cannot be synced.</b></li>
   <li><b>The server has the last word</b> over the local copy.</li>
+  <li><b>A write that picks its rows</b> — <code>order</code> and
+    <code>limit</code> before an <code>update</code> or a
+    <code>delete</code>, or <code>{ returning }</code>, a
+    <a href="/docs/queues">job queue's claim</a> — is refused on a synced
+    collection: the replica would pick and answer its own rows, and the
+    server its own. Send it to the server itself (<code>db.remote</code>).</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>

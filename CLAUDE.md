@@ -77,6 +77,7 @@ make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 10
 make growth-bench        # a @unique index over 4M puts one at a time: the longest (its table's growth), p50/p99.99, the build after an open, a lookup
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
+make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set
 ```
 
 Single tests:
@@ -1352,6 +1353,56 @@ rest made under temporary ids, a key twice in the page the row the first
 made) and reads the rows it sets first to put back (`Sync::upsert`,
 `#applyUpsert`); a document naming neither is refused (`UPSERT_KEY`), in
 both, which the scenario file holds.
+
+**A `set` or a `del` picks its rows with `order` and `limit`, and
+`returning` answers them.** A job queue's claim was a read of the ready
+page and a compare-and-set of it, and two workers that read the same page
+raced, one of them told only by an `affected` short of its page. `Update`
+and `Delete` carry `pick: Option<Box<Pick>>` (boxed: no other write has
+one), and `picked_ids` hands the filter, `order` and `limit` to a `get`'s
+`page_ids`, so `set jobs {owner: $1, run_at: now() + 30000, attempts:
+attempts + 1} where run_at <= now() order run_at limit 10 returning *`
+walks `@sorted` to its page and writes it under the one lock --
+PostgreSQL's `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)
+RETURNING *`, the single writer standing in for the row locks.
+`returning` (`*`, or fields and paths) reads each row out of the store, a
+`set`'s after it wrote them and a `del`'s before (`returned`), and
+`required` counts the rows answered: `limit 1 require 1` is one job or a
+412. A `take` statement of its own was weighed and not made: the same
+clauses are a pop (`del ... order ... limit 10 returning *`), an `UPDATE
+... RETURNING` anyone reads, and any picked write, where a `take` would be
+a queue's alone. The lease is the ready time moved on, so one `@sorted`
+field holds ready, leased and delayed jobs and a lapsed lease is ready
+again with nothing to sweep. That needed `now()` in a filter to be a range:
+`Expr::fold_now` works it out once in `answer_filter`, with the `+ - * /`
+over it, and `Database::pin` judges the folded filter; left a call, the
+walk tested every leased and delayed job after the ready ones and, short
+of a page, gave up past an eighth of the collection for the scan. A
+scoped token picks among the rows its update or delete rules reach, and
+`returning` ANDs its read rules in (`Scope::returning`), as PostgreSQL
+holds `RETURNING` to the `SELECT` policies; `WITH CHECK` and `update(..)`
+grants judge each row as any `set`'s. A sync replica refuses one on a
+synced collection (`PICKED`, the scenario file), since it would pick and
+answer the replica's rows. Builders take `order` and `limit` before an
+update or a delete, which a `limit` lets go unfiltered, and `returning`
+as an option (JS and Python resolve to the rows, Go's `Result.Rows`,
+.NET's `ExecResult.Rows`, Swift's, Kotlin's and Dart's `updateReturning`
+and `deleteReturning`), held to the golden file. Over a million jobs a
+claim of ten takes 18.7 us p50 against a scan's 132.7 ms; 16 threads
+claimed and acked them all at 185.8k jobs/s, against 93.8k for read,
+compare-and-set and read back, which lost 43% of the jobs it read to
+another worker; 16 HTTP clients 138.5k against 48.2k, 77% lost (`make
+queue-bench`). The browser module grew 5.2 KB, 1.9 KB brotli -- the
+clauses' parse, the pick and its answer (`page_of`, `returned`, each out
+of line so a write that picks nothing keeps its code), the fold, and
+`page_ids` out of line now that two call it (+0.7 KB net); `returned`
+reads by `select`'s places cost 1.4 KB more. A write or a read that picks
+nothing measured as before in process, 200 000 statements a round: an
+increment 1.15 us against 1.16-1.18, a lock renewed 2.15 against
+2.13-2.17, a read by a `@unique` key 0.61 against 0.59-0.60, which taking
+the time's check out did not move (0.61-0.62) -- where the code lands; a
+`set` over 100 000 rows 1-2% slower in `make counters-bench`, whose runs
+of one build move as much, and `make requests-bench` inside its spread.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from

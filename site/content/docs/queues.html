@@ -1,0 +1,297 @@
+<!--
+title: Job queues — fenecdb
+description: Workers taking jobs from a collection: claimed by one worker each under a lease, acked, extended, retried with a backoff and dead-lettered, delayed and by priority — a statement each, with what it costs over a million jobs.
+-->
+
+<h1>Job queues</h1>
+<p class="kicker">Many workers taking jobs from one collection: each job
+claimed by one of them under a lease, then acked, extended or failed —
+every step a statement.</p>
+
+<p>One statement claims. A <code>set</code> with <code>order</code> and
+<code>limit</code> writes the rows a <code>get</code> with the same clauses
+would answer, and <code>returning</code> hands them back as written:</p>
+
+<pre data-lang="text">set jobs {owner: $1, run_at: now() + 30000, attempts: attempts + 1}
+  where run_at &lt;= now() order run_at limit 10 returning *
+</pre>
+
+<p>The ten oldest ready jobs are found and written under the one writer's
+lock, so two workers never take the same one — what PostgreSQL's
+<code>FOR UPDATE SKIP LOCKED</code> is for, with no locks to skip. A job's
+<code>run_at</code> is the time it may next run: when it was enqueued, or
+later for a delayed one, and while a worker holds it, the end of its lease.
+So a worker that dies holds nothing for long: its lease lapses, the job is
+ready again, and the next claim takes it. See
+<a href="/docs/fenecql#pick">Writes that pick their rows</a> for the
+rules.</p>
+
+<p>Every FenecQL block on this page is run, statement by statement, by a
+test (<code>crates/fenec-core/tests/queues_docs.rs</code>), and each
+<code>-- → x</code> is the answer it checks: a write's count, or the first
+value of the first row it answered. A line <code>-- 20 s later</code> moves
+the test's clock. The costs are <code>make queue-bench</code> on an M1 Air,
+over a million jobs.</p>
+
+<h2 id="queue">The queue</h2>
+
+<p>A collection a queue. <code>run_at</code> takes <code>@sorted</code>, so
+a claim walks the ready jobs from the oldest and stops at its page.</p>
+
+<pre data-lang="fenecql">create collection jobs (payload json, run_at timestamp @sorted, owner text, attempts int, error text)
+put jobs {payload: {"to": "ada@example.com"}, run_at: now(), attempts: 0}
+put jobs [{payload: {"to": "bo@example.com"}, run_at: now(), attempts: 0}, {payload: {"to": "cy@example.com"}, run_at: now(), attempts: 0}]
+put jobs {payload: {"to": "di@example.com"}, run_at: now() + 3600000, attempts: 0}     -- → 1: delayed an hour
+</pre>
+
+<ul>
+  <li><b>A delayed job</b> is one whose <code>run_at</code> is ahead: no
+    claim takes it before then.</li>
+  <li><b>Jobs enqueued at the same time</b> come out in the order they
+    were written, their ids'.</li>
+  <li><b>Several queues</b> are several collections. Kept in one, a
+    <code>queue</code> field goes without <code>@hash</code>: the walk tests
+    it on each job it passes, where through a hash index a claim would read
+    the whole queue to put it in order.</li>
+</ul>
+
+<h2 id="claim">Claim</h2>
+
+<p>Each worker claims a batch, the oldest ready jobs, each its own for 30
+seconds:</p>
+
+<pre data-lang="fenecql">set jobs {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 2 returning id, payload.to   -- → 1: jobs 1 and 2
+set jobs {owner: "w2", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 2 returning id, payload.to   -- → 3: the one left ready
+set jobs {owner: "w3", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 2 returning id   -- → no row: none ready
+</pre>
+
+<ul>
+  <li><b>None is taken twice.</b> The claim finds and writes its jobs
+    under the write lock. Sixteen threads claiming batches of ten from
+    6 000 jobs, and eight HTTP clients from 2 000, never handed a job to
+    two of them, and every job was acked
+    (<code>crates/fenec-core/tests/claims.rs</code>,
+    <code>crates/fenec-http/tests/claims.rs</code>).</li>
+  <li><b><code>returning *</code></b> answers every field; a list answers
+    those, paths into a <code>json</code> field among them. Without
+    <code>returning</code> the answer is the count.</li>
+  <li><b><code>limit 1 require 1</code></b> is one job or a refusal (412):
+    <code>require</code> counts the rows the claim answers.</li>
+  <li><b>An empty queue answers no rows.</b> Nothing waits for a job to
+    come: a worker sleeps and claims again, or holds a
+    <a href="/docs/http#subscriptions">subscription</a> to the queue and
+    claims when it hears a write.</li>
+</ul>
+
+<h2 id="ack">Ack, extend</h2>
+
+<p>A worker acks a job it holds by deleting it, and keeps one longer by
+moving its lease on. Each names the owner it was claimed by and requires
+its row, so a worker whose lease lapsed, and whose job another worker
+claimed meanwhile, finds out:</p>
+
+<pre data-lang="fenecql">del jobs where id = 1 and owner = "w1" require 1                       -- → 1: done
+-- 20 s later
+set jobs {run_at: now() + 30000} where id = 2 and owner = "w1" require 1   -- → 1: 30 s more
+-- 15 s later
+set jobs {owner: "w3", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 10 returning id, attempts   -- → 3: w2's lease lapsed
+del jobs where id = 3 and owner = "w2" require 1                       -- → refused: 412, w3 holds it now
+del jobs where id = 3 and owner = "w3" require 1                       -- → 1
+</pre>
+
+<ul>
+  <li><b>At least once.</b> A job whose worker died is taken again once
+    its lease lapses, so a job can run twice — once by a worker that was
+    only slow. Work that must not happen twice keeps a check of its own:
+    a <code>@unique</code> key on what it writes, or an
+    <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a> on
+    the request it sends.</li>
+  <li><b>A token a claim</b> rather than the worker's name as the owner —
+    <code>"w1:1842"</code> — also tells apart two claims of one job by the
+    same worker.</li>
+  <li><b>To keep a job done</b> rather than delete it, give it no ready
+    time: <code>set jobs {run_at: null, owner: null} where id = $1 and
+    owner = $2 require 1</code>. No claim takes a job without one.</li>
+</ul>
+
+<h2 id="fail">Fail, back off, dead-letter</h2>
+
+<p>A job that failed goes back with a backoff that grows with its attempts,
+and after the fifth it has no ready time — a dead letter, which no claim
+takes and a read finds:</p>
+
+<pre data-lang="fenecql">set jobs {owner: null, error: "smtp timeout", run_at: case when attempts &gt;= 5 then null else now() + 1000 * attempts * attempts end} where id = 2 and owner = "w1" require 1   -- → 1: again in 1 s
+-- 2 s later
+set jobs {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 1 returning id, attempts   -- → 2: its second attempt
+set jobs {attempts: 5} where id = 2                         -- three failures on
+set jobs {owner: null, error: "smtp timeout", run_at: case when attempts &gt;= 5 then null else now() + 1000 * attempts * attempts end} where id = 2 and owner = "w1" require 1   -- → 1: the fifth: dead
+get jobs select id, error where run_at is null              -- → 2: the dead letters
+set jobs {run_at: now(), attempts: 0, error: null} where id = 2 and run_at is null   -- → 1: sent again by hand
+</pre>
+
+<ul>
+  <li><b>The backoff here is the square</b> of the attempts in seconds —
+    1, 4, 9, 16 — worked out over the row. One that doubles, or has jitter,
+    is the worker's to send: it read <code>attempts</code> in its claim.</li>
+  <li><b>A worker that dies on a job</b> never fails it, and its lease
+    lapses instead: <code>attempts</code> counts claims, so a job that comes
+    back to a worker with <code>attempts</code> past five is failed by it,
+    not run again — SQS's receive count.</li>
+</ul>
+
+<h2 id="priority">Priorities</h2>
+
+<p>With a priority, a claim takes the highest first, and among jobs of one
+priority those written first:</p>
+
+<pre data-lang="fenecql">create collection tasks (payload json, run_at timestamp @sorted, priority int @sorted, owner text, attempts int)
+put tasks [{payload: {"n": 1}, run_at: now(), priority: 0, attempts: 0}, {payload: {"n": 2}, run_at: now(), priority: 9, attempts: 0}]
+set tasks {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order priority desc limit 1 returning payload.n   -- → 2: the higher priority
+</pre>
+
+<ul>
+  <li><b>The walk is the priority's index</b>, testing each job's ready
+    time as it passes: jobs of a high priority that are leased or delayed
+    are passed over at every claim, so a queue holding many of them is a
+    collection of its own. While the ready jobs number a few thousand at
+    most, the claim reads them by <code>run_at</code> and puts them in
+    order instead.</li>
+</ul>
+
+<h2 id="pop">A pop</h2>
+
+<p>Where a job may be lost but never run twice — Redis's
+<code>LPOP</code> — a <code>del</code> takes and answers it at once:</p>
+
+<pre data-lang="fenecql">del tasks where run_at &lt;= now() order priority desc limit 10 returning id, payload   -- → 1: taken and gone
+</pre>
+
+<h2 id="workers">A worker</h2>
+
+<p>The loop, in JavaScript over HTTP: claim a batch, run each job, ack it
+or fail it, and wait a little when there was none.</p>
+
+<pre data-lang="ts">import { connect, expr, inc, raw } from '@fenecdb/web/client';
+
+const db = connect('http://127.0.0.1:8080', { token: 'a worker token' });
+const jobs = db.from('jobs');
+const me = `w-${crypto.randomUUID()}`;
+
+async function send(to: unknown): Promise&lt;void&gt; {
+  // the work
+}
+
+for (;;) {
+  const owner = `${me}:${Date.now()}`;
+  const claimed = await jobs
+    .where(raw('run_at &lt;= now()'))
+    .order('run_at')
+    .limit(10)
+    .update({ owner, run_at: expr('now() + ?', 30000), attempts: inc(1) }, { returning: true });
+  if (claimed.length === 0) {
+    await new Promise((r) =&gt; setTimeout(r, 500));
+    continue;
+  }
+  for (const job of claimed) {
+    try {
+      await send((job.payload as { to: string }).to);
+      await jobs.where('id', job.id).where('owner', owner).delete({ require: 1 });
+    } catch {
+      const backoff = 1000 * 2 ** Number(job.attempts);
+      await jobs.where('id', job.id).where('owner', owner).update(
+        { owner: null, run_at: expr('now() + ?', backoff) },
+        { require: 1 },
+      ).catch(() =&gt; {});
+    }
+  }
+}
+</pre>
+
+<ul>
+  <li><b>Every builder writes the claim</b> — Python's
+    <code>.update(patch, returning=True)</code>, Go's
+    <code>Update(ctx, patch, fenecdb.Returning("*"))</code> and its
+    <code>Result.Rows</code>, .NET's <code>UpdateAsync(patch, returning:
+    ["*"])</code>, and Swift's, Kotlin's and Dart's
+    <code>updateReturning</code> — held to the same text.</li>
+  <li><b>Over HTTP</b> the claim is a <code>POST /query</code>; sent
+    under an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>,
+    a retry after a timeout is answered the jobs the first try took, and
+    takes none.</li>
+  <li><b>A worker's token</b> claims through its rules: a policy line
+    <code>jobs update(owner, run_at, attempts) where queue = $jwt.queue for
+    worker</code> lets it take its queue's jobs alone and change nothing
+    else of them, and what it answers is held to its read rules as well
+    (<a href="/docs/server#security">Security</a>).</li>
+  <li><b>Not on a sync replica.</b> A replica would pick its own rows and
+    answer them, and the server its own: a claim there is refused, and goes
+    to the server itself.</li>
+</ul>
+
+<h2 id="costs">What it costs</h2>
+
+<p>Over a million jobs, <code>make queue-bench</code>:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>a million jobs</th><th class="n">jobs a second</th><th class="n">a claim of 10, p50</th><th class="n">p99</th></tr></thead>
+<tbody>
+<tr><td>one worker, <code>@sorted</code> on <code>run_at</code></td><td class="n">—</td><td class="n">18.7 us</td><td class="n">25.8 us</td></tr>
+<tr><td>one worker, no index: a scan</td><td class="n">—</td><td class="n">132.7 ms</td><td class="n">134.8 ms</td></tr>
+<tr><td>16 threads, the claim one statement, each job acked</td><td class="n"><b>185 800</b></td><td class="n">22.4 us</td><td class="n">1.52 ms</td></tr>
+<tr><td>16 threads, read, compare-and-set, read back</td><td class="n">93 800</td><td class="n">0.40 ms</td><td class="n">1.89 ms</td></tr>
+<tr><td>16 HTTP clients, a claim and a <code>/batch</code> of its acks</td><td class="n"><b>138 500</b></td><td class="n">0.48 ms</td><td class="n">2.99 ms</td></tr>
+<tr><td>16 HTTP clients, three round trips to claim</td><td class="n">48 200</td><td class="n">0.60 ms</td><td class="n">2.51 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>The three statements a client sends without
+    <code>returning</code></b> — read the ready page, set the jobs only
+    where they are still ready, read back which it won — lose a race
+    whenever two workers read the same page: 43% of the jobs read in
+    process, and 77% over HTTP, had gone to another worker by the time it
+    wrote, and were read again. Half the jobs a second in process, a third
+    over HTTP.</li>
+  <li><b>Sixteen claims wait for each other,</b> as every write does: a
+    claim's p99 among sixteen threads is the lock's queue, where one
+    worker's is 25.8 us.</li>
+  <li><b>The claim reads its page and no more:</b> the ready jobs are a
+    range of the index, the time worked out once before the plan. A queue
+    holding a million leased or delayed jobs and three ready claims the
+    three, where a walk testing each job's time would pass every leased
+    one.</li>
+</ul>
+
+<h2 id="compared">Compared</h2>
+
+<ul>
+  <li><b>PostgreSQL</b>: <code>UPDATE jobs SET ... WHERE id IN (SELECT id
+    FROM jobs WHERE run_at &lt;= now() ORDER BY run_at LIMIT 10 FOR UPDATE
+    SKIP LOCKED) RETURNING *</code>. Its row locks let claims run side by
+    side; here the one writer runs them one after another, each a few
+    microseconds, and none has rows to skip.</li>
+  <li><b>SQS</b>: a claim is <code>ReceiveMessage</code>, the lease its
+    visibility timeout, an extension <code>ChangeMessageVisibility</code>,
+    <code>attempts</code> its receive count and a dead letter its
+    redrive. A delayed job is <code>DelaySeconds</code>, with no
+    fifteen-minute ceiling.</li>
+  <li><b>BullMQ</b>: delayed, prioritised, retried with a backoff and kept
+    as failed, as here; its jobs live in Redis's memory, these in the file,
+    durable by the server's <code>--sync</code> policy, replicated with it,
+    and read with any query.</li>
+</ul>
+
+<h2 id="not-covered">What this does not cover</h2>
+
+<ul>
+  <li><b>A blocking claim</b> — a worker held until a job arrives, as
+    <code>BLPOP</code> holds one. A subscription wakes a worker on a write;
+    the claim does not wait.</li>
+  <li><b>Exactly once.</b> A lease that lapses under a slow worker hands
+    its job to another; the work's own check makes the second run
+    harmless.</li>
+  <li><b>Claims side by side.</b> They are writes, so each waits for the
+    one before: tens of thousands a second, not millions.</li>
+</ul>
