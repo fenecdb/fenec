@@ -2292,7 +2292,12 @@ largest paint against 1.40 warm. `Database::unbuilt_indexes` lists the
 derived indexes nothing has built, `warm_index` builds one as its first read
 would, and a thread of the server's builds them one at a time, each under
 the read lock on its own -- reads go on, one needing the index waits for
-that build, a write waits out one index at most. The thread starts once the
+that build, a write waits out one index at most. So a bench times nothing
+until its warm-up has read every index the writes keep up: `make
+recon-bench`'s read all but the journal's `@hash` on its account, which no
+statement there reads, and `--warm` built it -- 100 to 150 ms over a million
+entries -- as the first round began, every transfer and every read behind
+them waiting; a read of it waits for that build, or makes it. The thread starts once the
 HTTP endpoint is up: `Server::new` takes the write lock for its watcher,
 and a build's read lock held the listener back by its 141 ms. Over 100 000
 products with a text, two hash and an ordered index the first answer came
