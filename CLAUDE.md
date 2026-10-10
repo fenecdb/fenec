@@ -1552,6 +1552,50 @@ check keeps or the dashboard asks for that none of them sends, and
 `fenec-server`'s `tests/logs.rs` on an attribute the pipeline or the
 dashboard reads that no real line has.
 
+**A request is a trace, sent over OTLP** (`fenec_http::trace`,
+`--otlp-endpoint`, `--otlp-header`, `--trace-sample`, the standard `OTEL_*`
+variables). A W3C `traceparent` is continued -- a sampled parent followed
+whatever the ratio (`parentbased`), `tracestate` passed on unchanged -- and
+a trace with none starts at the ratio, its id's low 56 bits against it
+(`TraceIdRatioBased`, so a router and its nodes keep the same traces). The
+trace is a thread-local, as the request id is: `begin` where a request is
+read past the health check, the scrape, the preflight and the studio's
+files (most of the requests and none of the time), `end` once the answer is
+written, `discard` before a subscription or a replication stream takes the
+connection over (its spans would be held for as long as it lasts), a trace
+64 spans at most. The spans are the waits: the server span (`http.route` a
+template, `db.query.text` the statement's shape from `statements::record`,
+never a value -- a REST target's query string holds words the shape keeps,
+so it has its route alone -- `fenec.request_id`, `fenec.tenant`),
+`lock.wait` in `held::read`/`write`, `execute`, `durability` in
+`await_durable` holding the `Tee`'s `fsync` and `replication.wait_sent`,
+`fenec.wait_for_write` for `Fenec-After`, and the router's `forward`, a
+client span whose id `Pool::send` sends the node as its `traceparent` --
+the client's dropped from the forwarded headers while the router traces,
+passed through as they came while it does not. A finished trace goes into
+a queue (`OTEL_BSP_MAX_QUEUE_SIZE`, 2 048 spans) under a mutex held for a
+push, the exporter taking it whole in one swap; full, the spans are dropped
+and counted (`fenec_trace_spans_dropped_total{reason}`), so a request never
+waits on the collector, and a thread posts it every second or at 512 spans
+as OTLP/HTTP JSON written with `json::escape_into` and a client of a page,
+the connection kept alive, a post bounded by `OTEL_EXPORTER_OTLP_TIMEOUT`.
+fenecdb speaks no TLS, so an `https://` endpoint and a `grpc` protocol are
+refused at the start: the endpoint is a collector on loopback -- the
+OpenTelemetry Collector, the Datadog Agent's OTLP receiver -- forwarding
+over TLS. Off, each hook is one relaxed load: in `make requests-bench`,
+six runs in turns against main, one client's p50 stayed 0.022, 0.034, 0.059
+and 0.022 ms (main 0.022, 0.033, 0.059, 0.021) and eight clients' medians
+inside the runs' spread; on at 100% to a sink on loopback 0.022, 0.034,
+0.060 and 0.024, eight clients 2 to 9% fewer requests a second, the
+exporter's JSON a core of the eight. `fenec-server` grew 49.7 KB,
+`fenec-shard` 82.7 KB (aarch64-apple-darwin), and the browser module not by
+a byte: nothing below `fenec-http` changed. `fenec-server`'s
+`tests/tracing.rs` holds the spans an in-process receiver (`tests/otlp.rs`)
+is sent to OTLP's JSON, their parents and attributes, a ratio of 0 to
+nothing but a sampled parent's trace, and a collector that hangs or is down
+to costing no request its time; `fenec-shard`'s, a `[[test]]` of its own
+since tracing is the process's, a trace through the router into the node.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels, a `lookup` chain at 8 and
 an `in (get ...)` at 100 000 values and 4 levels; all of them return a query
