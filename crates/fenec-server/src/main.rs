@@ -144,6 +144,21 @@ usage: fenec-server [options]
                             --http-token or --admin-token; a non-loopback
                             address wants one of them (or --insecure)
 
+      --otlp-endpoint <url> send OpenTelemetry traces, OTLP over HTTP as JSON,
+                            to this collector: http://localhost:4318 (the
+                            OpenTelemetry Collector, the Datadog Agent's OTLP
+                            receiver). No TLS: a collector on this host or
+                            network forwards over TLS. Also read from
+                            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and
+                            OTEL_EXPORTER_OTLP_ENDPOINT. Off by default
+      --otlp-header <k=v>   a header on every post, such as an API key;
+                            repeatable. Also OTEL_EXPORTER_OTLP_HEADERS
+      --trace-sample <ratio>  the share of the requests that start a trace
+                            here that are kept, 0 to 1  default: 1 with an
+                            endpoint. A request whose traceparent was sampled
+                            is traced whatever the ratio. The service is
+                            named by OTEL_SERVICE_NAME  default: fenec-server
+
       --replication-token <value>  turn replication on: /_replication feeds
                             replicas the writes on this file's disk, reports
                             status, and promotes a replica. With --dir every
@@ -225,6 +240,26 @@ fn health_check(addr: &str) -> i32 {
     }
 }
 
+/// Turns tracing on when an endpoint is named, by flag or environment,
+/// and says where the spans go.
+fn start_tracing(options: fenec_http::trace::Options, service: &str) {
+    match options.settings(service) {
+        Err(e) => fail(&e),
+        Ok(None) => {}
+        Ok(Some(s)) => {
+            let (url, sample) = (s.endpoint.url(), s.sample);
+            if let Err(e) = fenec_http::trace::install(s) {
+                fail(&format!("could not start the tracing thread: {e}"));
+            }
+            fenec_http::log!("tracing: OTLP/HTTP JSON to {url}, sampling {sample}");
+            // The last second's spans go out before the process does.
+            durability::before_shutdown(|| {
+                fenec_http::trace::flush(std::time::Duration::from_secs(2))
+            });
+        }
+    }
+}
+
 fn main() {
     let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
     let mut checkpoint = true;
@@ -256,6 +291,7 @@ fn main() {
     let mut follow_named = false;
     let mut studio = false;
     let mut studio_connect: Option<String> = None;
+    let mut tracing = fenec_http::trace::Options::default();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut metrics: Option<String> = None;
@@ -313,6 +349,15 @@ fn main() {
                 http_cfg.max_memory = mib << 20;
             }
             "--metrics" => metrics = Some(next(&mut i, "--metrics")),
+            "--otlp-endpoint" => tracing.endpoint = Some(next(&mut i, "--otlp-endpoint")),
+            "--otlp-header" => {
+                let kv = next(&mut i, "--otlp-header");
+                tracing.header(&kv).unwrap_or_else(|e| fail(&e));
+            }
+            "--trace-sample" => {
+                let v = next(&mut i, "--trace-sample");
+                tracing.sample(&v).unwrap_or_else(|e| fail(&e));
+            }
             "--audit" => {
                 let path = next(&mut i, "--audit");
                 if let Err(e) = fenec_http::audit::open(std::path::Path::new(&path)) {
@@ -514,6 +559,10 @@ fn main() {
         }
         (false, Some(_)) => fail("--studio-connect is for the studio: add --studio"),
         (false, None) => {}
+    }
+
+    if !ping {
+        start_tracing(tracing, "fenec-server");
     }
 
     if ping {
@@ -871,6 +920,7 @@ fn serve_dir(
         if durability::shutdown_requested() {
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
+            fenec_http::trace::flush(Duration::from_secs(2));
             let open = tenants.shutdown();
             fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
             std::process::exit(0);

@@ -162,6 +162,12 @@ pub fn record(tenant: Option<&str>, text: &str, took: Duration, failed: bool) {
     });
 }
 
+/// `f` with the shape the last statement this thread counted was counted
+/// as: a span's `db.query.text`, which holds no literal.
+pub fn last_shape<R>(f: impl FnOnce(&str) -> R) -> R {
+    SHAPE.with(|s| f(&s.borrow()))
+}
+
 /// Forgets the twentieth of a full shard's shapes called least.
 fn forget(map: &mut HashMap<u64, Entry>) {
     let mut calls: Vec<u64> = map.values().map(|e| e.calls).collect();

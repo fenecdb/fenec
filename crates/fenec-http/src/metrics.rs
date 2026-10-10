@@ -388,6 +388,7 @@ fn render(source: Source) -> String {
         &[],
         CONNECTIONS.load(Ordering::Relaxed),
     );
+    crate::trace::metrics(&mut out);
 
     match source {
         Source::Single { db, repl } => {

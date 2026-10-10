@@ -600,9 +600,15 @@ impl Sink for Tee {
             Some(durable) => {
                 let feed = Arc::clone(&self.feed);
                 Ok(Some(Box::new(move || {
+                    // Spans of the request this runs for, when it is
+                    // traced: the disk's part and the replicas' apart.
+                    let syncing = crate::trace::span("fsync");
                     durable()?;
+                    drop(syncing);
                     feed.mark_durable(upto);
+                    let sending = crate::trace::span("replication.wait_sent");
                     feed.wait_sent(upto, SENT_WAIT);
+                    drop(sending);
                     Ok(())
                 })))
             }

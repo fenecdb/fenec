@@ -60,6 +60,7 @@ pub mod studio;
 pub mod sweep;
 pub mod tenants;
 pub mod timing;
+pub mod trace;
 pub mod warm;
 
 use access::Who;
@@ -474,6 +475,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
     let _ = stream.set_read_timeout(cfg.idle_timeout);
     let peer = stream.peer_addr().ok();
     audit::connection("http", peer);
+    trace::connection(stream.local_addr().ok(), peer);
     let Ok(write_half) = stream.try_clone() else {
         return;
     };
@@ -617,6 +619,11 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             continue;
         }
 
+        // A request from here on is traced: what is above it -- a health
+        // check, a scrape, a preflight, the studio's files -- would be most
+        // of the spans and none of the time.
+        trace::begin(&req);
+
         // The database is only ever borrowed from the tenant, never cloned
         // out of it: the tenant's `Arc` count is what says "in use", and a
         // clone of the inner `Arc` would keep the database alive past a
@@ -624,9 +631,15 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         let tenant = match backend {
             Backend::Single { .. } | Backend::Metrics { .. } => None,
             Backend::Tenants(tenants) => match route_tenant(tenants, cfg, &mut req) {
-                Ok(t) => Some(t),
+                Ok(t) => {
+                    if trace::recording() {
+                        trace::attr("fenec.tenant", t.name().to_string());
+                    }
+                    Some(t)
+                }
                 Err(resp) => {
                     audit::http(&req, resp.status, peer);
+                    trace::end(resp.status);
                     let resp = cors(resp, cfg);
                     if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                         return;
@@ -639,6 +652,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             let view = statements::View::Tenant(t.name());
             let resp = cors(statements::handle(&req, view, full(cfg, &req)), cfg);
             audit::http(&req, resp.status, peer);
+            trace::end(resp.status);
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }
@@ -661,6 +675,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             if req.segments().first() == Some(&"_replication") {
                 // A replica's stream is a body with no end, like a
                 // subscription: it takes the connection over.
+                trace::discard();
                 let _ = out.set_read_timeout(None);
                 match replication::handle(&mut out, db, repl, &req) {
                     None => return,
@@ -687,6 +702,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             };
             let resp = whoami(cfg, &req, node, tenant.as_ref().map(|t| t.name()));
             audit::http(&req, resp.status, peer);
+            trace::end(resp.status);
             if cors(resp, cfg)
                 .write(&mut out, keep_alive, head_only)
                 .is_err()
@@ -712,6 +728,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 (Ok(_), Some(feed)) => cdc::route(db, feed, cfg, &req),
             };
             audit::http(&req, resp.status, peer);
+            trace::end(resp.status);
             if cors(resp, cfg)
                 .write(&mut out, keep_alive, head_only)
                 .is_err()
@@ -725,6 +742,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // body with unknown `Content-Length` and no end. It takes the
         // connection over and never returns.
         if is_stream(&req) {
+            trace::discard();
             let who = match authenticate(cfg, &req) {
                 Ok(who) => who,
                 Err(deny) => {
@@ -742,6 +760,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // Reading one's own write on a replica: the request waits until the
         // write its client made on the primary (`Fenec-Seq`) is here.
         if let Some(refusal) = after(&req, db, hub) {
+            trace::end(refusal.status);
             if cors(refusal, cfg)
                 .write(&mut out, keep_alive, head_only)
                 .is_err()
@@ -764,6 +783,17 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             let name = tenant.as_ref().map(|t| t.name());
             metrics::record(took, failed, name, || what.clone());
             statements::record(name, &what, took, failed);
+            if trace::recording() {
+                statements::last_shape(|shape| {
+                    trace::attr("db.operation.name", operation(&req, shape));
+                    // FenecQL's shape holds no literal; a REST request's is
+                    // its target, whose query string's values are words the
+                    // shape keeps, so it has its route alone.
+                    if matches!(req.segments().as_slice(), ["query"] | ["batch"]) {
+                        trace::attr("db.query.text", shape.to_string());
+                    }
+                });
+            }
         }
         // Let go of the tenant before writing: a slow client must not keep
         // it from closing.
@@ -771,7 +801,9 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         audit::http(&req, resp.status, peer);
         let resp = cors(resp, cfg);
         timing::lap(timing::Phase::Books);
-        if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+        let written = resp.write(&mut out, keep_alive, head_only);
+        trace::end(resp.status);
+        if written.is_err() || !keep_alive {
             return;
         }
         http::give_back(resp.body);
@@ -800,6 +832,7 @@ fn after(req: &Request, db: &RwLock<Database>, hub: &sse::Hub) -> Option<Respons
         .map_or(AFTER_WAIT, Duration::from_millis)
         .min(AFTER_LONGEST);
     let seq = || db.read().unwrap_or_else(|e| e.into_inner()).change_seq();
+    let _waiting = trace::span("fenec.wait_for_write");
     match hub.reached(n, seq, std::time::Instant::now() + wait) {
         true => None,
         false => Some(Response::json(
@@ -830,6 +863,44 @@ fn describe(req: &Request) -> String {
         s.push_str(&String::from_utf8_lossy(&req.body));
     }
     s
+}
+
+/// What a request does, for a span's `db.operation.name`: a FenecQL
+/// statement's first word, or the one a REST route stands for.
+fn operation(req: &Request, shape: &str) -> &'static str {
+    const WORDS: [&str; 14] = [
+        "get",
+        "put",
+        "insert",
+        "set",
+        "del",
+        "create",
+        "drop",
+        "alter",
+        "compact",
+        "explain",
+        "collections",
+        "begin",
+        "commit",
+        "rollback",
+    ];
+    match (req.method, req.segments().as_slice()) {
+        (Method::Post, ["batch"]) => "batch",
+        (Method::Post, ["query"]) => {
+            let first = shape.split_whitespace().next().unwrap_or("");
+            WORDS
+                .iter()
+                .find(|w| first.eq_ignore_ascii_case(w))
+                .copied()
+                .unwrap_or("query")
+        }
+        (Method::Post, [_, "near"]) => "near",
+        (Method::Get | Method::Head, _) => "get",
+        (Method::Post, _) => "insert",
+        (Method::Patch | Method::Put, _) => "set",
+        (Method::Delete, _) => "del",
+        _ => "other",
+    }
 }
 
 /// Resolves `/t/<tenant>/rest` and strips the prefix, so everything below
@@ -1017,7 +1088,9 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
                 return error_response(&e);
             }
         }
+        let running = trace::span("execute");
         let result = access::within(&who, || guard.execute_with(&stmt, &[]));
+        drop(running);
         let answer =
             |result: &fenec_core::error::Result<fenec_core::prelude::Response>| match result {
                 Ok(resp) => {
@@ -1061,7 +1134,10 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(s) => s,
             Err(e) => return error_response(&e),
         };
-        match guard.query(&stmt, &[]) {
+        let running = trace::span("execute");
+        let result = guard.query(&stmt, &[]);
+        drop(running);
+        match result {
             Ok(resp) => {
                 let resp = visible(&who, resp);
                 statements::rows(counted(&resp));
@@ -1292,9 +1368,11 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             }
         }
         let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
+        let running = trace::span("execute");
         match guard.query_json(&stmt, &params, &mut body) {
             Ok(Some(n)) => {
                 drop(guard);
+                drop(running);
                 timing::lap(timing::Phase::Execute);
                 statements::rows(n as u64);
                 let mut resp = Response::json(200, body).versioned(fenec_core::VERSION);
@@ -1312,10 +1390,19 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
         let r = guard.query(&stmt, &params);
         drop(guard);
+        drop(running);
         timing::lap(timing::Phase::Execute);
         tagged = tag;
         r
-    } else if let Some(built) = Database::maintain(db, &stmt) {
+    } else if let Some(built) = {
+        let running = trace::span("execute");
+        running.attr("fenec.beside", true);
+        let built = Database::maintain(db, &stmt);
+        if built.is_none() {
+            running.forget();
+        }
+        built
+    } {
         // `create index` and `compact` are built beside the database, with
         // no lock held; the index's record then waits for the disk as any
         // write does.
@@ -1336,7 +1423,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         built
     } else {
         let mut guard = held::write(db);
+        let running = trace::span("execute");
         let r = access::within(who, || guard.execute_with(&stmt, &params));
+        drop(running);
         seq = Some(guard.change_seq());
         let durability = match r {
             Ok(_) => match flush_for(cfg, &mut guard) {
@@ -1478,7 +1567,9 @@ fn keyed_query(
     if let Err(e) = guard.begin() {
         return error_response(&e);
     }
+    let running = trace::span("execute");
     let result = access::within(who, || guard.execute_with(stmt, params));
+    drop(running);
     let resp = match &result {
         Ok(r) => {
             statements::rows(counted(r));
@@ -1577,6 +1668,8 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
     }
     let mut results = Vec::with_capacity(stmts.len());
+    let running = trace::span("execute");
+    running.attr("fenec.statements", stmts.len() as i64);
     for (stmt, params) in &stmts {
         // Measured before each statement, as a lone one is: the batch
         // stops at the first the ceiling refuses, as at an error.
@@ -1610,6 +1703,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             }
         }
     }
+    drop(running);
     let kept = match &key {
         Some(k) => {
             let resp = api::render_batch(&results, fenec_core::VERSION);
@@ -1651,6 +1745,8 @@ fn read_batch(
 ) -> Response {
     let guard = held::read(db);
     let mut results = Vec::with_capacity(stmts.len());
+    let running = trace::span("execute");
+    running.attr("fenec.statements", stmts.len() as i64);
     for (at, (stmt, params)) in stmts.iter().enumerate() {
         match guard.query(stmt, params) {
             Ok(r) => {
@@ -1735,7 +1831,11 @@ fn await_durable(
     let Some(durable) = durability else {
         return Ok(());
     };
+    // The fsync (`--sync always`), and on a primary the wait for its
+    // replicas' streams (`replication::Tee`), which open spans of their own.
+    let waiting = trace::span("durability");
     durable().inspect_err(|e| {
+        waiting.error(e.to_string());
         crate::log!("sync error: {e}");
         db.write().unwrap_or_else(|p| p.into_inner()).fail(e);
     })
