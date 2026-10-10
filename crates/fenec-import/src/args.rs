@@ -87,7 +87,7 @@ pub fn parse_cast(s: &str) -> std::result::Result<(String, DataType), String> {
     Ok((name.to_string(), ty))
 }
 
-/// `field@hash`, `field@sorted` or `field@hnsw[(metric, m=.., ef_construction=.., ef_search=.., quant=..)]`
+/// `field@hash`, `field@sorted`, `field@geo` or `field@hnsw[(metric, m=.., ef_construction=.., ef_search=.., quant=..)]`
 pub fn parse_index(s: &str) -> std::result::Result<(String, IndexKind), String> {
     let (name, spec) = s.split_once('@').ok_or_else(|| {
         format!("--index expects `field@hash`, `field@sorted` or `field@hnsw(...)`, got `{s}`")
@@ -133,6 +133,7 @@ mod tests {
     #[test]
     fn index_flag_parses() {
         assert_eq!(parse_index("k@hash").unwrap().1, IndexKind::HASH);
+        assert_eq!(parse_index("loc@geo").unwrap().1, IndexKind::Geo);
 
         let (name, IndexKind::Vector(v)) = parse_index("embed@hnsw").unwrap() else {
             panic!()

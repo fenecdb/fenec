@@ -225,6 +225,44 @@ fn a_json_field_asks_for_its_list_as_json() {
     by_handle(fenec_close, h);
 }
 
+/// A point handed apart as a vector's `f32`s is asked for as JSON, as a
+/// json field's list is: 179.999999999 as an `f32` is 180. Sent as written,
+/// a radius, a box and `near` answer over its degrees through `@geo`.
+#[test]
+fn a_point_asks_for_its_list_as_json() {
+    let h = memory();
+    query(h, "create collection p (name text, loc geo @geo)", "");
+    let (code, r) = query_with(h, "put p {loc: $1}", "[null]", &vector(0, &[179.9, -17.7]));
+    assert_eq!(code, FENEC_QUERY);
+    assert!(r.ends_with(r#""exact":[0]}"#), "{r}");
+    query(
+        h,
+        "put p [{name: \"date line\", loc: $1}, {name: \"suva\", loc: [178.4419, -18.1248]}]",
+        "[[179.999999999, -17.7]]",
+    );
+    let r = query(h, "get p select loc where name = \"date line\"", "");
+    assert!(r.contains(r#"{"loc":[179.999999999,-17.7]}"#), "{r}");
+    let r = query(
+        h,
+        "get p select name where distance(loc, $1) = 0",
+        "[[179.999999999, -17.7]]",
+    );
+    assert!(r.contains("date line") && !r.contains("suva"), "{r}");
+    let r = query(
+        h,
+        "get p where within(loc, [170, -20, -170, -10]) count",
+        "",
+    );
+    assert!(r.contains(r#"{"count":2}"#), "{r}");
+    let r = query(
+        h,
+        "get p select name near loc $1 limit 1",
+        "[[178.4, -18.1]]",
+    );
+    assert!(r.contains(r#"[{"name":"suva""#), "{r}");
+    by_handle(fenec_close, h);
+}
+
 #[test]
 fn changes_name_the_collections_a_write_landed_in() {
     let h = memory();

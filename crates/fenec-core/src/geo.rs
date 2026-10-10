@@ -6,14 +6,16 @@
 //! under its own tag in a document, `[lon, lat]` once read -- written and
 //! read as `[lon, lat]`: GeoJSON's order, and the order Redis and PostGIS
 //! take them in. Kept as given, not rounded to a cell -- Redis keeps a
-//! 52-bit geohash, which moves a point by up to 0.6 m, so its `GEOPOS`
-//! gives back other numbers than it was handed.
+//! 52-bit geohash, which moves a point to the centre of its cell -- 0.6 m
+//! by 0.3 m at the equator -- so its `GEOPOS` gives back other numbers than
+//! it was handed.
 //!
 //! A distance is the haversine on a sphere of Redis's radius, so it is
-//! Redis's `GEODIST` -- within the 0.6 m Redis moves its points by -- and
-//! PostGIS's over `geography` with `use_spheroid = false`. The ellipsoid
-//! (WGS84, PostGIS's default) differs from the sphere by up to 0.5%, and
-//! neither Redis nor a client computing distances by hand uses it.
+//! Redis's `GEODIST` -- within what Redis moves its points by. PostGIS
+//! over `geography` with `use_spheroid = false` takes the earth's mean
+//! radius, 6 371 008.8 m, and gives 0.03% less. The ellipsoid (WGS84,
+//! PostGIS's default) differs from a sphere by up to 0.5%, and neither
+//! Redis nor a client computing distances by hand uses it.
 //!
 //! The trigonometry is this module's own, in plain `f64` arithmetic: the
 //! standard library's `sin`, `cos` and `asin` are the platform's libm --
@@ -251,6 +253,21 @@ pub fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
     let v = sin(dl.to_radians() * 0.5);
     let h = (u * u + cos(p1) * cos(p2) * (v * v)).min(1.0);
     2.0 * EARTH_RADIUS_M * asin(h.sqrt())
+}
+
+/// What the latitudes alone prove of `distance(a, b)` against `r`: the arc
+/// along a meridian between them, less a metre and 1e-9 of it, when that is
+/// past `r` -- `None` otherwise. The haversine is never below the arc
+/// (`sin²(Δφ/2)` is its first term), and worked out in floats the two move
+/// by less than the slack: nearly antipodal, where `asin` is steep, a fifth
+/// of a metre. So a value past `r` here is past it as the distance is, and
+/// a comparison of either with `r` answers alike: a scan's row ruled out
+/// with no trigonometry, which most of a scan's rows are.
+#[inline]
+pub fn past(a: (f64, f64), b: (f64, f64), r: f64) -> Option<f64> {
+    let arc = EARTH_RADIUS_M * (a.1 - b.1).abs().to_radians();
+    let floor = arc - 1.0 - arc * 1e-9;
+    (floor > r).then_some(floor)
 }
 
 /// A box of longitudes and latitudes: `[west, south, east, north]`,
@@ -922,7 +939,7 @@ mod tests {
 
     /// Redis's `GEODIST Sicily Palermo Catania`, 166274.1516 m from the
     /// cells it keeps the two in, and the same from their coordinates to
-    /// within the 0.6 m those cells move a point.
+    /// within what those cells move a point by.
     #[test]
     fn a_distance_is_redis_s() {
         let palermo = (13.361389, 38.115556);
@@ -1002,6 +1019,34 @@ mod tests {
             assert!(floor <= distance(p, from), "{from:?} {p:?} {level}");
             let (lo, hi) = cell_keys(level, cx, cy);
             assert!(lo <= k && k <= hi);
+        }
+    }
+
+    /// The latitudes' floor never rules out a point the distance keeps, at
+    /// any radius -- the poles and nearly antipodal points among them.
+    #[test]
+    fn the_latitude_floor_is_never_past_the_distance() {
+        let mut r = rng(23);
+        for i in 0..400_000 {
+            let a = (r() * 360.0 - 180.0, r() * 180.0 - 90.0);
+            let b = match i % 3 {
+                0 => (r() * 360.0 - 180.0, r() * 180.0 - 90.0),
+                // Nearly antipodal.
+                1 => (
+                    a.0 + 180.0 - (a.0 + 180.0 > 180.0) as u8 as f64 * 360.0,
+                    -a.1 + (r() - 0.5) * 1e-6,
+                ),
+                _ => (
+                    a.0 + (r() - 0.5) * 1e-3,
+                    (a.1 + (r() - 0.5) * 1e-3).clamp(-90.0, 90.0),
+                ),
+            };
+            let d = distance(a, b);
+            for radius in [0.0, d * 0.999_999_999, d - 2.0, d - 0.5, d] {
+                if let Some(floor) = past(a, b, radius) {
+                    assert!(floor <= d && d > radius, "{a:?} {b:?} {radius} {floor} {d}");
+                }
+            }
         }
     }
 

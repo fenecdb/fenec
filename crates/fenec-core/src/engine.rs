@@ -7178,10 +7178,10 @@ impl Database {
     }
 
     /// [`Self::run_geo_near`] through the point index, `None` where it does
-    /// not answer. An index naming few rows for the filter -- a hash
-    /// bucket, a range, the box of a radius about the same point -- has
-    /// those measured. Otherwise the index is walked nearest first
-    /// ([`GeoIndex::nearest`]), each row tested against the filter as it
+    /// not answer. A filter a hash index names few rows for -- a bucket,
+    /// the buckets of an `in` -- has those measured (or the fewer a radius
+    /// or a range names among them). Otherwise the index is walked nearest
+    /// first ([`GeoIndex::nearest`]), each row tested against the filter as it
     /// comes, stopping at the page or past a radius the filter puts on the
     /// same point; a filter that passes almost nothing would have the walk
     /// test the whole collection out of order, so past an eighth of it the
@@ -7224,9 +7224,16 @@ impl Database {
                     }
                 }
             }
-            // A set an index names, if it is small: measured whole.
-            if let Some((rows, exact)) = self.filter_candidates(c, f, params, 64)? {
-                if rows.len() <= GEO_SET {
+            // A set an equality or an `in` names through a hash index, if
+            // it is small: measured whole. Not a radius's own box: about
+            // the same point the walk stops at the radius, and over 100 000
+            // rows round cities a 50 km box held thousands of rows to
+            // measure where the walk read a few dozen -- 440 us against 32.
+            if self
+                .indexed_size(c, f, params)?
+                .is_some_and(|n| n <= GEO_SET)
+            {
+                if let Some((rows, exact)) = self.filter_candidates(c, f, params, usize::MAX)? {
                     let mut kept = Vec::with_capacity(rows.len());
                     for id in rows {
                         if exact || passes(id)? {
@@ -9765,6 +9772,31 @@ fn nearest_of(
     ids: &[DocId],
     want: usize,
 ) -> Result<Vec<(DocId, f32)>> {
+    // A page of a few: the nearest held in order as the rows come, a row
+    // whose latitude alone puts it past the last of them passed over with
+    // no trigonometry (`geo::past`), and a row as near as the last after it
+    // in the order, its id higher. Over a million rows the ten nearest took
+    // 147 ms put in order by `order_rows`.
+    if want <= 64 {
+        let mut kept: Vec<(f64, DocId)> = Vec::with_capacity(want + 1);
+        for &id in ids {
+            let Some(p) = store.read_point(id, pos)? else {
+                continue;
+            };
+            let last = kept.last().map(|k| k.0).filter(|_| kept.len() == want);
+            if last.is_some_and(|r| crate::geo::past(p, from, r).is_some()) {
+                continue;
+            }
+            let d = crate::geo::distance(p, from);
+            if last.is_some_and(|r| d >= r) {
+                continue;
+            }
+            let at = kept.partition_point(|k| k.0 <= d);
+            kept.insert(at, (d, id));
+            kept.truncate(want);
+        }
+        return Ok(kept.into_iter().map(|(d, id)| (id, d as f32)).collect());
+    }
     let (mut keys, mut held) = (Vec::with_capacity(ids.len()), Vec::with_capacity(ids.len()));
     for &id in ids {
         if let Some(p) = store.read_point(id, pos)? {
@@ -10494,29 +10526,7 @@ impl<'q> Filter<'q> {
                 Value::List(items) => items.iter().any(|i| i.cmp_value(v) == Ordering::Equal),
                 _ => false,
             },
-            Test::Distance {
-                slot,
-                to,
-                field_first,
-                op,
-                value,
-                call_first,
-            } => {
-                let d = match crate::geo::point_in(get(*slot)) {
-                    Some(p) => Value::Float(match field_first {
-                        true => crate::geo::distance(p, *to),
-                        false => crate::geo::distance(*to, p),
-                    }),
-                    None => Value::Null,
-                };
-                let (l, r) = if *call_first {
-                    (&d, value)
-                } else {
-                    (value, &d)
-                };
-                compare(*op, l, r, &|| None)
-            }
-            Test::Within(s, b) => crate::geo::point_in(get(*s)).is_some_and(|p| b.holds(p)),
+            Test::Distance { slot, .. } | Test::Within(slot, _) => geo_test(t, get(*slot)),
             Test::Eval(e) => {
                 let mut row = StoreRow {
                     store: &self.c.store,
@@ -10526,6 +10536,46 @@ impl<'q> Filter<'q> {
                 truthy(&eval(e, &mut row, ctx)?)
             }
         })
+    }
+}
+
+/// A point's test, out of `Filter::test`'s line so that the test every
+/// scan runs stays the size it was: in it, `test` grew by 367 bytes of the
+/// browser module, a quarter, and V8 tiers a function up by its size.
+///
+/// A row whose latitude alone puts it past a number compares as its
+/// distance would, with no trigonometry (`geo::past`): a scan of a million
+/// rows by a radius went 136 -> 22 ms.
+#[inline(never)]
+fn geo_test(t: &Test, v: &Value) -> bool {
+    match t {
+        Test::Distance {
+            to,
+            field_first,
+            op,
+            value,
+            call_first,
+            ..
+        } => {
+            let d = match crate::geo::point_in(v) {
+                Some(p) => Value::Float(
+                    match value.as_f64().and_then(|r| crate::geo::past(p, *to, r)) {
+                        Some(floor) => floor,
+                        None if *field_first => crate::geo::distance(p, *to),
+                        None => crate::geo::distance(*to, p),
+                    },
+                ),
+                None => Value::Null,
+            };
+            let (l, r) = if *call_first {
+                (&d, value)
+            } else {
+                (value, &d)
+            };
+            compare(*op, l, r, &|| None)
+        }
+        Test::Within(_, b) => crate::geo::point_in(v).is_some_and(|p| b.holds(p)),
+        _ => false,
     }
 }
 

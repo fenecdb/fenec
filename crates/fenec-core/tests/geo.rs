@@ -169,7 +169,7 @@ fn shapes(r: &mut Rng) -> Vec<(Value, Value, Value)> {
     out
 }
 
-const FILTERS: [&str; 16] = [
+const FILTERS: [&str; 18] = [
     "where distance(loc, $1) <= $2",
     "where distance(loc, $1) < $2",
     "where $2 >= distance(loc, $1)",
@@ -186,6 +186,10 @@ const FILTERS: [&str; 16] = [
     "where not within(loc, $3)",
     "where loc is null",
     "where distance(loc, $1) <= $2 and within(loc, $3) and n < 40",
+    // Evaluated as a call, not bound: the bound test, its floor by
+    // latitude among it, answers as `eval` does.
+    "where distance(loc, $1) + 0 <= $2",
+    "where distance(loc, $1) * 1 > $2",
 ];
 
 fn check(ix: &Database, plain: &Database, stage: &str, seed: u64) {
@@ -209,6 +213,20 @@ fn check(ix: &Database, plain: &Database, stage: &str, seed: u64) {
                 );
                 asked += 1;
             }
+        }
+        // The bound test -- a row ruled out by its latitude alone among it
+        // -- answers as the call evaluated a row at a time does.
+        for (bound, called) in [
+            ("distance(loc, $1) <= $2", "distance(loc, $1) + 0 <= $2"),
+            ("distance($1, loc) > $2", "distance($1, loc) * 1 > $2"),
+            ("$2 >= distance(loc, $1)", "$2 + 0 >= distance(loc, $1)"),
+        ] {
+            let q = |f: &str| format!("get c select n where {f}");
+            assert_eq!(
+                rows(plain, &q(bound), &params),
+                rows(plain, &q(called), &params),
+                "{stage}: {bound} {params:?}"
+            );
         }
         for f in [
             "",
@@ -428,8 +446,8 @@ fn geosearch_answers_as_redis() {
             &[Value::Text(name.into()), pt(lon, lat)],
         );
     }
-    // GEODIST Sicily Palermo Catania -> 166274.1516 (Redis keeps a cell of
-    // 0.6 m; the coordinates as written are within it).
+    // GEODIST Sicily Palermo Catania -> 166274.1516 (Redis keeps each in a
+    // cell of 0.6 m by 0.3 m; the coordinates as written are within it).
     let d = rows(
         &db,
         "get sicily select distance(loc, $1) as d where name = \"Palermo\"",
