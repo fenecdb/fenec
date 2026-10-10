@@ -52,6 +52,20 @@ usage: fenec-shard [options]
                             start. A standby router leases nothing until it is
                             promoted, and then waits out a lease before it
                             fails anything over
+      --otlp-endpoint <url> send OpenTelemetry traces, OTLP over HTTP as JSON,
+                            to this collector: http://localhost:4318 (the
+                            OpenTelemetry Collector, the Datadog Agent's OTLP
+                            receiver). No TLS: a collector on this host or
+                            network forwards over TLS. Also read from
+                            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and
+                            OTEL_EXPORTER_OTLP_ENDPOINT. Off by default
+      --otlp-header <k=v>   a header on every post, such as an API key;
+                            repeatable. Also OTEL_EXPORTER_OTLP_HEADERS
+      --trace-sample <ratio>  the share of the requests that start a trace
+                            here that are kept, 0 to 1  default: 1 with an
+                            endpoint. A request whose traceparent was sampled
+                            is traced whatever the ratio. The service is
+                            named by OTEL_SERVICE_NAME  default: fenec-shard
       --replication-token <value>  serve the directory to standby routers at
                             /_replication, and present this to a primary
       --replica-of <url>    follow the primary router at http://host:port:
@@ -81,6 +95,7 @@ fn main() {
     let mut replica_of: Option<String> = None;
     let mut promote = false;
     let mut replication_buffer = 8 << 20;
+    let mut tracing = fenec_http::trace::Options::default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
@@ -114,6 +129,15 @@ fn main() {
                 fenec_http::audit::set_delay(number(next(&mut i, "--auth-delay"), "--auth-delay"))
             }
             "--replicas" => cfg.replicas = true,
+            "--otlp-endpoint" => tracing.endpoint = Some(next(&mut i, "--otlp-endpoint")),
+            "--otlp-header" => {
+                let kv = next(&mut i, "--otlp-header");
+                tracing.header(&kv).unwrap_or_else(|e| fail(&e));
+            }
+            "--trace-sample" => {
+                let v = next(&mut i, "--trace-sample");
+                tracing.sample(&v).unwrap_or_else(|e| fail(&e));
+            }
             "--auto-failover" => {
                 let secs = number(next(&mut i, "--auto-failover"), "--auto-failover");
                 if secs == 0 {
@@ -155,6 +179,18 @@ fn main() {
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
         }
         i += 1;
+    }
+
+    match tracing.settings("fenec-shard") {
+        Err(e) => fail(&e),
+        Ok(None) => {}
+        Ok(Some(s)) => {
+            let (url, sample) = (s.endpoint.url(), s.sample);
+            if let Err(e) = fenec_http::trace::install(s) {
+                fail(&format!("could not start the tracing thread: {e}"));
+            }
+            fenec_http::log!("tracing: OTLP/HTTP JSON to {url}, sampling {sample}");
+        }
     }
 
     let replicating = replication_token.as_deref().is_some_and(|t| !t.is_empty());

@@ -109,6 +109,21 @@ impl Pool {
                 }
             }
         });
+        // The trace this thread's request is in goes on as the id does,
+        // its parent the span open now -- `forward`'s -- so the node's spans
+        // hang under the router's. A forwarded request's own `traceparent`
+        // is left out by `forward` while the router traces, and passed on
+        // as it came while it does not.
+        fenec_http::trace::outgoing(|parent, state| {
+            for part in [fenec_http::trace::TRACEPARENT, ": ", parent, "\r\n"] {
+                req.push_str(part);
+            }
+            if let Some(state) = state {
+                for part in [fenec_http::trace::TRACESTATE, ": ", state, "\r\n"] {
+                    req.push_str(part);
+                }
+            }
+        });
         req.push_str(&format!(
             "Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
             body.len()
