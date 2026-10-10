@@ -369,6 +369,45 @@ fn what_a_compact_beside_the_writes_leaves_dead_is_counted_dead() {
     }
 }
 
+/// A look at a compact that is due, made while a write holds the lock,
+/// waits for it rather than pass the compact over until the next look:
+/// under a steady writer the lock is taken at many a look, and a compact
+/// passed over waited 5 s more while the file grew.
+#[test]
+fn a_look_made_while_a_write_holds_the_lock_waits_for_it() {
+    let path = tmp("look-waits");
+    let mut db = fenec_core::fs::open(&path).unwrap();
+    seed(&mut db, 100);
+    let db = Arc::new(RwLock::new(db));
+    let g = {
+        let mut g = db.write().unwrap();
+        let mut rng = Rng(5);
+        for _ in 0..3_000 {
+            let w = write(&mut rng, 100);
+            exec(&mut g, &w);
+        }
+        assert!(g.compact_due(&small()));
+        g
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let looking = Arc::clone(&db);
+    let look = std::thread::spawn(move || {
+        let r = compact_when_due(&looking, &small()).map(|r| r.map(|_| ()));
+        tx.send(()).unwrap();
+        r
+    });
+    // The look cannot end while the lock is held: one that ended meanwhile
+    // passed the compact over. Held a while, then let go.
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the look passed over a due compact while a write held the lock"
+    );
+    drop(g);
+    assert!(matches!(look.join().unwrap(), Some(Ok(()))));
+    assert_eq!(db.read().unwrap().compactions(), 1);
+    assert!(!small().due(db.read().unwrap().garbage()));
+}
+
 /// A writer that never pauses: each compact still runs and ends -- its
 /// catch-up copies the writes made meanwhile while the writer goes on, and
 /// takes the write lock only for the last few -- and the file comes back to
