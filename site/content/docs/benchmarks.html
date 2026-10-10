@@ -881,7 +881,26 @@ that costs when many want to write, and how fast readers go meanwhile.</p>
 <ul>
   <li><b>Durable writes scale with the writers.</b> Sixteen writers share
     their disk syncs; SQLite's stay flat.</li>
+  <li><b>A long read does not hold the writers.</b> It reads what it pinned
+    with no lock held, so a write waits milliseconds beside it, not the
+    read's whole length.</li>
 </ul>
+
+<p>Writers beside long reads: four threads each putting a row every half a
+millisecond into a million events, two reading one by id as often, and a long
+read every second — the longest any write waited, under the lock as before
+and pinned, over two runs.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">the read</th><th class="n">under the lock</th><th class="n">pinned</th></tr></thead>
+<tbody>
+<tr><td>a read-only batch of three aggregates</td><td class="n">151–158 ms</td><td class="n">183–389 ms</td><td class="n"><b>4.4–5.2 ms</b></td></tr>
+<tr><td>an aggregate of 50 000 groups</td><td class="n">0.66–0.75 s</td><td class="n">800–854 ms</td><td class="n"><b>2.5–9.0 ms</b></td></tr>
+<tr><td>a full scan</td><td class="n">61–65 ms</td><td class="n">118–119 ms</td><td class="n"><b>2.8–10.8 ms</b></td></tr>
+</tbody>
+</table>
+</div>
 
 <details class="deep"><summary>Method and details</summary>
 <p>fenecdb and SQLite both take one writer at a time. What that costs when
@@ -913,6 +932,26 @@ their places in the file — also ran by count: it ran once the documents
 reached 16 MB, which for rows this small was 930 000 of them, each a little
 work under the write lock. It runs every 65 536 writes as well now, the same
 work in pauses of about a millisecond.</p>
+
+<p><b>A long read is pinned.</b> A read took the shared lock for as long as
+it ran, and a write waited for every read, so an aggregate over a million
+events held every write — and every read by id behind a waiting write — for
+its whole 0.8 s. Now a long read takes the shared lock only to pin what it
+reads: each collection's id index copied, 12 bytes a row, its stored
+documents shared, 0.26 to 0.87 ms for the million rows. It then reads with
+no lock held, on the database as it stood at the pin, and answers what the
+read under the lock would have; alone it takes what it took, 151.9 ms
+against 151.4 for the batch. The writes beside it waited at most what they
+wait with no long read at all, a few milliseconds of handovers and the copy
+of the segment the pin shares. A read an index answers is short, and still
+reads under the lock: indexes change in place, and copying one would cost
+the read it spares. The same over HTTP, a ledger's reconciliation every
+second beside four clients sending transfers (<code>make
+recon-bench</code>), four runs each in turns: the transfers' longest wait
+went from 187–512 ms, 36 of them past 50 ms in every run, to 5.4–29 ms and
+none in three runs; the fourth met one stall of 385 ms, four transfers past
+50 ms, of the kind both servers met in the round with no reconciliation at
+all (118–162 ms).</p>
 </details>
 
 <h2 id="requests">A request over HTTP</h2>

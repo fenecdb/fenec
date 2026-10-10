@@ -66,7 +66,9 @@ pub trait Hook: Send + Sync {
     }
 }
 
-#[derive(Default)]
+/// Cloned, the functions and hooks are shared: what a pinned read
+/// ([`crate::engine::Pinned`]) calls a row's functions through.
+#[derive(Default, Clone)]
 pub struct Registry {
     /// Name, lowered, -> function: a `Vec` searched by name rather than a
     /// map. Four are built in, a lookup through the map lowered the name

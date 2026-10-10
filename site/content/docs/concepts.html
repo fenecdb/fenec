@@ -550,6 +550,9 @@ bookkeeping other databases need for concurrent writers.</p>
   <li><b>A statement or a batch</b> lands as one unit: a crash
     keeps all of it or none.</li>
   <li><b>Keep batches short:</b> other writes wait while one runs.</li>
+  <li><b>A long read does not hold the writer:</b> an aggregate, a scan or
+    a read-only batch reads what it pinned and lets writes land beside
+    it.</li>
 </ul>
 
 <div class="note trap">
@@ -565,6 +568,19 @@ it takes the exclusive lock and holds it until it lands or is put back. One
 writer is what makes that isolation: nothing reads a block's writes before
 they land, because nothing else runs. There are no interactive transactions
 held open across requests: one writer would wait on a client's think time.</p>
+
+<p>A long read holds the shared lock only as long as it takes to pin what
+it reads: on a server, an aggregate, a facet, an <code>order</code>, a
+filtered <code>count</code> or a read with no <code>limit</code> over a
+collection of 10 000 rows or more, and a read-only <code>/batch</code>
+holding one (<code>Database::pin</code> embedded). Under the lock it copies each
+collection's id index, 12 bytes a row, and shares its stored documents;
+the read then runs with no lock held, on the database as it stood at the
+pin, while writes land beside it. A read an index answers — an equality on
+a <code>@hash</code> field, a range on a <code>@sorted</code> one,
+<code>match</code>, <code>near</code>, <code>lookup</code> — is short, and
+runs under the lock as before: indexes change in place with every write,
+and copying one would cost as much as the read.</p>
 
 <p>Every write is a block. What a statement writes — every document of a
 <code>put</code> of many, of a <code>set</code> or a <code>del</code> matching

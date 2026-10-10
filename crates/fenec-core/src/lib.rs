@@ -60,6 +60,8 @@ mod synclog;
 pub mod prelude {
     pub use crate::changes::{ChangeLog, Since};
     pub use crate::collate::Collation;
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use crate::engine::Pinned;
     pub use crate::engine::{
         ChangeBatch, Changes, Collection, CollectionStats, Database, Durability, Sink,
         TextIndexStats, VectorIndexStats, Watcher,
