@@ -548,7 +548,12 @@ of its stale copies before the repair its answer triggers has them follow.
 The list rides only when its epoch (FNV of the sorted names) changed, and a
 node that does not hold it answers 412; a create or a move grants the new
 list at once. Grants go out in parallel over a pool bounded by a third of
-the lease, or one silent node let the others' lapse. A standby router forgets
+the lease, or one silent node let the others' lapse -- but to one node one
+at a time, and never with a list read before the last one it was sent
+(`Leases::turn`, each reading of the directory numbered): a round reads
+every list as it starts, and its grant, landing after the one a create
+sent at once, put the list from before the create back, the new tenant
+refused on its node (503) until the next round. A standby router forgets
 its leases while it follows and counts from its promotion; a node without
 `--lease` is never failed over on its own. A lease of a second: a node cut
 off stopped writing 697 ms after, its 10 tenants took writes again 1.29 to

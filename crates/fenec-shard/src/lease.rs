@@ -21,7 +21,8 @@
 //! start.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How much longer than a lease the router waits before it counts one
@@ -38,6 +39,14 @@ pub struct Leases {
     /// When this router began leasing: what a node it never reached counts
     /// from.
     started: Mutex<Instant>,
+    /// Each node's turn to be granted, holding the reading of the newest
+    /// list sent to it ([`Leases::turn`]).
+    turns: Mutex<HashMap<String, Arc<Mutex<u64>>>>,
+    /// Numbers the directory's readings for grants, in the order they were
+    /// taken ([`Leases::reading`]).
+    readings: AtomicU64,
+    /// Grants waiting for their node's turn: what a test waits for.
+    waiting: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -71,7 +80,48 @@ impl Leases {
             term,
             nodes: Mutex::new(HashMap::new()),
             started: Mutex::new(Instant::now()),
+            turns: Mutex::new(HashMap::new()),
+            readings: AtomicU64::new(0),
+            waiting: AtomicUsize::new(0),
         }
+    }
+
+    /// The number of a reading of the directory a grant's list comes from,
+    /// taken while the reading's lock is held: a later number read a
+    /// directory no older.
+    pub fn reading(&self) -> u64 {
+        self.readings.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// `node`'s turn to be granted, locked by the grant: the number of the
+    /// reading the newest list sent to it came from. A node is granted one
+    /// grant at a time, and never a list older than one it was sent -- a
+    /// round reads every node's list at its start, and its grant, landing
+    /// after the one a create sent at once, put the list from before the
+    /// create back: the new tenant was refused on its node (503) until the
+    /// next round.
+    pub fn turn(&self, node: &str) -> Arc<Mutex<u64>> {
+        Arc::clone(
+            self.turns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(node.to_string())
+                .or_default(),
+        )
+    }
+
+    /// Locks `turn`, counted among the grants waiting meanwhile.
+    pub fn wait_turn<'t>(&self, turn: &'t Mutex<u64>) -> std::sync::MutexGuard<'t, u64> {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let held = turn.lock().unwrap_or_else(|e| e.into_inner());
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        held
+    }
+
+    /// Grants waiting for their node's turn now: what a test waits for to
+    /// know one is queued behind another.
+    pub fn grants_waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
     }
 
     /// A standby router's: it leases nothing, and forgets what it knew, so
@@ -189,15 +239,19 @@ mod tests {
 
     #[test]
     fn a_node_is_failed_over_once_its_lease_has_certainly_lapsed() {
+        // The router's start lies between these two: each moment asked is
+        // placed from the one that bounds it, not from a clock read after
+        // the start, which a thread stalled 5 ms between them put past it.
+        let before = Instant::now();
         let l = Leases::new(Duration::from_millis(100));
         l.know("n1");
-        let start = Instant::now();
+        let after = Instant::now();
         // Counted as granted at the router's start: nothing lapses before.
-        assert!(l.lapsed(start).is_empty());
-        assert!(l.lapsed(start + Duration::from_millis(105)).is_empty());
-        assert_eq!(l.lapsed(start + Duration::from_millis(115)), ["n1"]);
+        assert!(l.lapsed(before).is_empty());
+        assert!(l.lapsed(before + Duration::from_millis(105)).is_empty());
+        assert_eq!(l.lapsed(after + Duration::from_millis(115)), ["n1"]);
         // Once: a node failed over is not failed over again.
-        assert!(l.lapsed(start + Duration::from_secs(5)).is_empty());
+        assert!(l.lapsed(after + Duration::from_secs(5)).is_empty());
         // It comes back, and says so once.
         assert!(l.answered("n1", "e", &Answer::Taken, Instant::now()));
         assert!(!l.answered("n1", "e", &Answer::Taken, Instant::now()));
@@ -208,11 +262,13 @@ mod tests {
             .lapsed(Instant::now() + Duration::from_secs(60))
             .iter()
             .all(|n| n != "n2"));
-        // A standby forgets, and counts from the moment it leases again.
+        // A standby forgets, and counts from the moment it leases again:
+        // counted from its grant 120 ms before, n1 would have lapsed.
         std::thread::sleep(Duration::from_millis(120));
+        let before = Instant::now();
         l.standby();
         l.know("n1");
-        assert!(l.lapsed(Instant::now()).is_empty());
+        assert!(l.lapsed(before + Duration::from_millis(105)).is_empty());
     }
 
     #[test]
