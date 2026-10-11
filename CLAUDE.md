@@ -2000,8 +2000,10 @@ minute, 5 s at most, and only a token verified clears the count
 checked and found good -- `authenticate`'s server token and JWT,
 `admin::handle`, `metrics::allowed`, `Replication::authorized`, a tenant's
 replication token in `route_tenant`, the router's `refused` -- and nowhere
-else, asking the table only when an address has one (`FAILING`), so the
-hooks cost a request 12 ns. It was inferred from the answer, any status
+else, asking the table only when an address has one (`FAILING`): the
+hooks cost a request 5.4 ns in process, 5.7 with a token verified, where
+reading the answer -- `Authorization` looked for among the headers -- took
+5.8 and 8.6. It was inferred from the answer, any status
 but 401 to a request carrying `Authorization`, and most answers verify
 nothing: an unknown path's 404 on a node or the router, `/_studio/`, an
 open `/_metrics` or `/_shard/`, `POST /_whoami`'s 405, a body past
@@ -2018,7 +2020,11 @@ mark sets a thread-local instead, which the answer's head carries as
 subscription's and a replication stream's heads), taken as it is written
 and reset as each request is read, so the request before on a pooled
 connection says nothing of the next; the router drops it from what it
-sends on and clears its client's count on it alone. The count is an
+sends on and clears its client's count on it alone. Against main in
+three ABBA rounds (`make requests-bench` with and without a token, `make
+shard-bench`'s latency, a node and the router asked with a data token and
+a JWT; one side of twelve left out, the machine's load past 6 from other
+builds), every median stayed inside the runs' spread. The count is an
 address's, not a token's: a client holding any good token -- a JWT an app
 hands every user among them -- clears its own between guesses at another,
 as it always could. `tests/audit.rs` (fenec-http) and `tests/refusals.rs`
