@@ -179,9 +179,12 @@ pub fn serve(
     req: &Request,
     who: &Who,
 ) {
+    // Said as every 503 says it, to come back in a second: the sync reads
+    // the wait from the body, where plain text left it at its own backoff.
     let Some(_slot) = hub.reserve(cfg.max_streams) else {
-        let _ = write_head(out, cfg, 503, "text/plain; charset=utf-8");
-        let _ = out.write_all(b"too many subscriptions\n");
+        let refused = crate::http::Response::retry_after(503, "too many subscriptions", 1);
+        let _ = write_head(out, cfg, 503, refused.content_type, Some(1));
+        let _ = out.write_all(&refused.body);
         return;
     };
 
@@ -220,6 +223,7 @@ pub fn serve(
                 cfg,
                 api::status_of(&e),
                 "application/json; charset=utf-8",
+                None,
             );
             let mut body = String::from("{\"error\":");
             fenec_core::json::escape_into(&mut body, &e.to_string());
@@ -229,7 +233,7 @@ pub fn serve(
         }
     };
 
-    if write_head(out, cfg, 200, "text/event-stream").is_err() {
+    if write_head(out, cfg, 200, "text/event-stream", None).is_err() {
         return;
     }
     // A client stalled during the stream must not hold the thread forever:
@@ -416,12 +420,16 @@ fn write_head(
     cfg: &Config,
     status: u16,
     content_type: &str,
+    retry_after: Option<u64>,
 ) -> std::io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\n\
          Cache-Control: no-cache, no-transform\r\nConnection: close\r\n",
         crate::http::reason(status)
     );
+    if let Some(secs) = retry_after {
+        head.push_str(&format!("Retry-After: {secs}\r\n"));
+    }
     // Turns off proxy buffering (nginx); otherwise events pile up, arrive in
     // bulk, and the stream stops being "live".
     if status == 200 {

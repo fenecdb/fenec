@@ -495,6 +495,7 @@ fn connection_limit_refuses_extra_connections() {
         .ask("GET", "/collections", "")
         .expect("the refusal is an answer");
     assert_eq!(status, 503, "{body}");
+    assert!(body.ends_with(r#""retry_after":1}"#), "{body}");
     ok(first.query("collections"));
 
     drop(first);

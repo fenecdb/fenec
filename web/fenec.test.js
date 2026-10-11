@@ -1723,6 +1723,22 @@ test("a tenant's quota is the error's: its name and the wait the server asks for
   assert.equal(batch.completed, 0);
 });
 
+test('a tenant being moved says when to come back, in its body as in its header', async () => {
+  const answers = [
+    // A page reads a header only where CORS exposes it: the body says it too.
+    new Response(JSON.stringify({ error: 'the tenant is being moved; retry shortly', retry_after: 1 }), {
+      status: 503,
+      headers: { 'content-type': 'application/json' },
+    }),
+  ];
+  const db = new FenecHttp('http://x', { fetch: async () => answers.shift() });
+  const moved = await db.run('put notes {n: 1}').catch((e) => e);
+  assert.ok(moved instanceof FenecError);
+  assert.equal(moved.status, 503);
+  assert.equal(moved.retryAfter, 1);
+  assert.equal(moved.quota, undefined, 'a move is no quota');
+});
+
 // ------------------------------------------------------------------ lookup
 
 test('lookup is terminal: its clauses bind to the child', () => {

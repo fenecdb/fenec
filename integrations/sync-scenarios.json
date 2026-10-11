@@ -638,6 +638,34 @@
       ]
     },
     {
+      "name": "a 503 a move or a failover answers is waited out for its retry_after, and the write lands under its key",
+      "covers": "sync.html#refusals-retries-and-offline, sharding.html#moving-a-tenant, sharding.html#automatic-failover: a node answers a write to a tenant it is moving or no longer holds 503 with retry_after, the seconds its Retry-After says, in the body as a quota's 429 says it; waited where longer than the backoff, not cut short by the network's signal, and naming no quota",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 503, "body": {"error": "the tenant is being moved; retry shortly", "retry_after": 1}, "expect": {
+          "refused": [], "pending": 1, "waits": [[1000, 1300]], "quota": null, "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}]}}},
+        {"do": "online", "online": false, "expect": {"requests": [], "streams": []}},
+        {"do": "online", "online": true, "expect": {"requests": [], "waits": [], "streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "fire", "expect": {"requests": [{"path": "/query", "key": "<w1>", "body": [{"query": "set tasks {title: $1} where key = $2"}]}]}},
+        {"do": "answer", "status": 503, "body": {"error": "this node's lease from its router lapsed: its tenants may be failing over to other nodes; send the write through the router", "retry_after": 1}, "expect": {
+          "refused": [], "pending": 1, "waits": [[1000, 1300]], "quota": null}},
+        {"do": "fire", "expect": {"requests": [{"path": "/query", "key": "<w1>"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "refused": [], "waits": [], "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "a stream refused 503 with retry_after waits the server's time, not the backoff",
+      "covers": "sync.html#refusals-retries-and-offline, sharding.html#a-standby-router: a standby router whose directory has not arrived answers 503 with retry_after rather than 404, and a stream refused so waits that long rather than the backoff's 250 ms; it names no quota",
+      "steps": [
+        {"do": "stream_status", "status": 503, "body": {"error": "the directory has not arrived from the primary yet", "retry_after": 1}},
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[1000, 1300]], "token_asked": false, "quota": null, "ready": false}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": []}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}
+      ]
+    },
+    {
       "name": "no answer at all keeps the write, and the same key lands it once",
       "covers": "mobile.html#sync, formerly a browser bug: a network failure is not a refusal; Idempotency-Key makes the second send the first's answer",
       "steps": [

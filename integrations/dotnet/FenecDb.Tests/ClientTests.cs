@@ -460,6 +460,33 @@ public sealed class ClientTests(Servers servers)
         Assert.True(rate.RetryAfter >= TimeSpan.FromSeconds(1));
     }
 
+    // A tenant being moved answers its writes 503 with the wait, as a quota's 429 says it: a freeze is what a
+    // move does first, and a failover's lapsed lease is refused the same way.
+    [Fact]
+    public async Task ATenantBeingMovedSaysWhenToComeBack()
+    {
+        var dir = Directory.CreateDirectory(Path.Combine(servers.Scratch, "moving")).FullName;
+        var node = servers.Serve("--dir", dir, "--admin-token", "dotnet-admin");
+        using var http = new HttpClient();
+        async Task Admin(HttpMethod method, string path)
+        {
+            using var req = new HttpRequestMessage(method, node + path);
+            req.Headers.Authorization = new("Bearer", "dotnet-admin");
+            Assert.True((await http.SendAsync(req)).IsSuccessStatusCode, path);
+        }
+        await Admin(HttpMethod.Put, "/_admin/tenants/acme");
+        using var acme = new FenecClient(node, new FenecClientOptions { Tenant = "acme" });
+        await acme.ExecAsync("create collection notes (t text)");
+        await Admin(HttpMethod.Post, "/_admin/tenants/acme/freeze");
+        var moved = await Assert.ThrowsAsync<FenecException>(() => acme.ExecAsync("put notes {t: $1}", ["a"]));
+        Assert.Equal((503, "unavailable", (string?)null), (moved.Status, moved.Code, moved.Quota));
+        Assert.Equal(TimeSpan.FromSeconds(1), moved.RetryAfter);
+        // Reads go on meanwhile, and the write lands once the tenant is let go.
+        await acme.QueryAsync("get notes");
+        await Admin(HttpMethod.Post, "/_admin/tenants/acme/thaw");
+        await acme.ExecAsync("put notes {t: $1}", ["a"]);
+    }
+
     [Fact]
     public async Task AScopedToken()
     {

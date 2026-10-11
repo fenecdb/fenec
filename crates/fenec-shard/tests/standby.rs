@@ -322,5 +322,6 @@ fn a_standby_without_its_directory_asks_to_be_asked_again() {
     s.read_to_string(&mut out).unwrap();
     assert!(out.starts_with("HTTP/1.1 503"), "{out}");
     assert!(out.contains("Retry-After: 1\r\n"), "{out}");
+    assert!(out.ends_with(r#""retry_after":1}"#), "{out}");
     drop(files);
 }

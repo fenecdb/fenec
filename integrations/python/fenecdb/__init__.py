@@ -113,7 +113,8 @@ class FenecError(Exception):
     A tenant's quota names itself (`quota`): "bytes" and "rows" answer 507,
     and room is made by deleting; "streams", "requests", "writes" and
     "write_bytes" answer 429, with the seconds to wait before sending again
-    (`retry_after`). None otherwise."""
+    (`retry_after`), as a tenant being moved or failed over answers its
+    writes 503. None otherwise."""
 
     def __init__(
         self,
@@ -500,7 +501,8 @@ def _answer(status: int, raw: bytes) -> Any:
         message = body.get("error", raw.decode(errors="replace"))
         at, completed = body.get("at"), body.get("completed")
         # A quota's refusal says which, and the wait its `Retry-After`
-        # says, in the body too: what is read here has no headers.
+        # says -- a quota's 429, a move's 503 -- in the body too: what is
+        # read here has no headers.
         quota, retry_after = body.get("quota"), body.get("retry_after")
     except (ValueError, AttributeError):
         message = raw.decode(errors="replace")

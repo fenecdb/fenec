@@ -176,6 +176,10 @@ void main() {
     expect((rate.quota, rate.retryAfter), ('writes', const Duration(seconds: 3)));
     final memory = FenecRemote.refused(507, {'error': 'data ceiling'}, null);
     expect((memory.code, memory.quota), (FenecCode.io, null));
+    // A tenant being moved says the wait in its body as a quota does.
+    final moved =
+        FenecRemote.refused(503, {'error': 'the tenant is being moved; retry shortly', 'retry_after': 1}, null);
+    expect((moved.status, moved.quota, moved.retryAfter), (503, null, const Duration(seconds: 1)));
   });
 
   test('a require not met is refused, and writes nothing', () async {

@@ -121,6 +121,11 @@ struct Note: Codable, Equatable, FenecValue {
         #expect(rate.code == .quota && rate.quota == "writes" && rate.retryAfter == 3)
         let memory = FenecRemote.refused(507, try Value.parse(#"{"error":"data ceiling"}"#), retryAfter: nil)
         #expect(memory.quota == nil && memory.code == .io)
+        // A tenant being moved says the wait in its body as a quota does.
+        let moved = FenecRemote.refused(
+            503, try Value.parse(#"{"error":"the tenant is being moved; retry shortly","retry_after":1}"#),
+            retryAfter: nil)
+        #expect(moved.status == 503 && moved.quota == nil && moved.retryAfter == 1)
     }
 
     /// `require 1` over a row that is not there is refused as `unmet`, and

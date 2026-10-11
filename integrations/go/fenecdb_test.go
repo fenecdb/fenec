@@ -582,6 +582,38 @@ func TestATenantsQuota(t *testing.T) {
 	}
 }
 
+// A tenant being moved answers its writes 503 with the wait, as a quota's
+// 429 says it: a freeze is what a move does first, and a failover's lapsed
+// lease is refused the same way.
+func TestATenantBeingMovedSaysWhenToComeBack(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(scratch, "moving")
+	os.MkdirAll(dir, 0o700)
+	node, stop := serve("--dir", dir, "--admin-token", "go-admin")
+	defer stop()
+	admin := func(method, path string) {
+		req, _ := http.NewRequest(method, node+path, nil)
+		req.Header.Set("Authorization", "Bearer go-admin")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil || res.StatusCode >= 300 {
+			t.Fatalf("%s %s: %v %v", method, path, res, err)
+		}
+		res.Body.Close()
+	}
+	admin(http.MethodPut, "/_admin/tenants/acme")
+	acme := fenecdb.New(node, fenecdb.WithTenant("acme"))
+	must(acme.Exec(ctx, "create collection notes (t text)")).of(t)
+	admin(http.MethodPost, "/_admin/tenants/acme/freeze")
+	_, err := acme.Exec(ctx, "put notes {t: $1}", "a")
+	if e := statusOf(t, err); e.Status != 503 || e.Code != fenecdb.CodeUnavailable || e.Quota != "" || e.RetryAfter != time.Second {
+		t.Fatalf("a write to a tenant being moved: %+v", e)
+	}
+	// Reads go on meanwhile, and the write lands once the tenant is let go.
+	must(acme.Query(ctx, "get notes")).of(t)
+	admin(http.MethodPost, "/_admin/tenants/acme/thaw")
+	must(acme.Exec(ctx, "put notes {t: $1}", "a")).of(t)
+}
+
 func TestAScopedToken(t *testing.T) {
 	ctx := context.Background()
 	out, err := exec.Command(binary, "--jwt-secret", jwtSecret, "--mint-token", `{"sub":"alice"}`).Output()

@@ -353,7 +353,8 @@ impl Server {
                 self.live.fetch_sub(1, Ordering::SeqCst);
                 let mut s = stream;
                 request_id::begin(None);
-                let _ = Response::error(503, "too many connections").write(&mut s, false, false);
+                let _ = Response::retry_after(503, "too many connections", 1)
+                    .write(&mut s, false, false);
                 request_id::end();
                 continue;
             }
@@ -941,8 +942,11 @@ fn respond(
             }
             waits::Next::Closed => {
                 ticket.leave(false);
-                resp = Response::error(503, "the tenant was closed on this node; retry shortly")
-                    .header("Retry-After", "1");
+                resp = Response::retry_after(
+                    503,
+                    "the tenant was closed on this node; retry shortly",
+                    1,
+                );
                 break;
             }
         }
@@ -1105,9 +1109,7 @@ fn route_tenant(
             .reaches(&name)
             .map_err(|why| Response::error(403, why))?;
     }
-    let t = tenants
-        .get(&name)
-        .map_err(|Refused(status, msg)| Response::error(status, &msg))?;
+    let t = tenants.get(&name).map_err(Refused::response)?;
     // Rebuilt from the segments rather than cut at an offset: `//t/acme`
     // has the same segments as `/t/acme` but not the same prefix length.
     req.path = format!("/{}", segs[2..].join("/"));
@@ -1154,7 +1156,7 @@ fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response
         }
     };
     match refused.or_else(|| refusal(t)) {
-        Some(why) if resp.status == 403 => Response::error(503, &why).header("Retry-After", "1"),
+        Some(why) if resp.status == 403 => Response::retry_after(503, &why, 1),
         _ => resp,
     }
 }
@@ -2349,6 +2351,7 @@ mod tests {
         let body = String::from_utf8_lossy(&late.body);
         assert_eq!(late.status, 503, "{body}");
         assert!(body.contains("lapsed"), "{body}");
+        assert!(body.ends_with(r#""retry_after":1}"#), "{body}");
         assert!(late.extra.iter().any(|(k, _)| k == "Retry-After"));
         drop(t);
         let _ = std::fs::remove_dir_all(dir);

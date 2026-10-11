@@ -67,6 +67,18 @@ pub struct Replicated {
 #[derive(Debug)]
 pub struct Refused(pub u16, pub String);
 
+impl Refused {
+    /// The answer it is. A 503 -- the node going down -- is told to come
+    /// back in a second, as a frozen tenant's write is: through the router
+    /// the tenant may be served by another node by then.
+    pub fn response(self) -> crate::http::Response {
+        match self.0 {
+            503 => crate::http::Response::retry_after(503, &self.1, 1),
+            status => crate::http::Response::error(status, &self.1),
+        }
+    }
+}
+
 pub struct Tenant {
     name: String,
     pub db: Arc<RwLock<Database>>,

@@ -52,6 +52,10 @@ def test_a_quota_names_itself_and_the_wait():
     with pytest.raises(FenecError) as e:
         fenecdb._answer(507, b'{"error":"past","quota":"bytes","completed":0,"at":1}')
     assert (e.value.quota, e.value.at, e.value.completed) == ("bytes", 1, 0)
+    # A tenant being moved or failed over says the wait as a quota does.
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(503, b'{"error":"the tenant is being moved; retry shortly","retry_after":1}')
+    assert (e.value.status, e.value.quota, e.value.retry_after) == (503, None, 1)
 
 
 def test_a_write_that_does_not_write_its_count_is_refused_and_put_back(client):

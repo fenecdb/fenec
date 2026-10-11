@@ -1199,7 +1199,8 @@ impl Sync {
             // No answer, or one that says to come back: the write stays, and
             // goes again under its key, which the server answers as the
             // first time if the first reached it -- after the `retry_after`
-            // a quota's 429 names, where that is longer than the backoff.
+            // a quota's 429 names, or a move's or a failover's 503, where
+            // that is longer than the backoff.
             0 | 408 | 429 | 500..=599 => {
                 self.fault_naming(message(status, body), status, true, said.quota);
                 self.flushing = false;

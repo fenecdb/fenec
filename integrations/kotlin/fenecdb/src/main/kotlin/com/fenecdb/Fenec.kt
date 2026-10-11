@@ -35,7 +35,7 @@ class FenecException internal constructor(
      * 429 with [retryAfter]. Null for any other refusal.
      */
     val quota: String? = null,
-    /** Seconds to wait before sending again, where the server said (`Retry-After`, a quota's 429). */
+    /** Seconds to wait before sending again, where the server said (`Retry-After`: a quota's 429, a move's or a failover's 503). */
     val retryAfter: Double? = null,
 ) : RuntimeException(message) {
     constructor(code: Code, message: String) : this(code, message, null)

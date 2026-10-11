@@ -1562,7 +1562,10 @@ empty queue, 16 busy HTTP workers took 148 000 jobs a second against
 at every write they looked 3 400 times and the workers took 142 000. A
 held request runs `handle` whole each time -- its token asked again, a
 tenant's gate entered and let go, so a freeze goes through beside it --
-and its time is out of the slow log; a tenant closed answers it 503 with `Retry-After`, a SIGTERM
+and its time is out of the slow log; a tenant closed answers it 503 with
+`Retry-After` and `retry_after`, a wait that ran out answers its last
+answer though a write it has not looked at landed in the moment before
+(its head woken late: the job is the next claim's, never lost), a SIGTERM
 answers every one at once with its last answer before the sync
 (`end_all`, `HELD_GRACE`), a client gone hands the row to the next (a
 `peek` before each run), a keyed one keeps no key while it writes nothing
@@ -3497,15 +3500,34 @@ third member of `Sync::timers`, `#wait`'s `server`) and lets the streams
 open past a write held so. Both runners read the body, not the headers:
 `Sync::response` is handed a body, a header would be a parameter more
 through the C ABI and three bindings, and a page on another origin reads
-`Retry-After` only where CORS lists it -- so a move's or a failover's 503,
-`Retry-After: 1` with no `retry_after` in its body, is backed off the
-sync's own way. Five scenarios hold both runners to it, and the Swift,
+`Retry-After` only where CORS lists it -- so every 503 says it in its body
+too (below). Five scenarios hold both runners to it, and the Swift,
 Kotlin, Dart and browser tests a real tenant node at its rows quota: the
 insert refused naming `rows`, the keyed delete behind it landing.
 `fenec.js` grew 99.4 -> 102.4 KB, 27.0 -> 27.9 KB brotli, 0.26 KB of
 that code (minified, 12.2 -> 12.5 KB); the native library's code 2.3 KB,
 its file 16 bytes on aarch64-apple-darwin; the browser module not by a
 byte, the sync being outside it.
+
+**Every 503 says when to come back, in its body too.** A move's or a
+failover's 503 carried `Retry-After: 1` as a header alone, and the sync,
+which reads bodies, came back after its own 250 and 500 ms where the node
+had said a second. `Response::retry_after` writes `{"error",
+"retry_after"}` beside the header, as `quota::refusal` writes a 429's: a
+write to a frozen tenant or one the lease does not let this node take
+(`handle_admitted`, the schema's apply), a held claim on a tenant closed
+here, a standby router without its directory, the ceilings of connections
+(node and router) and subscriptions (JSON now, plain text before), a node
+going down (`Refused::response`, the 503 of a tenant opened during the
+shutdown), `/_changes` over a database going. Both runners already waited
+a 5xx's `retry_after`; two scenarios hold them to a write's 503s of a move
+and a lapsed lease, waited a second and not cut short by `online`, and a
+stream's 503 from a standby router. Every SDK's error carried a body's
+`retry_after` for any status; the Go and .NET tests freeze a tenant on a
+real node and read it. The router has no CORS of its own, so a page on
+another origin reads nothing of the router's own answers -- a standby's
+503, a 404, a 502 -- and backs them off as a network failure; the nodes'
+answers it forwards carry the nodes' CORS headers.
 
 **A schema declared in code is checked at every open, in the engine.**
 Two front ends compile to one description (`fenec_core::declared`,

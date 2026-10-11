@@ -20,7 +20,7 @@ const (
 	CodeUnmet        = "unmet"        // 412: a write's Require not met, its batch put back
 	CodeKeyReused    = "key_reused"   // 422: an Idempotency-Key sent with another request
 	CodeTooMany      = "too_many"     // 429: a tenant's quota of streams, requests or writes a second
-	CodeUnavailable  = "unavailable"  // 503: too many connections or subscriptions
+	CodeUnavailable  = "unavailable"  // 503: too many connections or subscriptions, a tenant moved or failed over
 	CodeTimeout      = "timeout"      // 504: After's change did not reach the replica in the wait
 	CodeFull         = "storage_full" // 507: past --max-memory, or a tenant's quota of bytes or rows
 )
@@ -57,7 +57,8 @@ type Error struct {
 	// Quota constants; "" for any other refusal.
 	Quota string
 	// RetryAfter is how long to wait before sending again, where the
-	// server said (a quota's 429): 0 otherwise.
+	// server said -- a quota's 429, the 503 of a tenant being moved or
+	// failed over or of a server at its ceiling: 0 otherwise.
 	RetryAfter time.Duration
 }
 

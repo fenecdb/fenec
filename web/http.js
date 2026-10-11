@@ -463,11 +463,12 @@ async function refusal(res, collection) {
 
 /**
  * A refused request as the error it is: its status, where a batch stopped
- * and what stayed applied, and where a tenant's quota refused it the quota
+ * and what stayed applied, where a tenant's quota refused it the quota
  * (`bytes` and `rows` answer 507; `streams`, `requests`, `writes` and
- * `write_bytes` 429) and how many seconds to wait before coming back
- * (`Retry-After`), so a client backs off by what the server says rather
- * than by a guess.
+ * `write_bytes` 429), and how many seconds to wait before coming back
+ * (`Retry-After`: a quota's 429, a tenant being moved or failed over, a
+ * server at its ceiling of connections), so a client backs off by what the
+ * server says rather than by a guess.
  */
 function refused(res, body, message) {
   const e = new FenecError(message ?? body?.error ?? `HTTP ${res.status}`);

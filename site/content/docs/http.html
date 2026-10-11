@@ -454,9 +454,12 @@ way out. The rule and why it is there are under
 
 <p>A refusal is a status and <code>{"error": "..."}</code>. The status says
 what to do about it; a <code>/batch</code> that stopped adds where
-(<code>at</code>) and what stayed applied (<code>completed</code>), and a
+(<code>at</code>) and what stayed applied (<code>completed</code>), a
 tenant's quota names itself (<code>quota</code>, and the
-<code>Fenec-Quota</code> header). Every SDK's error carries all of them.</p>
+<code>Fenec-Quota</code> header), and one to come back from says when
+(<code>retry_after</code>, the seconds of its <code>Retry-After</code>
+header: a page on another origin, or an app's replica, reads the body).
+Every SDK's error carries all of them.</p>
 
 <div class="tbl">
 <table>
@@ -472,7 +475,7 @@ tenant's quota names itself (<code>quota</code>, and the
 <tr><td class="n">413</td><td>a body past the ceiling, 64 MB</td><td>send less at once</td></tr>
 <tr><td class="n">422</td><td>an <code>Idempotency-Key</code> sent with another request</td><td>a new key for a new request</td></tr>
 <tr><td class="n">429</td><td>a tenant's quota of <code>streams</code>, <code>requests</code>, <code>writes</code> or <code>write_bytes</code></td><td>come back after <code>Retry-After</code> seconds</td></tr>
-<tr><td class="n">503</td><td>too many connections or subscriptions; a tenant being moved or failed over</td><td>come back after <code>Retry-After</code></td></tr>
+<tr><td class="n">503</td><td>too many connections or subscriptions; a tenant being moved or failed over; a node going down</td><td>come back after <code>Retry-After</code> seconds</td></tr>
 <tr><td class="n">504</td><td>a <code>Fenec-After</code> change that did not reach a replica in the wait</td><td>ask again, or ask the primary</td></tr>
 <tr><td class="n">507</td><td>past <code>--max-memory</code>, or a tenant's quota of <code>bytes</code> or <code>rows</code>; the write put back whole</td><td>delete, then write again: waiting does not help</td></tr>
 </tbody>
@@ -483,7 +486,12 @@ tenant's quota names itself (<code>quota</code>, and the
 Fenec-Quota: writes
 Retry-After: 1
 
-{"error":"the tenant writes past its quota of 100 writes a second","quota":"writes","retry_after":1}</pre>
+{"error":"the tenant writes past its quota of 100 writes a second","quota":"writes","retry_after":1}
+
+HTTP/1.1 503 Service Unavailable
+Retry-After: 1
+
+{"error":"the tenant is being moved; retry shortly","retry_after":1}</pre>
 
 <p>A quota is a tenant node's (<code>fenec-server --dir</code>): what each
 bounds, how it is set and why the statuses are these is under

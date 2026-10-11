@@ -80,7 +80,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Post, ["tenants", t, "schema"]) => tenants.get(t).map(|tenant| {
             let _held = tenant.enter();
             match tenant.writable() {
-                Err(why) => Response::error(503, &why).header("Retry-After", "1"),
+                Err(why) => Response::retry_after(503, &why, 1),
                 Ok(()) => crate::apply_schema(&tenant.db, cfg, &String::from_utf8_lossy(&req.body)),
             }
         }),
@@ -127,7 +127,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         },
         _ => Err(Refused(404, "no such admin endpoint".into())),
     };
-    result.unwrap_or_else(|Refused(status, msg)| Response::error(status, &msg))
+    result.unwrap_or_else(Refused::response)
 }
 
 /// A tenant's schema as `fenec_abi::read` reads it from FenecQL `create

@@ -263,6 +263,8 @@ fn a_frozen_tenant_refuses_writes_with_retry_after_and_keeps_reading() {
         let r = call(n.port, method, target, body, None);
         assert_eq!(r.status, 503, "{method} {target}: {}", r.text());
         assert!(r.head.contains("Retry-After: 1"), "{}", r.head);
+        // The body says it too: a replica's sync reads the wait there.
+        assert!(r.text().contains(r#""retry_after":1}"#), "{}", r.text());
     }
     // Reads, including a read through /query, still work.
     let r = query(n.port, "acme", "get notes");
