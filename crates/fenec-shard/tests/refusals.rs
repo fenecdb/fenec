@@ -48,12 +48,12 @@ fn turn() -> MutexGuard<'static, ()> {
 }
 
 fn router(addr: &str, node: &str) -> String {
-    router_with(addr, node, None)
+    router_with(addr, node, None, None)
 }
 
 /// A router over the one node `node`, holding acme, with `token` for its
-/// own `/_shard/` and `/_metrics`.
-fn router_with(addr: &str, node: &str, token: Option<&str>) -> String {
+/// own `/_shard/` and `/_metrics`, and `cors` its `--http-cors`.
+fn router_with(addr: &str, node: &str, token: Option<&str>, cors: Option<&str>) -> String {
     let mut dir = Directory::in_memory();
     dir.set_node(
         "n1",
@@ -69,6 +69,7 @@ fn router_with(addr: &str, node: &str, token: Option<&str>) -> String {
         Config {
             addr: addr.into(),
             token: token.map(str::to_string),
+            cors: cors.map(str::to_string),
             upstream_timeout: Duration::from_secs(10),
             ..Config::default()
         },
@@ -313,7 +314,8 @@ fn the_router_starts_a_count_again_on_a_token_verified_alone() {
         panic!("this test needs IPv6's loopback for a second address: {e}");
     }
     let open = router("[::1]:0", &node);
-    let guarded = router_with("[::1]:0", &node, Some("rt"));
+    // With a token of its own, and a preflight it answers itself.
+    let guarded = router_with("[::1]:0", &node, Some("rt"), Some("*"));
     let forged = Access::new(b"another thirty-two bytes, and some more", "")
         .unwrap()
         .mint(r#"{"sub":"vera","tenant":"acme"}"#)
@@ -353,7 +355,14 @@ fn the_router_starts_a_count_again_on_a_token_verified_alone() {
     verify_nothing(
         &guarded,
         &guessed,
-        &[("GET", "/nosuch", "", "", 404)],
+        &[
+            ("GET", "/nosuch", "", "", 404),
+            // The router's own preflight, of a tenant it holds and of one
+            // it does not.
+            ("OPTIONS", "/t/acme/notes", origin, "", 204),
+            ("OPTIONS", "/t/nobody/notes", origin, "", 204),
+            ("OPTIONS", "/_shard/nodes", origin, "", 204),
+        ],
         held,
         router_held,
     );
