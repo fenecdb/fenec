@@ -1791,8 +1791,9 @@ it there: `make reopen-bench`'s deferred open of 100 000 x 768 never
 linked 0.59-0.75 -> 0.35 s, the linked one 16.2-17.3 -> 14.9-16.3 s. A
 put's p50, a batch's build (100 000 x 128 in 3.63-3.74 s against
 3.72-3.85), `near` and an open of a checkpointed file are as they were.
-The browser module keeps its table and its hash (`cfg`): 618 010 bytes as
-on main, every function the size it was.
+The browser module kept its table and its hash (`cfg`): 618 010 bytes as
+on main, every function the size it was, until it took the native hash
+with the halves (below).
 
 **A graph record carries the halves the copies table is made from**
 (`HALVES`, `Same::halves`). The first put after an open read and hashed
@@ -1800,10 +1801,10 @@ every vector to make the table: 33-169 ms over 1.1 million of 128
 dimensions. Hashed as the restore fills the arena, each vector in cache,
 the table would cost no put, but the open of a checkpointed 100 000 x 128
 took 0.45 ms longer (3.8%) and of 100 000 x 768 2 ms (6.7%), and four
-vectors' chains side by side hashed only 1.65 times as fast. So natively a
-version 9 or 10 record ends with a `HALVES` byte and the top half of each
-node's hash, 4 bytes a node, a tombstone's 0: 0.68% of a 128-dim file,
-0.13% of a 768-dim one. The restore keeps them -- once 64 live nodes
+vectors' chains side by side hashed only 1.65 times as fast. So a version
+9 or 10 record ends with a `HALVES` byte and the top half of each node's
+hash, 4 bytes a node, a tombstone's 0: 0.68% of a 128-dim file, 0.13% of
+a 768-dim one. The restore keeps them -- once the nodes at 64 places
 spread over the arena hash to theirs (`keep_halves`) -- and the first
 vector placed makes the table from them with no vector read, gathered by
 shard and each shard's table filled on whichever core is free
@@ -1822,16 +1823,39 @@ they walk -- 3.4 -> 8.4-9.7 ms p50 at 300 000 x 768 there, the first
 twenty puts 339 -> 224 ms in all. A
 database that is only read keeps the halves, 4 bytes a node -- 0.6% of a
 128-dim index. A writer has them from the restore, or reads them off the
-table's slots on every core past `SAME_SPLIT` nodes (`halves_by_node`:
-8.3 -> 2.3 ms at 1.1 million, under a server's read lock as it keeps its
-graphs), or hashes the arena where neither holds them, so a record is the
-same whatever way its index came to be. The record keeps its version: the
-reader before stops at the aliases, so the browser, whose hash is
-another, and a binary from before read it without them -- this build
-refuses anything else there -- and a record without them, the browser's
-or a binary's from before, has the table made from the arena. The browser
-module is the same code to the byte, and its first put after a load still
-hashes the arena: 12.8-15.0 ms at 20 000 x 384, the puts after it 0.31.
+table's slots (`halves_by_node`, on every core past `SAME_SPLIT` nodes:
+8.3 -> 2.3 ms at 1.1 million) -- natively, a split table's on the threads
+that write the record's lists, a share of the shards to each besides its
+part (`put_all_lists`): read after the lists, they held a server's read
+lock as it keeps a graph of 110 000 nodes 6.07-6.34 ms p50 against
+5.85-5.88 without them, and beside them 5.83-5.98 (100 saves a run, five
+runs each in turns) -- or hashes the arena where neither holds them, so a
+record is the same whatever way its index came to be. The record keeps
+its version: the reader before stops at the aliases, so a binary from
+before reads it without them -- this build refuses anything else there --
+and a record without them, a binary's from before, has the table made
+from the arena.
+
+**The browser module hashes as a native build does, and takes the
+halves.** Its `Same` hashed with one chain of multiplies (`hash_words`),
+so it could use no server's halves, and its first put after a load hashed
+every vector: 13.1-14.6 ms at 20 000 x 384, 21-34 at 100 000 x 128, the
+puts after it 0.3-0.5. It hashes with `hash_lanes` now, a slot placed by
+its half as natively, and reads and writes the halves as a native build
+does; `web/fenec.test.js` finds the bytes
+`the_halves_a_record_carries_are_the_browsers` holds a native record to in
+the module's image of the same vectors. Its first put after a load went
+13.1-14.6 -> 1.3-2.1 ms at 20 000 x 384 from its own image and 12.7-13.1
+-> 1.2-1.9 from a native file, 21.6-24.1 -> 2.8-4.2 and 21.3-30.7 ->
+3.0-5.9 at 100 000 x 128; its loads (65.4 against 65.6 ms median, 25.8
+against 26.0), builds, puts, `near`, filters and JSON (`make wasm-speed`)
+as they were, and the graph and its aliases the same bytes. 1 221 bytes,
+543 gzip, 197 brotli (`make size-report`): the module holds one copy of
+the hash, over the bytes the arena would hold -- an f32 vector written
+out as a code is -- where another over the floats was 0.4 KB more;
+checking the halves in a plain loop rather than through `filter`,
+`step_by` and `all` took 0.5 KB off, and appending them a half at a time
+rather than into room made first 0.4 KB.
 
 **An archive and a backup can be sealed** (`seal.rs`, `fenec key`,
 `--key-file`). A copy in a bucket is out of reach of the disk's
