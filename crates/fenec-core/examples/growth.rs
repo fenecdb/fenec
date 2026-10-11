@@ -24,8 +24,8 @@
 //!   `match` over a new term and over the common words.
 //! - `vector`: a `vector<dim>` under `@hnsw(cosine)`, a vector a row, the
 //!   table that finds a vector written again (`Same`) growing with the
-//!   nodes. Then opened again three times: the first put after the open,
-//!   which makes that table, and `near`.
+//!   nodes. Then opened again three times: the open, the first put after
+//!   it, which makes that table, and `near`.
 
 use fenec_core::prelude::*;
 use std::time::Instant;
@@ -232,6 +232,22 @@ fn splitmix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
+/// `from`'s bytes written into `to`, a mebibyte at a time.
+fn written(from: &std::path::Path, to: &std::path::Path) {
+    use std::io::{Read, Write};
+    let (mut r, mut w) = (
+        std::fs::File::open(from).unwrap(),
+        std::fs::File::create(to).unwrap(),
+    );
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match r.read(&mut buf).unwrap() {
+            0 => break,
+            n => w.write_all(&buf[..n]).unwrap(),
+        }
+    }
+}
+
 /// 64 centres, each vector one of them plus noise, as `reopen` makes them:
 /// row `i` is the same vector every run.
 fn centred(centres: &[Vec<f32>], i: u64) -> Vec<f32> {
@@ -266,8 +282,13 @@ fn vector(dir: &std::path::Path, dim: usize, n: usize, efc: usize) {
     let near = fenec_ql::parse_one("get d select id near e $1 limit 10").unwrap();
     for round in 0..3 {
         let _ = std::fs::remove_file(&copy);
-        std::fs::copy(&path, &copy).unwrap();
+        // Written a mebibyte at a time rather than copied: on APFS a copy
+        // is a clone, whose pages the open reads from the disk, where a
+        // server's file is in the cache.
+        written(&path, &copy);
+        let t = Instant::now();
         let mut db = fenec_core::fs::open(&copy).unwrap();
+        let opened = t.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now();
         let p = [Value::Vector(centred(&centres, (n + round) as u64))];
         db.execute_with(&put, &p).unwrap();
@@ -293,7 +314,7 @@ fn vector(dir: &std::path::Path, dim: usize, n: usize, efc: usize) {
         }
         let searched = t.elapsed().as_secs_f64() * 1e3 / q as f64;
         println!(
-            "  opened: the first put {first:.1} ms, the next 19 {second:.2} ms p50; near {searched:.3} ms"
+            "  opened in {opened:.1} ms: the first put {first:.1} ms, the next 19 {second:.2} ms p50; near {searched:.3} ms"
         );
     }
 }
