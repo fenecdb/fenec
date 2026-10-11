@@ -371,9 +371,12 @@ func TestAHeldClaimTakesTheJobEnqueuedMeanwhile(t *testing.T) {
 	if len(r.Rows) != 0 || time.Since(began) < 290*time.Millisecond {
 		t.Fatalf("a wait with nothing to take: %+v after %v", r, time.Since(began))
 	}
-	// Past the client's own timeout: the wait is added to it.
-	short := fenecdb.New(primary, fenecdb.WithToken(rootToken), fenecdb.WithTimeout(100*time.Millisecond))
-	if r := must(claim(short.Wait(400*time.Millisecond), ctx, "w3")).of(t); len(r.Rows) != 0 {
+	// Past the client's own timeout: the wait is added to it. The timeout
+	// is what is left for the request around the wait, and at 100 ms it
+	// was the system's to spend: under `taskpolicy -c background` the
+	// held claim's 400 ms timer ran past 500 ms in 16 runs of 16.
+	short := fenecdb.New(primary, fenecdb.WithToken(rootToken), fenecdb.WithTimeout(time.Second))
+	if r := must(claim(short.Wait(1500*time.Millisecond), ctx, "w3")).of(t); len(r.Rows) != 0 {
 		t.Fatalf("a held claim past the client's timeout: %+v", r)
 	}
 	// Its context gives it up.

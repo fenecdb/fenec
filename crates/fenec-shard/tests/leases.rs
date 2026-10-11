@@ -13,11 +13,19 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const REPL: &str = "tenant-replication";
-const TERM: Duration = Duration::from_millis(600);
+/// The lease a router grants nodes that take one. It bounds how late a
+/// renewal may come before the node stops writing whatever the test is
+/// about, and at 600 ms, renewed every 200, a loaded machine came close:
+/// at utility QoS beside eight busy loops n1's last grant before the cut
+/// was 499 ms old.
+const TERM: Duration = Duration::from_secs(3);
+/// A router's lease over nodes that take none: nothing of theirs lapses
+/// with it, so it is kept short and the test waits past it.
+const SHORT: Duration = Duration::from_millis(600);
 
 struct Node {
     port: u16,
@@ -64,11 +72,15 @@ fn node(tag: &str, lease: bool) -> Node {
     }
 }
 
-/// A TCP proxy: cut, it drops what it carries and every connection after.
+/// A TCP proxy: cut, it drops what it carries and every connection after;
+/// told to hold the next connection, it keeps it from the node until let go.
 struct Proxy {
     addr: String,
+    target: String,
     cut: Arc<AtomicBool>,
     open: Arc<Mutex<Vec<TcpStream>>>,
+    hold: Arc<AtomicBool>,
+    held: Arc<(Mutex<Vec<TcpStream>>, Condvar)>,
 }
 
 impl Proxy {
@@ -77,7 +89,10 @@ impl Proxy {
         let addr = listener.local_addr().unwrap().to_string();
         let cut = Arc::new(AtomicBool::new(false));
         let open = Arc::new(Mutex::new(Vec::new()));
-        let (flag, streams, target) = (Arc::clone(&cut), Arc::clone(&open), target.to_string());
+        let hold = Arc::new(AtomicBool::new(false));
+        let held = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let (flag, streams, to) = (Arc::clone(&cut), Arc::clone(&open), target.to_string());
+        let (holding, kept) = (Arc::clone(&hold), Arc::clone(&held));
         std::thread::spawn(move || {
             for client in listener.incoming() {
                 let Ok(client) = client else { continue };
@@ -85,18 +100,22 @@ impl Proxy {
                     let _ = client.shutdown(Shutdown::Both);
                     continue;
                 }
-                let Ok(server) = TcpStream::connect(&target) else {
+                if holding.swap(false, Ordering::SeqCst) {
+                    kept.0.lock().unwrap().push(client);
+                    kept.1.notify_all();
                     continue;
-                };
-                let mut held = streams.lock().unwrap();
-                held.push(client.try_clone().unwrap());
-                held.push(server.try_clone().unwrap());
-                drop(held);
-                pipe(client.try_clone().unwrap(), server.try_clone().unwrap());
-                pipe(server, client);
+                }
+                carry(client, &to, &streams);
             }
         });
-        Proxy { addr, cut, open }
+        Proxy {
+            addr,
+            target: target.to_string(),
+            cut,
+            open,
+            hold,
+            held,
+        }
     }
 
     fn cut(&self) {
@@ -109,6 +128,46 @@ impl Proxy {
     fn heal(&self) {
         self.cut.store(false, Ordering::SeqCst);
     }
+
+    /// Holds the next connection made, and ends those open now, so that a
+    /// pooled client connects again for its next request.
+    fn hold_next(&self) {
+        self.hold.store(true, Ordering::SeqCst);
+        for s in self.open.lock().unwrap().drain(..) {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// Waits until a connection is held.
+    fn until_held(&self) {
+        let (kept, arrived) = &*self.held;
+        let (_kept, waited) = arrived
+            .wait_timeout_while(kept.lock().unwrap(), Duration::from_secs(30), |k| {
+                k.is_empty()
+            })
+            .unwrap();
+        assert!(!waited.timed_out(), "no connection came to be held");
+    }
+
+    /// Lets the held connections through to the node.
+    fn release(&self) {
+        for client in self.held.0.lock().unwrap().drain(..) {
+            carry(client, &self.target, &self.open);
+        }
+    }
+}
+
+/// Connects `client` to `target`, both ways, kept among `open`.
+fn carry(client: TcpStream, target: &str, open: &Mutex<Vec<TcpStream>>) {
+    let Ok(server) = TcpStream::connect(target) else {
+        return;
+    };
+    let mut held = open.lock().unwrap();
+    held.push(client.try_clone().unwrap());
+    held.push(server.try_clone().unwrap());
+    drop(held);
+    pipe(client.try_clone().unwrap(), server.try_clone().unwrap());
+    pipe(server, client);
 }
 
 fn pipe(mut from: TcpStream, mut to: TcpStream) {
@@ -156,15 +215,15 @@ fn until(port: u16, path: &str, sql: &str, want: &str) {
     }
 }
 
-/// Three nodes behind a router leasing them for `TERM`, each registered at
+/// Three nodes behind a router leasing them for `term`, each registered at
 /// its proxy.
-fn three(tag: &str, lease: bool) -> ([Node; 3], u16) {
+fn three(tag: &str, lease: bool, term: Duration) -> ([Node; 3], u16) {
     let nodes = [1, 2, 3].map(|i| node(&format!("{tag}{i}"), lease));
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         upstream_timeout: Duration::from_secs(10),
         replicas: true,
-        auto_failover: Some(TERM),
+        auto_failover: Some(term),
         ..Config::default()
     };
     let router = Router::new(Directory::in_memory(), cfg);
@@ -206,13 +265,27 @@ fn placed(port: u16, tenant: &str) -> (String, Option<String>) {
     (value("node").unwrap(), value("replica"))
 }
 
+/// The number written right after `prefix` in `text`.
+fn number_after(text: &str, prefix: &str) -> f64 {
+    let rest = text
+        .split_once(prefix)
+        .unwrap_or_else(|| panic!("no {prefix} in {text}"))
+        .1;
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == 'e' || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..end]
+        .parse()
+        .unwrap_or_else(|e| panic!("{prefix}{rest}: {e}"))
+}
+
 fn by_name<'a>(nodes: &'a [Node; 3], name: &str) -> &'a Node {
     &nodes[name[1..].parse::<usize>().unwrap() - 1]
 }
 
 #[test]
 fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
-    let (nodes, port) = three("cut", true);
+    let (nodes, port) = three("cut", true, TERM);
     let (status, body) = call(
         port,
         "PUT",
@@ -241,6 +314,17 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
     // after that does the router promote acme's replica.
     nodes[0].proxy.cut();
     let cut = Instant::now();
+    // What each side holds, read after the cut: the lease n1 has left by its
+    // own clock, and how long ago the router last had n1's answer.
+    let (status, lease) = call(nodes[0].port, "GET", "/_admin/lease", "", Some("adm-cut1"));
+    assert_eq!(status, 200, "{lease}");
+    let left = Duration::from_millis(number_after(&lease, "\"left_ms\":") as u64);
+    let (status, scrape) = call(port, "GET", "/_metrics", "", None);
+    assert_eq!(status, 200, "{scrape}");
+    let age = Duration::from_secs_f64(number_after(
+        &scrape,
+        "fenec_router_lease_age_seconds{node=\"n1\"} ",
+    ));
     let (mut fenced, mut promoted) = (None, None);
     while fenced.is_none() || promoted.is_none() {
         assert!(
@@ -272,18 +356,25 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
         fenced < promoted,
         "fenced at {fenced:?}, promoted at {promoted:?}"
     );
-    // Renewed every third of a lease: n1 stops between two thirds and one
-    // lease after the cut, and the router waits a lease and a tenth from the
-    // last answer it had -- which came back up to a third of a lease before
-    // the cut, so a promotion 654 ms after it, against a 660 ms wait, was
-    // the router keeping its word.
-    assert!(
-        fenced >= TERM * 2 / 3 - Duration::from_millis(50),
-        "{fenced:?}"
+    // n1 stops as its lease runs out by its own clock, `left` after the cut
+    // at the least; the router waits a lease and a tenth from the last
+    // answer it had, `age` before the cut at the most. Counted from the
+    // renewals' schedule instead -- n1 stopping no sooner than two thirds of
+    // a lease after the cut -- the bound held only while every renewal came
+    // on time: at utility QoS beside eight busy loops one came late, and n1
+    // stopped, rightly, 101 ms after the cut against a bound of 350.
+    eprintln!(
+        "fenced {fenced:?} after the cut ({left:?} left), promoted {promoted:?} \
+         (the last answer {age:?} before)"
     );
     assert!(
-        promoted >= TERM + TERM / 10 - TERM / 3 - Duration::from_millis(50),
-        "{promoted:?}"
+        fenced >= left,
+        "fenced at {fenced:?}, {left:?} left at the cut"
+    );
+    let lapse = TERM + TERM / 10;
+    assert!(
+        promoted >= lapse.saturating_sub(age),
+        "promoted at {promoted:?}, the last answer {age:?} before the cut"
     );
     assert_eq!(placed(port, "acme").0, replica);
 
@@ -355,7 +446,7 @@ fn a_node_taking_leases_writes_nothing_before_one_and_only_what_it_names() {
 
 #[test]
 fn a_node_that_takes_no_lease_is_never_failed_over_on_its_own() {
-    let (nodes, port) = three("free", false);
+    let (nodes, port) = three("free", false, SHORT);
     let (status, body) = call(
         port,
         "PUT",
@@ -369,7 +460,7 @@ fn a_node_that_takes_no_lease_is_never_failed_over_on_its_own() {
         200
     );
     nodes[0].proxy.cut();
-    std::thread::sleep(TERM * 3);
+    std::thread::sleep(SHORT * 3);
     assert_eq!(
         placed(port, "acme").0,
         "n1",
@@ -384,7 +475,7 @@ fn a_node_that_takes_no_lease_is_never_failed_over_on_its_own() {
 /// grant, and its replica follows it there.
 #[test]
 fn a_tenant_created_with_its_schema_takes_it_under_a_lease_and_its_replica_follows() {
-    let (nodes, port) = three("schema", true);
+    let (nodes, port) = three("schema", true, TERM);
     let (status, body) = call(
         port,
         "PUT",
@@ -398,4 +489,66 @@ fn a_tenant_created_with_its_schema_takes_it_under_a_lease_and_its_replica_follo
     let (_, replica) = placed(port, "acme");
     let replica = by_name(&nodes, &replica.expect("a replica"));
     until(replica.port, "/t/acme/query", "get notes", "\"x\"");
+}
+
+/// A round reads every node's list as it starts, and its grant, landing
+/// after the one a create sent at once, put the list from before the
+/// create back: the new tenant's writes were refused on its node (503)
+/// until the next round -- the write after a create, in 1 run of 30 at
+/// utility QoS beside eight busy loops and 1 of 50 in a container of three
+/// cores. A node is granted one grant at a time, and never a list older
+/// than one it was sent: here the round's grant is held on its way, the
+/// create's queues behind it, and the tenant takes its writes once both
+/// have landed.
+#[test]
+fn a_round_that_read_the_lists_before_a_create_does_not_take_the_tenant_back() {
+    let n1 = node("stale1", true);
+    // A lease no round renews on its own: the test runs the one round.
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        upstream_timeout: Duration::from_secs(10),
+        auto_failover: Some(Duration::from_secs(60)),
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let serving = Arc::clone(&router);
+    std::thread::spawn(move || {
+        let _ = serving.serve_on(listener);
+    });
+    let body = format!(r#"{{"addr":"{}","token":"adm-stale1"}}"#, n1.proxy.addr);
+    let (status, body) = call(port, "PUT", "/_shard/nodes/n1", &body, None);
+    assert!(status == 200 || status == 201, "{body}");
+    let (status, body) = call(port, "PUT", "/_shard/tenants/a", r#"{"node":"n1"}"#, None);
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = query(port, "/t/a/query", "create collection c (x int)");
+    assert_eq!(status, 200, "{body}");
+
+    // The round reads n1's list -- `a` alone -- and its grant is held.
+    n1.proxy.hold_next();
+    let round = {
+        let r = Arc::clone(&router);
+        std::thread::spawn(move || r.lease_round())
+    };
+    n1.proxy.until_held();
+    // `b` is placed on n1 meanwhile, and granted at once: answered while
+    // the round's grant was held, or queued behind it.
+    let create = std::thread::spawn(move || {
+        call(port, "PUT", "/_shard/tenants/b", r#"{"node":"n1"}"#, None)
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !create.is_finished() && router.grants_waiting() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the create neither answered nor queued"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    n1.proxy.release();
+    round.join().unwrap();
+    let (status, body) = create.join().unwrap();
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = query(port, "/t/b/query", "create collection c (x int)");
+    assert_eq!(status, 200, "the round's list took `b` back: {body}");
 }

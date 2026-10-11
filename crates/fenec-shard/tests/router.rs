@@ -662,9 +662,15 @@ fn a_tenant_is_created_with_its_schema_by_the_routers_token_alone() {
 /// at the timeout, it was a 502 while the node went on to lease the job to
 /// no one. A tenant deleted under a held claim answers it 503 at once, and
 /// the delete does not wait for it.
+///
+/// The timeout bounds every request the test sends through the router, and
+/// at 600 ms it bounded the node's answers rather than the claim's wait:
+/// under `taskpolicy -c background` a tenant's create or delete took
+/// longer, a 502 in 2 runs of 30.
 #[test]
 fn a_held_claim_is_waited_for_through_the_router() {
-    let c = cluster_timed("held", 1, None, None, None, Duration::from_millis(600));
+    const TIMEOUT: Duration = Duration::from_secs(2);
+    let c = cluster_timed("held", 1, None, None, None, TIMEOUT);
     c.create("acme", None);
     let made = c.query(
         "acme",
@@ -672,15 +678,15 @@ fn a_held_claim_is_waited_for_through_the_router() {
     );
     assert_eq!(made.0, 200, "{}", made.1);
     let port = c.port;
-    let claim = || {
+    let claim = |wait_ms: u64| {
         std::thread::spawn(move || {
             let body = r#"{"query":"set jobs {owner: \"w\", run_at: now() + 60000} where run_at <= now() order run_at limit 1 returning id"}"#;
             let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
             write!(
                 s,
                 "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\
-                 Fenec-Wait: 5000\r\nContent-Length: {}\r\n\r\n{body}",
+                 Fenec-Wait: {wait_ms}\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             )
             .unwrap();
@@ -707,21 +713,23 @@ fn a_held_claim_is_waited_for_through_the_router() {
             std::thread::sleep(Duration::from_millis(2));
         }
     };
-    let first = claim();
+    let first = claim(10_000);
     held(&c);
     // Past the router's timeout: what is tested is the time itself.
-    std::thread::sleep(Duration::from_millis(900));
+    std::thread::sleep(TIMEOUT + Duration::from_millis(300));
     let put = c.query("acme", "put jobs {run_at: 1}");
     assert_eq!(put.0, 200, "{}", put.1);
     let answer = first.join().unwrap();
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     assert!(answer.ends_with("[{\"id\":1}]"), "{answer}");
 
-    let second = claim();
+    // Held for 30 s: answered by the delete, long before its wait would
+    // have ended it, and the delete waits for nothing the claim holds.
+    let second = claim(30_000);
     held(&c);
     let t = Instant::now();
     assert_eq!(c.call("DELETE", "/_shard/tenants/acme", "", None).0, 204);
     let answer = second.join().unwrap();
     assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
-    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
 }

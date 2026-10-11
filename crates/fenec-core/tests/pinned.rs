@@ -393,8 +393,21 @@ fn pinned_reads_beside_writers_answer_as_at_the_pin() {
                 }
             });
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Two seconds at least, and until the readers have compared 21
+        // answers: two seconds alone counted the machine's speed, and under
+        // `taskpolicy -c background` the readers compared 20 or fewer in 20
+        // runs of 30. The bound is only for readers that never get there.
+        // A panic here would leave the writers running and the scope
+        // waiting for them: the bound stops them and is asserted after.
+        let began = std::time::Instant::now();
+        while (began.elapsed() < std::time::Duration::from_secs(2)
+            || compared.load(Ordering::Relaxed) <= 20)
+            && began.elapsed() < std::time::Duration::from_secs(120)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         stop.store(true, Ordering::Relaxed);
     });
-    assert!(compared.load(Ordering::Relaxed) > 20);
+    let compared = compared.load(Ordering::Relaxed);
+    assert!(compared > 20, "{compared} answers compared in two minutes");
 }

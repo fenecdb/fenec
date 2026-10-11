@@ -250,26 +250,40 @@ fn a_held_claim_takes_the_job_enqueued() {
     assert_eq!(got.len(), 1, "{}", a.body);
     assert_eq!(int(&got[0]["id"]), id);
     assert!(a.header("Fenec-Seq").is_some(), "a write's seq: {a:?}");
+    // Woken by the put: a claim the put did not wake would have been
+    // answered at its wait's end with what it took last, nothing. How soon
+    // is the machine's, and printed, not asserted.
     eprintln!("enqueued to answered: {} ms", answered - at);
-    assert!(answered - at < 2_000, "{} ms", answered - at);
 }
 
 /// Time passing with no write wakes it: a delayed job is claimed at its
 /// time and not before, and a lease that lapses hands its job on.
+///
+/// Its time is asserted from below; from above, the job in the answer is
+/// the bound: a claim that slept through its time would have been answered
+/// at its wait's end with what it took last, nothing. How late it was is
+/// printed, from when the claim could first take the job. Bounded at a
+/// second from the job's time, it measured the requests before the claim
+/// as much as the wake, and at half the wait a run starved at background
+/// QoS beside a dozen other tests' loops was answered 9.3 s after the
+/// lease lapsed, with the job.
 #[test]
 fn a_delayed_job_and_a_lapsed_lease_are_claimed_at_their_time() {
+    const WAIT: i64 = 10_000;
     let node = start();
     let port = node.port;
     let ready = now_ms() + 300;
     let id = put(port, "mail", ready);
     let mut c = Conn::open(port);
-    let a = c.claim("w1", 10_000);
+    let sent = now_ms();
+    let a = c.claim("w1", WAIT as u64);
     let answered = now_ms();
     let got = rows(&a.body);
+    assert_eq!(got.len(), 1, "not woken at its time: {}", a.body);
     assert_eq!(int(&got[0]["id"]), id, "{}", a.body);
     assert!(answered >= ready, "claimed {} ms early", ready - answered);
-    eprintln!("delayed job claimed {} ms after its time", answered - ready);
-    assert!(answered - ready < 1_000);
+    let late = answered - ready.max(sent);
+    eprintln!("delayed job claimed {late} ms after it could be");
 
     // w1's lease ends in 250 ms and it never acks: w2 takes the job then.
     let lease = "set jobs {owner: \"w1\", run_at: now() + 250} where id = $1 returning run_at";
@@ -280,21 +294,28 @@ fn a_delayed_job_and_a_lapsed_lease_are_claimed_at_their_time() {
         Value::Int(n) => *n,
         other => panic!("{other:?}"),
     };
-    let a = c.claim("w2", 10_000);
+    let sent = now_ms();
+    let a = c.claim("w2", WAIT as u64);
     let answered = now_ms();
-    assert_eq!(int(&rows(&a.body)[0]["id"]), id, "{}", a.body);
+    let got = rows(&a.body);
+    assert_eq!(got.len(), 1, "not woken as the lease lapsed: {}", a.body);
+    assert_eq!(int(&got[0]["id"]), id, "{}", a.body);
     assert!(answered >= lapses);
-    eprintln!(
-        "lapsed lease claimed {} ms after it lapsed",
-        answered - lapses
-    );
-    assert!(answered - lapses < 1_000);
+    let late = answered - lapses.max(sent);
+    eprintln!("lapsed lease claimed {late} ms after it could be");
     let a = c.query(ACK, &format!("[{id}, \"w2\"]"));
     assert_eq!(a.status, 200, "{}", a.body);
 }
 
 /// The wait ends on time, answered as the claim was: no row. Nothing ran
 /// meanwhile -- no write, no row's time -- so it slept throughout.
+///
+/// On time is from below exactly, and from above within seconds, half the
+/// longest wait a request may ask: a wait that did not end would hold the
+/// claim for good. In a container of three cores beside busy loops 300
+/// waits ended 300 to 451 ms after they began, and one beside fifteen
+/// other tests' loops 10.7 s after; a canary sleeping 100 ms in such a
+/// container overslept by 2.7 s.
 #[test]
 fn the_wait_ends_on_time_with_no_row_having_run_nothing() {
     let node = start();
@@ -302,10 +323,11 @@ fn the_wait_ends_on_time_with_no_row_having_run_nothing() {
     let t = Instant::now();
     let a = c.claim("w1", 300);
     let took = t.elapsed();
+    eprintln!("a wait of 300 ms answered after {took:?}");
     assert_eq!(a.status, 200, "{}", a.body);
     assert_eq!(a.body, "[]");
     assert!(took >= Duration::from_millis(300), "{took:?}");
-    assert!(took < Duration::from_millis(1_300), "{took:?}");
+    assert!(took < Duration::from_secs(15), "{took:?}");
     let s = node.server.waits();
     assert_eq!((s.held, s.runs), (0, 0), "{s:?}");
     assert!(s.looks <= 1, "{s:?}");
@@ -709,13 +731,11 @@ fn a_held_claim_holds_no_tenant_against_a_freeze() {
         assert!(t.elapsed() < Duration::from_secs(10));
         std::thread::sleep(Duration::from_millis(1));
     }
-    let t = Instant::now();
+    // The freeze is through while the claim is still held: one that waited
+    // for the claim's gate would return only once its wait had ended it.
+    // Timed instead (500 ms), it measured how soon the system ran it.
     tenants.freeze("acme").unwrap();
-    assert!(
-        t.elapsed() < Duration::from_millis(500),
-        "{:?}",
-        t.elapsed()
-    );
+    assert_eq!(tenants.get("acme").unwrap().hub.waits().stats().held, 1);
     tenants.thaw("acme").unwrap();
     let a = c.post(
         "/t/acme/query",

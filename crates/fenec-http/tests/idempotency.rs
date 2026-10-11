@@ -201,9 +201,15 @@ fn a_key_past_its_time_is_a_new_request() {
 
 /// The keys are `@ttl`: one past its time is out of every read at once and
 /// the sweeper deletes it, where the write path once purged them itself.
+///
+/// "None past its time yet" holds only while the pass comes within the
+/// keys' time of their writes, which at 200 ms bounded two requests and a
+/// read by little more than the 161 ms one answer took in #264's container
+/// of three cores. Two seconds leaves a stall its room.
 #[test]
 fn the_sweeper_deletes_the_keys_past_their_time() {
-    let n = start(Duration::from_millis(200));
+    const TTL: Duration = Duration::from_secs(2);
+    let n = start(TTL);
     n.query(ROOT, Some("k1"), "put logs {t: \"a\"}");
     n.query(ROOT, Some("k2"), "put logs {t: \"b\"}");
     let keys = |n: &Node| {
@@ -220,7 +226,7 @@ fn the_sweeper_deletes_the_keys_past_their_time() {
         0,
         "none past its time yet"
     );
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(TTL + Duration::from_millis(100));
     assert_eq!(fenec_http::sweep::pass("test", &n.db), 2);
     assert_eq!(keys(&n), Value::Int(0));
     let schema =
@@ -230,7 +236,7 @@ fn the_sweeper_deletes_the_keys_past_their_time() {
             .unwrap()
             .schema
             .clone();
-    assert_eq!(schema.field("at").unwrap().index.ttl(), Some(200));
+    assert_eq!(schema.field("at").unwrap().index.ttl(), Some(2000));
 }
 
 /// Keys kept before the expiry -- `at int @sorted`, purged by the write

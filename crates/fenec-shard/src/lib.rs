@@ -242,11 +242,11 @@ impl Router {
             leases.standby();
             return;
         }
-        let lists = self.read_dir().primaries();
+        let (lists, reading) = self.primaries_read(leases);
         std::thread::scope(|s| {
             for (node, list) in &lists {
                 leases.know(node);
-                s.spawn(move || self.grant(node, list));
+                s.spawn(move || self.grant(node, list, reading));
             }
         });
         for node in leases.lapsed(Instant::now()) {
@@ -262,39 +262,67 @@ impl Router {
             fenec_http::log!("failover of `{node}`: {status} {why}");
             // The nodes its tenants went to take their writes now, not at
             // the next round.
-            let lists = self.read_dir().primaries();
+            let (lists, reading) = self.primaries_read(leases);
             std::thread::scope(|s| {
                 for (node, list) in &lists {
-                    s.spawn(move || self.grant(node, list));
+                    s.spawn(move || self.grant(node, list, reading));
                 }
             });
         }
+    }
+
+    /// Lease grants waiting for their node's turn behind another: how a
+    /// test knows a create's grant is queued behind a round's it holds.
+    #[doc(hidden)]
+    pub fn grants_waiting(&self) -> usize {
+        self.leases.as_ref().map_or(0, |(l, _)| l.grants_waiting())
+    }
+
+    /// Every node's primaries, and the number of this reading of the
+    /// directory, taken under its lock ([`lease::Leases::reading`]).
+    fn primaries_read(
+        &self,
+        leases: &lease::Leases,
+    ) -> (std::collections::BTreeMap<String, Vec<String>>, u64) {
+        let dir = self.read_dir();
+        (dir.primaries(), leases.reading())
     }
 
     /// Grants `node` its lease at once, over what the directory places there
     /// now: after a create or a move, so a tenant takes writes on the node it
     /// was placed on before the next round.
     fn lease_now(&self, node: &str) {
-        if self.leases.is_none() {
+        let Some((leases, _)) = &self.leases else {
             return;
-        }
-        let list = self.read_dir().primaries().remove(node).unwrap_or_default();
-        self.grant(node, &list);
+        };
+        let (mut lists, reading) = self.primaries_read(leases);
+        let list = lists.remove(node).unwrap_or_default();
+        self.grant(node, &list, reading);
     }
 
-    /// Sends `node` its lease over `primaries`: the list itself only when
-    /// the node may not hold it, and again with it when the node says it
-    /// does not. A node that answers after it was failed over has a repair
-    /// run, which has its copies follow its tenants' new primaries.
-    fn grant(&self, node: &str, primaries: &[String]) {
+    /// Sends `node` its lease over `primaries`, read from the directory's
+    /// `reading`: the list itself only when the node may not hold it, and
+    /// again with it when the node says it does not. One grant to a node at
+    /// a time, and none over a reading older than the last one sent, which
+    /// the node then holds the list of ([`lease::Leases::turn`]). A node
+    /// that answers after it was failed over has a repair run, which has its
+    /// copies follow its tenants' new primaries.
+    fn grant(&self, node: &str, primaries: &[String], reading: u64) {
         let Some((leases, pool)) = &self.leases else {
             return;
         };
         let Some(n) = self.read_dir().node(node).cloned() else {
             return;
         };
+        let turn = leases.turn(node);
+        let mut sent = leases.wait_turn(&turn);
+        if reading < *sent {
+            return;
+        }
+        *sent = reading;
         let epoch = lease::epoch_of(primaries);
         let mut with_list = leases.epoch(node).as_deref() != Some(epoch.as_str());
+        let mut back = false;
         loop {
             let mut body = format!(
                 "{{\"ms\":{},\"epoch\":{}",
@@ -313,17 +341,21 @@ impl Router {
                     Ok((404 | 409, _)) => lease::Answer::Refuses,
                     _ => lease::Answer::Silent,
                 };
-            if leases.answered(node, &epoch, &answer, Instant::now()) {
-                fenec_http::log!(
-                    "node `{node}` answers again: its copies are to follow the tenants' new primaries"
-                );
-                let r = self.repair();
-                fenec_http::log!("repair: {} {}", r.status, String::from_utf8_lossy(&r.body));
-            }
+            back |= leases.answered(node, &epoch, &answer, Instant::now());
             match answer {
                 lease::Answer::NeedsList if !with_list => with_list = true,
-                _ => return,
+                _ => break,
             }
+        }
+        // The repair calls on nodes for a while: no grant to this one waits
+        // for it.
+        drop(sent);
+        if back {
+            fenec_http::log!(
+                "node `{node}` answers again: its copies are to follow the tenants' new primaries"
+            );
+            let r = self.repair();
+            fenec_http::log!("repair: {} {}", r.status, String::from_utf8_lossy(&r.body));
         }
     }
 

@@ -276,11 +276,14 @@ def test_a_held_claim_takes_the_job_enqueued_meanwhile(client):
         assert jobs.update(lease("w2"), returning=True, wait=0.3) == []
         assert 0.3 <= time.monotonic() - began < 3
         # Longer than the client's own timeout: the socket waits it out too.
-        slow = Client(URL, TOKEN, timeout=0.2)
+        # The timeout is what is left for the request around the wait: at
+        # 0.2 s it was the system's to spend, and a held claim's 0.5 s timer,
+        # stretched on a loaded or clamped machine, ran past the 0.7.
+        slow = Client(URL, TOKEN, timeout=1)
         assert slow.query(
             f"del {name} where run_at <= now() and kind = $1 limit 1 returning kind",
             ["none"],
-            wait=0.5,
+            wait=1.5,
         ) == []
     finally:
         client.query(f"drop collection if exists {name}")

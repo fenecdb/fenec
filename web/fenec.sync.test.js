@@ -55,7 +55,15 @@ async function listening(path, args, name) {
   alive.add(proc);
   const url = await new Promise((res, rej) => {
     let buf = '';
-    const timer = setTimeout(() => rej(new Error(`server did not start: ${buf}`)), 10000);
+    // A bound only for a server that never starts, and it is killed then:
+    // left running, its stderr kept the process from ever exiting, and a
+    // run whose server started late -- 10 s on a starved machine -- hung
+    // rather than fail.
+    const timer = setTimeout(() => {
+      alive.delete(proc);
+      proc.kill('SIGKILL');
+      rej(new Error(`server did not start: ${buf}`));
+    }, 30000);
     proc.stderr.on('data', (d) => {
       buf += d;
       // A pattern that guarantees the line is **complete**. Matching only

@@ -207,10 +207,12 @@ public sealed class ClientTests(Servers servers)
         var began = DateTime.UtcNow;
         Assert.Empty((await Claim(db.WithWait(TimeSpan.FromMilliseconds(300)), "w2")).Rows!);
         Assert.True(DateTime.UtcNow - began >= TimeSpan.FromMilliseconds(290));
-        // Past the client's own timeout: the wait is added to it.
+        // Past the client's own timeout: the wait is added to it. The timeout is what is left for the
+        // request around the wait: at 100 ms it was the system's to spend, and a held claim's 400 ms
+        // timer, stretched on a loaded or clamped machine, ran past the 500.
         using var shortly = new FenecClient(servers.Primary,
-            new FenecClientOptions { Token = Servers.RootToken, Timeout = TimeSpan.FromMilliseconds(100) });
-        Assert.Empty((await Claim(shortly.WithWait(TimeSpan.FromMilliseconds(400)), "w3")).Rows!);
+            new FenecClientOptions { Token = Servers.RootToken, Timeout = TimeSpan.FromSeconds(1) });
+        Assert.Empty((await Claim(shortly.WithWait(TimeSpan.FromMilliseconds(1500)), "w3")).Rows!);
         // Its token gives it up.
         using var gone = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
