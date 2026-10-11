@@ -40,8 +40,10 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
 - `ChangesAsync(since, wait)` reads every write on disk (`/_changes`); `HealthAsync()` asks `/_health`.
 - `FenecClientOptions` takes `Token`, `Tenant` (`/t/<tenant>/`), `Timeout` and an `HttpClient` of your own.
 - A refusal is a `FenecException` with `Status`, `Code` and the server's message; a failed batch's also says which
-  statement stopped it, `At` (from 0; `null` otherwise), and how many stayed applied, `Completed`. Every call takes
-  a `CancellationToken`.
+  statement stopped it, `At` (from 0; `null` otherwise), and how many stayed applied, `Completed`. A tenant's quota
+  names itself, `Quota`: `"bytes"` and `"rows"` answer 507 (`storage_full`), and room is made by deleting;
+  `"streams"`, `"requests"`, `"writes"` and `"write_bytes"` answer 429 (`too_many`) with `RetryAfter`, the wait the
+  server asks for. Every call takes a `CancellationToken`.
 - A `float[]` or `ReadOnlyMemory<float>` goes out as the decimals that read back as each float, so a vector round-trips to the bit.
 
 - `Facet(field, ranges: [0, 25, 50])` counts by ranges of numbers, each value `[from, to]`; `disjunctive: true`

@@ -166,9 +166,7 @@ public final class FenecRemote: @unchecked Sendable {
         let status = http?.statusCode ?? 0
         let v = data.isEmpty ? Value.null : (try? Value.parse(bytes: Array(data)))
         guard (200..<300).contains(status) else {
-            throw FenecError(
-                code: FenecRemote.code(status), message: v?["error"]?.string ?? "HTTP \(status)",
-                status: status, at: v?["at"]?.int, completed: v?["completed"]?.int)
+            throw FenecRemote.refused(status, v, retryAfter: http?.value(forHTTPHeaderField: "retry-after"))
         }
         guard let v else {
             throw FenecError(code: .io, message: "the server did not answer JSON (\(status))")
@@ -199,6 +197,19 @@ public final class FenecRemote: @unchecked Sendable {
     /// The query builder, its queries run on the server.
     public func from(_ collection: String) throws -> Query {
         try Query.from(collection).bind { [self] text, params in try await self.run(text, params: params) }
+    }
+
+    /// A refusal as the error it is: its status and message, where a batch
+    /// stopped, and where a tenant's quota refused it the quota and how
+    /// many seconds to wait -- `Retry-After`, or the same in the body.
+    static func refused(_ status: Int, _ v: Value?, retryAfter: String?) -> FenecError {
+        let quota = v?["quota"]?.string
+        let wait = retryAfter.flatMap { Double($0) } ?? v?["retry_after"]?.int.map(Double.init)
+        return FenecError(
+            code: quota == nil ? FenecRemote.code(status) : .quota,
+            message: v?["error"]?.string ?? "HTTP \(status)",
+            status: status, at: v?["at"]?.int, completed: v?["completed"]?.int,
+            quota: quota, retryAfter: wait)
     }
 
     /// An HTTP status as the error kind the engine would have said; the

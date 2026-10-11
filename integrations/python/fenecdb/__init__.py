@@ -108,15 +108,29 @@ class FenecError(Exception):
     that stopped also says which statement stopped it, from 0 (`at`: the
     write whose `require` was not met, 412, or whose id was taken, 409),
     and how many statements stayed applied (`completed`: 0, since a batch
-    lands whole, but for one holding a `compact`); both None otherwise."""
+    lands whole, but for one holding a `compact`); both None otherwise.
+
+    A tenant's quota names itself (`quota`): "bytes" and "rows" answer 507,
+    and room is made by deleting; "streams", "requests", "writes" and
+    "write_bytes" answer 429, with the seconds to wait before sending again
+    (`retry_after`). None otherwise."""
 
     def __init__(
-        self, message: str, status: int, *, at: int | None = None, completed: int | None = None
+        self,
+        message: str,
+        status: int,
+        *,
+        at: int | None = None,
+        completed: int | None = None,
+        quota: str | None = None,
+        retry_after: float | None = None,
     ):
         super().__init__(message)
         self.status = status
         self.at = at
         self.completed = completed
+        self.quota = quota
+        self.retry_after = retry_after
 
 
 class SchemaError(FenecError):
@@ -480,14 +494,19 @@ def _answer(status: int, raw: bytes) -> Any:
     """A response's JSON, or the error it says, as `Client` raises it."""
     if 200 <= status < 300:
         return json.loads(raw) if raw else None
-    at = completed = None
+    at = completed = quota = retry_after = None
     try:
         body = json.loads(raw)
         message = body.get("error", raw.decode(errors="replace"))
         at, completed = body.get("at"), body.get("completed")
+        # A quota's refusal says which, and the wait its `Retry-After`
+        # says, in the body too: what is read here has no headers.
+        quota, retry_after = body.get("quota"), body.get("retry_after")
     except (ValueError, AttributeError):
         message = raw.decode(errors="replace")
-    raise FenecError(message, status, at=at, completed=completed)
+    raise FenecError(
+        message, status, at=at, completed=completed, quota=quota, retry_after=retry_after
+    )
 
 
 class AsyncClient:

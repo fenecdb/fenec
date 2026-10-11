@@ -697,3 +697,156 @@ fn a_replica_follows_its_own_primary_again_after_its_node_starts_over() {
     let (status, body) = query(copy.port, "/t/acme/query", r#"put notes {title: "no"}"#);
     assert_eq!(status, 403, "{body}");
 }
+
+/// A tenant's quota is the router's to keep: set as the tenant is created,
+/// it reaches its node and its replica's node; a move takes it to the
+/// target before the directory points there, and a failover finds it on
+/// the replica it promotes. Held to it everywhere it goes: the row past it
+/// is refused through the router, 507 and the quota named.
+#[test]
+fn a_quota_goes_with_its_tenant_through_a_move_and_a_failover() {
+    let (nodes, port) = three("qt");
+    let (status, body) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme",
+        r#"{"node":"n1","schema":"create collection notes (title text)","quota":{"rows":3}}"#,
+        None,
+    );
+    assert_eq!(status, 201, "{body}");
+    let (_, replica) = placed(port, "acme");
+    let replica = replica.expect("a replica of its own");
+    for nd in [&nodes[0], by_name(&nodes, &replica)] {
+        assert!(nd.dir.join("acme.quota").exists(), "{}", nd.addr);
+    }
+    let put = |title: &str| {
+        query(
+            port,
+            "/t/acme/query",
+            &format!("put notes {{title: \"{title}\"}}"),
+        )
+    };
+    for t in ["a", "b", "c"] {
+        assert_eq!(put(t).0, 200);
+    }
+    let (status, body) = put("d");
+    assert_eq!(status, 507, "{body}");
+    assert!(body.contains(r#""quota":"rows""#), "{body}");
+
+    // Moved: held to it on the target from its first write there.
+    let to = ["n2", "n3"].into_iter().find(|n| *n != replica).unwrap();
+    let (status, body) = call(
+        port,
+        "POST",
+        "/_shard/tenants/acme/move",
+        &format!(r#"{{"to":"{to}"}}"#),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(by_name(&nodes, to).dir.join("acme.quota").exists());
+    assert!(
+        !nodes[0].dir.join("acme.quota").exists(),
+        "gone with the source copy"
+    );
+    assert_eq!(put("d").0, 507);
+
+    // Raised through the router: the node takes it at once, and its
+    // replica is sent it too.
+    let (status, body) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme/quota",
+        r#"{"rows":4}"#,
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""set":{"rows":4}"#), "{body}");
+    assert_eq!(put("d").0, 200);
+    assert_eq!(put("e").0, 507);
+    let (_, replica) = placed(port, "acme");
+    let replica = replica.expect("a replica after the move");
+    until(
+        by_name(&nodes, &replica).port,
+        "/t/acme/query",
+        "get notes count",
+        "4",
+    );
+    let kept = std::fs::read_to_string(by_name(&nodes, &replica).dir.join("acme.quota")).unwrap();
+    assert_eq!(kept, r#"{"rows":4}"#);
+
+    // Its node lost: promoted on its replica, and held to its quota there.
+    let (status, body) = call(
+        port,
+        "POST",
+        &format!("/_shard/nodes/{to}/failover"),
+        "",
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(placed(port, "acme").0, replica);
+    assert_eq!(put("e").0, 507);
+    assert_eq!(
+        query(port, "/t/acme/query", "del notes where title = \"a\"").0,
+        200
+    );
+    assert_eq!(put("e").0, 200);
+    let (status, body) = call(port, "GET", "/_shard/tenants/acme/quota", "", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""usage":{"bytes":"#), "{body}");
+    assert!(body.contains(r#""rows":4"#), "{body}");
+    // The list of tenants carries it for the studio.
+    let (_, list) = call(port, "GET", "/_shard/tenants?bytes&quota", "", None);
+    assert!(
+        list.contains(r#""rows":4,"streams":0,"write_bytes":0"#),
+        "{list}"
+    );
+    assert!(list.contains(r#""usage":{"bytes":"#), "{list}");
+}
+
+/// A pair's standby is sent the quota of each tenant it follows, and the
+/// failover onto it keeps the tenant held to it.
+#[test]
+fn a_standby_is_sent_its_tenants_quota_and_holds_it_after_a_failover() {
+    let (n1, n2, port) = paired("qs");
+    let (status, body) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme/quota",
+        r#"{"rows":2}"#,
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(n2.dir.join("acme.quota").exists());
+    assert_eq!(
+        query(port, "/t/acme/query", r#"put notes {title: "two"}"#).0,
+        200
+    );
+    assert_eq!(
+        query(port, "/t/acme/query", r#"put notes {title: "three"}"#).0,
+        507
+    );
+    until(n2.port, "/t/acme/query", "get notes select title", "two");
+    let (status, body) = call(port, "POST", "/_shard/nodes/n1/failover", "", None);
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = query(port, "/t/acme/query", r#"put notes {title: "three"}"#);
+    assert_eq!(status, 507, "{body}");
+    assert!(body.contains(r#""quota":"rows""#), "{body}");
+    // A quota that does not read is refused before anything is recorded.
+    let (status, body) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme/quota",
+        r#"{"rowz":2}"#,
+        None,
+    );
+    assert_eq!(status, 400, "{body}");
+    let (status, _) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/nobody/quota",
+        r#"{"rows":2}"#,
+        None,
+    );
+    assert_eq!(status, 404);
+    drop(n1);
+}

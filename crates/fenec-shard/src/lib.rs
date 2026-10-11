@@ -684,9 +684,14 @@ impl Router {
     /// DELETE /_shard/nodes/<n>                 refused while it holds tenants
     /// GET    /_shard/tenants                   [{name, node, state}]; with
     ///                                       ?bytes, each one's bytes on its node
-    /// PUT    /_shard/tenants/<t> [{node, schema}]  place and create; least disk
-    ///                                       wins; `schema`, FenecQL text, applied
+    /// PUT    /_shard/tenants/<t> [{node, schema, quota}]  place and create;
+    ///                                       least disk wins; `schema`, FenecQL
+    ///                                       text, applied there and `quota` set
     ///                                       there before the tenant is answered
+    /// PUT    /_shard/tenants/<t>/quota {bytes, rows, ...}  the tenant's quota
+    ///                                       over its node's, kept here and sent
+    ///                                       to every node holding a copy
+    /// GET    /_shard/tenants/<t>/quota         the node's report: set, quota, usage
     /// DELETE /_shard/tenants/<t>               delete on the node, then forget
     /// POST   /_shard/tenants/<t>/move {to}     move to another node
     /// PUT    /_shard/nodes/<n> {addr, token, standby}  standby: the node
@@ -712,7 +717,9 @@ impl Router {
         // answered from the maps the primary's writes filled.
         let writes = !matches!(
             (req.method, &segs[1..]),
-            (Method::Get, ["nodes"]) | (Method::Get, ["tenants"])
+            (Method::Get, ["nodes"])
+                | (Method::Get, ["tenants"])
+                | (Method::Get, ["tenants", _, "quota"])
         );
         if writes && self.read_dir().following() {
             return Response::error(
@@ -728,9 +735,12 @@ impl Router {
             (Method::Post, ["nodes", n, "failover"]) => self.failover(n),
             (Method::Post, ["replicas"]) => Ok(self.repair()),
             (Method::Get, ["tenants"]) => Ok(self.list_tenants(req)),
-            (Method::Put, ["tenants", t]) => {
-                self.create(t, field(&body, "node"), field(&body, "schema"))
-            }
+            (Method::Put, ["tenants", t]) => match quota_member(&body) {
+                Ok(quota) => self.create(t, field(&body, "node"), field(&body, "schema"), quota),
+                Err(e) => Err(Fail(400, e)),
+            },
+            (Method::Put, ["tenants", t, "quota"]) => self.set_quota(t, &req.body),
+            (Method::Get, ["tenants", t, "quota"]) => self.quota_report(t),
             (Method::Delete, ["tenants", t]) => self.delete(t),
             (Method::Post, ["tenants", t, "move"]) => match field(&body, "to") {
                 Some(to) => self.relocate(t, to),
@@ -861,6 +871,7 @@ impl Router {
     /// answer leaves its tenants without a size rather than failing the list.
     fn list_tenants(&self, req: &Request) -> Response {
         let sized = req.query.iter().any(|(k, _)| k == "bytes");
+        let quotas = req.query.iter().any(|(k, _)| k == "quota");
         let (tenants, nodes) = {
             let dir = self.read_dir();
             let tenants: Vec<(String, String, bool, Option<String>)> = dir
@@ -875,7 +886,7 @@ impl Router {
                     )
                 })
                 .collect();
-            let nodes: Vec<(String, Node)> = match sized {
+            let nodes: Vec<(String, Node)> = match sized || quotas {
                 true => dir
                     .nodes()
                     .iter()
@@ -886,7 +897,36 @@ impl Router {
             (tenants, nodes)
         };
         let mut sizes: Vec<(String, String, i64)> = Vec::new();
-        for (node, n) in &nodes {
+        // `?quota`: each tenant's quota and what it uses of it, as its node
+        // reports them (`/_admin/quotas`), which the studio shows beside
+        // its size.
+        let mut used: Vec<(String, String, String)> = Vec::new();
+        for (node, n) in nodes.iter().filter(|_| quotas) {
+            let Ok((200, body)) = self
+                .pool
+                .call(&n.addr, "GET", "/_admin/quotas", &n.token, b"")
+            else {
+                continue;
+            };
+            let Ok(reports) = fenec_core::json::parse_documents(&String::from_utf8_lossy(&body))
+            else {
+                continue;
+            };
+            for r in reports {
+                let get = |k: &str| r.iter().find(|(f, _)| f == k).map(|(_, v)| v);
+                let (Some(Value::Text(t)), Some(q), Some(u)) =
+                    (get("tenant"), get("quota"), get("usage"))
+                else {
+                    continue;
+                };
+                let mut out = String::from(",\"quota\":");
+                fenec_core::json::value_into(&mut out, q);
+                out.push_str(",\"usage\":");
+                fenec_core::json::value_into(&mut out, u);
+                used.push((node.clone(), t.clone(), out));
+            }
+        }
+        for (node, n) in nodes.iter().filter(|_| sized) {
             let Ok((200, body)) = self
                 .pool
                 .call(&n.addr, "GET", "/_admin/sizes", &n.token, b"")
@@ -914,8 +954,13 @@ impl Router {
                     .find(|(n, t, _)| n == node && t == name)
                     .map(|(_, _, b)| format!(",\"bytes\":{b}"))
                     .unwrap_or_default();
+                let quota = used
+                    .iter()
+                    .find(|(n, t, _)| n == node && t == name)
+                    .map(|(_, _, q)| q.as_str())
+                    .unwrap_or_default();
                 format!(
-                    "{{\"name\":{},\"node\":{},\"state\":\"{}\"{replica}{bytes}}}",
+                    "{{\"name\":{},\"node\":{},\"state\":\"{}\"{replica}{bytes}{quota}}}",
                     quote(name),
                     quote(node),
                     if *moving { "moving" } else { "active" }
@@ -981,7 +1026,8 @@ impl Router {
                 let base = format!("/_admin/tenants/{t}");
                 let why = self
                     .on_standby(name, "PUT", &base)
-                    .or_else(|| self.on_standby(name, "POST", &format!("{base}/follow")));
+                    .or_else(|| self.on_standby(name, "POST", &format!("{base}/follow")))
+                    .or_else(|| self.quota_on_standby(t, name));
                 if let Some(w) = why {
                     fenec_http::log!("tenant `{t}` has no replica yet: {w}");
                     unfollowed.push(quote(t));
@@ -1089,6 +1135,10 @@ impl Router {
                 }
                 Err(e) => return Err(format!("`{on}` did not answer: {e}")),
             }
+        }
+        // Its quota, so a failover onto it finds the tenant held as it was.
+        if let Some(w) = self.send_quota(tenant, on) {
+            return Err(w);
         }
         self.write_dir()
             .set_replica(tenant, Some(on))
@@ -1271,6 +1321,9 @@ impl Router {
             let answer = self
                 .pool
                 .call(&standby.addr, "POST", &target, &standby.token, b"");
+            if matches!(answer, Ok((200, _))) {
+                self.quota_after_failover(&tenant, &to);
+            }
             match answer {
                 Ok((200, _)) => match self.write_dir().place(&tenant, &to, State::Active) {
                     Ok(()) => promoted.push(quote(&tenant)),
@@ -1359,6 +1412,7 @@ impl Router {
                 .call(&node.addr, "POST", &target, &node.token, b"")
             {
                 Ok((200, _)) => {
+                    self.quota_after_failover(&tenant, &to);
                     let mut dir = self.write_dir();
                     match dir
                         .place(&tenant, &to, State::Active)
@@ -1396,6 +1450,109 @@ impl Router {
                 unreplicated.join(",")
             ),
         )
+    }
+
+    /// `PUT /_shard/tenants/<t>/quota`: what is set for the tenant over its
+    /// node's quota -- the whole set, replacing the one before; `{}` leaves
+    /// it at the node's. Its own node takes it first, and one it refuses
+    /// records nothing; then the directory keeps it, and the tenant's
+    /// standby and replica are sent it, so a failover finds it there. A
+    /// copy that does not answer is sent it again as it is promoted.
+    fn set_quota(&self, tenant: &str, body: &[u8]) -> Outcome<Response> {
+        let set = fenec_http::quota::Set::parse(&String::from_utf8_lossy(body))
+            .map_err(|e| Fail(400, e))?;
+        let _claim = self.claim(tenant)?;
+        let node = self
+            .read_dir()
+            .placement(tenant)
+            .map(|p| p.node.clone())
+            .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
+        let n = self.node(&node)?;
+        let json = set.json();
+        let report = expect(
+            self.pool.call(
+                &n.addr,
+                "PUT",
+                &format!("/_admin/tenants/{tenant}/quota"),
+                &n.token,
+                json.as_bytes(),
+            ),
+            200,
+            &node,
+        )?;
+        self.write_dir()
+            .set_quota(tenant, (!set.is_empty()).then_some(json.as_str()))
+            .map_err(internal)?;
+        let copies = [
+            self.read_dir().standby(&node).map(str::to_string),
+            self.read_dir().replica(tenant).map(str::to_string),
+        ];
+        for copy in copies.into_iter().flatten() {
+            if let Some(w) = self.put_quota(tenant, &copy, &json) {
+                fenec_http::log!("tenant `{tenant}`'s quota did not reach its copy: {w}");
+            }
+        }
+        Ok(Response::json(200, report))
+    }
+
+    /// `GET /_shard/tenants/<t>/quota`: its node's report -- what is set,
+    /// what it is held to, what it uses.
+    fn quota_report(&self, tenant: &str) -> Outcome<Response> {
+        let node = self
+            .read_dir()
+            .placement(tenant)
+            .map(|p| p.node.clone())
+            .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
+        let n = self.node(&node)?;
+        let target = format!("/_admin/tenants/{tenant}/quota");
+        let report = expect(
+            self.pool.call(&n.addr, "GET", &target, &n.token, b""),
+            200,
+            &node,
+        )?;
+        Ok(Response::json(200, report))
+    }
+
+    /// Sends `node` the quota the directory keeps for `tenant`, where one
+    /// is kept: what went wrong, if anything. A tenant with none sends
+    /// nothing, and a create, a move or a failover costs it no call.
+    fn send_quota(&self, tenant: &str, node: &str) -> Option<String> {
+        let json = self.read_dir().quota(tenant)?.to_string();
+        self.put_quota(tenant, node, &json)
+    }
+
+    fn put_quota(&self, tenant: &str, node: &str, json: &str) -> Option<String> {
+        let Some(n) = self.read_dir().node(node).cloned() else {
+            return Some(format!("no node `{node}`"));
+        };
+        let target = format!("/_admin/tenants/{tenant}/quota");
+        match self
+            .pool
+            .call(&n.addr, "PUT", &target, &n.token, json.as_bytes())
+        {
+            Ok((200, _)) => None,
+            Ok((status, body)) => Some(format!(
+                "`{node}` answered {status}: {}",
+                String::from_utf8_lossy(&body).trim()
+            )),
+            Err(e) => Some(format!("`{node}` did not answer: {e}")),
+        }
+    }
+
+    /// [`Self::send_quota`] to the standby of `node`, where it has one.
+    fn quota_on_standby(&self, tenant: &str, node: &str) -> Option<String> {
+        let standby = self.read_dir().standby(node).map(str::to_string)?;
+        self.send_quota(tenant, &standby)
+    }
+
+    /// A promoted copy is sent the tenant's quota again: one it missed --
+    /// a copy down when the quota was set -- would otherwise take writes
+    /// with none. The failover goes on either way: a tenant taking writes
+    /// unbounded is better than one taking none, and it is logged.
+    fn quota_after_failover(&self, tenant: &str, to: &str) {
+        if let Some(w) = self.send_quota(tenant, to) {
+            fenec_http::log!("tenant `{tenant}` failed over to `{to}` without its quota: {w}");
+        }
     }
 
     fn remove_node(&self, name: &str) -> Outcome<Response> {
@@ -1479,7 +1636,13 @@ impl Router {
             .ok_or_else(|| Fail(404, format!("no node `{name}`")))
     }
 
-    fn create(&self, tenant: &str, node: Option<&str>, schema: Option<&str>) -> Outcome<Response> {
+    fn create(
+        &self,
+        tenant: &str,
+        node: Option<&str>,
+        schema: Option<&str>,
+        quota: Option<fenec_http::quota::Set>,
+    ) -> Outcome<Response> {
         fenec_http::tenants::check_name(tenant).map_err(|r| Fail(r.0, r.1))?;
         // Read before anything is placed: a schema that does not read
         // leaves no tenant behind.
@@ -1509,6 +1672,38 @@ impl Router {
             return Err(internal(e));
         }
         self.lease_now(&name);
+        // The quota, before anything is written: the tenant takes its first
+        // write held to it. Recorded here first, which is what every node
+        // the tenant is placed on later is sent; one the node refuses takes
+        // the tenant back off it, as a schema refused does.
+        if let Some(set) = quota.filter(|q| !q.is_empty()) {
+            let json = set.json();
+            let sent = self
+                .write_dir()
+                .set_quota(tenant, Some(&json))
+                .map_err(internal);
+            let sent = sent.and_then(|_| {
+                expect(
+                    self.pool.call(
+                        &n.addr,
+                        "PUT",
+                        &format!("/_admin/tenants/{tenant}/quota"),
+                        &n.token,
+                        json.as_bytes(),
+                    ),
+                    200,
+                    &name,
+                )
+            });
+            if let Err(e) = sent {
+                let _ = self.pool.call(&n.addr, "DELETE", &target, &n.token, b"");
+                if let Err(e) = self.write_dir().remove_tenant(tenant) {
+                    fenec_http::log!("tenant `{tenant}` stayed in the directory: {e}");
+                }
+                self.lease_now(&name);
+                return Err(e);
+            }
+        }
         // The schema, applied on the node with its admin token once the
         // lease names the tenant, which a write needs: the app that creates
         // tenants holds the router's token alone, where it held the nodes'
@@ -1548,7 +1743,9 @@ impl Router {
         };
         // The replica follows into a file of its own, so the tenant is
         // created on the standby as well.
-        let warning = self.on_standby(&name, "PUT", &target);
+        let warning = self
+            .on_standby(&name, "PUT", &target)
+            .or_else(|| self.quota_on_standby(tenant, &name));
         if let Some(w) = &warning {
             fenec_http::log!("tenant `{tenant}` has no replica yet: {w}");
         }
@@ -1711,6 +1908,12 @@ impl Router {
             installed = put(&image);
         }
         expect(installed, 201, to).map_err(thaw)?;
+        // Its quota goes with it, before the directory points there: the
+        // first write the target takes is held to it.
+        if let Some(w) = self.send_quota(tenant, to) {
+            let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
+            return Err(thaw(Fail(502, w)));
+        }
 
         if let Err(e) = self.write_dir().place(tenant, to, State::Active) {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
@@ -1721,7 +1924,10 @@ impl Router {
         // The replica follows the node the tenant is on now: a file there,
         // and the copy on the old node's standby is not this tenant's any
         // more.
-        if let Some(w) = self.on_standby(to, "PUT", &base) {
+        if let Some(w) = self
+            .on_standby(to, "PUT", &base)
+            .or_else(|| self.quota_on_standby(tenant, to))
+        {
             fenec_http::log!("tenant `{tenant}` has no replica on `{to}` yet: {w}");
         }
         if let Some(w) = self.on_standby(&from, "DELETE", &base) {
@@ -1850,6 +2056,19 @@ fn body_fields(req: &Request) -> std::result::Result<Vec<(String, Value)>, Strin
     fenec_core::json::parse_object(text).map_err(|e| message(&e))
 }
 
+/// The `quota` member of a create's body, an object, where it has one.
+fn quota_member(
+    body: &[(String, Value)],
+) -> std::result::Result<Option<fenec_http::quota::Set>, String> {
+    match body.iter().find(|(k, _)| k == "quota").map(|(_, v)| v) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(members)) => {
+            fenec_http::quota::Set::from_members(members.clone()).map(Some)
+        }
+        Some(_) => Err("`quota` is an object: {\"bytes\": .., \"rows\": .., ...}".into()),
+    }
+}
+
 fn field<'a>(body: &'a [(String, Value)], name: &str) -> Option<&'a str> {
     body.iter().find_map(|(k, v)| match v {
         Value::Text(s) if k == name => Some(s.as_str()),
@@ -1875,7 +2094,8 @@ fn message(e: &Error) -> String {
         | Error::Plugin(m)
         | Error::ReadOnly(m)
         | Error::Denied(m)
-        | Error::Unmet(m) => m.clone(),
+        | Error::Unmet(m)
+        | Error::Quota(m) => m.clone(),
     }
 }
 

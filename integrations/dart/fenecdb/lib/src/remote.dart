@@ -157,9 +157,7 @@ class FenecRemote {
       throw FenecException(FenecCode.io, 'the server did not answer JSON ($status)');
     }
     if (status < 200 || status > 299) {
-      final m = v is Map ? v : null;
-      throw FenecException.http(_code(status), m?['error'] as String? ?? 'HTTP $status',
-          status: status, at: m?['at'] as int?, completed: m?['completed'] as int?);
+      throw refused(status, v is Map ? v : null, headers.value('retry-after'));
     }
     final seq = int.tryParse(headers.value('fenec-seq') ?? '');
     if (seq != null) _shared.seq = seq;
@@ -178,6 +176,21 @@ class FenecRemote {
 
   /// Lets the connections go: this one's, and every copy's.
   void close() => _shared.client.close();
+
+  /// A refusal as the error it is: its status and message, where a batch
+  /// stopped, and where a tenant's quota refused it the quota and how long
+  /// to wait -- `Retry-After`, or the same in the body.
+  static FenecException refused(int status, Map? m, String? retryAfter) {
+    final quota = m?['quota'] as String?;
+    final secs = int.tryParse(retryAfter ?? '') ?? (m?['retry_after'] as num?)?.toInt();
+    return FenecException.http(
+        quota == null ? _code(status) : FenecCode.quota, m?['error'] as String? ?? 'HTTP $status',
+        status: status,
+        at: m?['at'] as int?,
+        completed: m?['completed'] as int?,
+        quota: quota,
+        retryAfter: secs == null ? null : Duration(seconds: secs));
+  }
 
   /// An HTTP status as the error kind the engine would have said; the
   /// status itself is the error's [FenecException.status].

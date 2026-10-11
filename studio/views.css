@@ -199,6 +199,9 @@
 .ad-open:hover { background: var(--surface-3); }
 .ad-open:focus-visible { outline: 2px solid var(--sun-ring); }
 .ad-tenant { display: block; color: var(--muted); font-size: 11px; }
+.ad-of { color: var(--muted); }
+.ad-meter { display: block; width: 100%; min-width: 72px; height: 4px; margin-top: 3px; }
+.ad-limits { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .segs { display: inline-flex; border: 1px solid var(--rule-2); border-radius: 6px; overflow: hidden; }
 .seg { border: 0; background: var(--surface); padding: 0 10px; height: 24px; font-size: 12px; cursor: pointer; color: var(--ink-2); }
 .seg + .seg { border-left: 1px solid var(--rule-2); }

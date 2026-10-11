@@ -499,6 +499,15 @@ export declare class FenecError extends Error {
    * for a batch holding a `compact`, whose statements run on their own.
    */
   completed?: number;
+  /**
+   * The tenant's quota that refused the request (`connect` to a tenant
+   * node): `bytes` and `rows` answer 507 -- delete rows to make room --
+   * `streams`, `requests`, `writes` and `write_bytes` answer 429 with
+   * `retryAfter`.
+   */
+  quota?: 'bytes' | 'rows' | 'streams' | 'requests' | 'writes' | 'write_bytes';
+  /** Seconds to wait before sending again, where the server said (`Retry-After`). */
+  retryAfter?: number;
 }
 
 /**

@@ -29,6 +29,14 @@ class FenecException internal constructor(
     val at: Int? = null,
     /** How many statements of a failed batch stayed applied: 0, since a batch lands whole, but for one holding a `compact`. */
     val completed: Int? = null,
+    /**
+     * The tenant's quota a server refused with ([FenecRemote] to a tenant node): "bytes" and "rows"
+     * answer 507, and room is made by deleting; "streams", "requests", "writes" and "write_bytes" answer
+     * 429 with [retryAfter]. Null for any other refusal.
+     */
+    val quota: String? = null,
+    /** Seconds to wait before sending again, where the server said (`Retry-After`, a quota's 429). */
+    val retryAfter: Double? = null,
 ) : RuntimeException(message) {
     constructor(code: Code, message: String) : this(code, message, null)
 
@@ -37,6 +45,8 @@ class FenecException internal constructor(
         DENIED(10), PANIC(11), MISUSE(12), LOCKED(13),
         /** A write's `require n` not met: it wrote another count, and was put back. */
         UNMET(14),
+        /** A tenant's quota a server holds it to ([quota] names it). */
+        QUOTA(15),
         BUILDER(100);
 
         companion object {

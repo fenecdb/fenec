@@ -56,7 +56,10 @@ condition on the field, as a shop's filter list does.
 
 Several statements are one `batch`, a block under one write lock: all
 land or none, and a `FenecError` that stops it says which (`e.at`, from 0;
-412 for a write whose `require` was not met). A retry after a timeout
+412 for a write whose `require` was not met). On a tenant node a quota
+names itself (`e.quota`): `"bytes"` and `"rows"` answer 507, and room is
+made by deleting; `"streams"`, `"requests"`, `"writes"` and `"write_bytes"`
+answer 429 with `e.retry_after`, the seconds the server asks to wait. A retry after a timeout
 cannot tell whether a write ran, so a write that must not run twice goes
 under an idempotency key -- the second answer is the first one kept
 (`db.replayed`), and the key with another request is refused (422):

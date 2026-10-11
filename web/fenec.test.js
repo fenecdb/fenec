@@ -1581,6 +1581,37 @@ test('a clear error when fetch is missing', () => {
   }
 });
 
+test("a tenant's quota is the error's: its name and the wait the server asks for", async () => {
+  const answers = [
+    new Response(JSON.stringify({ error: 'past its quota of 5 rows', quota: 'rows' }), {
+      status: 507,
+      headers: { 'content-type': 'application/json', 'fenec-quota': 'rows' },
+    }),
+    new Response(JSON.stringify({ error: 'past its quota of 2 writes a second', quota: 'writes', retry_after: 1 }), {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'fenec-quota': 'writes', 'retry-after': '3' },
+    }),
+    new Response(JSON.stringify({ error: 'past its quota', quota: 'bytes', completed: 0, at: 1 }), {
+      status: 507,
+      headers: { 'content-type': 'application/json', 'fenec-quota': 'bytes' },
+    }),
+  ];
+  const db = new FenecHttp('http://x', { fetch: async () => answers.shift() });
+  const rows = await db.run('put notes {n: 6}').catch((e) => e);
+  assert.ok(rows instanceof FenecError);
+  assert.equal(rows.status, 507);
+  assert.equal(rows.quota, 'rows');
+  assert.equal(rows.retryAfter, undefined, 'a full file is not helped by waiting');
+  const rate = await db.run('put notes {n: 7}').catch((e) => e);
+  assert.equal(rate.status, 429);
+  assert.equal(rate.quota, 'writes');
+  assert.equal(rate.retryAfter, 3, 'the header over the body');
+  const batch = await db.batch(['put notes {n: 8}', 'put notes {n: 9}']).catch((e) => e);
+  assert.equal(batch.quota, 'bytes');
+  assert.equal(batch.at, 1);
+  assert.equal(batch.completed, 0);
+});
+
 // ------------------------------------------------------------------ lookup
 
 test('lookup is terminal: its clauses bind to the child', () => {

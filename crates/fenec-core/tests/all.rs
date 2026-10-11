@@ -29,6 +29,7 @@ mod having;
 mod highlight;
 mod insert;
 mod json;
+mod limit;
 mod lookup;
 mod maintenance;
 mod mapped;

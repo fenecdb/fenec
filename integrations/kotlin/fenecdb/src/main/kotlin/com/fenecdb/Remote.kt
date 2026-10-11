@@ -175,13 +175,7 @@ class FenecRemote private constructor(
             throw FenecException(FenecException.Code.IO, "the server could not be reached: ${e.message}")
         }
         val v = runCatching { if (body.isEmpty()) null else Json.parse(body) }.getOrNull()
-        if (status !in 200..299) {
-            val r = v as? Row
-            throw FenecException(
-                code(status), r?.string("error") ?: "HTTP $status", null,
-                status = status, at = r?.int("at"), completed = r?.int("completed"),
-            )
-        }
+        if (status !in 200..299) throw refused(status, v as? Row, c.getHeaderField("retry-after"))
         v ?: throw FenecException(FenecException.Code.IO, "the server did not answer JSON ($status)")
         val seq = c.getHeaderField("fenec-seq")?.toLongOrNull()
         if (seq != null) shared.seq.set(seq)
@@ -189,6 +183,21 @@ class FenecRemote private constructor(
     }
 
     internal companion object {
+        /**
+         * A refusal as the error it is: its status and message, where a batch stopped, and where a
+         * tenant's quota refused it the quota and how many seconds to wait -- `Retry-After`, or the same
+         * in the body.
+         */
+        fun refused(status: Int, r: Row?, retryAfter: String?): FenecException {
+            val quota = r?.string("quota")
+            return FenecException(
+                if (quota == null) code(status) else FenecException.Code.QUOTA,
+                r?.string("error") ?: "HTTP $status", null,
+                status = status, at = r?.int("at"), completed = r?.int("completed"),
+                quota = quota, retryAfter = retryAfter?.toDoubleOrNull() ?: r?.double("retry_after"),
+            )
+        }
+
         /** An HTTP status as the error kind the engine would have said; the status itself is the error's `status`. */
         fun code(status: Int) = when (status) {
             400 -> FenecException.Code.QUERY

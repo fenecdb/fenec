@@ -51,6 +51,7 @@ pub mod idempotent;
 pub mod lease;
 pub mod link;
 pub mod metrics;
+pub mod quota;
 pub mod replication;
 pub mod request_id;
 pub mod seal;
@@ -738,8 +739,16 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     409,
                     "this server keeps no change feed: start it with --cdc or --replication-token",
                 ),
-                (Ok(_), Some(feed)) => cdc::route(db, feed, cfg, &req),
+                // A wait for changes holds a thread as a stream does; one
+                // that does not wait is a request in flight.
+                (Ok(_), Some(feed)) => match admit(&tenant, cdc_waits(&req)) {
+                    Ok(_slot) => cdc::route(db, feed, cfg, &req),
+                    Err(refused) => refused,
+                },
             };
+            if let Some(t) = &tenant {
+                quota::noted(&resp, t.name(), &req);
+            }
             audit::http(&req, resp.status, peer);
             trace::end(resp.status);
             if cors(resp, cfg)
@@ -764,6 +773,19 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     return;
                 }
             };
+            // Held for as long as the stream lasts: past the tenant's
+            // quota of streams, refused before its head.
+            let _slot = match admit(&tenant, true) {
+                Ok(slot) => slot,
+                Err(refused) => {
+                    if let Some(t) = &tenant {
+                        quota::noted(&refused, t.name(), &req);
+                    }
+                    audit::http(&req, refused.status, peer);
+                    let _ = cors(refused, cfg).write(&mut out, false, false);
+                    return;
+                }
+            };
             // A read timeout is meaningless during the stream: the client
             // sends nothing, and the wait is on a Condvar.
             let _ = out.set_read_timeout(None);
@@ -772,7 +794,18 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         }
         // Reading one's own write on a replica: the request waits until the
         // write its client made on the primary (`Fenec-Seq`) is here.
-        if let Some(refusal) = after(&req, db, hub) {
+        let waiting = match req.header("fenec-after").is_some() {
+            true => admit(&tenant, true),
+            false => Ok(None),
+        };
+        let refused = match waiting {
+            Ok(_slot) => after(&req, db, hub),
+            Err(refused) => Some(refused),
+        };
+        if let Some(refusal) = refused {
+            if let Some(t) = &tenant {
+                quota::noted(&refusal, t.name(), &req);
+            }
             trace::end(refusal.status);
             if cors(refusal, cfg)
                 .write(&mut out, keep_alive, head_only)
@@ -800,7 +833,11 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             let _ = s.set_nonblocking(false);
             closed
         };
-        let (resp, waited, held) = respond(run, hub, db, &req, gone);
+        let hold = tenant.as_ref().map(|t| &t.quota);
+        let (resp, waited, held) = respond(run, hub, db, &req, gone, hold);
+        if let Some(t) = &tenant {
+            quota::noted(&resp, t.name(), &req);
+        }
         // A preflight is the browser's, not a statement.
         if req.method != Method::Options {
             // A held request's time is its runs', not its wait: the slow
@@ -855,6 +892,7 @@ fn respond(
     db: &RwLock<Database>,
     req: &Request,
     gone: impl Fn() -> bool,
+    quota: Option<&Arc<quota::Held>>,
 ) -> (Response, Duration, bool) {
     // A plan left by a caller of `handle` that holds nothing is not this
     // request's.
@@ -866,6 +904,12 @@ fn respond(
     // Asked again: a server going down holds nothing more.
     let Ok(Some(wait)) = waits::asked(req) else {
         return (resp, Duration::ZERO, false);
+    };
+    // A held write holds a thread as a stream does: past its tenant's
+    // quota of streams it is answered as it ran, and told to come back.
+    let _stream = match quota.map(|q| q.stream()).transpose() {
+        Ok(slot) => slot,
+        Err(refused) => return (refused, Duration::ZERO, false),
     };
     let held = std::time::Instant::now();
     let until = held + wait;
@@ -1082,6 +1126,18 @@ fn route_tenant(
 /// the lease ran out was answered 403 on a slow CI runner, as if the write
 /// were not this server's to take, when the client should come back.
 fn handle_tenant(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
+    // A request in flight, where the tenant's quota counts them: one held
+    // here holds a worker thread, and a tenant past its share is told to
+    // come back rather than queued behind the others' work.
+    let _flight = match t.quota.request() {
+        Ok(slot) => slot,
+        Err(refused) => return refused,
+    };
+    quota::within(&t.quota, || handle_admitted(t, cfg, req))
+}
+
+/// [`handle_tenant`], the request let in by its tenant's quota.
+fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
     let _held = t.enter();
     if cfg.read_only {
         return handle(&t.db, cfg, req);
@@ -1109,6 +1165,31 @@ fn refusal(t: &tenants::Tenant) -> Option<String> {
         true => Some("the tenant is being moved; retry shortly".to_string()),
         false => t.writable().err(),
     }
+}
+
+/// What a tenant's quota holds of a request that holds a thread for long:
+/// a stream for one that waits -- a subscription, a `/_changes` wait, a
+/// `Fenec-After` wait -- a request in flight otherwise. A single database
+/// has no tenant, and holds nothing.
+fn admit(
+    tenant: &Option<Arc<tenants::Tenant>>,
+    stream: bool,
+) -> std::result::Result<Option<quota::Slot>, Response> {
+    let Some(t) = tenant else {
+        return Ok(None);
+    };
+    match stream {
+        true => t.quota.stream().map(Some),
+        false => t.quota.request().map(Some),
+    }
+}
+
+/// Whether a `/_changes` read waits for a write (`wait`), holding its
+/// thread as a stream does.
+fn cdc_waits(req: &Request) -> bool {
+    req.query
+        .iter()
+        .any(|(k, v)| k == "wait" && v.trim().parse::<u64>().is_ok_and(|ms| ms > 0))
 }
 
 /// `GET /<name>/changes`
@@ -1155,6 +1236,10 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // collection` arriving in between leaves the two stages inconsistent.
     if wants_write(req) {
         metrics::wrote();
+        // A tenant's write rates (`quota::within`), asked before the lock.
+        if let Err(refused) = quota::writing() {
+            return refused;
+        }
         let key = match idempotent::key(req, &who) {
             Ok(k) => k,
             Err(refusal) => return refusal,
@@ -1333,6 +1418,9 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
 /// 409 with the plan's refusals, which write nothing.
 pub(crate) fn apply_schema(db: &Arc<RwLock<Database>>, cfg: &Config, body: &str) -> Response {
     metrics::wrote();
+    if let Err(refused) = quota::writing() {
+        return refused;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
@@ -1421,6 +1509,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     }
     if !stmt.is_read_only() {
         metrics::wrote();
+        if let Err(refused) = quota::writing() {
+            return refused;
+        }
     }
     // `Fenec-Wait`: a `set` or a `del` that writes nothing is held until it
     // can ([`waits`]). Asked of the statement as the token runs it.
@@ -1794,6 +1885,9 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     }
     if stmts.iter().any(|(s, _)| !s.is_read_only()) {
         metrics::wrote();
+        if let Err(refused) = quota::writing() {
+            return refused;
+        }
     }
 
     let writes = stmts.iter().any(|(s, _)| !s.is_read_only());
@@ -1868,7 +1962,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                     held_plan(&guard, before);
                 }
                 let at = results.len();
-                return api::render_batch_stop(status, &why, 0, at, fenec_core::VERSION);
+                return batch_stop(status, &why, 0, at);
             }
             Err((status, why)) => {
                 // Sync on the error path too: whatever was applied is durable.
@@ -1879,7 +1973,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                     let _ = await_durable(db, durability);
                 }
                 let n = results.len();
-                return api::render_batch_stop(status, &why, n, n, fenec_core::VERSION);
+                return batch_stop(status, &why, n, n);
             }
         }
     }
@@ -1904,8 +1998,15 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
         None => guard.commit().map(|_| None),
     };
+    // Refused as it lands -- a quota past which the block would take the
+    // tenant (`quota::limit`) -- the batch stops at its last statement,
+    // nothing of it applied, as at an error there.
     let kept = match kept {
         Ok(kept) => kept,
+        Err(e @ Error::Quota(_)) => {
+            let at = stmts.len().saturating_sub(1);
+            return batch_stop(api::status_of(&e), &e.to_string(), 0, at);
+        }
         Err(e) => return error_response(&e),
     };
     let seq = Some(guard.change_seq());
@@ -1921,6 +2022,24 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         kept.unwrap_or_else(|| api::render_batch(&results, fenec_core::VERSION)),
         seq,
     )
+}
+
+/// A stopped `/batch`'s answer: where it stopped and how much of it stayed
+/// applied, and the quota where one stopped it -- whose refusal reads
+/// `quota: <kind>: <why>` as the engine's error says it.
+fn batch_stop(status: u16, why: &str, completed: usize, at: usize) -> Response {
+    let Some((kind, text)) = why.strip_prefix("quota: ").and_then(quota::split) else {
+        return api::render_batch_stop(status, why, completed, at, fenec_core::VERSION);
+    };
+    let mut out = String::from("{\"error\":");
+    fenec_core::json::escape_into(&mut out, text);
+    out.push_str(&format!(
+        ",\"quota\":\"{}\",\"completed\":{completed},\"at\":{at}}}",
+        kind.name()
+    ));
+    Response::json(status, out)
+        .versioned(fenec_core::VERSION)
+        .header(quota::HEADER, kind.name())
 }
 
 /// A `/batch` whose every statement only reads, as one snapshot: what a
@@ -2104,6 +2223,8 @@ fn error_response(e: &Error) -> Response {
         | Error::ReadOnly(m)
         | Error::Denied(m)
         | Error::Unmet(m) => m.as_str(),
+        // A quota's refusal names the quota (`quota::limit`).
+        Error::Quota(m) => return quota::engine_refusal(m),
     };
     Response::error(api::status_of(e), msg)
 }
@@ -2142,7 +2263,7 @@ fn cors(resp: Response, cfg: &Config) -> Response {
             )
             .header(
                 "Access-Control-Expose-Headers",
-                "fenec-seq, fenec-next, idempotent-replayed, etag, x-request-id",
+                "fenec-seq, fenec-next, idempotent-replayed, etag, x-request-id, fenec-quota, retry-after",
             )
             .header("Access-Control-Max-Age", "600")
             .header("Vary", "Origin"),

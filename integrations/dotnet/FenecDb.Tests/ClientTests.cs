@@ -431,6 +431,35 @@ public sealed class ClientTests(Servers servers)
         Assert.Equal(404, e.Status);
     }
 
+    // A tenant's quota, as the node's flag sets it and as one set for the tenant over it: the refusal names
+    // the quota, and a rate's says how long to wait.
+    [Fact]
+    public async Task ATenantsQuota()
+    {
+        var dir = Directory.CreateDirectory(Path.Combine(servers.Scratch, "quotas")).FullName;
+        var node = servers.Serve("--dir", dir, "--admin-token", "dotnet-admin", "--tenant-max-rows", "2");
+        using var http = new HttpClient();
+        async Task Admin(HttpMethod method, string path, string body)
+        {
+            using var req = new HttpRequestMessage(method, node + path) { Content = new StringContent(body) };
+            req.Headers.Authorization = new("Bearer", "dotnet-admin");
+            Assert.True((await http.SendAsync(req)).IsSuccessStatusCode, path);
+        }
+        await Admin(HttpMethod.Put, "/_admin/tenants/acme", "");
+        using var acme = new FenecClient(node, new FenecClientOptions { Tenant = "acme" });
+        await acme.ExecAsync("create collection notes (t text)");
+        await acme.ExecAsync("put notes [{t: $1}, {t: $2}]", ["a", "b"]);
+        var full = await Assert.ThrowsAsync<FenecException>(() => acme.ExecAsync("put notes {t: $1}", ["c"]));
+        Assert.Equal((507, "storage_full", "rows"), (full.Status, full.Code, full.Quota));
+        Assert.Null(full.RetryAfter);
+        // One byte a second: the first write lands and is charged, the next waits out its debt.
+        await Admin(HttpMethod.Put, "/_admin/tenants/acme/quota", "{\"rows\": 0, \"write_bytes\": 1}");
+        await acme.ExecAsync("put notes {t: $1}", ["c"]);
+        var rate = await Assert.ThrowsAsync<FenecException>(() => acme.ExecAsync("put notes {t: $1}", ["d"]));
+        Assert.Equal((429, "too_many", "write_bytes"), (rate.Status, rate.Code, rate.Quota));
+        Assert.True(rate.RetryAfter >= TimeSpan.FromSeconds(1));
+    }
+
     [Fact]
     public async Task AScopedToken()
     {

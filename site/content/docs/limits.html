@@ -117,7 +117,13 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td><code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's; the weights are <code>f32</code>, finite, and a zero is dropped</td></tr>
 
 <tr><td>change ring</td><td class="n"><b>4096 entries</b></td><td><code>--changes</code>; how far behind a subscriber may fall, 24 bytes each</td></tr>
-<tr><td>concurrent subscriptions</td><td class="n"><b>64</b></td><td><code>--http-max-streams</code>; each is a connection and a thread</td></tr>
+<tr><td>concurrent subscriptions</td><td class="n"><b>64</b></td><td><code>--http-max-streams</code>; each is a connection and a thread; on a tenant node, a tenant's</td></tr>
+<tr><td>a tenant's file (<code>--dir</code>)</td><td class="n">none unless set</td><td><code>--tenant-max-bytes</code>, a tenant's own <code>bytes</code>; a write that would take the file past it is refused (507) before it lands; deletes, drops and <code>compact</code> run</td></tr>
+<tr><td>a tenant's rows</td><td class="n">none unless set</td><td><code>--tenant-max-rows</code>, its <code>rows</code>; its collections together, the server's own (<code>_</code>-named) left out; 507</td></tr>
+<tr><td>a tenant's streams</td><td class="n">none unless set</td><td><code>--tenant-max-streams</code>, its <code>streams</code>: subscriptions, <code>/_changes</code> waits, held writes and <code>Fenec-After</code> waits together; 429</td></tr>
+<tr><td>a tenant's requests in flight</td><td class="n">none unless set</td><td><code>--tenant-max-requests</code>, its <code>requests</code>; 429</td></tr>
+<tr><td>a tenant's writes a second</td><td class="n">none unless set</td><td><code>--tenant-writes-per-sec</code>, its <code>writes</code>; a second's worth at once, then 429 with <code>Retry-After</code></td></tr>
+<tr><td>a tenant's bytes written a second</td><td class="n">none unless set</td><td><code>--tenant-write-bytes-per-sec</code>, its <code>write_bytes</code>; charged as each write lands, 429 while in debt</td></tr>
 </tbody>
 </table>
 </div>

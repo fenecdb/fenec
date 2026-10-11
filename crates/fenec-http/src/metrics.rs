@@ -492,6 +492,20 @@ fn render(source: Source) -> String {
                 &[],
                 s.open.iter().map(|(_, m, _)| m).sum::<usize>(),
             );
+            // By quota, never by tenant: a tenant's name is the admin
+            // API's to tell (`GET /_admin/quotas`), not a label's.
+            out.family(
+                "fenec_quota_refused_total",
+                "counter",
+                "Requests refused for a tenant's quota, by the quota: 507 for bytes and rows, 429 for the rest.",
+            );
+            for k in crate::quota::KINDS {
+                out.sample(
+                    "fenec_quota_refused_total",
+                    &[("quota", k.name())],
+                    crate::quota::refused(k),
+                );
+            }
             unlinked(&mut out, s.unlinked);
         }
     }

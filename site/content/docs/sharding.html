@@ -246,6 +246,126 @@ to the router instead, and the app needs the router's token alone:</p>
     follows every write.</li>
 </ul>
 
+<h2 id="quotas">Quotas</h2>
+
+<p>Tenants share a node: its disk, its memory, its threads. A quota keeps one
+tenant from taking all of them. Set defaults on the node, and a tenant's own
+through the router, which sends it wherever the tenant goes.</p>
+
+<pre data-lang="bash"># every tenant on this node, unless its own quota says otherwise
+fenec-server --dir /data/n1 --admin-token a1 \
+    --tenant-max-bytes 1G --tenant-max-rows 1000000 \
+    --tenant-max-streams 50 --tenant-max-requests 16 \
+    --tenant-writes-per-sec 500 --tenant-write-bytes-per-sec 8M
+
+# a tenant on a plan of its own: set as it is created ...
+curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root' \
+     -d '{"schema":"create collection notes (title text)","quota":{"bytes":104857600,"rows":50000}}'
+
+# ... or changed later: the whole set, 0 for none, left out for the node's
+curl -X PUT localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root' \
+     -d '{"bytes":1073741824,"rows":0,"writes":100}'
+
+# what it is held to, and what it uses
+curl localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root'
+# {"tenant":"acme","open":true,"set":{"bytes":1073741824,"rows":0,"writes":100},
+#  "quota":{"bytes":1073741824,"rows":0,"streams":50,...},
+#  "usage":{"bytes":48211,"rows":312,"streams":1,"requests":0}}</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Quota</th><th>Bounds</th><th>Past it</th></tr></thead>
+<tbody>
+<tr><td><code>bytes</code></td><td>the tenant's file, as written</td><td><b>507</b>, the write put back whole</td></tr>
+<tr><td><code>rows</code></td><td>the documents of its collections, together</td><td><b>507</b>, the write put back whole</td></tr>
+<tr><td><code>streams</code></td><td>subscriptions, <code>/_changes</code> waits, held writes and <code>Fenec-After</code> waits</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
+<tr><td><code>requests</code></td><td>requests in flight</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
+<tr><td><code>writes</code></td><td>writes a second, a second's worth at once</td><td><b>429</b>, <code>Retry-After</code> until the next</td></tr>
+<tr><td><code>write_bytes</code></td><td>bytes written a second, charged as each lands</td><td><b>429</b>, <code>Retry-After</code> until the debt is paid</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A refusal names its quota in the body and in a header, and every SDK's
+error carries it typed (<code>quota</code>, <code>retryAfter</code>):</p>
+
+<pre data-lang="bash">HTTP/1.1 507 Insufficient Storage
+Fenec-Quota: rows
+
+{"error":"the write would take the tenant past its quota of 50000 rows: delete rows, or raise the quota","quota":"rows"}</pre>
+
+<ul>
+  <li><b>Deletes always land.</b> A write that only takes away — a
+    <code>del</code>, a <code>drop</code> — is never refused, and neither is
+    a <code>compact</code>, which gives bytes back. A tenant at its quota
+    deletes its way under it.</li>
+  <li><b>A full file is compacted by the node</b> once an eighth of its quota
+    is dead, where a file of its own waits for 64 MB: deleted rows become room
+    without the tenant running <code>compact</code> itself.</li>
+  <li><b>Never passed by a write that adds.</b> Bytes and rows are asked as
+    the write lands, its record built, under the write lock: writers at once
+    cannot take the file a byte past its quota, nor the rows one past
+    theirs.</li>
+  <li><b>It goes with the tenant.</b> The router keeps each tenant's quota in
+    its directory and sends it to the tenant's node, its standby and its
+    replica; a move sends it to the target before the directory points
+    there, and a failover finds it on the copy it promotes.</li>
+  <li><b>Seen by quota, not by tenant:</b> <code>/_metrics</code> counts
+    refusals as <code>fenec_quota_refused_total{quota="rows"}</code>, the
+    audit log writes each as a <code>quota</code> event naming the tenant,
+    and <code>GET /_admin/quotas</code> on a node — or
+    <code>/_shard/tenants?quota</code> on the router, which the studio's admin
+    view shows — lists every tenant's usage against its quota.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><b>What is bounded is what is known exactly and cheaply.</b> A file's
+bytes are the engine's count of what it appended, read with no system call;
+rows are each store's count, a sum over the collections (those whose names
+start with <code>_</code> are the server's: idempotency keys, consumers'
+places); streams and requests are counters a request takes and gives back;
+the rates are a token bucket each. A tenant with no quota touches none of it.
+Left out: the memory an open tenant holds (<code>memory_bytes</code> counts
+what has been built, and a read builds an index on first use — a quota on it
+would refuse a write because of a search, and the same data holds less after
+a restart; <code>--max-memory</code> closes idle tenants for the node as a
+whole), a statement's time (the engine cannot stop a running scan; requests
+in flight bound how many cores one tenant's long reads take), and rows per
+collection (a tenant's own design: <code>@ttl</code> on a log).</p>
+
+<p><b>The block is refused before it lands.</b> A quota asked before a write
+runs would let that write past it by whatever it adds, and a
+<code>set</code> over every row adds the whole collection again. The engine
+asks the quota as a block lands, with its record's length to the byte and
+its documents counted (<code>Database::set_limit</code>); one past it is put
+back as a failed one is. A block larger than 16 MB spills into the file
+before it lands, and each spill is asked first: let through and refused
+after, its bytes would stay in the file, dead and past the quota. The file
+passes its quota only by what a write that takes away adds — a delete's
+tombstones, a drop's record — and by what no client writes: the graphs a
+server keeps in its file's tail. The next compact gives both back. A rate is
+not asked at the landing: a write lands while its
+bucket holds any, and its bytes are charged as it lands, so a write larger
+than a second's worth goes through and the next waits out the debt.</p>
+
+<p><b>A refusal tells the quota, not what the tenant holds:</b> a scoped
+token's user is told the tenant is full, not how many rows the other users
+make. Only the admin token reads usage.</p>
+
+<p><b>The router enforces none of it.</b> It holds no keys and parses no
+query, and a tenant lives whole on one node, so the node's count is the
+tenant's. A quota a node does not take — a node down when it was set — is
+logged, and sent again as that copy is promoted.</p>
+
+<p><b>What it costs.</b> A tenant with no quota touches none of it: against
+the code before quotas, in turns, a request to a tenant took 19.5–21.7 µs
+straight to the node and 43.7–46.0 µs through the router, against
+19.9–21.8 and 43.6–45.7. A tenant with every quota answered as one with none
+over HTTP — reads 20.9 µs either way, writes 23.7 against 23.6 — and in
+process a <code>put</code> held to bytes and rows took 593 ns against 566,
+618 with a bytes-a-second bucket besides (<code>make quota-bench</code>).</p>
+</details>
+
 <h2>Moving a tenant</h2>
 
 <p>Move a tenant to another node with one call. Reads keep working throughout;

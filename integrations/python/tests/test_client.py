@@ -36,6 +36,24 @@ def test_a_refusal_says_why_and_how(client):
     assert e.value.status == 400
 
 
+def test_a_quota_names_itself_and_the_wait():
+    """A tenant node's quota refusal, as the client raises it: the quota
+    and, where coming back helps, how long to wait."""
+    import fenecdb
+
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(507, b'{"error":"past its quota of 5 rows","quota":"rows"}')
+    assert (e.value.status, e.value.quota, e.value.retry_after) == (507, "rows", None)
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(
+            429, b'{"error":"past its quota of 2 writes a second","quota":"writes","retry_after":3}'
+        )
+    assert (e.value.status, e.value.quota, e.value.retry_after) == (429, "writes", 3)
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(507, b'{"error":"past","quota":"bytes","completed":0,"at":1}')
+    assert (e.value.quota, e.value.at, e.value.completed) == ("bytes", 1, 0)
+
+
 def test_a_write_that_does_not_write_its_count_is_refused_and_put_back(client):
     name = fresh("require")
     client.query(f"create collection {name} (name text, balance int)")

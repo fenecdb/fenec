@@ -95,6 +95,10 @@ pub const FENEC_LOCKED: i32 = 13;
 /// engine error's kind, numbered after the boundary's own, which were there
 /// first.
 pub const FENEC_UNMET: i32 = 14;
+/// A write past a quota a server holds a database to (`Error::Quota`):
+/// numbered so every engine error has a code, though the library sets no
+/// quota and never answers it.
+pub const FENEC_QUOTA: i32 = 15;
 
 /// `fenec_open`'s flags. Without any, every write is fsynced before the call
 /// returns and the file is mapped.
@@ -214,6 +218,7 @@ pub fn code(e: &Error) -> i32 {
         Error::ReadOnly(_) => FENEC_READ_ONLY,
         Error::Denied(_) => FENEC_DENIED,
         Error::Unmet(_) => FENEC_UNMET,
+        Error::Quota(_) => FENEC_QUOTA,
     }
 }
 
@@ -1131,6 +1136,7 @@ mod tests {
         let codes: Vec<i32> = all.iter().map(code).collect();
         assert_eq!(codes, (1..=10).collect::<Vec<_>>());
         assert_eq!(code(&Error::Unmet(String::new())), FENEC_UNMET);
+        assert_eq!(code(&Error::Quota(String::new())), FENEC_QUOTA);
     }
 
     /// A panic comes back as a code and its message, never across the

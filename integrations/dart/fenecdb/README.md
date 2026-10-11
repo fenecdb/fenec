@@ -59,7 +59,11 @@ with no file: every query a request, the same builder. Its `batch([...],
 idempotencyKey: id)` runs the builder's `toInsert`/`toUpdate`/`toDelete` as
 one block, all or none, answering a `BatchAnswer` (`results`, `seq`,
 `replayed`); a `FenecException` that stops it carries `status` (412 and
-`unmet` for a `require` not met) and `at`, the statement from 0.
+`unmet` for a `require` not met) and `at`, the statement from 0. On a
+tenant node a quota names itself (`FenecCode.quota`, and `quota`):
+`"bytes"` and `"rows"` answer 507, and room is made by deleting;
+`"streams"`, `"requests"`, `"writes"` and `"write_bytes"` answer 429 with
+`retryAfter`, the wait the server asks for.
 `withIdempotencyKey(key)` is a copy whose every write -- `run`, the
 builder's -- carries the key, so it lands once however often it is sent.
 

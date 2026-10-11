@@ -30,6 +30,12 @@ const rows = await db.from('docs').where('year', '>=', 2024).limit(10).rows();
 const stop = db.live(db.from('docs').where('done', false), render);   // again after a write it may read
 ```
 
+A refusal throws a `FenecError` with the server's `status`; a stopped
+`batch` adds `at` and `completed`, and on a tenant node a quota names itself
+(`quota`): `'bytes'` and `'rows'` answer 507, and room is made by deleting;
+`'streams'`, `'requests'`, `'writes'` and `'write_bytes'` answer 429 with
+`retryAfter`, the seconds the server asks to wait.
+
 **From npm** the files are the same. A page serves the module and `collate/`
 as static files and hands `Fenec.open` the module's URL -- with Vite, say:
 

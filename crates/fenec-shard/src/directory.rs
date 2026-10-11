@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-const SCHEMA: [&str; 4] = [
+const SCHEMA: [&str; 5] = [
     "create collection if not exists nodes (name text @hash, addr text, token text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
     // Which node replicates which. A collection of its own rather than a
@@ -26,6 +26,11 @@ const SCHEMA: [&str; 4] = [
     // rather than its node's standby -- a collection of its own for the
     // reason `pairs` is.
     "create collection if not exists replicas (tenant text @hash, node text @hash)",
+    // What a tenant's quota is set to over its node's (`fenec_http::quota`),
+    // as the JSON a node is sent: kept here so that every node the tenant
+    // is placed on -- its primary, its standby, its replica, the node it
+    // moves or fails over to -- is sent it from one place.
+    "create collection if not exists quotas (tenant text @hash, quota text)",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +92,8 @@ pub struct Directory {
     tenants: HashMap<String, Placement>,
     pairs: Pairs,
     replicas: Replicas,
+    /// Each tenant's quota, where one is set: the JSON a node is sent.
+    quotas: HashMap<String, String>,
     /// Whether the maps exist: a standby's arrive with the primary's first
     /// writes, and until then it knows of no tenant rather than that there
     /// is none.
@@ -106,6 +113,7 @@ struct Ids {
     tenants: HashMap<DocId, String>,
     pairs: HashMap<DocId, String>,
     replicas: HashMap<DocId, String>,
+    quotas: HashMap<DocId, String>,
     kept: bool,
 }
 
@@ -141,6 +149,7 @@ impl Directory {
             tenants: HashMap::new(),
             pairs: Pairs::new(),
             replicas: Replicas::new(),
+            quotas: HashMap::new(),
             arrived: false,
             ids: Ids::default(),
         };
@@ -202,12 +211,18 @@ impl Directory {
             ids.replicas.insert(id, text(&row[0]));
             replicas.insert(text(&row[0]), text(&row[1]));
         }
+        let mut quotas = HashMap::new();
+        for (id, row) in rows(&g, "get quotas select tenant, quota")? {
+            ids.quotas.insert(id, text(&row[0]));
+            quotas.insert(text(&row[0]), text(&row[1]));
+        }
         self.seq = g.change_seq();
         self.adopted = g.adoptions();
         self.nodes = nodes;
         self.tenants = tenants;
         self.pairs = pairs;
         self.replicas = replicas;
+        self.quotas = quotas;
         self.ids = ids;
         self.arrived = g.collection("tenants").is_ok();
         Ok(())
@@ -225,7 +240,7 @@ impl Directory {
         if !self.arrived || !self.ids.kept || g.adoptions() != self.adopted {
             return Ok(false);
         }
-        // All four read before any map changes, so a collection the ring
+        // All five read before any map changes, so a collection the ring
         // cannot answer for leaves the maps as they were for the reload.
         let changes = |coll: &str, fields: &[&str]| -> Result<Option<ChangeBatch>> {
             let project: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
@@ -235,11 +250,12 @@ impl Directory {
                 Err(e) => Err(e),
             }
         };
-        let (Some(nodes), Some(tenants), Some(pairs), Some(replicas)) = (
+        let (Some(nodes), Some(tenants), Some(pairs), Some(replicas), Some(quotas)) = (
             changes("nodes", &["name", "addr", "token"])?,
             changes("tenants", &["name", "node", "state"])?,
             changes("pairs", &["node", "standby"])?,
             changes("replicas", &["tenant", "node"])?,
+            changes("quotas", &["tenant", "quota"])?,
         ) else {
             return Ok(false);
         };
@@ -259,6 +275,10 @@ impl Directory {
         apply(&mut ids.replicas, replicas, |k, v| match v {
             Some(v) => drop(self.replicas.insert(k.into(), text(&v[1]))),
             None => drop(self.replicas.remove(k)),
+        });
+        apply(&mut ids.quotas, quotas, |k, v| match v {
+            Some(v) => drop(self.quotas.insert(k.into(), text(&v[1]))),
+            None => drop(self.quotas.remove(k)),
         });
         self.seq = g.change_seq();
         Ok(true)
@@ -357,6 +377,36 @@ impl Directory {
                     self.run("put replicas {tenant: $1, node: $2}", &params)?;
                 }
                 self.replicas.insert(tenant.into(), n.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// The quota set for a tenant over its node's, as the JSON a node is
+    /// sent (`PUT /_admin/tenants/<t>/quota`), where one is set.
+    pub fn quota(&self, tenant: &str) -> Option<&str> {
+        self.quotas.get(tenant).map(String::as_str)
+    }
+
+    /// Records (or clears) the quota set for a tenant.
+    pub fn set_quota(&mut self, tenant: &str, quota: Option<&str>) -> Result<()> {
+        match quota {
+            None if self.quotas.contains_key(tenant) => {
+                self.run(
+                    "del quotas where tenant = $1",
+                    &[Value::Text(tenant.into())],
+                )?;
+                self.quotas.remove(tenant);
+            }
+            None => {}
+            Some(q) => {
+                let params = [Value::Text(tenant.into()), Value::Text(q.into())];
+                if self.quotas.contains_key(tenant) {
+                    self.run("set quotas {quota: $2} where tenant = $1", &params)?;
+                } else {
+                    self.run("put quotas {tenant: $1, quota: $2}", &params)?;
+                }
+                self.quotas.insert(tenant.into(), q.into());
             }
         }
         Ok(())
@@ -484,6 +534,7 @@ impl Directory {
     pub fn remove_tenant(&mut self, tenant: &str) -> Result<()> {
         self.run("del tenants where name = $1", &[Value::Text(tenant.into())])?;
         self.tenants.remove(tenant);
+        self.set_quota(tenant, None)?;
         self.set_replica(tenant, None)
     }
 

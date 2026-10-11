@@ -38,13 +38,28 @@ class FenecException implements Exception {
   /// lands whole, but for one holding a `compact`.
   final int? completed;
 
+  /// The tenant's quota a server refused with ([FenecRemote] to a tenant
+  /// node): "bytes" and "rows" answer 507, and room is made by deleting;
+  /// "streams", "requests", "writes" and "write_bytes" answer 429 with
+  /// [retryAfter]. Null for any other refusal.
+  final String? quota;
+
+  /// How long to wait before sending again, where the server said
+  /// (`Retry-After`, a quota's 429).
+  final Duration? retryAfter;
+
   FenecException(this.code, this.message, [this.exact])
       : status = null,
         at = null,
-        completed = null;
+        completed = null,
+        quota = null,
+        retryAfter = null;
 
-  /// A server's refusal: its status and, for a batch, where it stopped.
-  FenecException.http(this.code, this.message, {required int this.status, this.at, this.completed}) : exact = null;
+  /// A server's refusal: its status and, for a batch, where it stopped; for
+  /// a tenant's quota, which one and how long to wait.
+  FenecException.http(this.code, this.message,
+      {required int this.status, this.at, this.completed, this.quota, this.retryAfter})
+      : exact = null;
 
   @override
   String toString() => 'FenecException(${code.name}): $message';
@@ -67,6 +82,9 @@ enum FenecCode {
 
   /// A write's `require n` not met: it wrote another count, and was put back.
   unmet(14),
+
+  /// A tenant's quota a server holds it to ([FenecException.quota] names it).
+  quota(15),
   builder(100);
 
   final int value;

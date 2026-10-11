@@ -150,7 +150,7 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
         return;
     };
     let level = match name {
-        "refused" => Level::Warn,
+        "refused" | "quota" => Level::Warn,
         _ => Level::Info,
     };
     let line = line(name, level, fields);

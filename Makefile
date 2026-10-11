@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench ttl-bench growth-bench search-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench replica-bench concurrency-bench requests-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench ttl-bench growth-bench search-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
@@ -241,6 +241,12 @@ shard:
 ## What the router adds per request, and how long a tenant move takes.
 shard-bench:
 	$(CARGO) run --release -p fenec-shard --example overhead -- 100000 128
+
+## What a tenant's quota costs: a put held to a limit in process, and a
+## tenant with every quota against one with none over HTTP, in turns
+## (crates/fenec-http/examples/quotas.rs)
+quota-bench:
+	$(CARGO) run --release -p fenec-http --example quotas -- 20000
 
 ## Replication: a replica's lag under each sync policy, how fast it
 ## catches up and starts from an image, and what a failover loses.

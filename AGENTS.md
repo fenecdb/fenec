@@ -59,6 +59,7 @@ make server TOKEN=secret HTTP=127.0.0.1:8080   # run the server against ./data.f
 make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease
+make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
@@ -662,6 +663,62 @@ held it. A tenant's
 database installs the `Check` hook as a single one does
 (`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
 and a scoped write to a tenant went unchecked.
+
+**A tenant is held to its quota by its node, a block as it lands**
+(`fenec_http::quota`, `fenec_core::engine::limit`). A node's tenants
+share its disk, memory and threads, and only `--max-connections` and
+`--max-memory` bounded them together. The node's flags
+(`--tenant-max-bytes`, `-rows`, `-streams`, `-requests`,
+`--tenant-writes-per-sec`, `--tenant-write-bytes-per-sec`) are every
+tenant's, and a tenant's own set (`PUT /_admin/tenants/<t>/quota`, kept as
+`<t>.quota` beside its file, written beside and renamed) goes over them, 0
+for none. The file's bytes (`appended`, no system call) and the rows of
+its collections (`Database::documents`, the `_`-named being the server's)
+are asked as each block lands (`Database::set_limit`, a `Landing`): the
+record's length is known to the byte there, so a block that would take the
+file past its quota is put back as a failed one is, 507 -- asked before
+the write ran, one `set` over every row would double a file at 99% of it
+-- and so is each spill of a block past 16 MB, before it is written, or
+every refused block left its spills dead in the file past the quota. A
+block that only takes away (`grows` false: deletes, a drop, the server's
+own rows, a keyed `del`'s key among them) always lands and a `compact`
+always runs, and a file within a quarter of its quota is compacted by the
+node once an eighth of the quota is dead (`link::quota_policy`), where the
+policy every file has waits for 64 MB and a tenant at a 10 MB quota would
+have deleted to no avail. Streams (subscriptions, `/_changes` waits, held
+writes, `Fenec-After` waits) and requests in flight are counters a request
+takes in `serve_connection`, `respond` and `handle_tenant`, only where the
+quota is set; writes and bytes a second are token buckets a second deep,
+asked where a write is known to be one (`quota::writing`, a thread-local
+as `access::within` is) and the bytes charged by the limit as they land,
+so a write larger than a second's worth goes through and the next waits
+its debt out: 429 with `Retry-After`. Every refusal carries `Fenec-Quota`
+and `"quota"` (with `"retry_after"`, which SDKs reading no header take),
+and `quota::noted` counts it by quota (`fenec_quota_refused_total`, never
+a tenant label) and logs it as an audit `quota` event; its message names
+the bound, never what the tenant holds, so a scoped user is told the
+tenant is full and not how many rows the others make. Left out: memory
+(`memory_bytes` counts what has been built, which a read changes), a
+statement's time (the engine stops no scan) and rows per collection. The
+router enforces nothing -- it parses no query, and a tenant lives on one
+node -- but keeps each tenant's quota in its directory's `quotas` and
+sends it to the tenant's node, standby and replica, to a move's target
+before the flip, and to a promoted copy again. The tests hold eight
+writers to a file's quota and eight to a rows quota exactly, and a tenant
+at its streams or requests quota beside another answered, by what each is
+answered. A lone put held to bytes and rows took 593 ns against 566 in
+process, and 618 with the bytes bucket's mutex and clock besides; over
+HTTP a tenant with every quota answered as one with none, reads 20.9 us
+either way and writes 23.7 against 23.6 (`make quota-bench`, in turns).
+And a tenant with none costs nothing measurable: against main in ABBA
+turns, `make requests-bench`'s one client stayed 0.021-0.022 ms a row by
+id and 0.020-0.023 a put (main 0.022-0.029 and 0.022-0.029), eight
+clients' 137-144k and 115-121k a second inside main's 122-143k and
+89-153k; `make shard-bench`'s tenant request 19.5-21.7 us straight to the
+node and 43.7-46.0 through the router, main 19.9-21.8 and 43.6-45.7, in
+twelve runs before the machine grew busy. The limit is native only, as the
+fence is: the browser module grew 63 bytes, the new error's words, and
+brotli made it 49 smaller.
 
 **fenec studio is a page with no authority of its own** (`studio/`,
 `fenec_http::studio`, `--studio` on `fenec-server` and `fenec-shard`; off,

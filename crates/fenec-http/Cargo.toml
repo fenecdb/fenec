@@ -37,3 +37,8 @@ path = "tests/tenants.rs"
 [[test]]
 name = "audit"
 path = "tests/audit.rs"
+
+# Apart: the quota refusals' counts and the audit log are the process's own.
+[[test]]
+name = "quotas"
+path = "tests/quotas.rs"
