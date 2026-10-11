@@ -3524,10 +3524,37 @@ a 5xx's `retry_after`; two scenarios hold them to a write's 503s of a move
 and a lapsed lease, waited a second and not cut short by `online`, and a
 stream's 503 from a standby router. Every SDK's error carried a body's
 `retry_after` for any status; the Go and .NET tests freeze a tenant on a
-real node and read it. The router has no CORS of its own, so a page on
-another origin reads nothing of the router's own answers -- a standby's
-503, a 404, a 502 -- and backs them off as a network failure; the nodes'
-answers it forwards carry the nodes' CORS headers.
+real node and read it. A page on another origin reads the router's own
+answers -- a standby's 503, a 404, a 502 -- once the router has
+`--http-cors` (below).
+
+**The router tells a page one CORS rule, its own** (`fenec-shard
+--http-cors`, `fenec_http::cors`, the one list a node and the router
+send). Without it the router's own answers -- an unknown tenant's 404, a
+node's 502, a standby's 503, the connection ceiling's 503, `/_shard/`'s
+401 -- carried no CORS header while the nodes' answers through it carried
+the nodes', so a page read each as the network failing and the sync and
+`FenecHttp.live` backed off from an answer; and a preflight was
+forwarded, so where the tenant was unknown or its node unreachable the
+request after it was never sent (a node's own connection ceiling went
+without them too, and has them now). With it the router answers a preflight
+itself (`cors::allows`) before the directory is read, puts the headers
+on every answer it writes but the studio's files (a node's go without
+too), and on a forwarded answer, a stream's head included, drops the
+node's (`cors::is_cors_header`: `Access-Control-*`, a `Vary: Origin`
+alone) for its own: kept both, a node allowing `*` behind a router
+allowing one origin answered two `Access-Control-Allow-Origin`s, which
+Chrome refuses whole (`studio/test/router-cors.test.mjs` holds it in the
+browser), and the answer has to say what the router's preflight said.
+Without the flag nothing changes: a node's headers pass through and a
+preflight goes to the node. The preflight is answered without
+`audit::http`, which clears an address's refusal count for any answer to
+a request bearing `Authorization`. The headers are the semantics a node's
+are: the configured origin on every answer whatever the request's
+`Origin`, the browser comparing. Off, a request through the router costs
+what it did: `make shard-bench`'s added p50 22.6 us against main's 23.3,
+six runs each in ABBA turns (20.7-25.2 and 20.5-25.7); on, 24.3
+(21.9-27.6), six header lines more in every answer.
 
 **A schema declared in code is checked at every open, in the engine.**
 Two front ends compile to one description (`fenec_core::declared`,

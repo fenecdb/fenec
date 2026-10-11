@@ -894,6 +894,42 @@ fn a_preflight_is_answered_before_the_token_is_asked_for() {
     );
 }
 
+/// The refusal past the connection ceiling is an answer a page on another
+/// origin reads, as every other is: without the CORS headers it read as
+/// the network failing.
+#[test]
+fn the_connection_ceiling_refuses_with_the_cors_headers() {
+    let h = start(Config {
+        max_connections: 1,
+        cors: Some("https://app.example".into()),
+        ..Config::default()
+    });
+    // One connection held, answered once so it is surely counted.
+    let mut held = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+    held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    held.write_all(b"GET /articles?count HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
+    let mut first = [0u8; 12];
+    held.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"HTTP/1.1 200");
+    // The refusal is written as the connection is taken, before a request
+    // is read, and the connection closed: a request written after it can
+    // meet the closed socket. Read alone.
+    let mut refused = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+    refused
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut out = String::new();
+    let _ = refused.read_to_string(&mut out);
+    let r = parse_res(&out);
+    assert_eq!(r.status, 503, "{}", r.body);
+    assert_eq!(
+        r.header("Access-Control-Allow-Origin"),
+        Some("https://app.example")
+    );
+    drop(held);
+}
+
 #[test]
 fn keep_alive_serves_two_requests_on_one_connection() {
     let h = start(Config::default());

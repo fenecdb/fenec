@@ -4,6 +4,7 @@
 //! The files apart (Cargo.toml) read the process's own counts, or run
 //! without the indexes.
 
+mod cors;
 mod leases;
 mod replicas;
 mod router;
