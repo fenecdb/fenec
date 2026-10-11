@@ -1,0 +1,337 @@
+<!--
+title: Agents and MCP — fenecdb
+description: fenecdb as an agent's search and memory tool over the Model Context Protocol: Streamable HTTP on fenec-server, stdio with fenec mcp, schema, search, query, get, write and a memory that outlives the conversation — each tool a statement held to the token's rules.
+-->
+
+<h1>Agents and MCP</h1>
+<p class="kicker">An agent — Claude Code, Cursor, Claude Desktop, one you build
+— searches and remembers through tools it calls. fenecdb serves those tools
+over MCP, the Model Context Protocol: on its HTTP endpoint, or as a process
+the agent starts.</p>
+
+<p>Each tool runs a statement as <code>/query</code> runs one, under the
+token the agent was given: a scoped token's agent reads its own rows and no
+others, the tools that write are off unless the server is told, and an answer
+too large for a model's context is refused with what to narrow — never cut,
+since a model told nothing of the cut takes half an answer for the whole.</p>
+
+<h2 id="start">Turn it on</h2>
+
+<p>On a server, <code>--mcp</code> serves the endpoint at
+<code>POST /_mcp</code> (and <code>/t/&lt;tenant&gt;/_mcp</code> on a tenant
+node, which a router forwards like any tenant path) — an underscore, as
+<code>/_metrics</code> has one, so that no collection's path is taken:</p>
+
+<pre data-lang="bash">fenec-server --file notes.fenec --http-token "$FENEC_TOKEN" --mcp
+fenec-server --file notes.fenec --http-token "$FENEC_TOKEN" --mcp-write --mcp-memory memories
+</pre>
+
+<p>Over a file, <code>fenec mcp</code> is the server as a process the agent
+starts, speaking stdio — a message a line on stdin, an answer a line on
+stdout, its log on stderr:</p>
+
+<pre data-lang="bash">fenec mcp --file notes.fenec --memory memories
+fenec mcp --url http://127.0.0.1:8080/_mcp        # in front of a server, the token from FENEC_TOKEN
+</pre>
+
+<p><code>--file</code> holds the database itself and takes
+<code>notes.fenec.lock</code> while the session lasts — a server or an app
+over the same file is refused, as it is refused while they hold it: two
+processes writing one file corrupt it. Each write is on the disk before it is
+answered. <code>--read-only</code> takes no lock and writes nothing, and reads
+the file as it stood when the session began, beside a server writing it; to
+read what a server serves now, use <code>--url</code>. Over
+<code>--url</code> the tools are the server's, under its options and the
+token's rules, and the bridge decides nothing.</p>
+
+<h2 id="claude-code">Claude Code</h2>
+
+<pre data-lang="bash">claude mcp add fenecdb -- fenec mcp --file notes.fenec --memory memories
+claude mcp add --transport http fenecdb http://127.0.0.1:8080/_mcp --header "Authorization: Bearer $FENEC_TOKEN"
+claude mcp list                                  # fenecdb: ... - ✓ Connected
+</pre>
+
+<p>With <code>--scope project</code> each goes into the project's
+<code>.mcp.json</code>, which Claude Code loads for whoever opens it — the
+token left in the environment:</p>
+
+<pre data-lang="json" data-label=".mcp.json">{
+  "mcpServers": {
+    "fenecdb": {
+      "type": "stdio",
+      "command": "fenec",
+      "args": ["mcp", "--file", "notes.fenec", "--memory", "memories"]
+    }
+  }
+}
+</pre>
+
+<pre data-lang="json" data-label=".mcp.json, a server">{
+  "mcpServers": {
+    "fenecdb": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/_mcp",
+      "headers": { "Authorization": "Bearer ${FENEC_TOKEN}" }
+    }
+  }
+}
+</pre>
+
+<h2 id="cursor">Cursor</h2>
+
+<pre data-lang="json" data-label=".cursor/mcp.json">{
+  "mcpServers": {
+    "fenecdb": {
+      "command": "fenec",
+      "args": ["mcp", "--file", "notes.fenec", "--memory", "memories"]
+    }
+  }
+}
+</pre>
+
+<pre data-lang="json" data-label=".cursor/mcp.json, a server">{
+  "mcpServers": {
+    "fenecdb": {
+      "url": "http://127.0.0.1:8080/_mcp",
+      "headers": { "Authorization": "Bearer ${env:FENEC_TOKEN}" }
+    }
+  }
+}
+</pre>
+
+<h2 id="claude-desktop">Claude Desktop</h2>
+
+<p>Claude Desktop starts its tools as processes, so a server is reached
+through the bridge. An app started from the dock does not see a shell's
+<code>PATH</code>: name <code>fenec</code> by its full path.</p>
+
+<pre data-lang="json" data-label="claude_desktop_config.json">{
+  "mcpServers": {
+    "fenecdb": {
+      "command": "fenec",
+      "args": ["mcp", "--url", "http://127.0.0.1:8080/_mcp"],
+      "env": { "FENEC_TOKEN": "the token" }
+    }
+  }
+}
+</pre>
+
+<p>Every configuration on this page is loaded by a test
+(<code>integrations/mcp/test.js</code>, <code>make mcp-test</code>) and each
+of its servers called with the official TypeScript MCP client.</p>
+
+<h2 id="tools">The tools</h2>
+
+<table>
+<thead><tr><th>tool</th><th>what it does</th><th>takes</th></tr></thead>
+<tbody>
+<tr><td><code>schema</code></td><td>the collections the token may read, each as the FenecQL that makes it, and — to the server's token — how many rows each holds</td><td><code>collection</code></td></tr>
+<tr><td><code>search</code></td><td>rows ranked best first: by words over an <code>@text</code> field (BM25), by an embedding over an <code>@hnsw</code> field, or both fused; each row with <code>_score</code> and, by words, a <code>snippet</code> with the words found in <code>**bold**</code></td><td><code>collection</code>, <code>text</code>, <code>vector</code>, <code>filter</code>, <code>params</code>, <code>limit</code>, <code>fields</code>, <code>text_field</code>, <code>vector_field</code></td></tr>
+<tr><td><code>query</code></td><td>one FenecQL read: <code>get</code> with any clause, aggregates, <code>count</code>, <code>lookup</code>, <code>explain</code></td><td><code>query</code>, <code>params</code>, <code>include_vectors</code></td></tr>
+<tr><td><code>get</code></td><td>rows by id; the ids with no row come back in <code>missing</code></td><td><code>collection</code>, <code>ids</code>, <code>fields</code></td></tr>
+<tr><td><code>write</code></td><td>one <code>put</code>, <code>insert</code>, <code>set</code> or <code>del</code>, with <code>require n</code> if it must touch n rows (<code>--mcp-write</code>)</td><td><code>statement</code>, <code>params</code></td></tr>
+<tr><td><code>remember</code></td><td>keeps a memory (<code>--mcp-memory</code>)</td><td><code>text</code>, <code>vector</code>, <code>tags</code>, <code>expires_in</code></td></tr>
+<tr><td><code>recall</code></td><td>the memories that best match, or the latest</td><td><code>text</code>, <code>vector</code>, <code>tags</code>, <code>limit</code></td></tr>
+<tr><td><code>forget</code></td><td>deletes a memory by its id</td><td><code>id</code></td></tr>
+</tbody>
+</table>
+
+<p>A tool answers JSON — <code>{"rows": [...], "count": n}</code> for a read
+— as its structured content and, written out, as the text a model reads. Vector
+fields are left out of the rows: a 768-dim embedding is some 7 KB of JSON a
+row, which a model reads as noise and pays for. <code>fields</code> names the
+ones to keep, and <code>query</code>'s <code>include_vectors</code> keeps them.
+A search's call and its answer:</p>
+
+<pre data-lang="json" data-label="tools/call">{"name": "search", "arguments": {"collection": "docs", "text": "fox", "filter": "year >= $1", "params": [2024]}}
+</pre>
+
+<pre data-lang="json" data-label="structuredContent">{"rows": [{"id": 3, "title": "cat", "body": "the cat watches the fox", "year": 2025,
+           "snippet": "the cat watches the **fox**", "_score": 0.67}], "count": 1}
+</pre>
+
+<p><b>Embeddings are the client's to compute.</b> fenecdb stores and searches
+vectors and runs no model: an agent that has one passes <code>vector</code>,
+made with the model the collection was filled with — a vector of another
+length is refused, naming the field's. Without one, search by words.</p>
+
+<p><b>Values go in <code>params</code>, never into the text.</b> A filter is
+a FenecQL condition, <code>year &gt;= $1 and tags has $2</code>, parsed on its
+own and refused unless it is a condition and nothing more — no clause after
+it, no second statement, no parenthesis closing on the statement around it —
+and it goes into the statement the tool builds as the condition parsed, never
+as text. Names are checked against FenecQL's rule for one.</p>
+
+<p><b>What a tool refuses comes back for the model to correct</b>, as its
+result with <code>isError</code>: an argument it does not take, a vector of
+the wrong length, a statement the token's rules refuse, an answer past a
+bound — each saying what to change, and with the status <code>/query</code>
+would have answered it with. A call that is not one — an unknown tool, a
+malformed message — is a JSON-RPC error.</p>
+
+<h2 id="limits">Bounds</h2>
+
+<table>
+<thead><tr><th>flag</th><th>default</th><th>past it</th></tr></thead>
+<tbody>
+<tr><td><code>--mcp-max-rows</code></td><td class="n">100</td><td>refused, 413: a <code>query</code> with no <code>limit</code> is asked for one row more than the bound, so a larger answer is known without being fetched</td></tr>
+<tr><td><code>--mcp-max-bytes</code></td><td class="n">64K</td><td>refused, 413, measured on the JSON the model would read</td></tr>
+<tr><td><code>--mcp-calls-per-sec</code></td><td class="n">20</td><td>refused, 429, with when to call again: a scoped token's subject, or an address for the server's token</td></tr>
+</tbody>
+</table>
+
+<p>A hundred rows and 64 KB are about 16 000 tokens of JSON, inside what
+Claude Code takes from one tool before it warns. A tenant node's quotas hold
+an agent's calls as they hold a client's requests.</p>
+
+<h2 id="security">Security</h2>
+
+<ul>
+  <li><b>The token is the request's.</b> The endpoint takes the bearer token
+    <code>/query</code> takes: the server's token reads and writes everything,
+    and a JSON Web Token is held to its <a href="/docs/http#scoped-access">policy</a>,
+    ANDed into every statement a tool runs — so an agent given a scoped token
+    sees exactly what its <code>/query</code> sees. <code>schema</code> lists
+    only the collections it may read and counts none of their rows, and on a
+    tenant node the token reaches only the tenant its claim names.</li>
+  <li><b>Writes are off unless asked for.</b> <code>--mcp-write</code> adds
+    <code>write</code>, and <code>--mcp-memory</code> the memory tools alone.
+    <code>write</code> runs <code>put</code>, <code>insert</code>,
+    <code>set</code> and <code>del</code>, each held to the token's grants and
+    to its policy as the row it writes; a schema change or a
+    <code>compact</code> is never made over MCP, by any token. A server with
+    <code>--http-read-only</code> takes no write over MCP either.</li>
+  <li><b>Where a request comes from is asked before its token.</b> An
+    <code>Origin</code> other than the server's own, or the one
+    <code>--http-cors</code> names, is refused (403). A server that asks for no
+    token answers only a <code>Host</code> naming this machine —
+    <code>localhost</code> or an address — so a page whose name was rebound to
+    127.0.0.1 reaches nothing.</li>
+  <li><b>No TLS.</b> fenecdb speaks none: on an open network put a TLS
+    terminator in front of the server, and give the agent's client the
+    <code>https</code> URL. The stdio bridge speaks plain HTTP only.</li>
+  <li><b>An agent's writes are audited.</b> With <code>--audit</code> each
+    call of <code>write</code>, <code>remember</code> or <code>forget</code> is
+    a line (<code>"event":"mcp"</code>, the tool, whether it failed), beside
+    the schema changes and the refused tokens. <code>/_metrics</code> counts
+    calls in <code>fenec_mcp_tool_calls_total</code> by tool and outcome — no
+    collection is a label.</li>
+</ul>
+
+<h2 id="memory">Memory</h2>
+
+<p><code>--mcp-memory memories</code> gives an agent a memory that outlives
+its conversations: <code>remember</code> keeps a sentence,
+<code>recall</code> finds the ones that match what it is asked, and
+<code>forget</code> lets a wrong one go. The collection is made at the first
+memory, with a vector field if that memory came with a vector — and given one
+at the first that does:</p>
+
+<pre data-lang="fenecql">create collection if not exists memories (text text required @text, tags [text], owner text @hash, at timestamp @sorted, expires timestamp @ttl(1ms), vector vector&lt;3&gt; @hnsw(cosine))
+</pre>
+
+<p>The text is searched by its words (<code>@text</code>), so an agent with
+no embedding model still recalls: BM25 finds <i>the deploy runs on fridays</i>
+for <i>when do we deploy</i>. With vectors — <code>vector&lt;N&gt;</code> of
+the embedding's length; 3 here so the examples fit — recall fuses the words
+with the meaning. <code>expires</code> is when a memory goes:
+<code>@ttl(1ms)</code> takes a row out of every read the moment its time
+passes, and the sweeper deletes it; a memory with none is kept for good.</p>
+
+<p><code>remember</code> runs <code>insert into memories {text: $1, tags: $2,
+at: now(), expires: now() + $3, vector: $4}</code>, its expiry the
+milliseconds <code>expires_in</code> names (<code>30m</code>,
+<code>12h</code>, <code>7d</code>). With the values written in:</p>
+
+<pre data-lang="fenecql">insert into memories {text: "the deploy runs on fridays", tags: ["ops"], at: now(), expires: null, vector: [0.9, 0.1, 0]}   -- → 1
+insert into memories {text: "staging is in eu-west-1", tags: ["ops"], at: now(), expires: null, vector: [0, 0.2, 1]}   -- → 1
+insert into memories {text: "the user is debugging the login page", tags: ["session"], at: now(), expires: now() + 10000}   -- → 1
+</pre>
+
+<p><code>recall</code> with words alone, with words and a vector, by a tag,
+and with nothing — the latest first:</p>
+
+<pre data-lang="fenecql">get memories select text, tags, at match text "when do we deploy" limit 5   -- → "the deploy runs on fridays"
+get memories select text, tags, at match text "which region" near vector [0, 0.1, 1] fuse limit 5   -- → "staging is in eu-west-1"
+get memories select text where tags has "session" limit 5   -- → "the user is debugging the login page"
+get memories select text, tags, at order at desc, id desc limit 5   -- → "the user is debugging the login page"
+</pre>
+
+<p>Ten seconds on, the session's memory is out of every read:</p>
+
+<pre data-lang="fenecql">get memories where tags has "session" count   -- → 1
+-- 20 s later
+get memories where tags has "session" count   -- → 0
+</pre>
+
+<p>Every FenecQL block on this page is run, statement by statement, by a test
+(<code>crates/fenec-core/tests/mcp_docs.rs</code>), and the collection above
+is held to the one <code>remember</code> makes.</p>
+
+<p><b>Each user's memories apart.</b> A policy line keeps each token's
+memories its own: a memory written without an owner gets the token's
+subject, and a recall reads that subject's alone. The collection is made by
+the server's token, once — a scoped one may not make collections, and its
+<code>remember</code> says what to run.</p>
+
+<pre data-lang="text">memories  read,write  where owner = $jwt.sub
+</pre>
+
+<p><b>An example agent.</b> <code>examples/mcp-agent</code> is Claude with
+these tools over <code>fenec mcp --file</code>, through the Anthropic SDK's
+tool runner: told something in one run, it recalls it in the next.</p>
+
+<pre data-lang="bash">cd examples/mcp-agent && npm install
+node agent.mjs "I indent with tabs, and the deploy runs on Fridays"
+node agent.mjs "when does the deploy run?"
+</pre>
+
+<h2 id="protocol">The protocol</h2>
+
+<p>The revision is <b>2026-07-28</b>, the stateless one: each request names
+its revision and the client's capabilities in <code>_meta</code>, there is no
+handshake and no session, and <code>server/discover</code> says what is here.
+Beside it are the handshake revisions clients still open with —
+<b>2025-11-25</b>, <b>2025-06-18</b> and <b>2025-03-26</b>, an
+<code>initialize</code> first — served the same way and without a session. A
+request carrying <code>_meta</code>'s version is served by 2026-07-28's rules,
+an <code>initialize</code> by the revision it agrees on.</p>
+
+<ul>
+  <li>Over HTTP a 2026-07-28 request's headers — <code>MCP-Protocol-Version</code>,
+    <code>Mcp-Method</code>, <code>Mcp-Name</code> — must say what its body
+    says (400, <code>-32020</code>); a revision not served is refused naming
+    those that are (400, <code>-32022</code>); an unknown method is a 404 with
+    a JSON-RPC body. An answer is one JSON object, never a stream: no tool
+    here has anything to say before its answer. <code>GET</code> and
+    <code>DELETE</code> are 405, and a batch is refused.</li>
+  <li>Resources and prompts are not offered. A collection as a resource is
+    what <code>schema</code> answers already, and the clients here put tools
+    before the model and resources behind a person's click; a prompt is a
+    recipe this page gives.</li>
+</ul>
+
+<h2 id="cost">What it costs</h2>
+
+<p>A tool call runs the statement <code>/query</code> would, and adds
+reading the JSON-RPC message, building the statement and writing the answer
+twice — as structured content and as its text. Over 10 000 rows
+(<code>make mcp-bench</code>, an M1):</p>
+
+<table>
+<thead><tr><th></th><th class="n"><code>/query</code></th><th class="n">MCP</th></tr></thead>
+<tbody>
+<tr><td>a row by id, in process, <code>query</code> tool</td><td class="n">1.2 us</td><td class="n">3.8 us</td></tr>
+<tr><td>a row by id, in process, <code>get</code> tool</td><td class="n">1.2 us</td><td class="n">4.4 us</td></tr>
+<tr><td>two words, top ten with snippets, in process</td><td class="n">261 us</td><td class="n">263 us</td></tr>
+<tr><td>a row by id over HTTP, p50</td><td class="n">17.7 us</td><td class="n">21.9 us</td></tr>
+<tr><td>two words over HTTP, p50</td><td class="n">316 us</td><td class="n">323 us</td></tr>
+</tbody>
+</table>
+
+<p>A few microseconds a call, against the seconds a model's turn takes. A
+server without <code>--mcp</code> asks one comparison more of a request's path
+and nothing else: <code>make requests-bench</code> in eight runs taken in turns
+against the server before it, a row by id answered one client in 0.027 ms
+against 0.028 at the median and eight in 122 000 requests a second against
+111 000, inside the runs' own spread.</p>

@@ -1,0 +1,15 @@
+{
+  "name": "fenecdb-mcp-agent",
+  "private": true,
+  "description": "An agent with a memory that outlives its conversations: Claude with fenecdb's MCP tools",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
+    "@modelcontextprotocol/client": "2.3.1"
+  },
+  "scripts": {
+    "start": "node agent.mjs",
+    "check": "node agent.mjs --check"
+  }
+}

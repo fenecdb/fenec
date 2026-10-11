@@ -408,6 +408,7 @@ fn render(source: Source) -> String {
     );
     out.sample("fenec_held_runs_total", &[], held.runs);
     crate::trace::metrics(&mut out);
+    crate::mcp::metrics(&mut out);
 
     match source {
         Source::Single { db, repl } => {

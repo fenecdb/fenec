@@ -345,6 +345,7 @@ name = "fenec-bench"
 version = "0.1.10"
 dependencies = [
  "fenec-core",
+ "fenec-http",
  "fenec-ql",
  "mongodb",
  "pgvector",
@@ -357,6 +358,7 @@ dependencies = [
 name = "fenec-cli"
 version = "0.1.10"
 dependencies = [
+ "fenec-abi",
  "fenec-core",
  "fenec-http",
  "fenec-import",
@@ -409,6 +411,7 @@ dependencies = [
 name = "fenec-server"
 version = "0.1.10"
 dependencies = [
+ "fenec-abi",
  "fenec-core",
  "fenec-http",
  "fenec-import",

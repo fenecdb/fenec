@@ -1,0 +1,13 @@
+{
+  "name": "fenecdb-mcp-integration",
+  "private": true,
+  "description": "fenecdb's MCP server held to the official TypeScript MCP client, over HTTP and stdio, in both eras",
+  "license": "Apache-2.0",
+  "type": "module",
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1"
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=spec test.js"
+  }
+}

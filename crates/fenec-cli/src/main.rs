@@ -12,6 +12,8 @@ mod backup;
 #[cfg(feature = "import")]
 mod import;
 mod langs;
+#[cfg(feature = "mcp")]
+mod mcp;
 #[cfg(any(feature = "backup", feature = "import"))]
 mod stop;
 mod types;
@@ -77,6 +79,16 @@ Types and schemas
                                          for details: fenec types --help
 "#;
 
+#[cfg(feature = "mcp")]
+const MCP_HELP: &str = r#"
+MCP, for agents
+  fenec mcp --file <path> [--write] [--memory <c>]   the MCP server over stdio, over a file
+  fenec mcp --url <http://host:port/_mcp>             ... or in front of a server (FENEC_TOKEN)
+                                         for details: fenec mcp --help
+"#;
+#[cfg(not(feature = "mcp"))]
+const MCP_HELP: &str = "";
+
 const SHELL_HELP: &str = r#"
 Shell commands
   .help        this text
@@ -110,6 +122,17 @@ fn main() {
         }
     }
 
+    if args.first().is_some_and(|a| a == "mcp") {
+        #[cfg(feature = "mcp")]
+        std::process::exit(mcp::main(&args[1..]));
+        #[cfg(not(feature = "mcp"))]
+        {
+            eprintln!("this binary was built without `mcp`: its `mcp` feature is off");
+            eprintln!("rebuild it: cargo build --release -p fenec-cli --features mcp");
+            std::process::exit(2);
+        }
+    }
+
     if args.first().is_some_and(|a| a == "import") {
         #[cfg(feature = "import")]
         std::process::exit(import::main(&args[1..]));
@@ -131,7 +154,7 @@ fn main() {
                 command = args.get(i).cloned();
             }
             "-h" | "--help" => {
-                println!("usage: fenec [file.fenec] [-c \"<query>\"]{HELP}{IMPORT_HELP}{BACKUP_HELP}{TYPES_HELP}{SHELL_HELP}");
+                println!("usage: fenec [file.fenec] [-c \"<query>\"]{HELP}{IMPORT_HELP}{BACKUP_HELP}{MCP_HELP}{TYPES_HELP}{SHELL_HELP}");
                 return;
             }
             other if !other.starts_with('-') => path = Some(other.to_string()),

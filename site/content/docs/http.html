@@ -67,6 +67,7 @@ GET    /_whoami                 who the server takes the token for, and the rule
 GET    /_schema                 the schema as a description (Schema in code); ?as=fenecql: as its statements
 POST   /_schema/plan            body: a description -- what an apply would do; ?mode=follow: what the server lacks
 POST   /_schema/apply           body: a description -- migrations, then what only adds; the server's token
+POST   /mcp                     MCP for agents (--mcp): one JSON-RPC message a request
 </pre>
 
 <details class="deep"><summary>Details</summary>
@@ -88,6 +89,13 @@ collections it reads. An apply takes the server's token, runs the
 migrations not yet recorded and the additions under the write lock as one
 block, and answers 409 with the refusals when anything is refused, having
 written nothing.</p>
+
+<p>With <code>--mcp</code>, <code>/_mcp</code> is the Model Context
+Protocol's endpoint: an agent's <code>schema</code>, <code>search</code>,
+<code>query</code> and <code>get</code> tools, and <code>write</code> and a
+memory where asked for, each a statement held to the request's token as
+<code>/query</code> is — see <a href="/docs/mcp">Agents and MCP</a>.
+Without the flag it answers 404.</p>
 
 <p><code>/_metrics</code> is the server's statements, latency and data in
 Prometheus's text format, readable with <code>--http-token</code> or the

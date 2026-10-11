@@ -810,5 +810,9 @@ mod tests {
         );
     }
 }
+// No files in the browser: compiled out of the module rather than left
+// for the linker to drop, since dead code still moved its inlining.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod lock;
 #[cfg(feature = "sync")]
 pub mod sync;

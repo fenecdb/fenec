@@ -48,6 +48,7 @@ make builder-golden   # integrations/builder-golden.json written again from the 
 make schema-golden    # integrations/schema-golden.json: declarations, FenecQL texts and plans, through the module (web/schema-golden.mjs)
 make docs-types   # every data-lang="ts" example on the site under tsc --strict (web/types/docs.mjs; part of make types-check)
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
+make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP and stdio, both eras, the docs' configs
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
 make grafana-check # monitoring/'s compose (Docker): both data dashboards, Infinity's and the Grafana plugin's (integrations/grafana), and its alert rule held to fenec-server
 make grafana-check # monitoring/'s compose (Docker): every panel of the data dashboard (Infinity) asked of Grafana, held to fenec-server's answer
@@ -64,6 +65,7 @@ make quota-bench         # a tenant's quotas: a put held to the limit in process
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
+make mcp-bench           # an MCP tool call against the /query it runs: in process, and over HTTP
 make pages-bench         # pages of every size and place, limit and offset written in against as parameters: the parse cache's hits
 make recon-bench         # a ledger's reconciliation /batch beside transfers and reads: their longest waits
 make roundtrip-bench     # one client's round trip taken apart: the client, the server's phases (--features timing, GET /_timing), PostgreSQL's bind and execute
@@ -812,6 +814,56 @@ come back in twelve runs at a load of 27 (busy loops on every core, three
 suites at once); a run filtered by name charges its first test with the
 `before` hook's 100 000-row seed, about 10 s, which is the hook's and not
 the router's.
+
+**An agent's MCP tool is a statement, held to the token as `/query` is**
+(`fenec_http::mcp`, `fenec-server --mcp`, `fenec mcp`). One `answer`
+serves the stateless 2026-07-28 revision -- its version and the client's
+capabilities in every request's `_meta`, `server/discover`, no session --
+and the handshake revisions 2025-11-25, 2025-06-18 and 2025-03-26 (an
+`initialize`), without a session either: the official TypeScript client
+of October 2026 opens in the old era unless told. Streamable HTTP is
+`POST /_mcp`, its underscore keeping it out of a collection's way as
+`/_metrics`'s does (a tenant's `/t/<t>/_mcp`, which a router forwards as any
+tenant path; GET and DELETE 405, a batch refused, an answer one JSON
+object, never a stream), with the 2026-07-28 headers held to the body
+(`-32020`); stdio is `fenec mcp --file` (`serve_lines`) and `--url`
+(`bridge`, the token from `FENEC_TOKEN`, never argv). The tools are
+`schema`, `search` (`match`, `near` or `fuse`, a snippet in `**bold**`),
+`query`, `get`; `write` with `--mcp-write` (put, insert, set and del:
+never a schema change or a compact, by any token); `remember`, `recall`
+and `forget` with `--mcp-memory`, whose collection `remember` makes at the
+first memory (`memory_schema`: `expires timestamp @ttl(1ms)` for a
+memory's own expiry, the vector field added at the first vector). A
+filter a model writes is parsed alone, `get <c> where <raw>`, and refused
+unless the `Select` is the bare one with a filter (its `PartialEq`), its
+condition put into a statement built here, never its text; names are
+checked against FenecQL's rule, values are parameters. A read past
+`--mcp-max-rows` is asked for one row more and refused (413), one past
+`--mcp-max-bytes` refused, never cut: a model told nothing of the cut
+takes half an answer for the whole. Refusals are the tool's result with
+`isError` and `/query`'s status, which a model corrects from; an unknown
+tool or a malformed call is JSON-RPC's error. The origin is asked before
+the token, and a server with no token answers only a `Host` naming
+localhost or an address, which a rebound DNS name cannot. A served
+session reads pinned and writes through `handle_query` (read-only mode,
+quotas, the ceiling, the fsync); a local one (`Run::local`) runs under the
+lock -- a function pointer, not a flag, since a flag kept `/query`'s path
+in the shell: `fenec mcp` added 243 KB to `fenec` with it (`maintain_with`
+alone 24 KB) and 130 KB without, `fenec-server` 97 KB, `fenec-shard` and
+the browser module not a byte. `<file>.lock` (`fenec_abi::lock`, moved
+from fenec-ffi) is taken by `fenec mcp --file`, `fenec-server --file` and
+the native library alike, so any two refuse each other. Calls are held to
+`--mcp-calls-per-sec` by a scoped token's subject or the caller's address,
+counted in `fenec_mcp_tool_calls_total` once a process serves MCP, and a
+write tool's call is an `mcp` line of the audit log. A row by id costs
+3.8 us through the `query` tool against `/query`'s 1.2 in process, 21.9
+against 17.7 us p50 over HTTP, a search 1-2% more (`make mcp-bench`);
+a server without `--mcp` pays a comparison a request, and `make
+requests-bench` in eight runs in turns against main moved inside its
+own spread (a row by id 0.027 against 0.028 ms p50).
+`integrations/mcp` holds it to `@modelcontextprotocol/client` in both
+eras over both transports, with every configuration `mcp.html` gives
+(`make mcp-test`).
 
 **A server's `create index` and `compact` run beside the database**
 (`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied

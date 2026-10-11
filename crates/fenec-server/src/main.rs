@@ -135,6 +135,22 @@ usage: fenec-server [options]
                             it on a private network or behind your own auth
       --studio-connect <origin>  an origin the studio's pages may also send
                             requests to: a router (https://router:8080)
+      --mcp                 serve MCP, the Model Context Protocol, at POST
+                            /mcp (/t/<tenant>/_mcp with --dir): an agent's
+                            schema, search, query and get tools, each a
+                            statement held to the request's token as
+                            /query is. Off by default
+      --mcp-write           also the write tool: put, insert, set and del,
+                            within the token's grants. Implies --mcp
+      --mcp-memory <collection>  also remember, recall and forget, an
+                            agent's memories in this collection, made at
+                            the first one. Implies --mcp
+      --mcp-max-rows <n>    the most rows a tool answers; past it the call
+                            is refused, never cut  default: 100
+      --mcp-max-bytes <size>  the most bytes a tool answers, refused past
+                            it  default: 64K
+      --mcp-calls-per-sec <n>  tool calls a second from one token's subject
+                            (0 = no bound)  default: 20
       --idempotency-ttl <s>  how long a write's Idempotency-Key and answer
                             are kept, in seconds. default: 86400
       --http-max-streams <n>  ceiling on concurrent subscriptions (0 = unlimited)
@@ -312,6 +328,7 @@ fn main() {
     let mut follow_named = false;
     let mut studio = false;
     let mut studio_connect: Option<String> = None;
+    let mut mcp: Option<fenec_http::mcp::Options> = None;
     let mut tracing = fenec_http::trace::Options::default();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -543,6 +560,41 @@ fn main() {
             }
             "--insecure" => http_cfg.insecure = true,
             "--studio" => studio = true,
+            "--mcp" => {
+                mcp.get_or_insert_with(Default::default);
+            }
+            "--mcp-write" => mcp.get_or_insert_with(Default::default).write = true,
+            "--mcp-memory" => {
+                let c = next(&mut i, "--mcp-memory");
+                let ok = c
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_alphabetic() || ch == '_')
+                    && c.chars().all(|ch| ch.is_alphanumeric() || ch == '_');
+                if !ok {
+                    fail(&format!(
+                        "--mcp-memory names a collection, and `{c}` is not a name"
+                    ));
+                }
+                mcp.get_or_insert_with(Default::default).memory = Some(c);
+            }
+            flag @ ("--mcp-max-rows" | "--mcp-max-bytes" | "--mcp-calls-per-sec") => {
+                let v = next(&mut i, flag);
+                let n = match flag {
+                    "--mcp-max-bytes" => fenec_http::quota::size(&v).filter(|n| *n > 0),
+                    "--mcp-max-rows" => v.parse::<u64>().ok().filter(|n| *n > 0),
+                    _ => v.parse::<u64>().ok(),
+                };
+                let Some(n) = n else {
+                    fail(&format!("{flag} expects a number, got `{v}`"));
+                };
+                let o = mcp.get_or_insert_with(Default::default);
+                match flag {
+                    "--mcp-max-rows" => o.max_rows = n.min(10_000) as usize,
+                    "--mcp-max-bytes" => o.max_bytes = n as usize,
+                    _ => o.calls_per_sec = n.min(u32::MAX as u64) as u32,
+                }
+            }
             "--studio-connect" => studio_connect = Some(next(&mut i, "--studio-connect")),
             "--follow" => follow_url = Some(next(&mut i, "--follow")),
             "--follow-table" => follow_table = Some(next(&mut i, "--follow-table")),
@@ -621,6 +673,14 @@ fn main() {
         }
         (false, Some(_)) => fail("--studio-connect is for the studio: add --studio"),
         (false, None) => {}
+    }
+
+    if let Some(o) = mcp {
+        if o.write && http_cfg.read_only {
+            fail("--mcp-write and --http-read-only: the server takes no writes, over MCP or not");
+        }
+        fenec_http::mcp::serving();
+        http_cfg.mcp = Some(Arc::new(o));
     }
 
     start_tracing(tracing, "fenec-server");
@@ -740,6 +800,16 @@ fn main() {
         );
     }
 
+    // `<file>.lock` for as long as the process serves the file: a second
+    // process over it -- another server, `fenec mcp --file`, an app through
+    // the native library -- corrupts it, and each takes the lock and is
+    // refused while another holds it. The system lets it go at the exit.
+    let _held = file.as_deref().map(|path| {
+        fenec_abi::lock::hold(path).unwrap_or_else(|e| {
+            fenec_http::log!("could not open {path}: {e}");
+            std::process::exit(1);
+        })
+    });
     let mut feed = None;
     let mut db = match &file {
         Some(path) => {

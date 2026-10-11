@@ -11,6 +11,8 @@ default-run = "fenec-bench"
 [dependencies]
 fenec-core = { path = "../fenec-core" }
 fenec-ql = { path = "../fenec-ql" }
+# `mcp`: a tool call against the `/query` it runs, in process.
+fenec-http = { path = "../fenec-http" }
 # For benchmarking only. SQLite is built from source so the version and the
 # compile flags stay fixed.
 rusqlite = { version = "0.40", features = ["bundled"] }

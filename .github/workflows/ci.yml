@@ -242,6 +242,12 @@ jobs:
       - name: Vercel AI SDK retrieval
         run: make ai-sdk-test
 
+      # The MCP server held to the official TypeScript MCP client over
+      # Streamable HTTP and stdio, in both eras, with every configuration
+      # the docs give; then the example agent's tools, without its model.
+      - name: MCP
+        run: make mcp-test
+
       # web/fenec.d.ts held to web/fenec.js: every export and method the
       # module has declared, and a caller's code type-checked under --strict;
       # then every TypeScript example in the docs against the same types.

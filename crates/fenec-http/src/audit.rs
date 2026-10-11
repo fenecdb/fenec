@@ -126,6 +126,14 @@ pub fn connection(proto: &'static str, peer: Option<std::net::SocketAddr>) {
     WHO.with(|w| *w.borrow_mut() = Who { proto, peer });
 }
 
+/// The address the request this thread serves comes from: the client a
+/// router forwarded it for, or the connection's peer.
+pub fn client_ip() -> Option<IpAddr> {
+    ROUTED
+        .with(|r| r.get())
+        .or_else(|| WHO.with(|w| w.borrow().peer.map(|p| p.ip())))
+}
+
 /// A value of an event's line.
 pub enum Field<'a> {
     Text(&'a str),
