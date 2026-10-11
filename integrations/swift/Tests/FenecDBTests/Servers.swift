@@ -9,11 +9,14 @@
 
     final class Server: @unchecked Sendable {
         let file: String
+        /// A tenant node's quota of rows a tenant, its tasks in tenant
+        /// `acme`; nil for a server over a file.
+        private let tenantRows: Int?
         private(set) var port = 0
         private var process: Process?
         private var ended: Once<Bool>?
 
-        var url: String { "http://127.0.0.1:\(port)" }
+        var url: String { "http://127.0.0.1:\(port)" + (tenantRows == nil ? "" : "/t/acme") }
 
         static var binary: String {
             if let b = ProcessInfo.processInfo.environment["FENEC_SERVER"] { return b }
@@ -23,10 +26,22 @@
             return root.appendingPathComponent("target/debug/fenec-server").path
         }
 
-        /// A server over a file of its own, holding `tasks`.
-        init(_ name: String) async throws {
+        /// A server over a file of its own, holding `tasks` -- or, given
+        /// `tenantRows`, a tenant node (`--dir`) holding each tenant to that
+        /// many rows, `tasks` in its tenant `acme`, which `url` names.
+        init(_ name: String, tenantRows: Int? = nil) async throws {
             file = try scratch("server-\(name)")
+            self.tenantRows = tenantRows
             try await start(port: 0)
+            if tenantRows != nil {
+                var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/_admin/tenants/acme")!)
+                req.httpMethod = "PUT"
+                req.setValue("Bearer adm", forHTTPHeaderField: "authorization")
+                let (_, res) = try await URLSession.shared.data(for: req)
+                guard (res as? HTTPURLResponse)?.statusCode == 201 else {
+                    throw FenecError(code: .io, message: "the tenant was not made: \(res)")
+                }
+            }
             try await run(
                 "create collection tasks (key text @unique, title text, status text @hash, priority int)")
             try await run(
@@ -51,7 +66,10 @@
         func start(port: Int) async throws {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: Server.binary)
-            p.arguments = ["--http", "127.0.0.1:\(port)", "--file", file, "--sync", "always"]
+            p.arguments =
+                ["--http", "127.0.0.1:\(port)", "--sync", "always"]
+                + (tenantRows.map { ["--dir", file, "--admin-token", "adm", "--tenant-max-rows", "\($0)"] }
+                    ?? ["--file", file])
             let err = Pipe()
             p.standardError = err
             p.standardOutput = FileHandle.nullDevice

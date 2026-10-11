@@ -61,8 +61,12 @@ The same `Fenec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while
 the server cannot be reached, under an idempotency key so it lands once --
 and one the server refuses is put back and comes on
-`db.replica!.refusals()`. `replica.status` says `online`, `offline` or
-`catchingUp`, the writes not yet answered and the last error; call
+`db.replica!.refusals()`, a tenant's quota of bytes or rows among them
+(its `quota` named), the writes behind it going on; a quota's 429 is
+waited out for the seconds it names. `replica.status` says `online`,
+`offline` or `catchingUp`, the writes not yet answered and the last error,
+whose `quota` tells a stream the quota of streams refused from the network
+gone; call
 `replica.resume()` as the app comes back to the foreground. The requests and
 the stream are `URLSession`'s, so a server is reached through TLS (App
 Transport Security). `Fenec.connect(url:token:)` is a server with no file:

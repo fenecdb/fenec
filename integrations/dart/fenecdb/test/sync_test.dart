@@ -11,18 +11,36 @@ import 'package:test/test.dart';
 
 class Server {
   final String file;
+
+  /// A tenant node's quota of rows a tenant, its tasks in tenant `acme`;
+  /// null for a server over a file.
+  final int? tenantRows;
   Process? _process;
   int port = 0;
 
-  Server._(this.file);
+  Server._(this.file, this.tenantRows);
 
-  String get url => 'http://127.0.0.1:$port';
+  String get url => 'http://127.0.0.1:$port${tenantRows == null ? '' : '/t/acme'}';
 
-  /// A server over a file of its own, holding `tasks`.
-  static Future<Server> start(String name) async {
+  /// A server over a file of its own, holding `tasks` -- or, given
+  /// [tenantRows], a tenant node (`--dir`) holding each tenant to that many
+  /// rows, `tasks` in its tenant `acme`, which [url] names.
+  static Future<Server> start(String name, {int? tenantRows}) async {
     final dir = await Directory.systemTemp.createTemp('fenecdb-dart-$name');
-    final s = Server._('${dir.path}/server.fenec');
+    final s = Server._('${dir.path}/server.fenec', tenantRows);
     await s._start(0);
+    if (tenantRows != null) {
+      final http = HttpClient();
+      try {
+        final req = await http.putUrl(Uri.parse('http://127.0.0.1:${s.port}/_admin/tenants/acme'));
+        req.headers.set('authorization', 'Bearer adm');
+        final res = await req.close();
+        await res.drain<void>();
+        if (res.statusCode != 201) throw StateError('the tenant was not made: ${res.statusCode}');
+      } finally {
+        http.close();
+      }
+    }
     await s.run('create collection tasks (key text @unique, title text, status text @hash, priority int)');
     await s.run('put tasks [{key: "a", title: "one", status: "open", priority: 1}, '
         '{key: "b", title: "two", status: "open", priority: 5}, '
@@ -33,7 +51,14 @@ class Server {
   Future<void> _start(int at) async {
     final binary =
         Platform.environment['FENEC_SERVER'] ?? '${Directory.current.path}/../../../target/debug/fenec-server';
-    final p = await Process.start(binary, ['--http', '127.0.0.1:$at', '--file', file, '--sync', 'always']);
+    final rows = tenantRows;
+    final p = await Process.start(binary, [
+      '--http',
+      '127.0.0.1:$at',
+      '--sync',
+      'always',
+      ...rows == null ? ['--file', file] : ['--dir', file, '--admin-token', 'adm', '--tenant-max-rows', '$rows'],
+    ]);
     _process = p;
     p.stdout.drain<void>();
     final found = Completer<int>();
@@ -167,9 +192,36 @@ void main() {
     db.replica!.setOnline(true);
     await eventually('the refusal', () => refused.isNotEmpty);
     expect(refused.first.status, 409);
+    expect(refused.first.quota, isNull);
     await eventually('the write put back', () async => (await titles(db)).join(',') == 'one,two');
     expect((await db.replica!.refresh()).error?.status, 409);
     expect((await db.replica!.refresh()).pending, 0);
+    await sub.cancel();
+    await db.close();
+  });
+
+  test("a write a tenant's quota refuses is put back, and the delete behind it goes", () async {
+    // A tenant node holding each tenant to the three rows it has.
+    final s = await Server.start('quota', tenantRows: 3);
+    servers.add(s);
+    final db = await Fenec.openSynced(url: s.url, shapes: [open], path: await scratch('quota'));
+    await db.replica!.ready();
+    final refused = <Refusal>[];
+    final sub = db.replica!.refusals.listen(refused.add);
+    // Offline, so both are made before the server answers either.
+    db.replica!.setOnline(false);
+    await db.from('tasks').insert({'key': 'd', 'title': 'four', 'status': 'open'});
+    await db.from('tasks').where('key', 'b').delete();
+    expect(await titles(db), ['four', 'one']);
+    db.replica!.setOnline(true);
+    await eventually('the refusal', () => refused.isNotEmpty);
+    expect(refused.first.status, 507);
+    expect(refused.first.quota, 'rows');
+    // The insert put back, and the delete behind it landed.
+    await eventually('the queue answered', () async => (await db.replica!.refresh()).pending == 0);
+    expect(await titles(db), ['one']);
+    expect((await db.replica!.refresh()).error?.quota, 'rows');
+    expect((await s.run('get tasks where key = "b"')).rows, isEmpty);
     await sub.cancel();
     await db.close();
   });

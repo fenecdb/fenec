@@ -28,8 +28,9 @@
 //! - `{"do":"wait","id":N,"ms":M}`: a timer
 //! - `{"do":"token"}`: the server said 401, a fresh token is wanted
 //! - `{"do":"changed"}`: the replica changed, live queries look again
-//! - `{"do":"refused","status":S,"message":..,"query":..}`: the server
-//!   refused a write, which was put back
+//! - `{"do":"refused","status":S,"message":..,"query":..,"quota":..}`: the
+//!   server refused a write, which was put back; `quota` is there where a
+//!   tenant's quota refused it (a 507 of `bytes` or `rows`)
 //! - `{"do":"status"}`: [`Sync::status`] has something new to say
 //!
 //! A write through `fenec_query` on a synced handle comes here
@@ -62,6 +63,11 @@ pub const TEMP_BASE: i64 = 1 << 52;
 /// so a server back up is not met by every client at once.
 const BACKOFF_MS: u64 = 250;
 const BACKOFF_MAX_MS: u64 = 15_000;
+
+/// The longest a server's `retry_after` is waited: past it the sync comes
+/// back and is told again. A bound, since the browser's `setTimeout` fires
+/// at once past 2^31 ms and the JS layer keeps the same rule.
+const RETRY_AFTER_MAX_MS: u64 = 3_600_000;
 
 /// The sync's own collections, and the statements over them, parsed once.
 const STATE: &[&str] = &[
@@ -144,6 +150,45 @@ struct Fault {
     status: u16,
     /// A connection's, cleared once the replica is back: a refusal stays.
     connection: bool,
+    /// The tenant's quota the server named (`bytes`, `streams`, ...), so an
+    /// app tells "the server holds this tenant to its share" from "the
+    /// network is gone" in a status that reads `offline` for both.
+    quota: Option<String>,
+}
+
+/// What an answer says beyond its words, read from the body fenec-server
+/// writes beside its headers: the tenant's quota (`"quota"`, the
+/// `Fenec-Quota` header's) and how long to stay away (`"retry_after"`,
+/// `Retry-After`'s seconds). The body, since that is what a binding hands
+/// the core: headers would take a parameter more through the C ABI and
+/// every binding, and a browser on another origin reads a header only
+/// where the server lists it for CORS.
+#[derive(Default)]
+struct Said {
+    quota: Option<String>,
+    /// Milliseconds, 0 for none.
+    retry_ms: u64,
+}
+
+fn said(body: &str) -> Said {
+    let Ok(m) = members(body) else {
+        return Said::default();
+    };
+    let quota = field(&m, "quota")
+        .and_then(|q| json::parse(q).ok())
+        .and_then(|q| match q {
+            Value::Text(q) if !q.is_empty() => Some(q),
+            _ => None,
+        });
+    let secs = match field(&m, "retry_after").and_then(|s| json::parse(s).ok()) {
+        Some(Value::Int(n)) if n > 0 => n as f64,
+        Some(Value::Float(f)) if f > 0.0 => f,
+        _ => 0.0,
+    };
+    Said {
+        quota,
+        retry_ms: ((secs * 1000.0) as u64).min(RETRY_AFTER_MAX_MS),
+    }
 }
 
 /// A small generator for keys, seeded by the binding from the platform's
@@ -190,7 +235,9 @@ pub struct Sync {
     rng: Rng,
     next_id: u64,
     outbox: Vec<String>,
-    timers: Vec<(u64, Timer)>,
+    /// Each timer asked for, and whether it waits out a server's
+    /// `retry_after`: the network's signal forgets the backoff, not that.
+    timers: Vec<(u64, Timer, bool)>,
     /// The request under way: its id and the write it sends.
     sending: Option<(u64, i64)>,
     send_attempt: u32,
@@ -799,20 +846,38 @@ impl Sync {
         id
     }
 
-    fn wait(&mut self, what: Timer, attempt: u32) {
-        let base = (BACKOFF_MS << attempt.min(10)).min(BACKOFF_MAX_MS);
+    /// Waits out the backoff for `attempt`, or the server's `retry_ms`
+    /// where that is longer -- the server's word is a floor, never cut to
+    /// the backoff's 15 s -- with the jitter on top either way: the clients
+    /// a quota refused in one moment are told one `Retry-After`, and would
+    /// all come back in the next.
+    fn wait(&mut self, what: Timer, attempt: u32, retry_ms: u64) {
+        let base = (BACKOFF_MS << attempt.min(10))
+            .min(BACKOFF_MAX_MS)
+            .max(retry_ms);
         let ms = base + self.rng.next() % (base * 3 / 10 + 1);
         let id = self.id();
-        self.timers.push((id, what));
+        self.timers.push((id, what, retry_ms > 0));
         self.outbox
             .push(format!("{{\"do\":\"wait\",\"id\":{id},\"ms\":{ms}}}"));
     }
 
     fn fault(&mut self, message: impl Into<String>, status: u16, connection: bool) {
+        self.fault_naming(message, status, connection, None);
+    }
+
+    fn fault_naming(
+        &mut self,
+        message: impl Into<String>,
+        status: u16,
+        connection: bool,
+        quota: Option<String>,
+    ) {
         self.fault = Some(Fault {
             message: message.into(),
             status,
             connection,
+            quota,
         });
         self.once("{\"do\":\"status\"}");
     }
@@ -846,7 +911,9 @@ impl Sync {
         }
     }
 
-    /// `{"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]}`.
+    /// `{"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]}`,
+    /// the error `{"message","status","quota"}`, `quota` null unless a
+    /// tenant's quota was named.
     pub fn status(&self) -> String {
         let mut out = format!(
             "{{\"state\":\"{}\",\"pending\":{},\"error\":",
@@ -858,7 +925,12 @@ impl Sync {
             Some(f) => {
                 out.push_str("{\"message\":");
                 json::escape_into(&mut out, &f.message);
-                out.push_str(&format!(",\"status\":{}}}", f.status));
+                out.push_str(&format!(",\"status\":{},\"quota\":", f.status));
+                match &f.quota {
+                    Some(q) => json::escape_into(&mut out, q),
+                    None => out.push_str("null"),
+                }
+                out.push('}');
             }
         }
         out.push_str(",\"shapes\":[");
@@ -990,14 +1062,18 @@ impl Sync {
         self.shapes[i].connected = false;
     }
 
-    fn retry_stream(&mut self, i: usize) {
+    /// Opens shape `i`'s stream again after the backoff, or after the
+    /// server's `retry_ms` where it said one: a subscription over a
+    /// tenant's `streams` quota is refused until another closes, and asked
+    /// again sooner it only counts against the quota of requests.
+    fn retry_stream(&mut self, i: usize, retry_ms: u64) {
         if self.stopped || self.offline || self.paused {
             return;
         }
         let attempt = self.shapes[i].attempt;
         self.shapes[i].attempt += 1;
         self.shapes[i].waiting = true;
-        self.wait(Timer::Stream(i), attempt);
+        self.wait(Timer::Stream(i), attempt, retry_ms);
     }
 
     // ------------------------------------------------------------- events
@@ -1022,15 +1098,17 @@ impl Sync {
             401 => return self.want_token(),
             _ => {
                 let why = message(status, body);
-                self.fault(
+                let said = said(body);
+                self.fault_naming(
                     format!("could not read the server's collections: {why}"),
                     status,
                     true,
+                    said.quota,
                 );
                 self.schema_waiting = true;
                 let a = self.schema_attempt;
                 self.schema_attempt += 1;
-                return self.wait(Timer::Schema, a);
+                return self.wait(Timer::Schema, a, said.retry_ms);
             }
         }
         let made = (|| -> Result<()> {
@@ -1087,12 +1165,18 @@ impl Sync {
                 self.schema_waiting = true;
                 let a = self.schema_attempt;
                 self.schema_attempt += 1;
-                self.wait(Timer::Schema, a);
+                self.wait(Timer::Schema, a, 0);
             }
         }
     }
 
     fn on_answer(&mut self, db: &mut Database, n: i64, status: u16, seq: u64, body: &str) {
+        // Read only where the write did not land: a landed write's answer is
+        // its rows, which nothing here needs walked.
+        let said = match status {
+            200..=299 => Said::default(),
+            _ => said(body),
+        };
         match status {
             200..=299 => {
                 self.send_attempt = 0;
@@ -1102,18 +1186,29 @@ impl Sync {
                 self.landed(db, n, seq);
             }
             401 => self.want_token(),
+            // A tenant past its quota of bytes or rows: waiting makes no
+            // room, deleting does, and a write that only deletes always
+            // lands. Held, this write would hold every write behind it --
+            // the delete that would make its room among them -- for good, so
+            // it is a refusal, put back and told with the quota. A 507
+            // naming none (past `--max-memory`, or a proxy's) passes as
+            // memory is let go of, and is waited out below.
+            507 if said.quota.is_some() => {
+                self.refused(db, n, status, &message(status, body), said.quota)
+            }
             // No answer, or one that says to come back: the write stays, and
             // goes again under its key, which the server answers as the
-            // first time if the first reached it.
+            // first time if the first reached it -- after the `retry_after`
+            // a quota's 429 names, where that is longer than the backoff.
             0 | 408 | 429 | 500..=599 => {
-                self.fault(message(status, body), status, true);
+                self.fault_naming(message(status, body), status, true, said.quota);
                 self.flushing = false;
                 self.send_waiting = true;
                 let a = self.send_attempt;
                 self.send_attempt += 1;
-                self.wait(Timer::Send, a);
+                self.wait(Timer::Send, a, said.retry_ms);
             }
-            _ => self.refused(db, n, status, &message(status, body)),
+            _ => self.refused(db, n, status, &message(status, body), said.quota),
         }
     }
 
@@ -1164,8 +1259,17 @@ impl Sync {
     }
 
     /// The server refused write `n`: what it did to the replica is put
-    /// back, the last statement's first, and the binding is told.
-    fn refused(&mut self, db: &mut Database, n: i64, status: u16, why: &str) {
+    /// back, the last statement's first, and the binding is told -- with
+    /// the tenant's quota where one refused it, so an app says "storage
+    /// full" rather than "refused".
+    fn refused(
+        &mut self,
+        db: &mut Database,
+        n: i64,
+        status: u16,
+        why: &str,
+        quota: Option<String>,
+    ) {
         let Some(at) = self.queue.iter().position(|o| o.n == n) else {
             return;
         };
@@ -1201,12 +1305,16 @@ impl Sync {
         if self.queue.is_empty() {
             self.flushing = false;
         }
-        self.fault(why.to_string(), status, false);
         let mut a = format!("{{\"do\":\"refused\",\"status\":{status},\"message\":");
         json::escape_into(&mut a, why);
         a.push_str(",\"query\":");
         json::escape_into(&mut a, &op.label);
+        if let Some(q) = &quota {
+            a.push_str(",\"quota\":");
+            json::escape_into(&mut a, q);
+        }
         a.push('}');
+        self.fault_naming(why.to_string(), status, false, quota);
         self.outbox.push(a);
         self.once("{\"do\":\"changed\"}");
     }
@@ -1279,18 +1387,24 @@ impl Sync {
                 self.drop_stream(i, false);
                 self.want_token();
             }
+            // A 429 of the tenant's `streams` quota among them: the shape is
+            // not live, so the status reads `offline` as it does for the
+            // network, its error naming the quota -- why it is not live is
+            // the error's to say, as it is for a 401.
             _ => {
                 self.drop_stream(i, false);
                 let c = self.shapes[i].spec.collection.clone();
-                self.fault(
+                let said = said(body);
+                self.fault_naming(
                     format!(
                         "could not open the subscription to `{c}`: {}",
                         message(status, body)
                     ),
                     status,
                     true,
+                    said.quota,
                 );
-                self.retry_stream(i);
+                self.retry_stream(i, said.retry_ms);
             }
         }
         self.once("{\"do\":\"status\"}");
@@ -1336,7 +1450,7 @@ impl Sync {
                 let c = self.shapes[i].spec.collection.clone();
                 self.fault(format!("the subscription to `{c}` stopped: {e}"), 0, true);
                 self.drop_stream(i, true);
-                self.retry_stream(i);
+                self.retry_stream(i, 0);
                 return;
             }
         }
@@ -1358,16 +1472,16 @@ impl Sync {
             why
         };
         self.fault(format!("the subscription to `{c}` ended: {why}"), 0, true);
-        self.retry_stream(i);
+        self.retry_stream(i, 0);
         self.kick(db);
     }
 
     /// A timer [`Sync::actions`] asked for ran out.
     pub fn timer(&mut self, db: &mut Database, id: u64) {
-        let Some(at) = self.timers.iter().position(|(t, _)| *t == id) else {
+        let Some(at) = self.timers.iter().position(|t| t.0 == id) else {
             return;
         };
-        let (_, what) = self.timers.remove(at);
+        let (_, what, _) = self.timers.remove(at);
         match what {
             Timer::Stream(i) => self.shapes[i].waiting = false,
             Timer::Send => self.send_waiting = false,
@@ -1395,18 +1509,23 @@ impl Sync {
             }
             Some(Value::Bool(true)) => {
                 // Come back at once, the backoff forgotten: the platform
-                // said the network is here.
+                // said the network is here. A server's `retry_after` is
+                // kept -- the network says nothing of a tenant's quota, and
+                // asked again before it the server only refuses again.
                 self.offline = false;
-                self.timers.clear();
-                self.send_waiting = false;
-                self.schema_waiting = false;
+                self.timers.retain(|t| t.2);
+                let held = |w: Timer, ts: &[(u64, Timer, bool)]| ts.iter().any(|t| t.1 == w);
+                self.send_waiting = held(Timer::Send, &self.timers);
+                self.schema_waiting = held(Timer::Schema, &self.timers);
                 self.send_attempt = 0;
                 self.schema_attempt = 0;
-                for s in &mut self.shapes {
-                    s.waiting = false;
+                for (i, s) in self.shapes.iter_mut().enumerate() {
+                    s.waiting = held(Timer::Stream(i), &self.timers);
                     s.attempt = 0;
                 }
-                self.flushing = !self.queue.is_empty();
+                // A write the server said to hold back lets the streams
+                // open, as its 429 did.
+                self.flushing = !self.queue.is_empty() && !self.send_waiting;
             }
             _ => {}
         }
@@ -2253,6 +2372,36 @@ impl FilterOf for Statement {
         match self {
             Statement::Update { filter, .. } | Statement::Delete { filter, .. } => filter.clone(),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_answer_says_its_quota_and_its_wait_or_nothing() {
+        let s = said(r#"{"error":"slow","quota":"writes","retry_after":3}"#);
+        assert_eq!((s.quota.as_deref(), s.retry_ms), (Some("writes"), 3000));
+        let s = said(r#"{"error":"full","quota":"bytes"}"#);
+        assert_eq!((s.quota.as_deref(), s.retry_ms), (Some("bytes"), 0));
+        // A wait in part of a second, as a proxy may write one.
+        assert_eq!(said(r#"{"retry_after":1.5}"#).retry_ms, 1500);
+        // Bounded: a browser's timer fires at once past 2^31 ms.
+        assert_eq!(
+            said(r#"{"retry_after":99999999}"#).retry_ms,
+            RETRY_AFTER_MAX_MS
+        );
+        for body in [
+            "",
+            "connection reset",
+            "{}",
+            r#"{"quota":"","retry_after":-1}"#,
+            r#"{"quota":7,"retry_after":"3"}"#,
+        ] {
+            let s = said(body);
+            assert_eq!((s.quota, s.retry_ms), (None, 0), "{body}");
         }
     }
 }

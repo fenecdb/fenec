@@ -43,6 +43,10 @@ public struct SyncStatus: Sendable, Equatable {
         public let message: String
         /// The HTTP status, or 0 for none (the network, or the replica).
         public let status: Int
+        /// The tenant's quota the server named, nil for none: a stream
+        /// refused by the quota of `streams` leaves the replica `offline`
+        /// as the network does, and this tells the two apart.
+        public let quota: String?
     }
 
     public struct ShapeState: Sendable, Equatable {
@@ -75,7 +79,9 @@ public struct SyncStatus: Sendable, Equatable {
     init(_ v: Value) {
         state = State(rawValue: v["state"]?.string ?? "") ?? .catchingUp
         pending = v["pending"]?.int ?? 0
-        error = v["error"]?.object.map { Failure(message: $0["message"]?.string ?? "", status: $0["status"]?.int ?? 0) }
+        error = v["error"]?.object.map {
+            Failure(message: $0["message"]?.string ?? "", status: $0["status"]?.int ?? 0, quota: $0["quota"]?.string)
+        }
         shapes = (v["shapes"]?.array ?? []).map {
             ShapeState(
                 collection: $0["collection"]?.string ?? "",
@@ -92,6 +98,10 @@ public struct Refusal: Sendable, Equatable {
     public let message: String
     /// The statement's text, as it was run.
     public let query: String
+    /// The tenant's quota that refused it -- "bytes" or "rows", a 507 --
+    /// nil for any other refusal: room is made by deleting, and the writes
+    /// behind it went on.
+    public let quota: String?
 }
 
 extension Fenec {
@@ -366,7 +376,8 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
                 if let db { db.lives.touch(db) }
             case "refused":
                 let r = Refusal(
-                    status: a["status"]?.int ?? 0, message: a["message"]?.string ?? "", query: a["query"]?.string ?? "")
+                    status: a["status"]?.int ?? 0, message: a["message"]?.string ?? "", query: a["query"]?.string ?? "",
+                    quota: a["quota"]?.string)
                 lock.lock()
                 let ws = Array(refusalWatchers.values)
                 lock.unlock()

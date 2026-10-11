@@ -36,9 +36,14 @@ enum SyncState {
 class SyncFailure {
   final String message;
   final int status;
-  const SyncFailure(this.message, this.status);
+
+  /// The tenant's quota the server named, null for none: a stream refused
+  /// by the quota of `streams` leaves the replica offline as the network
+  /// does, and this tells the two apart.
+  final String? quota;
+  const SyncFailure(this.message, this.status, [this.quota]);
   @override
-  String toString() => 'SyncFailure($status): $message';
+  String toString() => 'SyncFailure($status${quota == null ? '' : ', $quota'}): $message';
 }
 
 class ShapeState {
@@ -76,7 +81,7 @@ class SyncStatus {
         _ => SyncState.catchingUp,
       },
       v['pending'] as int? ?? 0,
-      e == null ? null : SyncFailure(e['message'] as String? ?? '', e['status'] as int? ?? 0),
+      e == null ? null : SyncFailure(e['message'] as String? ?? '', e['status'] as int? ?? 0, e['quota'] as String?),
       [
         for (final s in (v['shapes'] as List? ?? const []).cast<Map<String, Object?>>())
           ShapeState(s['collection'] as String, s['cursor'] as int, s['seeded'] == true, s['connected'] == true),
@@ -92,7 +97,12 @@ class Refusal {
 
   /// The statement's text, as it was run.
   final String query;
-  const Refusal(this.status, this.message, this.query);
+
+  /// The tenant's quota that refused it -- "bytes" or "rows", a 507 --
+  /// null for any other refusal: room is made by deleting, and the writes
+  /// behind it went on.
+  final String? quota;
+  const Refusal(this.status, this.message, this.query, [this.quota]);
 }
 
 const _kPoll = 0, _kResponse = 1, _kOpened = 2, _kBytes = 3, _kClosed = 4, _kTimer = 5, _kSignal = 6;
@@ -236,7 +246,8 @@ class Replica {
           _db.lives.touch();
         case 'refused':
           if (!_refusals.isClosed) {
-            _refusals.add(Refusal(a['status'] as int, a['message'] as String, a['query'] as String));
+            _refusals
+                .add(Refusal(a['status'] as int, a['message'] as String, a['query'] as String, a['quota'] as String?));
           }
         case 'status':
           await _reload();

@@ -3267,7 +3267,9 @@ collection is refused, a collection with no shape is the app's own. What
 describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
 keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
 a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
-30% jitter), 401 asks for a token, any other 4xx is a refusal put back. A
+30% jitter) or the `retry_after` a quota names where longer, 401 asks for
+a token, a 507 naming a tenant's quota and any other 4xx are a refusal put
+back (below). A
 replica reopened sends its queue before opening its streams. An update of
 an unanswered insert reaches the server's copy by its key as well
 (`fenec_ql::spans` keeps each statement's own text for the `/batch` lines,
@@ -3294,7 +3296,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 60 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 68 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,
@@ -3334,6 +3336,40 @@ without which a page on another origin could not send the one or read the
 other. `fenec.js` grew 113.3 -> 132.5 KB, 31.1 -> 35.8 KB brotli -- 3.1 KB
 of it code, the rest the comments -- and the browser module did not change
 by a byte.
+
+**A tenant's quota is a refusal where waiting makes no room, a wait the
+server names otherwise.** A synced write a tenant node refused 507 for its
+quota of `bytes` or `rows` was retried as a 5xx: room comes only from
+deletes, and writes go in order, so every write after it -- the delete
+that would make the room among them, which the engine lands on a tenant
+past its quota (`engine/limit.rs`) -- waited behind it for good, and the
+app was never told. A 507 whose body names a `quota` is a refusal now
+(`Sync::on_answer`, `#pump`): put back, `refused` and `onRefused` told
+with the quota, the queue going on; one naming none -- `--max-memory`'s,
+which a handover or an idle tenant's close brings back under, or a
+proxy's -- is waited out as a 5xx. A retried answer's `retry_after` is
+waited where it is longer than the backoff, never cut to the backoff's 15
+s and an hour at most (`RETRY_AFTER_MAX_MS`: a browser's `setTimeout`
+fires at once past 2^31 ms), the 30% jitter on top, since a bucket tells
+every client it refused in one moment the same wait. A stream a 429 of
+`streams` refuses waits the same way, its shape not `connected`: the
+status reads `offline`, as for the network, its error naming the quota
+(`error.quota`, JS `status()[i].quota`) rather than a state of its own --
+why a replica is not live is the error's to say, as a 401's is. `online`
+forgets the backoff but keeps a server's wait (each timer flagged, the
+third member of `Sync::timers`, `#wait`'s `server`) and lets the streams
+open past a write held so. Both runners read the body, not the headers:
+`Sync::response` is handed a body, a header would be a parameter more
+through the C ABI and three bindings, and a page on another origin reads
+`Retry-After` only where CORS lists it -- so a move's or a failover's 503,
+`Retry-After: 1` with no `retry_after` in its body, is backed off the
+sync's own way. Five scenarios hold both runners to it, and the Swift,
+Kotlin, Dart and browser tests a real tenant node at its rows quota: the
+insert refused naming `rows`, the keyed delete behind it landing.
+`fenec.js` grew 99.4 -> 102.4 KB, 27.0 -> 27.9 KB brotli, 0.26 KB of
+that code (minified, 12.2 -> 12.5 KB); the native library's code 2.3 KB,
+its file 16 bytes on aarch64-apple-darwin; the browser module not by a
+byte, the sync being outside it.
 
 **A schema declared in code is checked at every open, in the engine.**
 Two front ends compile to one description (`fenec_core::declared`,

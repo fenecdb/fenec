@@ -60,8 +60,12 @@ data class SyncStatus(
         CATCHING_UP,
     }
 
-    /** An error, and its HTTP status (0: the network, or the replica). */
-    data class Failure(val message: String, val status: Int)
+    /**
+     * An error, and its HTTP status (0: the network, or the replica). [quota] is the tenant's quota the
+     * server named, null for none: a stream refused by the quota of `streams` leaves the replica OFFLINE
+     * as the network does, and this tells the two apart.
+     */
+    data class Failure @JvmOverloads constructor(val message: String, val status: Int, val quota: String? = null)
 
     data class ShapeState(val collection: String, val cursor: Long, val seeded: Boolean, val connected: Boolean)
 
@@ -78,7 +82,7 @@ data class SyncStatus(
                 else -> State.CATCHING_UP
             },
             v.int("pending") ?: 0,
-            v.row("error")?.let { Failure(it.string("message") ?: "", it.int("status") ?: 0) },
+            v.row("error")?.let { Failure(it.string("message") ?: "", it.int("status") ?: 0, it.string("quota")) },
             (v.list("shapes") ?: emptyList()).map {
                 val s = it as Row
                 ShapeState(s.string("collection") ?: "", s.long("cursor") ?: 0, s.bool("seeded") == true, s.bool("connected") == true)
@@ -87,8 +91,12 @@ data class SyncStatus(
     }
 }
 
-/** A write the server refused: it was put back on the replica. */
-data class Refusal(val status: Int, val message: String, val query: String)
+/**
+ * A write the server refused: it was put back on the replica. [quota] is the tenant's quota that
+ * refused it -- "bytes" or "rows", a 507 -- null for any other refusal: room is made by deleting,
+ * and the writes behind it went on.
+ */
+data class Refusal @JvmOverloads constructor(val status: Int, val message: String, val query: String, val quota: String? = null)
 
 /**
  * A replica of [shapes] in the file at [path], kept in step with the server
@@ -264,7 +272,9 @@ class Replica internal constructor(
                     }.start()
                 }
                 "changed" -> db.lives.touch()
-                "refused" -> refused.tryEmit(Refusal(r.int("status") ?: 0, r.string("message") ?: "", r.string("query") ?: ""))
+                "refused" -> refused.tryEmit(
+                    Refusal(r.int("status") ?: 0, r.string("message") ?: "", r.string("query") ?: "", r.string("quota")),
+                )
                 "status" -> reload()
             }
         }

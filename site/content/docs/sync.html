@@ -218,8 +218,9 @@ once, whatever the network did meanwhile.</p>
 <thead><tr><th>The server answers</th><th>The write</th></tr></thead>
 <tbody>
 <tr><td>2xx</td><td>landed: it leaves the queue, its promise resolves</td></tr>
-<tr><td>nothing (the network failed), <code>408</code>, <code>429</code>, <code>5xx</code></td><td>kept and sent again under its key, after 250 ms doubling to 15 s</td></tr>
+<tr><td>nothing (the network failed), <code>408</code>, <code>429</code>, <code>5xx</code></td><td>kept and sent again under its key, after 250 ms doubling to 15 s -- or after the <code>Retry-After</code> a tenant's quota names, where that is longer</td></tr>
 <tr><td><code>401</code></td><td>kept; nothing is sent until a new token (<code>tokenProvider</code>, <code>setToken</code>)</td></tr>
+<tr><td><code>507</code> naming a tenant's quota of <code>bytes</code> or <code>rows</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told with <code>e.quota</code>, and the writes behind it go on</td></tr>
 <tr><td>any other <code>4xx</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told</td></tr>
 </tbody>
 </table>
@@ -232,7 +233,7 @@ const db = await sync({
   shapes: [{ collection: 'tasks', key: 'key' }],
   persist: 'tasks',                                // writes survive a reload
   tokenProvider: () => auth.refresh(),             // asked on a 401
-  onRefused: (e) => toast(`${e.status}: ${e.message}`),
+  onRefused: (e) => toast(e.quota ? 'This workspace is full' : `${e.status}: ${e.message}`),
 });
 await db.pushed();                                 // every write answered
 </pre>
@@ -246,7 +247,8 @@ rather than make the row twice.</p>
 
 <p><b>Offline.</b> A write made while the server cannot be reached waits in
 the queue; the page's <code>online</code> event, or
-<code>setOnline(true)</code>, sends it at once, the backoff forgotten, and
+<code>setOnline(true)</code>, sends it at once, the backoff forgotten -- unless
+the server said when to come back (below) -- and
 <code>offline</code> or <code>setOnline(false)</code> closes the streams.
 Writes left from before go before the streams open again, so what they
 bring holds them.</p>
@@ -260,6 +262,25 @@ with it.</p>
 <p><b>Backoff.</b> 250 ms, doubling to 15 s, with 30% jitter on top so a
 server back up is not met by every client at once; a stream that cannot
 reconnect waits the same way, and starts the count again once it opens.</p>
+
+<p><b>A tenant's quota.</b> A tenant node holds each tenant to its quotas
+(<a href="sharding.html#quotas">Quotas</a>), and names the one that refused
+a request in its body, which the replica reads. A <code>507</code> of
+<code>bytes</code> or <code>rows</code> is a refusal: waiting makes no room,
+deleting does, and a write that only deletes always lands -- held, the
+write would hold every write behind it for good, the delete that would make
+its room among them. A <code>507</code> naming no quota is the server's own
+ceiling (<code>--max-memory</code>) or a proxy's, and is waited out as a
+<code>5xx</code> is. A <code>429</code> of <code>streams</code>,
+<code>requests</code>, <code>writes</code> or <code>write_bytes</code> is
+waited out for its <code>retry_after</code> -- the seconds
+<code>Retry-After</code> says -- where that is longer than the backoff, an
+hour at most, with the jitter on top, since every client the quota refused
+in one moment is told the same wait; a stream refused so waits the same
+way, its shape not <code>connected</code> meanwhile, and
+<code>status()</code> names the quota (<code>quota</code>) beside the
+error. <code>setOnline(true)</code> forgets the backoff but not the
+server's word: the network says nothing of a tenant's quota.</p>
 
 <p><b>Put back in order.</b> A refused write's rows are written back as they
 stood before it. A later write to the same rows, still waiting, is not

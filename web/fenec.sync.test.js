@@ -925,6 +925,56 @@ test('a tenant syncs through the router with only the base URL changed', { ...op
   }
 });
 
+test("a tenant's rows quota refuses a write, and the delete behind it makes the room", opts, async () => {
+  // A node holding each tenant to 2 rows: the scenario file's 507 told by
+  // the real server, its body naming the quota, and a keyed delete --
+  // which writes its key into `_idempotency` -- landing past the quota.
+  const dir = await mkdtemp(join(tmpdir(), 'fenec-sync-'));
+  const node = await listening(
+    bin,
+    ['--dir', join(dir, 'n1'), '--http', '127.0.0.1:0', '--admin-token', 'adm', '--tenant-max-rows', '2'],
+    'fenec-http',
+  );
+  const call = async (path, body, method = 'POST') => {
+    const res = await fetch(`${node.url}${path}`, {
+      method,
+      headers: { authorization: 'Bearer adm' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${path}: ${res.status} ${text}`);
+    return text ? JSON.parse(text) : null;
+  };
+  await call('/_admin/tenants/acme', undefined, 'PUT');
+  await call('/t/acme/query', { query: 'create collection tasks (key text @unique, title text, status text @hash, priority int)' });
+  await call('/t/acme/query', { query: 'put tasks [{key: "a", title: "one", status: "open"}, {key: "b", title: "two", status: "open"}]' });
+  const refused = [];
+  const db = await open(`${node.url}/t/acme`, { onRefused: (e) => refused.push(e) });
+  const titles = async () => (await db.from('tasks').select('title').order('title').rows()).map((r) => r.title);
+  try {
+    await db.ready();
+    // Offline, so the row is read before the server can refuse it.
+    db.setOnline(false);
+    const insert = db.from('tasks').insert({ title: 'three', status: 'open' });
+    const del = db.from('tasks').where('key', 'b').delete();
+    assert.deepEqual(await titles(), ['one', 'three']);
+    db.setOnline(true);
+    await assert.rejects(insert, (e) => e.status === 507 && e.quota === 'rows');
+    assert.equal(await del, 1, 'the delete behind the refused write went, and landed');
+    assert.deepEqual(refused.map((e) => [e.status, e.quota]), [[507, 'rows']]);
+    assert.equal(db.status()[0].quota, 'rows');
+    assert.deepEqual(await titles(), ['one']);
+    // The room the delete made takes the insert now.
+    await db.from('tasks').insert({ title: 'three', status: 'open' });
+    await until(async () => (await call('/t/acme/query', { query: 'get tasks where title = "three" count' }))[0].count === 1, 'the insert landed');
+    await until(async () => (await titles()).join() === 'one,three', "the server's copy in place of the temporary row");
+  } finally {
+    db.close();
+    node.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ------------------------------------------------------------ schema in code
 
 const tasksTable = fenecTable(
