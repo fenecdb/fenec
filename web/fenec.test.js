@@ -982,6 +982,12 @@ test('the module made with no feature opens a file declaring every one', {
   assert.deepEqual(small.rows('get plain select n where tag = "b" order n').map((r) => r.n), [2, 3]);
   assert.deepEqual(small.rows('get plain select tag, count() as c group tag order tag').map((r) => r.c), [1, 2]);
   assert.deepEqual(small.rows('get places select n order n').map((r) => r.n), [1, 2]);
+  // `count(distinct)`, `first`/`last` and `having` are standard, in every build.
+  assert.deepEqual(small.rows('get plain select count(distinct tag) as u').map((r) => r.u), [2]);
+  assert.deepEqual(
+    small.rows('get plain select tag, last(n by at) as l group tag having count() > 1').map((r) => r.l),
+    [3],
+  );
   for (const [sql, feature] of [
     ['get users select n where email = "alice@x.com"', 'nocase'],
     ['get people select n order name', 'collate'],
@@ -989,7 +995,7 @@ test('the module made with no feature opens a file declaring every one', {
     ['get places select n near loc [2.0, 48.0] limit 1', 'geo'],
     ['get places select n where distance(loc, [13.4, 52.5]) < 1000', 'geo'],
     ['get plain select n facet tag', 'facets'],
-    ['get plain select count(distinct tag)', 'analytics'],
+    ['get plain select approx_count_distinct(tag)', 'analytics'],
     ['get plain select bucket(at, 1h) as b, count() as c group b', 'analytics'],
     ['create index on plain (n, tag) @sorted', 'composite'],
     ['create index on plain (tag) @sorted', 'sorted'],

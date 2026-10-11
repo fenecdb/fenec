@@ -82,8 +82,8 @@ pub fn format_pg(ms: i64) -> String {
 }
 
 fn num(s: &str) -> Result<i64> {
-    s.parse::<i64>()
-        .map_err(|_| Error::Type(format!("expected a number in the date: `{s}`")))
+    crate::num::parse_i64(s)
+        .ok_or_else(|| Error::Type(format!("expected a number in the date: `{s}`")))
 }
 
 /// Epoch ms from text. Accepted forms:

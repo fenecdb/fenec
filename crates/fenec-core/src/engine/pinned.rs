@@ -139,7 +139,7 @@ impl Database {
             }
         }
         let held: usize = (names.iter())
-            .filter_map(|n| self.collections.get(*n))
+            .filter_map(|n| self.collections.get(n))
             .map(|c| c.store.pinned_bytes())
             .sum();
         if self.pins.fetch_add(held, Relaxed) + held > self.pin_budget {
@@ -323,9 +323,7 @@ impl Collection {
     /// which only `near` reads, and `pin` declines.
     fn pinned(&self) -> Collection {
         fn refused<T>() -> Derived<T> {
-            Derived(std::sync::OnceLock::from(Err(Error::Query(
-                PINNED_OUT.into(),
-            ))))
+            Derived::refused(Error::Query(PINNED_OUT.into()))
         }
         fn out<T>(names: impl Iterator<Item = String>) -> Vec<(String, Derived<T>)> {
             names.map(|n| (n, refused())).collect()

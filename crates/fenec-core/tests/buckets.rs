@@ -83,6 +83,17 @@ fn buckets_of_many_rows_answer_as_the_scan_through_deletes_and_rewrites() {
                 &format!("get plain where k in [\"v{v}\", \"v{}\"]", (v + 2) % 5),
             );
             assert_eq!(a, b);
+            // Each bucket a run of the union, merged where it ends: three
+            // and five of them, a value twice, and one with no rows.
+            for list in [
+                format!("\"v{v}\", \"v{}\", \"v{}\"", (v + 1) % 5, (v + 3) % 5),
+                "\"v4\", \"v0\", \"v3\", \"v1\", \"v2\"".to_string(),
+                format!("\"v{v}\", \"none\", \"v{v}\", \"v{}\"", (v + 4) % 5),
+            ] {
+                let a = ids(db, &format!("get t where k in [{list}]"));
+                let b = ids(db, &format!("get plain where k in [{list}]"));
+                assert_eq!(a, b, "in [{list}]");
+            }
         }
     };
     check(&mut db);

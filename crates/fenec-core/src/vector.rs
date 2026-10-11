@@ -1625,9 +1625,11 @@ impl<T> Rows<T> {
             self.starts.push(std::ptr::null());
         }
         let last = self.chunks.last_mut()?;
-        // Doubled as a `Vec` would be, but never past the chunk.
+        // Doubled as a `Vec` would be, but never past the chunk. Not
+        // `clamp`, whose check of its bounds formats them with `Debug`:
+        // `width` is never past `full`.
         if last.capacity() - last.len() < width {
-            let to = (last.capacity() * 2).clamp(width, full);
+            let to = (last.capacity() * 2).max(width).min(full);
             last.reserve_exact(to - last.len());
         }
         Some(last)
@@ -2457,7 +2459,7 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new() -> Scratch {
+    const fn new() -> Scratch {
         Scratch {
             visited: Vec::new(),
             epoch: 0,
@@ -3336,8 +3338,10 @@ thread_local! {
     /// could not search the same index at once (which pinned every read on
     /// the server side behind a single lock). Moving the buffer into
     /// thread-local storage gives both: an allocation-free hot loop *and*
-    /// parallel search.
-    static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::new());
+    /// parallel search. Made at compile time: made lazily, every access
+    /// asked whether it was made yet, and the making was 285 bytes of the
+    /// browser module.
+    static SCRATCH: RefCell<Scratch> = const { RefCell::new(Scratch::new()) };
 }
 
 #[cfg(feature = "vector")]

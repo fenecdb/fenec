@@ -273,20 +273,17 @@ enum Fold {
     /// its fold -- which its text orders by.
     Extreme(Option<Value>, bool, TextOrder),
     /// `count(distinct ...)`: the values are in the query's one set, a
-    /// `nocase` field's by their fold. This and the two below are the
-    /// `analytics` feature's: without it none is made, and the compiler
-    /// drops the fold of each and the out-of-line [`Fold::row_held`].
-    #[cfg(feature = "analytics")]
+    /// `nocase` field's by their fold.
     Distinct(i64, Option<CaseFold>),
     /// `first`, or `last` when `true`: the row's order and id, and its value.
     /// Boxed, so that every fold is the size it was: a fold the size of
     /// two values and an id took the fixed aggregates of before 11%
     /// longer. The order's text compares as its field's does.
-    #[cfg(feature = "analytics")]
     Pick(Option<Box<(Value, DocId, Value)>>, bool, TextOrder),
     /// `approx_count_distinct`, `hll_accumulate` and `hll_combine`: the
     /// group's sketch, made at its first value, which of the three, and the
-    /// fold a `nocase` field's values are counted by.
+    /// fold a `nocase` field's values are counted by. The `analytics`
+    /// feature's: without it none is made, and the compiler drops its fold.
     #[cfg(feature = "analytics")]
     Hll(Option<Box<Sketch>>, u8, Option<CaseFold>),
 }
@@ -313,17 +310,11 @@ impl Fold {
             )))
         };
         #[cfg(not(feature = "analytics"))]
-        if distinct || ANALYTICS.contains(&name) {
-            let what = match distinct {
-                true => "`count(distinct ...)`".to_string(),
-                false => format!("`{name}`"),
-            };
-            return Err(not_built(&what, "analytics"));
+        if SKETCHES.contains(&name) {
+            return Err(not_built(&format!("`{name}`"), "analytics"));
         }
-        #[cfg(feature = "analytics")]
         let fold = ty.and_then(|f| f.case_fold());
         Ok(match (name, t) {
-            #[cfg(feature = "analytics")]
             ("count", _) if distinct => Fold::Distinct(0, fold),
             #[cfg(feature = "analytics")]
             ("approx_count_distinct", _) => Fold::Hll(None, HLL_COUNT, fold),
@@ -338,7 +329,6 @@ impl Fold {
                 _ => Fold::Avg(0.0, 0),
             },
             ("sum" | "avg", _) => return refuse("an int or float field"),
-            #[cfg(feature = "analytics")]
             ("first" | "last", _) => Fold::Pick(None, name == "last", TextOrder::BYTES),
             (
                 _,
@@ -414,8 +404,9 @@ impl Fold {
                     *best = Some(v.clone());
                 }
             }
+            Fold::Distinct(..) | Fold::Pick(..) => return Ok(false),
             #[cfg(feature = "analytics")]
-            Fold::Distinct(..) | Fold::Pick(..) | Fold::Hll(..) => return Ok(false),
+            Fold::Hll(..) => return Ok(false),
         }
         Ok(true)
     }
@@ -426,7 +417,6 @@ impl Fold {
     /// after, the one held. Out of line, so that the loop every other
     /// aggregate folds in stays the size it was: with these in it, the
     /// fixed aggregates of before took 15% longer.
-    #[cfg(feature = "analytics")]
     #[inline(never)]
     fn row_held(
         &mut self,
@@ -440,8 +430,10 @@ impl Fold {
         if v.is_null() {
             return Ok(());
         }
+        #[cfg_attr(not(feature = "analytics"), allow(unused_variables))]
         let (key, sketched) = (&mut scratch.0, &mut scratch.1);
         match self {
+            #[cfg(feature = "analytics")]
             Fold::Hll(s, kind, fold) => {
                 let s = s.get_or_insert_with(Default::default);
                 let before = s.bytes();
@@ -522,10 +514,7 @@ impl Fold {
 
     fn value(self) -> Value {
         match self {
-            #[cfg(feature = "analytics")]
             Fold::Count(n) | Fold::Distinct(n, _) => Value::Int(n),
-            #[cfg(not(feature = "analytics"))]
-            Fold::Count(n) => Value::Int(n),
             #[cfg(feature = "analytics")]
             Fold::Hll(s, HLL_COUNT, _) => Value::Int(s.map_or(0, |s| s.estimate() as i64)),
             #[cfg(feature = "analytics")]
@@ -535,22 +524,14 @@ impl Fold {
             Fold::SumFloat(s, _) => Value::Float(s),
             Fold::Avg(s, n) => Value::Float(s / n as f64),
             Fold::Extreme(v, ..) => v.unwrap_or(Value::Null),
-            #[cfg(feature = "analytics")]
             Fold::Pick(p, ..) => p.map_or(Value::Null, |p| p.2),
         }
     }
 }
 
-/// The aggregates the `analytics` feature brings, beside `count(distinct
-/// ...)`: refused by name without it.
+/// The sketches the `analytics` feature brings: refused by name without it.
 #[cfg(not(feature = "analytics"))]
-const ANALYTICS: [&str; 5] = [
-    "first",
-    "last",
-    "approx_count_distinct",
-    "hll_accumulate",
-    "hll_combine",
-];
+const SKETCHES: [&str; 3] = ["approx_count_distinct", "hll_accumulate", "hll_combine"];
 
 /// What a fold says of a value it cannot fold: out of line, so that the
 /// fold a value goes through stays small enough to be inlined into the loop.
@@ -569,7 +550,6 @@ fn refused(what: &str, v: &Value) -> Error {
 struct Item {
     start: Fold,
     arg: Option<usize>,
-    #[cfg_attr(not(feature = "analytics"), allow(dead_code))]
     by: Option<usize>,
 }
 
@@ -731,13 +711,7 @@ impl Database {
             collect(&col.expr, &keys, &mut calls);
         }
         // `having`'s own aggregates are folded after the list's, numbered on.
-        // A build without `analytics` refused it where the query was
-        // checked, and asks nothing of it here.
-        let having = if cfg!(feature = "analytics") {
-            sel.having.as_ref()
-        } else {
-            None
-        };
+        let having = sel.having.as_ref();
         if let Some(h) = having {
             collect(h, &keys, &mut calls);
         }
@@ -768,10 +742,8 @@ impl Database {
             let arg = arg.map(|a| rd.bind(a)).transpose()?;
             let ty = arg.and_then(|t| rd.typed(t));
             let by = args.get(1).map(|b| rd.bind(b)).transpose()?;
-            #[cfg_attr(not(feature = "analytics"), allow(unused_mut))]
             let mut start = Fold::new(name, distinct, ty)?;
             // `first(e by k)` orders by `k` as its field compares.
-            #[cfg(feature = "analytics")]
             if let (Fold::Pick(_, _, text), Some(b)) = (&mut start, by) {
                 *text = rd.typed(b).map_or(TextOrder::BYTES, |f| f.text_order());
             }
@@ -847,7 +819,6 @@ impl Database {
         // the browser module. `count(distinct ...)`'s values go in one more
         // of them, each under its item's and its group's numbers.
         let mut index: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
-        #[cfg_attr(not(feature = "analytics"), allow(unused_variables, unused_mut))]
         let mut seen: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
         let mut key_values: Vec<Value> = Vec::new();
         let mut folds: Vec<Fold> = Vec::new();
@@ -884,7 +855,6 @@ impl Database {
         rd.env.push(Value::Bool(true));
         let counted = rd.env.len() - 1;
         let args: Vec<usize> = items.iter().map(|it| it.arg.unwrap_or(counted)).collect();
-        #[cfg_attr(not(feature = "analytics"), allow(unused_variables, unused_mut))]
         let (mut key, mut last_key, mut dkey) = (Vec::new(), Vec::new(), (Vec::<u8>::new(), 0));
         // The group the row before went to, and whether it was the one
         // before that's too: only then is a row's key asked of it first.
@@ -938,16 +908,12 @@ impl Database {
                 }
             };
             let at = g * ni;
-            #[cfg_attr(not(feature = "analytics"), allow(unused_variables))]
             for (i, (fold, &arg)) in folds[at..at + ni].iter_mut().zip(&args).enumerate() {
                 let v = &rd.env[arg];
-                #[cfg(feature = "analytics")]
                 if !fold.add(v)? {
                     let by = items[i].by.map(|b| &rd.env[b]);
                     fold.row_held(v, by, id, (i, g), &mut seen, &mut dkey)?
                 }
-                #[cfg(not(feature = "analytics"))]
-                fold.add(v)?;
             }
         }
         let n = groups;
@@ -967,7 +933,11 @@ impl Database {
         for g in 0..n {
             env.clear();
             env.extend_from_slice(&key_values[g * nk..g * nk + nk]);
-            env.extend(folds.by_ref().take(ni).map(Fold::value));
+            // A loop: `extend` over the folds' `take` was 0.3 KB more of
+            // the browser module.
+            for f in folds.by_ref().take(ni) {
+                env.push(f.value());
+            }
             env.extend_from_slice(params);
             for out in &outs {
                 values.push(match out {
@@ -1009,16 +979,7 @@ impl Database {
             None => n,
         };
         if sel.count {
-            return Ok(ResultSet {
-                columns: vec![COUNT_COLUMN.to_string()],
-                rows: vec![Row {
-                    id: 0,
-                    values: vec![Value::Int(n as i64)],
-                    score: None,
-                }],
-                nested: None,
-                facets: Vec::new(),
-            });
+            return Ok(ResultSet::counted(n, Vec::new()));
         }
         // Groups come out by their keys unless `order` says otherwise, naming
         // the list's columns; the keys break what the order leaves tied.

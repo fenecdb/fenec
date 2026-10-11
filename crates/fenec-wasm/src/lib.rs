@@ -16,11 +16,26 @@ use fenec_core::engine::Kept;
 use fenec_core::json;
 use fenec_core::prelude::*;
 use std::alloc::{alloc, dealloc, Layout};
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::sync::{Arc, Mutex};
 
 thread_local! {
-    static HANDLES: RefCell<Vec<Option<Slot>>> = const { RefCell::new(Vec::new()) };
+    static HANDLES: UnsafeCell<Vec<Option<Slot>>> = const { UnsafeCell::new(Vec::new()) };
+}
+
+/// The handles' table. The module runs on one thread and its exports never
+/// call one another, so no two of them hold it at once; native tests run
+/// each on a thread of its own, with a table of its own. Reached through a
+/// pointer rather than a closure handed to `LocalKey::with` and a
+/// `RefCell`'s borrow: generic over each export's closure, those were 15
+/// copies of the access and the borrow, 2.7 KB of the module and 0.7
+/// brotli, and handed
+/// the closure as `dyn` the work moved into each caller with the glue
+/// around it, 319 bytes more.
+fn table() -> &'static mut Vec<Option<Slot>> {
+    // SAFETY: as above -- nothing else holds the table while an export
+    // runs, and an export lets go of it before it returns.
+    unsafe { &mut *HANDLES.with(UnsafeCell::get) }
 }
 
 /// A handle's database, and the journal `fenec_journal` started for it. In
@@ -222,8 +237,40 @@ unsafe fn str_from<'a>(ptr: *const u8, len: usize) -> std::borrow::Cow<'a, str> 
     let bytes = std::slice::from_raw_parts(ptr, len);
     match std::str::from_utf8(bytes) {
         Ok(s) => s.into(),
-        Err(_) => String::from_utf8_lossy(bytes),
+        Err(_) => lossy(bytes).into(),
     }
+}
+
+/// `bytes` with each sequence that is not UTF-8 replaced by U+FFFD, as
+/// `String::from_utf8_lossy` replaces them -- `Utf8Error` names the same
+/// sequences -- through the check every text goes through anyway: the
+/// standard library's walk was 1.1 KB of the module for text that
+/// `TextEncoder`, which writes what JavaScript hands over, never makes.
+#[cold]
+fn lossy(mut bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    loop {
+        match std::str::from_utf8(bytes) {
+            Ok(s) => {
+                out.push_str(s);
+                return out;
+            }
+            Err(e) => {
+                let (good, bad) = bytes.split_at(e.valid_up_to());
+                // `valid_up_to` is where the text stopped being UTF-8.
+                out.push_str(unsafe { std::str::from_utf8_unchecked(good) });
+                out.push('\u{FFFD}');
+                bytes = bad
+                    .get(e.error_len().unwrap_or(bad.len())..)
+                    .unwrap_or_default();
+            }
+        }
+    }
+}
+
+/// The answer for a handle no database holds.
+fn no_handle(handle: u32) -> String {
+    json::error_to_string(&Error::NotFound(format!("handle {handle}")))
 }
 
 // --------------------------------------------------------- lifecycle
@@ -231,26 +278,22 @@ unsafe fn str_from<'a>(ptr: *const u8, len: usize) -> std::borrow::Cow<'a, str> 
 /// Opens a new in-memory database and returns a handle.
 #[no_mangle]
 pub extern "C" fn fenec_open() -> u32 {
-    HANDLES.with(|h| {
-        let mut h = h.borrow_mut();
-        h.push(Some(Slot {
-            db: Database::new(),
-            journal: None,
-            loaded: 0,
-            chunks: Chunks::default(),
-        }));
-        (h.len() - 1) as u32
-    })
+    let h = table();
+    h.push(Some(Slot {
+        db: Database::new(),
+        journal: None,
+        loaded: 0,
+        chunks: Chunks::default(),
+    }));
+    (h.len() - 1) as u32
 }
 
 /// Closes the database and releases its memory.
 #[no_mangle]
 pub extern "C" fn fenec_close(handle: u32) {
-    HANDLES.with(|h| {
-        if let Some(slot) = h.borrow_mut().get_mut(handle as usize) {
-            *slot = None;
-        }
-    });
+    if let Some(slot) = table().get_mut(handle as usize) {
+        *slot = None;
+    }
 }
 
 #[no_mangle]
@@ -258,15 +301,9 @@ pub extern "C" fn fenec_version() -> *mut u8 {
     boxed(fenec_core::VERSION.as_bytes())
 }
 
-/// Generic, so every caller compiles its own `LocalKey::with`, 17 of them.
-/// Handed its closure as `dyn` through one function that reached `HANDLES`,
-/// they went down to 9 and the module grew by 319 bytes: the work moved into
-/// each caller's closure, with the glue around it.
+/// `f` over the handle's slot, `None` when no database holds it.
 fn with_slot<T>(handle: u32, f: impl FnOnce(&mut Slot) -> T) -> Option<T> {
-    HANDLES.with(|h| {
-        let mut h = h.borrow_mut();
-        h.get_mut(handle as usize).and_then(|s| s.as_mut()).map(f)
-    })
+    table().get_mut(handle as usize)?.as_mut().map(f)
 }
 
 fn with_db<T>(handle: u32, f: impl FnOnce(&mut Database) -> T) -> Option<T> {
@@ -324,7 +361,7 @@ fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
         fenec_abi::execute(db, &p)
     });
     match res {
-        None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
+        None => no_handle(handle),
         Some(r) => fenec_abi::answer(&r),
     }
 }
@@ -370,7 +407,7 @@ pub unsafe extern "C" fn fenec_schema(
         }
     });
     let out = match out {
-        None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
+        None => no_handle(handle),
         Some(Ok(o)) => o,
         Some(Err(e)) => fenec_abi::refused(&e, 0, None),
     };
@@ -397,7 +434,7 @@ pub extern "C" fn fenec_block(handle: u32, op: u32) -> *mut u8 {
         }
     });
     let out = match r {
-        None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
+        None => no_handle(handle),
         Some(Ok(())) => String::from("{\"kind\":\"ok\"}"),
         Some(Err(e)) => json::error_to_string(&e),
     };
@@ -576,19 +613,29 @@ pub unsafe extern "C" fn fenec_load(handle: u32, ptr: *const u8, len: usize) -> 
     }
     let bytes = std::slice::from_raw_parts(ptr, len);
     collate::take_missing();
-    let out = with_slot(handle, |s| {
+    loaded(with_slot(handle, |s| {
         s.loaded = s.db.load(bytes).ok()?;
-        let missing = s.db.collation_missing() | collate::take_missing();
-        if missing != 0 {
-            let mut empty = Database::new();
-            empty.set_change_capacity(s.db.change_capacity());
-            if let Some(j) = &s.journal {
-                empty.set_sink(Box::new(JournalSink(Arc::clone(j))));
-            }
-            s.db = empty;
+        Some(missing(s))
+    }))
+}
+
+/// The collation data a load found missing, the database emptied when it
+/// did: its `@sorted` indexes were built without it.
+fn missing(s: &mut Slot) -> u32 {
+    let missing = s.db.collation_missing() | collate::take_missing();
+    if missing != 0 {
+        let mut empty = Database::new();
+        empty.set_change_capacity(s.db.change_capacity());
+        if let Some(j) = &s.journal {
+            empty.set_sink(Box::new(JournalSink(Arc::clone(j))));
         }
-        Some(missing)
-    });
+        s.db = empty;
+    }
+    missing
+}
+
+/// What `fenec_load` and `fenec_load_owned` answer, written once for both.
+fn loaded(out: Option<Option<u32>>) -> i32 {
     match out.flatten() {
         Some(0) => 0,
         Some(missing) => (2 | missing << 2) as i32,
@@ -610,24 +657,10 @@ pub unsafe extern "C" fn fenec_load_owned(handle: u32, ptr: *mut u8, len: usize)
     let bytes: Vec<u8> = unsafe { Vec::from_raw_parts(ptr, len, len) };
     let base: fenec_core::store::Base = Arc::new(bytes);
     collate::take_missing();
-    let out = with_slot(handle, |s| {
+    loaded(with_slot(handle, |s| {
         s.loaded = s.db.load_mapped(base).ok()?;
-        let missing = s.db.collation_missing() | collate::take_missing();
-        if missing != 0 {
-            let mut empty = Database::new();
-            empty.set_change_capacity(s.db.change_capacity());
-            if let Some(j) = &s.journal {
-                empty.set_sink(Box::new(JournalSink(Arc::clone(j))));
-            }
-            s.db = empty;
-        }
-        Some(missing)
-    });
-    match out.flatten() {
-        Some(0) => 0,
-        Some(missing) => (2 | missing << 2) as i32,
-        None => 1,
-    }
+        Some(missing(s))
+    }))
 }
 
 /// The bytes the last `fenec_load` took: all of them, or those before a
@@ -680,6 +713,36 @@ pub extern "C" fn fenec_stats(handle: u32) -> *mut u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_that_is_not_utf8_reads_as_from_utf8_lossy_reads_it() {
+        let mut cases: Vec<Vec<u8>> = vec![
+            b"\xff".to_vec(),
+            b"a\xffb".to_vec(),
+            b"\xe2\x82".to_vec(),
+            b"x\xe2\x82".to_vec(),
+            b"\xe2\x82y\xf0\x9f\x98".to_vec(),
+            b"\xed\xa0\x80".to_vec(),
+            b"\xc0\x80\xf8\x88\x80\x80\x80".to_vec(),
+            "ok \u{1F600}".as_bytes().to_vec(),
+        ];
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        for _ in 0..5_000 {
+            let mut b = Vec::new();
+            for _ in 0..(x % 12) {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                b.push([b'a', 0x80, 0xc3, 0xa9, 0xe2, 0xf0, 0x9f, 0xff][(x % 8) as usize]);
+            }
+            cases.push(b);
+        }
+        for b in &cases {
+            let want = String::from_utf8_lossy(b);
+            let got = unsafe { str_from(b.as_ptr(), b.len()) };
+            assert_eq!(got, want, "{b:?}");
+        }
+    }
 
     #[test]
     fn query_through_abi() {

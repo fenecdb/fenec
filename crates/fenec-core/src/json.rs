@@ -576,16 +576,19 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
                 // A whole number past an `i64` is the `f64` it says, as the
                 // writer writes a float that large without an exponent:
                 // refused, `1e300` written out did not read back.
-                match text.parse::<i64>() {
-                    Ok(n) => Ok(Value::Int(n)),
-                    Err(_) => crate::num::parse_f64(text)
+                match crate::num::parse_i64(text) {
+                    Some(n) => Ok(Value::Int(n)),
+                    None => crate::num::parse_f64(text)
                         .map(Value::Float)
                         .ok_or_else(|| Error::Query(format!("invalid number `{text}`"))),
                 }
             }
         }
         _ => {
-            let other = char_at(s, *i).unwrap_or(char::REPLACEMENT_CHARACTER);
+            // The character as the text holds it, not a `char` formatted.
+            let other = char_at(s, *i).map_or("\u{FFFD}", |c| {
+                s.get(*i..*i + c.len_utf8()).unwrap_or_default()
+            });
             Err(Error::Query(format!("unexpected JSON character `{other}`")))
         }
     }
@@ -642,7 +645,7 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
                 let (text, is_float) = number_at(s, &mut j);
                 match is_float {
                     true => crate::num::parse_f64(text)?,
-                    false => text.parse::<i64>().ok()? as f64,
+                    false => crate::num::parse_i64(text)? as f64,
                 }
             }
         };

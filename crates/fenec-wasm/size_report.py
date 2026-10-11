@@ -551,9 +551,12 @@ def why(root, target, pattern):
     whose path matches `pattern`, and the way -- what calls what, whose
     address is taken where, which vtable points at it. The module is linked
     with its relocations, in place of `.cargo/config.toml`'s compressed ones,
-    which the linker cannot write together."""
+    which the linker cannot write together: in `CARGO_ENCODED_RUSTFLAGS`,
+    which takes the place of every other source -- Cargo joins the target's
+    `RUSTFLAGS` variable to the config's list, and the link was handed both."""
     env = dict(os.environ, CARGO_TARGET_DIR=target, CARGO_PROFILE_WASM_STRIP="false",
-               CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-C target-feature=+simd128 -C link-arg=--emit-relocs")
+               CARGO_ENCODED_RUSTFLAGS="\x1f".join(["-C", "target-feature=+simd128", "-C",
+                                                    "link-arg=--emit-relocs"]))
     subprocess.run([CARGO, "build", "-q", "-p", "fenec-wasm", "--target", "wasm32-unknown-unknown",
                     "--profile", "wasm"], check=True, cwd=root, env=env)
     with open(os.path.join(target, WASM), "rb") as f:

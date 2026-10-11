@@ -10,7 +10,7 @@ npm, and the `fenec-web` bundle of each release.
 | `client.js` | the two of them, and nothing that could pull in the engine, sync or storage: `@fenecdb/web/client`, 8 KB brotli in an app's bundle |
 | `fenec.d.ts`, `client.d.ts` | their types |
 | `schema.js`, `schema.d.ts` | a schema declared in code, Drizzle's way: `@fenecdb/web/schema` |
-| `fenec.wasm` | the engine with every index and the schema check: 229 KB brotli |
+| `fenec.wasm` | the engine with every index and the schema check: 224 KB brotli |
 | `collate/` | the collation data the module fetches beside it, a chunk a group of scripts |
 
 ```js
@@ -60,8 +60,8 @@ const db = await Fenec.open(await file('fenec.wasm'), {
 `@fenecdb/web/client` and loads no module; a database in the page, or a
 synced replica, loads `fenec.wasm`, with every feature and the schema
 check. A page that needs fewer can build its own module with them alone --
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none (145 KB
-brotli against 229), and `SCHEMA=0` leaves the schema check out (9.6 KB
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none (142 KB
+brotli against 224), and `SCHEMA=0` leaves the schema check out (9.5 KB
 brotli) -- and the file is the same either way: a store one build wrote
 opens in the other. Without the graph a `near` measures every vector, as
 `exact` does; without the text index a `match` throws a `FenecError`

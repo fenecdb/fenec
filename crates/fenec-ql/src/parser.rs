@@ -264,7 +264,14 @@ impl Parser {
     }
 
     fn err<T>(&self, msg: impl std::fmt::Display) -> Result<T> {
-        Err(Error::Query(format!("position {}: {msg}", self.pos())))
+        Err(self.error(&msg))
+    }
+
+    /// What [`Self::err`] answers with, once: generic over its message and
+    /// what it answers, `err` was ten copies of the formatting.
+    #[inline(never)]
+    fn error(&self, msg: &dyn std::fmt::Display) -> Error {
+        Error::Query(format!("position {}: {msg}", self.pos()))
     }
 
     fn expect(&mut self, t: Tok) -> Result<()> {
@@ -1946,35 +1953,32 @@ impl Parser {
                     self.next();
                 }
                 self.expect(Tok::RBracket)?;
-                // If every element is a constant number, produce a vector
-                // directly, so embedding lists become Value::Vector in one go.
-                if !self.exact
-                    && !items.is_empty()
-                    && items
-                        .iter()
-                        .all(|e| matches!(e, Expr::Lit(Value::Int(_)) | Expr::Lit(Value::Float(_))))
-                {
-                    let v: Vec<f32> = items
-                        .iter()
-                        .map(|e| match e {
-                            Expr::Lit(Value::Int(i)) => *i as f32,
-                            Expr::Lit(Value::Float(f)) => *f as f32,
-                            _ => unreachable!(),
-                        })
-                        .collect();
+                // Constants alone, moved out in one pass: through iterator
+                // chains, the vector's and the list's, this was 1.2 KB of the
+                // browser module.
+                let mut vals = Vec::with_capacity(items.len());
+                let mut numbers = !self.exact && !items.is_empty();
+                for e in items {
+                    let Expr::Lit(v) = e else {
+                        return self.err("only constant values can be used inside a list");
+                    };
+                    numbers &= matches!(v, Value::Int(_) | Value::Float(_));
+                    vals.push(v);
+                }
+                // Every element a constant number: a vector, so embedding
+                // lists become Value::Vector in one go.
+                if numbers {
+                    let mut v = Vec::with_capacity(vals.len());
+                    for x in &vals {
+                        v.push(match x {
+                            Value::Int(i) => *i as f32,
+                            Value::Float(f) => *f as f32,
+                            _ => continue,
+                        });
+                    }
                     return Ok(Expr::Lit(Value::Vector(v)));
                 }
-                let lits: Option<Vec<Value>> = items
-                    .iter()
-                    .map(|e| match e {
-                        Expr::Lit(v) => Some(v.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                match lits {
-                    Some(vals) => Ok(Expr::Lit(Value::List(vals))),
-                    None => self.err("only constant values can be used inside a list"),
-                }
+                Ok(Expr::Lit(Value::List(vals)))
             }
             Tok::Str(s) => {
                 self.next();
