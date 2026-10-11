@@ -52,10 +52,6 @@ enum Calc {
     Expr(Expr),
 }
 
-fn unbound(i: usize) -> Error {
-    Error::Query(format!("parameter ${} is not bound", i + 1))
-}
-
 /// A row's id for what `eval` reads of it; its fields are parameters.
 struct IdRow(DocId);
 impl RowAccess for IdRow {
@@ -974,12 +970,13 @@ impl Database {
             }
             flat.extend_from_slice(&key_values[g * nk..g * nk + nk]);
         }
-        let k = sel.limit.map_or(n, |l| l.saturating_add(sel.offset)).min(n);
-        let mut rows = Vec::with_capacity(k.saturating_sub(sel.offset));
-        for g in order_rows(&flat, w, n, &order, k)
-            .into_iter()
-            .skip(sel.offset)
-        {
+        let offset = sel.offset.at(params);
+        let k = sel
+            .limit
+            .map_or(n, |l| l.at(params).saturating_add(offset))
+            .min(n);
+        let mut rows = Vec::with_capacity(k.saturating_sub(offset));
+        for g in order_rows(&flat, w, n, &order, k).into_iter().skip(offset) {
             rows.push(Row {
                 id: 0,
                 values: values[g * width..g * width + width].to_vec(),

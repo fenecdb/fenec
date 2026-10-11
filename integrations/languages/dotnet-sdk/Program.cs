@@ -10,14 +10,14 @@ await db.ExecAsync("create collection if not exists docs (title text, embed vect
 await db.ExecAsync("put docs {title: $1, embed: $2}", ["Night at the oasis", new[] { 0.1f, 0.2f, 0.3f }]);
 await db.ExecAsync("put docs {title: $1, embed: $2}", ["Dunes", new[] { 0.9f, 0.1f, 0.0f }]);
 
-var hits = await db.QueryAsync<Hit>("get docs select title near embed $1 limit 5", [new[] { 0.1f, 0.2f, 0.3f }]);
+var hits = await db.QueryAsync<Hit>("get docs select title near embed $1 limit $2", [new[] { 0.1f, 0.2f, 0.3f }, 5]);
 var titles = hits.Select(h => h.Title).ToArray();
 if (!titles.SequenceEqual(["Night at the oasis", "Dunes"]))
     throw new Exception($"near answered {string.Join(", ", titles)}");
 
 // The same through the query builder, which writes that statement itself.
 var query = db.From("docs").Select("title").Near("embed", new[] { 0.1f, 0.2f, 0.3f }).Limit(5);
-if (query.ToFenecQL().Text != "get docs select title near embed $1 limit 5")
+if (query.ToFenecQL().Text != "get docs select title near embed $1 limit $2")
     throw new Exception($"the builder wrote {query.ToFenecQL().Text}");
 var built = await query.RowsAsync<Hit>();
 if (!built.SequenceEqual(hits))

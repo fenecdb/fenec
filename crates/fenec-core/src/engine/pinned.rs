@@ -220,15 +220,23 @@ impl Database {
         {
             return None;
         }
-        let page = |l: usize| l.saturating_add(sel.offset) >= self.pin_at;
+        // A page by the numbers it will read: `limit $1` is as short as
+        // `limit 20` when handed 20. A count refused is refused under the
+        // lock, where the read runs as any other.
+        let offset = sel.offset.of("offset", params).ok()?;
+        let limit = match sel.limit {
+            Some(l) => Some(l.of("limit", params).ok()?),
+            None => None,
+        };
+        let page = |l: usize| l.saturating_add(offset) >= self.pin_at;
         let mut rows = !sel.aggregate.is_empty()
             || !sel.group.is_empty()
             || !sel.facets.is_empty()
             || !sel.order.is_empty()
             || match &sel.filter {
                 // Counted without one, the ids are listed and nothing read.
-                None => !sel.count && sel.limit.is_none_or(page),
-                Some(_) => sel.count || sel.limit.is_none_or(page),
+                None => !sel.count && limit.is_none_or(page),
+                Some(_) => sel.count || limit.is_none_or(page),
             };
         let big = c.store.len() >= self.pin_at;
         if alone && !(rows && big) && !sel.has_subquery() {

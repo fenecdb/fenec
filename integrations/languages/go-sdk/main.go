@@ -24,7 +24,7 @@ func main() {
 	must(db.Exec(ctx, "put docs {title: $1, embed: $2}", "Night at the oasis", []float32{0.1, 0.2, 0.3}))
 	must(db.Exec(ctx, "put docs {title: $1, embed: $2}", "Dunes", []float32{0.9, 0.1, 0.0}))
 
-	hits, err := fenecdb.QueryAs[Hit](ctx, db, "get docs select title near embed $1 limit 5", []float32{0.1, 0.2, 0.3})
+	hits, err := fenecdb.QueryAs[Hit](ctx, db, "get docs select title near embed $1 limit $2", []float32{0.1, 0.2, 0.3}, 5)
 	if err != nil {
 		fail("%v", err)
 	}
@@ -38,7 +38,7 @@ func main() {
 
 	// The same through the query builder, which writes that statement itself.
 	query := db.From("docs").Select("title").Near("embed", []float32{0.1, 0.2, 0.3}).Limit(5)
-	if text, _, err := query.ToFenecQL(); err != nil || text != "get docs select title near embed $1 limit 5" {
+	if text, _, err := query.ToFenecQL(); err != nil || text != "get docs select title near embed $1 limit $2" {
 		fail("the builder wrote %q, %v", text, err)
 	}
 	built, err := fenecdb.RowsAs[Hit](ctx, query)

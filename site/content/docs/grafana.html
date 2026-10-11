@@ -128,7 +128,8 @@ beside it, never in its text.</p>
     epoch milliseconds, which a timestamp field compares with as it is;
     <b><code>$__interval_ms</code></b> is the interval Grafana picks for the
     panel's width, which <code>bucket</code> takes as milliseconds;
-    <code>$__max_data_points</code> its width in points. The backend works
+    <code>$__max_data_points</code> its width in points, which
+    <code>limit $__max_data_points</code> holds a series to. The backend works
     them out from the request, so an alert rule has them as a panel
     does.</li>
   <li><b>A dashboard variable</b> is <code>$sym</code> or

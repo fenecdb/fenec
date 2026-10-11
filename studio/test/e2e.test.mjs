@@ -347,7 +347,7 @@ test('scrolling 100 000 rows keeps the rows in view and reads a block a step', a
   for (const r of steps.reads) {
     // A block of 100 rows, by its offset or after the last id read; never
     // the collection whole, and no count.
-    assert.match(r.body.query, /^get orders( where id > \$1)? limit 100( offset \d+)?$/, r.body.query);
+    assert.match(r.body.query, /^get orders( where id > \$1)? limit \$\d( offset \$\d)?$/, r.body.query);
     byStep.set(r.step, (byStep.get(r.step) ?? 0) + 1);
   }
   const most = Math.max(0, ...byStep.values());

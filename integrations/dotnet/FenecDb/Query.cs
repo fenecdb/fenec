@@ -396,8 +396,9 @@ internal static class Builder
         _ => throw Refuse($"unknown collation: {Quote(name)}; there are 'und' and 'tr'"),
     };
 
-    // limit, offset, ef and the rest are literals in FenecQL, never parameters: a whole number JavaScript holds
-    // exactly.
+    // A count, a whole number JavaScript holds exactly. limit, offset and a facet's top go as parameters, so a
+    // page of any size or place is one text; ef, candidates, k and a snippet's words are written in, as FenecQL
+    // takes them.
     public static long Whole(long n, string what) =>
         n is >= 0 and <= (1L << 53) - 1 ? n : throw Refuse($"{what} must be a non-negative integer: {n}");
 
@@ -991,15 +992,15 @@ public sealed class Query
             if (fuse.Candidates is { } c) sql.Append($" candidates {c}");
         }
         AppendOrder(sql, s.Order);
-        if (s.Limit is { } limit) sql.Append($" limit {limit}");
-        if (s.Offset > 0) sql.Append($" offset {s.Offset}");
+        if (s.Limit is { } limit) sql.Append(" limit ").Append(bind.Bind(limit));
+        if (s.Offset > 0) sql.Append(" offset ").Append(bind.Bind(s.Offset));
         // Before a lookup, whose clauses are the children's.
         sql.Append(s.Require);
         if (s.Count) sql.Append(" count");
         if (s.Facets.Count > 0)
             sql.Append(" facet ").Append(string.Join(", ",
                 s.Facets.Select(f => f.Field
-                    + (f.Top is { } top ? $" top {top}" : "")
+                    + (f.Top is { } top ? " top " + bind.Bind(top) : "")
                     + (f.Ranges is { } r ? $" ranges [{string.Join(", ", r)}]" : "")
                     + (f.Disjunctive ? " disjunctive" : ""))));
         // Terminal, so every clause after it is the child's -- and last, so its parameters come after the
@@ -1012,8 +1013,8 @@ public sealed class Query
             if (l.Project is not null) sql.Append(" select ").Append(string.Join(", ", l.Project));
             if (WhereOf(l.Cond, bind) is { } w) sql.Append(" where ").Append(w);
             AppendOrder(sql, l.Order);
-            if (l.Limit is { } n) sql.Append($" limit {n}");
-            if (l.Offset > 0) sql.Append($" offset {l.Offset}");
+            if (l.Limit is { } n) sql.Append(" limit ").Append(bind.Bind(n));
+            if (l.Offset > 0) sql.Append(" offset ").Append(bind.Bind(l.Offset));
         }
         return (sql.ToString(), bind.Params);
     }
@@ -1065,7 +1066,8 @@ public sealed class Query
     }
 
     // " require n" for a write's require: the rows it must write, a whole number from 0 written into the text
-    // -- not a parameter, as limit is not, so a statement keeps its shape.
+    // -- FenecQL takes no parameter there: the count is what the statement guards, a constant of the code,
+    // where a page's limit and offset change with each request and go as parameters.
     static string RequireClause(long? n) => n switch
     {
         null => "",
@@ -1073,13 +1075,13 @@ public sealed class Query
         _ => $" require {n}",
     };
 
-    // An update's or a delete's " order ... limit n returning ...": the rows it picks, and whether it answers
+    // An update's or a delete's " order ... limit $n returning ...": the rows it picks, and whether it answers
     // them, under the fields named -- "*" for every one.
-    string Pick(IReadOnlyList<string>? returning)
+    string Pick(IReadOnlyList<string>? returning, Binder bind)
     {
         var sql = new StringBuilder();
         AppendOrder(sql, _s.Order);
-        if (_s.Limit is { } n) sql.Append($" limit {n}");
+        if (_s.Limit is { } n) sql.Append(" limit ").Append(bind.Bind(n));
         if (returning is null) return sql.ToString();
         if (returning.Count == 0) throw Builder.Refuse("returning names the fields it answers, or * for every one");
         if (returning.Contains("*"))
@@ -1122,7 +1124,7 @@ public sealed class Query
         var bind = new Binder();
         var body = Builder.RenderDoc(patch, bind, "update");
         var where = RequireFilter("update", all, bind);
-        return ($"set {_s.Collection} {body}{where}{Pick(returning)}{RequireClause(require)}", bind.Params);
+        return ($"set {_s.Collection} {body}{where}{Pick(returning, bind)}{RequireClause(require)}", bind.Params);
     }
 
     /// <summary>The upsert, <c>put ... if absent else set {patch}</c>, not sent: a document whose id or first
@@ -1149,7 +1151,7 @@ public sealed class Query
         AssertPlain("delete");
         var bind = new Binder();
         var where = RequireFilter("delete", all, bind);
-        return ($"del {_s.Collection}{where}{Pick(returning)}{RequireClause(require)}", bind.Params);
+        return ($"del {_s.Collection}{where}{Pick(returning, bind)}{RequireClause(require)}", bind.Params);
     }
 
     FenecClient Client => _s.Client ?? throw Builder.Refuse(

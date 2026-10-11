@@ -268,7 +268,7 @@ public sealed class BuilderTests(Servers servers)
         var l = b.Limit(3);
         Assert.Equal("get articles where year >= $1", b.ToFenecQL().Text);
         Assert.Equal("get articles where year >= $1 and tags has $2", a.ToFenecQL().Text);
-        Assert.Equal("get articles where year >= $1 limit 3", l.ToFenecQL().Text);
+        Assert.Equal("get articles where year >= $1 limit $2", l.ToFenecQL().Text);
         Assert.Throws<FenecQueryException>(() => Query.From("t; drop collection x"));
         await Assert.ThrowsAsync<FenecQueryException>(() => Query.From("t").RowsAsync());
     }
@@ -326,7 +326,7 @@ public sealed class BuilderTests(Servers servers)
                 $"get {name} select title where lang = $1 and tags has $2", ["en", "sand"]),
             (shelf.Select("title").Where(Cond.Or(Cond.Cmp("lang", "=", "tr"), Cond.Cmp("year", "<", 2022))).Order("title"),
                 $"get {name} select title where lang = $1 or year < $2 order title asc", ["tr", 2022]),
-            (shelf.Select("title").Near("embed", v).Limit(2), $"get {name} select title near embed $1 limit 2", [v]),
+            (shelf.Select("title").Near("embed", v).Limit(2), $"get {name} select title near embed $1 limit $2", [v, 2]),
             (shelf.Select("title").Match("body", "oasis stars"), $"get {name} select title match body $1", ["oasis stars"]),
             (shelf.Select("title").Where("id", "in", new[] { 1, 3 }).Lookup(notes, on: "doc_id", select: ["stars"], order: [new("stars", "desc")]),
                 $"get {name} select title where id in [$1, $2] lookup {notes} on doc_id select stars order stars desc", [1, 3]),

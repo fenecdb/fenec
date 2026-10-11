@@ -66,3 +66,42 @@ fn statements_are_counted_by_their_shape() {
     let json = stats(&mut c);
     assert!(!json.contains(put), "{json}");
 }
+
+/// A page's size and offset as parameters are one statement whatever the
+/// page -- one shape here, as the same pages written into the text were
+/// already, since a literal is shaped as a place -- and the answers are
+/// the pages the numbers written give.
+#[test]
+fn every_page_size_is_one_shape() {
+    let path = tmp("statements", "pages.fenec");
+    let s = start(&["--http-token", TOKEN, "--file", path.to_str().unwrap()]);
+    let mut c = s.http().with_token(TOKEN);
+    c.run("create collection t (n int)");
+    c.run("put t [{n: 1}, {n: 2}, {n: 3}, {n: 4}, {n: 5}, {n: 6}]");
+    let page = "get t select n where n > $1 order n limit $2 offset $3";
+    for (limit, offset) in [(2, 0), (3, 1), (10, 4)] {
+        let body = format!(r#"{{"query":"{page}","params":[1,{limit},{offset}]}}"#);
+        let a = c.ask("POST", "/query", &body);
+        assert_eq!(a.status, 200, "{}", a.body);
+        let written = c.run(&format!(
+            "get t select n where n > 1 order n limit {limit} offset {offset}"
+        ));
+        assert_eq!(a.body, written, "limit {limit} offset {offset}");
+    }
+    let json = stats(&mut c);
+    assert_eq!(field(&json, page, "calls"), Some("6"), "{json}");
+    assert_eq!(json.matches("order n limit").count(), 1, "{json}");
+    // Refused as the number written is, 400 in the literal's words.
+    let a = c.ask(
+        "POST",
+        "/query",
+        &format!(r#"{{"query":"{page}","params":[1,-2,0]}}"#),
+    );
+    assert_eq!(a.status, 400, "{}", a.body);
+    assert!(
+        a.body
+            .contains("`limit` takes a whole number from 0, not -2"),
+        "{}",
+        a.body
+    );
+}

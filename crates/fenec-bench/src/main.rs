@@ -233,7 +233,7 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
             ef: None,
             exact,
         }),
-        limit: Some(10),
+        limit: Some(Count::N(10)),
         ..Default::default()
     };
 

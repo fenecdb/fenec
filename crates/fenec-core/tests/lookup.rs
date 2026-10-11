@@ -144,7 +144,7 @@ fn a_childless_parent_keeps_its_row() {
 fn limit_and_offset_are_per_parent() {
     let db = fixture();
     let mut l = lookup("product_id", "id");
-    l.limit = Some(2);
+    l.limit = Some(Count::N(2));
     let (_, n) = nested(&db, &plan(l));
     assert_eq!(
         n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
@@ -152,8 +152,8 @@ fn limit_and_offset_are_per_parent() {
     );
 
     let mut l = lookup("product_id", "id");
-    l.offset = 1;
-    l.limit = Some(1);
+    l.offset = Count::N(1);
+    l.limit = Some(Count::N(1));
     let (_, n) = nested(&db, &plan(l));
     assert_eq!(
         n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
@@ -340,15 +340,15 @@ fn a_bounded_child_order_agrees_with_a_full_sort() {
     for asc in [true, false] {
         let mut full = lookup_c();
         full.order = vec![Sort::new("k", asc)];
-        full.limit = Some(10_000);
+        full.limit = Some(Count::N(10_000));
         let reference = ids(full);
         assert_eq!(reference.len(), 400);
 
         for (offset, limit) in [(0, 1), (0, 3), (0, 57), (0, 58), (5, 10), (57, 3), (399, 5)] {
             let mut l = lookup_c();
             l.order = vec![Sort::new("k", asc)];
-            l.offset = offset;
-            l.limit = Some(limit);
+            l.offset = Count::N(offset);
+            l.limit = Some(Count::N(limit));
             let want: Vec<u64> = reference.iter().copied().skip(offset).take(limit).collect();
             assert_eq!(ids(l), want, "asc={asc} offset={offset} limit={limit}");
         }
@@ -357,11 +357,11 @@ fn a_bounded_child_order_agrees_with_a_full_sort() {
     // Two keys, the second breaking ties of the first.
     let mut full = lookup_c();
     full.order = vec![Sort::new("k", false), Sort::new("tag", true)];
-    full.limit = Some(10_000);
+    full.limit = Some(Count::N(10_000));
     let reference = ids(full);
     let mut l = lookup_c();
     l.order = vec![Sort::new("k", false), Sort::new("tag", true)];
-    l.limit = Some(9);
+    l.limit = Some(Count::N(9));
     assert_eq!(ids(l), reference[..9].to_vec());
 }
 
@@ -442,7 +442,7 @@ fn required_fills_the_page_before_limit_applies() {
     ));
     l.required = true;
     let mut sel = plan(l);
-    sel.limit = Some(2);
+    sel.limit = Some(Count::N(2));
     let (parents, n) = nested(&db, &sel);
     assert_eq!(parents.rows.len(), 2, "the page must be full");
     assert_eq!(
@@ -459,7 +459,7 @@ fn a_child_offset_does_not_undo_required() {
     let db = fixture();
     let mut l = lookup("product_id", "id");
     l.required = true;
-    l.offset = 99;
+    l.offset = Count::N(99);
     let (parents, n) = nested(&db, &plan(l));
     // Products 1, 2 and 4 have reviews; 3 does not.
     assert_eq!(

@@ -314,7 +314,13 @@ impl Drop for Server {
 /// fenec-server over `file`, its HTTP on `http`, with `extra` flags;
 /// `target` names the make target that builds it.
 pub fn start_fenec(file: &Path, http: u16, target: &str, extra: &[&str]) -> Server {
-    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/fenec-server");
+    // `FENECBENCH_SERVER` names another build -- one with `--features
+    // timing`, or another commit's -- to hold beside this one.
+    let bin = std::env::var_os("FENECBENCH_SERVER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/fenec-server")
+        });
     let child = Command::new(&bin)
         .args(["--http", &format!("127.0.0.1:{http}")])
         .args(["--file", file.to_str().unwrap(), "--no-checkpoint"])

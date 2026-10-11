@@ -278,8 +278,10 @@ String _jsNumber(num n) {
   return n.toString();
 }
 
-/// `limit`, `offset`, `ef` and the rest are literals, never parameters: a
-/// whole number JavaScript holds exactly.
+/// A count, a whole number JavaScript holds exactly. `limit`, `offset` and a
+/// facet's `top` go as parameters, so a page of any size or place is one
+/// text; `ef`, `candidates`, `k` and a snippet's words are written in, as
+/// FenecQL takes them.
 int _whole(int n, String what) =>
     n >= 0 && n <= 9007199254740991 ? n : throw _refuse('$what must be a non-negative integer: $n');
 
@@ -897,15 +899,15 @@ class Query {
       if (_fuse.$2 != null) sql.write(' candidates ${_fuse.$2}');
     }
     _orderText(sql, _order);
-    if (_limit != null) sql.write(' limit $_limit');
-    if (_offset > 0) sql.write(' offset $_offset');
+    if (_limit != null) sql.write(' limit ${bind(_limit)}');
+    if (_offset > 0) sql.write(' offset ${bind(_offset)}');
     // Before a lookup, whose clauses are the children's.
     sql.write(_require);
     if (_count) sql.write(' count');
     if (_facets.isNotEmpty) {
       sql.write(' facet ${_facets.map((f) => [
             f.$1,
-            if (f.$2 != null) ' top ${f.$2}',
+            if (f.$2 != null) ' top ${bind(f.$2)}',
             if (f.$3 != null) ' ranges [${f.$3!.join(', ')}]',
             if (f.$4) ' disjunctive',
           ].join()).join(', ')}');
@@ -920,8 +922,8 @@ class Query {
       final lw = _whereOf(l.cond, bind);
       if (lw != null) sql.write(' where $lw');
       _orderText(sql, l.order);
-      if (l.limit != null) sql.write(' limit ${l.limit}');
-      if (l.offset > 0) sql.write(' offset ${l.offset}');
+      if (l.limit != null) sql.write(' limit ${bind(l.limit)}');
+      if (l.offset > 0) sql.write(' offset ${bind(l.offset)}');
     }
     return sql.toString();
   }
@@ -988,20 +990,23 @@ class Query {
   }
 
   // `require n`: the write is refused, and put back whole, unless it
-  // wrote exactly n rows -- a check and its write in one statement.
+  // wrote exactly n rows -- a check and its write in one statement. A
+  // number written in, never a parameter: the count is what the statement
+  // guards, a constant of the code, where a page's `limit` and `offset`
+  // change with each request and go as parameters.
   static String _requireClause(int? n) {
     if (n == null) return '';
     if (n < 0) throw _refuse('require takes a count of rows, a whole number from 0 (got $n)');
     return ' require $n';
   }
 
-  // An update's or a delete's ` order ... limit n returning ...`: the rows
+  // An update's or a delete's ` order ... limit $n returning ...`: the rows
   // it picks, and whether it answers them, under the fields named -- `*`
   // for every one.
-  String _pick(List<String>? returning) {
+  String _pick(List<String>? returning, String Function(Object?) bind) {
     final sql = StringBuffer();
     _orderText(sql, _order);
-    if (_limit != null) sql.write(' limit $_limit');
+    if (_limit != null) sql.write(' limit ${bind(_limit)}');
     if (returning == null) return sql.toString();
     if (returning.isEmpty) throw _refuse('returning names the fields it answers, or * for every one');
     if (returning.contains('*')) {
@@ -1059,7 +1064,7 @@ class Query {
     final bind = _binder(params);
     final body = _renderDoc(patch, bind);
     final filter = _requireFilter('update', all, bind);
-    return (text: 'set $collection $body$filter${_pick(returning)}${_requireClause(require)}', params: params);
+    return (text: 'set $collection $body$filter${_pick(returning, bind)}${_requireClause(require)}', params: params);
   }
 
   /// The upsert, `put ... if absent else set {patch}`, not run: a document
@@ -1089,8 +1094,9 @@ class Query {
   Statement toDelete({bool all = false, int? require, List<String>? returning}) {
     _assertPlain('delete');
     final params = <Object?>[];
-    final filter = _requireFilter('delete', all, _binder(params));
-    return (text: 'del $collection$filter${_pick(returning)}${_requireClause(require)}', params: params);
+    final bind = _binder(params);
+    final filter = _requireFilter('delete', all, bind);
+    return (text: 'del $collection$filter${_pick(returning, bind)}${_requireClause(require)}', params: params);
   }
 
   // ------------------------------------------------------------- running

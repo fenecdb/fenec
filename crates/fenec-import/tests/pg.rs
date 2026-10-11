@@ -183,7 +183,7 @@ fn pgvector_columns_become_vectors() {
                 ef: None,
                 exact: true,
             }),
-            limit: Some(1),
+            limit: Some(Count::N(1)),
             ..Default::default()
         }))
         .unwrap()

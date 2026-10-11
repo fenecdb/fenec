@@ -29,7 +29,7 @@ query('create collection if not exists docs (title text, embed vector<3> @hnsw(c
 query('put docs {title: $1, embed: $2}', ['Night at the oasis', [0.1, 0.2, 0.3]]);
 query('put docs {title: $1, embed: $2}', ['Dunes', [0.9, 0.1, 0.0]]);
 
-$rows = query('get docs select title near embed $1 limit 5', [[0.1, 0.2, 0.3]]);
+$rows = query('get docs select title near embed $1 limit $2', [[0.1, 0.2, 0.3], 5]);
 $titles = array_column($rows, 'title');
 if ($titles !== ['Night at the oasis', 'Dunes']) {
     fwrite(STDERR, 'near answered ' . json_encode($rows) . "\n");

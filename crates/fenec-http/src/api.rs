@@ -192,8 +192,8 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
                     .map_err(|e| Error::Query(format!("`group`: {e}")))?
             }
             "order" => sel.order = order(schema, v)?,
-            "limit" => sel.limit = Some(number(v, "limit")?),
-            "offset" => sel.offset = number(v, "offset")?,
+            "limit" => sel.limit = Some(Count::N(number(v, "limit")?)),
+            "offset" => sel.offset = Count::N(number(v, "offset")?),
             "count" => sel.count = truthy(v),
             // `facet=brand top 5,color`: FenecQL's list, read by its parser.
             "facet" => {
@@ -273,8 +273,8 @@ fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> R
             "parent" => l.parent_field = field_of(parent, raw)?,
             "select" => l.project = Some(projection(child, raw)?),
             "order" => l.order = order(child, raw)?,
-            "limit" => l.limit = Some(number(raw, "limit")?),
-            "offset" => l.offset = number(raw, "offset")?,
+            "limit" => l.limit = Some(Count::N(number(raw, "limit")?)),
+            "offset" => l.offset = Count::N(number(raw, "offset")?),
             "required" => l.required = truthy(raw),
             "where" => parts.push(parse_expr(child, raw)?),
             other => parts.push(condition(child, other, raw)?),
@@ -445,7 +445,7 @@ fn parse_expr(schema: &Schema, raw: &str) -> Result<Expr> {
         || sel.near.is_some()
         || !sel.order.is_empty()
         || sel.limit.is_some()
-        || sel.offset != 0
+        || !sel.offset.is_zero()
         || sel.count
     {
         return Err(Error::Query(
@@ -722,8 +722,8 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
             ef: as_usize("ef")?,
             exact: matches!(get("exact"), Some(Value::Bool(true))),
         }),
-        limit: as_usize("limit")?,
-        offset: as_usize("offset")?.unwrap_or(0),
+        limit: as_usize("limit")?.map(Count::N),
+        offset: Count::N(as_usize("offset")?.unwrap_or(0)),
         ..Default::default()
     };
 
@@ -1017,6 +1017,7 @@ static PARSED: [Parsed; PARSED_SHARDS] = [const { std::sync::Mutex::new(None) };
 /// parse reads the text alone, so the statement is the same one each time.
 fn parsed(text: &str) -> Result<Arc<Statement>> {
     let parse = || {
+        crate::timing::parsed();
         fenec_ql::parse_one(text)
             .map(Arc::new)
             .map_err(|e| Error::Query(e.to_string()))

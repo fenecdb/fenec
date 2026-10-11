@@ -18,8 +18,8 @@ test('bare get', () => {
 
 test('select, limit, offset', () => {
   const [sql, p] = q().select('title', 'year').limit(10).offset(5).toFenecQL();
-  assert.equal(sql, 'get articles select title, year limit 10 offset 5');
-  assert.deepEqual(p, []);
+  assert.equal(sql, 'get articles select title, year limit $1 offset $2');
+  assert.deepEqual(p, [10, 5]);
 });
 
 test('select with an array and with a star', () => {
@@ -121,8 +121,8 @@ test('null becomes is null, not = null', () => {
 test('near with ef and exact', () => {
   const v = [0.1, 0.2];
   const [sql, p] = q().near('embed', v, { ef: 128 }).limit(5).toFenecQL();
-  assert.equal(sql, 'get articles near embed $1 ef 128 limit 5');
-  assert.deepEqual(p, [v]);
+  assert.equal(sql, 'get articles near embed $1 ef 128 limit $2');
+  assert.deepEqual(p, [v, 5]);
   assert.equal(q().near('embed', v, { exact: true }).toFenecQL()[0], 'get articles near embed $1 exact');
 });
 
@@ -171,8 +171,8 @@ test('fuse ranks by match and near together', () => {
     .fuse({ k: 20, candidates: 50 })
     .limit(10)
     .toFenecQL();
-  assert.equal(sql, 'get articles near embed $1 match body $2 fuse k 20 candidates 50 limit 10');
-  assert.deepEqual(p, [[1, 0, 0], 'rust wasm']);
+  assert.equal(sql, 'get articles near embed $1 match body $2 fuse k 20 candidates 50 limit $3');
+  assert.deepEqual(p, [[1, 0, 0], 'rust wasm', 10]);
   assert.throws(() => q().match('body', 'x').near('embed', [1]).toFenecQL(), FenecError);
   assert.throws(() => q().match('body', 'x').fuse().toFenecQL(), FenecError);
 });
@@ -188,7 +188,7 @@ test('aggregates go in the select list, grouped or whole', () => {
   assert.equal(
     sql,
     'get orders select status, count(*), sum(total), avg(total) where year = $1 ' +
-      'group status order sum(total) desc limit 3',
+      'group status order sum(total) desc limit $2',
   );
   assert.equal(
     from('orders').select('min(at)', 'max(at)').toFenecQL()[0],
@@ -207,8 +207,8 @@ test('aggregates refuse what the engine would', () => {
 
 test('match, on its own and with a filter', () => {
   const [sql, p] = q().match('body', 'business trip').limit(10).toFenecQL();
-  assert.equal(sql, 'get articles match body $1 limit 10');
-  assert.deepEqual(p, ['business trip']);
+  assert.equal(sql, 'get articles match body $1 limit $2');
+  assert.deepEqual(p, ['business trip', 10]);
 
   const [sql2, p2] = q()
     .select('title')
@@ -227,9 +227,9 @@ test('rerank rides on match and takes a candidate budget', () => {
     .toFenecQL();
   assert.equal(
     sql,
-    'get articles match body $1 rerank embed $2 candidates 500 limit 5',
+    'get articles match body $1 rerank embed $2 candidates 500 limit $3',
   );
-  assert.deepEqual(p, ['rust', [1, 0, 0]]);
+  assert.deepEqual(p, ['rust', [1, 0, 0], 5]);
 
   // Without a budget the engine's default applies and nothing is emitted.
   assert.equal(
@@ -266,9 +266,9 @@ test('near together with where and order', () => {
     .toFenecQL();
   assert.equal(
     sql,
-    'get articles select title where year >= $1 near embed $2 ef 64 order year desc limit 10',
+    'get articles select title where year >= $1 near embed $2 ef 64 order year desc limit $3',
   );
-  assert.deepEqual(p, [2024, [1, 2]]);
+  assert.deepEqual(p, [2024, [1, 2], 10]);
 });
 
 test('a path into a json field goes where a field does', () => {
@@ -369,8 +369,8 @@ test('write statements do not accept near/offset; an update and a delete pick wi
   assert.deepEqual(await q().order('year', 'desc').limit(1).bind(db).delete({ returning: true }), [{ id: 4 }]);
   assert.deepEqual(await q().where('id', 4).bind(db).update({ a: 1 }, { returning: ['id'] }), [{ id: 4 }]);
   assert.deepEqual(seen, [
-    'del articles order year asc limit 1',
-    'del articles order year desc limit 1 returning *',
+    'del articles order year asc limit $1',
+    'del articles order year desc limit $1 returning *',
     'set articles {a: $1} where id = $2 returning id',
   ]);
 });
@@ -389,7 +389,7 @@ test('rows, first, count', async () => {
 test('first adds limit 1', async () => {
   const seen = [];
   await from('t').bind((sql) => (seen.push(sql), { rows: [] })).first();
-  assert.equal(seen[0], 'get t limit 1');
+  assert.equal(seen[0], 'get t limit $1');
 });
 
 test('an unbound query cannot run but still generates text', async () => {
@@ -442,7 +442,7 @@ test('a query is immutable and can be branched', () => {
   const b = base.limit(3);
   assert.equal(base.toFenecQL()[0], 'get articles where year >= $1');
   assert.equal(a.toFenecQL()[0], 'get articles where year >= $1 and tags has $2');
-  assert.equal(b.toFenecQL()[0], 'get articles where year >= $1 limit 3');
+  assert.equal(b.toFenecQL()[0], 'get articles where year >= $1 limit $2');
   assert.ok(a instanceof Query);
 });
 
@@ -453,13 +453,13 @@ test('the conditional filter pattern', () => {
     if (f.tag) x = x.where('tags', 'has', f.tag);
     return x.limit(20).toFenecQL();
   };
-  assert.deepEqual(build({}), ['get articles select title limit 20', []]);
+  assert.deepEqual(build({}), ['get articles select title limit $1', [20]]);
   assert.deepEqual(build({ year: 2024 }), [
-    'get articles select title where year >= $1 limit 20', [2024],
+    'get articles select title where year >= $1 limit $2', [2024, 20],
   ]);
   assert.deepEqual(build({ year: 2024, tag: 'rust' }), [
-    'get articles select title where year >= $1 and tags has $2 limit 20',
-    [2024, 'rust'],
+    'get articles select title where year >= $1 and tags has $2 limit $3',
+    [2024, 'rust', 20],
   ]);
 });
 
@@ -1474,8 +1474,8 @@ test('the HTTP transport sends the text the builder generated', async () => {
     assert.equal(s.seen[0].method, 'POST');
     assert.equal(s.seen[0].url, '/query');
     assert.deepEqual(s.seen[0].body, {
-      query: 'get articles select title where year >= $1 near embed $2 limit 5',
-      params: [2024, [1, 2]],
+      query: 'get articles select title where year >= $1 near embed $2 limit $3',
+      params: [2024, [1, 2], 5],
     });
   } finally {
     s.close();
@@ -1492,7 +1492,7 @@ test('the HTTP transport hands facets beside the rows', async () => {
     const rows = await db.from('articles').select('title').facet('brand').limit(1).rows();
     assert.deepEqual([...rows], [{ title: 'a' }]);
     assert.deepEqual(rows.facets, facets);
-    assert.equal(s.seen[0].body.query, 'get articles select title limit 1 facet brand');
+    assert.equal(s.seen[0].body.query, 'get articles select title limit $1 facet brand');
     assert.deepEqual((await db.rows('get articles facet brand')).facets, facets);
   } finally {
     s.close();
@@ -1597,11 +1597,11 @@ test('lookup is terminal: its clauses bind to the child', () => {
     .toFenecQL();
   assert.equal(
     sql,
-    'get products where price > $1 limit 20 lookup reviews on product_id ' +
-      'select body, stars where stars >= $2 order created desc limit 3',
+    'get products where price > $1 limit $2 lookup reviews on product_id ' +
+      'select body, stars where stars >= $3 order created desc limit $4',
   );
   // The child's parameters follow the parent's, because the clause is last.
-  assert.deepEqual(p, [100, 4]);
+  assert.deepEqual(p, [100, 20, 4, 3]);
 });
 
 test('lookup defaults the parent key to id, and can name it', () => {
@@ -1727,10 +1727,10 @@ test('a second lookup chains onto the first instead of replacing it', () => {
     .toFenecQL();
   assert.equal(
     sql,
-    'get shops limit 20 lookup orders on shop_id where paid = $1 limit 3 ' +
-      'lookup lines on order_id select item limit 5',
+    'get shops limit $1 lookup orders on shop_id where paid = $2 limit $3 ' +
+      'lookup lines on order_id select item limit $4',
   );
-  assert.deepEqual(p, [true]);
+  assert.deepEqual(p, [20, true, 3, 5]);
 });
 
 test('a chain refuses a repeated collection and a chain too deep', () => {

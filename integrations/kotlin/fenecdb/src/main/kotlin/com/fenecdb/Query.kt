@@ -295,7 +295,6 @@ internal object Builder {
         else -> throw refuse("unknown collation: ${quote(name)}; there are 'und' and 'tr'")
     }
 
-    /** `limit`, `offset`, `ef` and the rest are literals, never parameters: a whole number JavaScript holds exactly. */
     /** A tag or an ellipsis: text, or refused naming the value as `JSON.stringify` writes it. */
     fun text(v: Any, what: String): String =
         v as? String ?: throw refuse("$what must be text: ${Json.write(Values.normalize(v))}")
@@ -315,6 +314,12 @@ internal object Builder {
         return java.math.BigDecimal(mant).stripTrailingZeros().toPlainString() + "e" + (if (e < 0) "-" else "+") + Math.abs(e)
     }
 
+    /**
+     * A count, a whole number JavaScript holds exactly. `limit`, `offset` and
+     * a facet's `top` go as parameters, so a page of any size or place is one
+     * text; `ef`, `candidates`, `k` and a snippet's words are written in, as
+     * FenecQL takes them.
+     */
     fun whole(n: Long, what: String): Long =
         if (n in 0..(1L shl 53) - 1) n else throw refuse("$what must be a non-negative integer: $n")
 
@@ -859,15 +864,15 @@ class Query private constructor(private val s: State) {
             c?.let { sql.append(" candidates $it") }
         }
         appendOrder(sql, s.order)
-        s.limit?.let { sql.append(" limit $it") }
-        if (s.offset > 0) sql.append(" offset ${s.offset}")
+        s.limit?.let { sql.append(" limit ").append(bind.bind(it)) }
+        if (s.offset > 0) sql.append(" offset ").append(bind.bind(s.offset))
         // Before a lookup, whose clauses are the children's.
         sql.append(s.require)
         if (s.count) sql.append(" count")
         if (s.facets.isNotEmpty()) {
             sql.append(" facet ").append(
                 s.facets.joinToString(", ") { f ->
-                    f.field + (f.top?.let { " top $it" } ?: "") +
+                    f.field + (f.top?.let { " top " + bind.bind(it) } ?: "") +
                         (f.ranges?.let { " ranges [${it.joinToString(", ")}]" } ?: "") +
                         (if (f.disjunctive) " disjunctive" else "")
                 },
@@ -882,8 +887,8 @@ class Query private constructor(private val s: State) {
             l.project?.let { sql.append(" select ").append(it.joinToString(", ")) }
             whereOf(l.cond, bind)?.let { sql.append(" where ").append(it) }
             appendOrder(sql, l.order)
-            l.limit?.let { sql.append(" limit $it") }
-            if (l.offset > 0) sql.append(" offset ${l.offset}")
+            l.limit?.let { sql.append(" limit ").append(bind.bind(it)) }
+            if (l.offset > 0) sql.append(" offset ").append(bind.bind(l.offset))
         }
         return sql.toString()
     }
@@ -929,20 +934,23 @@ class Query private constructor(private val s: State) {
     }
 
     // `require n`: the write is refused, and put back whole, unless it
-    // wrote exactly n rows -- a check and its write in one statement.
+    // wrote exactly n rows -- a check and its write in one statement. A
+    // number written in, never a parameter: the count is what the statement
+    // guards, a constant of the code, where a page's limit and offset change
+    // with each request and go as parameters.
     private fun requireClause(n: Long?): String {
         if (n == null) return ""
         if (n < 0) throw refuse("require takes a count of rows, a whole number from 0 (got $n)")
         return " require $n"
     }
 
-    // An update's or a delete's ` order ... limit n returning ...`: the rows
+    // An update's or a delete's ` order ... limit $n returning ...`: the rows
     // it picks, and whether it answers them, under the fields named -- `*`
     // for every one.
-    private fun pick(returning: List<String>?): String {
+    private fun pick(returning: List<String>?, bind: Binder): String {
         val sql = StringBuilder()
         appendOrder(sql, s.order)
-        s.limit?.let { sql.append(" limit ").append(it) }
+        s.limit?.let { sql.append(" limit ").append(bind.bind(it)) }
         if (returning == null) return sql.toString()
         if (returning.isEmpty()) throw refuse("returning names the fields it answers, or * for every one")
         if ("*" in returning) {
@@ -991,7 +999,7 @@ class Query private constructor(private val s: State) {
         val bind = Binder()
         val body = Builder.renderDoc(patch, bind)
         val filter = requireFilter("update", all, bind)
-        return Statement("set ${s.collection} $body$filter${pick(returning)}${requireClause(require)}", bind.params)
+        return Statement("set ${s.collection} $body$filter${pick(returning, bind)}${requireClause(require)}", bind.params)
     }
 
     /**
@@ -1024,7 +1032,7 @@ class Query private constructor(private val s: State) {
         assertPlain("delete")
         val bind = Binder()
         val filter = requireFilter("delete", all, bind)
-        return Statement("del ${s.collection}$filter${pick(returning)}${requireClause(require)}", bind.params)
+        return Statement("del ${s.collection}$filter${pick(returning, bind)}${requireClause(require)}", bind.params)
     }
 
     // ---------------------------------------------------------------- running

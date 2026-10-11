@@ -106,7 +106,7 @@ impl Database {
             project: Some(vec![probe.field.to_string()]),
             filter: Some(filter),
             order: vec![Sort::new(probe.field, true)],
-            limit: Some(1),
+            limit: Some(Count::N(1)),
             ..Select::default()
         };
         let Response::Rows(rs) = self.query(&Statement::Select(sel), params)? else {

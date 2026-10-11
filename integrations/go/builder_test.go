@@ -689,7 +689,7 @@ func TestBuilderIsImmutable(t *testing.T) {
 	}{
 		{base, "get articles where year >= $1"},
 		{a, "get articles where year >= $1 and tags has $2"},
-		{b, "get articles where year >= $1 limit 3"},
+		{b, "get articles where year >= $1 limit $2"},
 		{c, "get articles where year >= $1 and lang = $2"},
 	} {
 		text, _, err := w.q.ToFenecQL()
@@ -778,7 +778,7 @@ func TestBuilderAnswersAreTheTextsAnswers(t *testing.T) {
 		{shelf.Select("title").WhereCond(fenecdb.Or(fenecdb.Cmp("lang", "=", "tr"), fenecdb.Cmp("year", "<", 2022))).Order("title", "asc"),
 			"get " + name + " select title where lang = $1 or year < $2 order title asc", []any{"tr", 2022}},
 		{shelf.Select("title").Near("embed", v).Limit(2),
-			"get " + name + " select title near embed $1 limit 2", []any{v}},
+			"get " + name + " select title near embed $1 limit $2", []any{v, 2}},
 		{shelf.Select("title").Match("body", "oasis stars"),
 			"get " + name + " select title match body $1", []any{"oasis stars"}},
 		{shelf.Select("title").Where("id", "in", []int{1, 3}).Lookup(notes, fenecdb.On("doc_id"), fenecdb.Select("stars"), fenecdb.Sort("stars", "desc")),

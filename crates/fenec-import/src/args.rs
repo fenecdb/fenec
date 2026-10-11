@@ -67,7 +67,7 @@ pub fn parse_where(s: &str) -> std::result::Result<Expr, String> {
         || sel.near.is_some()
         || !sel.order.is_empty()
         || sel.limit.is_some()
-        || sel.offset != 0
+        || !sel.offset.is_zero()
         || sel.count
     {
         return Err("--where only takes a condition expression".into());

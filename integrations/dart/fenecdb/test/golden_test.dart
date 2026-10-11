@@ -314,7 +314,7 @@ void main() {
         'get shelf select title where lang = \$1 or year < \$2 order title asc',
         ['tr', 2022]
       ),
-      (shelf.select(['title']).near('embed', v).limit(2), 'get shelf select title near embed \$1 limit 2', [v]),
+      (shelf.select(['title']).near('embed', v).limit(2), 'get shelf select title near embed \$1 limit \$2', [v, 2]),
       (shelf.select(['title']).match('body', 'oasis stars'), 'get shelf select title match body \$1', ['oasis stars']),
       (
         shelf.select(['title']).where('id', 'in', [1, 3]).lookup('notes',
@@ -348,7 +348,7 @@ void main() {
     final b = Query.from('articles').where('year', '>=', 2024);
     expect(b.toFenecQL().text, 'get articles where year >= \$1');
     expect(b.where('tags', 'has', 'rust').toFenecQL().text, 'get articles where year >= \$1 and tags has \$2');
-    expect(b.limit(3).toFenecQL().text, 'get articles where year >= \$1 limit 3');
+    expect(b.limit(3).toFenecQL().text, 'get articles where year >= \$1 limit \$2');
     expect(b.reads, ['articles']);
     expect(b.lookup('notes', on: 'article_id').reads, ['articles', 'notes']);
     expect(b.where(Cond.raw('id in (get x select id)')).reads, isNull);

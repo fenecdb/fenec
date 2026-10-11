@@ -195,10 +195,11 @@ class FenecVectorStore(VectorStore):
             vector = [float(x) for x in self._embedding.embed_query(query)]
             rank, ahead = "match content $1 near embedding $2 fuse", [query, vector]
         where, params = self._where(filter, first=len(ahead) + 1)
+        # `k` a parameter, as the builder sends a limit: one text whatever k.
         rows = self._run(
             f"get {self.collection} select lc_id, content, metadata{where} "
-            f"{rank} limit {int(k)}",
-            [*ahead, *params],
+            f"{rank} limit ${len(ahead) + len(params) + 1}",
+            [*ahead, *params, int(k)],
         )
         return [(self._document(r), r["_score"]) for r in rows]
 
@@ -214,8 +215,8 @@ class FenecVectorStore(VectorStore):
         where, params = self._where(filter, first=2)
         rows = self._run(
             f"get {self.collection} select lc_id, content, metadata{where} "
-            f"near embedding $1 limit {int(k)}",
-            [[float(x) for x in embedding], *params],
+            f"near embedding $1 limit ${len(params) + 2}",
+            [[float(x) for x in embedding], *params, int(k)],
         )
         return [(self._document(r), r["_score"]) for r in rows]
 

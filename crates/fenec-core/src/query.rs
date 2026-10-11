@@ -709,14 +709,17 @@ pub(crate) fn like_match(hay: &str, needle: &str) -> bool {
     h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
+/// `$n` (`Param(i)`) asked of a statement handed fewer parameters: one
+/// message, where four places each wrote it.
+#[inline(never)]
+pub fn unbound(i: usize) -> Error {
+    Error::Query(format!("parameter ${} is not bound", i + 1))
+}
+
 pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value> {
     Ok(match expr {
         Expr::Lit(v) => v.clone(),
-        Expr::Param(i) => ctx
-            .params
-            .get(*i)
-            .cloned()
-            .ok_or_else(|| Error::Query(format!("parameter ${} is not bound", i + 1)))?,
+        Expr::Param(i) => ctx.params.get(*i).cloned().ok_or_else(|| unbound(*i))?,
         Expr::Field(name) => {
             if name == "id" {
                 Value::Int(row.id() as i64)
@@ -945,6 +948,105 @@ pub struct Fuse {
     pub candidates: Option<usize>,
 }
 
+/// A count a statement is paged or cut by -- a `limit`, an `offset`, a
+/// facet's `top` -- written in the text or handed as a parameter, `limit
+/// $2`. A page size and an offset are a request's data: written into the
+/// text, each page of a list was a text of its own, parsed again and kept
+/// apart in the server's parse cache (16 shards of 64, a shard emptied when
+/// full), and every client spliced a number into its statement. A
+/// parameter is checked as the statement runs ([`Select::check_counts`]),
+/// refused as the literal it stands for is ([`count_refused`]), and read
+/// where the plan reads the number ([`Count::at`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Count {
+    /// Written in the text: `limit 20`.
+    N(usize),
+    /// `$n`, zero-based as [`Expr::Param`] is: checked before the plan
+    /// and read where it reads the number.
+    Param(usize),
+}
+
+impl Default for Count {
+    fn default() -> Count {
+        Count::N(0)
+    }
+}
+
+impl Count {
+    /// The number a plan reads: its own, or its parameter's, which
+    /// [`Select::check_counts`] has held to a count before the plan -- and
+    /// had it not, nothing rather than everything. Read where it is used
+    /// rather than bound into a copy of the select: the copy took a read by
+    /// id 472 -> 710 ns in process.
+    #[inline]
+    pub fn at(self, params: &[Value]) -> usize {
+        match self {
+            Count::N(n) => n,
+            Count::Param(i) => param_count(params, i),
+        }
+    }
+
+    /// The number it stands for: its own, or its parameter's out of
+    /// `params`, refused as a literal is ([`count_refused`]).
+    pub fn of(self, what: &str, params: &[Value]) -> Result<usize> {
+        match self {
+            Count::N(n) => Ok(n),
+            Count::Param(i) => match params.get(i) {
+                Some(v) => as_count(v).ok_or_else(|| Error::Query(count_refused(what, v))),
+                None => Err(unbound(i)),
+            },
+        }
+    }
+
+    /// Whether it is `0` as written: no `offset`, which a parameter is not
+    /// -- `offset $1` is an offset whatever it is handed.
+    pub fn is_zero(self) -> bool {
+        self == Count::N(0)
+    }
+
+    fn param(self) -> usize {
+        match self {
+            Count::N(_) => 0,
+            Count::Param(i) => i + 1,
+        }
+    }
+}
+
+/// [`Count::at`] of a parameter, out of line: the number written is the
+/// one read on every page.
+#[inline(never)]
+fn param_count(params: &[Value], i: usize) -> usize {
+    let n = params.get(i).and_then(as_count);
+    debug_assert!(n.is_some(), "a count is checked before the plan");
+    n.unwrap_or(0)
+}
+
+/// The count a value gives a `limit`, an `offset` or a `top`: a whole
+/// number from 0 -- a float too where it has no fraction, `20.0`, which is
+/// what a JSON number may be read as -- and `None` for anything else, which
+/// [`count_refused`] says. Past what `usize` holds (a 32-bit target's
+/// 4 294 967 295) it is that: no more rows than memory holds can be asked
+/// for, where `as` wrapped a literal `limit 5000000000` to 705 million in
+/// the browser module.
+pub fn as_count(v: &Value) -> Option<usize> {
+    match *v {
+        Value::Int(n) if n >= 0 => Some(usize::try_from(n).unwrap_or(usize::MAX)),
+        // `as` saturates; a NaN or an infinity has no zero fraction.
+        Value::Float(f) if f >= 0.0 && f.fract() == 0.0 => Some(f as usize),
+        _ => None,
+    }
+}
+
+/// Why `v` is no count for `what`, the value as JSON writes it: a literal
+/// and a parameter are refused in the same words. Written by the JSON
+/// writer the module has anyway: by type, with a number's own text, it was
+/// 459 bytes of the browser module.
+pub fn count_refused(what: &str, v: &Value) -> String {
+    let mut out = format!("`{what}` takes a whole number from 0, not ");
+    crate::json::value_into(&mut out, v);
+    out
+}
+
 /// The `lookup` clause: attach each matching document of another collection
 /// to the row it belongs to.
 ///
@@ -974,8 +1076,8 @@ pub struct Lookup {
     pub project: Option<Vec<String>>,
     pub filter: Option<Expr>,
     pub order: Vec<Sort>,
-    pub limit: Option<usize>,
-    pub offset: usize,
+    pub limit: Option<Count>,
+    pub offset: Count,
     /// `required`: drop a parent that no child matches.
     ///
     /// Without it the page is the parents and a childless one keeps its row
@@ -1293,7 +1395,7 @@ pub struct Facet {
     pub field: String,
     /// How many values, the commonest; None: every one, up to
     /// [`MAX_FACET_VALUES`].
-    pub top: Option<usize>,
+    pub top: Option<Count>,
     /// `ranges [0, 2500, 5000]`: rows counted by the range their number
     /// falls in -- from each bound, included, to the next, excluded --
     /// rather than by value, every range answered in order, an empty one
@@ -1331,6 +1433,22 @@ impl Facet {
 /// refused rather than cut: a list cut where it happened to stop is a
 /// wrong answer believed right, and a sidebar shows far fewer anyway.
 pub const MAX_FACET_VALUES: usize = 10_000;
+
+/// A facet's `top`, written or a parameter's: from 1 to
+/// [`MAX_FACET_VALUES`].
+fn top_in_range(field: &str, n: usize) -> Result<()> {
+    if n == 0 {
+        return Err(Error::Query(format!(
+            "`facet {field} top 0` answers nothing: `top` takes at least 1"
+        )));
+    }
+    if n > MAX_FACET_VALUES {
+        return Err(Error::Query(format!(
+            "`facet {field} top {n}`: a facet answers at most {MAX_FACET_VALUES} values"
+        )));
+    }
+    Ok(())
+}
 
 /// One facet's answer: each value and how many matched rows hold it, by
 /// count, most first, then by value.
@@ -1383,7 +1501,7 @@ impl Sort {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Pick {
     pub order: Vec<Sort>,
-    pub limit: Option<usize>,
+    pub limit: Option<Count>,
     /// `returning`: the rows answered rather than counted -- a `set`'s as
     /// it wrote them, a `del`'s as they were -- in the order they were
     /// picked, under the columns a `get`'s `select` names: `None` every
@@ -1414,8 +1532,8 @@ pub struct Select {
     /// Sort keys in priority order. Empty = no ordering. Additional keys
     /// break ties: `order year desc, title asc`.
     pub order: Vec<Sort>,
-    pub limit: Option<usize>,
-    pub offset: usize,
+    pub limit: Option<Count>,
+    pub offset: Count,
     /// `count`: returns the number of matching rows instead of the rows.
     pub count: bool,
     /// `lookup`: children of another collection, attached per row.
@@ -1607,7 +1725,7 @@ impl Select {
             "order"
         } else if self.limit.is_some() {
             "limit"
-        } else if self.offset != 0 {
+        } else if !self.offset.is_zero() {
             "offset"
         } else {
             return Ok(());
@@ -1679,20 +1797,10 @@ impl Select {
             if self.facets[..i].iter().any(|g| g.field == f.field) {
                 return Err(Error::Query(format!("`facet {}` is asked twice", f.field)));
             }
-            match f.top {
-                Some(0) => {
-                    return Err(Error::Query(format!(
-                        "`facet {} top 0` answers nothing: `top` takes at least 1",
-                        f.field
-                    )))
-                }
-                Some(n) if n > MAX_FACET_VALUES => {
-                    return Err(Error::Query(format!(
-                        "`facet {} top {n}`: a facet answers at most {MAX_FACET_VALUES} values",
-                        f.field
-                    )))
-                }
-                _ => {}
+            // A parameter's is judged where it is checked
+            // (`check_counts`), as the number written is here.
+            if let Some(Count::N(n)) = f.top {
+                top_in_range(&f.field, n)?;
             }
             if let Some(bounds) = &f.ranges {
                 // One message for every way to get them wrong: each was a
@@ -1740,12 +1848,21 @@ impl Select {
         // A `lookup`'s `where` belongs to the same statement, so its
         // parameters count here too: a client told there are fewer sends
         // fewer, and the query then fails on an unbound `$1`.
+        let counts = |l: &Option<Count>, o: &Count| l.map_or(0, Count::param).max(o.param());
         let lk = self
             .lookup
             .as_ref()
-            .map(|l| l.chain().map(|s| opt(&s.filter)).max().unwrap_or(0))
+            .map(|l| {
+                (l.chain())
+                    .map(|s| opt(&s.filter).max(counts(&s.limit, &s.offset)))
+                    .max()
+                    .unwrap_or(0)
+            })
             .unwrap_or(0);
-        let mut marks = 0;
+        let mut marks = counts(&self.limit, &self.offset);
+        for f in &self.facets {
+            marks = marks.max(f.top.map_or(0, Count::param));
+        }
         for m in &self.marks {
             for a in &m.args {
                 marks = marks.max(a.max_param());
@@ -1795,6 +1912,37 @@ impl Select {
                 .lookup
                 .as_ref()
                 .is_some_and(|l| l.chain().any(|s| opt(&s.filter)))
+    }
+
+    /// Each count of its own that is a parameter -- its `limit` or
+    /// `offset`, a facet's `top`, a `lookup` level's -- held to what the
+    /// number written there is held to: a value [`as_count`] refuses, by
+    /// the literal's message, and a `top` from 1 to [`MAX_FACET_VALUES`];
+    /// past a ranked page's ceiling the plan refuses it as it refuses the
+    /// number written. An inner `get`'s are checked where it is answered.
+    pub fn check_counts(&self, params: &[Value]) -> Result<()> {
+        for f in &self.facets {
+            if let Some(t @ Count::Param(_)) = f.top {
+                top_in_range(&f.field, t.of("top", params)?)?;
+            }
+        }
+        // The select's own, then each `lookup` level's, in one loop.
+        let (mut limit, mut offset) = (self.limit, self.offset);
+        let mut level = self.lookup.as_ref();
+        // A number written is looked at and passed over: no call a page.
+        loop {
+            if let Some(l @ Count::Param(_)) = limit {
+                l.of("limit", params)?;
+            }
+            if let o @ Count::Param(_) = offset {
+                o.of("offset", params)?;
+            }
+            let Some(l) = level else {
+                return Ok(());
+            };
+            (limit, offset) = (l.limit, l.offset);
+            level = l.next.as_deref();
+        }
     }
 
     /// Whether a filter of its own or of a `lookup` level calls `now()`
@@ -1931,7 +2079,7 @@ impl Select {
                 "order"
             } else if self.limit.is_some() {
                 "limit"
-            } else if self.offset != 0 {
+            } else if !self.offset.is_zero() {
                 "offset"
             } else {
                 ""
@@ -2242,7 +2390,7 @@ pub fn documents_in<'p>(
         ))
     };
     match params.get(i) {
-        None => Err(Error::Query(format!("parameter ${} is not bound", i + 1))),
+        None => Err(unbound(i)),
         Some(Value::Object(m)) => Ok(vec![m.as_slice()]),
         Some(Value::List(items)) => items
             .iter()
@@ -2336,6 +2484,8 @@ impl Statement {
         let opt = |e: &Option<Expr>| e.as_ref().map(|e| e.max_param()).unwrap_or(0);
         let pairs =
             |v: &Vec<(String, Expr)>| v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0);
+        let picked =
+            |p: &Option<Box<Pick>>| p.as_ref().and_then(|p| p.limit).map_or(0, Count::param);
         match self {
             Statement::Put {
                 docs,
@@ -2350,8 +2500,10 @@ impl Statement {
                 .unwrap_or(0)
                 .max(docs_param.map_or(0, |i| i + 1)),
             Statement::Select(sel) | Statement::Explain(sel) => sel.max_param(),
-            Statement::Update { set, filter, .. } => pairs(set).max(opt(filter)),
-            Statement::Delete { filter, .. } => opt(filter),
+            Statement::Update {
+                set, filter, pick, ..
+            } => pairs(set).max(opt(filter)).max(picked(pick)),
+            Statement::Delete { filter, pick, .. } => opt(filter).max(picked(pick)),
             _ => 0,
         }
     }
@@ -2652,8 +2804,8 @@ mod tests {
             Box::new(Expr::Lit(Value::Int(10))),
         ));
         sel.order = vec![Sort::new("price", false)];
-        sel.limit = Some(20);
-        sel.offset = 40;
+        sel.limit = Some(Count::N(20));
+        sel.offset = Count::N(40);
         sel.project = Some(vec!["name".into()]);
         assert!(sel.check().is_ok());
     }

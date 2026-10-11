@@ -180,14 +180,14 @@ test('a relation is looked up by its name, on a database opened with it', { skip
   const db = await Fenec.open(wasm, { schema: { products, reviews }, relations });
   db.run('put products [{name: "a"}, {name: "b"}]; put reviews [{productId: 1, stars: 5}, {productId: 1, stars: 3}]');
   const q = db.from(products).lookup('reviews', { order: [['stars', 'desc']], limit: 1 });
-  assert.equal(q.toFenecQL()[0], 'get products lookup reviews on productId order stars desc limit 1');
+  assert.deepEqual(q.toFenecQL(), ['get products lookup reviews on productId order stars desc limit $1', [1]]);
   assert.deepEqual(await q.rows(), [
     { id: 1, name: 'a', reviews: [{ id: 1, productId: 1, stars: 5 }] },
     { id: 2, name: 'b', reviews: [] },
   ]);
   // `one` is the first child; a relation chains from the level it reaches.
   const back = db.from(reviews).lookup('product');
-  assert.equal(back.toFenecQL()[0], 'get reviews lookup products on id = productId limit 1');
+  assert.deepEqual(back.toFenecQL(), ['get reviews lookup products on id = productId limit $1', [1]]);
   // A table by itself, with its key, as a name would be.
   assert.equal(db.from(products).lookup(reviews, { on: 'productId' }).toFenecQL()[0], 'get products lookup reviews on productId');
   db.close();

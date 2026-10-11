@@ -240,7 +240,7 @@ import Testing
              "get shelf select title where lang = $1 and tags has $2", ["en", "sand"]),
             (try shelf.select("title").where(.or(.cmp("lang", "=", "tr"), .cmp("year", "<", 2022))).order("title"),
              "get shelf select title where lang = $1 or year < $2 order title asc", ["tr", 2022]),
-            (try shelf.select("title").near("embed", v).limit(2), "get shelf select title near embed $1 limit 2", [v]),
+            (try shelf.select("title").near("embed", v).limit(2), "get shelf select title near embed $1 limit $2", [v, 2]),
             (try shelf.select("title").match("body", "oasis stars"), "get shelf select title match body $1", ["oasis stars"]),
             (try shelf.select("title").where("id", "in", [1, 3]).lookup("notes", on: "doc_id", select: ["stars"], order: [SortKey("stars", "desc")]),
              "get shelf select title where id in [$1, $2] lookup notes on doc_id select stars order stars desc", [1, 3]),
@@ -299,7 +299,7 @@ import Testing
         let b = try Query.from("articles").where("year", ">=", 2024)
         #expect(try b.toFenecQL().text == "get articles where year >= $1")
         #expect(try b.where("tags", "has", "rust").toFenecQL().text == "get articles where year >= $1 and tags has $2")
-        #expect(try b.limit(3).toFenecQL().text == "get articles where year >= $1 limit 3")
+        #expect(try b.limit(3).toFenecQL().text == "get articles where year >= $1 limit $2")
         #expect(b.reads == ["articles"])
         #expect(try b.lookup("notes", on: "article_id").reads == ["articles", "notes"])
         #expect(try b.where(.raw("id in (get x select id)")).reads == nil)

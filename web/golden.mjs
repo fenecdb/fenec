@@ -234,6 +234,7 @@ c('a later limit replaces the earlier', docs, ['limit', 10], ['limit', 3], Q);
 c('a negative limit is refused', docs, ['limit', -1], Q);
 c('a negative offset is refused', docs, ['offset', -2], Q);
 c('a limit past 2^53 is refused', docs, ['limit', 9007199254740992], Q);
+c('a page goes as parameters, one text whatever its size', docs, ['where', 'year', 2024], ['order', 'title'], ['limit', 50], ['offset', 100], Q);
 
 // near, match, fuse, rerank.
 c('near', docs, ['near', 'embed', [0.1, 0.2, 0.3]], ['limit', 5], Q);

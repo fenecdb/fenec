@@ -134,8 +134,8 @@ export class FenecVectorStore extends VectorStore {
   async similaritySearchVectorWithScore(query, k, filter) {
     const [where, params] = this.#where(filter, 2);
     const rows = await this.#run(
-      `get ${this.collection} select lc_id, content, metadata${where} near embedding $1 limit ${k | 0}`,
-      [Array.from(query, Number), ...params],
+      `get ${this.collection} select lc_id, content, metadata${where} near embedding $1 limit $${params.length + 2}`,
+      [Array.from(query, Number), ...params, k | 0],
     );
     return rows.map((r) => [this.#document(r), r._score]);
   }
@@ -161,8 +161,8 @@ export class FenecVectorStore extends VectorStore {
     }
     const [where, params] = this.#where(filter, ahead.length + 1);
     const rows = await this.#run(
-      `get ${this.collection} select lc_id, content, metadata${where} ${rank} limit ${k | 0}`,
-      [...ahead, ...params],
+      `get ${this.collection} select lc_id, content, metadata${where} ${rank} limit $${ahead.length + params.length + 1}`,
+      [...ahead, ...params, k | 0],
     );
     return rows.map((r) => [this.#document(r), r._score]);
   }

@@ -350,6 +350,30 @@ impl Parser {
         }
     }
 
+    /// A `limit`, an `offset` or a facet's `top`: a whole number from 0, or
+    /// a parameter, `limit $2`, read as the statement runs -- so a client
+    /// paging through a list sends one text whatever the page. Read as an
+    /// operand, which folds `-1` and takes `"x"`, so a number written is
+    /// refused in the words a parameter's value is (`count_refused`).
+    fn count(&mut self, what: &str) -> Result<Count> {
+        let mark = self.depth;
+        let e = self.operand();
+        self.depth = mark;
+        let v = match e? {
+            Expr::Param(i) => return Ok(Count::Param(i)),
+            Expr::Lit(v) => v,
+            _ => {
+                return self.err(format!(
+                    "`{what}` takes a whole number from 0, or a parameter"
+                ))
+            }
+        };
+        match as_count(&v) {
+            Some(n) => Ok(Count::N(n)),
+            None => self.err(count_refused(what, &v)),
+        }
+    }
+
     /// A number that may be written with a decimal point. Only the BM25 knobs
     /// need it -- `k1 = 0.9` reads the way the literature writes it, and the
     /// schema stores it in hundredths.
@@ -1027,11 +1051,11 @@ impl Parser {
                 continue;
             }
             if self.eat_kw("limit") {
-                sel.limit = Some(self.int()?.max(0) as usize);
+                sel.limit = Some(self.count("limit")?);
                 continue;
             }
             if self.eat_kw("offset") {
-                sel.offset = self.int()?.max(0) as usize;
+                sel.offset = self.count("offset")?;
                 continue;
             }
             // `require <n>`: the rows answered must number `n` -- before a
@@ -1199,11 +1223,11 @@ impl Parser {
                 continue;
             }
             if self.eat_kw("limit") {
-                l.limit = Some(self.int()?.max(0) as usize);
+                l.limit = Some(self.count("limit")?);
                 continue;
             }
             if self.eat_kw("offset") {
-                l.offset = self.int()?.max(0) as usize;
+                l.offset = self.count("offset")?;
                 continue;
             }
             // A bare flag among the keyword clauses, the way `exact` sits
@@ -1229,8 +1253,9 @@ impl Parser {
     }
 
     /// `[0, 2500, 5000]`: a facet's range bounds, numbers as written --
-    /// literals and never parameters, as `top` is, so a statement keeps
-    /// its shape.
+    /// literals and never parameters: a sidebar's buckets are its code's,
+    /// one text every request, where a page's `limit` and `offset` -- and a
+    /// "show more" growing a `top` -- change with each.
     /// A list literal, read as any is: what the bounds are -- numbers,
     /// rising -- `Select::check` says.
     fn bounds(&mut self) -> Result<Vec<Value>> {
@@ -1270,7 +1295,7 @@ impl Parser {
             let mut f = Facet::new(self.path()?);
             // Both read, so the check names what they cannot do together.
             if self.eat_kw("top") {
-                f.top = Some(self.int()?.max(0) as usize);
+                f.top = Some(self.count("top")?);
             }
             if self.eat_kw("ranges") {
                 f.ranges = Some(self.bounds()?);
@@ -1442,7 +1467,7 @@ impl Parser {
                 continue;
             }
             if self.eat_kw("limit") {
-                pick.limit = Some(self.int()?.max(0) as usize);
+                pick.limit = Some(self.count("limit")?);
                 continue;
             }
             if self.eat_kw("returning") {

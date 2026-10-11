@@ -60,7 +60,7 @@ func main() {
 		Title string  `json:"title"`
 		Score float32 `json:"_score"`
 	}
-	must(query(&rows, "get docs select title near embed $1 limit 5", []float32{0.1, 0.2, 0.3}))
+	must(query(&rows, "get docs select title near embed $1 limit $2", []float32{0.1, 0.2, 0.3}, 5))
 	titles := []string{}
 	for _, r := range rows {
 		titles = append(titles, r.Title)

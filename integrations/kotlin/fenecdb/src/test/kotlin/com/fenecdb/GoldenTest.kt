@@ -223,7 +223,7 @@ class GoldenTest {
             Triple(shelf.select("title").where("year", ">=", 2022).order("year", "desc"), "get shelf select title where year >= \$1 order year desc", listOf<Any?>(2022)),
             Triple(shelf.select("title").where(mapOf("lang" to "en", "tags" to mapOf("has" to "sand"))), "get shelf select title where lang = \$1 and tags has \$2", listOf("en", "sand")),
             Triple(shelf.select("title").where(Cond.or(Cond.cmp("lang", "=", "tr"), Cond.cmp("year", "<", 2022))).order("title"), "get shelf select title where lang = \$1 or year < \$2 order title asc", listOf("tr", 2022)),
-            Triple(shelf.select("title").near("embed", v).limit(2), "get shelf select title near embed \$1 limit 2", listOf(v)),
+            Triple(shelf.select("title").near("embed", v).limit(2), "get shelf select title near embed \$1 limit \$2", listOf(v, 2)),
             Triple(shelf.select("title").match("body", "oasis stars"), "get shelf select title match body \$1", listOf("oasis stars")),
             Triple(
                 shelf.select("title").where("id", "in", listOf(1, 3)).lookup("notes", on = "doc_id", select = listOf("stars"), order = listOf(SortKey("stars", "desc"))),
@@ -252,7 +252,7 @@ class GoldenTest {
         val b = Query.from("articles").where("year", ">=", 2024)
         assertEquals("get articles where year >= \$1", b.toFenecQL().text)
         assertEquals("get articles where year >= \$1 and tags has \$2", b.where("tags", "has", "rust").toFenecQL().text)
-        assertEquals("get articles where year >= \$1 limit 3", b.limit(3).toFenecQL().text)
+        assertEquals("get articles where year >= \$1 limit \$2", b.limit(3).toFenecQL().text)
         assertEquals(listOf("articles"), b.reads)
         assertEquals(listOf("articles", "notes"), b.lookup("notes", on = "article_id").reads)
         assertNull(b.where(Cond.raw("id in (get x select id)")).reads)

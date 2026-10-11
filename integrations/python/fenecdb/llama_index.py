@@ -225,10 +225,11 @@ class FenecVectorStore(BasePydanticVectorStore):
         where, params = self._where(
             query.node_ids or None, query.doc_ids or None, query.filters, first=len(ahead) + 1
         )
+        # The page's size a parameter, as the builder sends a limit.
         rows = self._run(
             f"get {self.collection} select node_id, content, metadata{where} "
-            f"{rank} limit {int(query.similarity_top_k)}",
-            [*ahead, *params],
+            f"{rank} limit ${len(ahead) + len(params) + 1}",
+            [*ahead, *params, int(query.similarity_top_k)],
         )
         return VectorStoreQueryResult(
             nodes=[self._node(r) for r in rows],

@@ -223,8 +223,8 @@ mod tests {
         .unwrap();
         let Statement::Select(sel) = s else { panic!() };
         assert_eq!(sel.project, Some(vec!["id".into(), "title".into()]));
-        assert_eq!(sel.limit, Some(10));
-        assert_eq!(sel.offset, 5);
+        assert_eq!(sel.limit, Some(Count::N(10)));
+        assert_eq!(sel.offset, Count::N(5));
         let near = sel.near.unwrap();
         assert_eq!(near.field, "embed");
         assert_eq!(near.ef, Some(128));
@@ -256,6 +256,89 @@ mod tests {
         assert_eq!(n("get t where y >= $1 lookup c on k where s >= $2"), 2);
         assert_eq!(n("get t where cosine(e, $1) > 0.5"), 1);
         assert_eq!(n("collections"), 0);
+        // A count's parameter is one of the statement's, wherever it is.
+        assert_eq!(n("get t where a = $1 limit $2 offset $3"), 3);
+        assert_eq!(n("get t limit $2"), 2);
+        assert_eq!(n("get t facet b top $4"), 4);
+        assert_eq!(n("get t lookup c on k limit $1 offset $5"), 5);
+        assert_eq!(n("get t lookup c on k lookup d on j limit $6"), 6);
+        assert_eq!(n("set t {a: 1} order a limit $3"), 3);
+        assert_eq!(n("del t where a = $1 order a limit $2"), 2);
+        assert_eq!(n("get t where a in (get u select b limit $7)"), 7);
+    }
+
+    /// `limit`, `offset` and a facet's `top` take a parameter wherever they
+    /// take a number, and the number written is held to what a parameter's
+    /// value is held to, in the same words.
+    #[test]
+    fn counts_take_a_parameter() {
+        let sel = |q: &str| match parse_one(q).unwrap() {
+            Statement::Select(s) => s,
+            other => panic!("{other:?}"),
+        };
+        let s = sel("get t where a = $1 limit $2 offset $3 facet b top $4");
+        assert_eq!(s.limit, Some(Count::Param(1)));
+        assert_eq!(s.offset, Count::Param(2));
+        assert_eq!(s.facets[0].top, Some(Count::Param(3)));
+        let s = sel("get t near e $1 limit $2");
+        assert_eq!(s.limit, Some(Count::Param(1)));
+        let s = sel("get t lookup c on k limit $1 offset $2 lookup d on j limit $3");
+        let l = s.lookup.unwrap();
+        assert_eq!(
+            (l.limit, l.offset),
+            (Some(Count::Param(0)), Count::Param(1))
+        );
+        assert_eq!(l.next.unwrap().limit, Some(Count::Param(2)));
+        let Statement::Update { pick, .. } = parse_one("set t {a: 1} order a limit $1").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(pick.unwrap().limit, Some(Count::Param(0)));
+        let Statement::Delete { pick, .. } = parse_one("del t limit $2").unwrap() else {
+            panic!()
+        };
+        assert_eq!(pick.unwrap().limit, Some(Count::Param(1)));
+        // A float with no fraction is the number it is, as a parameter's.
+        assert_eq!(sel("get t limit 20.0").limit, Some(Count::N(20)));
+        // `offset $1` is an offset whatever it is handed, so `count` and an
+        // aggregate without `group` refuse it, as they refuse `offset 5`.
+        for q in ["get t offset $1 count", "get t select count(*) limit $1"] {
+            assert!(parse_one(q).is_err(), "{q}");
+        }
+        let refused = |q: &str| parse_one(q).unwrap_err().to_string();
+        for (q, says) in [
+            (
+                "get t limit -1",
+                "`limit` takes a whole number from 0, not -1",
+            ),
+            (
+                "get t offset 2.5",
+                "`offset` takes a whole number from 0, not 2.5",
+            ),
+            (
+                "get t limit \"ten\"",
+                "`limit` takes a whole number from 0, not \"ten\"",
+            ),
+            (
+                "get t limit x",
+                "`limit` takes a whole number from 0, or a parameter",
+            ),
+            (
+                "get t facet b top -2",
+                "`top` takes a whole number from 0, not -2",
+            ),
+            (
+                "get t lookup c on k offset -1",
+                "`offset` takes a whole number from 0, not -1",
+            ),
+            (
+                "del t order a limit 1.5",
+                "`limit` takes a whole number from 0, not 1.5",
+            ),
+        ] {
+            let e = refused(q);
+            assert!(e.contains(says), "{q}: {e}");
+        }
     }
 
     #[test]

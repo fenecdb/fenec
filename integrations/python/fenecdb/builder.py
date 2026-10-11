@@ -206,8 +206,10 @@ def _js_number(n: float) -> str:
 
 
 def _whole(n: Any, what: str) -> int:
-    """`limit`, `offset`, `ef` and the rest are literals in FenecQL, never
-    parameters: a whole number JavaScript holds exactly."""
+    """A count, a whole number JavaScript holds exactly. `limit`, `offset`
+    and a facet's `top` go as parameters, so a page of any size or place is
+    one text; `ef`, `candidates`, `k` and a snippet's words are written in,
+    as FenecQL takes them."""
     if isinstance(n, bool) or not isinstance(n, int) or n < 0 or n > 2**53 - 1:
         raise _err(f"{what} must be a non-negative integer: {_quote(n) if isinstance(n, bool) else n}")
     return n
@@ -974,9 +976,9 @@ class _Builder:
         for i, k in enumerate(order):
             sql += f"{' order ' if i == 0 else ', '}{_sort_key(k)}"
         if s["limit"] is not None:
-            sql += f" limit {s['limit']}"
+            sql += f" limit {bind(s['limit'], 'limit')}"
         if s["offset"]:
-            sql += f" offset {s['offset']}"
+            sql += f" offset {bind(s['offset'], 'offset')}"
         # Before a lookup, whose clauses are the children's.
         sql += s["require"]
         if count:
@@ -984,7 +986,7 @@ class _Builder:
         if facets:
             sql += " facet " + ", ".join(
                 f
-                + ("" if top is None else f" top {top}")
+                + ("" if top is None else f" top {bind(top, 'top')}")
                 + ("" if bounds is None else f" ranges [{', '.join(bounds)}]")
                 + (" disjunctive" if disjunctive else "")
                 for f, top, bounds, disjunctive in facets
@@ -1005,9 +1007,9 @@ class _Builder:
             for i, k in enumerate(level["order"]):
                 sql += f"{' order ' if i == 0 else ', '}{_sort_key(k)}"
             if level["limit"] is not None:
-                sql += f" limit {level['limit']}"
+                sql += f" limit {bind(level['limit'], 'limit')}"
             if level["offset"]:
-                sql += f" offset {level['offset']}"
+                sql += f" offset {bind(level['offset'], 'offset')}"
         return sql, bind.params
 
     def to_insert(
@@ -1051,7 +1053,7 @@ class _Builder:
         bind = _Binder()
         body = _render_doc(patch, bind, "update")
         where = self._require_filter("update", all, bind)
-        tail = f"{self._pick(returning)}{_require_clause(require)}"
+        tail = f"{self._pick(returning, bind)}{_require_clause(require)}"
         return f"set {self.collection} {body}{where}{tail}", bind.params
 
     def to_upsert(
@@ -1087,7 +1089,7 @@ class _Builder:
         self._assert_plain("delete")
         bind = _Binder()
         where = self._require_filter("delete", all, bind)
-        tail = f"{self._pick(returning)}{_require_clause(require)}"
+        tail = f"{self._pick(returning, bind)}{_require_clause(require)}"
         return f"del {self.collection}{where}{tail}", bind.params
 
     # `near`, `offset`, `select` mean something only to a read; dropped from
@@ -1119,13 +1121,13 @@ class _Builder:
             else None
         )  # fmt: skip
 
-    # An update's or a delete's ` order ... limit n returning ...`.
-    def _pick(self, returning: Any) -> str:
+    # An update's or a delete's ` order ... limit $n returning ...`.
+    def _pick(self, returning: Any, bind: _Binder) -> str:
         sql = ""
         for i, k in enumerate(self._s["order"]):
             sql += f"{' order ' if i == 0 else ', '}{_sort_key(k)}"
         if self._s["limit"] is not None:
-            sql += f" limit {self._s['limit']}"
+            sql += f" limit {bind(self._s['limit'], 'limit')}"
         return sql + _returning_clause(returning)
 
     # An update or delete of every row is too easy to do by accident and
@@ -1398,9 +1400,10 @@ def _held(wait: float | None) -> dict:
 
 
 # ` require n` for a write's `require=n`: the rows it must write, a whole
-# number from 0 -- not a parameter, as `limit` is not, so a statement keeps
-# its shape. A bool is an int to Python and is refused, as JavaScript's
-# builder refuses `true`.
+# number from 0 written in -- FenecQL takes no parameter there: the count is
+# what the statement guards, a constant of the code, where a page's `limit`
+# and `offset` change with each request and go as parameters. A bool is an
+# int to Python and is refused, as JavaScript's builder refuses `true`.
 def _require_clause(n: Any) -> str:
     if n is None:
         return ""

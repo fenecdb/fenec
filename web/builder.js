@@ -210,7 +210,13 @@ function columnText(c, bind) {
   return c.node.name ? `${text} as ${c.node.name}` : text;
 }
 
-/** `limit`, `offset`, `ef` cannot be parameterised: FenecQL wants a literal. */
+/**
+ * A count, a whole number from 0, refused here before anything is sent.
+ * `limit`, `offset` and a facet's `top` go as parameters, so a page of any
+ * size or place is one text -- one statement a server parses and keeps;
+ * `ef`, `candidates`, `k` and a snippet's words are written in, as
+ * FenecQL takes them.
+ */
 export function whole(n, what) {
   if (!Number.isSafeInteger(n) || n < 0) {
     throw new FenecError(`${what} must be a non-negative integer: ${n}`);
@@ -1091,15 +1097,15 @@ export class Query {
     for (const [i, o] of order.entries()) {
       sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
     }
-    if (limit !== undefined) sql += ` limit ${limit}`;
-    if (offset) sql += ` offset ${offset}`;
+    if (limit !== undefined) sql += ` limit ${bind(limit, 'limit')}`;
+    if (offset) sql += ` offset ${bind(offset, 'offset')}`;
     // Before a lookup, whose clauses are the children's.
     if (this.#s.require) sql += this.#s.require;
     if (count) sql += ' count';
     if (facets.length) {
       const one = (f) =>
         f.field +
-        (f.top === null ? '' : ` top ${f.top}`) +
+        (f.top === null ? '' : ` top ${bind(f.top, 'top')}`) +
         (f.ranges ? ` ranges [${f.ranges.join(', ')}]` : '') +
         (f.disjunctive ? ' disjunctive' : '');
       sql += ` facet ${facets.map(one).join(', ')}`;
@@ -1120,8 +1126,8 @@ export class Query {
       for (const [i, o] of lookup.order.entries()) {
         sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
       }
-      if (lookup.limit !== undefined) sql += ` limit ${lookup.limit}`;
-      if (lookup.offset) sql += ` offset ${lookup.offset}`;
+      if (lookup.limit !== undefined) sql += ` limit ${bind(lookup.limit, 'limit')}`;
+      if (lookup.offset) sql += ` offset ${bind(lookup.offset, 'offset')}`;
     }
     return sql;
   }
@@ -1207,7 +1213,7 @@ export class Query {
     const bind = binder(params);
     const body = renderDoc(patch, bind, 'update');
     const where = this.#requireFilter('update', opts, bind);
-    return [`set ${this.#s.collection} ${body}${where}${this.#pick(opts)}${requireClause(opts)}`, params];
+    return [`set ${this.#s.collection} ${body}${where}${this.#pick(opts, bind)}${requireClause(opts)}`, params];
   }
 
   /**
@@ -1244,7 +1250,7 @@ export class Query {
     const params = [];
     const bind = binder(params);
     const where = this.#requireFilter('delete', opts, bind);
-    return [`del ${this.#s.collection}${where}${this.#pick(opts)}${requireClause(opts)}`, params];
+    return [`del ${this.#s.collection}${where}${this.#pick(opts, bind)}${requireClause(opts)}`, params];
   }
 
   /**
@@ -1330,14 +1336,14 @@ export class Query {
       : null;
   }
 
-  // An update's or a delete's ` order ... limit n returning ...`: the rows
+  // An update's or a delete's ` order ... limit $n returning ...`: the rows
   // it picks, and whether it answers them.
-  #pick(opts) {
+  #pick(opts, bind) {
     let sql = '';
     for (const [i, o] of this.#s.order.entries()) {
       sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
     }
-    if (this.#s.limit !== undefined) sql += ` limit ${this.#s.limit}`;
+    if (this.#s.limit !== undefined) sql += ` limit ${bind(this.#s.limit, 'limit')}`;
     return sql + returningClause(opts);
   }
 
@@ -1415,8 +1421,10 @@ function binder(params) {
 }
 
 // ` require n` for a write's `{ require: n }`: the rows it must write, a
-// whole number from 0 -- not a parameter, as `limit` is not, so a statement
-// keeps its shape.
+// whole number from 0 written in -- FenecQL takes no parameter there: the
+// count is what the statement guards, a constant of the code, where a
+// page's `limit` and `offset` change with each request and go as
+// parameters.
 function requireClause(opts) {
   const n = opts?.require;
   if (n === undefined || n === null) return '';
