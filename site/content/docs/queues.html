@@ -26,6 +26,12 @@ ready again, and the next claim takes it. See
 <a href="/docs/fenecql#pick">Writes that pick their rows</a> for the
 rules.</p>
 
+<p>This is Redis's <code>LPUSH</code> and <code>BRPOP</code>, with a lease
+so that a job outlives the worker that took it. The other jobs an app adds
+Redis for — locks, rate limits, caches, <a
+href="/docs/redis#streams">streams</a>, pub/sub — are recipes of
+<a href="/docs/redis">Instead of Redis</a>.</p>
+
 <p>Every FenecQL block on this page is run, statement by statement, by a
 test (<code>crates/fenec-core/tests/queues_docs.rs</code>), and each
 <code>-- → x</code> is the answer it checks: a write's count, or the first

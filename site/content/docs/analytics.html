@@ -24,6 +24,13 @@ costs are <code>make analytics-bench</code> on an M1 Air, in process, over
 a million events and a million ticks; over HTTP a request adds its round
 trip.</p>
 
+<p>Counts by the minute and distinct users are what an app often keeps in
+Redis — <code>INCR</code> on a key a minute, <code>PFADD</code> and
+<code>PFCOUNT</code>. Here they are statements over the events as they were
+written; the other patterns, <a href="/docs/redis#unique-visitors">unique
+visitors</a> among them, are recipes of <a href="/docs/redis">Instead of
+Redis</a>.</p>
+
 <p>These recipes make a whole application in
 <a href="https://github.com/fenecdb/fenec/tree/main/examples/analytics">examples/analytics</a>:
 a 572-byte tracker, beacons written once however often they are sent,
