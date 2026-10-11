@@ -1347,6 +1347,9 @@ def build():
 
 
 STUDIO_HIGHLIGHT = os.path.join(REPO, "studio", "highlight.js")
+# The Grafana data source's query editor colours FenecQL by the same rules
+# (integrations/grafana): its Monaco tokenizer reads `tokens` from a copy.
+GRAFANA_HIGHLIGHT = os.path.join(REPO, "integrations", "grafana", "src", "fenecql", "highlight.js")
 
 # ------------------------------------------------------------------ the studio
 #
@@ -1456,8 +1459,9 @@ def studio_highlight():
     repository, with no Python at `cargo build`, so the generated file is
     kept there, and `site/test_highlight.py` refuses one that is not what
     this writes (`make studio-highlight`)."""
-    open(STUDIO_HIGHLIGHT, "w", encoding="utf-8").write(highlight_js())
-    print(f"wrote {os.path.relpath(STUDIO_HIGHLIGHT, REPO)}")
+    for path in (STUDIO_HIGHLIGHT, GRAFANA_HIGHLIGHT):
+        open(path, "w", encoding="utf-8").write(highlight_js())
+        print(f"wrote {os.path.relpath(path, REPO)}")
 
 
 if __name__ == "__main__":

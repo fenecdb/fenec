@@ -31,7 +31,8 @@ def main():
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
     sub("Cargo.toml", r'^(fenec-wire = \{ version = )"[^"]+"', rf'\g<1>"{v}"')
     sub("integrations/python/pyproject.toml", r'^version = "[^"]+"', f'version = "{v}"')
-    for path in ("web/package.json", "integrations/react/package.json", "integrations/cloudflare/package.json", "integrations/langchain/package.json"):
+    for path in ("web/package.json", "integrations/react/package.json", "integrations/cloudflare/package.json", "integrations/langchain/package.json",
+                 "integrations/grafana/package.json"):
         sub(path, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
     # A lock file names the package's version twice, at its top and as the
     # root of `packages`; each package's `make ...-test` installs from it
@@ -41,6 +42,12 @@ def main():
         lock = f"integrations/{name}/package-lock.json"
         sub(lock, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
         sub(lock, rf'^(    "": \{{\n      "name": "@fenecdb/{name}",\n      "version": )"[^"]+"', rf'\g<1>"{v}"')
+    # The Grafana data source's, published by no registry: mage writes the
+    # number into the backend's build info and webpack into plugin.json,
+    # which Grafana's catalog reads.
+    lock = "integrations/grafana/package-lock.json"
+    sub(lock, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
+    sub(lock, r'^(    "": \{\n      "name": "fenecdb-datasource",\n      "version": )"[^"]+"', rf'\g<1>"{v}"')
     sub("README.md", r"(ghcr\.io/fenecdb/fenec-server:)\d+\.\d+\.\d+", rf"\g<1>{v}")
     # NuGet's FenecDb. The Go module has no number of its own to write: it
     # is the tag release.yml pushes beside the release's (RELEASING.md).
