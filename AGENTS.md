@@ -3368,6 +3368,23 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   A failing mobile job also uploads `test-reports-android` (the JUnit
   reports) or `test-results-apple` (the simulator's `.xcresult`) for a
   week.
+- A test reads the clock from below. A sleep never ends early, so `took >=
+  wait` holds on any machine, while a bound from above measures the machine:
+  macOS gives the timers of a job whose QoS it clamps hundreds of
+  milliseconds of leeway (`taskpolicy -c background` is the way to try
+  it), and a container of three cores beside busy loops stood still for
+  2.7 s. Where the time is the property -- a held request answered before
+  its wait, a node that stops once its lease is out -- the bound is what it
+  stands against, with seconds to spare: half the wait, the lease the node
+  reports it has left, never a guess at how soon the system runs a thread.
+  Anywhere else the test asserts the event, the count or the order: the
+  wait a refusal would take (`audit::would_wait`), a claim still held when a
+  freeze returns, another tenant answered while a slow open is held at a
+  gate, a grant queued behind another (`Router::grants_waiting`). A timeout
+  a test gives its servers or clients bounds every request they make, not
+  just the one it is about: a router's upstream timeout of 600 ms failed a
+  tenant's create at background QoS, and an SDK client's 100 ms left
+  around a held claim's 400 failed nearly every run there.
 - Comments explain *why* a thing is the way it is — a measured cost, a trap that
   was hit, an alternative that was rejected. Match that when adding code.
 - All prose in the repo (comments, docs, README) is English.

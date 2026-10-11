@@ -545,23 +545,32 @@ fn a_read_sent_after_a_write_waits_for_it_on_a_replica() {
     let (_, _, body) = raw(r.port, "POST", "/query", "", get);
     assert!(!body.contains("held back"), "{body}");
     let port = r.port;
+    // The follower starts 300 ms after the reader says it is sending, not
+    // after it was spawned: timed from its own start, a reader the system
+    // started 50 ms late was answered sooner than the bound. The read waits
+    // 15 s for the write, not the 5 a header alone gives: a replica starved
+    // at background QoS beside a dozen other tests' loops applied it after
+    // those, a 504 in 1 run of 100.
+    let (sending, sent) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let started = Instant::now();
+        sending.send(()).unwrap();
         let answer = raw(
             port,
             "POST",
             "/query",
-            &format!("Fenec-After: {written}\r\n"),
+            &format!("Fenec-After: {written}\r\nFenec-Wait: 15000\r\n"),
             get,
         );
         (started.elapsed(), answer)
     });
+    sent.recv().unwrap();
     std::thread::sleep(Duration::from_millis(300));
     f.start("replica".into()).unwrap();
     let (took, (status, _, body)) = reader.join().unwrap();
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("held back"), "{body}");
-    assert!(took >= Duration::from_millis(250), "{took:?}");
+    assert!(took >= Duration::from_millis(300), "{took:?}");
     // A change that has not come: the wait, then 504 and where it stands.
     let started = Instant::now();
     let (status, _, body) = raw(

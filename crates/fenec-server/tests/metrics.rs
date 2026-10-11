@@ -176,42 +176,65 @@ fn the_scrape_takes_the_servers_tokens() {
     assert_eq!(s.ask(s.metrics, "GET", "/t", Some(TOKEN), "").0, 404);
 }
 
+/// Which statements are slow is told by thresholds no statement can miss --
+/// 0, every one, and a minute, none -- not by how long they take. At 20 ms
+/// the test counted on a put of 20 000 rows taking longer and on the create
+/// before it and a point read taking less, which a fast machine could undo
+/// for the one and a loaded one did for the others: at utility QoS beside
+/// eight busy loops the create took 47 ms and was the slow line found.
 #[test]
 fn a_slow_statement_is_logged_with_its_text() {
-    let s = node("slow.fenec", &["--slow-ms", "20"]);
-    let mut c = s.server.http().with_token(TOKEN);
-    c.run("create collection t (name text, n int)");
-    let docs: Vec<String> = (0..20_000)
-        .map(|i| format!("{{name: \"row {i}\", n: {i}}}"))
-        .collect();
-    let t = Instant::now();
-    c.run(&format!("put t [{}]", docs.join(", ")));
-    assert!(
-        t.elapsed() >= Duration::from_millis(20),
-        "the put was not slow"
-    );
-    // A point read by id, far under the threshold, with a mark to look for.
-    c.run("get t where id = 987654");
+    let statements = |s: &Node| {
+        let mut c = s.server.http().with_token(TOKEN);
+        c.run("create collection t (name text, n int)");
+        let docs: Vec<String> = (0..20_000)
+            .map(|i| format!("{{name: \"row {i}\", n: {i}}}"))
+            .collect();
+        c.run(&format!("put t [{}]", docs.join(", ")));
+        // A point read by id, with a mark to look for.
+        c.run("get t where id = 987654");
+    };
 
+    // Every statement is logged, the put's megabyte cut short.
+    let s = node("slow.fenec", &["--slow-ms", "0"]);
+    statements(&s);
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
+    let log = loop {
         let log = s.server.log.lock().unwrap().clone();
-        if let Some(line) = log.lines().find(|l| l.contains(r#""event":"slow""#)) {
-            // A JSON line; the request as it came: its line, then its body.
-            assert!(
-                line.starts_with('{')
-                    && line.contains(r#""kind":"write""#)
-                    && line.contains(r#""statement":"POST /query "#)
-                    && line.contains("put t [{name:"),
-                "{line}"
-            );
-            // Cut short: the statement is a megabyte, the line is not.
-            assert!(line.len() < 1400 && line.ends_with(r#"..."}"#), "{line}");
-            assert!(!log.contains("987654"), "{log}");
-            break;
+        if log.contains("987654") {
+            break log;
         }
-        assert!(Instant::now() < deadline, "no slow statement in:\n{log}");
+        assert!(
+            Instant::now() < deadline,
+            "no slow line for the read in:\n{log}"
+        );
         std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(value(&s.scrape(), "fenec_slow_statements_total"), 1.0);
+    };
+    let slow = |mark: &str| {
+        log.lines()
+            .find(|l| l.contains(r#""event":"slow""#) && l.contains(mark))
+            .unwrap_or_else(|| panic!("no slow line holding {mark} in:\n{log}"))
+    };
+    // A JSON line; the request as it came: its line, then its body.
+    let put = slow("put t [{name:");
+    assert!(
+        put.starts_with('{')
+            && put.contains(r#""kind":"write""#)
+            && put.contains(r#""statement":"POST /query "#),
+        "{put}"
+    );
+    // Cut short: the statement is a megabyte, the line is not.
+    assert!(put.len() < 1400 && put.ends_with(r#"..."}"#), "{put}");
+    let read = slow("987654");
+    assert!(read.contains(r#""kind":"read""#), "{read}");
+    assert!(!read.ends_with(r#"..."}"#), "{read}");
+    assert_eq!(value(&s.scrape(), "fenec_slow_statements_total"), 3.0);
+
+    // Under a minute, the same statements stay out of the log: counted as
+    // each is answered, before the scrape.
+    let s = node("fast.fenec", &["--slow-ms", "60000"]);
+    statements(&s);
+    assert_eq!(value(&s.scrape(), "fenec_slow_statements_total"), 0.0);
+    let log = s.server.log.lock().unwrap().clone();
+    assert!(!log.contains(r#""event":"slow""#), "{log}");
 }

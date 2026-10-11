@@ -237,9 +237,12 @@ fn sigterm_answers_held_claims_at_once() {
         for h in held {
             let (status, body, at) = h.join().unwrap();
             assert_eq!((status, body.as_str()), (200, "[]"));
+            // Answered by the shutdown, not by its 30 s wait running out.
+            // Bounded at a second, it measured the system: under `taskpolicy
+            // -c background` one was answered 1.75 s after the signal.
             let after = at - signalled;
             assert!(
-                after < Duration::from_secs(1),
+                after < Duration::from_secs(15),
                 "answered {after:?} after SIGTERM"
             );
         }

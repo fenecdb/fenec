@@ -1068,29 +1068,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// An open that takes long -- a large file without its graph -- holds
+    /// up no other tenant: an open one is handed out while the slow open is
+    /// held at a gate in its setup, for as long as the test keeps it there.
+    /// The open slept 400 ms and the other tenant's `get` was bounded at
+    /// 100 ms, which measured the machine as much as the registry: the
+    /// sleep before it gave the slow open 50 ms to begin, and a get
+    /// throttled for longer than that failed with no open in its way.
     #[test]
     fn a_slow_open_does_not_stall_other_tenants() {
+        #[derive(Default)]
+        struct Gate {
+            armed: bool,
+            entered: bool,
+            released: bool,
+        }
+        let gate = Arc::new((Mutex::new(Gate::default()), std::sync::Condvar::new()));
         let dir = scratch("slow");
-        // Every open takes 400 ms, as a large file without its graph would.
-        let reg = Arc::new(Tenants::new(&dir).unwrap().with_setup(|_| {
-            std::thread::sleep(Duration::from_millis(400));
+        let g = Arc::clone(&gate);
+        let reg = Arc::new(Tenants::new(&dir).unwrap().with_setup(move |_| {
+            let (m, cv) = &*g;
+            let mut s = m.lock().unwrap();
+            if s.armed {
+                s.entered = true;
+                cv.notify_all();
+                while !s.released {
+                    s = cv.wait(s).unwrap();
+                }
+            }
             Ok(())
         }));
         reg.create("fast").unwrap();
         reg.create("slow").unwrap();
         assert_eq!(reg.close_idle(Duration::ZERO), 1 + 1);
-        let fast = reg.get("fast").unwrap();
-        drop(fast);
+        drop(reg.get("fast").unwrap());
 
+        // The next open is held in its setup until released.
+        gate.0.lock().unwrap().armed = true;
         let opener = Arc::clone(&reg);
         let slow = std::thread::spawn(move || opener.get("slow").map(|_| ()));
-        std::thread::sleep(Duration::from_millis(50));
-        let t = Instant::now();
-        reg.get("fast").unwrap();
+        {
+            let (m, cv) = &*gate;
+            let (_s, waited) = cv
+                .wait_timeout_while(m.lock().unwrap(), Duration::from_secs(30), |s| !s.entered)
+                .unwrap();
+            assert!(!waited.timed_out(), "the slow open never reached its setup");
+        }
+        // Asked on a thread of its own: a get that waited for the held
+        // open would wait for good, and is seen not answering instead.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asker = Arc::clone(&reg);
+        std::thread::spawn(move || {
+            let _ = tx.send(asker.get("fast").map(|_| ()));
+        });
+        let fast = rx.recv_timeout(Duration::from_secs(30));
+        // Let go only now, whatever the answer: a failure leaves no thread
+        // held behind it.
+        {
+            let (m, cv) = &*gate;
+            m.lock().unwrap().released = true;
+            cv.notify_all();
+        }
         assert!(
-            t.elapsed() < Duration::from_millis(100),
-            "an open tenant waited {:?} for another one's open",
-            t.elapsed()
+            matches!(fast, Ok(Ok(()))),
+            "an open tenant waited for another one's open: {fast:?}"
         );
         slow.join().unwrap().unwrap();
         let _ = std::fs::remove_dir_all(dir);
