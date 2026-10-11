@@ -89,6 +89,22 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> io::Result<Answer> {
+        self.send_held(addr, method, target, headers, body, Duration::ZERO)
+    }
+
+    /// [`Pool::send`] of a request the node may hold for `held` before it
+    /// answers (`Fenec-Wait`): the answer is waited for that much longer.
+    /// Cut at the timeout alone, a claim held longer was answered 502 here
+    /// while the node went on to take a job for it, leased to no one.
+    pub fn send_held(
+        &self,
+        addr: &str,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        held: Duration,
+    ) -> io::Result<Answer> {
         let mut req = String::with_capacity(256);
         for part in [method, " ", target, " HTTP/1.1\r\nHost: ", addr, "\r\n"] {
             req.push_str(part);
@@ -130,7 +146,7 @@ impl Pool {
         ));
 
         if let Some(s) = self.take(addr) {
-            match self.exchange(addr, s, req.as_bytes(), body) {
+            match self.exchange(addr, s, req.as_bytes(), body, held) {
                 Ok(a) => return Ok(a),
                 // Closed while idle: the request never reached the node.
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
@@ -140,11 +156,18 @@ impl Pool {
             }
         }
         let s = self.connect(addr)?;
-        self.exchange(addr, s, req.as_bytes(), body)
+        self.exchange(addr, s, req.as_bytes(), body, held)
     }
 
-    fn exchange(&self, addr: &str, s: TcpStream, head: &[u8], body: &[u8]) -> io::Result<Answer> {
-        s.set_read_timeout(Some(self.timeout))?;
+    fn exchange(
+        &self,
+        addr: &str,
+        s: TcpStream,
+        head: &[u8],
+        body: &[u8],
+        held: Duration,
+    ) -> io::Result<Answer> {
+        s.set_read_timeout(Some(self.timeout + held))?;
         s.set_write_timeout(Some(self.timeout))?;
         let mut w = &s;
         w.write_all(head)?;

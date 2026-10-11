@@ -97,6 +97,10 @@ pub fn shutdown_flag() -> &'static AtomicBool {
     &SHUTDOWN
 }
 
+/// How long a shutdown waits for the answers of the requests it ends
+/// (`Fenec-Wait`) to be written.
+pub const HELD_GRACE: Duration = Duration::from_secs(2);
+
 /// What runs before the shutdown's sync and checkpoint.
 type Before = Box<dyn FnOnce() + Send>;
 static BEFORE_SHUTDOWN: std::sync::Mutex<Vec<Before>> = std::sync::Mutex::new(Vec::new());
@@ -164,6 +168,10 @@ pub fn run_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: boo
 /// meant a write accepted between `sync` and `exit` could look successful to
 /// the client and never reach the disk; the window was small but silent.
 fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
+    // Claims held until a job comes (`Fenec-Wait`) are answered first, with
+    // the nothing they found: left held, each was cut off with the process
+    // and its worker learned of the shutdown from a broken connection.
+    fenec_http::waits::end_all(HELD_GRACE);
     let before = std::mem::take(&mut *BEFORE_SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()));
     for f in before {
         f();

@@ -84,13 +84,24 @@ fn cluster_cors(
     access: Option<Arc<fenec_http::access::Access>>,
     cors: Option<&str>,
 ) -> Cluster {
+    cluster_timed(tag, n, token, access, cors, Duration::from_secs(5))
+}
+
+fn cluster_timed(
+    tag: &str,
+    n: usize,
+    token: Option<&str>,
+    access: Option<Arc<fenec_http::access::Access>>,
+    cors: Option<&str>,
+    upstream_timeout: Duration,
+) -> Cluster {
     let nodes: Vec<Node> = (1..=n)
         .map(|i| node_cors(&format!("{tag}{i}"), access.clone(), cors))
         .collect();
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: token.map(String::from),
-        upstream_timeout: Duration::from_secs(5),
+        upstream_timeout,
         ..Config::default()
     };
     let router = Router::new(Directory::in_memory(), cfg);
@@ -644,4 +655,73 @@ fn a_tenant_is_created_with_its_schema_by_the_routers_token_alone() {
     assert_eq!(c.nodes[0].tenants.names(), ["acme"]);
     let list = c.call("GET", "/_shard/tenants", "", Some("rt"));
     assert!(!body(&list).contains("globex"), "{}", list.1);
+}
+
+/// A claim its node holds (`Fenec-Wait`) longer than the router's upstream
+/// timeout is waited for, and answered by a job put through the router: cut
+/// at the timeout, it was a 502 while the node went on to lease the job to
+/// no one. A tenant deleted under a held claim answers it 503 at once, and
+/// the delete does not wait for it.
+#[test]
+fn a_held_claim_is_waited_for_through_the_router() {
+    let c = cluster_timed("held", 1, None, None, None, Duration::from_millis(600));
+    c.create("acme", None);
+    let made = c.query(
+        "acme",
+        "create collection jobs (run_at timestamp @sorted, owner text)",
+    );
+    assert_eq!(made.0, 200, "{}", made.1);
+    let port = c.port;
+    let claim = || {
+        std::thread::spawn(move || {
+            let body = r#"{"query":"set jobs {owner: \"w\", run_at: now() + 60000} where run_at <= now() order run_at limit 1 returning id"}"#;
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            write!(
+                s,
+                "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\
+                 Fenec-Wait: 5000\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let mut out = String::new();
+            let _ = s.read_to_string(&mut out);
+            out
+        })
+    };
+    let held = |c: &Cluster| {
+        let t = Instant::now();
+        loop {
+            let n = c.nodes[0]
+                .tenants
+                .get("acme")
+                .unwrap()
+                .hub
+                .waits()
+                .stats()
+                .held;
+            if n > 0 {
+                return;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "never held");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    let first = claim();
+    held(&c);
+    // Past the router's timeout: what is tested is the time itself.
+    std::thread::sleep(Duration::from_millis(900));
+    let put = c.query("acme", "put jobs {run_at: 1}");
+    assert_eq!(put.0, 200, "{}", put.1);
+    let answer = first.join().unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(answer.ends_with("[{\"id\":1}]"), "{answer}");
+
+    let second = claim();
+    held(&c);
+    let t = Instant::now();
+    assert_eq!(c.call("DELETE", "/_shard/tenants/acme", "", None).0, 204);
+    let answer = second.join().unwrap();
+    assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
 }
