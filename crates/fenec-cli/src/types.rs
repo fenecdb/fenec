@@ -356,6 +356,9 @@ fn render_tables(path: &str, import: &str, schemas: &[Schema]) -> String {
                     None => format!("{chain}.collate('{}')", c.name()),
                 };
             }
+            if f.nocase {
+                chain.push_str(".nocase()");
+            }
             if f.required {
                 chain.push_str(".notNull()");
             }

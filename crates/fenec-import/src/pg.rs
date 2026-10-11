@@ -52,6 +52,8 @@ pub struct VectorOids {
     pub sparsevec: Option<i32>,
     pub geometry: Option<i32>,
     pub geography: Option<i32>,
+    /// The `citext` extension's text, compared without case.
+    pub citext: Option<i32>,
 }
 
 /// How a column is decoded from COPY text.
@@ -166,6 +168,12 @@ pub(crate) fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
             )),
             _ => unsupported("a `geo` field holds points, and this column other shapes"),
         };
+    }
+
+    // `citext`: text its `=` compares by `lower()`, which a `nocase`
+    // field's fold does too -- and more: `ß` and `SS`, a final sigma.
+    if Some(f.oid) == oids.citext {
+        return (col(DataType::Text, "citext").nocase(), Kind::Text);
     }
 
     match f.oid {
@@ -619,7 +627,7 @@ pub fn count_rows(url: &Url, query: &Query) -> Result<u64> {
 pub fn vector_oids(client: &mut Client) -> Result<VectorOids> {
     let r = client.query(
         "select typname, oid from pg_type where typname in \
-         ('vector', 'halfvec', 'sparsevec', 'geometry', 'geography')",
+         ('vector', 'halfvec', 'sparsevec', 'geometry', 'geography', 'citext')",
     )?;
     let mut out = VectorOids::default();
     for row in &r.rows {
@@ -635,6 +643,7 @@ pub fn vector_oids(client: &mut Client) -> Result<VectorOids> {
             Some("sparsevec") => out.sparsevec = Some(oid),
             Some("geometry") => out.geometry = Some(oid),
             Some("geography") => out.geography = Some(oid),
+            Some("citext") => out.citext = Some(oid),
             _ => {}
         }
     }
@@ -810,6 +819,23 @@ mod tests {
         let (c, _) = map_oid(&f("splade", 16395, -1), &o);
         assert_eq!(c.ty, None);
         assert!(c.note.unwrap().contains("sparse<N>"));
+    }
+
+    /// `citext`'s OID is the extension's too: a text field compared by its
+    /// case fold.
+    #[test]
+    fn citext_is_a_nocase_text() {
+        let o = VectorOids {
+            citext: Some(16500),
+            ..VectorOids::default()
+        };
+        let (c, k) = map_oid(&f("email", 16500, -1), &o);
+        assert_eq!(
+            (c.ty, c.nocase, k),
+            (Some(DataType::Text), true, Kind::Text)
+        );
+        let (c, _) = map_oid(&f("email", TEXT, -1), &o);
+        assert!(!c.nocase);
     }
 
     #[test]

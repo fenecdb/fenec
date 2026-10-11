@@ -2,8 +2,9 @@
 -- one is what `fenec types` writes for it in one language or form, and the
 -- CLI's tests make each again (FENEC_TYPES_GOLDEN=write cargo test -p
 -- fenec-cli types writes them). Every type, a required field and not, a
--- collation, every index and a path index, indexes over several fields, a
--- name past ASCII, and a collection named as a builder is.
+-- collation, a field compared by its case fold, every index and a path
+-- index, indexes over several fields, a name past ASCII, and a collection
+-- named as a builder is.
 create collection articles (
   title text required collate tr @text(prefix=6, chars),
   year int @hash,
@@ -18,7 +19,7 @@ create collection articles (
   splade sparse<30522> @inverted,
   tags [text] @hash,
   counts [int] required,
-  slug text @unique,
+  slug text nocase @unique,
   @sorted(draft, published desc),
   @unique(year, meta.lang)
 )

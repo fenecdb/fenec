@@ -22,7 +22,7 @@ class Articles(TypedDict):
     splade: Optional[str]  # sparse<30522> @inverted
     tags: Optional[list[str]]  # [text] @hash
     counts: list[int]  # [int] required
-    slug: Optional[str]  # text @unique
+    slug: Optional[str]  # text nocase @unique
 
 
 class ProductReviews(TypedDict):

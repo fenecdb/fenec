@@ -45,6 +45,10 @@ pub struct Column {
     pub source_type: String,
     /// A lossy-mapping warning, or the reason there is no `ty`.
     pub note: Option<String>,
+    /// The source compares it without case -- PostgreSQL's `citext`,
+    /// SQLite's `COLLATE NOCASE` -- and so does the field, `nocase`, while
+    /// it is text.
+    pub nocase: bool,
 }
 
 impl Column {
@@ -54,6 +58,7 @@ impl Column {
             ty: Some(ty),
             source_type: source_type.into(),
             note: None,
+            nocase: false,
         }
     }
 
@@ -69,7 +74,14 @@ impl Column {
             ty: None,
             source_type: source_type.into(),
             note: Some(reason.into()),
+            nocase: false,
         }
+    }
+
+    /// Compared without case in the source ([`Column::nocase`]).
+    pub fn nocase(mut self) -> Column {
+        self.nocase = true;
+        self
     }
 
     pub fn note(mut self, note: impl Into<String>) -> Column {

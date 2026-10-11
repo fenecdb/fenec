@@ -372,6 +372,8 @@ struct Decl {
     ty: String,
     /// `INTEGER PRIMARY KEY` -- the value is in the rowid, not in the record.
     rowid_alias: bool,
+    /// `COLLATE NOCASE`: compared without ASCII's case.
+    nocase: bool,
 }
 
 /// Keywords that begin a column constraint; the type ends before them.
@@ -432,6 +434,7 @@ fn parse_create(sql: &str) -> Result<Vec<Decl>> {
             name,
             ty: ty.trim().to_string(),
             rowid_alias,
+            nocase: collates_nocase(tail),
         });
     }
 
@@ -618,6 +621,19 @@ fn take_type(s: &str) -> (String, &str) {
     (s[..end].to_string(), &s[end..])
 }
 
+/// Whether the constraint tail says `COLLATE NOCASE`.
+fn collates_nocase(tail: &str) -> bool {
+    let up = tail.to_ascii_uppercase();
+    let mut words = up.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "COLLATE" {
+            let next = words.next().unwrap_or("");
+            return next.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']')) == "NOCASE";
+        }
+    }
+    false
+}
+
 /// Whether the constraint tail contains `PRIMARY KEY`.
 fn has_primary_key(tail: &str) -> bool {
     let up = tail.to_ascii_uppercase();
@@ -752,6 +768,13 @@ impl Reader {
                 if d.rowid_alias {
                     // A rowid is always an i64, whatever the declared type says.
                     Column::new(&d.name, DataType::Int, "INTEGER PRIMARY KEY")
+                } else if d.nocase {
+                    // Broader than SQLite's, which folds ASCII alone: a
+                    // `nocase` field folds every script.
+                    map_decl(&d.name, &d.ty).nocase().note(
+                        "COLLATE NOCASE taken as `nocase`, which folds every script's case \
+                         where SQLite's folds ASCII's",
+                    )
                 } else {
                     map_decl(&d.name, &d.ty)
                 }
@@ -954,6 +977,20 @@ mod tests {
         assert_eq!(d[4].ty, "", "an untyped column carries an empty type");
         assert!(d[0].rowid_alias);
         assert!(!d[3].rowid_alias);
+    }
+
+    /// `COLLATE NOCASE` is a column compared without case, and so is the
+    /// field it becomes; another collation is not.
+    #[test]
+    fn collate_nocase_is_a_nocase_field() {
+        let d = parse_create(
+            "CREATE TABLE u (email TEXT NOT NULL COLLATE NOCASE UNIQUE, name TEXT COLLATE \"nocase\", \
+             code TEXT COLLATE BINARY, n INT)",
+        )
+        .unwrap();
+        let nocase: Vec<bool> = d.iter().map(|x| x.nocase).collect();
+        assert_eq!(nocase, [true, true, false, false]);
+        assert_eq!(d[0].ty, "TEXT");
     }
 
     /// A table-level `PRIMARY KEY (x)` produces a rowid alias too.

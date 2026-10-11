@@ -254,6 +254,8 @@ test('a schema change names only what FenecQL writes, and checks each option', (
   }
   assert.throws(() => S.createIndex('orders', 'id', { kind: 'hash' }), S.StatementError);
   assert.throws(() => S.addField('orders', 'n', 'int', { collate: 'tr' }), /orders text/);
+  assert.equal(S.addField('users', 'email', 'text', { nocase: true, index: { kind: 'unique' } }).text, 'alter collection users add field email text nocase @unique');
+  assert.throws(() => S.addField('users', 'n', 'int', { nocase: true }), /case fold/);
   assert.deepEqual(S.indexKinds('vector<8>'), ['hnsw']);
   assert.deepEqual(S.indexKinds('json'), []);
   // An index over several fields: its parts as typed, each name checked.

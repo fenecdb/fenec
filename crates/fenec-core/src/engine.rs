@@ -1,8 +1,9 @@
 //! Database engine: where the catalog, execution and persistence meet.
 
+use crate::case::CaseFold;
 use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
-use crate::collate::{self, Collation};
+use crate::collate::{self, Collation, TextOrder};
 use crate::composite::CompositeIndex;
 use crate::error::{Error, Result};
 use crate::geo::GeoIndex;
@@ -1149,6 +1150,9 @@ impl Sink for NullSink {
 pub struct HashIndex {
     map: crate::maps::Sharded<Vec<u8>, Bucket>,
     heap: usize,
+    /// The fold a `nocase` field's text is filed under: its key is the
+    /// fold's encoding, so a bucket holds every spelling of one text.
+    fold: Option<CaseFold>,
 }
 
 // The keys are taken as `&Vec<u8>`, the type the map holds, rather than
@@ -1156,9 +1160,23 @@ pub struct HashIndex {
 // second time, 650 bytes of the browser module.
 #[allow(clippy::ptr_arg)]
 impl HashIndex {
+    /// An empty index over a field whose text is filed under `fold`.
+    fn folding(fold: Option<CaseFold>) -> HashIndex {
+        HashIndex {
+            fold,
+            ..HashIndex::default()
+        }
+    }
+
     /// The documents under `key`, ascending.
     pub fn get(&self, key: &Vec<u8>) -> Option<&Bucket> {
         self.map.get(key)
+    }
+
+    /// The key `v` is filed under: [`hash_key`], a `nocase` field's text
+    /// folded first.
+    pub fn key(&self, v: &Value) -> Vec<u8> {
+        folded_key(v, self.fold)
     }
 
     /// The distinct values held.
@@ -1417,7 +1435,8 @@ impl Collection {
                     );
                 }
                 (IndexKind::Hash { .. }, _) => {
-                    hashes.insert(f.name.clone(), Derived::new(HashIndex::default()));
+                    let ix = HashIndex::folding(f.case_fold());
+                    hashes.insert(f.name.clone(), Derived::new(ix));
                 }
                 #[cfg(feature = "text")]
                 (IndexKind::Text(spec), DataType::Text) => {
@@ -1425,7 +1444,7 @@ impl Collection {
                 }
                 #[cfg(feature = "sorted")]
                 (IndexKind::Sorted { .. }, ty) if SortedIndex::supports(ty) => {
-                    let ix = SortedIndex::new(ty, f.collate);
+                    let ix = SortedIndex::new(ty, f.text_order());
                     sorted.push((f.name.clone(), Derived::new(ix)));
                 }
                 #[cfg(feature = "sparse")]
@@ -1553,7 +1572,9 @@ impl Collection {
         else {
             return Ok(None);
         };
-        d.or_build(|| hash_of(&self.store, pos, keys)).map(Some)
+        let fold = self.schema.indexed(field).and_then(|f| f.case_fold());
+        d.or_build(|| hash_of(&self.store, pos, keys, fold))
+            .map(Some)
     }
 
     /// Takes `field`'s indexes off the collection, whichever it has.
@@ -1682,7 +1703,7 @@ impl Collection {
             let Some(ix) = self.hash(&f.name)? else {
                 continue;
             };
-            if let Some(b) = ix.get(&hash_key(v)) {
+            if let Some(b) = ix.get(&ix.key(v)) {
                 out.extend(
                     b.iter()
                         .filter(|&d| d != doc.id)
@@ -1734,7 +1755,8 @@ impl Collection {
                 return Ok(false);
             };
             let v = read_source(&self.store, id, (pos, keys))?;
-            if hash_key(&v) != hash_key(doc.at(k).unwrap_or(&Value::Null)) {
+            let fold = self.schema.field(k).and_then(|f| f.case_fold());
+            if folded_key(&v, fold) != folded_key(doc.at(k).unwrap_or(&Value::Null), fold) {
                 return Ok(false);
             }
         }
@@ -1902,7 +1924,7 @@ impl Collection {
         for (name, ix) in self.hashes.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(v) = doc.at(name).filter(|_| !kept(name)) {
-                ix.add(hash_key(v), doc.id);
+                ix.add(ix.key(v), doc.id);
             }
         }
         for (name, ix) in self.texts.iter_mut() {
@@ -1991,7 +2013,7 @@ impl Collection {
         for (name, ix) in self.hashes.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if let Some(v) = doc.at(name).filter(|_| !kept(name)) {
-                ix.remove(&hash_key(v), doc.id);
+                ix.remove(&ix.key(v), doc.id);
             }
         }
         // Every caller reads the *stored* document before unindexing, so the
@@ -2185,6 +2207,42 @@ fn hash_key(v: &Value) -> Vec<u8> {
 /// 2^53: the ints an `f64` holds every one of.
 const EXACT_INT: f64 = 9_007_199_254_740_992.0;
 
+/// [`hash_key`] under a `nocase` field's fold: a text's key is its fold's
+/// encoding, so `Alice` and `alice` are one bucket and one `@unique` value.
+/// Encoded as a text value is, so a key reads back as the fold.
+fn folded_key(v: &Value, fold: Option<CaseFold>) -> Vec<u8> {
+    match (v, fold) {
+        (Value::Text(_), Some(_)) => {
+            let mut out = Vec::new();
+            encode_folded(&mut out, v, fold);
+            out
+        }
+        _ => hash_key(v),
+    }
+}
+
+/// `v`'s encoding as a group, a facet, a distinct value or a sketch tells
+/// values apart by: a `nocase` field's text as its fold's -- encoded as a
+/// text is, so the key reads back as the fold.
+fn encode_folded(out: &mut Vec<u8>, v: &Value, fold: Option<CaseFold>) {
+    match (v, fold) {
+        // An ASCII text's fold is as long as it is: written lowercased as
+        // it is copied, with no text made in between -- a put of a row
+        // whose `@unique` email is written in mixed case went 1 348 ->
+        // 1 210 ns, a plain field's 1 230.
+        (Value::Text(t), Some(CaseFold::Unicode)) if t.is_ascii() => {
+            out.push(crate::codec::TAG_TEXT);
+            put_uvarint(out, t.len() as u64);
+            out.extend(t.bytes().map(|b| b.to_ascii_lowercase()));
+        }
+        (Value::Text(t), Some(f)) => {
+            out.push(crate::codec::TAG_TEXT);
+            crate::codec::encode_str(out, &crate::case::fold(t, f));
+        }
+        _ => crate::codec::encode_value(out, v),
+    }
+}
+
 /// The bucket key `v` finds in the hash index on `field`: the value coerced
 /// to the field's type, as the write path filed it, or -- over a `json`
 /// field or a path, whose values have no type -- the value itself where
@@ -2193,14 +2251,19 @@ const EXACT_INT: f64 = 9_007_199_254_740_992.0;
 /// an int past 2^53 equals floats near it that no bucket of its own holds,
 /// and a timestamp equals the text it parses from.
 fn lookup_key(schema: &Schema, field: &str, v: &Value) -> Option<Vec<u8>> {
-    match &schema.indexed(field)?.ty {
+    let fd = schema.indexed(field)?;
+    match &fd.ty {
         DataType::Json => match v {
             Value::Null | Value::Bool(_) | Value::Text(_) => Some(hash_key(v)),
             Value::Int(i) if i.unsigned_abs() <= 1 << 53 => Some(hash_key(v)),
             Value::Float(f) if f.abs() <= EXACT_INT => Some(hash_key(v)),
             _ => None,
         },
-        ty => v.clone().coerce(ty).ok().map(|k| hash_key(&k)),
+        ty => v
+            .clone()
+            .coerce(ty)
+            .ok()
+            .map(|k| folded_key(&k, fd.case_fold())),
     }
 }
 
@@ -2565,7 +2628,9 @@ impl<'a> Probe<'a> {
                 let Ok(k) = key.clone().coerce(ty) else {
                     return Ok(false);
                 };
-                let Some(ids) = map.get(&hash_key(&k)) else {
+                // The child's index decides how its key compares: a
+                // `nocase` one finds a parent's value by its fold.
+                let Some(ids) = map.get(&map.key(&k)) else {
                     return Ok(false);
                 };
                 for id in ids.iter() {
@@ -2609,7 +2674,7 @@ impl<'a> Probe<'a> {
                 let Ok(k) = key.clone().coerce(ty) else {
                     return;
                 };
-                let Some(ids) = map.get(&hash_key(&k)) else {
+                let Some(ids) = map.get(&map.key(&k)) else {
                     return;
                 };
                 // A bucket can hold ids whose document is gone. It holds
@@ -2672,8 +2737,10 @@ impl<'a> RowAccess for StoreRow<'a> {
         let at = source_or_err(self.schema, name, "")?;
         read_source(self.store, self.id, at)
     }
-    fn collation(&self, name: &str) -> Option<Collation> {
-        self.schema.field(name).and_then(|f| f.collate)
+    fn text_order(&self, name: &str) -> TextOrder {
+        self.schema
+            .field(name)
+            .map_or(TextOrder::BYTES, |f| f.text_order())
     }
 }
 
@@ -2687,8 +2754,10 @@ impl<'a> RowAccess for DocRow<'a> {
         self.1.path_of(name)?;
         Ok(self.0.at(name).cloned().unwrap_or(Value::Null))
     }
-    fn collation(&self, name: &str) -> Option<Collation> {
-        self.1.field(name).and_then(|f| f.collate)
+    fn text_order(&self, name: &str) -> TextOrder {
+        self.1
+            .field(name)
+            .map_or(TextOrder::BYTES, |f| f.text_order())
     }
 }
 
@@ -4357,7 +4426,7 @@ impl Database {
             for (p, ix, rows) in sorted_ix.iter_mut() {
                 **ix = Derived::new(SortedIndex::build(
                     &schema.fields[*p].ty,
-                    schema.fields[*p].collate,
+                    schema.fields[*p].text_order(),
                     &mut std::mem::take(rows).into_iter(),
                 ));
             }
@@ -8303,7 +8372,7 @@ impl Database {
             let Ok(key) = val.clone().coerce(&fd.ty) else {
                 continue;
             };
-            let bucket = map.get(&hash_key(&key));
+            let bucket = map.get(&map.key(&key));
             let len = |b: Option<&Bucket>| b.map_or(0, Bucket::len);
             if best.map(|b| len(bucket) < len(b)).unwrap_or(true) {
                 best = Some(bucket);
@@ -8931,13 +9000,17 @@ impl Database {
                     // Built by hand: `join` brought a 1.2 KB copy of its own
                     // into the browser module for this one line.
                     let mut by = String::new();
-                    // The collation in force, named or the field's.
+                    // The collation in force, named or the field's, and the
+                    // field's fold.
                     for (i, (s, key)) in sel.order.iter().zip(&keys).enumerate() {
                         by.push_str(if i == 0 { "" } else { ", " });
                         by.push_str(&s.field);
-                        if let Some(c) = key.2 {
+                        if let Some(c) = key.2.coll {
                             by.push_str(" collate ");
                             by.push_str(c.name());
+                        }
+                        if key.2.fold.is_some() {
+                            by.push_str(" nocase");
                         }
                         by.push_str(if s.asc { "" } else { " desc" });
                     }
@@ -9139,22 +9212,42 @@ impl Database {
                     DataType::Text | DataType::Int | DataType::Bool | DataType::Timestamp
                 );
             let mut counted: Vec<(Value, u64)> = Vec::new();
+            // A `nocase` field's values are its folds, each shown as the
+            // first row holding it -- in id order, as the rows come --
+            // wrote it.
+            let fold = keys.is_none().then(|| field.case_fold()).flatten();
             let ix = bucketed.then(|| c.hash(&f.field)).transpose()?.flatten();
             if let Some(ix) = ix {
                 if !all && member.is_none() {
                     *member = Some(member_bits(ids));
                 }
+                let bit = |bits: &[u64], d: DocId| {
+                    let w = bits.get(d as usize / 64).copied().unwrap_or(0);
+                    (w >> (d % 64)) & 1
+                };
                 let mut held = 0u64;
                 for (key, docs) in ix.iter() {
                     let mut n = docs.len() as u64;
                     if let (Some(bits), false) = (&*member, all) {
                         n = 0;
                         for d in docs.iter() {
-                            let w = bits.get(d as usize / 64).copied().unwrap_or(0);
-                            n += (w >> (d % 64)) & 1;
+                            n += bit(bits, d);
                         }
                     }
-                    let value = crate::codec::decode_value(key, &mut 0)?;
+                    // The first of the set the bucket holds, read as written.
+                    let mut shown = None;
+                    if fold.is_some() && n > 0 {
+                        for d in docs.iter() {
+                            if all || member.as_deref().is_some_and(|b| bit(b, d) == 1) {
+                                shown = c.store.read_field(d, pos)?;
+                                break;
+                            }
+                        }
+                    }
+                    let value = match shown {
+                        Some(v) => v,
+                        None => crate::codec::decode_value(key, &mut 0)?,
+                    };
                     if n > 0 && !value.is_null() {
                         held += n;
                         counted.push((value, n));
@@ -9172,7 +9265,7 @@ impl Database {
                 let mut key = Vec::new();
                 let mut count = |row: usize, v: &Value| {
                     key.clear();
-                    crate::codec::encode_value(&mut key, v);
+                    encode_folded(&mut key, v, fold);
                     let at = match index.get(&key) {
                         Some(n) => n.first().unwrap_or(0) as usize,
                         None => {
@@ -9239,9 +9332,16 @@ impl Database {
                 )));
             }
             // Most first, then by value -- in the field's collation when it
-            // has one -- through the one sort `order` and `group` use.
-            let collate = keys.is_none().then_some(field.collate).flatten();
-            let order: [OrderKey; 2] = [(None, false, None, None), (None, true, collate, None)];
+            // has one, by its fold where it is `nocase` -- through the one
+            // sort `order` and `group` use.
+            let text = match keys {
+                None => field.text_order(),
+                Some(_) => TextOrder::BYTES,
+            };
+            let order: [OrderKey; 2] = [
+                (None, false, TextOrder::BYTES, None),
+                (None, true, text, None),
+            ];
             let mut flat = Vec::with_capacity(n * 2);
             for (v, k) in &counted {
                 flat.push(Value::Int(*k as i64));
@@ -9298,7 +9398,7 @@ impl Database {
         if let (None, Some(ix)) = (keys, c.sorted_index(&f.field)?) {
             let mut at = Vec::with_capacity(bounds.len());
             for b in bounds {
-                match SortedIndex::bound(&field.ty, b) {
+                match SortedIndex::bound(&field.ty, None, b) {
                     Some(k) => at.push(k),
                     None => break,
                 }
@@ -9745,15 +9845,20 @@ fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexS
 
 /// The hash index of the field at `pos`, from the documents: what `create
 /// index` builds, and what the first read after an open does.
-fn hash_of(store: &Store, pos: usize, keys: Option<&str>) -> Result<HashIndex> {
-    let mut ix = HashIndex::default();
+fn hash_of(
+    store: &Store,
+    pos: usize,
+    keys: Option<&str>,
+    fold: Option<CaseFold>,
+) -> Result<HashIndex> {
+    let mut ix = HashIndex::folding(fold);
     for id in store.ids() {
         let v = match keys {
             None => store.read_field(id, pos)?,
             Some(keys) => store.read_path(id, pos, keys)?,
         };
         if let Some(v) = v {
-            ix.add(hash_key(&v), id);
+            ix.add(ix.key(&v), id);
         }
     }
     Ok(ix)
@@ -9784,11 +9889,23 @@ fn composite_shared(c: &Collection, comp: &Composite, a: DocId, b: DocId) -> Err
 fn refuse_shared(c: &Collection, field: &str) -> Result<()> {
     let shared = c.hash(field)?.and_then(HashIndex::shared);
     match shared {
-        Some((v, a, b)) => Err(Error::Duplicate(format!(
-            "`{}.{field}` cannot be unique: documents {a} and {b} both hold {}",
-            c.schema.name,
-            crate::json::to_string(&v)
-        ))),
+        Some((v, a, b)) => {
+            // A `nocase` field's key is the fold: the value is named as the
+            // first document wrote it.
+            let v = match c.schema.field(field).filter(|f| f.nocase) {
+                Some(f) => c
+                    .store
+                    .read(&c.schema, a)?
+                    .and_then(|d| d.get(&f.name).cloned()),
+                None => None,
+            }
+            .unwrap_or(v);
+            Err(Error::Duplicate(format!(
+                "`{}.{field}` cannot be unique: documents {a} and {b} both hold {}",
+                c.schema.name,
+                crate::json::to_string(&v)
+            )))
+        }
         None => Ok(()),
     }
 }
@@ -9826,7 +9943,7 @@ fn sorted_of(
     }
     Ok(SortedIndex::build(
         &field.ty,
-        field.collate,
+        field.text_order(),
         &mut rows.into_iter(),
     ))
 }
@@ -9845,9 +9962,9 @@ fn sorted_of(
 /// The inverted index over the sparse vectors of the field at `pos`, as
 /// [`hash_of`].
 /// The parts of `c`, an index over several fields of `schema`: each part's
-/// kind by its field's type, its collation by its field's. `None` in a
-/// build without the `sorted` feature, or where a part names no field --
-/// which the schema refuses before it gets here.
+/// kind by its field's type, its collation and its fold by its field's.
+/// `None` in a build without the `sorted` feature, or where a part names no
+/// field -- which the schema refuses before it gets here.
 fn composite_parts(schema: &Schema, c: &Composite) -> Option<Vec<crate::composite::Part>> {
     if !cfg!(feature = "sorted") {
         return None;
@@ -9855,8 +9972,8 @@ fn composite_parts(schema: &Schema, c: &Composite) -> Option<Vec<crate::composit
     let mut parts = Vec::with_capacity(c.keys.len());
     for (k, desc) in &c.keys {
         let ty = schema.part_type(k).ok()?;
-        let coll = schema.field(k).and_then(|f| f.collate);
-        parts.push(crate::composite::Part::of(&ty, *desc, coll));
+        let order = schema.field(k).map_or(TextOrder::BYTES, |f| f.text_order());
+        parts.push(crate::composite::Part::of(&ty, *desc, order));
     }
     Some(parts)
 }
@@ -9972,7 +10089,8 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     match c.schema.fields[pos].index.clone() {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash { .. } => {
-            let ix = Derived::new(hash_of(&c.store, pos, None)?);
+            let fold = c.schema.fields[pos].case_fold();
+            let ix = Derived::new(hash_of(&c.store, pos, None, fold)?);
             c.hashes.insert(field, ix);
         }
         IndexKind::Text(spec) => {
@@ -10039,7 +10157,7 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
     };
     match f.index {
         IndexKind::Hash { .. } => {
-            let ix = Derived::new(hash_of(&c.store, pos, keys)?);
+            let ix = Derived::new(hash_of(&c.store, pos, keys, None)?);
             c.hashes.insert(path.to_string(), ix);
         }
         IndexKind::Sorted { .. } => {
@@ -10456,8 +10574,8 @@ impl RowAccess for Upserting<'_> {
         }
         Ok(self.1.at(f).cloned().unwrap_or(Value::Null))
     }
-    fn collation(&self, name: &str) -> Option<Collation> {
-        self.0.collation(name.strip_prefix(NEW).unwrap_or(name))
+    fn text_order(&self, name: &str) -> TextOrder {
+        self.0.text_order(name.strip_prefix(NEW).unwrap_or(name))
     }
 }
 
@@ -10590,7 +10708,7 @@ fn nearest_of(
             held.push(id);
         }
     }
-    let by: [OrderKey; 1] = [(None, true, None, None)];
+    let by: [OrderKey; 1] = [(None, true, TextOrder::BYTES, None)];
     let mut out = Vec::with_capacity(want.min(held.len()));
     for i in order_rows(&keys, 1, held.len(), &by, want) {
         if let Value::Float(d) = keys[i] {
@@ -10935,6 +11053,10 @@ struct Filter<'q> {
     vals: std::cell::RefCell<Vec<Value>>,
     /// A row's value encoded, for a [`Test::InSet`] to look up.
     key: std::cell::RefCell<Vec<u8>>,
+    /// A `nocase` field's text of a row, folded, for a [`Folded`] test that
+    /// needs it whole: written over row after row, so nothing is allocated
+    /// once it has grown.
+    scratch: std::cell::RefCell<String>,
 }
 
 /// How long an `in` list is before a row is looked up in it rather than
@@ -11021,7 +11143,37 @@ enum Test<'q> {
     },
     /// `within(<a point field>, <box>)`.
     Within(Slot, crate::geo::GeoBox),
+    /// A `nocase` field's text against values folded where it is bound,
+    /// by its fold.
+    Folded(Slot, CaseFold, Box<Folded>),
     Eval(&'q Expr),
+}
+
+/// What a [`Test::Folded`] asks of its field's fold. Folded as a row was
+/// read, a scan for one name over 100 000 rows, a third of them past ASCII,
+/// took 5.4 -> 17.0 ms -- each such row's fold a new text, and the whole of
+/// it; compared as it is folded, `=` and the order stop where the two
+/// part, mostly at the first character, and nothing is allocated.
+enum Folded {
+    /// `=`, `!=`, `<`...: the field on the left when `first`, its text
+    /// ordered in its collation over the folds, which `=` need not ask.
+    Cmp {
+        op: CmpOp,
+        value: Value,
+        first: bool,
+        coll: Option<Collation>,
+    },
+    /// `in`, each text folded.
+    In(Vec<Value>),
+    /// `in` a long list, looked up as [`Test::InSet`] is: the row's fold's
+    /// key among its values'.
+    InSet(Vec<Value>, std::cell::OnceCell<Option<HashIndex>>),
+    /// `~`: whether the row's fold holds the needle's. A fold is lowercase
+    /// but where a character's fold is its capital (Cherokee) or a letter
+    /// of its own (`ı`), and lowercasing tells no two folds' characters
+    /// apart it did not: searched as bytes, it is `~`'s answer over the
+    /// two lowercased.
+    Like(String),
 }
 
 impl<'q> Filter<'q> {
@@ -11044,6 +11196,7 @@ impl<'q> Filter<'q> {
             paths,
             vals: std::cell::RefCell::new(Vec::new()),
             key: std::cell::RefCell::new(Vec::new()),
+            scratch: std::cell::RefCell::new(String::new()),
         }
     }
 
@@ -11090,6 +11243,16 @@ impl<'q> Filter<'q> {
             Slot::At(p) => c.schema.fields[p].collate,
             Slot::Id | Slot::Path(_) => None,
         };
+        // A `nocase` field's fold, and a value it is compared with folded,
+        // once a query.
+        let fold_of = |s: Option<Slot>| match s {
+            Some(Slot::At(p)) => c.schema.fields[p].case_fold(),
+            _ => None,
+        };
+        let folded = |f: CaseFold, v: Value| match v {
+            Value::Text(t) => Value::Text(crate::case::fold(&t, f).into_owned()),
+            v => v,
+        };
         if let Some(t) = Filter::bind_geo(c, e, &value, &mut slot) {
             return t;
         }
@@ -11107,40 +11270,63 @@ impl<'q> Filter<'q> {
                 Some(s) => Test::IsNull(s),
                 None => Test::Eval(e),
             },
-            Expr::Cmp(op, a, b) => match (slot(a), value(b), value(a), slot(b)) {
-                (Some(s), Some(value), ..) => Test::Cmp {
-                    op: *op,
-                    slot: s,
-                    value,
-                    first: true,
-                    coll: coll(s),
-                },
-                (_, _, Some(value), Some(s)) => Test::Cmp {
-                    op: *op,
-                    slot: s,
-                    value,
-                    first: false,
-                    coll: coll(s),
-                },
-                _ => Test::Eval(e),
-            },
+            Expr::Cmp(op, a, b) => {
+                let (s, value, first) = match (slot(a), value(b), value(a), slot(b)) {
+                    (Some(s), Some(value), ..) => (s, value, true),
+                    (_, _, Some(value), Some(s)) => (s, value, false),
+                    _ => return Test::Eval(e),
+                };
+                match (fold_of(Some(s)), value) {
+                    (Some(f), v @ Value::Text(_)) => Test::Folded(
+                        s,
+                        f,
+                        Box::new(Folded::Cmp {
+                            op: *op,
+                            value: folded(f, v),
+                            first,
+                            coll: coll(s),
+                        }),
+                    ),
+                    (_, value) => Test::Cmp {
+                        op: *op,
+                        slot: s,
+                        value,
+                        first,
+                        coll: coll(s),
+                    },
+                }
+            }
             Expr::In(a, items) => {
+                let s = slot(a);
+                let fold = fold_of(s);
                 let mut values = Vec::with_capacity(items.len());
                 for it in items {
-                    match value(it) {
-                        Some(v) => values.push(v),
-                        None => return Test::Eval(e),
+                    match (value(it), fold) {
+                        (Some(v), Some(f)) => values.push(folded(f, v)),
+                        (Some(v), None) => values.push(v),
+                        (None, _) => return Test::Eval(e),
                     }
                 }
-                match slot(a) {
-                    Some(s) if values.len() >= IN_SET_AT => {
-                        Test::InSet(s, values, Default::default())
+                let long = values.len() >= IN_SET_AT;
+                match (s, fold) {
+                    (Some(s), Some(f)) => {
+                        let t = match long {
+                            true => Folded::InSet(values, Default::default()),
+                            false => Folded::In(values),
+                        };
+                        Test::Folded(s, f, Box::new(t))
                     }
-                    Some(s) => Test::In(s, values),
-                    None => Test::Eval(e),
+                    (Some(s), None) if long => Test::InSet(s, values, Default::default()),
+                    (Some(s), None) => Test::In(s, values),
+                    (None, _) => Test::Eval(e),
                 }
             }
             Expr::Like(a, b) => match (slot(a), value(b)) {
+                (Some(s), Some(Value::Text(t))) if fold_of(Some(s)).is_some() => {
+                    let f = fold_of(Some(s)).unwrap_or(CaseFold::Unicode);
+                    let needle = crate::case::fold(&t, f).into_owned();
+                    Test::Folded(s, f, Box::new(Folded::Like(needle)))
+                }
                 (Some(s), Some(v)) => Test::Like(s, v),
                 _ => Test::Eval(e),
             },
@@ -11245,6 +11431,85 @@ impl<'q> Filter<'q> {
         self.test(&self.root, id, &vals, &Value::Int(id as i64), ctx)
     }
 
+    /// A point's test or a `nocase` field's, of a row's value `v`.
+    #[inline(never)]
+    fn apart(&self, slot: Slot, t: &Test, v: &Value) -> bool {
+        match t {
+            Test::Folded(_, f, folded) => self.folded(slot, v, *f, folded),
+            t => geo_test(t, v),
+        }
+    }
+
+    /// A [`Folded`] test of a row's value `v`.
+    fn folded(&self, slot: Slot, v: &Value, f: CaseFold, t: &Folded) -> bool {
+        let Value::Text(x) = v else {
+            // No text: a null, which compares as it does anywhere.
+            return match t {
+                Folded::Cmp {
+                    op, value, first, ..
+                } => {
+                    let (l, r) = if *first { (v, value) } else { (value, v) };
+                    compare(*op, l, r, &|| TextOrder::BYTES)
+                }
+                Folded::In(values) | Folded::InSet(values, _) => {
+                    values.iter().any(|w| w.cmp_value(v) == Ordering::Equal)
+                }
+                Folded::Like(_) => false,
+            };
+        };
+        // The row's fold, whole, into the scratch text.
+        let whole = || {
+            let mut s = self.scratch.borrow_mut();
+            s.clear();
+            crate::case::fold_into(x, f, &mut s);
+            s
+        };
+        match t {
+            Folded::Cmp {
+                op,
+                value,
+                first,
+                coll,
+            } => {
+                let y = value.as_text().unwrap_or("");
+                let o = match (op, coll) {
+                    (CmpOp::Eq | CmpOp::Ne, _) | (_, None) => crate::case::cmp_to_folded(x, y, f),
+                    (_, Some(c)) => c.compare(&whole(), y),
+                };
+                let o = if *first { o } else { o.reverse() };
+                match op {
+                    CmpOp::Eq => o == Ordering::Equal,
+                    CmpOp::Ne => o != Ordering::Equal,
+                    CmpOp::Lt => o == Ordering::Less,
+                    CmpOp::Le => o != Ordering::Greater,
+                    CmpOp::Gt => o == Ordering::Greater,
+                    CmpOp::Ge => o != Ordering::Less,
+                }
+            }
+            Folded::InSet(values, set)
+                if set.get_or_init(|| in_set(self.c, slot, values)).is_some() =>
+            {
+                let s = whole();
+                let mut key = self.key.borrow_mut();
+                key.clear();
+                key.push(crate::codec::TAG_TEXT);
+                crate::codec::encode_str(&mut key, &s);
+                set.get()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|set| set.get(&key).is_some())
+            }
+            // A short list, or a long one no set holds: a value at a time.
+            Folded::In(values) | Folded::InSet(values, _) => values.iter().any(|w| match w {
+                Value::Text(y) => crate::case::cmp_to_folded(x, y, f) == Ordering::Equal,
+                w => w.cmp_value(v) == Ordering::Equal,
+            }),
+            Folded::Like(needle) => {
+                let (h, n) = (whole(), needle.as_bytes());
+                n.is_empty() || h.as_bytes().windows(n.len()).any(|w| w == n)
+            }
+        }
+    }
+
     #[inline(never)]
     fn read_paths(&self, id: DocId, vals: &mut Vec<Value>) -> Result<()> {
         let n = self.positions.len();
@@ -11286,7 +11551,12 @@ impl<'q> Filter<'q> {
             } => {
                 let f = get(*slot);
                 let (l, r) = if *first { (f, value) } else { (value, f) };
-                compare(*op, l, r, &|| *coll)
+                // A `nocase` field's value and its value are folds already.
+                let order = TextOrder {
+                    coll: *coll,
+                    fold: None,
+                };
+                compare(*op, l, r, &|| order)
             }
             Test::In(s, values) => {
                 let f = get(*s);
@@ -11312,7 +11582,13 @@ impl<'q> Filter<'q> {
                 Value::List(items) => items.iter().any(|i| i.cmp_value(v) == Ordering::Equal),
                 _ => false,
             },
-            Test::Distance { slot, .. } | Test::Within(slot, _) => geo_test(t, get(*slot)),
+            // One arm, out of line, for the tests no scan of a plain field
+            // runs: an arm of its own for a `nocase` field's took the
+            // browser module's count over 20 000 rows by two numbers, which
+            // runs neither, 1.25 -> 1.34 ms.
+            Test::Distance { slot, .. } | Test::Within(slot, _) | Test::Folded(slot, ..) => {
+                self.apart(*slot, t, get(*slot))
+            }
             Test::Eval(e) => {
                 let mut row = StoreRow {
                     store: &self.c.store,
@@ -11361,7 +11637,7 @@ fn geo_test(t: &Test, v: &Value) -> bool {
             } else {
                 (value, &d)
             };
-            compare(*op, l, r, &|| None)
+            compare(*op, l, r, &|| TextOrder::BYTES)
         }
         Test::Within(_, b) => crate::geo::point_in(v).is_some_and(|p| b.holds(p)),
         _ => false,
@@ -11639,7 +11915,7 @@ fn sorted_range(
         if name != field {
             continue;
         }
-        match SortedIndex::bound(ty, v) {
+        match SortedIndex::bound(ty, fd.case_fold(), v) {
             Some(key) => {
                 range.narrow(op, key);
                 any = true;
@@ -11650,10 +11926,10 @@ fn sorted_range(
     any.then_some((range, exact))
 }
 
-/// Sort keys: a field position (`None` for `id`), whether it ascends, the
-/// collation its text is compared in, and the keys past the field of a
-/// path into a json one.
-type OrderKey = (Option<usize>, bool, Option<Collation>, Option<Box<str>>);
+/// Sort keys: a field position (`None` for `id`), whether it ascends, how
+/// its text is compared -- its collation, its fold -- and the keys past the
+/// field of a path into a json one.
+type OrderKey = (Option<usize>, bool, TextOrder, Option<Box<str>>);
 
 /// The key `s` names in `schema`. `collate` is refused on anything but text:
 /// on a number it would claim an order it does not change. `owner` goes in
@@ -11683,19 +11959,25 @@ fn order_key(schema: &Schema, s: &Sort, owner: &str) -> Result<OrderKey> {
             )));
         }
     }
-    // A field in a collation orders in it unless the query names one.
-    let field = pos
-        .filter(|_| keys.is_none())
-        .and_then(|p| schema.fields[p].collate);
-    Ok((pos, s.asc, s.collate.or(field), keys))
+    // A field in a collation orders in it unless the query names one, and
+    // a `nocase` one by its fold whatever the collation.
+    let field = match pos.filter(|_| keys.is_none()) {
+        Some(p) => schema.fields[p].text_order(),
+        None => TextOrder::BYTES,
+    };
+    let order = TextOrder {
+        coll: s.collate.or(field.coll),
+        fold: field.fold,
+    };
+    Ok((pos, s.asc, order, keys))
 }
 
 /// The order `order` asks for between two rows' keys, before any tie-break.
 fn rank(keys: &[OrderKey], a: &[Value], b: &[Value]) -> Ordering {
-    for (i, (_, asc, collate, _)) in keys.iter().enumerate() {
-        let o = match collate {
-            Some(c) => c.compare_values(&a[i], &b[i]),
-            None => a[i].cmp_value(&b[i]),
+    for (i, (_, asc, text, _)) in keys.iter().enumerate() {
+        let o = match text.is_bytes() {
+            true => a[i].cmp_value(&b[i]),
+            false => text.compare_values(&a[i], &b[i]),
         };
         if o != Ordering::Equal {
             return if *asc { o } else { o.reverse() };
@@ -11735,8 +12017,47 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
             });
         }
     }
+    let unfolded: Vec<OrderKey>;
+    let keys = match keys.iter().any(|k| k.2.fold.is_some()) {
+        false => keys,
+        true => {
+            unfolded = folded_keys(&mut flat, keys);
+            &unfolded
+        }
+    };
     let idx = order_rows(&flat, n, ids.len(), keys, k);
     Ok(idx.into_iter().map(|i| ids[i]).collect())
+}
+
+/// The `nocase` keys' texts in `flat`, rows of `keys.len()`, made their
+/// folds, once a row, and the keys that order them -- by their bytes or
+/// their collation, the fold done. Compared by their folds as they were,
+/// two texts were folded again at every comparison, and an order of 100 000
+/// rows by a name, a third past ASCII, took 8.6 -> 17.4 ms; this is 16.2.
+/// A pass of its own after the reading, so that an order over no `nocase`
+/// key reads as it did: asked of each value as it was read, the browser
+/// module's scan with an order went 1.76 -> 1.85 ms (`make wasm-speed`).
+#[inline(never)]
+fn folded_keys(flat: &mut [Value], keys: &[OrderKey]) -> Vec<OrderKey> {
+    let mut scratch = String::new();
+    for (i, v) in flat.iter_mut().enumerate() {
+        if let (Some(f), Value::Text(t)) = (keys[i % keys.len()].2.fold, v) {
+            // Folded into the text the value before was read into, which
+            // this one's then is: no text made for it.
+            scratch.clear();
+            crate::case::fold_into(t, f, &mut scratch);
+            std::mem::swap(t, &mut scratch);
+        }
+    }
+    keys.iter()
+        .map(|(p, asc, t, path)| {
+            let t = TextOrder {
+                coll: t.coll,
+                fold: None,
+            };
+            (*p, *asc, t, path.clone())
+        })
+        .collect()
 }
 
 /// The first `k` of `count` rows, each `n` keys wide in `flat`, in the

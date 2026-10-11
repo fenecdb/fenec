@@ -60,6 +60,7 @@ const todos = fenecTable(
   'todos',
   {
     title: text().notNull().collate('tr'),
+    owner: text().collate('tr').nocase().notNull(),
     done: boolean(),
     at: timestamp(),
     meta: json(),
@@ -96,6 +97,10 @@ integer().primaryKey();
 integer().collate('tr');
 // @ts-expect-error -- a collation fenecdb has not got
 text().collate('fr');
+// @ts-expect-error -- nocase compares text
+integer().nocase();
+// @ts-expect-error -- nocase is a text's, not a list's
+text().array().nocase();
 // @ts-expect-error -- a path reads into json
 fenecTable('x', { a: text() }, (t) => [index().on(t.a.path('k'))]);
 // @ts-expect-error -- an hnsw index is on a vector

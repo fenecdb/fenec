@@ -3,7 +3,7 @@
 //! This module is independent of FenecQL: plan structures can also be built
 //! straight from Rust (embedded use); FenecQL is just a front end producing them.
 
-use crate::collate::Collation;
+use crate::collate::{Collation, TextOrder};
 use crate::error::{Error, Result};
 use crate::schema::Schema;
 use crate::value::{DocId, Value};
@@ -588,12 +588,13 @@ impl Expr {
 pub trait RowAccess {
     fn id(&self) -> DocId;
     fn field(&mut self, name: &str) -> Result<Value>;
-    /// The collation a field's text compares in, when its schema names one
-    /// (`name text collate tr`); `<` and `>` against it then compare in
-    /// that order rather than the bytes'.
-    fn collation(&self, name: &str) -> Option<Collation> {
+    /// How a field's text compares, when its schema says: in a collation
+    /// (`name text collate tr`), whose order `<` and `>` against it take
+    /// rather than the bytes', and by its case fold (`email text nocase`),
+    /// which `=`, `in` and `~` take as well.
+    fn text_order(&self, name: &str) -> TextOrder {
         let _ = name;
-        None
+        TextOrder::BYTES
     }
 }
 
@@ -760,16 +761,34 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
         Expr::Cmp(op, a, b) => {
             let (l, r) = (eval(a, row, ctx)?, eval(b, row, ctx)?);
             let field = |e: &Expr| match e {
-                Expr::Field(name) => row.collation(name),
-                _ => None,
+                Expr::Field(name) => row.text_order(name),
+                _ => TextOrder::BYTES,
             };
-            Value::Bool(compare(*op, &l, &r, &|| field(a).or_else(|| field(b))))
+            // The first side that is a field with an order of its own.
+            let order = || match field(a) {
+                o if o.is_bytes() => field(b),
+                o => o,
+            };
+            // A `nocase` field's text equals any text that folds to it.
+            if let (CmpOp::Eq | CmpOp::Ne, Value::Text(x), Value::Text(y)) = (op, &l, &r) {
+                if let Some(f) = order().fold {
+                    let eq = crate::case::eq_folded(x, y, f);
+                    return Ok(Value::Bool(eq == (*op == CmpOp::Eq)));
+                }
+            }
+            Value::Bool(compare(*op, &l, &r, &order))
         }
         Expr::Like(a, b) => {
             let l = eval(a, row, ctx)?;
             let r = eval(b, row, ctx)?;
             match (l.as_text(), r.as_text()) {
-                (Some(hay), Some(needle)) => Value::Bool(like_match(hay, needle)),
+                // A `nocase` field's fold holds the needle's: `straße ~ SS`.
+                (Some(hay), Some(needle)) => Value::Bool(match folded(&*row, a) {
+                    Some(f) => {
+                        like_match(&crate::case::fold(hay, f), &crate::case::fold(needle, f))
+                    }
+                    None => like_match(hay, needle),
+                }),
                 _ => Value::Bool(false),
             }
         }
@@ -789,9 +808,19 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
         }
         Expr::In(a, items) => {
             let l = eval(a, row, ctx)?;
+            // A `nocase` field's text is any of the texts that fold to it.
+            let fold = match &l {
+                Value::Text(_) => folded(&*row, a),
+                _ => None,
+            };
             let mut found = false;
             for it in items {
-                if eval(it, row, ctx)?.cmp_value(&l) == Ordering::Equal {
+                let v = eval(it, row, ctx)?;
+                let same = match (fold, &v, &l) {
+                    (Some(f), Value::Text(x), Value::Text(y)) => crate::case::eq_folded(x, y, f),
+                    _ => v.cmp_value(&l) == Ordering::Equal,
+                };
+                if same {
                     found = true;
                     break;
                 }
@@ -840,18 +869,25 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
     })
 }
 
+/// The fold `e` compares by, when it is a `nocase` field of the row's.
+fn folded(row: &dyn RowAccess, e: &Expr) -> Option<crate::case::CaseFold> {
+    match e {
+        Expr::Field(name) => row.text_order(name).fold,
+        _ => None,
+    }
+}
+
 /// `l op r` as a filter takes it: a null equal only to a null and ordered
-/// against nothing. Text against a field in a collation orders as the field
-/// does (`coll`, asked only then), so the scan and the field's `@sorted`
-/// index agree; equality is the bytes' either way, as the collation ties
-/// no two strings.
+/// against nothing. Text against a field orders as the field does
+/// (`order`, asked only of two texts ordered), so the scan and the field's
+/// `@sorted` index agree: in its collation, and by its case fold where it
+/// is `nocase`. Equality is the bytes', as a collation ties no two strings:
+/// a `nocase` field's is asked before (`eval`, `Filter`'s `Folded`) -- asked
+/// here, every text `=` of a bound filter called for the order it had no
+/// use for, and the browser module's count by one text over 20 000 rows
+/// went 1.55 -> 1.66 ms.
 #[inline]
-pub(crate) fn compare(
-    op: CmpOp,
-    l: &Value,
-    r: &Value,
-    coll: &dyn Fn() -> Option<Collation>,
-) -> bool {
+pub(crate) fn compare(op: CmpOp, l: &Value, r: &Value, order: &dyn Fn() -> TextOrder) -> bool {
     if l.is_null() || r.is_null() {
         return match op {
             CmpOp::Eq => l.is_null() && r.is_null(),
@@ -861,9 +897,9 @@ pub(crate) fn compare(
     }
     let ord = match (op, l, r) {
         (CmpOp::Eq | CmpOp::Ne, ..) => l.cmp_value(r),
-        (_, Value::Text(x), Value::Text(y)) => match coll() {
-            Some(c) => c.compare(x, y),
-            None => l.cmp_value(r),
+        (_, Value::Text(x), Value::Text(y)) => match order() {
+            o if o.is_bytes() => l.cmp_value(r),
+            o => o.compare(x, y),
         },
         _ => l.cmp_value(r),
     };

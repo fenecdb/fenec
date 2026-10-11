@@ -65,7 +65,15 @@ pub fn plan(columns: &[Column], opts: &Options) -> Result<Plan> {
         } else {
             c.name.clone()
         };
-        fields.push(Field::new(name.clone(), ty));
+        // A column its source compares without case keeps comparing so,
+        // as long as it is still text: a `@unique` over it refuses what
+        // the source's refused.
+        let text = ty == DataType::Text;
+        let mut f = Field::new(name.clone(), ty);
+        if c.nocase && text {
+            f = f.nocase();
+        }
+        fields.push(f);
         targets.push(Target::Field(name));
     }
 
@@ -336,6 +344,20 @@ mod tests {
         let c = vec![Column::new("t", DataType::Text, "uuid").note("uuid taken as text")];
         let p = plan(&c, &Options::new("m")).unwrap();
         assert_eq!(p.warnings, vec!["t: uuid taken as text"]);
+    }
+
+    /// A column compared without case is a `nocase` field while it stays
+    /// text, and a plain one cast to another type.
+    #[test]
+    fn a_column_without_case_is_a_nocase_field() {
+        let ci = [
+            Column::new("e", DataType::Text, "citext").nocase(),
+            Column::new("n", DataType::Text, "citext").nocase(),
+        ];
+        let mut opts = Options::new("m");
+        opts.casts.push(("n".into(), DataType::Int));
+        let p = plan(&ci, &opts).unwrap();
+        assert!(p.schema.fields[0].nocase && !p.schema.fields[1].nocase);
     }
 
     #[test]

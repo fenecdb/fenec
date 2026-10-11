@@ -265,18 +265,21 @@ enum Fold {
     SumInt(i64, u64),
     SumFloat(f64, u64),
     Avg(f64, u64),
-    /// `true` for `max`; the field's collation, which its text orders in.
-    Extreme(Option<Value>, bool, Option<Collation>),
-    /// `count(distinct ...)`: the values are in the query's one set.
-    Distinct(i64),
+    /// `true` for `max`; how the field's text compares -- its collation,
+    /// its fold -- which its text orders by.
+    Extreme(Option<Value>, bool, TextOrder),
+    /// `count(distinct ...)`: the values are in the query's one set, a
+    /// `nocase` field's by their fold.
+    Distinct(i64, Option<CaseFold>),
     /// `first`, or `last` when `true`: the row's order and id, and its value.
     /// Boxed, so that every fold is the size it was: a fold the size of
     /// two values and an id took the fixed aggregates of before 11%
-    /// longer.
-    Pick(Option<Box<(Value, DocId, Value)>>, bool),
+    /// longer. The order's text compares as its field's does.
+    Pick(Option<Box<(Value, DocId, Value)>>, bool, TextOrder),
     /// `approx_count_distinct`, `hll_accumulate` and `hll_combine`: the
-    /// group's sketch, made at its first value, and which of the three.
-    Hll(Option<Box<Sketch>>, u8),
+    /// group's sketch, made at its first value, which of the three, and the
+    /// fold a `nocase` field's values are counted by.
+    Hll(Option<Box<Sketch>>, u8, Option<CaseFold>),
 }
 
 /// What a sketch answers: a count, or itself as bytes; `MERGE` folds
@@ -297,11 +300,12 @@ impl Fold {
                 t.map_or(String::new(), |t| t.name())
             )))
         };
+        let fold = ty.and_then(|f| f.case_fold());
         Ok(match (name, t) {
-            ("count", _) if distinct => Fold::Distinct(0),
-            ("approx_count_distinct", _) => Fold::Hll(None, HLL_COUNT),
-            ("hll_accumulate", _) => Fold::Hll(None, HLL_STATE),
-            ("hll_combine", _) => Fold::Hll(None, HLL_MERGE),
+            ("count", _) if distinct => Fold::Distinct(0, fold),
+            ("approx_count_distinct", _) => Fold::Hll(None, HLL_COUNT, fold),
+            ("hll_accumulate", _) => Fold::Hll(None, HLL_STATE, fold),
+            ("hll_combine", _) => Fold::Hll(None, HLL_MERGE, None),
             ("count", _) => Fold::Count(0),
             ("sum", Some(DataType::Float)) => Fold::SumFloat(0.0, 0),
             ("sum" | "avg", Some(DataType::Int | DataType::Float) | None) => match name {
@@ -309,7 +313,7 @@ impl Fold {
                 _ => Fold::Avg(0.0, 0),
             },
             ("sum" | "avg", _) => return refuse("an int or float field"),
-            ("first" | "last", _) => Fold::Pick(None, name == "last"),
+            ("first" | "last", _) => Fold::Pick(None, name == "last", TextOrder::BYTES),
             (
                 _,
                 Some(
@@ -320,7 +324,11 @@ impl Fold {
                     | DataType::Bool,
                 )
                 | None,
-            ) => Fold::Extreme(None, name == "max", ty.and_then(|f| f.collate)),
+            ) => Fold::Extreme(
+                None,
+                name == "max",
+                ty.map_or(TextOrder::BYTES, |f| f.text_order()),
+            ),
             _ => return refuse("a field with an order"),
         })
     }
@@ -361,13 +369,13 @@ impl Fold {
                 };
                 *n += 1;
             }
-            Fold::Extreme(best, max, coll) => {
+            Fold::Extreme(best, max, text) => {
                 let better = match best {
                     None => true,
                     Some(b) => {
-                        let o = match coll {
-                            Some(c) => c.compare_values(v, b),
-                            None => v.cmp_value(b),
+                        let o = match text.is_bytes() {
+                            true => v.cmp_value(b),
+                            false => text.compare_values(v, b),
                         };
                         o == if *max {
                             Ordering::Greater
@@ -380,7 +388,7 @@ impl Fold {
                     *best = Some(v.clone());
                 }
             }
-            Fold::Distinct(_) | Fold::Pick(..) | Fold::Hll(..) => return Ok(false),
+            Fold::Distinct(..) | Fold::Pick(..) | Fold::Hll(..) => return Ok(false),
         }
         Ok(true)
     }
@@ -406,7 +414,7 @@ impl Fold {
         }
         let (key, sketched) = (&mut scratch.0, &mut scratch.1);
         match self {
-            Fold::Hll(s, kind) => {
+            Fold::Hll(s, kind, fold) => {
                 let s = s.get_or_insert_with(Default::default);
                 let before = s.bytes();
                 match (*kind, v) {
@@ -420,7 +428,7 @@ impl Fold {
                     }
                     _ => {
                         key.clear();
-                        crate::codec::encode_value(key, v);
+                        encode_folded(key, v, *fold);
                         s.add(crate::hll::hash(key));
                     }
                 }
@@ -435,11 +443,11 @@ impl Fold {
                     )));
                 }
             }
-            Fold::Distinct(n) => {
+            Fold::Distinct(n, fold) => {
                 key.clear();
                 key.extend_from_slice(&(at.0 as u32).to_le_bytes());
                 key.extend_from_slice(&(at.1 as u32).to_le_bytes());
-                crate::codec::encode_value(key, v);
+                encode_folded(key, v, *fold);
                 if !seen.contains_key(key.as_slice()) {
                     if seen.len() >= MAX_DISTINCT_VALUES {
                         return Err(Error::Query(format!(
@@ -451,7 +459,7 @@ impl Fold {
                     *n += 1;
                 }
             }
-            Fold::Pick(best, later) => {
+            Fold::Pick(best, later, text) => {
                 let written = Value::Int(id as i64);
                 let by = by.unwrap_or(&written);
                 if by.is_null() {
@@ -460,7 +468,11 @@ impl Fold {
                 let better = match best.as_deref() {
                     None => true,
                     Some((b, bid, _)) => {
-                        let o = by.cmp_value(b).then(id.cmp(bid));
+                        let o = match text.is_bytes() {
+                            true => by.cmp_value(b),
+                            false => text.compare_values(by, b),
+                        }
+                        .then(id.cmp(bid));
                         o == if *later {
                             Ordering::Greater
                         } else {
@@ -482,15 +494,15 @@ impl Fold {
 
     fn value(self) -> Value {
         match self {
-            Fold::Count(n) | Fold::Distinct(n) => Value::Int(n),
-            Fold::Hll(s, HLL_COUNT) => Value::Int(s.map_or(0, |s| s.estimate() as i64)),
-            Fold::Hll(s, _) => s.map_or(Value::Null, |s| Value::Bytes(s.to_bytes())),
+            Fold::Count(n) | Fold::Distinct(n, _) => Value::Int(n),
+            Fold::Hll(s, HLL_COUNT, _) => Value::Int(s.map_or(0, |s| s.estimate() as i64)),
+            Fold::Hll(s, ..) => s.map_or(Value::Null, |s| Value::Bytes(s.to_bytes())),
             Fold::SumInt(_, 0) | Fold::SumFloat(_, 0) | Fold::Avg(_, 0) => Value::Null,
             Fold::SumInt(s, _) => Value::Int(s),
             Fold::SumFloat(s, _) => Value::Float(s),
             Fold::Avg(s, n) => Value::Float(s / n as f64),
             Fold::Extreme(v, ..) => v.unwrap_or(Value::Null),
-            Fold::Pick(p, _) => p.map_or(Value::Null, |p| p.2),
+            Fold::Pick(p, ..) => p.map_or(Value::Null, |p| p.2),
         }
     }
 }
@@ -610,7 +622,7 @@ impl Database {
             return Ok(None);
         };
         for v in alive {
-            match SortedIndex::bound(&fd.ty, v) {
+            match SortedIndex::bound(&fd.ty, None, v) {
                 Some(k) => range.narrow(CmpOp::Gt, k),
                 None => return Ok(None),
             }
@@ -683,6 +695,14 @@ impl Database {
         for k in &keys {
             terms.push(rd.bind(k)?);
         }
+        // A `nocase` field's groups are its folds: `Alice` and `alice` one,
+        // shown as the first row to hold it wrote it. None at all, the keys
+        // are encoded as they were.
+        let key_folds: Vec<Option<CaseFold>> = terms
+            .iter()
+            .map(|&t| rd.typed(t).and_then(|f| f.case_fold()))
+            .collect();
+        let folded = key_folds.iter().any(Option::is_some);
         let mut items = Vec::with_capacity(calls.len());
         for call in &calls {
             let Expr::Call(name, args) = call else {
@@ -694,11 +714,13 @@ impl Database {
             };
             let arg = arg.map(|a| rd.bind(a)).transpose()?;
             let ty = arg.and_then(|t| rd.typed(t));
-            items.push(Item {
-                start: Fold::new(name, distinct, ty)?,
-                arg,
-                by: args.get(1).map(|b| rd.bind(b)).transpose()?,
-            });
+            let by = args.get(1).map(|b| rd.bind(b)).transpose()?;
+            let mut start = Fold::new(name, distinct, ty)?;
+            // `first(e by k)` orders by `k` as its field compares.
+            if let (Fold::Pick(_, _, text), Some(b)) = (&mut start, by) {
+                *text = rd.typed(b).map_or(TextOrder::BYTES, |f| f.text_order());
+            }
+            items.push(Item { start, arg, by });
         }
         let (nk, ni) = (keys.len(), items.len());
         let mut outs = Vec::with_capacity(sel.aggregate.len());
@@ -818,8 +840,17 @@ impl Database {
                 0 => 0,
                 _ => {
                     key.clear();
-                    for t in &terms {
-                        crate::codec::encode_value(&mut key, &rd.env[*t]);
+                    match folded {
+                        false => {
+                            for t in &terms {
+                                crate::codec::encode_value(&mut key, &rd.env[*t]);
+                            }
+                        }
+                        true => {
+                            for (t, f) in terms.iter().zip(&key_folds) {
+                                encode_folded(&mut key, &rd.env[*t], *f);
+                            }
+                        }
                     }
                     // Rows in a time series come in the order they were
                     // written, a bucket's together: while they do, the
@@ -952,15 +983,24 @@ impl Database {
                 }
             }
             picked.push(at);
+            let text = field.map_or(TextOrder::BYTES, |f| f.text_order());
             order.push((
                 None,
                 s.asc,
-                s.collate.or(field.and_then(|f| f.collate)),
+                TextOrder {
+                    coll: s.collate.or(text.coll),
+                    fold: text.fold,
+                },
                 None,
             ));
         }
-        for _ in 0..nk {
-            order.push((None, true, None, None));
+        // A `nocase` key by its fold, as its groups were told apart.
+        for k in &keys {
+            let fold = match k {
+                Expr::Field(f) => c.schema.field(f).and_then(|f| f.case_fold()),
+                _ => None,
+            };
+            order.push((None, true, TextOrder { coll: None, fold }, None));
         }
         let w = order.len();
         let mut flat: Vec<Value> = Vec::with_capacity(n * w);

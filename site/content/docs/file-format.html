@@ -177,7 +177,9 @@ stored; every other index is built from the documents after an open.</p>
 
 <p>A field ordered in a collation (<code>name text collate tr</code>) is
 written with type tag 11 and the collation's code in front of its type: 1
-for <code>tr</code>, 2 for <code>und</code>. A dropped field's place
+for <code>tr</code>, 2 for <code>und</code>. A text field compared by its
+case fold (<code>email text nocase</code>) has type tag 17 in front of its
+type, after the collation's where it has one. A dropped field's place
 (<code>alter collection ... drop field</code>) is written where it stands
 as a field with no name and type tag 12: the documents written before the
 drop hold a value there, which a read passes over, and a document written
@@ -202,7 +204,10 @@ and refuses the file, rather than read the field and order it in another
 order — or, meeting a <code>json</code> field, before it reads an object
 (value tag 13) it would have no reading of: <i>unknown type tag 14</i>.
 The value and type tags share their numbers, so 13 and 14 are new to both,
-where 11 and 12 are a collation's and a dropped place's. The collation's weights are not in the file: they are the binary's,
+where 11 and 12 are a collation's and a dropped place's, and 17 is
+<code>nocase</code>'s: a binary from before it refuses the file rather than
+compare the field's bytes and take a second spelling its
+<code>@unique</code> refuses. The collation's weights are not in the file: they are the binary's,
 and a <code>@sorted</code> index over the field is built from the documents
 on open.</p>
 </details>

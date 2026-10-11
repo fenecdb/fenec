@@ -47,7 +47,7 @@ public struct Articles: Codable, Sendable, Equatable {
     public var splade: String?  // sparse<30522> @inverted
     public var tags: [String]?  // [text] @hash
     public var counts: [Int64]  // [int] required
-    public var slug: String?  // text @unique
+    public var slug: String?  // text nocase @unique
 }
 
 /// A row of `product_reviews`.

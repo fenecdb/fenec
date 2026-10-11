@@ -22,7 +22,7 @@ data class Articles(
     val splade: String?, // sparse<30522> @inverted
     val tags: List<String>?, // [text] @hash
     val counts: List<Long>, // [int] required
-    val slug: String?, // text @unique
+    val slug: String?, // text nocase @unique
 ) {
     companion object {
         /** The row as the binding reads it. */

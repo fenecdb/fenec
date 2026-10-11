@@ -239,8 +239,8 @@ export function dropComposite(collection, fields) {
   return { text: `drop index on ${collection} (${keys.map((k) => k.field).join(', ')})`, params: [] };
 }
 
-/** `alter collection <c> add field <f> <type> [collate ..] [@index]`. */
-export function addField(collection, field, type, { index = null, collate = null } = {}) {
+/** `alter collection <c> add field <f> <type> [collate ..] [nocase] [@index]`. */
+export function addField(collection, field, type, { index = null, collate = null, nocase = false } = {}) {
   name(collection, 'collection');
   name(field);
   if (field === 'id') throw new StatementError('every row has an id already');
@@ -249,6 +249,10 @@ export function addField(collection, field, type, { index = null, collate = null
     if (!['und', 'tr'].includes(collate)) throw new StatementError('a collation is und or tr');
     if (kindOf(type).kind !== 'text') throw new StatementError('a collation orders text');
     text += ` collate ${collate}`;
+  }
+  if (nocase) {
+    if (typeText(type) !== 'text') throw new StatementError('nocase compares a text by its case fold');
+    text += ' nocase';
   }
   if (index) text += ` ${indexSpec(index).text}`;
   return { text, params: [] };
@@ -284,7 +288,7 @@ export function dropCollection(collection) {
  * left out, and a collection the code does not declare is one the plan
  * leaves alone, so the plan speaks of this change and nothing else.
  * `change` is `{op: 'index', collection, field, index}`, `{op: 'add',
- * collection, field, type, index, collate}`, `{op: 'rename', collection,
+ * collection, field, type, index, collate, nocase}`, `{op: 'rename', collection,
  * from, to}`, `{op: 'drop-field', collection, field}`, `{op: 'composite',
  * collection, keys, unique}`, `{op: 'drop-index', collection, fields}` or
  * `{op: 'drop', collection}`.
@@ -305,6 +309,7 @@ export function planned(description, change) {
     case 'add': {
       const f = { name: name(change.field), type: typeText(change.type) };
       if (change.collate) f.collate = change.collate;
+      if (change.nocase) f.nocase = true;
       if (change.index) f.index = indexSpec(change.index).json;
       c.fields.push(f);
       break;

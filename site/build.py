@@ -811,6 +811,9 @@ Writing FenecQL -- the reference below spells it out in full:
 - Text is ordered by its bytes; `order title collate tr` orders it as
   Turkish does (ICU's `tr`: `ç` after `c`, `ı` before `i`). The collation
   is for `order` alone -- `where` compares bytes.
+- A text field declared `nocase` (`email text nocase @unique`) compares by
+  its case fold everywhere -- `=`, `in`, its indexes, `order`, `group`,
+  `facet` -- and keeps what was written: `Alice@x.com` is `alice@X.COM`.
 - `near` and `match` decide the order: neither combines with `order`, and
   the two together need `fuse`, which ranks by both. Each returns at most
   10 000 rows (`limit + offset`) and adds a `_score` column.

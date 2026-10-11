@@ -1341,9 +1341,11 @@ function restValue(v, field) {
 }
 
 /**
- * `create collection` text from a schema: field name, type, collation and
- * index as is. The collation too: without it the replica's field compared
- * its text by the bytes, and paged and ordered differently from the server.
+ * `create collection` text from a schema: field name, type, collation,
+ * `nocase` and index as is. The collation too: without it the replica's
+ * field compared its text by the bytes, and paged and ordered differently
+ * from the server -- and without `nocase` its `=` missed what the server's
+ * found.
  * `@unique` is a plain hash here, as on a replica: a batch lands rows'
  * last states one at a time, and a value moved between two collided -- and
  * a unique index over several fields an ordered one.
@@ -1353,6 +1355,7 @@ function schemaDDL(schema) {
     (f) =>
       `${ident(f.name)} ${f.type}` +
       (f.collate ? ` collate ${collation(f.collate)}` : '') +
+      (f.nocase ? ' nocase' : '') +
       (f.required ? ' required' : '') +
       (f.index ? ` @${f.index === 'unique' ? 'hash' : f.index}` : ''),
   );

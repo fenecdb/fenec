@@ -100,6 +100,9 @@ fn note(f: &fenec_core::schema::Field) -> String {
         s.push_str(" collate ");
         s.push_str(c.name());
     }
+    if f.nocase {
+        s.push_str(" nocase");
+    }
     if let Some(ix) = fenec_core::declared::index_text(&f.index) {
         s.push(' ');
         s.push_str(&ix);

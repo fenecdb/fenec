@@ -110,6 +110,8 @@ export interface FieldDescription {
   type: string;
   required?: true;
   collate?: Collation;
+  /** `nocase`: compared by its case fold, kept as written. */
+  nocase?: true;
   index?: IndexDescription;
   /** Indexes on paths into a json field. */
   paths?: { path: string; index: IndexDescription }[];
@@ -135,6 +137,7 @@ export interface SchemaRefusal {
     | 'required_changed'
     | 'required_added'
     | 'collate_changed'
+    | 'nocase_changed'
     | 'index_changed'
     | 'index_removed'
     | 'collection_missing'

@@ -35,6 +35,7 @@ mod lookup;
 mod maintenance;
 mod mapped;
 mod memory;
+mod nocase;
 mod paging;
 mod persist;
 mod pinned;

@@ -34,7 +34,8 @@
 // Without the `sorted` feature the index's code is here but unused
 // (`off.rs`); the encoding the planner shares stays.
 #![cfg_attr(not(feature = "sorted"), allow(dead_code, unused_imports))]
-use crate::collate::Collation;
+use crate::case::CaseFold;
+use crate::collate::{Collation, TextOrder};
 use crate::sorted::{float_key, int_key, json_slot, Chunked, Entry, JsonSlot};
 use crate::value::{DataType, DocId, Value};
 use std::cmp::Ordering;
@@ -83,10 +84,14 @@ pub struct Part {
     pub desc: bool,
     /// The collation a text part compares in.
     pub coll: Option<Collation>,
+    /// The fold a `nocase` text part is keyed by: its bytes are the fold's,
+    /// so an equality finds every spelling and a `@unique` one refuses a
+    /// second.
+    pub fold: Option<CaseFold>,
 }
 
 impl Part {
-    pub fn of(ty: &DataType, desc: bool, coll: Option<Collation>) -> Part {
+    pub fn of(ty: &DataType, desc: bool, order: TextOrder) -> Part {
         let kind = match ty {
             DataType::Int => Kind::Int,
             DataType::Timestamp => Kind::Time,
@@ -98,7 +103,8 @@ impl Part {
         Part {
             kind,
             desc,
-            coll: coll.filter(|_| kind == Kind::Text),
+            coll: order.coll.filter(|_| kind == Kind::Text),
+            fold: order.fold.filter(|_| kind == Kind::Text),
         }
     }
 }
@@ -223,7 +229,10 @@ fn put_part(out: &mut Vec<u8>, p: &Part, v: &Value) -> bool {
             out.push(if *b { TRUE } else { FALSE });
             false
         }
-        (Kind::Text, Value::Text(t)) => text(out, t, p.coll),
+        (Kind::Text, Value::Text(t)) => match p.fold {
+            Some(f) => text(out, &crate::case::fold(t, f), p.coll),
+            None => text(out, t, p.coll),
+        },
         (Kind::Json, v) => match json_slot(Some(v)) {
             JsonSlot::Num(k) => num(out, k),
             JsonSlot::Text(t) => text(out, &t, None),
@@ -828,6 +837,7 @@ mod tests {
                     kind,
                     desc,
                     coll: None,
+                    fold: None,
                 })
                 .collect(),
         )
@@ -923,11 +933,13 @@ mod tests {
                     kind: Kind::Text,
                     desc,
                     coll: Some(Collation::Turkish),
+                    fold: None,
                 },
                 Part {
                     kind: Kind::Int,
                     desc: false,
                     coll: None,
+                    fold: None,
                 },
             ]);
             let words = ["", "ağaç", "Ağaç", "çay", "cay", "zeytin", "ılık", "ilik"];
@@ -982,16 +994,19 @@ mod build_tests {
                 kind: Kind::Int,
                 desc: false,
                 coll: None,
+                fold: None,
             },
             Part {
                 kind: Kind::Float,
                 desc: true,
                 coll: None,
+                fold: None,
             },
             Part {
                 kind: Kind::Text,
                 desc: false,
                 coll: None,
+                fold: None,
             },
         ];
         let mut one = CompositeIndex::new(parts.clone());

@@ -1198,6 +1198,73 @@ test('collate tr on wasm is Intl.Collator("tr")', { skip: wasm ? false : 'no web
   db.close();
 });
 
+test('a nocase field on wasm is its fold, held to Python\'s casefold() row for row', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  // Python's fold of every code point it changes (crates/fenec-core's
+  // tools/casefold.py), applied a code point at a time: the reference the
+  // module's fold shares no code with.
+  const table = new Map();
+  const src = await readFile(new URL('../crates/fenec-core/tests/casefold.txt', import.meta.url), 'utf8');
+  for (const line of src.split('\n')) {
+    if (!line || line.startsWith('#')) continue;
+    const [cp, ...to] = line.split(' ').map((h) => parseInt(h, 16));
+    table.set(cp, String.fromCodePoint(...to));
+  }
+  const fold = (s) => [...s].map((c) => table.get(c.codePointAt(0)) ?? c).join('');
+  const pieces = ['a', 'Al', 'ice', 'İ', 'ı', 'I', 'straße', 'STRASSE', 'ẞ', 'ss', 'Σ', 'ς', 'οδο', 'Ꭰ', 'ꭰ', 'Ａ', 'ﬁ', 'K', 'é', 'é', 'ǅ', '0', '@x.com'];
+  let seed = 7;
+  const rnd = (n) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return (seed >>> 12) % n;
+  };
+  const vocab = Array.from({ length: 40 }, () => Array.from({ length: 1 + rnd(3) }, () => pieces[rnd(pieces.length)]).join(''));
+  const respell = (w) => [...w].map((c) => [c, c.toUpperCase(), c.toLowerCase()][rnd(3)]).join('');
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection nc (h text nocase @hash, s text nocase @sorted, p text nocase, g int)');
+  db.run('create collection tw (h text @hash, s text @sorted, p text, g int)');
+  const written = [];
+  for (let i = 0; i < 600; i++) {
+    const w = respell(vocab[rnd(vocab.length)]);
+    written.push(w);
+    db.run('put nc {h: $1, s: $1, p: $1, g: $2}', [w, i % 5]);
+    db.run('put tw {h: $1, s: $1, p: $1, g: $2}', [fold(w), i % 5]);
+  }
+  const ids = (r) => r.rows.map((x) => x.id);
+  const twin = (sql, params = []) => {
+    const a = db.run(sql.replaceAll('COLL', 'nc'), params);
+    const b = db.run(sql.replaceAll('COLL', 'tw'), params.map((p) => (typeof p === 'string' ? fold(p) : p)));
+    return [a, b];
+  };
+  for (const f of ['h', 's', 'p']) {
+    for (let k = 0; k < 25; k++) {
+      const q = respell(vocab[rnd(vocab.length)]);
+      for (const sql of [`get COLL where ${f} = $1`, `get COLL where ${f} >= $1 and g = 2`, `get COLL where ${f} in [$1, "nobody"]`, `get COLL where ${f} ~ $1`]) {
+        const [a, b] = twin(sql, [q]);
+        assert.deepEqual(ids(a), ids(b), `${sql} ${q}`);
+      }
+    }
+    for (const sql of [`get COLL order ${f}`, `get COLL order ${f} desc limit 30`]) {
+      const [a, b] = twin(sql);
+      assert.deepEqual(ids(a), ids(b), sql);
+    }
+    // A group and a facet are one value a fold, shown as the first row to
+    // hold it wrote it -- through the hash index's buckets and the scan.
+    const first = (v) => written.find((w) => fold(w) === fold(v));
+    const [a, b] = twin(`get COLL select ${f}, count() as n group ${f}`);
+    assert.deepEqual(a.rows.map((r) => [fold(r[f]), r.n]), b.rows.map((r) => [r[f], r.n]), f);
+    for (const r of a.rows) assert.equal(r[f], first(r[f]));
+    const [x, y] = twin(`get COLL facet ${f}`);
+    assert.deepEqual(x.facets[f].map((v) => [fold(v.value), v.count]), y.facets[f].map((v) => [v.value, v.count]), f);
+    for (const v of x.facets[f]) assert.equal(v.value, first(v.value));
+  }
+  // `@unique` refuses another spelling, and `if absent` passes over it.
+  db.run('create collection users (email text nocase @unique)');
+  db.run('put users {email: "Straße@X.com"}');
+  assert.throws(() => db.run('put users {email: "STRASSE@x.COM"}'), /is unique/);
+  assert.equal(db.run('put users {email: "strasse@x.com"} if absent').count, 0);
+  db.close();
+});
+
 test('a collate tr field pages by its last row on wasm, in Intl.Collator("tr") order', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   // A field in the collation compares in it too: `where name > $1` after
   // the last row of a page is the next page, as keyset paging wants, over
