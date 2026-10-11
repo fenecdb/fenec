@@ -1,26 +1,87 @@
 <!--
 title: Instead of Redis — fenecdb
-description: Counters, rate limits, locks that expire, optimistic concurrency, sessions, leaderboards and change notification, in the database you already run — each with what it costs, and what it does not cover.
+description: Counters, rate limits, locks with fencing tokens, sessions, caches, leaderboards, sets, unique visitors, queues, delayed jobs, streams, pub/sub, idempotency keys and geo, in the database you already run — each a recipe a test runs, with what it guarantees, what it costs, and what fenecdb does not do that Redis does.
 -->
 
 <h1>Instead of Redis</h1>
 <p class="kicker">The jobs an app adds Redis for — counters, rate limits,
-locks, sessions — done by the database it already has, each a statement or
-two.</p>
+locks, sessions, queues — done by the database it already has, each a
+statement or two.</p>
 
-<p>Three things make these work. A <code>set</code> can read the row it
+<p>Four things make these work. A <code>set</code> can read the row it
 writes (<code>{n: n + 1}</code>), and the read and the write happen under
 the one writer's lock, so an increment is atomic. Every write answers how
 many rows it changed, so a write that names what it expects says whether it
-found it. And <code>@ttl</code> lets a row expire, and a write take its
-place the moment it does. See <a href="/docs/fenecql#writes">Writes that
-read the row</a> for the rules.</p>
+found it, and <code>require</code> makes that count a condition of its
+<code>/batch</code>. <code>@ttl</code> lets a row expire, and a write take
+its place the moment it does. And every write can be watched: a
+subscription is sent the rows of a shape as they change, and
+<code>/_changes</code> every write on disk. See <a
+href="/docs/fenecql#writes">Writes that read the row</a> for the
+rules.</p>
 
 <p>Every FenecQL block on this page is run, statement by statement, by a
 test (<code>crates/fenec-core/tests/redis_docs.rs</code>), and each
-<code>-- → n</code> is the answer it checks. The costs are
-<code>make counters-bench</code> on an M1 Air, in process unless said
-otherwise; over HTTP a request adds its round trip.</p>
+<code>-- → x</code> is the answer it checks: a write's count, or the first
+value of the first row a read answered. A line <code>-- 20 s later</code>
+moves the test's clock, and <code>$1</code> is the rows the read before it
+answered, as a client sends them back. The costs are <code>make
+counters-bench</code> on an M1 Air, in process unless said otherwise; over
+HTTP a request adds its round trip. Where another bench measured a recipe,
+it is named.</p>
+
+<h2 id="patterns">Redis's patterns, and where each one is</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Pattern</th><th>Redis</th><th>Here</th></tr></thead>
+<tbody>
+<tr><td>Counters</td><td><code>INCR</code>, <code>INCRBY</code>, <code>HINCRBY</code></td><td><a href="#counter"><code>set c {n: n + 1}</code></a></td></tr>
+<tr><td>Rate limit, fixed window</td><td><code>INCR</code> and <code>EXPIRE</code></td><td><a href="#fixed-window">a row a window, <code>@ttl</code></a></td></tr>
+<tr><td>Rate limit, sliding window</td><td><code>ZADD</code>, <code>ZREMRANGEBYSCORE</code>, <code>ZCARD</code> in <code>MULTI</code></td><td><a href="#sliding-window">a row a request, <code>@ttl</code>, a read that must find none</a></td></tr>
+<tr><td>Rate limit, token bucket</td><td>a Lua script</td><td><a href="#token-bucket">one <code>set</code> over the bucket's row</a></td></tr>
+<tr><td>Lock with a lease</td><td><code>SET NX PX</code>, a check-and-delete script</td><td><a href="#lock"><code>put … if absent</code>, <code>@ttl</code>, <code>del … where owner</code></a></td></tr>
+<tr><td>Fencing token</td><td>none of its own: <code>INCR</code> beside the lock</td><td><a href="#fencing">counted by the write that takes the lock</a></td></tr>
+<tr><td>Optimistic transaction</td><td><code>WATCH</code>, <code>MULTI</code>, <code>EXEC</code></td><td><a href="#optimistic">a version, and <code>require 1</code> in a <code>/batch</code></a></td></tr>
+<tr><td>Sessions</td><td><code>SET EX</code>, <code>GET</code>, <code>GETEX</code>, <code>EXPIRE</code></td><td><a href="#sessions"><code>@ttl</code>, <code>set … returning</code></a></td></tr>
+<tr><td>Cache with a TTL</td><td><code>SET EX</code>, <code>GET</code>, <code>DEL</code></td><td><a href="#cache"><code>@ttl</code> and an upsert — no eviction</a></td></tr>
+<tr><td>Leaderboard</td><td><code>ZADD</code>, <code>ZINCRBY</code>, <code>ZREVRANGE</code>, <code>ZRANGEBYSCORE</code>, <code>ZREVRANK</code></td><td><a href="#leaderboard"><code>@sorted</code>, <code>order … limit</code>, <code>count</code></a></td></tr>
+<tr><td>Sets, deduplication</td><td><code>SADD</code>, <code>SISMEMBER</code>, <code>SREM</code>, <code>SCARD</code>, <code>SINTER</code></td><td><a href="#sets"><code>@unique</code> and <code>if absent</code></a></td></tr>
+<tr><td>Unique visitors</td><td><code>PFADD</code>, <code>PFCOUNT</code>, <code>PFMERGE</code></td><td><a href="#unique-visitors"><code>approx_count_distinct</code>, sketches kept as bytes</a></td></tr>
+<tr><td>Job queue</td><td><code>LPUSH</code>, <code>BRPOP</code>, <code>BLMOVE</code></td><td><a href="#queue">a claim: <code>set … order … limit … returning</code>, <code>Fenec-Wait</code></a></td></tr>
+<tr><td>Delayed jobs</td><td><code>ZADD</code> by time, <code>ZRANGEBYSCORE</code> polled</td><td><a href="#delayed">a <code>run_at</code> ahead, the claim woken at it</a></td></tr>
+<tr><td>Streams, consumer groups</td><td><code>XADD</code>, <code>XRANGE</code>, <code>XREADGROUP</code>, <code>XACK</code></td><td><a href="#streams">a collection, <code>/_changes</code> and its consumers</a></td></tr>
+<tr><td>Pub/sub, keyspace notifications</td><td><code>PUBLISH</code>, <code>SUBSCRIBE</code>, <code>notify-keyspace-events</code></td><td><a href="#notification">a row with a short <code>@ttl</code>, a subscription</a></td></tr>
+<tr><td>Idempotency keys</td><td><code>SET NX EX</code> on a request's id</td><td><a href="#idempotency"><code>Idempotency-Key</code>, or <code>@unique</code> and <code>if absent</code></a></td></tr>
+<tr><td>Places near a point</td><td><code>GEOADD</code>, <code>GEOSEARCH</code>, <code>GEODIST</code></td><td><a href="#geo">a <code>geo</code> field, <code>@geo</code></a> (<a href="/docs/geo">Points and distances</a>)</td></tr>
+<tr><td>Counts by the minute</td><td><code>INCR</code> on a key a minute</td><td><a href="/docs/analytics#rollups"><code>bucket(at, 1m)</code> over the events</a> (<a href="/docs/analytics">Analytics</a>)</td></tr>
+<tr><td>A cache that evicts under memory pressure</td><td><code>maxmemory</code>, <code>allkeys-lru</code>, <code>allkeys-lfu</code></td><td><a href="#not-covered">not covered</a>: a row lives until its <code>@ttl</code></td></tr>
+<tr><td>Scripts</td><td><code>EVAL</code>, <code>FUNCTION</code></td><td><a href="#not-covered">not covered</a>: a <code>/batch</code> with <code>require</code></td></tr>
+<tr><td>Bitmaps, Bloom filters, Top-K</td><td><code>SETBIT</code>, <code>BITCOUNT</code>, <code>BF.ADD</code>, <code>TOPK.ADD</code></td><td><a href="#not-covered">not covered</a></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>What every recipe can count on:</p>
+
+<ul>
+  <li><b>Atomic.</b> There is one writer: a statement finds its rows and
+    writes them under the write lock, and a <code>/batch</code> is one
+    block — every statement in it lands, or none does, with no other write
+    between them.</li>
+  <li><b>Durable by <code>--sync</code>.</b> Under <code>--sync
+    always</code> a write is answered once it is on disk; under the
+    default, <code>250</code>, a crash loses at most the last 250 ms of
+    writes (<a href="/docs/server#durability">Durability</a>).</li>
+  <li><b>On a replica.</b> A replica is sent each write as the primary
+    wrote it — a counter's new value, never <code>n + 1</code> — once it
+    is on the primary's disk, in the primary's order. It refuses writes
+    (403), so increments, locks and claims go to the primary; a read sent
+    there with <code>Fenec-After</code> waits for the write it names
+    (<a href="/docs/replication">Replication</a>). A row past its
+    <code>@ttl</code> is out of a replica's reads as it is out of the
+    primary's, and deleted when the primary's sweep is sent.</li>
+</ul>
 
 <h2 id="counter">Counter</h2>
 
@@ -30,6 +91,10 @@ otherwise; over HTTP a request adds its round trip.</p>
 put counters {name: "visits", n: 0}
 set counters {n: n + 1} where name = "visits"     -- → 1
 get counters select n where name = "visits"       -- → 1
+set counters {n: n + 5} where name = "visits" returning n   -- → 6: INCRBY's answer
+put counters {name: "signups", n: 1} if absent else set {n: n + 1}   -- → 1: made at 1
+put counters {name: "signups", n: 1} if absent else set {n: n + 1}   -- → 1: added to
+get counters select n where name = "signups"      -- → 2
 </pre>
 
 <ul>
@@ -40,7 +105,10 @@ get counters select n where name = "visits"       -- → 1
   <li><b>An increment costs</b> 1.36 us in process.</li>
   <li><b>From nothing:</b> <code>coalesce(n, 0) + 1</code> counts a row
     with no <code>n</code> yet; <code>n + 1</code> over a <code>null</code>
-    is <code>null</code>.</li>
+    is <code>null</code>. A key that may not be there yet is made or added
+    to by one statement, an upsert: <code>if absent else set</code>.</li>
+  <li><b><code>returning</code></b> answers the row as written, so the
+    new value comes back with no second read.</li>
 </ul>
 
 <p>In JavaScript, <code>inc()</code> writes the <code>coalesce</code> for
@@ -56,7 +124,13 @@ await db.from('counters').where('name', 'visits').update({ n: inc(1) });
 <code>Computed.Inc(1)</code>, and Swift's, Kotlin's and Dart's builders
 render the same text.</p>
 
-<h2 id="rate-limit">Fixed-window rate limit</h2>
+<h2 id="rate-limit">Rate limits</h2>
+
+<p>Three ways, each decided by what a write finds: a fixed window, the
+cheapest; a sliding window, exact to the moment; a token bucket, which lets
+a burst through up to its size and then a steady rate.</p>
+
+<h3 id="fixed-window">Fixed window</h3>
 
 <p>A row a client and window, made if absent and expiring after the window;
 the increment names the limit, so its answer is the decision.</p>
@@ -76,7 +150,92 @@ set hits {n: n + 1} where key = "ip1:29630000" and n &lt; 2     -- → 0: over t
   <li><b>A request costs</b> its two statements, 3.5 us; send them as
     one <a href="/docs/http#batches"><code>/batch</code></a> for one round
     trip.</li>
+  <li><b>A fixed window lets a burst through at its edge:</b> the limit
+    at the end of one minute and again at the start of the next. The two
+    below do not.</li>
 </ul>
+
+<h3 id="sliding-window">Sliding window</h3>
+
+<p>A row a request, expiring after the window, and a read that must find
+fewer than the limit: <code>offset 2 limit 1 require 0</code> asks that no
+third row is there, so it allows three a minute. Sent as one
+<code>/batch</code> with the request's row, the read refuses the batch (412)
+once three are, and the row is not written.</p>
+
+<pre data-lang="fenecql">create collection calls (key text @hash, at timestamp @ttl(1m))
+get calls where key = "ip1" offset 2 limit 1 require 0    -- → no row: allowed
+put calls {key: "ip1", at: now()}                          -- → 1
+get calls where key = "ip1" offset 2 limit 1 require 0    -- → no row: allowed
+put calls {key: "ip1", at: now()}                          -- → 1
+-- 30 s later
+get calls where key = "ip1" offset 2 limit 1 require 0    -- → no row: allowed
+put calls {key: "ip1", at: now()}                          -- → 1
+get calls where key = "ip1" offset 2 limit 1 require 0    -- → refused: three in the last minute
+-- 30 s later
+get calls where key = "ip1" offset 2 limit 1 require 0    -- → no row: the first two are a minute old
+</pre>
+
+<ul>
+  <li><b>Exact:</b> the rows of the last minute, counted the moment the
+    request comes, since a row past its <code>@ttl</code> is out of the
+    read at once. The guard and the write are one block under the write
+    lock, so two requests cannot both take the last place.</li>
+  <li><b>A row a request</b> is what it keeps, as Redis's sorted set keeps
+    a member a request; a limit of thousands a window is a fixed window or
+    a bucket instead.</li>
+</ul>
+
+<h3 id="token-bucket">Token bucket</h3>
+
+<p>A bucket holds up to two tokens and gains one a second; a request takes
+one. The row keeps the tokens and when they were counted, and one
+<code>set</code> works out what the time since has added — the two
+timestamps apart are milliseconds — and takes a token only where there is
+one:</p>
+
+<pre data-lang="fenecql">create collection buckets (key text @unique, tokens float, at timestamp @ttl(1h))
+put buckets {key: "ip1", tokens: 2.0, at: now()} if absent   -- → 1: a full bucket
+set buckets {tokens: least(2.0, tokens + (now() - at) / 1000.0) - 1, at: now()} where key = "ip1" and tokens + (now() - at) / 1000.0 &gt;= 1   -- → 1: allowed
+set buckets {tokens: least(2.0, tokens + (now() - at) / 1000.0) - 1, at: now()} where key = "ip1" and tokens + (now() - at) / 1000.0 &gt;= 1   -- → 1: allowed, empty now
+set buckets {tokens: least(2.0, tokens + (now() - at) / 1000.0) - 1, at: now()} where key = "ip1" and tokens + (now() - at) / 1000.0 &gt;= 1   -- → 0: refused
+-- 1 s later
+set buckets {tokens: least(2.0, tokens + (now() - at) / 1000.0) - 1, at: now()} where key = "ip1" and tokens + (now() - at) / 1000.0 &gt;= 1   -- → 1: one token back
+</pre>
+
+<ul>
+  <li><b>The script Redis needs</b> for this is the one statement: the
+    row is read and written under the write lock, so no two requests take
+    the same token.</li>
+  <li><b>A refused request writes nothing,</b> so the time it waited
+    still counts toward the next token.</li>
+  <li><b>The <code>@ttl</code> is longer than a refill:</b> a bucket idle
+    for an hour would be full again, so its row may go, and the next
+    request makes it full.</li>
+</ul>
+
+<p>From a client, the two statements go as one <code>/batch</code>, with
+<code>require 1</code> on the take so that a refusal is a 412:</p>
+
+<pre data-lang="ts">import { connect, FenecError } from '@fenecdb/web/client';
+
+const db = connect('http://127.0.0.1:8080');
+
+// true: serve the request; false: answer it 429.
+async function allow(key: string): Promise&lt;boolean&gt; {
+  try {
+    await db.batch([
+      ['put buckets {key: $1, tokens: 2.0, at: now()} if absent', [key]],
+      ['set buckets {tokens: least(2.0, tokens + (now() - at) / 1000.0) - 1, at: now()} ' +
+        'where key = $1 and tokens + (now() - at) / 1000.0 &gt;= 1 require 1', [key]],
+    ]);
+    return true;
+  } catch (e) {
+    if (e instanceof FenecError &amp;&amp; e.status === 412) return false;
+    throw e;
+  }
+}
+</pre>
 
 <h2 id="lock">Lock with expiry</h2>
 
@@ -101,6 +260,9 @@ del locks where name = "nightly" and owner = "w1"                  -- → 1: rel
     read, the renewal's answer is 0 — the holder has lost it — and the next
     <code>put … if absent</code> takes it, the old row deleted in the same
     statement. The sweeper need not have come by.</li>
+  <li><b>The check-and-delete is the <code>del</code>:</b> it names the
+    owner, so a holder whose lock lapsed and was taken by another deletes
+    nothing — the script Redis's documentation gives for the release.</li>
   <li><b>Costs:</b> refused while held 0.91 us, renewed 2.34, released and
     taken again 2.67.</li>
 </ul>
@@ -117,13 +279,62 @@ by a number can be its <code>id</code>:
 <p>Time is the server's clock, and a lock lasts its ttl from its last
 renewal: renew well within it. As with any lock that expires, a holder
 paused past its ttl may still believe it holds the lock; give the work it
-guards a check of its own — the version below — where that matters.</p>
+guards a check of its own — a fencing token, below — where that
+matters.</p>
 </details>
+
+<h3 id="fencing">Fencing tokens</h3>
+
+<p>A holder paused past its lease — a long garbage collection, a stalled
+disk —
+wakes believing it holds the lock, while another does. A fencing token
+tells the two apart: a number the lock hands out, one more at every
+acquisition, which the work it guards carries and the resource checks. Here
+the lock's row keeps it, so the lock is a row that stays, and the lease is
+its <code>until</code>:</p>
+
+<pre data-lang="fenecql">create collection leases (name text @unique, owner text, until timestamp, fence int)
+put leases {name: "report", fence: 0} if absent        -- → 1: the lock's row, made once
+set leases {owner: "w1", until: now() + 30000, fence: fence + 1} where name = "report" and (owner is null or until &lt;= now()) returning fence   -- → 1: w1 holds it, token 1
+set leases {owner: "w2", until: now() + 30000, fence: fence + 1} where name = "report" and (owner is null or until &lt;= now()) returning fence   -- → no row: held
+-- 40 s later
+set leases {owner: "w2", until: now() + 30000, fence: fence + 1} where name = "report" and (owner is null or until &lt;= now()) returning fence   -- → 2: w1's lease lapsed
+set leases {until: now() + 30000} where name = "report" and owner = "w2" and fence = 2 and until &gt; now() require 1   -- → 1: renewed
+</pre>
+
+<p>The resource keeps the highest token it has been written with, and
+takes a write only from that token or a newer one:</p>
+
+<pre data-lang="fenecql">create collection reports (day text @unique, body text, fence int)
+put reports {day: "2026-05-03", fence: 0} if absent    -- → 1
+set reports {body: "by w2", fence: 2} where day = "2026-05-03" and fence &lt;= 2 require 1   -- → 1: token 2 is the newest
+set reports {body: "by w1", fence: 1} where day = "2026-05-03" and fence &lt;= 1 require 1   -- → refused: w1 woke late, with token 1
+set leases {owner: null, until: null} where name = "report" and owner = "w2" and fence = 2 require 1   -- → 1: released
+</pre>
+
+<ul>
+  <li><b>The token is counted by the write that takes the lock,</b> under
+    the write lock: no two acquisitions get one number, and none is
+    skipped. Redis's <code>SET NX</code> hands out none: a counter beside
+    the lock is a second key, kept in step with it by a script.</li>
+  <li><b>The row stays</b> so the count does: under <code>@ttl</code> it
+    would be deleted when it lapsed, its count with it. A lapsed lease is
+    <code>until &lt;= now()</code>, which the next acquisition reads.</li>
+  <li><b>Waiting for it:</b> sent over HTTP with
+    <code>Fenec-Wait</code>, an acquisition that takes nothing is held at
+    the server until the holder releases it or its lease lapses, whichever
+    comes first — both are a write or a time the server knows of (<a
+    href="/docs/http#wait">Holding a write until it can write</a>).</li>
+  <li><b>A resource in fenecdb</b> checks the token in the write itself,
+    as above. One elsewhere — a file store, another service — needs a
+    check of its own; the token is a number it can keep.</li>
+</ul>
 
 <h2 id="optimistic">Optimistic concurrency</h2>
 
 <p>Read a row with its version; write it back only where the version is
-still the one read, and move the version on in the same statement.</p>
+still the one read, and move the version on in the same statement — what
+Redis's <code>WATCH</code> and <code>MULTI</code> are for.</p>
 
 <pre data-lang="fenecql">create collection docs (body text, version int)
 put docs {id: 7, body: "draft", version: 1}
@@ -140,7 +351,10 @@ set docs {body: "other", version: version + 1} where id = 7 and version = 1 requ
     would let the statements after it go on, where a lost race should stop
     them. With it the write that found another version is refused (412) and
     the batch is put back whole (<a href="/docs/fenecql#require">Writes that
-    must find their rows</a>).</li>
+    must find their rows</a>). A <code>get … require 1</code> guards a
+    batch on a value it does not write (<a
+    href="/docs/fenecql#read-require">A read that must find its
+    rows</a>).</li>
   <li><b>Costs:</b> a write that wins 1.13 us, one that loses
     0.66.</li>
 </ul>
@@ -154,15 +368,68 @@ time it was last seen, a <code>@unique</code> token to find it by.</p>
 put sessions {token: "s-81f2", user: "ada", data: {"cart": 2}, seen: now()}
 get sessions select user where token = "s-81f2"            -- → "ada"
 set sessions {seen: now()} where token = "s-81f2"           -- → 1: seen again
+set sessions {seen: now()} where token = "s-81f2" returning user, data.cart   -- → "ada": read and seen again, GETEX
 del sessions where token = "s-81f2"                         -- → 1: signed out
 </pre>
 
 <ul>
   <li><b>An idle session is gone at once</b> for every read, thirty
-    minutes after it was last seen, and the server deletes it within a
-    minute (<a href="/docs/fenecql#ttl">Rows that expire</a>).</li>
+    minutes after it was last seen, and the server's sweeper deletes it
+    one to two minutes later (<a href="/docs/fenecql#ttl">Rows that
+    expire</a>).</li>
+  <li><b>Read and renewed in one</b> by <code>set … returning</code>: the
+    row as written comes back, and a session already gone answers no
+    row.</li>
   <li><b>Costs,</b> over 10 000 sessions: a read 1.32 us, seen
     again 2.26.</li>
+</ul>
+
+<h2 id="cache">Cache with expiry</h2>
+
+<p>A value kept for a while in front of something slow to work out: read it
+by its key, and on a miss work it out and keep it. The upsert writes a key
+that is there and one that is not alike, and starts its time again.</p>
+
+<pre data-lang="fenecql">create collection cache (key text @unique, value json, at timestamp @ttl(5m))
+get cache select value.name where key = "user:7"      -- → no row: a miss
+put cache {key: "user:7", value: {"name": "Ada"}, at: now()} if absent else set {value: new.value, at: now()}   -- → 1: kept for five minutes
+get cache select value.name where key = "user:7"      -- → "Ada": a hit
+put cache {key: "user:7", value: {"name": "Ada L."}, at: now()} if absent else set {value: new.value, at: now()}   -- → 1: written over
+del cache where key = "user:7"                         -- → 1: invalidated
+put cache {key: "user:7", value: {"name": "Ada"}, at: now()} if absent else set {value: new.value, at: now()}   -- → 1
+-- 300 s later
+get cache select value.name where key = "user:7"      -- → no row: five minutes old
+</pre>
+
+<p>What it is, and what it is not:</p>
+
+<ul>
+  <li><b>No eviction.</b> There is no LRU or LFU and no
+    <code>maxmemory</code> policy: a row lives until its
+    <code>@ttl</code> or a <code>del</code>, however rarely it is read.
+    What the cache holds is what was written within its ttl. With
+    <code>--max-memory</code>, a write past the ceiling is refused (507)
+    rather than make room by dropping another row (<a
+    href="/docs/server#limits">Limits</a>). A cache that must stay inside
+    a memory budget by dropping what is used least wants Redis.</li>
+  <li><b>It survives a restart.</b> The rows are in the file, durable by
+    <code>--sync</code>, so a server started again answers from a warm
+    cache, and a replica holds it too.</li>
+  <li><b>The values are in the file, not the heap.</b> The file is mapped:
+    the process holds the indexes derived from the rows, and the rows
+    themselves are pages the system keeps or lets go — a 1 GB file of 2.3
+    million rows with two indexes held 188 MB (<a
+    href="/docs/concepts#the-file-is-mapped">The file is mapped</a>).</li>
+  <li><b>Expired rows go in the background.</b> Out of every read at once,
+    deleted by the server's sweeper one to two minutes later, 1 000 a
+    block: 100 000 of 200 000 rows went in 0.56 s, each block holding the
+    write lock 1.06 ms at the median and 2.3 at most (<code>make
+    ttl-bench</code>). The space an overwrite leaves is taken back by the
+    server's compaction once half the file is dead (<a
+    href="/docs/server#compaction">Compaction</a>).</li>
+  <li><b>Many clients missing one key</b> at once each work it out; to
+    have one do it, the first takes the key's <a href="#lock">lock</a>
+    and the rest read again after.</li>
 </ul>
 
 <h2 id="leaderboard">Leaderboard</h2>
@@ -171,17 +438,90 @@ del sessions where token = "s-81f2"                         -- → 1: signed out
 of the index from its end, and a player's rank is a count.</p>
 
 <pre data-lang="fenecql">create collection scores (player text @unique, score int @sorted)
-put scores [{player: "ada", score: 0}, {player: "bo", score: 90}]
-set scores {score: score + 120} where player = "ada"            -- → 1
-get scores select player, score order score desc limit 10       -- → "ada"
-get scores where score > 120 count                              -- → 0: ada is first
+put scores [{player: "ada", score: 0}, {player: "bo", score: 90}, {player: "cy", score: 40}]
+set scores {score: score + 120} where player = "ada"            -- → 1: ZINCRBY
+get scores select player, score order score desc limit 10       -- → "ada": ZREVRANGE 0 9
+get scores select player, score order score desc limit 10 offset 1   -- → "bo": the next page
+get scores select score where player = "ada"                    -- → 120: ZSCORE
+get scores where score &gt; 120 count                              -- → 0: ada is first, ZREVRANK
+get scores select player where score &gt;= 40 and score &lt;= 100 order score desc   -- → "bo": ZRANGEBYSCORE
 </pre>
 
 <ul>
+  <li><b>A rank is a count</b> of the scores above the player's: read
+    the score, then count, two statements — or one, where the score is
+    known.</li>
+  <li><b>Ties</b> come out in the order the players were first written,
+    their ids', whichever way the board is read; Redis orders them by the
+    members' names.</li>
   <li><b>Costs,</b> over 100 000 players: a score added 1.79 us,
     the top ten 1.52. A player's rank is a count of the scores
     above it, the index's range gathered: 1.5 ms at the median of
     the board.</li>
+</ul>
+
+<h2 id="sets">Sets and deduplication</h2>
+
+<p>A member is a row, and <code>@unique</code> over the set and the member
+keeps it there once: <code>if absent</code> adds it and answers whether it
+was new.</p>
+
+<pre data-lang="fenecql">create collection members (list text @hash, member text, @unique(list, member))
+put members {list: "tags:7", member: "rust"} if absent      -- → 1: SADD, new
+put members {list: "tags:7", member: "rust"} if absent      -- → 0: there already
+put members [{list: "tags:7", member: "db"}, {list: "tags:8", member: "rust"}] if absent   -- → 2
+get members where list = "tags:7" and member = "rust" count   -- → 1: SISMEMBER
+get members where list = "tags:7" count                       -- → 2: SCARD
+get members select member where list = "tags:7" and member in (get members select member where list = "tags:8")   -- → "rust": SINTER
+del members where list = "tags:7" and member = "db"           -- → 1: SREM
+</pre>
+
+<ul>
+  <li><b>A set's members</b> are its <code>@hash</code> bucket, read
+    without the others: <code>SMEMBERS</code> is <code>get members select
+    member where list = $1</code>.</li>
+  <li><b>Seen-it sets</b> — message ids, a feed's items already shown —
+    are a collection of one <code>@unique</code> key and a
+    <code>@ttl</code>, so an id is remembered for as long as a repeat
+    can come.</li>
+  <li><b>Exact,</b> at a row a member: a Bloom filter's fixed memory and
+    its false positives are <a href="#not-covered">not here</a>.</li>
+</ul>
+
+<h2 id="unique-visitors">Unique visitors</h2>
+
+<p><code>approx_count_distinct</code> is HyperLogLog with 2<sup>14</sup>
+registers — Redis's register count, so its standard error, 0.81% —
+counted over the visits as they were written. <code>count(distinct)</code>
+is the exact count, up to a million values a query.</p>
+
+<pre data-lang="fenecql">create collection visits (user text, page text @hash, at timestamp @sorted)
+put visits [{user: "ada", page: "/", at: "2026-05-03T09:00:00Z"}, {user: "bo", page: "/", at: "2026-05-03T09:05:00Z"}, {user: "ada", page: "/docs", at: "2026-05-03T10:00:00Z"}, {user: "cy", page: "/", at: "2026-05-04T08:00:00Z"}]   -- → 4: PFADD, a row a visit
+get visits select approx_count_distinct(user) as users                   -- → 3: PFCOUNT
+get visits select approx_count_distinct(user) as users, bucket(at, 1d) as day group day   -- → 2: on the 3rd
+get visits select count(distinct user) as users where page = "/"         -- → 3: exact
+</pre>
+
+<p>A day's sketch kept in a row is Redis's key a day: read out as bytes
+with <code>hll_accumulate</code>, put back as a client sends rows, and
+merged — <code>PFMERGE</code> — by <code>hll_combine</code>, each visitor
+of two days counted once:</p>
+
+<pre data-lang="fenecql">create collection daily (day timestamp @unique, users bytes)
+get visits select bucket(at, 1d) as day, hll_accumulate(user) as users group day   -- → "2026-05-03T00:00:00Z"
+put daily $1                                                                       -- → 2: the rows above
+get daily select hll_estimate(hll_combine(users)) as users                        -- → 3: both days, ada once
+get daily select hll_estimate(users) as users where day = "2026-05-03"            -- → 2
+</pre>
+
+<ul>
+  <li><b>Costs:</b> per hour over a million events, 121 ms against
+    <code>count(distinct)</code>'s 128, the furthest of the 169 hours
+    1.3% off (<code>make analytics-bench</code>).</li>
+  <li><b>Sketches are the same bytes</b> wherever they are made, the
+    browser's or a server's, and a group of few values keeps few words
+    rather than 16 KB (<a href="/docs/analytics#distinct">Distinct
+    users</a>).</li>
 </ul>
 
 <h2 id="queue">Job queue</h2>
@@ -199,29 +539,117 @@ del jobs where id = 1 and owner = "w1" require 1                       -- → 1:
 <ul>
   <li><b>None is taken twice:</b> the claim finds its jobs and writes them
     under the write lock. A job whose worker died is ready again once its
-    lease lapses, and the next claim takes it.</li>
+    lease lapses, and the next claim takes it — at least once, where
+    <code>BRPOP</code> loses a job its worker dies holding.</li>
   <li><b>Costs,</b> over a million jobs: a claim of ten 18.7 us; sixteen
     threads claimed and acked them all in 5.4 s, 185 800 jobs a second,
-    and sixteen HTTP clients at 138 500.</li>
+    and sixteen HTTP clients at 138 500 (<code>make
+    queue-bench</code>).</li>
   <li><b><code>BLPOP</code>:</b> sent over HTTP with
     <code>Fenec-Wait</code>, a claim that finds no job is held at the
     server until one is enqueued, a delayed one comes due or a lease
-    lapses, and handed to the worker that has waited longest (<a
+    lapses, and handed to the worker that has waited longest: a job
+    enqueued reached a waiting worker in 0.38 ms at the median (<a
     href="/docs/queues#wait">Waiting for a job</a>).</li>
   <li><b>Retries with a backoff, dead letters, delays and priorities</b>
     are on their own page, <a href="/docs/queues">Job queues</a>.</li>
 </ul>
 
-<h2 id="notification">Change notification</h2>
+<h3 id="delayed">Delayed jobs</h3>
 
-<p>A client that wants to hear of a change subscribes to the rows it cares
-about; a service that must see every write reads the change stream.</p>
+<p>A job delayed is one whose <code>run_at</code> is ahead: no claim takes
+it before then, and the claim that would take it is the same one.</p>
 
-<pre data-lang="bash"># the rows of a shape, then each change to them as it lands
-curl -N 'http://127.0.0.1:8080/jobs/changes?state=eq.ready'
+<pre data-lang="fenecql">create collection reminders (payload json, run_at timestamp @sorted, owner text, attempts int)
+put reminders {payload: {"to": "ada"}, run_at: now() + 60000, attempts: 0}   -- → 1: due in a minute
+set reminders {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 10 returning id   -- → no row: not yet
+-- 60 s later
+set reminders {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 10 returning id   -- → 1: due
+</pre>
+
+<ul>
+  <li><b>No poll:</b> a claim held with <code>Fenec-Wait</code> is woken
+    at the moment the next job comes due, which the server works out from
+    the <code>@sorted</code> index: 0.04 ms after its time at the median
+    and 1.9 at p99, against 1.2 and 8.4 polling every 10 ms (<a
+    href="/docs/queues#wait">Waiting for a job</a>).</li>
+  <li><b>No ceiling</b> on the delay, and a delayed job is read like any
+    row: <code>get reminders where run_at &gt; now() count</code>.</li>
+</ul>
+
+<h2 id="streams">Streams</h2>
+
+<p>A stream is a collection written to and never written over: each entry a
+row, its <code>id</code> counted up as it is added. A range is a walk of
+the ids from the last one read, and old entries go by <code>@ttl</code>.</p>
+
+<pre data-lang="fenecql">create collection activity (kind text @hash, user text, at timestamp @ttl(7d))
+put activity {kind: "signup", user: "ada", at: now()}                                         -- → 1: XADD
+put activity [{kind: "order", user: "ada", at: now()}, {kind: "order", user: "bo", at: now()}]   -- → 2
+get activity select id, kind where id &gt; 1 limit 100      -- → 2: XRANGE, after entry 1
+get activity where kind = "order" count                  -- → 2
+</pre>
+
+<p>A reader that must see every write once, and pick up where it left off,
+reads the server's change stream: every write on disk, a JSON line each.
+Started with <code>--cdc</code>, a named consumer keeps its place on the
+server, as a consumer group's last delivered id does:</p>
+
+<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080 --cdc
+
+curl -X POST http://127.0.0.1:8080/_changes/consumers/mailer                  # XGROUP CREATE … $
+curl -i 'http://127.0.0.1:8080/_changes?consumer=mailer&amp;wait=10000'          # XREADGROUP … BLOCK 10000
+# Fenec-Next: 42 -- handle the lines, then XACK up to there:
+curl -X POST http://127.0.0.1:8080/_changes/consumers/mailer -d '{"since": 42}'
+</pre>
+
+<ul>
+  <li><b>At least once</b> where the server keeps the place: a consumer
+    that crashes between reading and committing is handed those writes
+    again (<a href="/docs/http#consumers">Consumers</a>). One that keeps
+    <code>Fenec-Next</code> beside its own state, committed with it, has
+    each write once (<a href="/docs/http#changes">Change data
+    capture</a>).</li>
+  <li><b>Only what is on disk:</b> a write is handed out once an fsync
+    has covered it, so none a crash lost reaches a consumer.</li>
+  <li><b>Every collection's writes</b> are in it, each line naming its
+    collection, puts, deletes and schema changes alike; a consumer passes
+    over the rest.</li>
+  <li><b>One consumer, every write.</b> A consumer group whose consumers
+    share the entries — each to one of them, the pending ones claimed
+    again after a while — is a <a href="#queue">job queue</a>: a claim and
+    its lease.</li>
+  <li><b>How far back:</b> as many writes as
+    <code>--replication-buffer</code> holds, 64 MiB unless given; a cursor
+    further back is answered 410 with the first <code>since</code> it
+    does serve, never with writes missing from the middle.</li>
+</ul>
+
+<h2 id="notification">Pub/sub and change notification</h2>
+
+<p>A message is a row, kept for as long as a late subscriber should still
+see it, and a subscription is sent the rows of a shape — first those there
+are, then each change as it lands.</p>
+
+<pre data-lang="fenecql">create collection messages (room text @hash, body text, at timestamp @ttl(1m))
+put messages {room: "lobby", body: "hello", at: now()}     -- → 1: PUBLISH
+</pre>
+
+<pre data-lang="bash"># SUBSCRIBE: the rows of a shape, then each change to them as it lands
+curl -N 'http://127.0.0.1:8080/messages/changes?room=eq.lobby'
 
 # every write on disk, from where a named consumer left off
 curl 'http://127.0.0.1:8080/_changes?consumer=mailer&amp;wait=10000'
+</pre>
+
+<pre data-lang="ts">import { connect } from '@fenecdb/web/client';
+
+const db = connect('http://127.0.0.1:8080');
+const stop = db.subscribe('messages', { room: 'eq.lobby' }, (ev) =&gt; {
+  if (ev.type === 'change') for (const m of ev.puts) console.log(m.body);
+});
+await db.run('put messages {room: $1, body: $2, at: now()}', ['lobby', 'hi']);
+stop();
 </pre>
 
 <ul>
@@ -229,10 +657,64 @@ curl 'http://127.0.0.1:8080/_changes?consumer=mailer&amp;wait=10000'
     is woken by the write, not by polling: from a write sent to its event read
     by a subscriber took 0.037 ms at the median and
     0.103 at p99 over HTTP on one machine.</li>
+  <li><b>A late subscriber</b> is sent the messages still inside their
+    <code>@ttl</code> first, where Redis's pub/sub hands it only what is
+    published after it subscribed.</li>
+  <li><b>Fan-out costs the writer.</b> Every write wakes every stream,
+    which reads what it changed: a write's p50 went from 0.26 ms with no
+    stream to 0.94 with 60 and 3.1 with 500, each stream a connection and
+    a thread, 64 at most unless <code>--http-max-streams</code> says
+    otherwise. A page thousands view polls instead (<a
+    href="/docs/http#polling">Polling a read</a>).</li>
+  <li><b>A live query</b> keeps a query's answer rather than a shape's
+    rows: <code>db.live(query, cb)</code> runs it again on the server
+    after every write to what it reads (<a
+    href="/docs/javascript">JavaScript</a>).</li>
   <li><b>The change stream</b> (<a href="/docs/http#changes">Change data
     capture</a>) hands out every write on disk exactly once to a consumer
     that sends back where it is, which a subscription — a shape's rows kept
-    up to date — does not promise.</li>
+    up to date — does not promise: <code>notify-keyspace-events</code>
+    with a cursor.</li>
+</ul>
+
+<h2 id="idempotency">Idempotency keys</h2>
+
+<p>A client that sends a write again after a timeout, not knowing whether
+the first landed, sends it with the same <code>Idempotency-Key</code>: the
+server keeps the key and the answer in the same block as the write, and a
+repeat is handed the first answer.</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
+  -H 'Idempotency-Key: 5f0c2d6e-order-1142' \
+  -d '{"query":"put orders {customer: $1, total: $2}","params":[7, 129.5]}'
+# sent again with the key: the first answer, Idempotent-Replayed: true, nothing written
+</pre>
+
+<ul>
+  <li><b>The key and the write land together,</b> so a crash cannot leave
+    one without the other; a failed write keeps no key, and the key with
+    another request is refused (422). Keys are kept a day unless
+    <code>--idempotency-ttl</code> says otherwise (<a
+    href="/docs/http#idempotency">Retrying a write</a>).</li>
+  <li><b>Costs:</b> 16 200 single puts a second over HTTP with a key,
+    against 18 300 without.</li>
+</ul>
+
+<p>A message that arrives more than once — a webhook redelivered, an event
+replayed — is told apart by its own id: a row of it, made if absent, and
+the work done only where it was.</p>
+
+<pre data-lang="fenecql">create collection deliveries (event text @unique, at timestamp @ttl(1d))
+put deliveries {event: "evt_1J8", at: now()} if absent             -- → 1: first time, handle it
+put deliveries {event: "evt_1J8", at: now()} if absent             -- → 0: a repeat, already handled
+put deliveries {event: "evt_1J8", at: now()} if absent require 1   -- → refused: in a /batch, its work put back with it
+</pre>
+
+<ul>
+  <li><b>With <code>require 1</code> in a <code>/batch</code></b> beside
+    the writes it guards, the mark and the work land together or not at
+    all: a repeat is refused (412) and writes nothing, and a crash cannot
+    leave work done with no mark.</li>
 </ul>
 
 <h2 id="geo">Places near a point</h2>
@@ -247,20 +729,76 @@ put sicily [{name: "Palermo", loc: [13.361389, 38.115556]}, {name: "Catania", lo
 get sicily select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 37] limit 10   -- → "Catania"
 </pre>
 
-<h2 id="not-covered">What this does not cover</h2>
+<ul>
+  <li><b>Costs,</b> over a million points: every point within 1 km 12.6
+    us, against 34.3 us for Redis's <code>GEOSEARCH</code>, and the ten
+    nearest 33 us, against 198 ms — the server's own time for Redis, the
+    network left out (<code>make geo-bench</code>, <a
+    href="/docs/geo#costs">What it costs</a>).</li>
+</ul>
+
+<h2 id="not-covered">What fenecdb does not do</h2>
 
 <ul>
-  <li><b>A cache in front of another database.</b> There is no eviction by
-    memory or by use, no LRU: a row lives until its <code>@ttl</code>, and
-    the file is not a cache that can lose what it holds.</li>
-  <li><b>HyperLogLog</b> and Redis's other probabilistic structures. A
-    <code>count</code> of distinct values is exact, and costs a scan or a
-    <code>@hash</code> index's buckets.</li>
-  <li><b>Pub/sub without storage.</b> Every message is a write that lands in
-    the file and moves the change counter; there is no fire-and-forget
-    channel. For messages that need not be kept, a row with a short
-    <code>@ttl</code> and a subscription is the nearest.</li>
-  <li><b>Sub-millisecond latency across a network</b> as Redis's design
-    goal: a write here is durable by the server's <code>--sync</code>
-    policy, and a request is HTTP.</li>
+  <li><b>Evict.</b> No LRU or LFU, no <code>maxmemory</code> policy: a row
+    lives until its <code>@ttl</code> or a <code>del</code>, and
+    <code>--max-memory</code> refuses a write past it (507) rather than
+    drop another row (<a href="#cache">Cache with expiry</a>). A cache that
+    must stay inside a memory budget by forgetting what is used least
+    wants Redis.</li>
+  <li><b>Keep its data in memory alone.</b> A server always keeps a file,
+    and a write is as durable as <code>--sync</code> says: the default,
+    <code>250</code>, answers before the fsync and loses at most the last
+    250 ms in a crash; <code>always</code> answers after it, a durable
+    update 4.0 ms at the median on a Mac (<code>F_FULLFSYNC</code>) and
+    0.325 ms on Linux in Docker (<a
+    href="/docs/benchmarks#round-trip">One request's round trip</a>);
+    <code>off</code> syncs at shutdown alone (<a
+    href="/docs/server#durability">Durability</a>). A request is HTTP: a
+    read by id took 0.022 ms at the median on one machine (<a
+    href="/docs/benchmarks#requests">A request over HTTP</a>), and a
+    network's round trip adds to it. Memory alone, a function call a
+    statement, is the engine embedded in the app — in Rust, where an
+    increment costs 1.36 us, or in the page (<a
+    href="/docs/embedding">Embedded Rust</a>, <a
+    href="/docs/javascript">JavaScript</a>).</li>
+  <li><b>Run scripts.</b> No Lua, no <code>EVAL</code> or
+    <code>FUNCTION</code>. What a script checks before it writes is
+    <code>require</code> on the statements of a <code>/batch</code>, which
+    lands whole or not at all, and a value worked out over the row is a
+    <code>set</code>'s expression or <code>case</code>. A batch cannot read
+    a value and branch on it: a decision between two reads is the
+    client's, a round trip each.</li>
+  <li><b>Write from more than one writer.</b> A file has one: writes run
+    one after another under its lock — 320 000 increments a second in
+    process and 102 000 over HTTP from sixteen clients (<code>make
+    counters-bench</code>), 185 800 jobs claimed and acked a second
+    (<code>make queue-bench</code>) — and reads go beside them: four
+    threads read 701 000 rows a second by id beside four writers (<a
+    href="/docs/benchmarks#concurrency">Writers and readers at
+    once</a>). Past one machine's writer the data is split by tenant, a
+    file each (<a href="/docs/sharding">Tenants and sharding</a>); there
+    are no hash slots.</li>
+  <li><b>Fan out across tenants.</b> A subscription and
+    <code>/_changes</code> are one file's: on a tenant node each tenant is
+    a file of its own, and the router forwards a stream to the node
+    holding it. There is no channel every tenant's subscribers hear; a
+    message for all of them is a write to each.</li>
+  <li><b>Pub/sub without storage.</b> Every message is a write that lands
+    in the file and moves the change counter; there is no fire-and-forget
+    channel. A row with a short <code>@ttl</code> and a subscription is
+    the nearest (<a href="#notification">above</a>).</li>
+  <li><b>Speak RESP.</b> A Redis client cannot connect: the server speaks
+    HTTP, and every language reaches it through it or an SDK (<a
+    href="/docs/languages">Your language</a>).</li>
+  <li><b>Bitmaps, Bloom filters and Top-K.</b> No <code>SETBIT</code> or
+    <code>BITCOUNT</code>, no Bloom or Cuckoo filter, Count-Min sketch or
+    Top-K. Membership is exact, a row a member (<a
+    href="#sets">Sets</a>); HyperLogLog is there (<a
+    href="#unique-visitors">Unique visitors</a>).</li>
+  <li><b>Deliver exactly once.</b> A queue's lease that lapses under a
+    slow worker hands its job to another, and a consumer that crashes
+    before it commits reads again: the work's own check — a
+    <code>@unique</code> key, an <code>Idempotency-Key</code> — makes the
+    second run harmless.</li>
 </ul>

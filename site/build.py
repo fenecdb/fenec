@@ -67,11 +67,15 @@ NAV = [
         ("docs/mobile", "Mobile and native apps"),
         ("docs/http", "HTTP endpoint"),
         ("docs/sync", "Sync"),
-        ("docs/redis", "Instead of Redis"),
+        ("docs/integrations", "Integrations"),
+    ]),
+    # What an app adds Redis for, a page a family of patterns: the first
+    # says which page holds each.
+    ("Instead of Redis", [
+        ("docs/redis", "Recipes"),
         ("docs/queues", "Job queues"),
         ("docs/geo", "Points and distances"),
         ("docs/analytics", "Analytics and market data"),
-        ("docs/integrations", "Integrations"),
     ]),
     ("Operate", [
         ("docs/server", "Server"),

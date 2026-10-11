@@ -30,9 +30,11 @@ fn blocks(page: &str) -> Vec<String> {
 #[test]
 fn every_recipe_runs_and_answers_what_the_page_says() {
     let (statements, checked) = run_page(PAGE);
-    // The page has its recipes, and says what most of them answer.
+    // The page has its recipes, and says what most of them answer: a
+    // recipe dropped from it, or a block whose language tag changed, is
+    // a recipe no longer run.
     assert!(
-        statements >= 30 && checked >= 20,
+        statements >= 100 && checked >= 80,
         "{statements} run, {checked} checked"
     );
 }
@@ -42,11 +44,15 @@ fn every_recipe_runs_and_answers_what_the_page_says() {
 /// it checked. `analytics_docs.rs`, `queues_docs.rs` and `geo_docs.rs` run
 /// their pages through it too. A line of a comment alone is passed over,
 /// and one saying `-- 20 s later` moves the clock on: a lease that lapses.
+/// A statement holding `$1` is handed the rows the read before it
+/// answered, as JSON writes them and a client sends them back -- a day's
+/// sketches put into a rollup (`put daily $1`).
 pub(crate) fn run_page(page: &str) -> (usize, usize) {
     let mut db = Database::new();
     let mut now = 1_777_800_000_000;
     db.set_clock(Some(now));
     let (mut statements, mut checked) = (0, 0);
+    let mut rows = String::from("[]");
     for block in blocks(page) {
         for line in block.lines().filter(|l| !l.trim().is_empty()) {
             if let Some(comment) = line.trim().strip_prefix("--") {
@@ -64,18 +70,28 @@ pub(crate) fn run_page(page: &str) -> (usize, usize) {
             // point's list of numbers is read as written (`geo_docs.rs`).
             let st = fenec_ql::parse_one_for(&db, code)
                 .unwrap_or_else(|e| panic!("`{code}` does not parse: {e}"));
+            // Read exact, as a server reads a body's parameters.
+            let params = match code.contains("$1") {
+                true => fenec_core::json::parse_params_exact(&format!("[{rows}]"))
+                    .unwrap_or_else(|e| panic!("`{code}`: the rows before: {e}")),
+                false => Vec::new(),
+            };
             // `-- → refused`: a write whose `require` the page says is not met.
             if expect.is_some_and(|e| e.starts_with("refused")) {
-                let e = db.execute(&st).expect_err(code);
+                let e = db.execute_with(&st, &params).expect_err(code);
                 assert!(matches!(e, Error::Unmet(_)), "`{code}`: {e}");
                 statements += 1;
                 checked += 1;
                 continue;
             }
             let answer = db
-                .execute(&st)
+                .execute_with(&st, &params)
                 .unwrap_or_else(|e| panic!("`{code}` failed: {e}"));
             statements += 1;
+            if let Response::Rows(rs) = &answer {
+                rows.clear();
+                fenec_core::json::rows_array_into(&mut rows, rs);
+            }
             let Some(expect) = expect else { continue };
             // The answer is what comes before a `:` and its explanation.
             // A quoted answer is whole, `:`s and all: a time is one.

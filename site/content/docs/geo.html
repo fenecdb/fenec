@@ -17,6 +17,10 @@ box, and <code>near loc p</code> puts rows in order nearest first.
 read the rows near the point rather than every row. Every answer is the one
 a scan of every row gives, row for row.</p>
 
+<p>The other jobs an app adds Redis for — counters, locks, caches, <a
+href="/docs/queues">job queues</a>, pub/sub — are recipes of
+<a href="/docs/redis">Instead of Redis</a>.</p>
+
 <p>Every FenecQL block on this page is run, statement by statement, by a
 test (<code>crates/fenec-core/tests/geo_docs.rs</code>), and each
 <code>-- → x</code> is the answer it checks: a write's count, or the first
@@ -191,8 +195,8 @@ get couriers count   -- → 1
   <li><b>An upsert a position:</b> the row made the first time, its point
     and time set after, one statement whichever it is.</li>
   <li><b>Gone at once:</b> a row past its <code>@ttl</code> is out of every
-    read the moment it is, and the server's sweeper deletes it within the
-    minute after (<a href="/docs/fenecql#ttl">Rows that expire</a>).</li>
+    read the moment it is, and the server's sweeper deletes it one to two
+    minutes later (<a href="/docs/fenecql#ttl">Rows that expire</a>).</li>
 </ul>
 
 <h2 id="clients">From a client</h2>
