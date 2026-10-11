@@ -6,7 +6,7 @@
 
 use crate::{IdSource, Options};
 use fenec_core::query::{Expr, Statement};
-use fenec_core::schema::IndexKind;
+use fenec_core::schema::{Composite, IndexKind};
 use fenec_core::value::DataType;
 
 /// Applies `flag`, one of the options above, with its `value`: `None` for
@@ -15,7 +15,11 @@ pub fn option(opts: &mut Options, flag: &str, value: &str) -> Option<Result<(), 
     let done = match flag {
         "--where" => parse_where(value).map(|e| opts.filter = Some(e)),
         "--vector" => parse_vector(value).map(|v| opts.vectors.push(v)),
-        "--index" => parse_index(value).map(|i| opts.indexes.push(i)),
+        // `owner,created desc@sorted`: an index over several fields.
+        "--index" => match parse_composite(value) {
+            Some(c) => c.map(|c| opts.composites.push(c)),
+            None => parse_index(value).map(|i| opts.indexes.push(i)),
+        },
         "--cast" => parse_cast(value).map(|c| opts.casts.push(c)),
         "--id" => {
             opts.id = match value {
@@ -85,6 +89,23 @@ pub fn parse_cast(s: &str) -> std::result::Result<(String, DataType), String> {
         return Err(format!("invalid --cast: `{s}`"));
     }
     Ok((name.to_string(), ty))
+}
+
+/// `owner,created desc@sorted` or `org,slug@unique`: an index over several
+/// fields, read as `create index` reads its fields -- `None` for a field's
+/// own (no comma before the `@`).
+pub fn parse_composite(s: &str) -> Option<std::result::Result<Composite, String>> {
+    let (names, spec) = s.split_once('@')?;
+    if !names.contains(',') {
+        return None;
+    }
+    Some(
+        match fenec_ql::parse_one(&format!("create index on imported ({names}) @{spec}")) {
+            Ok(Statement::CreateComposite { index, .. }) => Ok(index),
+            Ok(_) => Err(format!("invalid --index: `{s}`")),
+            Err(e) => Err(format!("--index `{s}`: {e}")),
+        },
+    )
 }
 
 /// `field@hash`, `field@sorted`, `field@geo` or `field@hnsw[(metric, m=.., ef_construction=.., ef_search=.., quant=..)]`
@@ -196,5 +217,13 @@ mod tests {
         assert!(parse_index("embed@hnsw(cosine, k=3)").is_err());
         assert!(parse_index("embed@hnsw(cosine").is_err());
         assert!(parse_index("@hash").is_err());
+        let c = parse_composite("owner, created desc@sorted")
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.keys_text(), "owner, created desc");
+        assert!(!c.unique);
+        assert!(parse_composite("org,slug@unique").unwrap().unwrap().unique);
+        assert!(parse_composite("org,slug@hash").unwrap().is_err());
+        assert!(parse_composite("org@hash").is_none());
     }
 }

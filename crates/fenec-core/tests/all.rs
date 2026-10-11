@@ -15,6 +15,7 @@ mod buckets;
 mod changes;
 mod claims;
 mod collate;
+mod composite;
 mod counts;
 mod crash;
 mod derived;

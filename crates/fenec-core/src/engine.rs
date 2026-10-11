@@ -3,12 +3,13 @@
 use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
 use crate::collate::{self, Collation};
+use crate::composite::CompositeIndex;
 use crate::error::{Error, Result};
 use crate::geo::GeoIndex;
 use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
-use crate::schema::{collatable, IndexKind, Metric, Schema};
+use crate::schema::{collatable, Composite, IndexKind, Metric, Schema};
 use crate::sorted::{Range as SortRange, SortedIndex};
 use crate::sparse::SparseIndex;
 use crate::store::{Store, OP_DEL, OP_PUT};
@@ -662,6 +663,13 @@ const LINK_AT: usize = 512;
 /// waiting was 843 bytes brotli of its module for nothing.
 const DEFERS: bool = !cfg!(target_arch = "wasm32");
 
+/// What a `@unique` value of a document is held in: a field (or a path),
+/// or an index over several fields.
+enum Unique<'a> {
+    Field(&'a crate::schema::Field),
+    Composite(&'a Composite),
+}
+
 /// What puts one of a block's writes back ([`Database::rollback`]).
 enum Undo {
     /// A document written: its collection, its id, and where its record was
@@ -679,6 +687,11 @@ enum Undo {
     /// A collection's fields changed: the schema before, and the indexes
     /// a dropped field took with it, to put back.
     Altered(u32, Box<Altered>),
+    /// An index over several fields made, by its name: it goes.
+    Composed(u32, String),
+    /// An index over several fields dropped, with where it stood: it
+    /// comes back as it was.
+    Uncomposed(u32, usize, Box<(Composite, Derived<CompositeIndex>)>),
 }
 
 /// What [`Undo::Altered`] puts back.
@@ -1372,6 +1385,9 @@ pub struct Collection {
     /// conditions alone, and kept in the schema's order through
     /// `in_schema_order` its copy of that was 0.4 KB of the browser module.
     pub geo: Vec<(String, Derived<GeoIndex>)>,
+    /// The indexes over several fields, each beside the declaration it was
+    /// made from, in the schema's order ([`Self::fit_composites`]).
+    pub composites: Vec<(Composite, Derived<CompositeIndex>)>,
 }
 
 impl Collection {
@@ -1425,7 +1441,7 @@ impl Collection {
         }
         let mut store = Store::new();
         store.set_dropped(&schema.dropped);
-        Collection {
+        let mut c = Collection {
             id,
             schema,
             store,
@@ -1435,7 +1451,20 @@ impl Collection {
             sorted,
             sparse,
             geo,
+            composites: Vec::new(),
+        };
+        // A new collection's are empty, and as built as its documents.
+        let Collection {
+            schema, composites, ..
+        } = &mut c;
+        for comp in &schema.composites {
+            let d = match empty_composite(schema, comp) {
+                Some(ix) => Derived::new(ix),
+                None => Derived::unbuilt(),
+            };
+            composites.push((comp.clone(), d));
         }
+        c
     }
 
     /// Rebuilds the index structures from the schema's index definitions:
@@ -1485,6 +1514,36 @@ impl Collection {
                 _ => {}
             }
         }
+        self.composites.clear();
+        self.fit_composites();
+    }
+
+    /// The indexes over several fields made to match the schema's: one it
+    /// declares as it was kept with what it holds, any other unbuilt, for
+    /// the first read to build from the documents, and one it declares no
+    /// more let go. What an alter, an index made or dropped and a block put
+    /// back leave -- a renamed part's index built again by the first read
+    /// rather than moved, as a path's is.
+    fn fit_composites(&mut self) {
+        let mut had = std::mem::take(&mut self.composites);
+        for c in &self.schema.composites {
+            let d = match had.iter().position(|(o, _)| o == c) {
+                Some(i) => had.swap_remove(i).1,
+                None => Derived::unbuilt(),
+            };
+            self.composites.push((c.clone(), d));
+        }
+    }
+
+    /// The index over several fields at `i` among the schema's, built as
+    /// [`Self::hash`] is; `None` in a build without the `sorted` feature,
+    /// whose queries over its fields the scan answers.
+    pub fn composite(&self, i: usize) -> Result<Option<&CompositeIndex>> {
+        let Some((c, d)) = self.composites.get(i).filter(|_| cfg!(feature = "sorted")) else {
+            return Ok(None);
+        };
+        d.or_build(|| composite_of(&self.store, &self.schema, c))
+            .map(Some)
     }
 
     /// The hash index on `field`, built from the documents if nothing has
@@ -1580,8 +1639,10 @@ impl Collection {
         self.schema = ch.schema.clone();
         self.store.set_dropped(&self.schema.dropped);
         // A json field's indexes on paths go with it, by the paths the
-        // schema after names.
+        // schema after names, and the indexes over several fields with the
+        // parts it names.
         self.fit_paths();
+        self.fit_composites();
         if ch.op == FIELD_RENAME {
             self.put_indexes(&ch.to, taken);
             return Taken::default();
@@ -1607,8 +1668,9 @@ impl Collection {
     }
 
     /// The other documents holding one of `doc`'s `@unique` values, each
-    /// with the field it holds it in.
-    fn unique_holders(&self, doc: &Document) -> Result<Vec<(&crate::schema::Field, DocId)>> {
+    /// with the field it holds it in -- or the index over several fields
+    /// whose every part it holds them in, after the fields.
+    fn unique_holders(&self, doc: &Document) -> Result<Vec<(Unique<'_>, DocId)>> {
         let mut out = Vec::new();
         for f in self.schema.fields.iter().chain(&self.schema.paths) {
             if !f.index.is_unique() {
@@ -1621,10 +1683,62 @@ impl Collection {
                 continue;
             };
             if let Some(b) = ix.get(&hash_key(v)) {
-                out.extend(b.iter().filter(|&d| d != doc.id).map(|d| (f, d)));
+                out.extend(
+                    b.iter()
+                        .filter(|&d| d != doc.id)
+                        .map(|d| (Unique::Field(f), d)),
+                );
+            }
+        }
+        for (i, (c, _)) in self.composites.iter().enumerate() {
+            // A `null` in any part is no value, as a `@unique` field's is.
+            if !c.unique
+                || c.keys
+                    .iter()
+                    .any(|(k, _)| doc.at(k).is_none_or(Value::is_null))
+            {
+                continue;
+            }
+            match self.composite(i)? {
+                Some(ix) => {
+                    let k = composite_key(ix, c, doc);
+                    for d in ix.holders(&k.bytes) {
+                        if d != doc.id {
+                            out.push((Unique::Composite(c), d));
+                        }
+                    }
+                }
+                // A build without the index reads the rows, as the scan
+                // answers what the index would.
+                #[cfg(not(feature = "sorted"))]
+                None => {
+                    for d in self.store.iter_ids() {
+                        if d != doc.id && self.holds_tuple(d, c, doc)? {
+                            out.push((Unique::Composite(c), d));
+                        }
+                    }
+                }
+                #[cfg(feature = "sorted")]
+                None => {}
             }
         }
         Ok(out)
+    }
+
+    /// Whether the stored document `id` holds `doc`'s values in every part
+    /// of `c`, each the same value as a bucket finds it ([`hash_key`]).
+    #[cfg(not(feature = "sorted"))]
+    fn holds_tuple(&self, id: DocId, c: &Composite, doc: &Document) -> Result<bool> {
+        for (k, _) in &c.keys {
+            let Some((pos, keys)) = source(&self.schema, k) else {
+                return Ok(false);
+            };
+            let v = read_source(&self.store, id, (pos, keys))?;
+            if hash_key(&v) != hash_key(doc.at(k).unwrap_or(&Value::Null)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The refusal of `doc` where an `@unique` field of it holds a value
@@ -1636,13 +1750,32 @@ impl Collection {
     /// document keeping its own value is not a second one. A field without
     /// `@unique` costs the look at its index kind.
     fn unique_clash(&self, doc: &Document) -> Result<()> {
+        let at = |k: &str| crate::json::to_string(doc.at(k).unwrap_or(&Value::Null));
         match self.unique_holders(doc)?.first() {
-            Some((f, other)) => Err(Error::Duplicate(format!(
+            Some((Unique::Field(f), other)) => Err(Error::Duplicate(format!(
                 "`{}.{}` is unique, and document {other} holds {} already",
                 self.schema.name,
                 f.name,
-                crate::json::to_string(doc.at(&f.name).unwrap_or(&Value::Null))
+                at(&f.name)
             ))),
+            // Its fields, then their values as a list: what a scoped token
+            // is told stops before the values ([`Error::Duplicate`]'s
+            // "is unique, and document").
+            Some((Unique::Composite(c), other)) => {
+                let mut vals = String::from("[");
+                for (i, (k, _)) in c.keys.iter().enumerate() {
+                    if i > 0 {
+                        vals.push_str(", ");
+                    }
+                    vals.push_str(&at(k));
+                }
+                vals.push(']');
+                Err(Error::Duplicate(format!(
+                    "`{} ({})` is unique, and document {other} holds {vals} already",
+                    self.schema.name,
+                    c.keys_text()
+                )))
+            }
             None => Ok(()),
         }
     }
@@ -1676,16 +1809,27 @@ impl Collection {
                 out.push(name.clone());
             }
         }
+        // An index over several fields by its fields joined by `+`
+        // (`Composite::name`), and none in a build that cannot make one.
+        for (c, d) in self.composites.iter().filter(|_| cfg!(feature = "sorted")) {
+            if d.0.get().is_none() {
+                out.push(c.name());
+            }
+        }
         out
     }
 
-    /// Builds whichever derived index `field` has, as its first read would.
+    /// Builds whichever derived index `field` has, as its first read would:
+    /// a field's, or an index over several fields by its name.
     pub fn warm(&self, field: &str) -> Result<()> {
         self.hash(field)?;
         self.text(field)?;
         self.sorted_index(field)?;
         self.sparse_index(field)?;
         self.geo_index(field)?;
+        if let Some(i) = self.composites.iter().position(|(c, _)| c.name() == field) {
+            self.composite(i)?;
+        }
         Ok(())
     }
 
@@ -1785,6 +1929,12 @@ impl Collection {
                 ix.insert(doc.id, doc.get(name));
             }
         }
+        for (c, ix) in self.composites.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
+            if !c.keys.iter().all(|(k, _)| kept(k)) {
+                ix.insert(doc.id, composite_key(ix, c, doc));
+            }
+        }
     }
 
     /// Bulk-inserts every vector in a batch, field by field.
@@ -1868,6 +2018,12 @@ impl Collection {
             let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
                 ix.remove(doc.id, doc.get(name));
+            }
+        }
+        for (c, ix) in self.composites.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
+            if !c.keys.iter().all(|(k, _)| kept(k)) {
+                ix.remove(doc.id, composite_key(ix, c, doc));
             }
         }
     }
@@ -3110,6 +3266,11 @@ impl Database {
                         .filter_map(|(_, ix)| ix.built())
                         .map(|ix| ix.memory_bytes())
                         .sum::<usize>()
+                    + c.composites
+                        .iter()
+                        .filter_map(|(_, ix)| ix.built())
+                        .map(|ix| ix.memory_bytes())
+                        .sum::<usize>()
             })
             .sum::<usize>()
             + self.noted_bytes()
@@ -4114,6 +4275,15 @@ impl Database {
                     *d = Derived::unbuilt();
                 }
             }
+            // An index over several fields as well, and one with a collated
+            // part built now, for the reason an ordered index over a
+            // collated field is.
+            for i in 0..c.composites.len() {
+                c.composites[i].1 = Derived::unbuilt();
+                if c.composites[i].0.keys.iter().any(|(k, _)| collated(k)) {
+                    c.composite(i)?;
+                }
+            }
             if fields.iter().all(|f| kept(f)) && !c.sorted.iter().any(|(f, _)| collated(f)) {
                 continue; // everything restored, no need to read the documents
             }
@@ -4597,8 +4767,10 @@ impl Database {
             for i in changed {
                 build_index(c, i)?;
             }
-            // A path's, built by the first read.
+            // A path's, and an index over several fields, built by the
+            // first read.
             c.fit_paths();
+            c.fit_composites();
         } else {
             c.reset_index_structures();
             for i in 0..c.schema.fields.len() {
@@ -4999,6 +5171,25 @@ impl Database {
                             }
                         }
                         c.fit_paths();
+                        c.fit_composites();
+                    }
+                }
+                Undo::Composed(cid, made) => {
+                    if let Some(name) = self.named(cid) {
+                        let c = self.collections.get_mut(&name).unwrap();
+                        let comps = &mut c.schema.composites;
+                        if let Some(at) = comps.iter().rposition(|o| o.name() == made) {
+                            comps.remove(at);
+                        }
+                        c.fit_composites();
+                    }
+                }
+                Undo::Uncomposed(cid, at, b) => {
+                    if let Some(name) = self.named(cid) {
+                        let c = self.collections.get_mut(&name).unwrap();
+                        let at = at.min(c.composites.len());
+                        c.schema.composites.insert(at, b.0.clone());
+                        c.composites.insert(at, *b);
                     }
                 }
             }
@@ -5316,6 +5507,16 @@ impl Database {
                 kind,
                 if_not_exists,
             } => self.create_index(collection, field, kind, *if_not_exists),
+            Statement::CreateComposite {
+                collection,
+                index,
+                if_not_exists,
+            } => self.create_composite(collection, index, *if_not_exists),
+            Statement::DropComposite {
+                collection,
+                keys,
+                if_exists,
+            } => self.drop_composite(collection, keys, *if_exists),
             Statement::Put {
                 collection,
                 docs,
@@ -5854,9 +6055,11 @@ impl Database {
                 schema.fields.remove(pos);
                 let at = schema.dropped.partition_point(|&d| d < place);
                 schema.dropped.insert(at, place);
-                // The indexes on paths into it go with it.
+                // The indexes on paths into it go with it, and those over
+                // several fields it is a part of.
                 let prefix = format!("{name}.");
                 schema.paths.retain(|p| !p.name.starts_with(&prefix));
+                schema.composites.retain(|c| !c.reads(name));
                 (FIELD_DROP, name.clone(), String::new())
             }
             Alter::RenameField(from, to) => {
@@ -5865,11 +6068,21 @@ impl Database {
                 let mut fields = schema.fields.clone();
                 fields[pos].name = to.clone();
                 schema.fields = Schema::new(collection.to_string(), fields)?.fields;
-                // The paths into it are under its new name.
+                // The paths into it are under its new name, and so are the
+                // parts of an index over several fields that read it.
                 let prefix = format!("{from}.");
                 for p in schema.paths.iter_mut() {
                     if let Some(keys) = p.name.strip_prefix(&prefix) {
                         p.name = format!("{to}.{keys}");
+                    }
+                }
+                for c in schema.composites.iter_mut() {
+                    for (k, _) in c.keys.iter_mut() {
+                        if k == from {
+                            *k = to.clone();
+                        } else if let Some(keys) = k.strip_prefix(&prefix) {
+                            *k = format!("{to}.{keys}");
+                        }
                     }
                 }
                 (FIELD_RENAME, from.clone(), to.clone())
@@ -5991,6 +6204,110 @@ impl Database {
         )))
     }
 
+    /// Builds an index over several fields and fills it from the documents
+    /// there, all under the write lock; a server runs it beside the database
+    /// instead ([`Database::maintain`]). A unique one over documents holding
+    /// one key twice is refused, naming two of them.
+    fn create_composite(
+        &mut self,
+        collection: &str,
+        comp: &Composite,
+        if_not_exists: bool,
+    ) -> Result<Response> {
+        if let Some(done) = self.check_composite(collection, comp, if_not_exists)? {
+            return Ok(done);
+        }
+        let c = self.collections.get_mut(collection).unwrap();
+        let cid = c.id;
+        c.schema.composites.push(comp.clone());
+        c.fit_composites();
+        // Before the build, which a block that does not land -- or a build
+        // that fails -- puts back with it.
+        if let Some(b) = &mut self.block {
+            b.was.push(Undo::Composed(cid, comp.name()));
+        }
+        let c = &self.collections[collection];
+        let at = c.composites.len() - 1;
+        if let (true, Some(ix)) = (comp.unique, c.composite(at)?) {
+            if let Some((a, b)) = ix.shared() {
+                return Err(composite_shared(c, comp, a, b));
+            }
+        }
+        let encoded = c.schema.encode();
+        self.wal(REC_ALTER, cid, &encoded)?;
+        self.note(cid, SCHEMA_MARK);
+        Ok(Response::Ok(format!(
+            "index built on `{collection}` ({})",
+            comp.keys_text()
+        )))
+    }
+
+    /// Checks a `create index` over several fields: `Some` answers it
+    /// without building anything.
+    pub(crate) fn check_composite(
+        &self,
+        collection: &str,
+        comp: &Composite,
+        if_not_exists: bool,
+    ) -> Result<Option<Response>> {
+        if !cfg!(feature = "sorted") {
+            return Err(not_built("the index", "sorted"));
+        }
+        let c = self.collection(collection)?;
+        match c.schema.check_composite(comp)? {
+            Some(_) if if_not_exists => Ok(Some(Response::Ok(format!(
+                "`{collection}` ({}) is already indexed",
+                comp.keys_text()
+            )))),
+            Some(_) => Err(Error::Exists(format!(
+                "an index on `{collection}` ({})",
+                comp.keys_text()
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    /// Takes an index over several fields off, by its fields: undone in a
+    /// block as a collection dropped is, the index kept whole until the
+    /// block lands.
+    fn drop_composite(
+        &mut self,
+        collection: &str,
+        keys: &[String],
+        if_exists: bool,
+    ) -> Result<Response> {
+        let c = self.collection(collection)?;
+        let named = |o: &Composite| {
+            o.keys.len() == keys.len() && o.keys.iter().zip(keys).all(|(a, b)| a.0 == *b)
+        };
+        let Some(at) = c.schema.composites.iter().position(named) else {
+            let mut what = format!("an index on `{collection}` (");
+            for (i, k) in keys.iter().enumerate() {
+                what.push_str(if i > 0 { ", " } else { "" });
+                what.push_str(k);
+            }
+            what.push(')');
+            return match if_exists {
+                true => Ok(Response::Ok(format!("no {what}"))),
+                false => Err(Error::NotFound(what)),
+            };
+        };
+        let c = self.collections.get_mut(collection).unwrap();
+        let cid = c.id;
+        c.schema.composites.remove(at);
+        let taken = c.composites.remove(at);
+        let encoded = c.schema.encode();
+        let text = taken.0.keys_text();
+        if let Some(b) = &mut self.block {
+            b.was.push(Undo::Uncomposed(cid, at, Box::new(taken)));
+        }
+        self.wal(REC_ALTER, cid, &encoded)?;
+        self.note(cid, SCHEMA_MARK);
+        Ok(Response::Ok(format!(
+            "index on `{collection}` ({text}) dropped"
+        )))
+    }
+
     /// A document out of an object a parameter holds, each member a field:
     /// `put <name> $n`. The object was read as a body's document is -- a
     /// json field's numbers as written, a list of numbers made a vector's
@@ -6084,11 +6401,7 @@ impl Database {
         // it holds is let go of with it. Otherwise a lock taken by
         // `insert` and left to expire stayed held until the sweeper came
         // by, up to a minute later.
-        let unique = schema
-            .fields
-            .iter()
-            .chain(&schema.paths)
-            .any(|f| f.index.is_unique());
+        let unique = schema.has_unique();
         // Without a clock -- the browser module handed none -- no row is
         // past its time for a write, as before.
         let expiry = match self.ttl_of(collection).filter(|_| insert || unique) {
@@ -6166,10 +6479,16 @@ impl Database {
                             .try_for_each(|h| h.before_overwrite(&schema, old, &doc)),
                         None => Ok(()),
                     })
-                    .and_then(|_| match c.unique_clash(&doc) {
+                    // Asked only of a collection holding a unique index,
+                    // known once a statement: asked of each document, the
+                    // look at every field's index and every index over
+                    // several fields took a put in a block of 1 000 from
+                    // 530 ns to 545; asked once, 529.
+                    .and_then(|_| match unique.then(|| c.unique_clash(&doc)) {
+                        None => Ok(true),
                         // `if absent` passes over a value held as an id held.
-                        Err(Error::Duplicate(_)) if if_absent => Ok(false),
-                        r => r.map(|_| true),
+                        Some(Err(Error::Duplicate(_))) if if_absent => Ok(false),
+                        Some(r) => r.map(|_| true),
                     });
                 match checked {
                     Ok(true) => {}
@@ -6368,8 +6687,10 @@ impl Database {
         let mut eqs = Vec::new();
         f.conjunct_equalities(params, &mut eqs);
         let mut candidates: Option<Vec<DocId>> = None;
-        // Which index the candidates came from, for `explain`.
+        // Which index the candidates came from, for `explain`: a field's, or
+        // one over several fields said whole.
         let mut source: (&str, &str) = ("", "");
+        let mut composed_said: Option<String> = None;
         for (field, val) in eqs {
             if field == "id" {
                 let Some(hit) = id_candidates(&c.store, &[val]) else {
@@ -6484,6 +6805,59 @@ impl Database {
             }
         }
 
+        // An index over several fields narrows to the run of its entries the
+        // equalities on its first parts and a range on the next name --
+        // counted exactly, two searches a span, before anything is gathered,
+        // and taken under the rule a range is: while it is smaller than what
+        // is in hand and than half the collection, past which the scan is
+        // cheaper. Its rows apart, which no span holds, are candidates too.
+        // Whether it is the answer is its own to say (`Composed::exact`),
+        // since the rows apart need a look.
+        let mut composed_exact: Option<bool> = None;
+        if cfg!(feature = "sorted") {
+            let n = c.store.len();
+            for at in 0..c.composites.len() {
+                let comp = &c.composites[at].0;
+                if !names_first(Some(f), params, &comp.keys[0].0) {
+                    continue;
+                }
+                let Some(ix) = c.composite(at)? else {
+                    continue;
+                };
+                let p = composed(comp, ix, Some(f), params);
+                if p.fixed == 0 && !p.ranged {
+                    continue;
+                }
+                let count = p.spans.iter().map(|s| ix.count(s)).sum::<usize>() + ix.apart().len();
+                let mut cap = candidates.as_ref().map_or(n / 2, |b| b.len()).min(n / 2);
+                if want != usize::MAX {
+                    cap = cap.min(want.saturating_mul(64).max(4096));
+                }
+                if count > cap || candidates.as_ref().is_some_and(|b| count >= b.len()) {
+                    plan(|| {
+                        format!(
+                            "filter: {} not used, its {count} rows are more than the other plans read",
+                            composed_text(comp, &p)
+                        )
+                    });
+                    continue;
+                }
+                let mut ids = Vec::with_capacity(count);
+                for s in &p.spans {
+                    ix.ids(s, usize::MAX, &mut ids);
+                }
+                // A row apart may lie in a span too: once each.
+                if !ix.apart().is_empty() {
+                    ids.extend_from_slice(ix.apart());
+                    ids.sort_unstable();
+                    ids.dedup();
+                }
+                candidates = Some(ids);
+                composed_said = Some(composed_text(comp, &p));
+                composed_exact = Some(p.exact);
+            }
+        }
+
         // Comparisons over an ordered index narrow to a range. It is collected
         // only while it stays smaller than the candidates already in hand and
         // than the scan it would replace: past half the collection the scan
@@ -6525,6 +6899,7 @@ impl Database {
                     source = ("the ordered index on", field);
                     bare_range = exact && f.only_ranges_on(field, params);
                     bare_in = false;
+                    (composed_exact, composed_said) = (None, None);
                 } else {
                     plan(|| {
                         format!(
@@ -6556,6 +6931,7 @@ impl Database {
                     candidates = Some(ids);
                     source = ("the point index on", field);
                     (bare_range, bare_in) = (false, false);
+                    (composed_exact, composed_said) = (Some(false), None);
                 } else {
                     plan(|| {
                         format!(
@@ -6573,13 +6949,14 @@ impl Database {
             // If the filter is exactly that equality, or exactly a list that
             // was pushed down whole, or exactly the range an ordered index
             // expressed, no re-evaluation is needed.
-            let exact = f.is_bare_equality(params) || bare_in || bare_range;
+            let exact = composed_exact
+                .unwrap_or_else(|| f.is_bare_equality(params) || bare_in || bare_range);
             plan(|| {
                 let (index, field) = source;
-                let named = if field == "id" {
-                    index.to_string()
-                } else {
-                    format!("{index} {field}")
+                let named = match (&composed_said, field == "id") {
+                    (Some(said), _) => said.clone(),
+                    (None, true) => index.to_string(),
+                    (None, false) => format!("{index} {field}"),
                 };
                 let then = if exact { ", which is the answer" } else { "" };
                 format!("filter: {named}, {} rows{then}", b.len())
@@ -6863,6 +7240,20 @@ impl Database {
                 take(sum);
             }
         }
+        // An index over several fields whose first parts an equality fixes:
+        // its spans counted, two searches each.
+        for at in (0..c.composites.len()).filter(|_| cfg!(feature = "sorted")) {
+            if !names_first(Some(f), params, &c.composites[at].0.keys[0].0) {
+                continue;
+            }
+            let Some(ix) = c.composite(at)? else {
+                continue;
+            };
+            let p = composed(&c.composites[at].0, ix, Some(f), params);
+            if p.fixed > 0 {
+                take(p.spans.iter().map(|s| ix.count(s)).sum::<usize>() + ix.apart().len());
+            }
+        }
         Ok(best)
     }
 
@@ -6882,6 +7273,11 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Option<Vec<DocId>>> {
+        if cfg!(feature = "sorted") && !c.composites.is_empty() {
+            if let Some(ids) = self.walk_composite(c, sel, params, ctx)? {
+                return Ok(Some(ids));
+            }
+        }
         let [Sort {
             field,
             asc,
@@ -7010,6 +7406,209 @@ impl Database {
             }
         });
         Ok((!gave_up).then_some(out))
+    }
+
+    /// `order ... limit N` answered by walking an index over several
+    /// fields -- `None` where none fits, or where another plan reads fewer
+    /// rows.
+    ///
+    /// An index fits when the filter's equalities fix its first parts and
+    /// the order reads the parts after them, each in its direction or every
+    /// one the other way round (an order key an equality fixes holds one
+    /// value, and orders nothing); a range on the first part it orders by
+    /// bounds the walk. The walk is the run of entries those name, in the
+    /// order asked: one whose filter the index says whole reads the page
+    /// alone. One that tests the rest of the filter row by row is taken
+    /// while its run -- counted exactly, two searches -- holds no more rows
+    /// than the smallest set an equality over a hash index or the ids names,
+    /// and gives up as an ordered index's walk does past an eighth of the
+    /// collection. Of several that fit, the one the filter is wholly said
+    /// by, and then the shortest run.
+    fn walk_composite(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Option<Vec<DocId>>> {
+        let (Some(limit), false) = (sel.limit.map(|l| l.at(params)), sel.order.is_empty()) else {
+            return Ok(None);
+        };
+        if sel.lookup.as_ref().is_some_and(|l| l.required) {
+            return Ok(None);
+        }
+        // The smallest set an index names for the filter, exactly -- an
+        // equality's bucket, an `in`'s, the ids, an index over several
+        // fields' run: what a walk testing the filter row by row is held to.
+        let smallest = match &sel.filter {
+            Some(f) => self.indexed_size(c, f, params)?,
+            None => None,
+        };
+        // (index, plan, run, backwards, tie parts)
+        let mut best: Option<(usize, Composed, usize, bool, usize)> = None;
+        for at in 0..c.composites.len() {
+            let comp = &c.composites[at].0;
+            // Its first part fixed by the filter or read by the order.
+            let first = &comp.keys[0].0;
+            if !names_first(sel.filter.as_ref(), params, first)
+                && !sel.order.iter().any(|s| s.field == *first)
+            {
+                continue;
+            }
+            let Some(ix) = c.composite(at)? else {
+                continue;
+            };
+            if !ix.apart().is_empty() {
+                plan(|| {
+                    format!(
+                        "order: the index on ({}) not walked, it holds a value it cannot order",
+                        comp.keys_text()
+                    )
+                });
+                continue;
+            }
+            let p = composed(comp, ix, sel.filter.as_ref(), params);
+            let fixed = &comp.keys[..p.fixed];
+            let (mut next, mut back, mut fits) = (p.fixed, None, true);
+            for s in &sel.order {
+                // A part an equality fixes orders nothing; one an `in`
+                // fixes holds several values, which the walk of each span
+                // does not put in order.
+                match fixed.iter().position(|(k, _)| *k == s.field) {
+                    Some(i) if p.inlisted & (1 << i) == 0 => continue,
+                    Some(_) => {
+                        fits = false;
+                        break;
+                    }
+                    None => {}
+                }
+                let Some((k, desc)) = comp.keys.get(next) else {
+                    fits = false;
+                    break;
+                };
+                // The index holds its field's order, a collation's or the
+                // bytes': a key in another one sorts.
+                let own = c.schema.field(k).and_then(|f| f.collate);
+                if *k != s.field || s.collate.is_some_and(|x| Some(x) != own) {
+                    fits = false;
+                    break;
+                }
+                let rev = s.asc == *desc;
+                if *back.get_or_insert(rev) != rev {
+                    fits = false;
+                    break;
+                }
+                next += 1;
+            }
+            let Some(back) = back.filter(|_| fits) else {
+                continue;
+            };
+            let run: usize = p.spans.iter().map(|s| ix.count(s)).sum();
+            if !p.exact && smallest.is_some_and(|s| s < run) {
+                plan(|| {
+                    format!(
+                        "order: {} not walked, an equality names fewer rows than its {run}",
+                        composed_text(comp, &p)
+                    )
+                });
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some((_, q, r, ..)) => (p.exact && !q.exact) || (p.exact == q.exact && run < *r),
+            };
+            if better {
+                best = Some((at, p, run, back, next));
+            }
+        }
+        let Some((at, p, run, back, ties)) = best else {
+            return Ok(None);
+        };
+        let ix = c.composite(at)?.expect("the index was there a moment ago");
+        let comp = &c.composites[at].0;
+        let want = limit.saturating_add(sel.offset.at(params));
+        let mut out = Vec::with_capacity(want.min(4096));
+        if want == 0 {
+            return Ok(Some(out));
+        }
+        let budget = (c.store.len() / 8).max(want);
+        let (mut walked, mut gave_up) = (0usize, false);
+        let test = match p.exact {
+            true => None,
+            false => sel.filter.as_ref().map(|f| Filter::new(c, f, ctx)),
+        };
+        ix.walk(&p.spans, p.fixed, back, ties, &mut |id| {
+            walked += 1;
+            if let Some(test) = &test {
+                if walked > budget {
+                    gave_up = true;
+                    return Ok(false);
+                }
+                if !test.matches(id, ctx)? {
+                    return Ok(true);
+                }
+            }
+            out.push(id);
+            Ok(out.len() < want)
+        })?;
+        plan(|| {
+            // One text for every outcome: each `format!` is code of its own
+            // in the browser module.
+            let (dir, read) = (if back { ", backwards" } else { "" }, walked.min(budget));
+            let then = if gave_up {
+                ", gave up, back to the scan"
+            } else {
+                ""
+            };
+            let tested = if p.exact { "read" } else { "tested" };
+            format!(
+                "order: walked {}{dir}, {read} of {run} rows {tested}, {} kept{then}",
+                composed_text(comp, &p),
+                out.len()
+            )
+        });
+        Ok((!gave_up).then_some(out))
+    }
+
+    /// A `count` an index over several fields says whole -- its filter is
+    /// that index's equalities and range, and no row of it apart -- counted
+    /// off its chunks, two searches a span, with no id gathered: a tenant's
+    /// rows in a range of days. `None` where none does, or where the count
+    /// needs the rows: a facet, a `lookup`, a block open (whose writes the
+    /// rows are read past, as `filter_candidates` reads them).
+    fn count_composed(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        params: &[Value],
+    ) -> Result<Option<usize>> {
+        if !cfg!(feature = "sorted")
+            || c.composites.is_empty()
+            || sel.lookup.is_some()
+            || !sel.facets.is_empty()
+            || self.block.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(f) = &sel.filter else {
+            return Ok(None);
+        };
+        for at in 0..c.composites.len() {
+            let comp = &c.composites[at].0;
+            if !names_first(Some(f), params, &comp.keys[0].0) {
+                continue;
+            }
+            let Some(ix) = c.composite(at)? else {
+                continue;
+            };
+            let p = composed(comp, ix, Some(f), params);
+            if p.exact && (p.fixed > 0 || p.ranged) {
+                let n = p.spans.iter().map(|s| ix.count(s)).sum();
+                plan(|| format!("count: {}, counted off its chunks", composed_text(comp, &p)));
+                return Ok(Some(n));
+            }
+        }
+        Ok(None)
     }
 
     /// `near`'s first `want` candidates, nearest first -- the filter's rows
@@ -8074,6 +8673,18 @@ impl Database {
         // `count` sends the filter down the same path but never decodes the
         // rows: it returns a single row with a single column.
         if sel.count {
+            if let Some(n) = self.count_composed(c, sel, params)? {
+                return Ok(ResultSet {
+                    columns: vec![COUNT_COLUMN.to_string()],
+                    rows: vec![Row {
+                        id: 0,
+                        values: vec![Value::Int(n as i64)],
+                        score: None,
+                    }],
+                    nested: None,
+                    facets: Vec::new(),
+                });
+            }
             let mut ids = self.matching_ids(&sel.collection, &sel.filter, params)?;
             // `count` reaches here with a `lookup` only when it is
             // `required`, so the children are a filter and nothing is being
@@ -9150,6 +9761,26 @@ fn hash_of(store: &Store, pos: usize, keys: Option<&str>) -> Result<HashIndex> {
 
 /// The refusal of a unique index over the field at `pos` whose documents
 /// hold a value twice.
+/// The refusal of a unique index over several fields that documents `a`
+/// and `b` both hold one key of.
+fn composite_shared(c: &Collection, comp: &Composite, a: DocId, b: DocId) -> Error {
+    let mut vals = String::from("[");
+    if let Ok(Some(doc)) = c.store.read(&c.schema, a) {
+        for (i, (k, _)) in comp.keys.iter().enumerate() {
+            if i > 0 {
+                vals.push_str(", ");
+            }
+            vals.push_str(&crate::json::to_string(doc.at(k).unwrap_or(&Value::Null)));
+        }
+    }
+    vals.push(']');
+    Error::Duplicate(format!(
+        "`{} ({})` cannot be unique: documents {a} and {b} both hold {vals}",
+        c.schema.name,
+        comp.keys_text()
+    ))
+}
+
 fn refuse_shared(c: &Collection, field: &str) -> Result<()> {
     let shared = c.hash(field)?.and_then(HashIndex::shared);
     match shared {
@@ -9213,6 +9844,106 @@ fn sorted_of(
 
 /// The inverted index over the sparse vectors of the field at `pos`, as
 /// [`hash_of`].
+/// The parts of `c`, an index over several fields of `schema`: each part's
+/// kind by its field's type, its collation by its field's. `None` in a
+/// build without the `sorted` feature, or where a part names no field --
+/// which the schema refuses before it gets here.
+fn composite_parts(schema: &Schema, c: &Composite) -> Option<Vec<crate::composite::Part>> {
+    if !cfg!(feature = "sorted") {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(c.keys.len());
+    for (k, desc) in &c.keys {
+        let ty = schema.part_type(k).ok()?;
+        let coll = schema.field(k).and_then(|f| f.collate);
+        parts.push(crate::composite::Part::of(&ty, *desc, coll));
+    }
+    Some(parts)
+}
+
+/// An empty index over the parts of `c` ([`composite_parts`]).
+fn empty_composite(schema: &Schema, c: &Composite) -> Option<CompositeIndex> {
+    composite_parts(schema, c).map(CompositeIndex::new)
+}
+
+/// `doc`'s key in `ix`, the index over the fields of `c`: a value a part
+/// does not find is `null`.
+fn composite_key(ix: &CompositeIndex, c: &Composite, doc: &Document) -> crate::composite::RowKey {
+    const NULL: Value = Value::Null;
+    let mut vals = [&NULL; crate::schema::MAX_COMPOSITE_KEYS];
+    for (slot, (k, _)) in vals.iter_mut().zip(&c.keys) {
+        *slot = doc.at(k).unwrap_or(&NULL);
+    }
+    ix.key(&vals[..c.keys.len().min(vals.len())])
+}
+
+/// A build without ordered indexes holds none over several fields either.
+#[cfg(not(feature = "sorted"))]
+fn composite_of(_: &Store, _: &Schema, _: &Composite) -> Result<CompositeIndex> {
+    Err(not_built("the index", "sorted"))
+}
+
+/// The index over the fields of `c` built from the documents: each read
+/// once, the fields its parts read in one pass, and the keys put in order
+/// together ([`CompositeIndex::build`]).
+#[cfg(feature = "sorted")]
+fn composite_of(store: &Store, schema: &Schema, c: &Composite) -> Result<CompositeIndex> {
+    let parts = composite_parts(schema, c).ok_or_else(|| not_built("the index", "sorted"))?;
+    let ix = CompositeIndex::new(parts.clone());
+    let mut keys = Vec::with_capacity(store.len());
+    composite_keys(store, schema, c, &ix, &mut |id, k| keys.push((id, k)))?;
+    Ok(CompositeIndex::build(parts, keys))
+}
+
+/// Each document's key in `ix`, the index over the fields of `c`, handed
+/// to `out` in id order: what a build puts in, and what a build beside the
+/// database copies under the read lock to put in with none held.
+#[cfg(feature = "sorted")]
+fn composite_keys(
+    store: &Store,
+    schema: &Schema,
+    c: &Composite,
+    ix: &CompositeIndex,
+    out: &mut dyn FnMut(DocId, crate::composite::RowKey),
+) -> Result<()> {
+    let mut srcs = Vec::with_capacity(c.keys.len());
+    for (k, _) in &c.keys {
+        srcs.push(source_or_err(schema, k, "")?);
+    }
+    // The fields read, in field order, as `read_fields` wants them; walked
+    // rather than sorted, as `rebuild_indexes_with` walks them.
+    let mut positions = Vec::new();
+    for p in 0..schema.fields.len() {
+        if srcs.iter().any(|s| s.0 == p) {
+            positions.push(p);
+        }
+    }
+    let mut places = Vec::with_capacity(positions.len());
+    for &p in &positions {
+        places.push(schema.place(p));
+    }
+    let mut slots = Vec::with_capacity(srcs.len());
+    for s in &srcs {
+        slots.push(positions.iter().position(|&p| p == s.0).unwrap_or(0));
+    }
+    let mut vals = Vec::with_capacity(places.len());
+    const NULL: Value = Value::Null;
+    for id in store.iter_ids() {
+        if !store.read_fields(id, &places, &mut vals)? {
+            continue;
+        }
+        let mut row = [&NULL; crate::schema::MAX_COMPOSITE_KEYS];
+        for (i, (s, &at)) in srcs.iter().zip(&slots).enumerate() {
+            row[i] = match s.1 {
+                None => &vals[at],
+                Some(keys) => vals[at].at_path(keys),
+            };
+        }
+        out(id, ix.key(&row[..srcs.len()]));
+    }
+    Ok(())
+}
+
 fn sparse_of(store: &Store, pos: usize) -> Result<SparseIndex> {
     let mut ix = SparseIndex::new();
     for id in store.ids() {
@@ -10712,6 +11443,181 @@ impl FilterProbe {
         ids.sort_unstable();
         ids
     }
+}
+
+/// What an index over several fields answers of a filter: the run of its
+/// entries the `and` chain's equalities on its first parts and the
+/// comparisons on the part after them name.
+struct Composed {
+    /// The spans: one, or one for each combination of the elements of the
+    /// `in` lists that fix parts.
+    spans: Vec<crate::composite::Span>,
+    /// How many leading parts an equality or an `in` fixes.
+    fixed: usize,
+    /// Whether an `in` fixed one, making several spans.
+    listed: bool,
+    /// Which of the fixed parts an `in` fixed, a bit each: they hold
+    /// several values, which an `order` on them puts in order.
+    inlisted: u8,
+    /// Whether the part after the fixed ones is narrowed by a range.
+    ranged: bool,
+    /// Whether the spans are the filter's whole answer: every term of it
+    /// one the index said exactly, and no row of the index apart.
+    exact: bool,
+}
+
+/// The most spans the `in` lists over an index's parts make together, past
+/// which the lists are tested row by row: each span is two searches.
+const MAX_SPANS: usize = 256;
+
+/// The plan of the index over several fields `comp`, `ix`, for `filter`:
+/// its first parts fixed by the chain's equalities -- or `in` lists, each
+/// element said exactly as a key or none of the list taken -- in order, as
+/// far as one is fixed, and the part after them narrowed by the chain's
+/// comparisons on it. Every term it did not take is tested row by row.
+fn composed(
+    comp: &Composite,
+    ix: &CompositeIndex,
+    filter: Option<&Expr>,
+    params: &[Value],
+) -> Composed {
+    let mut terms = Vec::new();
+    if let Some(f) = filter {
+        f.conjuncts(&mut terms);
+    }
+    let mut used = vec![false; terms.len()];
+    let mut prefixes: Vec<Vec<u8>> = vec![Vec::new()];
+    let (mut fixed, mut listed, mut inlisted) = (0, false, 0u8);
+    'parts: for (i, (k, _)) in comp.keys.iter().enumerate() {
+        for (j, e) in terms.iter().enumerate() {
+            let Some((name, v)) = e.equality_key(params).filter(|_| !used[j]) else {
+                continue;
+            };
+            if let (true, Some(b)) = (name == k, ix.literal(i, v)) {
+                for p in prefixes.iter_mut() {
+                    p.extend_from_slice(&b);
+                }
+                used[j] = true;
+                fixed += 1;
+                continue 'parts;
+            }
+        }
+        for (j, e) in terms.iter().enumerate() {
+            let (Expr::In(lhs, items), false) = (e, used[j]) else {
+                continue;
+            };
+            if !matches!(lhs.as_ref(), Expr::Field(n) if n == k) {
+                continue;
+            }
+            if items.len() * prefixes.len() > MAX_SPANS {
+                continue;
+            }
+            // Every element said exactly, once: two that coerce to one key
+            // (`year in [2024, 2024.0]`) would read its span twice.
+            let mut parts: Vec<Vec<u8>> = Vec::with_capacity(items.len());
+            let mut whole = true;
+            for it in items {
+                let v = match it {
+                    Expr::Lit(v) => Some(v),
+                    Expr::Param(p) => params.get(*p),
+                    _ => None,
+                };
+                match v.and_then(|v| ix.literal(i, v)) {
+                    Some(b) if !parts.contains(&b) => parts.push(b),
+                    Some(_) => {}
+                    None => {
+                        whole = false;
+                        break;
+                    }
+                }
+            }
+            if !whole {
+                continue;
+            }
+            let mut next = Vec::with_capacity(prefixes.len() * parts.len());
+            for p in &prefixes {
+                for b in &parts {
+                    let mut q = p.clone();
+                    q.extend_from_slice(b);
+                    next.push(q);
+                }
+            }
+            prefixes = next;
+            used[j] = true;
+            listed = true;
+            inlisted |= 1 << i;
+            fixed += 1;
+            continue 'parts;
+        }
+        break;
+    }
+    let mut range = crate::composite::PartRange {
+        lo: std::ops::Bound::Unbounded,
+        hi: std::ops::Bound::Unbounded,
+    };
+    let mut ranged = false;
+    if let Some((k, _)) = comp.keys.get(fixed) {
+        for (j, e) in terms.iter().enumerate() {
+            let Some((name, op, v)) = e.range_key(params).filter(|_| !used[j]) else {
+                continue;
+            };
+            if name == k && ix.narrow(&mut range, fixed, op, v) {
+                used[j] = true;
+                ranged = true;
+            }
+        }
+    }
+    let spans = prefixes
+        .iter()
+        .map(|p| ix.span(p, fixed, ranged.then_some(&range)))
+        .collect();
+    Composed {
+        spans,
+        fixed,
+        listed,
+        inlisted,
+        ranged,
+        exact: used.iter().all(|u| *u) && ix.apart().is_empty(),
+    }
+}
+
+/// Whether the `and` chain of `filter` names `field` -- an equality, an
+/// `in`, a comparison: what an index over several fields whose first part
+/// it is could answer anything of. Asked before the index is reached for,
+/// so a read it could not help neither builds one nor, pinned, meets one.
+fn names_first(filter: Option<&Expr>, params: &[Value], field: &str) -> bool {
+    let mut terms = Vec::new();
+    if let Some(f) = filter {
+        f.conjuncts(&mut terms);
+    }
+    terms.iter().any(|e| match e {
+        Expr::In(lhs, _) => matches!(lhs.as_ref(), Expr::Field(n) if n == field),
+        e => e.range_key(params).is_some_and(|(n, ..)| n == field),
+    })
+}
+
+/// How `explain` says what a plan of an index over several fields reads:
+/// `the index on (owner, created desc), owner fixed, a range on created`.
+fn composed_text(comp: &Composite, p: &Composed) -> String {
+    let mut s = format!("the index on ({})", comp.keys_text());
+    if p.fixed > 0 {
+        s.push_str(", ");
+        for (i, (k, _)) in comp.keys[..p.fixed].iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(k);
+        }
+        s.push_str(" fixed");
+        if p.listed {
+            s.push_str(&format!(", {} spans", p.spans.len()));
+        }
+    }
+    if p.ranged {
+        s.push_str(", a range on ");
+        s.push_str(&comp.keys[p.fixed].0);
+    }
+    s
 }
 
 /// The range a filter's comparisons put on an ordered field, and whether

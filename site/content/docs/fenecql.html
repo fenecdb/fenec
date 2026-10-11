@@ -13,9 +13,12 @@ documents and search them by vector, by text or by filter.</p>
 does not try to be, though the familiar <code>select … from</code> word order
 is accepted. These are all its statements.</p>
 
-<pre data-lang="fenecql">create collection [if not exists] &lt;name&gt; ( &lt;field&gt; &lt;type&gt; [required] [collate und|tr] [@index], ... )
+<pre data-lang="fenecql">create collection [if not exists] &lt;name&gt; ( &lt;field&gt; &lt;type&gt; [required] [collate und|tr] [@index], ...
+                                         [, @sorted(&lt;field&gt; [desc], ...) | @unique(&lt;field&gt;, ...)] )
 drop collection [if exists] &lt;name&gt;
 create index [if not exists] on &lt;name&gt; (&lt;field&gt; | &lt;path&gt;) @index
+create index [if not exists] on &lt;name&gt; (&lt;field&gt; [desc], &lt;field&gt; [desc], ...) @sorted | @unique
+drop index [if exists] on &lt;name&gt; (&lt;field&gt;, &lt;field&gt;, ...)
 alter collection &lt;name&gt; add field &lt;field&gt; &lt;type&gt; [collate und|tr] [@index]
 alter collection &lt;name&gt; drop field &lt;field&gt;
 alter collection &lt;name&gt; rename field &lt;field&gt; to &lt;new name&gt;
@@ -106,7 +109,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tbody>
 <tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>sparse&lt;N&gt;</code> <code>[type]</code> <code>json</code> <code>geo</code> (a point, <code>[lon, lat]</code> — see <a href="#geo">Points</a>)</td></tr>
 <tr><td><b>Paths</b></td><td><code>meta.source.rank</code> reads into a <code>json</code> field in <code>where</code>, <code>select</code>, <code>order</code> and <code>set</code>, and takes <code>@hash</code>, <code>@unique</code> and <code>@sorted</code> — see <a href="#json">Objects and paths</a></td></tr>
-<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@unique</code>, <code>@sorted</code>, <code>@ttl(30m)</code> (a <code>timestamp</code> field's rows expire — see <a href="#ttl">Rows that expire</a>), <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's), <code>@geo</code> (a <code>geo</code> field's)</td></tr>
+<tr><td><b>Indexes</b></td><td><code>@sorted(owner, created desc)</code> and <code>@unique(org, slug)</code> over several fields (see <a href="#composite">Indexes over several fields</a>), <code>@hash</code>, <code>@unique</code>, <code>@sorted</code>, <code>@ttl(30m)</code> (a <code>timestamp</code> field's rows expire — see <a href="#ttl">Rows that expire</a>), <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's), <code>@geo</code> (a <code>geo</code> field's)</td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>in (get …)</code> — see <a href="#subqueries">Subqueries</a>, <code>is null</code></td></tr>
@@ -642,7 +645,8 @@ create the collection, or add it later with <code>create index</code>.</p>
     for points near a place. A path into a
     <code>json</code> field takes <code>@hash</code>, <code>@unique</code>
     or <code>@sorted</code> of its own (<a href="#json">Objects and
-    paths</a>).</li>
+    paths</a>), and an index over several fields is the collection's, beside
+    them (<a href="#composite">below</a>).</li>
   <li><b><code>@unique</code> is a <code>@hash</code> that refuses a second
     document</b> holding a value one holds already. <code>null</code> is no
     value: any number of documents may hold it.</li>
@@ -1124,6 +1128,123 @@ than gathering and sorting that many ids.</p>
   that reads it after an open, like the hash and text indexes — it is never
   written to the file.</p>
 </div>
+</details>
+
+<h2 id="composite">Indexes over several fields</h2>
+
+<p><code>@sorted(owner, created desc)</code> keeps the rows in the order of
+several fields, the first first. The page an app reads most — one user's
+latest twenty, a tenant's inbox, a feed — is a run of it, read to the page
+and no further. <code>@unique(org, slug)</code> refuses a second row holding
+the same values in every part.</p>
+
+<pre data-lang="fenecql">create collection posts (
+  owner    int,
+  created  timestamp,
+  title    text,
+  @sorted(owner, created desc)
+)
+get posts where owner = $1 order created desc limit 20     -- a run of the index, 20 rows read
+get posts where owner in [$1, $2, $3] order created desc limit 20   -- three runs, merged
+get posts where owner = $1 and created >= $2 count          -- counted off the index
+create index on pages (org, slug) @unique                   -- or @unique(org, slug) in the collection
+</pre>
+
+<ul>
+  <li><b>Equalities on its first fields, then a range or an order on the
+    next.</b> <code>where owner = $1 order created desc</code> reads its
+    run; <code>where created &gt; $1</code> alone does not use
+    <code>(owner, created)</code>, since <code>owner</code> comes first.</li>
+  <li><b>An order matches it</b> in its fields' directions, or every one the
+    other way round: <code>(owner, created desc)</code> answers
+    <code>order created desc</code> and <code>order created</code> for one
+    owner.</li>
+  <li><b>It gives the scan's answer, row for row</b>, ties in ascending
+    <code>id</code> either way, as <code>@sorted</code> does.</li>
+  <li><b>Up to 8 fields</b> of <code>bool</code>, <code>int</code>,
+    <code>float</code>, <code>timestamp</code>, <code>text</code> (in its
+    collation) or <code>json</code>, a path into one among them
+    (<code>meta.lang</code>). A field keeps its own index beside it.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">create index on posts (owner, created desc) @sorted        -- built beside the database on a server
+drop index on posts (owner, created)                        -- by its fields
+explain get posts where owner = 7 order created desc limit 20
+-- order: walked the index on (owner, created desc), owner fixed, 20 of 100 rows read, 20 kept
+</pre>
+
+<p>A key is its fields' values laid end to end, each written so that the
+bytes order as the values do — an int's sign turned over, a float's bits
+made to order, a text escaped and ended, a descending field's bytes
+inverted — so an equality on its first fields is a run of the keys and a
+range on the next one is a run inside it. A text in a collation is kept as
+written and compared in it. <code>null</code> stands below every value of a
+field, as <code>order</code> puts it; a row holding a float's
+<code>NaN</code>, which compares equal to everything, or a json value no
+order has a place for (a boolean, a list, an object, an int past
+2<sup>53</sup>) is held apart: while one is, the index is walked for no
+<code>order</code>, and a filter's run takes those rows with it, each
+tested.</p>
+
+<p>The planner takes the <code>and</code> chain's terms in the index's order
+— an equality, or an <code>in</code> whose every element it can say exactly,
+on each field as far as one is fixed, then the comparisons on the next — and
+tests every other term row by row; a term it cannot say exactly (a
+<code>null</code>, <code>12.5</code> against an <code>int</code>) is left to
+that test, so the answer never changes. An <code>in</code> makes a run for
+each element, 256 at most together; under an <code>order</code> on the
+fields after it the runs are walked together, merged by those fields. Of the
+plans, the narrower set wins by exact counts: the run is two searches, a
+<code>@hash</code> bucket its length, so a filter the index says whole reads
+the page and nothing more, and one it does not is walked only while its run
+is no longer than any set another index names — and gives up past an eighth
+of the collection, as a <code>@sorted</code> walk does. A
+<code>count</code> the index says whole is counted off it without a row
+read. <code>explain</code> names the index, the fields fixed, the runs and
+the range.</p>
+
+<p><code>@unique</code> over several fields is asked before every
+<code>put</code>, <code>insert</code> and <code>set</code>: a second row
+holding the same values in every part is refused,
+<code>409</code> over HTTP, naming the fields and the other row — to a
+scoped token the fields alone. A <code>null</code> in any part is no value.
+<code>put ... if absent</code> passes over the row holding them, and
+<code>if absent else set</code> sets it. <code>create index ...
+@unique</code> over rows already holding a key twice is refused naming two of
+them.</p>
+
+<p>It is derived data, built from the documents by the first read after an
+open, kept on every write, put back with a block that does not land, and
+never written to the file. A field renamed keeps it under the new name; a
+field dropped takes it off. A sync replica builds what the schema declares,
+a unique one as an ordered one, as its <code>@unique</code> fields are
+<code>@hash</code>.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>1 000 000 posts over 10 000 owners</th><th class="n">p50</th><th class="n">p99</th><th class="n">built in</th><th class="n">memory</th></tr></thead>
+<tbody>
+<tr><td><code>where owner = $1 order created desc limit 20</code>, <code>@sorted(owner, created desc)</code></td><td class="n">0.006 ms</td><td class="n">0.011 ms</td><td class="n">147 ms</td><td class="n">40 MB</td></tr>
+<tr><td>the same over <code>owner @hash</code>, its bucket sorted</td><td class="n">0.012 ms</td><td class="n">0.017 ms</td><td class="n">75 ms</td><td class="n">11 MB</td></tr>
+<tr><td>the same over <code>created @sorted</code>, walked and given up</td><td class="n">24.4 ms</td><td class="n">40.5 ms</td><td class="n">34 ms</td><td class="n">20 MB</td></tr>
+<tr><td>the same by the scan</td><td class="n">21.3 ms</td><td class="n">37.4 ms</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>a feed, <code>owner in</code> ten owners, <code>@sorted(owner, created desc)</code></td><td class="n">0.022 ms</td><td class="n">0.029 ms</td><td></td><td></td></tr>
+<tr><td>the feed over <code>owner @hash</code></td><td class="n">0.100 ms</td><td class="n">0.136 ms</td><td></td><td></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Writes pay for it: a lone <code>put</code> into those million rows took
+715 ns with no index, 851 beside <code>created @sorted</code> and
+<code>owner @hash</code>, and 1 561 beside <code>@sorted(owner, created
+desc)</code>, whose first field puts each write anywhere in it. A unique one
+asks its run before each write: 1 745 ns a put against 1 285 for
+<code>@unique</code> on the two joined into one field, and a read by both
+fields 2.5 µs against 1.3 by the joined field — a hash index
+over several fields would answer that read sooner, by a microsecond, and was
+not worth a third index's code beside this one (<code>make
+composite-bench</code>).</p>
 </details>
 
 <h2 id="ttl">Rows that expire</h2>

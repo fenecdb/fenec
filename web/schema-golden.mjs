@@ -89,6 +89,15 @@ d('a primary key', `fenecTable('t', { n: integer().primaryKey() })`);
 d('a collation of a number', `fenecTable('t', { n: integer().collate('tr') })`);
 d('a list of json', `fenecTable('t', { m: json().array() })`);
 d('an index on two columns', `fenecTable('t', { a: text(), b: text() }, (t) => [index().on(t.a, t.b)])`);
+d('indexes over several fields', `fenecTable('posts', { owner: integer(), at: timestamp(), slug: text(), meta: json() }, (t) => [
+  index('posts_feed').on(t.owner, t.at.desc()),
+  uniqueIndex('posts_slug').on(t.owner, t.slug),
+  index().using('btree', t.meta.path('lang'), t.at.desc()),
+])`);
+d('desc on an index of one column', `fenecTable('t', { a: text() }, (t) => [index().on(t.a.desc())])`);
+d('a hash over two columns', `fenecTable('t', { a: text(), b: text() }, (t) => [index().using('hash', t.a, t.b)])`);
+d('a vector in an index over several fields', `fenecTable('t', { a: text(), e: vector({ dimensions: 3 }) }, (t) => [index().on(t.a, t.e)])`);
+d('one column twice in an index', `fenecTable('t', { a: text(), b: text() }, (t) => [index().on(t.a, t.a.desc())])`);
 d('an expiry of a hash', `fenecTable('t', { at: timestamp() }, (t) => [index().using('hash', t.at).ttl('1h')])`);
 d('an expiry of a number', `fenecTable('t', { n: integer() }, (t) => [index().on(t.n).ttl('1h')])`);
 d('hnsw over text', `fenecTable('t', { a: text() }, (t) => [index().using('hnsw', t.a)])`);
@@ -126,6 +135,9 @@ x('a bad duration', 'create collection t (a timestamp @ttl(soon))');
 x('a collation there is not', 'create collection t (a text collate fr)');
 x('a write in a schema', 'create collection t (a int)\nput t {a: 1}');
 x('a path into a number', 'create collection t (a int)\ncreate index on t (a.b) @hash');
+x('indexes over several fields', 'create collection t (a int, b text, m json, @sorted(a, b desc))\ncreate index on t (b, m.k) @unique');
+x('an index over several fields on no field', 'create collection t (a int, @sorted(a, nope))');
+x('an index over several fields twice', 'create collection t (a int, b int, @sorted(a, b))\ncreate index on t (a, b desc) @unique');
 
 // ------------------------------------------------------------------- plans
 
@@ -161,6 +173,15 @@ p('an index changed, rebuilt', [TODOS, 'put todos [{title: "a", done: true}, {ti
 p('an expiry changed in place', ['create collection s (seen timestamp @ttl(30m))'], `{ s: fenecTable('s', { seen: timestamp() }, (t) => [index().on(t.seen).ttl('1h')]) }`);
 p('hnsw options changed', ['create collection v (e vector<3> @hnsw(cosine))'], `{ v: fenecTable('v', { e: vector({ dimensions: 3 }) }, (t) => [index().using('hnsw', t.e.op('vector_cosine_ops')).with({ m: 32 })]) }`);
 p('a path index taken off', ['create collection docs (meta json)', 'create index on docs (meta.lang) @hash'], `{ docs: fenecTable('docs', { meta: json() }) }`);
+const POSTS = 'create collection posts (owner int, at timestamp, slug text)';
+const posts = (...ix) => `{ posts: fenecTable('posts', { owner: integer(), at: timestamp(), slug: text() }, (t) => [${ix.join(', ')}]) }`;
+p('an index over several fields is added', [POSTS], posts('index().on(t.owner, t.at.desc())', 'uniqueIndex().on(t.owner, t.slug)'));
+p('an index over several fields as declared plans nothing', [POSTS, 'create index on posts (owner, at desc) @sorted'], posts('index().on(t.owner, t.at.desc())'));
+p('an index over several fields changed', [POSTS, 'create index on posts (owner, at) @sorted'], posts('index().on(t.owner, t.at.desc())'));
+p('an index over several fields taken off', [POSTS, 'create index on posts (owner, at) @sorted'], posts());
+p('an index over several fields changed, dropped by a migration', [POSTS, 'create index on posts (owner, at) @sorted'], posts('index().on(t.owner, t.at.desc())'), [
+  "dropIndex('posts', 'owner', 'at')",
+]);
 p('a collection the code lacks is left as it is', [TODOS, 'create collection gone (x int)'], `{ todos: ${todos} }`);
 p('a dropped collection, as a migration', [TODOS, 'create collection gone (x int)'], `{ todos: ${todos} }`, ["dropTable('gone')"]);
 p('the database\'s own collections are its own', [TODOS, 'create collection _idempotency (key text)'], `{ todos: ${todos} }`);

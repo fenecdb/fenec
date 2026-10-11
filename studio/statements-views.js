@@ -202,6 +202,43 @@ export function createIndex(collection, field, spec) {
   return { text: `create index on ${collection} (${field}) ${indexSpec(spec).text}`, params: [] };
 }
 
+/**
+ * An index's parts as a person types them, `owner, at desc`: each a field
+ * -- or a path into a json one, `meta.lang` -- each name one FenecQL
+ * writes, ascending unless `desc` follows it.
+ */
+export function compositeKeys(text) {
+  const keys = String(text ?? '')
+    .split(',')
+    .map((part) => {
+      const words = part.trim().split(/\s+/u);
+      const desc = words.length === 2 && /^desc$/iu.test(words[1]);
+      if (words.length > 2 || (words.length === 2 && !desc && !/^asc$/iu.test(words[1]))) {
+        throw new StatementError(`${JSON.stringify(part.trim())} is a field and, at most, asc or desc`);
+      }
+      for (const n of words[0].split('.')) name(n);
+      return { field: words[0], desc };
+    });
+  if (keys.length < 2) throw new StatementError('an index over several fields names two at least, a comma between');
+  if (new Set(keys.map((k) => k.field)).size !== keys.length) throw new StatementError('a field is named twice');
+  return keys;
+}
+
+const keysText = (keys) => keys.map((k) => (k.desc ? `${k.field} desc` : k.field)).join(', ');
+
+/** `create index on <c> (<a>, <b> desc) @sorted | @unique`. */
+export function createComposite(collection, keys, unique) {
+  name(collection, 'collection');
+  return { text: `create index on ${collection} (${keysText(compositeKeys(keysText(keys)))}) @${unique ? 'unique' : 'sorted'}`, params: [] };
+}
+
+/** `drop index on <c> (<a>, <b>)`. */
+export function dropComposite(collection, fields) {
+  name(collection, 'collection');
+  const keys = compositeKeys(fields.join(', '));
+  return { text: `drop index on ${collection} (${keys.map((k) => k.field).join(', ')})`, params: [] };
+}
+
 /** `alter collection <c> add field <f> <type> [collate ..] [@index]`. */
 export function addField(collection, field, type, { index = null, collate = null } = {}) {
   name(collection, 'collection');
@@ -248,8 +285,9 @@ export function dropCollection(collection) {
  * leaves alone, so the plan speaks of this change and nothing else.
  * `change` is `{op: 'index', collection, field, index}`, `{op: 'add',
  * collection, field, type, index, collate}`, `{op: 'rename', collection,
- * from, to}`, `{op: 'drop-field', collection, field}` or `{op: 'drop',
- * collection}`.
+ * from, to}`, `{op: 'drop-field', collection, field}`, `{op: 'composite',
+ * collection, keys, unique}`, `{op: 'drop-index', collection, fields}` or
+ * `{op: 'drop', collection}`.
  */
 export function planned(description, change) {
   const found = (description?.collections ?? []).find((c) => c.name === change.collection);
@@ -278,6 +316,19 @@ export function planned(description, change) {
       field(change.field);
       c.fields = c.fields.filter((f) => f.name !== change.field);
       break;
+    case 'composite':
+      c.indexes = [
+        ...(c.indexes ?? []),
+        { kind: change.unique ? 'unique' : 'sorted', keys: compositeKeys(keysText(change.keys)).map((k) => (k.desc ? { field: k.field, desc: true } : { field: k.field })) },
+      ];
+      break;
+    case 'drop-index': {
+      const named = (ix) => ix.keys.length === change.fields.length && ix.keys.every((k, i) => k.field === change.fields[i]);
+      if (!(c.indexes ?? []).some(named)) throw new StatementError(`${change.collection} has no index on (${change.fields.join(', ')})`);
+      c.indexes = c.indexes.filter((ix) => !named(ix));
+      if (!c.indexes.length) delete c.indexes;
+      break;
+    }
     case 'drop':
       return { format: 1, collections: [] };
     default:

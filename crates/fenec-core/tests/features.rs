@@ -350,3 +350,42 @@ fn sparse_near_without_the_index_scores_every_document() {
     let e = run(&mut db, r#"get s near w "{1:1}/6" ef 10 limit 1"#).unwrap_err();
     assert!(e.to_string().contains("`ef`"), "{e}");
 }
+
+/// An index over several fields declared: its queries are the scan's, a
+/// unique one is asked by reading the rows, and one made is refused.
+#[test]
+fn an_index_over_several_fields_declared_is_answered_by_the_scan() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection p (owner int, at int, slug text, @sorted(owner, at desc), \
+         @unique(owner, slug))",
+    )
+    .expect("a collection declaring one is made");
+    for (owner, at, slug) in [(1, 5, "a"), (2, 7, "b"), (1, 9, "c"), (1, 3, "d")] {
+        run(
+            &mut db,
+            &format!(r#"put p {{owner: {owner}, at: {at}, slug: "{slug}"}}"#),
+        )
+        .unwrap();
+    }
+    let r = run(
+        &mut db,
+        "get p select at where owner = 1 order at desc limit 2",
+    )
+    .unwrap();
+    assert_eq!(ints(&r, 0), [9, 5]);
+    let e = run(&mut db, r#"put p {owner: 1, at: 1, slug: "c"}"#).unwrap_err();
+    assert!(matches!(e, Error::Duplicate(_)), "{e}");
+    run(&mut db, r#"put p {owner: 2, at: 1, slug: "c"}"#).unwrap();
+    let e = run(&mut db, "create index on p (slug, at) @sorted").unwrap_err();
+    assert!(e.to_string().contains("sorted"), "{e}");
+    let mut back = Database::new();
+    back.load(&db.snapshot()).expect("the image opens");
+    let r = run(&mut back, "get p select at where owner = 1 order at desc").unwrap();
+    assert_eq!(ints(&r, 0), [9, 5, 3]);
+    let e = run(&mut back, r#"put p {owner: 2, at: 4, slug: "b"}"#).unwrap_err();
+    assert!(matches!(e, Error::Duplicate(_)), "{e}");
+    run(&mut back, "drop index on p (owner, slug)").unwrap();
+    run(&mut back, r#"put p {owner: 2, at: 4, slug: "b"}"#).unwrap();
+}

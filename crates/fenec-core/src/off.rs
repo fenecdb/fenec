@@ -346,3 +346,87 @@ impl SortedIndex {
         match *self {}
     }
 }
+
+/// The index over several fields, which the `sorted` feature carries with
+/// the ordered index whose chunks it keeps its keys in: without it a
+/// filter and an `order` over its fields are the scan's, the same answers,
+/// and a unique one is asked by reading the rows.
+pub enum CompositeIndex {}
+
+impl CompositeIndex {
+    pub fn new(parts: Vec<crate::composite::Part>) -> CompositeIndex {
+        absent("sorted")
+    }
+    pub fn parts(&self) -> &[crate::composite::Part] {
+        match *self {}
+    }
+    pub fn build(
+        parts: Vec<crate::composite::Part>,
+        rows: Vec<(DocId, crate::composite::RowKey)>,
+    ) -> CompositeIndex {
+        absent("sorted")
+    }
+    pub fn key(&self, vals: &[&Value]) -> crate::composite::RowKey {
+        match *self {}
+    }
+    pub fn insert(&mut self, id: DocId, k: crate::composite::RowKey) {
+        match *self {}
+    }
+    pub fn remove(&mut self, id: DocId, k: crate::composite::RowKey) {
+        match *self {}
+    }
+    pub fn apart(&self) -> &[DocId] {
+        match *self {}
+    }
+    pub fn len(&self) -> usize {
+        match *self {}
+    }
+    pub fn is_empty(&self) -> bool {
+        match *self {}
+    }
+    pub fn memory_bytes(&self) -> usize {
+        match *self {}
+    }
+    pub fn holders(&self, key: &[u8]) -> Vec<DocId> {
+        match *self {}
+    }
+    pub fn shared(&self) -> Option<(DocId, DocId)> {
+        match *self {}
+    }
+    pub fn literal(&self, part: usize, v: &Value) -> Option<Vec<u8>> {
+        match *self {}
+    }
+    pub fn narrow(
+        &self,
+        r: &mut crate::composite::PartRange,
+        part: usize,
+        op: crate::query::CmpOp,
+        v: &Value,
+    ) -> bool {
+        match *self {}
+    }
+    pub fn span(
+        &self,
+        prefix: &[u8],
+        part: usize,
+        range: Option<&crate::composite::PartRange>,
+    ) -> crate::composite::Span {
+        match *self {}
+    }
+    pub fn count(&self, s: &crate::composite::Span) -> usize {
+        match *self {}
+    }
+    pub fn ids(&self, s: &crate::composite::Span, cap: usize, out: &mut Vec<DocId>) -> bool {
+        match *self {}
+    }
+    pub fn walk(
+        &self,
+        spans: &[crate::composite::Span],
+        fixed: usize,
+        back: bool,
+        ties: usize,
+        emit: &mut dyn FnMut(DocId) -> Result<bool>,
+    ) -> Result<()> {
+        match *self {}
+    }
+}

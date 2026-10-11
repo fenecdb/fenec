@@ -5,6 +5,9 @@
 //! create collection [if not exists] <name> ( <field> <type> [required] [collate und|tr] [@index], ... )
 //!        type:  bool int float text bytes timestamp vector<N[, f16]> sparse<N> [type] json
 //!        index: @hash @unique @sorted @ttl(30m) @hnsw(..) @text(..) @inverted (a sparse<N> field's)
+//!        and among the fields: @sorted(<field> [desc], ...) | @unique(<field>, ...)
+//! create index [if not exists] on <name> (<field> [desc], <field> [desc], ...) @sorted | @unique
+//! drop   index [if exists] on <name> (<field>, <field>, ...)
 //! drop   collection [if exists] <name>
 //! put    <name> { k: v, ... }            -- or [ {...}, {...} ]; v may be {..}, a json value
 //! a.b.c                                  -- a path into a json field, where a field goes
@@ -41,7 +44,9 @@ use fenec_core::collate::Collation;
 use fenec_core::engine::Database;
 use fenec_core::error::{Error, Result};
 use fenec_core::query::*;
-use fenec_core::schema::{Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec};
+use fenec_core::schema::{
+    Composite, Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec,
+};
 use fenec_core::value::{DataType, Value, VecPrec};
 
 /// The maximum nesting level of an expression.
@@ -442,11 +447,17 @@ impl Parser {
         let name = self.ident()?;
         self.expect(Tok::LParen)?;
         let mut fields = Vec::new();
+        let mut composites = Vec::new();
         loop {
             if self.peek() == &Tok::RParen {
                 break;
             }
-            fields.push(self.field_def()?);
+            // `@sorted(owner, created desc)`: an index over several fields,
+            // a line of the collection's own among its fields.
+            match self.peek() {
+                Tok::At => composites.push(self.composite_line()?),
+                _ => fields.push(self.field_def()?),
+            }
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
@@ -456,10 +467,60 @@ impl Parser {
         if fields.is_empty() {
             return self.err("a collection must contain at least one field");
         }
+        let mut schema = Schema::new(name, fields)?;
+        for c in composites {
+            schema.add_composite(c)?;
+        }
         Ok(Statement::CreateCollection {
-            schema: Schema::new(name, fields)?,
+            schema,
             if_not_exists,
         })
+    }
+
+    /// `@sorted(owner, created desc)` or `@unique(org, slug)` in a `create
+    /// collection`.
+    fn composite_line(&mut self) -> Result<Composite> {
+        self.expect(Tok::At)?;
+        let unique = self.composite_kind()?;
+        let keys = self.index_keys()?;
+        Ok(Composite { keys, unique })
+    }
+
+    /// The kind of an index over several fields: `false` for `@sorted`,
+    /// `true` for `@unique`, the `@` already read.
+    fn composite_kind(&mut self) -> Result<bool> {
+        match self.ident()?.to_ascii_lowercase().as_str() {
+            "sorted" => Ok(false),
+            "unique" => Ok(true),
+            other => self.err(format!(
+                "an index over several fields is @sorted or @unique, not @{other}: its keys \
+                 are ordered part by part"
+            )),
+        }
+    }
+
+    /// `(owner, created desc)`: an index's fields -- or paths into json
+    /// ones -- each ascending unless `desc` follows it.
+    fn index_keys(&mut self) -> Result<Vec<(String, bool)>> {
+        self.expect(Tok::LParen)?;
+        let mut keys = Vec::new();
+        loop {
+            let k = self.path()?;
+            let desc = match self.eat_kw("desc") {
+                true => true,
+                false => {
+                    self.eat_kw("asc");
+                    false
+                }
+            };
+            keys.push((k, desc));
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        self.expect(Tok::RParen)?;
+        Ok(keys)
     }
 
     /// `create index [if not exists] on <collection> (<field>) @hnsw(...)`
@@ -473,10 +534,24 @@ impl Parser {
         }
         self.expect_kw("on")?;
         let collection = self.ident()?;
-        self.expect(Tok::LParen)?;
-        let field = self.path()?;
-        self.expect(Tok::RParen)?;
+        let mut keys = self.index_keys()?;
         self.expect(Tok::At)?;
+        // Several fields: an index over them, ordered part by part.
+        if keys.len() > 1 {
+            let unique = self.composite_kind()?;
+            return Ok(Statement::CreateComposite {
+                collection,
+                index: Composite { keys, unique },
+                if_not_exists,
+            });
+        }
+        let (field, desc) = keys.remove(0);
+        if desc {
+            return self.err(format!(
+                "`{field} desc`: an index of one field is walked both ways, and `desc` orders \
+                 a part of an index over several"
+            ));
+        }
         let kind = match self.ident()?.to_ascii_lowercase().as_str() {
             "hash" => IndexKind::HASH,
             "unique" => IndexKind::UNIQUE,
@@ -753,6 +828,29 @@ impl Parser {
 
     fn drop(&mut self) -> Result<Statement> {
         self.expect_kw("drop")?;
+        // `drop index [if exists] on posts (owner, created)`: an index over
+        // several fields, named by its fields.
+        if self.eat_kw("index") {
+            let mut if_exists = false;
+            if self.eat_kw("if") {
+                self.expect_kw("exists")?;
+                if_exists = true;
+            }
+            self.expect_kw("on")?;
+            let collection = self.ident()?;
+            let keys = self.index_keys()?;
+            if keys.len() < 2 {
+                return self.err(
+                    "`drop index` takes an index over several fields: a field's own index goes \
+                     with a rebuild of the field",
+                );
+            }
+            return Ok(Statement::DropComposite {
+                collection,
+                keys: keys.into_iter().map(|(k, _)| k).collect(),
+                if_exists,
+            });
+        }
         self.expect_kw("collection")?;
         let mut if_exists = false;
         if self.eat_kw("if") {

@@ -1345,7 +1345,8 @@ function restValue(v, field) {
  * index as is. The collation too: without it the replica's field compared
  * its text by the bytes, and paged and ordered differently from the server.
  * `@unique` is a plain hash here, as on a replica: a batch lands rows'
- * last states one at a time, and a value moved between two collided.
+ * last states one at a time, and a value moved between two collided -- and
+ * a unique index over several fields an ordered one.
  */
 function schemaDDL(schema) {
   const fields = schema.fields.map(
@@ -1355,6 +1356,7 @@ function schemaDDL(schema) {
       (f.required ? ' required' : '') +
       (f.index ? ` @${f.index === 'unique' ? 'hash' : f.index}` : ''),
   );
+  for (const ix of schema.indexes ?? []) fields.push(`@${ix.replace(/^unique\(/, 'sorted(')}`);
   return `create collection if not exists ${ident(schema.name, 'collection')} (${fields.join(', ')})`;
 }
 

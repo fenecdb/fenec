@@ -1633,6 +1633,8 @@ impl Sync {
                 Statement::CreateCollection { schema, .. } => (Some(schema.name.as_str()), false),
                 Statement::DropCollection { name, .. } => (Some(name.as_str()), false),
                 Statement::CreateIndex { collection, .. }
+                | Statement::CreateComposite { collection, .. }
+                | Statement::DropComposite { collection, .. }
                 | Statement::AlterCollection { collection, .. } => {
                     (Some(collection.as_str()), false)
                 }

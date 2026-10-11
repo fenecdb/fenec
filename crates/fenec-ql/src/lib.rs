@@ -76,6 +76,15 @@ pub fn schema_text(src: &str) -> Result<Vec<Schema>> {
                     }
                 }
             }
+            // An index over several fields, made after its collection.
+            Statement::CreateComposite {
+                collection, index, ..
+            } => {
+                let Some(s) = out.iter_mut().find(|s| s.name == collection) else {
+                    return Err(bad(&collection, "is indexed before it is declared"));
+                };
+                s.add_composite(index)?;
+            }
             _ => {
                 return Err(bad(
                     "a schema",
@@ -168,6 +177,120 @@ mod tests {
         );
         assert!(parse_one("alter collection orders rename total amount").is_err());
         assert!(parse_one("alter table orders add field x int").is_err());
+    }
+
+    /// An index over several fields, as a line of `create collection` and
+    /// as `create index`, written out as FenecQL and as a description and
+    /// read back as the same schema; and the plan that brings a database to
+    /// a declaration of one.
+    #[test]
+    fn an_index_over_several_fields_reads_back_and_plans() {
+        use fenec_core::declared::{self, Mode};
+        use fenec_core::schema::Composite;
+        let stmt = parse_one(
+            "create collection posts (owner text, at timestamp, slug text, meta json, \
+             @sorted(owner, at desc), @unique(owner, slug))",
+        )
+        .unwrap();
+        let Statement::CreateCollection { schema, .. } = stmt else {
+            panic!()
+        };
+        assert_eq!(
+            schema.composites,
+            vec![
+                Composite {
+                    keys: vec![("owner".into(), false), ("at".into(), true)],
+                    unique: false
+                },
+                Composite {
+                    keys: vec![("owner".into(), false), ("slug".into(), false)],
+                    unique: true
+                },
+            ]
+        );
+        let text = declared::fenecql(&[&schema]);
+        assert!(
+            text.contains("@sorted(owner, at desc), @unique(owner, slug))"),
+            "{text}"
+        );
+        assert_eq!(schema_text(&text).unwrap(), vec![schema.clone()]);
+        let described = declared::describe(&[&schema]);
+        assert!(
+            described.contains(
+                r#""indexes":[{"kind":"sorted","keys":[{"field":"owner"},{"field":"at","desc":true}]}"#
+            ),
+            "{described}"
+        );
+        assert_eq!(
+            declared::parse(&described).unwrap().collections,
+            vec![schema.clone()]
+        );
+        // In the binary schema too.
+        let encoded = schema.encode();
+        assert_eq!(Schema::decode(&encoded, &mut 0).unwrap(), schema);
+        // Made by `create index` after its collection, in a schema text.
+        let later = schema_text(
+            "create collection posts (owner text, at timestamp, slug text, meta json)\n\
+             create index on posts (owner, at desc) @sorted\n\
+             create index on posts (owner, slug) @unique",
+        )
+        .unwrap();
+        assert_eq!(later, vec![schema.clone()]);
+
+        // Against a database with none: made. With other directions, and
+        // with one the code lacks: refused, the fix a migration dropping it.
+        let plain =
+            parse_one("create collection posts (owner text, at timestamp, slug text, meta json)")
+                .unwrap();
+        let Statement::CreateCollection { schema: bare, .. } = plain else {
+            panic!()
+        };
+        let p = declared::plan(&[&bare], std::slice::from_ref(&schema), Mode::Apply);
+        assert_eq!(
+            p.statements,
+            vec![
+                "create index on posts (owner, at desc) @sorted",
+                "create index on posts (owner, slug) @unique"
+            ]
+        );
+        assert!(p.refusals.is_empty());
+        let mut other = schema.clone();
+        other.composites[0].keys[1].1 = false;
+        other.composites.push(Composite {
+            keys: vec![("slug".into(), false), ("at".into(), false)],
+            unique: false,
+        });
+        let p = declared::plan(&[&other], std::slice::from_ref(&schema), Mode::Apply);
+        let kinds: Vec<_> = p.refusals.iter().map(|r| (r.kind, r.fix.clone())).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (
+                    "index_changed",
+                    "the migration `drop index on posts (owner, at)`, after which the plan makes \
+                     the one declared"
+                        .to_string()
+                ),
+                (
+                    "index_removed",
+                    "the migration `drop index on posts (slug, at)`".to_string()
+                ),
+            ]
+        );
+        // Following, the database's own extra one is its owner's; a missing
+        // one is refused.
+        let p = declared::plan(&[&other], std::slice::from_ref(&schema), Mode::Follow);
+        assert_eq!(p.refusals.len(), 1, "{:?}", p.refusals);
+        let p = declared::plan(&[&bare], std::slice::from_ref(&schema), Mode::Follow);
+        assert_eq!(p.refusals[0].kind, "index_missing");
+        assert!(p.statements.is_empty());
+
+        let Statement::DropComposite { keys, .. } =
+            parse_one("drop index if exists on posts (owner, at)").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(keys, ["owner", "at"]);
     }
 
     /// A point field and its index, written out and read back as the same

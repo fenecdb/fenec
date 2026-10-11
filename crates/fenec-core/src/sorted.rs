@@ -95,8 +95,12 @@ where
 /// a random key shifts half a chunk: over a million rows the load with two
 /// ordered indexes measured 1050 ms at 2048, 900 ms at 512 and no better at
 /// 128, and with ranges walked lazily the queries do not tell the sizes
-/// apart.
-const CHUNK: usize = 512;
+/// apart. 256 since the chunk is found among `firsts`, where more chunks
+/// cost the search next to nothing: a lone put into a million rows beside
+/// an ordered index over a random int went 1 155 -> 1 098 ns, beside an
+/// index over several fields 1 803 -> 1 653, the reads as they were (`make
+/// composite-bench`'s `sorted`, in turns).
+const CHUNK: usize = 256;
 
 /// A sorted sequence in chunks of at most `CHUNK` entries, each chunk a
 /// sorted `Vec`, found by binary search over the chunks' first entries.
@@ -108,6 +112,11 @@ const CHUNK: usize = 512;
 /// is a run of slices.
 pub(crate) struct Chunked<T> {
     chunks: Vec<Vec<T>>,
+    /// Each chunk's first entry, side by side: what a search for the chunk
+    /// an entry belongs in reads. Read off the chunks, each probe was a
+    /// cache miss into a buffer of its own -- twelve of them over a million
+    /// random keys, most of a write's cost (see `chunk_for`).
+    firsts: Vec<T>,
     pub(crate) len: usize,
     /// The order of a text field's collation (`collate tr`), where the
     /// entries' own is their bytes'.
@@ -138,10 +147,11 @@ impl Entry for (Box<str>, DocId) {
     }
 }
 
-impl<T: Entry> Chunked<T> {
+impl<T: Entry + Clone> Chunked<T> {
     pub(crate) fn new(coll: Option<Collation>) -> Self {
         Chunked {
             chunks: Vec::new(),
+            firsts: Vec::new(),
             len: 0,
             coll,
         }
@@ -156,21 +166,33 @@ impl<T: Entry> Chunked<T> {
         let len = v.len();
         let mut chunks = Vec::with_capacity(len / CHUNK + 1);
         let mut it = v.into_iter();
+        let mut firsts = Vec::with_capacity(len / CHUNK + 1);
         loop {
             let chunk: Vec<T> = it.by_ref().take(CHUNK / 2).collect();
-            if chunk.is_empty() {
+            let Some(first) = chunk.first() else {
                 break;
-            }
+            };
+            firsts.push(first.clone());
             chunks.push(chunk);
         }
-        Chunked { chunks, len, coll }
+        Chunked {
+            chunks,
+            firsts,
+            len,
+            coll,
+        }
     }
 
     /// The chunk an entry belongs in: the last whose first entry is not
-    /// above it.
+    /// above it. Searched over `firsts`, side by side, rather than each
+    /// chunk's own first, a cache miss a probe: a lone put into a million
+    /// rows beside an ordered index over a random int went 1 324 -> 1 155 ns,
+    /// beside one over a time and one over a random int 1 248 -> 1 112, and
+    /// beside an index over several fields 2 019 -> 1 803 (`make
+    /// composite-bench`'s `sorted` and `writes`, in turns).
     fn chunk_for(&self, x: &T) -> usize {
-        self.chunks
-            .partition_point(|c| self.cmp(&c[0], x) != Ordering::Greater)
+        self.firsts
+            .partition_point(|f| self.cmp(f, x) != Ordering::Greater)
             .saturating_sub(1)
     }
 
@@ -184,7 +206,10 @@ impl<T: Entry> Chunked<T> {
         }) {
             match self.chunks.last_mut() {
                 Some(c) if c.len() < CHUNK => c.push(x),
-                _ => self.chunks.push(vec![x]),
+                _ => {
+                    self.firsts.push(x.clone());
+                    self.chunks.push(vec![x]);
+                }
             }
             self.len += 1;
             return true;
@@ -200,6 +225,7 @@ impl<T: Entry> Chunked<T> {
             (ci, pos)
         } else {
             let tail = self.chunks[ci].split_off(CHUNK / 2);
+            self.firsts.insert(ci + 1, tail[0].clone());
             self.chunks.insert(ci + 1, tail);
             if pos <= CHUNK / 2 {
                 (ci, pos)
@@ -207,6 +233,9 @@ impl<T: Entry> Chunked<T> {
                 (ci + 1, pos - CHUNK / 2)
             }
         };
+        if pos == 0 {
+            self.firsts[ci] = x.clone();
+        }
         self.chunks[ci].insert(pos, x);
         self.len += 1;
         true
@@ -223,8 +252,13 @@ impl<T: Entry> Chunked<T> {
             return false;
         };
         chunk.remove(pos);
-        if chunk.is_empty() {
-            self.chunks.remove(ci);
+        match chunk.first() {
+            None => {
+                self.chunks.remove(ci);
+                self.firsts.remove(ci);
+            }
+            Some(f) if pos == 0 => self.firsts[ci] = f.clone(),
+            Some(_) => {}
         }
         self.len -= 1;
         true
@@ -243,13 +277,16 @@ impl<T: Entry> Chunked<T> {
             Ordering::Equal => past,
             Ordering::Greater => false,
         };
-        let ci = self
-            .chunks
-            .partition_point(|c| below(c.last().expect("chunks are never empty")));
-        if ci == self.chunks.len() {
-            return (ci, 0);
+        // The chunks whose first entry is below `x`: the place is in the
+        // last of them, or where the next one starts.
+        let ci = self.firsts.partition_point(below);
+        let Some(c) = ci.checked_sub(1) else {
+            return (0, 0);
+        };
+        match self.chunks[c].partition_point(below) {
+            at if at == self.chunks[c].len() => (ci, 0),
+            at => (c, at),
         }
-        (ci, self.chunks[ci].partition_point(below))
     }
 
     /// The entries within the bounds, in order, both ways.
@@ -280,7 +317,7 @@ impl<T: Entry> Chunked<T> {
         })
     }
 
-    fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
         self.chunks.iter().flatten()
     }
 
@@ -288,7 +325,26 @@ impl<T: Entry> Chunked<T> {
     /// searches and the lengths of the chunks between, not a walk over the
     /// entries.
     pub(crate) fn count(&self, lo: &T, hi: &T) -> usize {
-        let (a, b) = (self.seek(lo, false), self.seek(hi, false));
+        self.between(self.seek(lo, false), self.seek(hi, false))
+    }
+
+    /// [`Self::count`] within bounds as [`Self::range`] takes them.
+    pub(crate) fn count_within(&self, lo: &Bound<T>, hi: &Bound<T>) -> usize {
+        let a = match lo {
+            Bound::Included(x) => self.seek(x, false),
+            Bound::Excluded(x) => self.seek(x, true),
+            Bound::Unbounded => (0, 0),
+        };
+        let b = match hi {
+            Bound::Included(x) => self.seek(x, true),
+            Bound::Excluded(x) => self.seek(x, false),
+            Bound::Unbounded => (self.chunks.len(), 0),
+        };
+        self.between(a, b)
+    }
+
+    /// The entries from one place a search found to another.
+    fn between(&self, a: (usize, usize), b: (usize, usize)) -> usize {
         if (a.0, a.1) >= (b.0, b.1) {
             return 0;
         }
@@ -331,14 +387,14 @@ pub struct Range {
 
 /// `int`/`timestamp` onto `u64`, order kept: flipping the sign bit puts the
 /// negatives below the positives.
-fn int_key(i: i64) -> u64 {
+pub(crate) fn int_key(i: i64) -> u64 {
     (i as u64) ^ (1 << 63)
 }
 
 /// `float` onto `u64`, order kept: a negative has every bit flipped, a
 /// positive only its sign. `-0.0` and `0.0` compare equal, so they share a
 /// key. The caller keeps `NaN` out.
-fn float_key(f: f64) -> u64 {
+pub(crate) fn float_key(f: f64) -> u64 {
     let f = if f == 0.0 { 0.0 } else { f };
     let b = f.to_bits();
     if b >> 63 == 1 {
@@ -728,7 +784,7 @@ impl SortedIndex {
 }
 
 /// Where a json value goes: a number's key, a text's, the nulls, or apart.
-enum JsonSlot {
+pub(crate) enum JsonSlot {
     Num(u64),
     Text(Box<str>),
     Null,
@@ -738,7 +794,7 @@ enum JsonSlot {
 /// Where a json value goes in its index. An int is keyed as the `f64` it
 /// is, which `cmp_value` meets a float as; past 2^53 two ints share an `f64`
 /// that `cmp_value` tells apart, so it goes apart, as a `NaN` does.
-fn json_slot(v: Option<&Value>) -> JsonSlot {
+pub(crate) fn json_slot(v: Option<&Value>) -> JsonSlot {
     const EXACT: u64 = 1 << 53;
     match v {
         Some(Value::Int(i)) if i.unsigned_abs() <= EXACT => JsonSlot::Num(float_key(*i as f64)),

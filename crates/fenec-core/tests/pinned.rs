@@ -269,6 +269,10 @@ fn a_read_that_reaches_for_an_index_is_answered_none() {
          s sparse<8> @inverted, at timestamp @ttl(1d))",
     );
     exec(&mut db, "create collection u (k int @hash)");
+    exec(
+        &mut db,
+        "create collection v (a int, b int, @sorted(a, b desc))",
+    );
     for i in 0..50 {
         let put = format!(
             "put t {{k: {}, n: {i}, body: \"w{} common\", s: \"{{1:0.5}}/8\"}}",
@@ -277,6 +281,7 @@ fn a_read_that_reaches_for_an_index_is_answered_none() {
         );
         exec(&mut db, &put);
         exec(&mut db, &format!("put u {{k: {i}}}"));
+        exec(&mut db, &format!("put v {{a: {}, b: {i}}}", i % 4));
     }
     db.set_pin_at(0);
     let p = db.pin_every_collection();
@@ -292,6 +297,10 @@ fn a_read_that_reaches_for_an_index_is_answered_none() {
         "get t where k in (get u select k where k < 3) count",
         "get t where expired() count",
         "get t limit 3 lookup u on k = k",
+        "get v where a = 1 order b desc limit 3",
+        "get v where a in [1, 2] count",
+        "get v where a >= 2 count",
+        "get v order a, b desc limit 3",
     ] {
         let s = stmt(sql);
         assert!(db.pin(&[(&s, &[][..])]).is_none(), "{sql}");
@@ -301,6 +310,8 @@ fn a_read_that_reaches_for_an_index_is_answered_none() {
         "get t where body ~ \"w1\" count",
         "get t select k, count(*), sum(n) group k",
         "get t where n in (get u select k where id < 5) count",
+        "get v where b = 1 count",
+        "get v order b limit 3",
     ] {
         let s = stmt(sql);
         assert_eq!(p.query(&s, &[]), Some(db.query(&s, &[])), "{sql}");

@@ -95,6 +95,14 @@ export interface SchemaDescription {
 export interface CollectionDescription {
   name: string;
   fields: FieldDescription[];
+  /** Its indexes over several fields. */
+  indexes?: CompositeDescription[];
+}
+/** An index over several fields: `@sorted(owner, at desc)`, `@unique(org, slug)`. */
+export interface CompositeDescription {
+  kind: 'sorted' | 'unique';
+  /** Each part: a field, or a path into a json one (`meta.lang`). */
+  keys: { field: string; desc?: true }[];
 }
 export interface FieldDescription {
   name: string;

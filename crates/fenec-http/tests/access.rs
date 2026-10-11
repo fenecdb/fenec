@@ -534,6 +534,55 @@ fn a_unique_clash_tells_a_scoped_token_nothing_of_the_other_row() {
     );
 }
 
+/// The same of a unique index over several fields: the fields alone, and
+/// a read through it held to the token's rows as any read is.
+#[test]
+fn a_unique_index_over_several_fields_tells_a_scoped_token_its_fields_alone() {
+    let n = start_with(
+        "pages  read,write  where owner = $jwt.sub\n",
+        &[
+            "create collection pages (owner text, org text, slug text, @unique(org, slug), \
+             @sorted(owner, slug desc))",
+            r#"put pages {owner: "bob", org: "acme", slug: "home"}"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    for (status, body) in [
+        n.query(&alice, r#"insert pages {org: "acme", slug: "home"}"#),
+        n.call(
+            Some(&alice),
+            "POST",
+            "/pages",
+            r#"{"org":"acme","slug":"home"}"#,
+        ),
+    ] {
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("`pages (org, slug)` is unique"), "{body}");
+        assert!(!body.contains("acme") && !body.contains("home"), "{body}");
+        assert!(!body.contains("document"), "the row was told: {body}");
+    }
+    assert_eq!(
+        n.query(&alice, r#"put pages {org: "acme", slug: "about"}"#)
+            .0,
+        200
+    );
+    let (status, body) = n.query(
+        &alice,
+        r#"get pages select slug where owner = "bob" order slug desc limit 5"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("home"), "{body}");
+    let (status, body) = n.query(&alice, r#"get pages select slug where org = "acme""#);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("about") && !body.contains("home"), "{body}");
+    let (status, body) = n.query(ROOT, r#"insert pages {org: "acme", slug: "home"}"#);
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body.contains("document 1 holds") && body.contains("acme"),
+        "{body}"
+    );
+}
+
 const LEDGER: &str = "\
 journal  read,write  where owner = $jwt.sub
 journal  append-only

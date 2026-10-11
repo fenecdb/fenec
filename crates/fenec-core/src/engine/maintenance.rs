@@ -76,6 +76,19 @@ struct IndexCopy {
     values: Vec<(DocId, Option<Value>)>,
 }
 
+/// An index over several fields' keys, copied: each row's in id order, and
+/// the empty index they go into.
+#[cfg(feature = "sorted")]
+struct CompositeCopy {
+    token: u64,
+    cid: u32,
+    collection: String,
+    index: Composite,
+    keys: Vec<(DocId, crate::composite::RowKey)>,
+    /// What the keys were made by: the empty index over the parts.
+    keyed: CompositeIndex,
+}
+
 /// One of these is made a maintenance and moved into place once, so the
 /// graph's size beside the other variants' costs nothing worth a box.
 #[allow(clippy::large_enum_variant)]
@@ -231,6 +244,15 @@ impl Database {
                 kind,
                 if_not_exists,
             } => index_online(db, collection, field, kind, *if_not_exists, during),
+            #[cfg(feature = "sorted")]
+            Statement::CreateComposite {
+                collection,
+                index,
+                if_not_exists,
+            } => composite_online(db, collection, index, *if_not_exists, during),
+            // Refused, the feature named, as `execute` refuses it.
+            #[cfg(not(feature = "sorted"))]
+            Statement::CreateComposite { .. } => write(db).execute_with(stmt, &[]),
             Statement::Compact(which) => compact_online(db, which.as_deref(), during),
             _ => return None,
         })
@@ -487,6 +509,96 @@ impl Database {
         Ok(Response::Ok(format!(
             "index built on `{}.{}`",
             copy.collection, copy.field
+        )))
+    }
+
+    /// The keys of an index over several fields copied under the read lock,
+    /// as [`Self::begin_index`] copies a field's values.
+    #[cfg(feature = "sorted")]
+    fn begin_composite(
+        &self,
+        collection: &str,
+        comp: &Composite,
+        if_not_exists: bool,
+    ) -> Result<std::result::Result<CompositeCopy, Response>> {
+        self.may_write(false)?;
+        if let Some(done) = self.check_composite(collection, comp, if_not_exists)? {
+            return Ok(Err(done));
+        }
+        let c = &self.collections[collection];
+        let keyed = super::empty_composite(&c.schema, comp)
+            .ok_or_else(|| super::not_built("the index", "sorted"))?;
+        let mut keys = Vec::with_capacity(c.store.len());
+        super::composite_keys(&c.store, &c.schema, comp, &keyed, &mut |id, k| {
+            keys.push((id, k))
+        })?;
+        Ok(Ok(CompositeCopy {
+            token: self.watch(c.id),
+            cid: c.id,
+            collection: collection.to_string(),
+            index: comp.clone(),
+            keys,
+            keyed,
+        }))
+    }
+
+    /// The index built beside the database put in place under the write
+    /// lock, once the writes made meanwhile are in it: each out with the
+    /// key the copy saw, in with the one its row holds now.
+    #[cfg(feature = "sorted")]
+    fn finish_composite(
+        &mut self,
+        copy: CompositeCopy,
+        mut built: CompositeIndex,
+    ) -> Result<Response> {
+        let CompositeCopy {
+            token,
+            cid,
+            collection,
+            index,
+            keys,
+            ..
+        } = copy;
+        let tail = self.unwatch(token);
+        self.refuse_if_failed()?;
+        self.fenced()?;
+        let changed = || {
+            Error::Query(format!(
+                "`{collection}` changed while the index was built; run `create index` again"
+            ))
+        };
+        let tail = tail.ok_or_else(changed)?;
+        if tail.schema || self.named(cid).as_deref() != Some(&collection) {
+            return Err(changed());
+        }
+        let c = self.collections.get_mut(&collection).unwrap();
+        let mut ids = tail.ids;
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            if let Ok(k) = keys.binary_search_by_key(&id, |e| e.0) {
+                built.remove(id, keys[k].1.clone());
+            }
+            if let Some(doc) = c.store.read(&c.schema, id)? {
+                built.insert(id, super::composite_key(&built, &index, &doc));
+            }
+        }
+        // Asked of the index as it stands once the writes made meanwhile
+        // are in: one of them may be the second holder.
+        if let (true, Some((a, b))) = (index.unique, built.shared()) {
+            return Err(super::composite_shared(c, &index, a, b));
+        }
+        let text = index.keys_text();
+        c.schema.composites.push(index.clone());
+        c.composites.push((index, Derived::new(built)));
+        let encoded = c.schema.encode();
+        self.wal(REC_ALTER, cid, &encoded)?;
+        self.note(cid, SCHEMA_MARK);
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(Response::Ok(format!(
+            "index built on `{collection}` ({text})"
         )))
     }
 
@@ -1111,6 +1223,33 @@ fn index_online(
     during();
     let built = copy.build();
     let r = write(db).finish_index(built);
+    watching.tokens.clear();
+    r
+}
+
+/// `create index` over several fields beside the database: the keys
+/// copied under the read lock, put in order with no lock held -- the
+/// inserts are the build -- and the writes made meanwhile caught up with
+/// under the write lock.
+#[cfg(feature = "sorted")]
+fn composite_online(
+    db: &RwLock<Database>,
+    collection: &str,
+    comp: &Composite,
+    if_not_exists: bool,
+    during: &mut dyn FnMut(),
+) -> Result<Response> {
+    let copy = match read(db).begin_composite(collection, comp, if_not_exists)? {
+        Ok(copy) => copy,
+        Err(done) => return Ok(done),
+    };
+    let mut watching = Watching {
+        db,
+        tokens: vec![copy.token],
+    };
+    during();
+    let built = CompositeIndex::build(copy.keyed.parts().to_vec(), copy.keys.clone());
+    let r = write(db).finish_composite(copy, built);
     watching.tokens.clear();
     r
 }

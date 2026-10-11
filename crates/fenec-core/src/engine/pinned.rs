@@ -208,12 +208,19 @@ impl Database {
         let c = self.collections.get(&sel.collection)?;
         let hashed = |f: &str| c.hashes.contains_key(f);
         let ordered = |f: &str| c.sorted.iter().any(|(n, _)| n == f);
+        // An index over several fields answers what names its first part:
+        // an equality, an `in`, a range, an order -- the walk of one whose
+        // first part an equality fixes is named by that equality.
+        let composed = |f: &str| c.composites.iter().any(|(k, _)| k.keys[0].0 == f);
         // An ordered walk (`walk_order`), and a facet the hash index's
         // buckets count or the ordered index's ranges.
         if let [s] = sel.order.as_slice() {
             if ordered(&s.field) {
                 return None;
             }
+        }
+        if sel.order.first().is_some_and(|s| composed(&s.field)) {
+            return None;
         }
         if (sel.facets.iter())
             .any(|f| hashed(&f.field) || (f.ranges.is_some() && ordered(&f.field)))
@@ -277,13 +284,13 @@ impl Database {
             for field in named {
                 match field {
                     "id" => rows = false,
-                    f if hashed(f) => return None,
+                    f if hashed(f) || composed(f) => return None,
                     _ => {}
                 }
             }
             let mut ranges = Vec::new();
             f.conjunct_ranges(params, &mut ranges);
-            if ranges.iter().any(|r| ordered(r.0)) {
+            if ranges.iter().any(|r| ordered(r.0) || composed(r.0)) {
                 return None;
             }
             // A radius or a box the point index narrows.
@@ -315,12 +322,12 @@ impl Collection {
     /// one fails rather than plans without it; the graphs are left out,
     /// which only `near` reads, and `pin` declines.
     fn pinned(&self) -> Collection {
+        fn refused<T>() -> Derived<T> {
+            Derived(std::sync::OnceLock::from(Err(Error::Query(
+                PINNED_OUT.into(),
+            ))))
+        }
         fn out<T>(names: impl Iterator<Item = String>) -> Vec<(String, Derived<T>)> {
-            let refused = || {
-                Derived(std::sync::OnceLock::from(Err(Error::Query(
-                    PINNED_OUT.into(),
-                ))))
-            };
             names.map(|n| (n, refused())).collect()
         }
         Collection {
@@ -333,6 +340,9 @@ impl Collection {
             sorted: out(self.sorted.iter().map(|(n, _)| n.clone())),
             sparse: out(self.sparse.iter().map(|(n, _)| n.clone())),
             geo: out(self.geo.iter().map(|(n, _)| n.clone())),
+            composites: (self.composites.iter())
+                .map(|(c, _)| (c.clone(), refused()))
+                .collect(),
         }
     }
 }

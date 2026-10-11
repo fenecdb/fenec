@@ -499,6 +499,20 @@ impl Expr {
         }
     }
 
+    /// The terms of an `and` chain, left to right -- the expression itself
+    /// when it is not one: what an index over several fields matches its
+    /// parts against, one term at a time, to know whether it answered every
+    /// one.
+    pub fn conjuncts<'a>(&'a self, out: &mut Vec<&'a Expr>) {
+        match self {
+            Expr::And(a, b) => {
+                a.conjuncts(out);
+                b.conjuncts(out);
+            }
+            other => out.push(other),
+        }
+    }
+
     /// Does the filter consist of exactly one equality?
     pub fn is_bare_equality(&self, params: &[Value]) -> bool {
         self.equality_key(params).is_some()
@@ -2265,6 +2279,22 @@ pub enum Statement {
         field: String,
         kind: crate::schema::IndexKind,
         if_not_exists: bool,
+    },
+    /// `create index on posts (owner, created desc) @sorted`, or `@unique`:
+    /// an index over several fields ([`crate::schema::Composite`]), built
+    /// from the documents there as `create index` builds one on a field.
+    CreateComposite {
+        collection: String,
+        index: crate::schema::Composite,
+        if_not_exists: bool,
+    },
+    /// `drop index on posts (owner, created)`: an index over several fields
+    /// taken off, named by its fields. A field's own index goes with a
+    /// rebuild of the field, as the declared schema's plan says.
+    DropComposite {
+        collection: String,
+        keys: Vec<String>,
+        if_exists: bool,
     },
     /// `alter collection <name> add field | drop field | rename field`: the
     /// fields change, and no document is rewritten for it (`Alter`).

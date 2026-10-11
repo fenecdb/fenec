@@ -54,6 +54,11 @@ pub const TAG_JSON: u8 = 14;
 /// no point meets an unknown type tag in the schema and refuses the file
 /// before it reads a value.
 pub const TAG_GEO: u8 = 15;
+/// Never a value's: a schema writes it, nameless, one place past its last,
+/// before the indexes over several fields (`Schema::composites`). A version
+/// that knows none meets an unknown type tag and refuses the file, rather
+/// than open it without them -- and take a duplicate a unique one refuses.
+pub const TAG_COMPOSITES: u8 = 16;
 
 // ------------------------------------------------------- half precision
 //

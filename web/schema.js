@@ -8,7 +8,7 @@
 //     title: text().notNull(),
 //     done: boolean(),
 //     at: timestamp(),
-//   }, (t) => [index('todos_at').on(t.at)]);
+//   }, (t) => [index('todos_at').on(t.at), index('todos_open').on(t.done, t.at.desc())]);
 //
 //   const db = await Fenec.open('./fenec.wasm', { schema: { todos } });
 //   type Todo = typeof todos.$inferSelect;
@@ -109,7 +109,15 @@ class Column {
     if (typeof keys !== 'string' || !keys.split('.').every((k) => IDENT.test(k))) {
       throw new FenecError(`invalid path ${JSON.stringify(keys)}`);
     }
-    return { column: this, path: keys };
+    return new Part(this, keys, false);
+  }
+  /** The column ascending, a part of an index over several: `index().on(t.owner.asc(), t.at.desc())`. */
+  asc() {
+    return new Part(this, null, false);
+  }
+  /** The column descending, a part of an index over several. */
+  desc() {
+    return new Part(this, null, true);
   }
   default() {
     throw new FenecError('FenecQL has no column defaults: a write leaves a field it does not name null');
@@ -130,6 +138,24 @@ class Column {
     return out;
   }
 }
+
+/** A column, or a path into one, as an index's part: its direction beside it. */
+class Part {
+  constructor(column, path, descending) {
+    this.column = column;
+    this.path = path;
+    this.descending = descending;
+  }
+  asc() {
+    return new Part(this.column, this.path, false);
+  }
+  desc() {
+    return new Part(this.column, this.path, true);
+  }
+}
+
+// The kinds of column whose values an index over several fields orders.
+const ORDERED = ['text', 'int', 'float', 'bool', 'timestamp', 'json'];
 
 const column = (type, kind = type) => {
   // Drizzle 1.0's builders take no name: the key is the field's name.
@@ -193,8 +219,10 @@ export const geometry = (opts) => {
  * `.using('bm25', t.body)` `@text`, `.using('inverted', t.splade)`
  * `@inverted` and `.using('gist', t.loc)` `@geo`, PostGIS's index of a point;
  * `.with({...})` takes their options and `.ttl('30d')` makes an
- * ordered index's rows expire. fenecdb does not name its indexes: a name is
- * checked to be the table's one of it, and kept nowhere.
+ * ordered index's rows expire. `.on(t.owner, t.at.desc())` over several
+ * columns is an index over several fields, `@sorted(owner, at desc)`, and
+ * `uniqueIndex().on(t.org, t.slug)` a unique one. fenecdb does not name its
+ * indexes: a name is checked to be the table's one of it, and kept nowhere.
  */
 class Index {
   constructor(name, unique) {
@@ -207,14 +235,19 @@ class Index {
     this.expiry = null;
   }
   on(...targets) {
-    if (targets.length !== 1) throw new FenecError('a fenecdb index is on one field');
+    if (!targets.length) throw new FenecError('an index is on a column: .on(t.col)');
+    if (targets.length > 1) return copy(this, { method: 'btree', targets });
     return copy(this, { method: this.unique ? 'hash' : 'btree', target: targets[0] });
   }
   using(method, ...targets) {
     if (!['btree', 'hash', 'hnsw', 'bm25', 'inverted', 'gist'].includes(method)) {
       throw new FenecError(`unknown index method ${JSON.stringify(method)}: btree, hash, hnsw, bm25, inverted or gist`);
     }
-    if (targets.length !== 1) throw new FenecError('a fenecdb index is on one field');
+    if (targets.length > 1) {
+      if (method !== 'btree') throw new FenecError('an index over several fields is a btree: its keys are ordered part by part');
+      return copy(this, { method, targets });
+    }
+    if (targets.length !== 1) throw new FenecError('an index is on a column: .using(method, t.col)');
     if (this.unique && method !== 'hash' && method !== 'btree') throw new FenecError('a unique index is a hash');
     return copy(this, { method, target: targets[0] });
   }
@@ -227,9 +260,39 @@ class Index {
     if (!m || Number(m[1]) <= 0) throw new FenecError(`a ttl is a duration such as '30m' or '7d', not ${JSON.stringify(duration)}`);
     return copy(this, { expiry: Number(m[1]) * UNITS[m[2]] });
   }
+  /**
+   * An index over several fields as the description writes it, `{kind,
+   * keys: [{field, desc}]}` -- each part a column of the table or a path into
+   * one, of a kind with an order.
+   */
+  composite() {
+    if (Object.keys(this.options).length || this.expiry) {
+      throw new FenecError('an index over several fields takes no options and no ttl()');
+    }
+    if (this.targets.length > 8) throw new FenecError('an index takes at most 8 fields');
+    const keys = this.targets.map((t) => {
+      const part = t instanceof Part ? t : t instanceof Column ? new Part(t, null, false) : null;
+      if (!part || !(part.column instanceof Column)) throw new FenecError('an index is on a column of the table');
+      const c = part.column;
+      if (part.path === null && !ORDERED.includes(c.kind)) {
+        throw new FenecError(`${c.table}.${c.name} is ${c.type}: an index over several fields orders text, int, float, bool, timestamp and json`);
+      }
+      const key = { field: part.path === null ? c.name : `${c.name}.${part.path}` };
+      if (part.descending) key.desc = true;
+      return { col: c, key };
+    });
+    const fields = keys.map((k) => k.key.field);
+    const twice = fields.find((f, i) => fields.indexOf(f) !== i);
+    if (twice) throw new FenecError(`${twice} is named twice in one index`);
+    return { cols: keys.map((k) => k.col), composite: { kind: this.unique ? 'unique' : 'sorted', keys: keys.map((k) => k.key) } };
+  }
   /** The index as the description writes it, and the field or path it is on. */
   resolve() {
-    const t = this.target;
+    let t = this.target;
+    if (t instanceof Part) {
+      if (t.descending) throw new FenecError('desc() orders a part of an index over several fields: an index of one field is walked both ways');
+      t = t.path === null ? t.column : { column: t.column, path: t.path };
+    }
     if (!t) throw new FenecError(`index ${this.indexName ?? ''} is on no column: .on(t.col) or .using(method, t.col)`);
     const col = t instanceof Column ? t : t.column;
     if (!(col instanceof Column)) throw new FenecError('an index is on a column of the table');
@@ -290,11 +353,20 @@ export function fenecTable(tableName, columns, extra) {
     table[key] = Object.assign(Object.create(Column.prototype), c, { name: key, table: tname, paths: [] });
   }
   const named = new Set();
+  const composites = [];
   for (const ix of extra?.(table) ?? []) {
     if (!(ix instanceof Index)) throw new FenecError(`${tname}: the third argument returns indexes`);
     if (ix.indexName !== null) {
       if (named.has(ix.indexName)) throw new FenecError(`${tname} names two indexes ${ix.indexName}`);
       named.add(ix.indexName);
+    }
+    if (ix.targets) {
+      const { cols, composite } = ix.composite();
+      for (const c of cols) if (table[c.name] !== c) throw new FenecError(`${tname}: index ${ix.indexName ?? ''} is on another table's column`);
+      const same = (o) => o.keys.length === composite.keys.length && o.keys.every((k, i) => k.field === composite.keys[i].field);
+      if (composites.some(same)) throw new FenecError(`${tname} has two indexes on (${composite.keys.map((k) => k.field).join(', ')})`);
+      composites.push(composite);
+      continue;
     }
     const { col, path, index: kind } = ix.resolve();
     if (table[col.name] !== col) throw new FenecError(`${tname}: index ${ix.indexName ?? ''} is on another table's column`);
@@ -310,6 +382,7 @@ export function fenecTable(tableName, columns, extra) {
   }
   Object.defineProperties(table, {
     $name: { value: tname },
+    $indexes: { value: composites },
     [TABLE]: { value: true },
   });
   return Object.freeze(table);
@@ -321,7 +394,9 @@ export const collection = fenecTable;
 class Table {
   /** The collection as the description writes it. */
   toJSON() {
-    return { name: this.$name, fields: Object.values(this).map((c) => c.toJSON()) };
+    const out = { name: this.$name, fields: Object.values(this).map((c) => c.toJSON()) };
+    if (this.$indexes.length) out.indexes = this.$indexes;
+    return out;
   }
   /**
    * The collection as FenecQL writes it -- what a `schema.fenecql` file
@@ -337,6 +412,9 @@ class Table {
       if (c.index) f += ` ${indexText(c.index)}`;
       return f;
     });
+    for (const ix of this.$indexes) {
+      fields.push(`@${ix.kind}(${ix.keys.map((k) => (k.desc ? `${k.field} desc` : k.field)).join(', ')})`);
+    }
     const lines = [`create collection ${this.$name} (${fields.join(', ')})`];
     for (const c of cols) for (const p of c.paths) lines.push(`create index on ${this.$name} (${c.name}.${p.path}) ${indexText(p.index)}`);
     return lines.join('\n');
@@ -399,6 +477,11 @@ export const rename = (table, from, to) =>
   `alter collection ${name(nameOf(table), 'a table')} rename field ${name(from, 'a column')} to ${name(to, 'a column')}`;
 /** `alter collection <t> drop field <f>`: a field and its values gone. */
 export const drop = (table, field) => `alter collection ${name(nameOf(table), 'a table')} drop field ${name(field, 'a column')}`;
+/** `drop index on <t> (a, b)`: an index over several fields taken off, named by its fields. */
+export const dropIndex = (table, ...fields) => {
+  if (fields.length < 2) throw new FenecError('dropIndex() names an index over several fields: a field\'s own goes with rebuild()');
+  return `drop index on ${name(nameOf(table), 'a table')} (${fields.map((f) => name(f, 'a column')).join(', ')})`;
+};
 /** `drop collection <t>`: a collection and its documents gone. */
 export const dropTable = (table) => `drop collection ${name(nameOf(table), 'a table')}`;
 /**

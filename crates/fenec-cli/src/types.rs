@@ -377,6 +377,29 @@ fn render_tables(path: &str, import: &str, schemas: &[Schema]) -> String {
                 indexes.push(ix);
             }
         }
+        // An index over several fields, Drizzle's way: `.on(t.owner,
+        // t.at.desc())`, named by its table and fields.
+        for c in &s.composites {
+            let b = if c.unique { "uniqueIndex" } else { "index" };
+            if !used.contains(&b) {
+                used.push(b);
+            }
+            let mut name = s.name.clone();
+            let mut on = Vec::new();
+            for (k, desc) in &c.keys {
+                name.push('_');
+                name.push_str(&k.replace('.', "_"));
+                let target = match fenec_core::schema::split_path(k) {
+                    Some((field, keys)) => format!("{}.path('{keys}')", member(field)),
+                    None => member(k),
+                };
+                on.push(match desc {
+                    true => format!("{target}.desc()"),
+                    false => target,
+                });
+            }
+            indexes.push(format!("{b}('{name}_idx').on({})", on.join(", ")));
+        }
         match indexes.is_empty() {
             true => body.push_str("});\n"),
             false => {

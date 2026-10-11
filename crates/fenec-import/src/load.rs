@@ -94,6 +94,13 @@ pub fn run_with_progress(
             if_not_exists: false,
         })?;
     }
+    for c in &opts.composites {
+        db.execute(&Statement::CreateComposite {
+            collection: opts.into.clone(),
+            index: c.clone(),
+            if_not_exists: false,
+        })?;
+    }
 
     // The checkpoint writes the HNSW graph into the file too: the next open
     // does not rebuild the index.
@@ -490,6 +497,56 @@ mod tests {
         assert_eq!(vi.len(), 1, "the vector index was not built");
         assert_eq!(vi[0].field, "embed");
         assert_eq!(vi[0].count, 20);
+    }
+
+    /// `--index owner,at desc@sorted`: an index over several fields, built
+    /// once the rows are in; one over a part no order has refused before
+    /// anything is written.
+    #[test]
+    fn an_index_over_several_fields_is_built_after_load() {
+        let table = || {
+            Rows::new(
+                vec![
+                    Column::new("id", DataType::Int, "INTEGER"),
+                    Column::new("owner", DataType::Int, "INTEGER"),
+                    Column::new("at", DataType::Int, "INTEGER"),
+                    Column::new("embed", DataType::Vector(2, VecPrec::F32), "BLOB"),
+                ],
+                (1..=30)
+                    .map(|i| {
+                        vec![
+                            Value::Int(i),
+                            Value::Int(i % 3),
+                            Value::Int(i),
+                            Value::Vector(vec![1.0, 0.0]),
+                        ]
+                    })
+                    .collect(),
+            )
+        };
+        let mut o = Options::new("m");
+        let c = crate::args::parse_composite("owner,embed@sorted")
+            .unwrap()
+            .unwrap();
+        o.composites.push(c);
+        let e = run(&mut table(), &mut Database::new(), &o).unwrap_err();
+        assert!(e.to_string().contains("orders bool, int"), "{e}");
+        assert!(o.composites.pop().is_some());
+        o.composites.push(
+            crate::args::parse_composite("owner, at desc@sorted")
+                .unwrap()
+                .unwrap(),
+        );
+        let mut db = Database::new();
+        run(&mut table(), &mut db, &o).unwrap();
+        let q = fenec_ql::parse_one("explain get m where owner = 1 order at desc limit 2").unwrap();
+        let Ok(Response::Rows(plan)) = db.query(&q, &[]) else {
+            panic!()
+        };
+        assert!(
+            format!("{:?}", plan.rows[0].values).contains("walked the index on (owner, at desc)"),
+            "{plan:?}"
+        );
     }
 
     /// An unparseable value has to say which row it was on; in a 2000-row

@@ -2478,11 +2478,80 @@ out in ascending id both ways, since that is the order the scan leaves them in
 -- a descending walk reverses each run of equal keys. A walk tests the rest of
 the filter row by row and gives up past an eighth of the collection, so a filter
 that matches almost nothing costs 1.25x the scan rather than 2x in random reads.
-The structure is a sorted `Vec` of chunks of at most 512 entries, not a
-`BTreeSet`, which made the browser module 75 KB larger; `tests/sorted.rs` checks
+The structure is a sorted `Vec` of chunks of at most 256 entries, not a
+`BTreeSet`, which made the browser module 75 KB larger, each chunk found among
+`firsts`, the chunks' first entries side by side: searched over the chunks'
+own, each probe was a cache miss into a buffer of its own, and a lone put
+beside an ordered index over a random int took 1 324 ns, 1 098 now (512 to 256
+moved what a write shifts; the reads did not move). `tests/sorted.rs` checks
 every filter, order and page against a twin collection without the index. It is
 derived data like the hash and text indexes: built when a statement first reads
 it after an open (below), never in the file.
+
+**An index over several fields is its parts' bytes laid end to end**
+(`composite.rs`, `Schema::composites`). `@sorted(owner, created desc)` among
+a `create collection`'s fields or `create index on posts (owner, created
+desc) @sorted`, `@unique(org, slug)` the same refusing a second holder of
+every part, `drop index on posts (owner, created)` by its fields; 2 to 8
+parts of bool, int, float, timestamp, text or json, a path among them. The
+schema writes them one nameless place past its last behind type tag 16
+(`TAG_COMPOSITES`), which a binary from before refuses. A part's value is
+encoded so its bytes order as `cmp_value` orders the values -- an int's sign
+bit flipped, a float's bits made to order with `-0.0` folded, a bool a tag,
+text escaped (`00` as `00 FF`) and ended (`00 01`), a json number as its
+`f64` below json text -- null a tag below every value, a descending part's
+bytes inverted; a collated text is kept as written behind a tag naming the
+collation, and an index holding one compares part by part (`cmp_keys`),
+the rest as bytes. A float's `NaN` and a json bool, list, object or int past
+2^53 are apart: their codec bytes are their part (a unique index finds them
+by them), the rows are listed, and while one is no walk answers and a
+filter's run takes them as candidates to test. Entries are `(KeyBytes,
+DocId)` in the ordered index's `Chunked`, a key of up to 22 bytes held in the
+32-byte entry (an int and a time are 18), longer on the heap, two held ones
+compared as a `u128` and a `u64` big-endian and then by length: each boxed,
+a million keys counted 48 MB and a put cost 2.0 us; `memcmp` a comparison
+was 13% of an insert. Natively the build sorts the keys once (1 015 -> 148
+ms over a million); the browser module inserts them, a sort of these entries
+being code of its own there. The planner (`composed`) fixes the parts the
+`and` chain's equalities name, in order -- an `in` whose every element it
+can say makes a span each, `MAX_SPANS` (256) at most together -- narrows the
+part after them by its comparisons, and calls the plan exact when it took
+every term and nothing is apart; any term it did not take is tested row by
+row, so a literal it cannot say (`null`, `12.5` against an int) changes
+nothing. `filter_candidates` takes its spans by exact count, two searches
+each, under a range's rule; `walk_composite` an `order` on the parts after
+the fixed ones in their directions or every one reversed (an `in`'s part is
+no fixed one for an order), the spans merged by the order's parts
+(`CompositeIndex::walk`), ties gathered and put in id order, a walk testing
+the filter only while its run is no longer than `indexed_size`'s smallest
+set and giving up past an eighth of the collection; `count_composed` counts
+an exact plan off the chunks. A read names it only by its first part
+(`names_first`), so one it cannot help neither builds it nor, pinned, meets
+it -- and `pin` declines a read naming a composite's first part. Over a
+million posts and 10 000 owners `where owner = $1 order created desc limit
+20` took 6.3 us p50 against 11.8 through `owner @hash` and 24.4
+ms through `created @sorted`, a feed over ten owners 22 us against
+100, built in 147 ms in 40 MB; a lone put 715 ns, 1 561
+beside it (its first part puts a write anywhere in it), 851 beside
+`created @sorted` and `owner @hash`; `@unique(org, slug)` 1 745 ns a put
+against 1 285 for `@unique` on the two joined, a read by both 2.5 us
+against 1.3 -- a hash index over several fields would answer that by a
+microsecond sooner, not worth a third index's code (`make composite-bench`).
+`create index` builds it beside the database (`begin_composite` copies the
+keys under the read lock); a block puts one made or dropped back
+(`Undo::Composed`, `Uncomposed`); a field renamed renames its parts, one
+dropped takes it off, either way unbuilt for the first read
+(`fit_composites`). A replica builds what the schema declares, a sync
+replica a unique one as an ordered one (`schema_ddl`, `schemaDDL`, from
+`/collections`' `indexes`). Without `sorted` a file declaring one opens, its
+queries the scan's and a unique one asked by reading the rows
+(`holds_tuple`). `tests/composite.rs` holds every filter, order and page --
+`limit $1` too -- to a twin collection without it through writes, a block
+put back, a reopen, an index made later and one beside the database, a
+rename and a drop, NaN, nulls, `-0.0`, collations and json paths. The
+browser module grew 43.6 KB, 14.1 KB brotli -- the index, its planner, its DDL
+and its declared schema, no one function past 4 KB -- and the test build
+without the indexes 12.8 KB, 3.9 KB brotli.
 
 **`collate und` and `collate tr` are ICU's orders, a query's or a field's.**
 The weights are ICU's own for every assigned code point --

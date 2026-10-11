@@ -6,6 +6,7 @@
 import type {
   Bytes,
   CollectionDescription,
+  CompositeDescription,
   Collation,
   FieldDescription,
   Fields,
@@ -48,6 +49,10 @@ export interface Column<T = unknown, NN extends boolean = boolean, K extends Kin
   unique(): Col<T, NN, K>;
   /** What the column reads as, for TypeScript alone: a json column's shape. */
   $type<U>(): Col<U, NN, K>;
+  /** The column ascending, a part of an index over several: `index().on(t.owner, t.at.desc())`. */
+  asc(): PartRef;
+  /** The column descending, a part of an index over several. */
+  desc(): PartRef;
   // No `default`, `primaryKey` or `references`: FenecQL has no column
   // defaults, every document has an `id` of its own, and a relation is
   // `defineRelations`. Called from JavaScript, each throws saying so.
@@ -91,7 +96,21 @@ export type VectorOp =
 export interface PathRef {
   readonly column: AnyColumn;
   readonly path: string;
+  /** The path ascending, a part of an index over several fields. */
+  asc(): PartRef;
+  /** The path descending, a part of an index over several fields. */
+  desc(): PartRef;
 }
+/** A column or a path with its direction, a part of an index over several fields. */
+export interface PartRef {
+  readonly column: AnyColumn;
+  readonly path: string | null;
+  readonly descending: boolean;
+  asc(): PartRef;
+  desc(): PartRef;
+}
+/** What an index over several fields takes a part of: a column, a path, a direction. */
+export type IndexPart = AnyColumn | PathRef | PartRef;
 export interface VectorOpRef {
   readonly column: AnyColumn;
   readonly metric: 'cosine' | 'l2' | 'dot';
@@ -166,7 +185,13 @@ type TextColumn = Column<string | string[], boolean, 'text' | 'array'>;
 export interface IndexBuilder {
   /** `@sorted`, a btree's work. */
   on(target: AnyColumn | PathRef): OrderedIndexDef;
+  /**
+   * `@sorted(owner, at desc)`: an index over several fields, ordered part by
+   * part -- an equality on its first parts and an order on the next.
+   */
+  on(first: IndexPart, second: IndexPart, ...more: IndexPart[]): IndexDef;
   using(method: 'btree', target: AnyColumn | PathRef): OrderedIndexDef;
+  using(method: 'btree', first: IndexPart, second: IndexPart, ...more: IndexPart[]): IndexDef;
   /** `@hash`: equality, and a `lookup`'s key. */
   using(method: 'hash', target: AnyColumn | PathRef): IndexDef;
   /** `@hnsw`: nearest neighbours, by the operator class's distance. */
@@ -181,7 +206,10 @@ export interface IndexBuilder {
 export interface UniqueIndexBuilder {
   /** `@unique`: a hash refusing a value held twice. */
   on(target: AnyColumn | PathRef): IndexDef;
+  /** `@unique(org, slug)`: a second document holding every part's value refused. */
+  on(first: IndexPart, second: IndexPart, ...more: IndexPart[]): IndexDef;
   using(method: 'hash' | 'btree', target: AnyColumn | PathRef): IndexDef;
+  using(method: 'btree', first: IndexPart, second: IndexPart, ...more: IndexPart[]): IndexDef;
 }
 
 /**
@@ -208,6 +236,8 @@ export type FenecTable<N extends string = string, C extends Record<string, AnyCo
     toJSON(): CollectionDescription;
     /** The collection as FenecQL: `create collection`, then a `create index` a path. */
     toFenecQL(): string;
+    /** Its indexes over several fields, as the description writes them. */
+    readonly $indexes: readonly CompositeDescription[];
   };
 
 /**
@@ -240,6 +270,8 @@ type TableOrName = TableRef | string;
 export function rename(table: TableOrName, from: string, to: string): string;
 /** `alter collection <t> drop field <field>`. */
 export function drop(table: TableOrName, field: string): string;
+/** `drop index on <t> (a, b)`: an index over several fields taken off. */
+export function dropIndex(table: TableOrName, ...fields: string[]): string;
 /** `drop collection <t>`. */
 export function dropTable(table: TableOrName): string;
 /** A field made again as the code declares it, its values copied: what changes its index or collation. */
