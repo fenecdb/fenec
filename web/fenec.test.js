@@ -1916,6 +1916,32 @@ test('distance kernels keep their summation order', { skip: wasm ? false : 'no w
   }
 });
 
+// A graph record ends with each node's hash half, from which the first put
+// after a load makes the table that finds a vector written again rather
+// than hash every vector (`HALVES` in vector.rs). The module hashes as a
+// native build does, so a page takes a server's halves and a server a
+// page's: these are the bytes `the_halves_a_record_carries_are_the_browsers`
+// holds a native record of the same vectors to -- the fourth the first's
+// again, as cosine stores it, so five nodes. An image loaded and written
+// again carries them as they were.
+test('a graph record carries the halves a native build writes', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection h (n int, e vector<4> @hnsw(cosine))');
+  const vectors = [[1, 0, 0, 0], [0, 1, 0, 0], [0.5, 0.5, 0, 0], [2, 0, 0, 0], [1, 2, 3, 4], [-0.25, 0, 0.125, 8]];
+  for (const [n, e] of vectors.entries()) db.run('put h {n: $1, e: $2}', [n, e]);
+  const halves = Buffer.from('013303c48fca17dcd03246a72eb01a282f82d564cf', 'hex');
+  const image = db.snapshot();
+  assert.ok(Buffer.from(image).includes(halves), 'the native halves in the image');
+  const again = await Fenec.open(wasm);
+  again.load(image);
+  assert.deepEqual(again.snapshot(), image);
+  // A copy written after the load joins its node, found through them.
+  again.run('put h {n: 9, e: [3, 0, 0, 0]}');
+  const near = again.rows('get h select n near e $1 limit 3', [[1, 0, 0, 0]]);
+  assert.deepEqual(near.map((r) => r.n).sort(), [0, 3, 9]);
+});
+
 // The module keeps an index's vectors in chunks of about a mebibyte, a
 // whole number of rows each, rather than one array doubled as it grows
 // (`Rows` in vector.rs). 150 vectors fill three chunks of 64 rows each,

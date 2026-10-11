@@ -490,7 +490,6 @@ struct Read<'a> {
     aliases: Vec<(u32, DocId)>,
     /// The top half of each node's hash in [`Same`], four bytes a node,
     /// where the record carries them ([`HALVES`]).
-    #[cfg(not(target_family = "wasm"))]
     halves: Option<&'a [u8]>,
 }
 
@@ -504,7 +503,6 @@ impl<'a> Read<'a> {
             upper: Vec::with_capacity(count),
             tombs: Vec::new(),
             aliases: Vec::new(),
-            #[cfg(not(target_family = "wasm"))]
             halves: None,
         })
     }
@@ -650,9 +648,7 @@ impl<'a> Read<'a> {
                 return None;
             }
             // The nodes' hash halves, where they follow, and nothing else:
-            // the browser, and a binary from before them, read the record
-            // without them.
-            #[cfg(not(target_family = "wasm"))]
+            // a binary from before them reads the record without them.
             match bytes.get(at.pos..)? {
                 [] => {}
                 [HALVES, halves @ ..] if halves.len() == count.checked_mul(4)? => {
@@ -2407,25 +2403,23 @@ const GRAPH_VERSION_FLAT_KEPT: u8 = 8;
 const GRAPH_VERSION_ALIASED: u8 = 9;
 const GRAPH_VERSION_ALIASED_KEPT: u8 = 10;
 
-/// What a native build writes after a version 9 or 10 record's aliases:
-/// this byte, then the top half of each node's hash in [`Same`], four bytes
-/// a node in node order and a tombstone's 0, so that the first vector
-/// placed after an open makes the table from them rather than read and
-/// hash every vector in the arena again -- 33-169 ms over 1.1 million of
-/// 128 dimensions. The reader before them stops at the aliases, so the
-/// record needs no version of its own: the browser, whose hash is another,
-/// reads it without them, as a binary from before them does. Hashed as the
-/// restore fills the arena instead, the vector in cache, the open of
-/// 100 000 x 128 took 0.45 ms longer (3.8%) and of 100 000 x 768 2 ms
-/// (6.7%), and four vectors' chains side by side hashed only 1.65 times as
-/// fast; the 4 bytes a node are 0.68% of a 128-dim file, 0.13% of a 768-dim
-/// one.
-#[cfg(not(target_family = "wasm"))]
+/// What is written after a version 9 or 10 record's aliases: this byte,
+/// then the top half of each node's hash in [`Same`], four bytes a node in
+/// node order and a tombstone's 0, so that the first vector placed after an
+/// open makes the table from them rather than read and hash every vector in
+/// the arena again -- 33-169 ms over 1.1 million of 128 dimensions. The
+/// reader before them stops at the aliases, so the record needs no version
+/// of its own: a binary from before them reads it without them. The browser
+/// module hashes as a native build does, so a page and a server take each
+/// other's. Hashed as the restore fills the arena instead, the vector in
+/// cache, the open of 100 000 x 128 took 0.45 ms longer (3.8%) and of
+/// 100 000 x 768 2 ms (6.7%), and four vectors' chains side by side hashed
+/// only 1.65 times as fast; the 4 bytes a node are 0.68% of a 128-dim file,
+/// 0.13% of a 768-dim one.
 const HALVES: u8 = 1;
 
-/// The live nodes, spread over the arena, whose halves a restore checks
-/// against their vectors before it keeps a record's.
-#[cfg(not(target_family = "wasm"))]
+/// The nodes, spread evenly over the arena, whose halves a restore checks
+/// against their vectors before it keeps a record's, a tombstone passed over.
 const HALVES_CHECKED: usize = 64;
 
 /// Whether a graph can hold nodes not linked yet: a server's open leaves
@@ -2971,13 +2965,13 @@ pub struct VectorIndex {
 /// 10 000 x 128 in the browser took 5% longer. 8 bytes a slot, 16 to 32 a
 /// node -- 3 to 6% of a 128-dim f32 arena, under 1% of a 768-dim one. Made
 /// the first time a vector is placed, not at an open, which would hold it
-/// for a database that may only be read: natively from the halves of the
-/// hashes the graph record carried ([`HALVES`]) where it did, from the
-/// arena otherwise.
+/// for a database that may only be read: from the halves of the hashes the
+/// graph record carried ([`HALVES`]) where it did, from the arena
+/// otherwise.
 ///
-/// In the browser one table, made again from the arena twice the size once
-/// it is half full, and a node that became a tombstone stays in it, passed
-/// over, until it grows. Natively that reading was the write that found it
+/// In the browser one table, a slot's place the low bits of its half,
+/// made again from the arena twice the size once it is half full, and a
+/// node that became a tombstone stays in it, passed over, until it grows. Natively that reading was the write that found it
 /// full: every vector hashed again, a doubling at a time -- 118-132 and
 /// 242-281 ms at 2^19 and 2^20 nodes of 128 dimensions, 376 ms at 2^18 of
 /// 768 and 1.45 s at 2^19, every write and read waiting for it. So natively
@@ -2996,6 +2990,9 @@ struct Same {
     slots: Vec<u64>,
     used: usize,
     built: bool,
+    /// As natively: the halves a restored record carried, until the table
+    /// is made from them.
+    halves: Vec<u32>,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -3232,22 +3229,24 @@ impl Same {
 impl Same {
     #[inline]
     fn bytes(&self) -> usize {
-        self.slots.capacity() * 8
+        self.slots.capacity() * 8 + self.halves.capacity() * 4
+    }
+
+    /// Each of the first `n` nodes' hash half, read off the slots: 0 for a
+    /// node with none.
+    fn halves_by_node(&self, n: usize) -> Vec<u32> {
+        let mut halves = vec![0u32; n];
+        for &s in self.slots.iter().filter(|&&s| s != 0) {
+            if let Some(h) = halves.get_mut((s as u32 - 1) as usize) {
+                *h = (s >> 32) as u32;
+            }
+        }
+        halves
     }
 }
 
-/// A hash of a vector as the arena stores it (`Arena::write_stored`), four
-/// bytes at a time -- so an f32 arena's is its floats' bits, taken with no
-/// bytes written ([`hash_words`]).
-#[cfg(target_family = "wasm")]
-fn hash_stored(bytes: &[u8]) -> u64 {
-    let (words, rest) = bytes.as_chunks::<4>();
-    let words = words.iter().map(|w| u32::from_le_bytes(*w));
-    hash_words(words.chain(rest.iter().map(|&b| b as u32)))
-}
-
 /// A multiply and a rotate a word.
-#[cfg(any(target_family = "wasm", not(feature = "vector")))]
+#[cfg(not(feature = "vector"))]
 fn hash_words(words: impl Iterator<Item = u32>) -> u64 {
     let mut h: u64 = 0x243F_6A88_85A3_08D3;
     for w in words {
@@ -3258,13 +3257,14 @@ fn hash_words(words: impl Iterator<Item = u32>) -> u64 {
     h ^ (h >> 32)
 }
 
-/// [`hash_words`] natively: two words a step into each of four chains,
-/// folded together and finished, so that every bit of the top half -- a
-/// slot's place and its shard -- hears every word. One chain waited on its
-/// multiply a word: a 768-dim vector in cache took 1.18 us against 0.17, a
-/// 128-dim one 0.16 against 0.02, which leaves [`Same`]'s making from the
-/// arena to the memory's speed.
-#[cfg(not(target_family = "wasm"))]
+/// A vector's hash in [`Same`], on every target, since a graph record
+/// carries its halves: two words a step into each of four chains, folded
+/// together and finished, so that every bit of the top half -- a slot's
+/// place and its shard -- hears every word. One chain, [`hash_words`] (the
+/// browser's until its module took the halves), waited on its multiply a
+/// word: a 768-dim vector in cache took 1.18 us against 0.17, a 128-dim one
+/// 0.16 against 0.02, which leaves [`Same`]'s making from the arena to the
+/// memory's speed.
 #[inline]
 fn hash_lanes<T: Copy>(words: &[T], bits: impl Fn(T) -> u32, rest: &[u8]) -> u64 {
     const K: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -3302,7 +3302,9 @@ fn hash_lanes<T: Copy>(words: &[T], bits: impl Fn(T) -> u32, rest: &[u8]) -> u64
     x ^ (x >> 33)
 }
 
-#[cfg(not(target_family = "wasm"))]
+/// A hash of a vector as the arena stores it (`Arena::write_stored`), four
+/// bytes at a time -- so an f32 arena's is its floats' bits, taken with no
+/// bytes written.
 #[inline]
 fn hash_stored(bytes: &[u8]) -> u64 {
     let (words, rest) = bytes.as_chunks::<4>();
@@ -3824,11 +3826,20 @@ impl VectorIndex {
                     true => unit_scale(flat_sq(raw)),
                     false => 1.0,
                 };
-                // The browser's hash takes the closure the comparison
-                // below takes: through a function of its own, 21 bytes of
-                // its module more.
+                // The browser hashes the bytes the arena would hold, as it
+                // hashes a code's: one copy of the hash in its module, where
+                // one over the floats was 0.4 KB more.
                 #[cfg(target_family = "wasm")]
-                let hash = hash_words(raw.iter().map(|&x| scaled(x, inv).to_bits()));
+                let hash = {
+                    let mut stored = std::mem::take(&mut self.stored_buf);
+                    stored.clear();
+                    for &x in raw {
+                        stored.extend_from_slice(&scaled(x, inv).to_bits().to_le_bytes());
+                    }
+                    let hash = hash_stored(&stored);
+                    self.stored_buf = stored;
+                    hash
+                };
                 #[cfg(not(target_family = "wasm"))]
                 let hash = hash_scaled(raw, inv);
                 (hash, Some(inv))
@@ -3846,7 +3857,7 @@ impl VectorIndex {
         #[cfg(target_family = "wasm")]
         let (slots, mask) = (&self.same.slots, self.same.slots.len() - 1);
         #[cfg(target_family = "wasm")]
-        let mut i = hash as usize & mask;
+        let mut i = (hash >> 32) as usize & mask;
         #[cfg(not(target_family = "wasm"))]
         let (slots, mut i) = self.same.home(hash);
         #[cfg(not(target_family = "wasm"))]
@@ -3879,23 +3890,23 @@ impl VectorIndex {
         out
     }
 
-    /// Makes [`Same`] from the arena, two to four slots a live node: more
-    /// than half full it is made again twice the size.
+    /// Makes [`Same`] from the halves a restored record carried, or from
+    /// the arena, two to four slots a live node: more than half full it is
+    /// made again twice the size, from the arena.
     #[cfg(target_family = "wasm")]
     fn same_build(&mut self) {
-        let live = self.doc_ids.len() - self.deleted_count;
+        let n = self.doc_ids.len();
+        let halves = match self.same.halves.len() == n {
+            true => std::mem::take(&mut self.same.halves),
+            false => self.arena_halves(n),
+        };
+        let live = n - self.deleted_count;
         self.same.slots = vec![0; (live.max(8) * 2).next_power_of_two()];
         self.same.used = 0;
         self.same.built = true;
-        for node in 0..self.doc_ids.len() as u32 {
-            if !self.is_deleted(node) {
-                let h = match &self.data {
-                    Arena::F32(d) => {
-                        hash_words(d.row(node as usize, self.dim).iter().map(|x| x.to_bits()))
-                    }
-                    _ => hash_stored(&self.stored_of(node)),
-                };
-                self.same_put(node, h);
+        for (node, &h) in halves.iter().enumerate() {
+            if !self.is_deleted(node as u32) {
+                self.same_put(node as u32, (h as u64) << 32);
             }
         }
     }
@@ -3907,7 +3918,7 @@ impl VectorIndex {
             return self.same_build();
         }
         let mask = self.same.slots.len() - 1;
-        let mut i = hash as usize & mask;
+        let mut i = (hash >> 32) as usize & mask;
         while self.same.slots[i] != 0 {
             i = (i + 1) & mask;
         }
@@ -3933,58 +3944,51 @@ impl VectorIndex {
     }
 
     /// The top half of the first `n` nodes' hashes in [`Same`], from their
-    /// vectors in the arena -- a share of [`SAME_SHARE`] nodes at a time by
-    /// whichever thread is free, where there are more than one.
-    #[cfg(not(target_family = "wasm"))]
+    /// vectors in the arena -- natively a share of [`SAME_SHARE`] nodes at a
+    /// time by whichever thread is free, where there are more than one.
     fn arena_halves(&self, n: usize) -> Vec<u32> {
-        let dim = self.dim;
-        let half = |node: usize, buf: &mut Vec<u8>| self.arena_half(node, buf);
-        let threads = match n * dim > SAME_SHARE * 64 {
-            true => Self::threads(),
-            false => 1,
-        };
         let mut halves = vec![0u32; n];
-        if threads < 2 {
-            let mut buf = Vec::new();
-            for (node, h) in halves.iter_mut().enumerate() {
-                *h = half(node, &mut buf);
-            }
-        } else {
+        #[cfg(not(target_family = "wasm"))]
+        if n * self.dim > SAME_SHARE * 64 && Self::threads() > 1 {
             let shares: Vec<Mutex<&mut [u32]>> =
                 halves.chunks_mut(SAME_SHARE).map(Mutex::new).collect();
-            let mut bufs: Vec<Vec<u8>> = vec![Vec::new(); threads.min(shares.len())];
+            let mut bufs: Vec<Vec<u8>> = vec![Vec::new(); Self::threads().min(shares.len())];
             spread(shares.len(), &mut bufs, |buf, i| {
                 let mut share = shares[i].lock().unwrap_or_else(|e| e.into_inner());
                 for (j, h) in share.iter_mut().enumerate() {
-                    *h = half(i * SAME_SHARE + j, buf);
+                    *h = self.arena_half(i * SAME_SHARE + j, buf);
                 }
             });
+            drop(shares);
+            return halves;
+        }
+        let mut buf = Vec::new();
+        for (node, h) in halves.iter_mut().enumerate() {
+            *h = self.arena_half(node, &mut buf);
         }
         halves
     }
 
     /// Node `node`'s hash half in [`Same`], from its vector in the arena.
-    #[cfg(not(target_family = "wasm"))]
+    /// The browser writes an f32 vector out and hashes its bytes, as a
+    /// code's: the module holds one copy of the hash.
     fn arena_half(&self, node: usize, buf: &mut Vec<u8>) -> u32 {
-        let h = match &self.data {
-            Arena::F32(d) => hash_lanes(d.row(node, self.dim), f32::to_bits, &[]),
-            data => {
-                buf.clear();
-                data.write_stored(node as u32, self.dim, buf);
-                hash_stored(buf)
-            }
-        };
-        (h >> 32) as u32
+        #[cfg(not(target_family = "wasm"))]
+        if let Arena::F32(d) = &self.data {
+            return (hash_lanes(d.row(node, self.dim), f32::to_bits, &[]) >> 32) as u32;
+        }
+        buf.clear();
+        self.data.write_stored(node as u32, self.dim, buf);
+        (hash_stored(buf) >> 32) as u32
     }
 
     /// The hash halves a restored record carries, kept for the first vector
-    /// placed to make [`Same`] from, where a few live nodes spread over the
+    /// placed to make [`Same`] from, where the nodes at a few places over the
     /// arena hash to theirs: halves of another hash, or of other vectors,
     /// would leave a copy unfound, and the table is made from the arena
     /// then, as for a record without them. Nothing more is checked, as a
     /// link is checked only to name a node: a half gone wrong costs a copy
     /// a node of its own, never a document.
-    #[cfg(not(target_family = "wasm"))]
     fn keep_halves(&mut self, bytes: &[u8], flags: &[u8]) {
         let halves: Vec<u32> = bytes
             .as_chunks::<4>()
@@ -3995,15 +3999,16 @@ impl VectorIndex {
         if halves.len() != flags.len() {
             return;
         }
-        let live = flags.iter().filter(|&&f| f != DEAD).count();
-        let mut buf = Vec::new();
-        let agree = (0..flags.len())
-            .filter(|&node| flags[node] != DEAD)
-            .step_by((live / HALVES_CHECKED).max(1))
-            .all(|node| self.arena_half(node, &mut buf) == halves[node]);
-        if agree {
-            self.same.halves = halves;
+        // A loop: an iterator's `filter`, `step_by` and `all` were 0.5 KB
+        // of the browser module.
+        let (mut buf, mut node) = (Vec::new(), 0);
+        while node < flags.len() {
+            if flags[node] != DEAD && self.arena_half(node, &mut buf) != halves[node] {
+                return;
+            }
+            node += (flags.len() / HALVES_CHECKED).max(1);
         }
+        self.same.halves = halves;
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -4660,7 +4665,6 @@ impl VectorIndex {
             put_le(out, node as u64, lw);
             put_le(out, doc, 8);
         }
-        #[cfg(not(target_family = "wasm"))]
         self.put_halves(n, out);
     }
 
@@ -4670,7 +4674,6 @@ impl VectorIndex {
     /// hashed from the arena, as the table is made where a restore had none
     /// or a bit index coded its vectors. So the record is the same whatever
     /// way the index came to be where it is.
-    #[cfg(not(target_family = "wasm"))]
     fn put_halves(&self, n: usize, out: &mut Vec<u8>) {
         if n == 0 {
             return;
@@ -5032,7 +5035,6 @@ impl VectorIndex {
                 return None;
             }
         }
-        #[cfg(not(target_family = "wasm"))]
         if let Some(halves) = read.halves {
             self.keep_halves(halves, &read.flags);
         }
@@ -6374,6 +6376,40 @@ mod tests {
         slots.sort_unstable();
         slots
     }
+
+    /// The halves a graph record carries are the browser module's as well:
+    /// `web/fenec.test.js` finds these bytes in the image the module writes
+    /// of the same vectors, so a page takes a server's halves and a server
+    /// a page's. The fourth vector is the first's again, as cosine stores
+    /// it: no node of its own.
+    #[test]
+    fn the_halves_a_record_carries_are_the_browsers() {
+        let spec = VectorIndexSpec {
+            metric: Metric::Cosine,
+            ..VectorIndexSpec::default()
+        };
+        let mut ix = VectorIndex::new(4, spec);
+        let vectors: [[f32; 4]; 6] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0, 4.0],
+            [-0.25, 0.0, 0.125, 8.0],
+        ];
+        for (doc, v) in vectors.iter().enumerate() {
+            ix.insert(doc as u64 + 1, v);
+        }
+        assert_eq!(ix.doc_ids.len(), 5);
+        let bytes = ix.serialize_graph();
+        let halves = &bytes[bytes.len() - 21..];
+        let hex: String = halves.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, HALVES_OF_SIX);
+    }
+
+    /// The bytes [`the_halves_a_record_carries_are_the_browsers`] holds a
+    /// record to, as `web/fenec.test.js` holds the module's image to them.
+    const HALVES_OF_SIX: &str = "013303c48fca17dcd03246a72eb01a282f82d564cf";
 
     /// A graph record carries its nodes' hash halves, so the first vector
     /// placed after a restore makes the copies table from them rather than
