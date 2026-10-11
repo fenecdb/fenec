@@ -218,7 +218,7 @@ once, whatever the network did meanwhile.</p>
 <thead><tr><th>The server answers</th><th>The write</th></tr></thead>
 <tbody>
 <tr><td>2xx</td><td>landed: it leaves the queue, its promise resolves</td></tr>
-<tr><td>nothing (the network failed), <code>408</code>, <code>429</code>, <code>5xx</code></td><td>kept and sent again under its key, after 250 ms doubling to 15 s -- or after the <code>Retry-After</code> a tenant's quota names, where that is longer</td></tr>
+<tr><td>nothing (the network failed), <code>408</code>, <code>429</code>, <code>5xx</code></td><td>kept and sent again under its key, after 250 ms doubling to 15 s -- or after the <code>Retry-After</code> the server names, where that is longer: a tenant's quota, a tenant being moved or failed over</td></tr>
 <tr><td><code>401</code></td><td>kept; nothing is sent until a new token (<code>tokenProvider</code>, <code>setToken</code>)</td></tr>
 <tr><td><code>507</code> naming a tenant's quota of <code>bytes</code> or <code>rows</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told with <code>e.quota</code>, and the writes behind it go on</td></tr>
 <tr><td>any other <code>4xx</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told</td></tr>
@@ -281,6 +281,15 @@ way, its shape not <code>connected</code> meanwhile, and
 <code>status()</code> names the quota (<code>quota</code>) beside the
 error. <code>setOnline(true)</code> forgets the backoff but not the
 server's word: the network says nothing of a tenant's quota.</p>
+
+<p><b>A move or a failover.</b> A node answers a write to a tenant it is
+moving, or no longer holds, <code>503</code> with
+<code>"retry_after": 1</code> beside its <code>Retry-After</code>
+(<a href="sharding.html#moving-a-tenant">Moving a tenant</a>); a standby
+router whose directory has not arrived answers a stream so too. The write is
+kept and goes again through the router after that second where it is longer
+than the backoff, as after a quota's <code>429</code>: the node's word for
+how long a move holds its writes, never the backoff's guess under it.</p>
 
 <p><b>Put back in order.</b> A refused write's rows are written back as they
 stood before it. A later write to the same rows, still waiting, is not

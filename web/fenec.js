@@ -1461,10 +1461,10 @@ class SyncQuery extends Query {
  * two are held to one script, `integrations/sync-scenarios.json`: writes go
  * one at a time and in order, each under an `Idempotency-Key` it keeps until
  * the server answers; no answer, a 408, a 429 or a 5xx is tried again with
- * backoff -- or after a quota's `retry_after`, where longer -- a 401 asks
- * for a token, and a 507 naming a tenant's quota and any other 4xx are a
- * refusal, put back. Moving this layer onto that core instead was measured
- * at +21 KB brotli.
+ * backoff -- or after the `retry_after` a quota's 429 or a move's 503 names,
+ * where longer -- a 401 asks for a token, and a 507 naming a tenant's quota
+ * and any other 4xx are a refusal, put back. Moving this layer onto that
+ * core instead was measured at +21 KB brotli.
  */
 export class FenecSync {
   #local;
@@ -2155,7 +2155,8 @@ export class FenecSync {
       // No answer, or one that says to come back: the write stays, and goes
       // again under its key, which the server answers as the first time if
       // the first reached it -- after the `retry_after` a quota's 429 names,
-      // where that is longer than the backoff.
+      // or a move's or a failover's 503, where that is longer than the
+      // backoff.
       this.#setFault(why(status, body), status, true, s.quota);
       this.#flushing = false;
       this.#sendWaiting = true;

@@ -336,7 +336,7 @@ pub fn handle(
                     ),
                 )
             }
-            Tail::Gone => return Response::error(503, "the database is going"),
+            Tail::Gone => return Response::retry_after(503, "the database is going", 1),
         }
     }
 }

@@ -116,6 +116,11 @@ class FenecTest {
         val memory = FenecRemote.refused(507, Json.parse("""{"error":"data ceiling"}""") as Row, null)
         assertEquals(null, memory.quota)
         assertEquals(FenecException.Code.IO, memory.code)
+        // A tenant being moved says the wait in its body as a quota does.
+        val moved = FenecRemote.refused(503, Json.parse("""{"error":"the tenant is being moved; retry shortly","retry_after":1}""") as Row, null)
+        assertEquals(null, moved.quota)
+        assertEquals(503, moved.status)
+        assertEquals(1.0, moved.retryAfter)
     }
 
     /** `require 1` over a row that is not there is refused as UNMET, and the write is put back. */

@@ -77,7 +77,8 @@ it carries `status` (412 and `.unmet` for a `require` not met) and `at`,
 the statement from 0. On a tenant node a quota names itself (`.quota`, and
 `quota`): `"bytes"` and `"rows"` answer 507, and room is made by deleting;
 `"streams"`, `"requests"`, `"writes"` and `"write_bytes"` answer 429 with
-`retryAfter`, the seconds to wait. `run(text, params:, idempotencyKey:)` and
+`retryAfter`, the seconds to wait, as a tenant being moved or failed over
+answers its writes 503. `run(text, params:, idempotencyKey:)` and
 `withIdempotencyKey(key)`, a copy whose every write carries the key, make a
 write once however often it is sent.
 

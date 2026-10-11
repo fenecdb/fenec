@@ -45,7 +45,7 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
   says which statement stopped it, `At` (from 0; -1 otherwise), and how many stayed applied, `Completed`. A
   tenant's quota names itself, `Quota` (the `Quota*` constants): `QuotaBytes` and `QuotaRows` answer 507
   (`CodeFull`), and room is made by deleting; the rest answer 429 (`CodeTooMany`) with `RetryAfter`, the wait the
-  server asks for.
+  server asks for, as a tenant being moved or failed over answers its writes 503 (`CodeUnavailable`).
 - A `[]float32` goes out as the decimals that read back as each `f32`, so a vector round-trips to the bit.
 
 - The builder's options are functional: `Ef`, `Exact`, `K`, `Candidates`, `Collate`, `All`, and `On`, `ParentKey`,

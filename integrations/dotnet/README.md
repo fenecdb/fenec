@@ -43,7 +43,8 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
   statement stopped it, `At` (from 0; `null` otherwise), and how many stayed applied, `Completed`. A tenant's quota
   names itself, `Quota`: `"bytes"` and `"rows"` answer 507 (`storage_full`), and room is made by deleting;
   `"streams"`, `"requests"`, `"writes"` and `"write_bytes"` answer 429 (`too_many`) with `RetryAfter`, the wait the
-  server asks for. Every call takes a `CancellationToken`.
+  server asks for, as a tenant being moved or failed over answers its writes 503 (`unavailable`). Every call takes a
+  `CancellationToken`.
 - A `float[]` or `ReadOnlyMemory<float>` goes out as the decimals that read back as each float, so a vector round-trips to the bit.
 
 - `Facet(field, ranges: [0, 25, 50])` counts by ranges of numbers, each value `[from, to]`; `disjunctive: true`

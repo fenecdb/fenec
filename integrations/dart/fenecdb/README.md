@@ -66,7 +66,8 @@ one block, all or none, answering a `BatchAnswer` (`results`, `seq`,
 tenant node a quota names itself (`FenecCode.quota`, and `quota`):
 `"bytes"` and `"rows"` answer 507, and room is made by deleting;
 `"streams"`, `"requests"`, `"writes"` and `"write_bytes"` answer 429 with
-`retryAfter`, the wait the server asks for.
+`retryAfter`, the wait the server asks for, as a tenant being moved or
+failed over answers its writes 503.
 `withIdempotencyKey(key)` is a copy whose every write -- `run`, the
 builder's -- carries the key, so it lands once however often it is sent.
 

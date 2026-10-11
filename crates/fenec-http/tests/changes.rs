@@ -417,8 +417,19 @@ fn stream_cap_is_separate_from_connection_cap() {
 
     let mut first = Sub::open(h.port, "/tasks/changes");
     assert_eq!(first.next().expect("seed").0, "seed");
-    let second = Sub::open(h.port, "/tasks/changes");
+    let mut second = Sub::open(h.port, "/tasks/changes");
     assert_eq!(second.status, 503);
+    // Come back in a second, in the head and in the body a replica's sync
+    // reads the wait from.
+    assert!(
+        second.head_line().contains("Retry-After: 1"),
+        "{}",
+        second.head
+    );
+    let said = second
+        .read_until("}", Duration::from_secs(3))
+        .unwrap_or_default();
+    assert!(said.ends_with(r#""retry_after":1"#), "{said}");
 
     // Ordinary requests are unaffected.
     let (st, _) = call(h.port, "GET", "/tasks", None, &[]);

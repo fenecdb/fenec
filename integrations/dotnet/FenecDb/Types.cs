@@ -151,7 +151,8 @@ public class FenecException : Exception
     /// with <see cref="RetryAfter"/>. <c>null</c> for any other refusal.</summary>
     public string? Quota { get; }
 
-    /// <summary>How long to wait before sending again, where the server said (a quota's 429).</summary>
+    /// <summary>How long to wait before sending again, where the server said: a quota's 429, the 503 of a tenant
+    /// being moved or failed over or of a server at its ceiling.</summary>
     public TimeSpan? RetryAfter { get; }
 
     /// <summary>A refusal with its status, message and, for a batch, how many statements were applied and

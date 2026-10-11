@@ -189,7 +189,8 @@ impl Router {
                 self.live.fetch_sub(1, Ordering::SeqCst);
                 let mut s = stream;
                 fenec_http::request_id::begin(None);
-                let _ = Response::error(503, "too many connections").write(&mut s, false, false);
+                let _ = Response::retry_after(503, "too many connections", 1)
+                    .write(&mut s, false, false);
                 fenec_http::request_id::end();
                 continue;
             }
@@ -506,8 +507,11 @@ impl Router {
                 None if !dir.arrived() => {
                     return reply(
                         out,
-                        Response::error(503, "the directory has not arrived from the primary yet")
-                            .header("Retry-After", "1"),
+                        Response::retry_after(
+                            503,
+                            "the directory has not arrived from the primary yet",
+                            1,
+                        ),
                     )
                 }
                 None => {

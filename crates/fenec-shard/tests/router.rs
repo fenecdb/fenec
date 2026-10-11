@@ -424,6 +424,8 @@ fn writes_to_a_frozen_tenant_come_back_as_503_with_retry_after() {
     let r = c.call("POST", "/t/acme/notes", r#"{"title":"x"}"#, None);
     assert_eq!(r.0, 503, "{}", r.1);
     assert!(r.1.contains("Retry-After: 1"), "{}", r.1);
+    // The node's body, passed on: the wait a replica's sync reads.
+    assert!(r.1.ends_with(r#""retry_after":1}"#), "{}", r.1);
     assert_eq!(c.call("GET", "/t/acme/notes", "", None).0, 200);
 }
 
@@ -667,6 +669,20 @@ fn a_tenant_is_created_with_its_schema_by_the_routers_token_alone() {
 /// at 600 ms it bounded the node's answers rather than the claim's wait:
 /// under `taskpolicy -c background` a tenant's create or delete took
 /// longer, a 502 in 2 runs of 30.
+///
+/// The first claim's wait bounds everything before the job reaches it: the
+/// sleep past the timeout and the put through the router. Held 10 s, it was
+/// answered as its first run had been -- `200 []` at `Fenec-Seq: 1`, the
+/// change before the put -- once in about 50 runs under 14 loops of tests
+/// at background QoS, and once in 200 under 8 beside 4 busy loops, in a
+/// stall that held all 8 at once: its wait ran out, its head woken 1.7 s
+/// past it, before the put had landed (one look, the one it was held with,
+/// and no run), and the put was answered 11.7 s in. The process stopped
+/// (`SIGSTOP`) for 9 s from 1.2 s in answers exactly that every time; held
+/// the 30 s a node holds one at most, the claim takes its job through the
+/// same stop, the steps having three times the room. An answer that is not
+/// the job says how long it was held and what the node's held claims did:
+/// a look more and no run would be a job a look missed.
 #[test]
 fn a_held_claim_is_waited_for_through_the_router() {
     const TIMEOUT: Duration = Duration::from_secs(2);
@@ -690,10 +706,15 @@ fn a_held_claim_is_waited_for_through_the_router() {
                 body.len()
             )
             .unwrap();
+            let sent = Instant::now();
             let mut out = String::new();
             let _ = s.read_to_string(&mut out);
-            out
+            (out, sent.elapsed())
         })
+    };
+    let waits = |c: &Cluster| {
+        let t = c.nodes[0].tenants.get("acme").ok()?;
+        Some(t.hub.waits().stats())
     };
     let held = |c: &Cluster| {
         let t = Instant::now();
@@ -713,15 +734,22 @@ fn a_held_claim_is_waited_for_through_the_router() {
             std::thread::sleep(Duration::from_millis(2));
         }
     };
-    let first = claim(10_000);
+    let first = claim(30_000);
     held(&c);
     // Past the router's timeout: what is tested is the time itself.
     std::thread::sleep(TIMEOUT + Duration::from_millis(300));
     let put = c.query("acme", "put jobs {run_at: 1}");
     assert_eq!(put.0, 200, "{}", put.1);
-    let answer = first.join().unwrap();
-    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-    assert!(answer.ends_with("[{\"id\":1}]"), "{answer}");
+    let (answer, took) = first.join().unwrap();
+    let said = || {
+        format!(
+            "{answer}\nanswered {took:?} after it was sent, of a 30 s wait; \
+             the node's held claims: {:?}",
+            waits(&c)
+        )
+    };
+    assert!(answer.starts_with("HTTP/1.1 200"), "{}", said());
+    assert!(answer.ends_with("[{\"id\":1}]"), "{}", said());
 
     // Held for 30 s: answered by the delete, long before its wait would
     // have ended it, and the delete waits for nothing the claim holds.
@@ -729,7 +757,12 @@ fn a_held_claim_is_waited_for_through_the_router() {
     held(&c);
     let t = Instant::now();
     assert_eq!(c.call("DELETE", "/_shard/tenants/acme", "", None).0, 204);
-    let answer = second.join().unwrap();
-    assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
+    let (answer, took) = second.join().unwrap();
+    assert!(
+        answer.starts_with("HTTP/1.1 503"),
+        "{answer}\nanswered after {took:?}"
+    );
+    // To come back through the router, and when: the sync reads the body.
+    assert!(answer.ends_with(r#""retry_after":1}"#), "{answer}");
     assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
 }

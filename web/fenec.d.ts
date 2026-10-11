@@ -517,7 +517,11 @@ export declare class FenecError extends Error {
    * `retryAfter`.
    */
   quota?: 'bytes' | 'rows' | 'streams' | 'requests' | 'writes' | 'write_bytes';
-  /** Seconds to wait before sending again, where the server said (`Retry-After`). */
+  /**
+   * Seconds to wait before sending again, where the server said
+   * (`Retry-After`): a quota's 429, and the 503 of a tenant being moved or
+   * failed over, or of a server at its ceiling of connections.
+   */
   retryAfter?: number;
 }
 
@@ -1432,7 +1436,8 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
    * which waiting would not make room for -- once it was put back, a write
    * left from a page before among them; the writes behind it go on. A
    * network failure or a 5xx is no refusal: the write waits and goes
-   * again, after the `Retry-After` a quota's 429 names where it is longer.
+   * again, after the `Retry-After` a quota's 429 or a move's 503 names
+   * where it is longer.
    */
   onRefused?: (e: FenecError & { status: number; query: string }) => void;
 }

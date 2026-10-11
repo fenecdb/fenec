@@ -357,6 +357,23 @@ impl Response {
         Response::json(status, body)
     }
 
+    /// A refusal to come back from in `secs` seconds: `Retry-After`, and
+    /// `{"error", "retry_after"}` with the same seconds, as a quota's 429
+    /// says it ([`crate::quota::refusal`]). The body too, since that is
+    /// what a replica's sync reads -- a header would take a parameter more
+    /// through the C ABI and every binding, and a page on another origin
+    /// reads one only where CORS exposes it -- and without it a write sent
+    /// during a move went again after the sync's own 250 ms, doubling,
+    /// where the node had said a second.
+    pub fn retry_after(status: u16, message: &str, secs: u64) -> Response {
+        let mut body = String::from("{\"error\":");
+        fenec_core::json::escape_into(&mut body, message);
+        body.push_str(",\"retry_after\":");
+        body.push_str(&secs.to_string());
+        body.push('}');
+        Response::json(status, body).header("Retry-After", &secs.to_string())
+    }
+
     pub fn empty(status: u16) -> Response {
         Response {
             status,

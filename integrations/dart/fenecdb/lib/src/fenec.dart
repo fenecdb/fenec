@@ -45,7 +45,7 @@ class FenecException implements Exception {
   final String? quota;
 
   /// How long to wait before sending again, where the server said
-  /// (`Retry-After`, a quota's 429).
+  /// (`Retry-After`: a quota's 429, a move's or a failover's 503).
   final Duration? retryAfter;
 
   FenecException(this.code, this.message, [this.exact])

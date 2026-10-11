@@ -33,7 +33,7 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
     /// `retryAfter`. nil for any other refusal.
     public let quota: String?
     /// Seconds to wait before sending again, where the server said
-    /// (`Retry-After`, a quota's 429).
+    /// (`Retry-After`: a quota's 429, a move's or a failover's 503).
     public let retryAfter: Double?
     /// The parameters the library asked for again as JSON (`exact`).
     let exact: [Int]?
