@@ -566,7 +566,7 @@ fn the_last_whole_graph_record_is_the_one_restored() {
         !db.graphs_due(),
         "400 writes outweigh no graph of 1400 nodes"
     );
-    put(&mut db, &mut r, 800);
+    put(&mut db, &mut r, 1000);
     assert!(db.graphs_due());
     let before = file.0.lock().unwrap().len();
     assert_eq!(db.save_graphs().unwrap().0, 1);
@@ -579,8 +579,8 @@ fn the_last_whole_graph_record_is_the_one_restored() {
         file.0.lock().unwrap()[..before + record / 2].to_vec(),
     )));
     let back = reopen_serving(&torn);
-    assert_eq!(back.unlinked(), 1200);
-    assert_eq!(ids(&back, "get d select id limit 5000", &[]).len(), 2200);
+    assert_eq!(back.unlinked(), 1400);
+    assert_eq!(ids(&back, "get d select id limit 5000", &[]).len(), 2400);
 }
 
 /// `rerank` reads the stored vectors, and a `vector<N, f16>` field is
