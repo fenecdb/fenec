@@ -398,6 +398,7 @@ fn authenticate(cfg: &Config, req: &Request) -> std::result::Result<Who, Respons
     let refuse = |why: &str| Response::error(401, why).header("WWW-Authenticate", "Bearer");
     if let (Some(token), Some(given)) = (&cfg.token, given) {
         if constant_eq(given.as_bytes(), token.as_bytes()) {
+            audit::verified();
             return Ok(Who::Full);
         }
     }
@@ -407,11 +408,17 @@ fn authenticate(cfg: &Config, req: &Request) -> std::result::Result<Who, Respons
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
             return match access.scope(given, now) {
-                Ok(scope) => Ok(Who::Scoped(Arc::new(scope))),
+                Ok(scope) => {
+                    audit::verified();
+                    Ok(Who::Scoped(Arc::new(scope)))
+                }
                 Err(why) => Err(refuse(why)),
             };
         }
     }
+    // Open: everyone is everything, and no token was verified -- a server
+    // that asks for none may still hold an admin, a replication or a
+    // scrape's token, whose guesses this must not forgive.
     if cfg.token.is_none() && cfg.access.is_none() {
         return Ok(Who::Full);
     }
@@ -1106,6 +1113,7 @@ fn route_tenant(
             return Err(Response::error(401, "invalid or missing replication token")
                 .header("WWW-Authenticate", "Bearer"));
         }
+        audit::verified();
     } else if let Who::Scoped(scope) = authenticate(cfg, req)? {
         // A token is held to the tenant it names here, before the tenant
         // is looked up and once for every route below the prefix: the

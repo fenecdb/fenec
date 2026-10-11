@@ -445,6 +445,7 @@ fn write_head(
             head.push_str(&format!("{}: {id}\r\n", crate::request_id::HEADER));
         }
     });
+    crate::audit::push_verified(&mut head);
     head.push_str("\r\n");
     out.write_all(head.as_bytes())?;
     out.flush()
