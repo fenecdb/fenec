@@ -32,9 +32,13 @@ fn headers(origin: &str) -> [(&'static str, &str); 6] {
         // request id goes out too: the studio's query editor, served by
         // a node and asking a router (`--studio-connect`), shows it
         // beside an answer so a person can find its lines in the logs.
+        // An MCP client in a page -- the MCP Inspector's, an agent's --
+        // mirrors a 2026-07-28 request's version, method and tool into
+        // headers its binding requires, refused unread otherwise.
         (
             "Access-Control-Allow-Headers",
-            "content-type, authorization, idempotency-key, fenec-after, fenec-wait, if-none-match",
+            "content-type, authorization, idempotency-key, fenec-after, fenec-wait, if-none-match, \
+             mcp-protocol-version, mcp-method, mcp-name",
         ),
         (
             "Access-Control-Expose-Headers",

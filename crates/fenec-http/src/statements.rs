@@ -101,6 +101,14 @@ pub fn text(sql: &str) {
     });
 }
 
+/// Forgets what was noted for a statement that will not be counted: a
+/// stdio session's (`fenec mcp`), which keeps no counts, and whose notes
+/// would otherwise grow with every call.
+pub fn clear() {
+    TEXT.with(|t| t.borrow_mut().clear());
+    ROWS.with(|r| r.set(0));
+}
+
 /// Notes that the statement this thread is running returned or changed `n`
 /// rows.
 pub fn rows(n: u64) {

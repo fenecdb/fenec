@@ -16,8 +16,8 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench replica-bench concurrency-bench requests-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench ttl-bench growth-bench search-bench nocase-bench analytics-bench \
-	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench replica-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench ttl-bench growth-bench search-bench nocase-bench analytics-bench \
+	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
 	site site-serve site-deploy
@@ -320,6 +320,12 @@ requests-bench:
 	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-bench --bin requests
 
+## An MCP tool call against the /query it runs: in process, and one client's
+## round trip to a release fenec-server --mcp
+mcp-bench:
+	$(CARGO) build --release -p fenec-server
+	$(CARGO) run --release -p fenec-bench --bin mcp
+
 ## A paged read whose size and place change each request, limit and offset
 ## written into the text against sent as parameters
 ## (crates/fenec-bench/src/bin/pages.rs): once against the release server,
@@ -469,6 +475,16 @@ react-test:
 langchain-test:
 	@$(CARGO) build -q -p fenec-server
 	cd integrations/langchain && npm ci --no-audit --no-fund --loglevel=error && npm test
+
+## The MCP server held to the official TypeScript client over Streamable HTTP
+## and stdio, in both eras, with the configurations the docs give; then the
+## example agent's tools, run without its model
+mcp-test:
+	@$(CARGO) build -q -p fenec-server -p fenec-cli
+	cd integrations/mcp && npm ci --no-audit --no-fund --loglevel=error && npm test
+	cd examples/mcp-agent && npm ci --no-audit --no-fund --loglevel=error && \
+	    d=$$(mktemp -d) && FENEC_BIN=$(CURDIR)/target/debug/fenec FENEC_FILE=$$d/agent.fenec node agent.mjs --check; \
+	    s=$$?; rm -rf "$$d"; exit $$s
 
 ## Retrieval for the Vercel AI SDK against its own mock models (needs `make wasm`)
 ai-sdk-test:

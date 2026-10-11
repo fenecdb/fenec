@@ -57,12 +57,12 @@
 //! to free with `fenec_free_string`. JSON writes a NUL as `\u0000`, so an
 //! answer never holds one.
 
+use fenec_abi::lock::FileLock;
 use fenec_abi::Refused;
 use fenec_core::engine::{CompactPolicy, Compactor};
 use fenec_core::json;
 use fenec_core::prelude::*;
 use std::ffi::{c_char, CString};
-use std::fs::File;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::result::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -426,148 +426,21 @@ fn keep(db: Database, durable: bool, lock: Option<FileLock>) -> u64 {
     h
 }
 
-/// `<path>.lock`, held exclusively for as long as the file is open
-/// ([`lock_file`]), and noted among this process's ([`LOCKED`]) until
-/// dropped.
-struct FileLock {
-    file: Option<File>,
-    /// The lock file's device and inode, under which [`LOCKED`] notes it.
-    key: (u64, u64),
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let mut locked = LOCKED.lock().unwrap_or_else(|e| e.into_inner());
-        // Closed before the note goes: an open that finds the file free
-        // here finds the lock let go of too.
-        drop(self.file.take());
-        locked.retain(|k| *k != self.key);
-    }
-}
-
-/// The lock files this process holds, by device and inode. A record lock
-/// is the process's, so it refuses only another process's open; a second
-/// open here is refused by this list -- before the lock file is opened
-/// again, since closing any descriptor of a file lets go of the process's
-/// record locks on it.
-static LOCKED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
-
-fn locked_already(path: &str) -> Failed {
-    (
-        FENEC_LOCKED,
-        json::error_to_string(&Error::Io(format!(
-            "{path} is open already, in this process or another: \
-             two databases over one file corrupt it"
-        ))),
-    )
-}
-
-/// Holds `<path>.lock` exclusively for as long as the file is open. The
-/// file itself cannot carry the lock: a checkpoint or a compact renames a
-/// new file over it, and a lock on the old one would let a second opener
-/// in. It is a record lock (`fcntl`'s `F_SETLK`), which belongs to the
-/// process, not an `flock`, which belongs to the open file: a child
-/// spawned while the lock file was open -- a test starting a server, an app
-/// starting a helper -- shares that open file until its exec closes it, and
-/// a close and an open again in that window found the `flock` still held
-/// (37 of 20 000 beside a thread spawning `/usr/bin/true`, none with the
-/// record lock). The system lets either go when the process ends, however.
+/// `<path>.lock`, held for as long as the file is open: refused as
+/// `FENEC_LOCKED` where it is held already, here or in another process
+/// (`fenec_abi::lock`, which `fenec mcp --file` and `fenec-server` take
+/// too).
 fn lock_file(path: &str) -> Result<FileLock, Failed> {
-    let name = format!("{path}.lock");
-    let mut locked = LOCKED.lock().unwrap_or_else(|e| e.into_inner());
-    #[cfg(unix)]
-    let key = |m: &std::fs::Metadata| {
-        use std::os::unix::fs::MetadataExt;
-        (m.dev(), m.ino())
-    };
-    #[cfg(not(unix))]
-    let key = |_: &std::fs::Metadata| (0, 0);
-    if let Ok(m) = std::fs::metadata(&name) {
-        if cfg!(unix) && locked.contains(&key(&m)) {
-            return Err(locked_already(path));
-        }
-    }
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&name)
-        .map_err(|e| failed(&e.into()))?;
-    let key = key(&lock.metadata().map_err(|e| failed(&e.into()))?);
-    #[cfg(unix)]
-    if !record_lock(&lock) {
-        return Err(locked_already(path));
-    }
-    locked.push(key);
-    Ok(FileLock {
-        file: Some(lock),
-        key,
+    fenec_abi::lock::hold(path).map_err(|e| match e {
+        fenec_abi::lock::Refused::Held => (
+            FENEC_LOCKED,
+            json::error_to_string(&Error::Io(format!(
+                "{path} is open already, in this process or another: \
+                 two databases over one file corrupt it"
+            ))),
+        ),
+        fenec_abi::lock::Refused::Io(e) => failed(&e.into()),
     })
-}
-
-/// An exclusive record lock over the whole file, not waited for: whether
-/// it was taken. `struct flock` and the commands as each system lays them
-/// out -- the crate takes no `libc`.
-#[cfg(unix)]
-fn record_lock(file: &File) -> bool {
-    use std::os::fd::AsRawFd;
-    extern "C" {
-        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-    }
-    #[cfg(target_vendor = "apple")]
-    {
-        #[repr(C)]
-        struct Flock {
-            start: i64,
-            len: i64,
-            pid: i32,
-            kind: i16,
-            whence: i16,
-        }
-        const F_SETLK: i32 = 8;
-        const F_WRLCK: i16 = 3;
-        let l = Flock {
-            start: 0,
-            len: 0,
-            pid: 0,
-            kind: F_WRLCK,
-            whence: 0,
-        };
-        unsafe { fcntl(file.as_raw_fd(), F_SETLK, &l as *const Flock) == 0 }
-    }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        // `off_t` is a `long` in the `struct flock` of `F_SETLK`, 32 bits
-        // on a 32-bit Android.
-        #[repr(C)]
-        struct Flock {
-            kind: i16,
-            whence: i16,
-            start: isize,
-            len: isize,
-            pid: i32,
-        }
-        const F_SETLK: i32 = 6;
-        const F_WRLCK: i16 = 1;
-        let l = Flock {
-            kind: F_WRLCK,
-            whence: 0,
-            start: 0,
-            len: 0,
-            pid: 0,
-        };
-        unsafe { fcntl(file.as_raw_fd(), F_SETLK, &l as *const Flock) == 0 }
-    }
-    #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
-    {
-        extern "C" {
-            fn flock(fd: i32, op: i32) -> i32;
-        }
-        const LOCK_EX: i32 = 2;
-        const LOCK_NB: i32 = 4;
-        unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) == 0 }
-    }
 }
 
 /// Closes the database: waits for the calls in flight, appends each graph

@@ -51,6 +51,7 @@ pub mod http;
 pub mod idempotent;
 pub mod lease;
 pub mod link;
+pub mod mcp;
 pub mod metrics;
 pub mod quota;
 pub mod replication;
@@ -147,6 +148,9 @@ pub struct Config {
     /// The studio's files, served under `/_studio/` (`--studio`); `None`
     /// answers that path 404.
     pub studio: Option<Arc<studio::Studio>>,
+    /// The MCP endpoint, `POST /_mcp`, and what its tools may do (`--mcp`);
+    /// `None` answers that path 404.
+    pub mcp: Option<Arc<mcp::Options>>,
 }
 
 impl Default for Config {
@@ -172,6 +176,7 @@ impl Default for Config {
             max_memory: 0,
             router_mark: None,
             studio: None,
+            mcp: None,
         }
     }
 }
@@ -858,12 +863,16 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             metrics::record(took, failed, name, || what.clone());
             statements::record(name, &what, took, failed);
             if trace::recording() {
+                // An MCP call's statements are noted as `/query`'s are, and
+                // its shape is theirs.
+                let mcp = cfg.mcp.is_some() && req.segments() == ["_mcp"];
                 statements::last_shape(|shape| {
-                    trace::attr("db.operation.name", operation(&req, shape));
+                    let op = if mcp { "mcp" } else { operation(&req, shape) };
+                    trace::attr("db.operation.name", op);
                     // FenecQL's shape holds no literal; a REST request's is
                     // its target, whose query string's values are words the
                     // shape keeps, so it has its route alone.
-                    if matches!(req.segments().as_slice(), ["query"] | ["batch"]) {
+                    if mcp || matches!(req.segments().as_slice(), ["query"] | ["batch"]) {
                         trace::attr("db.query.text", shape.to_string());
                     }
                 });
@@ -1208,6 +1217,14 @@ fn is_stream(req: &Request) -> bool {
 
 /// Turns a request into a response: auth, preflight, routing, execution.
 pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Response {
+    // The MCP endpoint asks where a request comes from before its token,
+    // and answers in JSON-RPC: its own path, a tenant's below its prefix,
+    // and 404 on a server without `--mcp`. Its underscore keeps it out of a
+    // collection's way, as `/_metrics`'s does. The path is looked at before
+    // its segments are made: every other request pays a scan, not a `Vec`.
+    if req.path.contains("_mcp") && req.segments() == ["_mcp"] {
+        return mcp::http(db, cfg, req);
+    }
     let who = match authenticate(cfg, req) {
         Ok(who) => who,
         Err(deny) => return deny,

@@ -62,7 +62,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <table>
 <thead><tr><th>Flag</th><th>What it does</th></tr></thead>
 <tbody>
-<tr><td><code>-f, --file &lt;path&gt;</code></td><td>The database file. In memory without it.</td></tr>
+<tr><td><code>-f, --file &lt;path&gt;</code></td><td>The database file. In memory without it. The server holds <code>&lt;path&gt;.lock</code> while it runs, so a second process over the file — another server, <code>fenec mcp --file</code>, an app through the native library — is refused rather than let corrupt it.</td></tr>
 <tr><td><code>--dir &lt;path&gt;</code></td><td>One file per tenant in this directory (<a href="/docs/sharding">Tenants and sharding</a>).</td></tr>
 <tr><td><code>--http &lt;address&gt;</code></td><td>Where to listen. Default <code>127.0.0.1:8080</code>.</td></tr>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>.</td></tr>
@@ -80,6 +80,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--metrics</code>, <code>--slow-ms</code>, <code>--audit</code>, <code>--auth-delay</code></td><td><a href="/docs/monitoring">Monitoring</a> and the audit log.</td></tr>
 <tr><td><code>--otlp-endpoint</code>, <code>--otlp-header</code>, <code>--trace-sample</code></td><td>OpenTelemetry traces to a collector; off unless an endpoint is given (<a href="/docs/monitoring#tracing">Tracing</a>).</td></tr>
 <tr><td><code>--studio</code>, <code>--studio-connect</code></td><td>fenec studio, the admin pages, at <code>/_studio/</code>; off unless given (<a href="/docs/studio">Studio</a>).</td></tr>
+<tr><td><code>--mcp</code>, <code>--mcp-write</code>, <code>--mcp-memory</code>, <code>--mcp-max-rows</code>, <code>--mcp-max-bytes</code>, <code>--mcp-calls-per-sec</code></td><td>MCP for agents at <code>POST /_mcp</code>, each tool held to the request's token; off unless given (<a href="/docs/mcp">Agents and MCP</a>).</td></tr>
 <tr><td><code>--insecure</code></td><td>Allows a non-loopback address without a token.</td></tr>
 <tr><td><code>--ping</code></td><td>Asks the server whether it is up and exits (<a href="#limits">health checks</a>).</td></tr>
 </tbody>

@@ -1015,7 +1015,7 @@ static PARSED: [Parsed; PARSED_SHARDS] = [const { std::sync::Mutex::new(None) };
 
 /// `text` parsed as one statement, from the shards when it was before. A
 /// parse reads the text alone, so the statement is the same one each time.
-fn parsed(text: &str) -> Result<Arc<Statement>> {
+pub(crate) fn parsed(text: &str) -> Result<Arc<Statement>> {
     let parse = || {
         crate::timing::parsed();
         fenec_ql::parse_one(text)

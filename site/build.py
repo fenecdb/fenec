@@ -68,6 +68,7 @@ NAV = [
         ("docs/http", "HTTP endpoint"),
         ("docs/sync", "Sync"),
         ("docs/integrations", "Integrations"),
+        ("docs/mcp", "Agents and MCP"),
     ]),
     # What an app adds Redis for, a page a family of patterns: the first
     # says which page holds each.

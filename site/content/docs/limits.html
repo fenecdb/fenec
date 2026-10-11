@@ -126,6 +126,9 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td>a tenant's requests in flight</td><td class="n">none unless set</td><td><code>--tenant-max-requests</code>, its <code>requests</code>; 429</td></tr>
 <tr><td>a tenant's writes a second</td><td class="n">none unless set</td><td><code>--tenant-writes-per-sec</code>, its <code>writes</code>; a second's worth at once, then 429 with <code>Retry-After</code></td></tr>
 <tr><td>a tenant's bytes written a second</td><td class="n">none unless set</td><td><code>--tenant-write-bytes-per-sec</code>, its <code>write_bytes</code>; charged as each write lands, 429 while in debt</td></tr>
+<tr><td>rows an MCP tool answers</td><td class="n"><b>100</b></td><td><code>--mcp-max-rows</code>; past it the call is refused (413) with what to narrow, never cut (<a href="/docs/mcp#limits">Agents and MCP</a>)</td></tr>
+<tr><td>bytes an MCP tool answers</td><td class="n"><b>64K</b></td><td><code>--mcp-max-bytes</code>, the answer's JSON; refused past it (413)</td></tr>
+<tr><td>MCP tool calls a second</td><td class="n"><b>20</b></td><td><code>--mcp-calls-per-sec</code>, a scoped token's subject or an address; 429, with when to call again</td></tr>
 </tbody>
 </table>
 </div>

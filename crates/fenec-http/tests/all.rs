@@ -11,6 +11,7 @@ mod cdc;
 mod changes;
 mod claims;
 mod idempotency;
+mod mcp;
 mod replication;
 mod require;
 mod schema;

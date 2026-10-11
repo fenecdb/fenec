@@ -6,6 +6,7 @@
 mod crash;
 mod follow;
 mod logs;
+mod mcp;
 mod otlp;
 mod shutdown;
 mod studio;

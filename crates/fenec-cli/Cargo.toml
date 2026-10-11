@@ -21,11 +21,15 @@ fenec-import = { workspace = true, optional = true }
 # stream through fenec-http's client -- 65 KB next to import, 66 KB alone. Off
 # with the rest in `make small`.
 fenec-http = { workspace = true, optional = true }
+# `fenec mcp`: the MCP server over stdio, over a file or in front of a
+# server; `<file>.lock` is fenec-abi's, which the native library takes too.
+fenec-abi = { workspace = true, optional = true }
 
 [features]
-default = ["import", "backup"]
+default = ["import", "backup", "mcp"]
 import = ["dep:fenec-import"]
 backup = ["dep:fenec-http"]
+mcp = ["dep:fenec-http", "dep:fenec-abi"]
 
 [[bin]]
 name = "fenec"
