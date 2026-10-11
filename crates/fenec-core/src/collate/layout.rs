@@ -122,7 +122,7 @@ pub(super) static EMBEDDED: [&[u8]; 12] = [
     include_bytes!("other.bin"),
     include_bytes!("smp.bin"),
 ];
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "collate"))]
 pub(super) static EMBEDDED: [&[u8]; 12] = [
     include_bytes!("latin.bin"),
     &[],
@@ -137,6 +137,10 @@ pub(super) static EMBEDDED: [&[u8]; 12] = [
     &[],
     &[],
 ];
+
+/// A browser module without the `collate` feature carries none.
+#[cfg(all(target_arch = "wasm32", not(feature = "collate")))]
+pub(super) static EMBEDDED: [&[u8]; 12] = [&[]; 12];
 
 /// The tailorings' bytes, which every build carries.
 pub(super) static TAILORED: [&[u8]; 1] = [include_bytes!("tr.bin")];

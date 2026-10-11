@@ -13,7 +13,7 @@ categories.workspace = true
 [dependencies]
 # No external dependencies. The SQLite file format is read by hand; the
 # PostgreSQL wire protocol is spoken through fenec-wire's client.
-fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
+fenec-core = { workspace = true, features = ["std-fs", "full"] }
 fenec-wire.workspace = true
 # `--where` and `--index` are read by FenecQL's own parser (`args`).
 fenec-ql.workspace = true

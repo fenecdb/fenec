@@ -30,11 +30,15 @@ mod having;
 mod highlight;
 mod insert;
 mod json;
+mod language_file;
 mod limit;
 mod lookup;
 mod maintenance;
 mod mapped;
 mod memory;
+// Its fold is held to Python's by the fold's own functions, which a build
+// without the feature has no fold to call.
+#[cfg(feature = "nocase")]
 mod nocase;
 mod paging;
 mod persist;

@@ -146,6 +146,11 @@ impl Registry {
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value> {
         let f = self.function(name).ok_or_else(|| {
+            if !crate::FULL {
+                if let Some(feature) = missing_function(name) {
+                    return crate::error::not_built(&format!("`{name}`"), feature);
+                }
+            }
             match name.eq_ignore_ascii_case(crate::query::EXPIRED) {
                 true => Error::Query(
                     "`expired()` reads the rows past their `@ttl`, and this collection \
@@ -165,6 +170,29 @@ impl Registry {
         }
         f.call(args)
     }
+}
+
+/// The feature a builtin function named `name` comes with, where this build
+/// was made without it (`Cargo.toml`): its call is refused naming the
+/// feature rather than as a function nobody wrote. A registry's own
+/// function by that name is found before this is asked.
+fn missing_function(name: &str) -> Option<&'static str> {
+    const GEO: &[&str] = if cfg!(feature = "geo") {
+        &[]
+    } else {
+        &[crate::geo::DISTANCE, crate::geo::WITHIN]
+    };
+    const ANALYTICS: &[&str] = if cfg!(feature = "analytics") {
+        &[]
+    } else {
+        &["bucket", "hll_estimate"]
+    };
+    for (feature, names) in [("geo", GEO), ("analytics", ANALYTICS)] {
+        if names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            return Some(feature);
+        }
+    }
+    None
 }
 
 pub trait Plugin {
@@ -302,6 +330,7 @@ pub mod builtins {
             "converts text or epoch milliseconds into a timestamp",
             |a| { a[0].clone().coerce(&crate::value::DataType::Timestamp) }
         );
+        #[cfg(feature = "analytics")]
         reg!(
             r,
             "bucket",
@@ -333,6 +362,7 @@ pub mod builtins {
         reg!(r, "least", 1, None, "the smallest of its values", |a| {
             Ok(extreme(a, false))
         });
+        #[cfg(feature = "analytics")]
         reg!(
             r,
             "hll_estimate",
@@ -355,6 +385,7 @@ pub mod builtins {
                 })
             }
         );
+        #[cfg(feature = "geo")]
         reg!(
             r,
             "distance",
@@ -363,6 +394,7 @@ pub mod builtins {
             "the metres between two points [lon, lat], as Redis's GEODIST",
             crate::geo::distance_fn
         );
+        #[cfg(feature = "geo")]
         reg!(
             r,
             "within",

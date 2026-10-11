@@ -17,7 +17,7 @@ categories.workspace = true
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
+fenec-core = { workspace = true, features = ["std-fs", "full"] }
 fenec-ql.workspace = true
 fenec-abi = { workspace = true, features = ["sync"] }
 

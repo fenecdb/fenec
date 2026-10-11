@@ -14,7 +14,9 @@ standard library is split by what it is for: float formatting, the rest of
 panics.
 
 The test build without the indexes (`make wasm-lite`) is built too, and
-its sizes listed after, against the base's.
+the module with no feature at all, and their sizes listed after, against
+the base's. `--features a,b` measures the module built with those alone
+(`make size-report FEATURES="text geo"`, FEATURES=none for none).
 
 gzip and brotli move by up to 0.3 KB with nothing but the layout of the bytes
 changed -- two lines of comment at the top of engine.rs moved brotli 46 bytes,
@@ -304,8 +306,10 @@ def part_of(home):
 
 
 # The builds measured beside the full module, by the features each is
-# built with: `make wasm-lite`, a test build no package ships.
-OTHERS = [("fenec-lite.wasm", [])]
+# built with: `make wasm-lite`, a test build no package ships, and the
+# smallest module there is, with no feature (`make wasm FEATURES=none
+# SCHEMA=0`).
+OTHERS = [("fenec-lite.wasm", ["language"]), ("no feature", [])]
 
 
 def build(root, target, features=None):
@@ -585,8 +589,8 @@ def why(root, target, pattern):
     return "\n".join(lines)
 
 
-def measure(root, target):
-    served, bodies, data = read(build(root, target))
+def measure(root, target, features=None):
+    served, bodies, data = read(build(root, target, features))
     brotli = None
     if shutil.which("brotli"):
         brotli = len(subprocess.run(["brotli", "-c", "-q", "11"], input=served,
@@ -622,18 +626,25 @@ def served_sizes(served):
 
 
 def others(root, target):
-    """The other modules' served sizes, by name."""
-    return {name: served_sizes(read(build(root, target, features))[0]) for name, features in OTHERS}
+    """The other modules' served sizes, by name: `None`s for one the tree
+    cannot build, a base from before a feature its features name."""
+    out = {}
+    for name, features in OTHERS:
+        try:
+            out[name] = served_sizes(read(build(root, target, features))[0])
+        except subprocess.CalledProcessError:
+            out[name] = (None, None, None)
+    return out
 
 
 def others_report(head, base=None):
-    """Markdown: the build without the indexes, against the base's."""
+    """Markdown: the other builds, against the base's."""
     out = ["| module | raw | gzip | brotli |" + (" against the base, bytes |" if base else ""),
            "| --- | ---: | ---: | ---: |" + (" ---: |" if base else "")]
     for name, sizes in head.items():
         line = f"| `{name}` | " + " | ".join(kb(n) for n in sizes) + " |"
         if base:
-            was = base[name]
+            was = base.get(name, (None, None, None))
             line += " " + ", ".join(signed(None if a is None or b is None else a - b, NOISE if i else 0)
                                     for i, (a, b) in enumerate(zip(sizes, was))) + " |"
         out.append(line)
@@ -768,6 +779,11 @@ def main():
         at = args.index("--why")
         pattern = args[at + 1]
         del args[at:at + 2]
+    features = None
+    if "--features" in args:
+        at = args.index("--features")
+        features = [f for f in re.split(r"[ ,]+", args[at + 1]) if f]
+        del args[at:at + 2]
     if "--bin" in args:
         print(native(args[args.index("--bin") + 1]))
         return
@@ -777,7 +793,7 @@ def main():
     if pattern:
         print(why(ROOT, os.path.join(out, "why"), pattern))
         return
-    head = measure(ROOT, os.path.join(out, "head"))
+    head = measure(ROOT, os.path.join(out, "head"), features)
     head_others = others(ROOT, os.path.join(out, "head"))
     base = base_others = None
     if base_ref:
@@ -788,14 +804,17 @@ def main():
         subprocess.run(["git", "worktree", "add", "--detach", "-f", tree, base_ref], check=True,
                        cwd=ROOT, stdout=subprocess.DEVNULL)
         try:
-            base = measure(tree, os.path.join(out, "base"))
+            base = measure(tree, os.path.join(out, "base"), features)
             base_others = others(tree, os.path.join(out, "base"))
         finally:
             subprocess.run(["git", "worktree", "remove", "--force", tree], cwd=ROOT)
             shutil.rmtree(os.path.dirname(tree), ignore_errors=True)
-    title = "## The browser module" + (f", against `{called}`" if base_ref else "")
+    title = "## The browser module" + ("" if features is None else
+                                       f" with {', '.join(f'`{f}`' for f in features) or 'no feature'}")
+    title += f", against `{called}`" if base_ref else ""
     text = title + "\n\n" + report(head, base) + "\n"
-    text += ("\n## Without the indexes (`make wasm-lite`)" + (f", against `{called}`" if base_ref else "")
+    text += ("\n## Without the indexes (`make wasm-lite`), and without any feature"
+             + (f", against `{called}`" if base_ref else "")
              + "\n\n" + others_report(head_others, base_others) + "\n")
     print(text)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")

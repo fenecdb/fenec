@@ -51,12 +51,15 @@ npm install -q --no-audit --no-fund \
   "$out/dist/fenecdb-cloudflare-$version.tgz" \
   "$out/dist/fenecdb-langchain-$version.tgz" \
   @langchain/core@1 react@19 >/dev/null
-# The module built without the indexes (`make wasm-lite`) is a test of the
-# files the two builds hand each other, not something a user is offered.
-if [ -e node_modules/@fenecdb/web/fenec-lite.wasm ]; then
-  echo "@fenecdb/web carries fenec-lite.wasm, a test build" >&2
-  exit 1
-fi
+# The modules built without the indexes (`make wasm-lite`) and without
+# anything (`make wasm-min`) are tests of the files the builds hand each
+# other, not something a user is offered.
+for test_build in fenec-lite.wasm fenec-min.wasm; do
+  if [ -e "node_modules/@fenecdb/web/$test_build" ]; then
+    echo "@fenecdb/web carries $test_build, a test build" >&2
+    exit 1
+  fi
+done
 cat > smoke.mjs <<'EOF'
 import { readFile } from 'node:fs/promises';
 import { Fenec } from '@fenecdb/web';

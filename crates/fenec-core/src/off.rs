@@ -256,17 +256,18 @@ impl SparseIndex {
     }
 }
 
-/// The `@geo` index, which the `sorted` feature carries with the ordered
-/// index whose chunks it keeps its keys in: without it a point's
-/// conditions and `near` over one are the scan's, the same answers.
+/// The `@geo` index, which needs the `geo` feature and the `sorted` one,
+/// whose chunks it keeps its keys in: without `sorted` a point's
+/// conditions and `near` over one are the scan's, the same answers, and
+/// without `geo` they are refused.
 pub enum GeoIndex {}
 
 impl GeoIndex {
     pub fn new() -> GeoIndex {
-        absent("sorted")
+        absent("geo")
     }
     pub fn build(rows: &mut dyn Iterator<Item = (DocId, (f64, f64))>) -> GeoIndex {
-        absent("sorted")
+        absent("geo")
     }
     pub fn insert(&mut self, id: DocId, v: Option<&Value>) {
         match *self {}
@@ -348,15 +349,15 @@ impl SortedIndex {
     }
 }
 
-/// The index over several fields, which the `sorted` feature carries with
-/// the ordered index whose chunks it keeps its keys in: without it a
-/// filter and an `order` over its fields are the scan's, the same answers,
-/// and a unique one is asked by reading the rows.
+/// The index over several fields, which the `composite` feature carries,
+/// keeping its keys in the ordered index's chunks: without it a filter and
+/// an `order` over its fields are the scan's, the same answers, and a
+/// unique one is asked by reading the rows.
 pub enum CompositeIndex {}
 
 impl CompositeIndex {
     pub fn new(parts: Vec<crate::composite::Part>) -> CompositeIndex {
-        absent("sorted")
+        absent("composite")
     }
     pub fn parts(&self) -> &[crate::composite::Part] {
         match *self {}
@@ -365,7 +366,7 @@ impl CompositeIndex {
         parts: Vec<crate::composite::Part>,
         rows: Vec<(DocId, crate::composite::RowKey)>,
     ) -> CompositeIndex {
-        absent("sorted")
+        absent("composite")
     }
     pub fn key(&self, vals: &[&Value]) -> crate::composite::RowKey {
         match *self {}

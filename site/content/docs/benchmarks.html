@@ -1362,7 +1362,8 @@ server, the client alone in its bundle.</p>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1525 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1331 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>690 KB</b></td><td class="n"><b>229 KB</b></td><td class="n">277 KB</td></tr>
-<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">490 KB</td><td class="n">167 KB</td><td class="n">199 KB</td></tr>
+<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">491 KB</td><td class="n">167 KB</td><td class="n">199 KB</td></tr>
+<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">432 KB</td><td class="n">145 KB</td><td class="n">173 KB</td></tr>
 <tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">180 KB</td><td class="n">47 KB</td><td class="n">50 KB</td></tr>
 <tr><td><code>@fenecdb/web/client</code> in an app's bundle, esbuild, minified</td><td class="n">16 KB</td><td class="n">6 KB</td><td class="n">6 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
@@ -1447,54 +1448,60 @@ of vectors as JSON 15% (<code>make wasm-speed</code>). <code>make size-report
 WHY=&lt;pattern&gt;</code> names what pulls a part in.</p>
 </details>
 
-<h2 id="module-features">The browser module, index by index</h2>
+<h2 id="module-features">The browser module, feature by feature</h2>
 
-<p>A page that does not search text, or needs no graph behind its vector
-search, can load a smaller module built without that index. Leaving all four
-indexes out saves 35.5 KB brotli, 20% of the module; without the graph a
-<code>near</code> still answers, every vector measured. The release ships
-the module with every index; any other set is a build option.</p>
+<p>A page that does not search text, needs no graph behind its vector
+search, or asks no facets, can load a smaller module built without what it
+does not use. With every feature the module is 229.3 KB brotli; with none,
+145.3 KB, 37% less, and a <code>near</code> still answers, every vector
+measured. The release ships the module with every feature; any other set
+is a build option.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>Built with</th><th class="n">On disk, KB</th><th class="n">Brotli, KB</th><th class="n">gzip, KB</th><th class="n">Brotli saved</th></tr></thead>
+<thead><tr><th>Feature</th><th class="n">Added to none, brotli KB</th><th class="n">Left out of every one, brotli KB</th><th class="n">On disk, KB saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">543.2</td><td class="n">180.7</td><td class="n">216.9</td><td class="n">—</td></tr>
-<tr><td><code>vector text sparse</code></td><td class="n">512.7</td><td class="n">172.8</td><td class="n">206.5</td><td class="n">7.9</td></tr>
-<tr><td><code>vector text sorted</code></td><td class="n">538.7</td><td class="n">179.4</td><td class="n">215.1</td><td class="n">1.3</td></tr>
-<tr><td><code>vector sparse sorted</code></td><td class="n">518.4</td><td class="n">173.0</td><td class="n">207.5</td><td class="n">7.7</td></tr>
-<tr><td><code>text sparse sorted</code></td><td class="n">480.5</td><td class="n">161.9</td><td class="n">193.6</td><td class="n">18.8</td></tr>
-<tr><td><code>vector text</code></td><td class="n">507.0</td><td class="n">170.9</td><td class="n">204.1</td><td class="n">9.8</td></tr>
-<tr><td><code>vector sparse</code></td><td class="n">487.1</td><td class="n">164.8</td><td class="n">196.6</td><td class="n">15.9</td></tr>
-<tr><td><code>vector sorted</code></td><td class="n">511.6</td><td class="n">171.1</td><td class="n">204.9</td><td class="n">9.6</td></tr>
-<tr><td><code>text sparse</code></td><td class="n">449.2</td><td class="n">153.3</td><td class="n">182.6</td><td class="n">27.4</td></tr>
-<tr><td><code>text sorted</code></td><td class="n">475.2</td><td class="n">160.3</td><td class="n">191.3</td><td class="n">20.4</td></tr>
-<tr><td><code>sparse sorted</code></td><td class="n">453.7</td><td class="n">153.3</td><td class="n">183.2</td><td class="n">27.4</td></tr>
-<tr><td><code>vector</code></td><td class="n">479.9</td><td class="n">162.4</td><td class="n">193.6</td><td class="n">18.3</td></tr>
-<tr><td><code>text</code></td><td class="n">443.2</td><td class="n">151.3</td><td class="n">180.0</td><td class="n">29.4</td></tr>
-<tr><td><code>sparse</code></td><td class="n">422.1</td><td class="n">144.6</td><td class="n">172.1</td><td class="n">36.1</td></tr>
-<tr><td><code>sorted</code></td><td class="n">446.6</td><td class="n">151.0</td><td class="n">180.1</td><td class="n">29.7</td></tr>
-<tr><td>none, <code>FEATURES=none</code></td><td class="n">414.7</td><td class="n">142.1</td><td class="n">168.7</td><td class="n">38.6</td></tr>
+<tr><td><code>vector</code>, the HNSW graph</td><td class="n">20.7</td><td class="n">19.0</td><td class="n">62.8</td></tr>
+<tr><td><code>text</code>, <code>match</code></td><td class="n">5.6</td><td class="n">7.4</td><td class="n">24.8</td></tr>
+<tr><td><code>sparse</code>, <code>@inverted</code></td><td class="n">2.5</td><td class="n">1.3</td><td class="n">4.3</td></tr>
+<tr><td><code>sorted</code>, <code>@sorted</code>, and <code>composite</code> with it</td><td class="n">9.0</td><td class="n">21.3</td><td class="n">71.3</td></tr>
+<tr><td><code>composite</code>, an index over several fields, beside <code>sorted</code></td><td class="n">9.0</td><td class="n">8.5</td><td class="n">26.5</td></tr>
+<tr><td><code>geo</code>, points, and <code>@geo</code> where <code>sorted</code> is</td><td class="n">2.6</td><td class="n">5.9</td><td class="n">17.3</td></tr>
+<tr><td><code>nocase</code></td><td class="n">2.9</td><td class="n">2.6</td><td class="n">7.8</td></tr>
+<tr><td><code>collate</code>, ICU's order</td><td class="n">8.7</td><td class="n">8.3</td><td class="n">19.3</td></tr>
+<tr><td><code>facets</code></td><td class="n">3.9</td><td class="n">4.5</td><td class="n">14.3</td></tr>
+<tr><td><code>highlight</code>, beside <code>text</code></td><td class="n">3.5</td><td class="n">3.1</td><td class="n">9.3</td></tr>
+<tr><td><code>analytics</code></td><td class="n">3.6</td><td class="n">3.1</td><td class="n">9.9</td></tr>
+<tr><td>the schema check, <code>SCHEMA=0</code> without</td><td class="n">9.7</td><td class="n">9.6</td><td class="n">28.9</td></tr>
 </tbody>
 </table>
 </div>
 
 <details class="deep"><summary>Method and details</summary>
-<p>A page that does not search vectors, or text, loads a module built
-without the index it does not use (<a href="javascript.html#features">A
-smaller module</a>): <code>make wasm FEATURES="text sorted"</code>, and
-<code>make wasm-sizes</code> builds and measures every set of the four.
-What stands in for a missing index is a type no value can have, so the
-compiler drops the index whole, and the engine's paths through it with it.</p>
+<p>A page loads a module built with what it uses (<a
+href="javascript.html#features">A smaller module</a>): <code>make wasm
+FEATURES="text sorted"</code>, <code>FEATURES=indexes</code> or
+<code>language</code> for a group. <code>make wasm-sizes</code> builds the
+module with every feature (689.9 KB on disk), with none (431.7 KB), with
+each added to none and with every one but each, and measures each under
+gzip -9 and brotli -q 11. The two columns differ where features share
+code: the sort and the map the sparse index ranks through are the other
+indexes' too, and the ordered index's chunks are the index over several
+fields' and <code>@geo</code>'s, so <code>sorted</code> left out takes both
+with it.</p>
 
-<p>Left out alone, the graph saves 18.8 KB brotli, the ordered index 7.9,
-the text index 7.7 and the sparse index 1.3, since the sort and the map it
-ranks through are the other indexes' too; built alone it adds 2.5. All four
-save 38.6 KB, 21% of the module. Each row is built with the schema check,
-as <code>make wasm</code> builds it; <code>SCHEMA=0</code> leaves that
-out too. Making the indexes optional cost the module with every index
-nothing: it came out the size it had been before any could be left out, to
-the byte.</p>
+<p>What stands in for a missing index is a type no value can have, so the
+compiler drops the index whole, and the engine's paths through it with it;
+a fold of no value does the same for <code>nocase</code>, and a function
+or an aggregate a feature brings is refused by name. A module without a
+feature opens every file: a collection declaring an index it lacks is
+answered by the scan, a point is read and written, and a statement over a
+collection whose <code>nocase</code> or collated field it cannot compare
+is refused, the feature named. Making these optional cost the module with
+every feature nothing: its code came out 14 bytes smaller, functions moved
+and closures renumbered, and its compressed sizes within the noise of a
+build's layout. Left in every module, measured: json fields and their
+paths, which would save 0.6 KB brotli, and <code>@ttl</code>, 0.7 KB.</p>
 
 <p>Without the graph a <code>near</code> measures every vector, as
 <code>near ... exact</code> does in the full module, with the same rows and

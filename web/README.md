@@ -58,13 +58,14 @@ const db = await Fenec.open(await file('fenec.wasm'), {
 
 **Which package.** A page whose queries run on a server imports
 `@fenecdb/web/client` and loads no module; a database in the page, or a
-synced replica, loads `fenec.wasm`, with every index and the schema check.
-A page that needs fewer indexes can build its own module with them alone --
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none, and `SCHEMA=0`
-leaves the schema check out (7.5 KB brotli) -- and the file is the same
-either way: a store one build wrote opens in the other. Without the graph a
-`near` measures every vector, as `exact` does; without the text index a
-`match` throws a `FenecError` naming it.
+synced replica, loads `fenec.wasm`, with every feature and the schema
+check. A page that needs fewer can build its own module with them alone --
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none (145 KB
+brotli against 229), and `SCHEMA=0` leaves the schema check out (9.6 KB
+brotli) -- and the file is the same either way: a store one build wrote
+opens in the other. Without the graph a `near` measures every vector, as
+`exact` does; without the text index a `match` throws a `FenecError`
+naming it, and so does what needs any other feature a module lacks.
 
 Serve `.wasm` as `application/wasm`, compressed once at build time.
 Full reference: https://fenecdb.com/docs/javascript

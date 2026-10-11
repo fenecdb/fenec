@@ -146,6 +146,13 @@ impl Collation {
 
     /// `a` against `b` in this order.
     pub fn compare(self, a: &str, b: &str) -> Ordering {
+        // A build without the `collate` feature carries none of the tables:
+        // a statement that would compare in a collation is refused before
+        // it gets here (`Database::refuse_unbuilt`), and this is never
+        // asked.
+        if !cfg!(feature = "collate") {
+            return a.cmp(b);
+        }
         // What the two share weighs the same in both, at every level, so the
         // comparison starts where they part: `Ahmet Yılmaz` against `Ahmet
         // Kaya` is `Y` against `K`. Sorting a million names, a comparison
@@ -303,6 +310,9 @@ const LOW_CONTINUES: [u64; 16] = {
 /// page needs them. Returns the chunk's name, or `None` for bytes that are
 /// not one of these tables' chunks.
 pub fn add_chunk(bytes: &[u8]) -> Option<&'static str> {
+    if !cfg!(feature = "collate") {
+        return None;
+    }
     let (n, table) = Table::parse(bytes, CHUNK_MAGIC)?;
     let n = n as usize;
     let mut table = Some(table);
@@ -321,8 +331,9 @@ pub fn take_missing() -> u32 {
 
 /// Whether the build may lack chunks: the browser module, which is handed
 /// them. Everything that checks for them is behind it, so a native build
-/// checks nothing.
-pub const PARTIAL: bool = cfg!(target_arch = "wasm32");
+/// checks nothing -- and neither does one without the `collate` feature,
+/// which compares in no collation.
+pub const PARTIAL: bool = cfg!(all(target_arch = "wasm32", feature = "collate"));
 
 /// The chunks this build has, a bit each.
 pub fn loaded() -> u32 {
@@ -827,7 +838,8 @@ fn element(primary: u64, secondary: u32, tertiary: u32) -> u64 {
     primary << 14 | (secondary as u64) << 5 | tertiary as u64
 }
 
-#[cfg(test)]
+// A build without the feature compares in no collation.
+#[cfg(all(test, feature = "collate"))]
 mod tests {
     use super::*;
 

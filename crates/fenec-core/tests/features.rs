@@ -1,12 +1,19 @@
-//! A build made without the indexes (`Cargo.toml`'s `vector`, `text`,
-//! `sparse` and `sorted`): a collection that declares them is made and
-//! opened all the same, its documents read and written, its `@sorted`
-//! field's comparisons and orders answered by the scan, a `near` over a
-//! vector or a sparse vector by measuring every one, as `exact` does, and
-//! what needs the others -- `match`, an index made -- refused, the feature
-//! named. `web/fenec.test.js` holds the module without the graph to the
-//! full one's `near ... exact`, row for row and score for score.
+//! A build made without the indexes (`Cargo.toml`'s `indexes`): a
+//! collection that declares them is made and opened all the same, its
+//! documents read and written, its `@sorted` field's comparisons and orders
+//! answered by the scan, a `near` over a vector or a sparse vector by
+//! measuring every one, as `exact` does, and what needs the others --
+//! `match`, an index made -- refused, the feature named. `web/fenec.test.js`
+//! holds the module without the graph to the full one's `near ... exact`,
+//! row for row and score for score.
 //!
+//! And a build made without the rest of the language as well (`language`):
+//! a file declaring what it lacks -- `tests/language.fenec`, which only a
+//! build with it can write -- opens, its other collections answer, and a
+//! statement that needs what is missing is refused, the feature named. Run
+//! both ways, each test asking for what it needs:
+//!
+//!     cargo test -p fenec-core --no-default-features --features std-fs,language --test features
 //!     cargo test -p fenec-core --no-default-features --features std-fs --test features
 
 #![cfg(not(any(
@@ -18,10 +25,14 @@
 
 use fenec_core::prelude::*;
 
+/// The statements of `sql`, each parsed once the ones before it ran: a
+/// refusal a statement's own check makes comes at its parse.
 fn run(db: &mut Database, sql: &str) -> Result<Response> {
     let mut last = Response::Affected(0);
-    for s in fenec_ql::parse_for(db, sql).expect("parse") {
-        last = db.execute_with(&s, &[])?;
+    for text in sql.split(';').filter(|t| !t.trim().is_empty()) {
+        for s in fenec_ql::parse_for(db, text)? {
+            last = db.execute_with(&s, &[])?;
+        }
     }
     Ok(last)
 }
@@ -79,6 +90,7 @@ fn documents_read_and_write_and_the_scan_orders_them() {
 
 /// Facets need no index: the scan counts them, over the rows a filter
 /// keeps, beside the page.
+#[cfg(feature = "facets")]
 #[test]
 fn facets_count_without_the_indexes() {
     let mut db = declared();
@@ -100,15 +112,17 @@ fn facets_count_without_the_indexes() {
 fn what_needs_a_missing_index_is_refused() {
     let mut db = declared();
     run(&mut db, "alter collection d add field other vector<3>").unwrap();
+    // The marks are asked of before the `match` they mark is run.
+    let marks = match cfg!(feature = "highlight") {
+        true => "`text`",
+        false => "`highlight`",
+    };
     for (sql, feature) in [
         (r#"get d match title "rust""#, "`text`"),
-        (
-            r#"get d select highlight(title) match title "rust""#,
-            "`text`",
-        ),
+        (r#"get d select highlight(title) match title "rust""#, marks),
         (
             r#"get d select snippet(title, 3) match title "rust" facet year"#,
-            "`text`",
+            marks,
         ),
         ("create index on d (title) @sorted", "`sorted`"),
         ("create index on d (other) @hnsw(cosine)", "`vector`"),
@@ -156,10 +170,11 @@ fn a_path_declaring_an_ordered_index_is_scanned() {
     assert!(e.contains("`sorted`"), "{e}");
 }
 
-/// A point field declaring `@geo`, which the `sorted` feature carries: a
+/// A point field declaring `@geo`, which needs the `sorted` feature: a
 /// build without it opens the file, answers a radius, a box and `near` by
 /// measuring every point -- what the index's answers are held to -- and
 /// refuses to make one.
+#[cfg(feature = "geo")]
 #[test]
 fn a_point_index_declared_is_answered_by_the_scan() {
     let mut db = Database::new();
@@ -379,7 +394,7 @@ fn an_index_over_several_fields_declared_is_answered_by_the_scan() {
     assert!(matches!(e, Error::Duplicate(_)), "{e}");
     run(&mut db, r#"put p {owner: 2, at: 1, slug: "c"}"#).unwrap();
     let e = run(&mut db, "create index on p (slug, at) @sorted").unwrap_err();
-    assert!(e.to_string().contains("sorted"), "{e}");
+    assert!(e.to_string().contains("`composite`"), "{e}");
     let mut back = Database::new();
     back.load(&db.snapshot()).expect("the image opens");
     let r = run(&mut back, "get p select at where owner = 1 order at desc").unwrap();
@@ -390,6 +405,7 @@ fn an_index_over_several_fields_declared_is_answered_by_the_scan() {
     run(&mut back, r#"put p {owner: 2, at: 4, slug: "b"}"#).unwrap();
 }
 
+#[cfg(feature = "nocase")]
 #[test]
 fn a_nocase_field_is_its_fold_without_the_indexes() {
     let mut db = Database::new();
@@ -430,4 +446,167 @@ fn a_nocase_field_is_its_fold_without_the_indexes() {
     back.load(&db.snapshot()).expect("the image opens");
     let r = run(&mut back, r#"get u select n where email = "carol@X.COM""#).unwrap();
     assert_eq!(ints(&r, 0), [2]);
+}
+
+/// Asserts `sql` is refused naming `feature` as one this build lacks.
+#[cfg(not(all(
+    feature = "nocase",
+    feature = "collate",
+    feature = "geo",
+    feature = "facets",
+    feature = "analytics"
+)))]
+fn refused(db: &mut Database, sql: &str, feature: &str) {
+    let e = run(db, sql).unwrap_err().to_string();
+    assert!(
+        e.contains(&format!(
+            "`{feature}` feature, which this build was made without"
+        )),
+        "{sql}: {e}"
+    );
+}
+
+/// `tests/language.fenec`, which a build with every feature wrote
+/// (`tests/language_file.rs`): a `nocase` field's collection, a collated
+/// one's, points under `@geo`, and a collection declaring none of them.
+#[cfg(not(all(feature = "nocase", feature = "collate", feature = "geo")))]
+fn language_file() -> Database {
+    let mut db = Database::new();
+    db.load(include_bytes!("language.fenec"))
+        .expect("a file declaring what the build lacks opens");
+    db
+}
+
+/// The file's collection that declares nothing missing answers as ever,
+/// and an image of the file written again opens again.
+#[cfg(not(all(feature = "nocase", feature = "collate", feature = "geo")))]
+#[test]
+fn a_file_declaring_what_the_build_lacks_opens() {
+    let mut db = language_file();
+    let r = run(&mut db, "get plain select n order n").unwrap();
+    assert_eq!(ints(&r, 0), [1, 2]);
+    run(&mut db, r#"put plain {n: 3, tag: "c"}"#).unwrap();
+    let r = run(&mut db, r#"get plain select n where tag = "c""#).unwrap();
+    assert_eq!(ints(&r, 0), [3]);
+    let mut back = Database::new();
+    back.load(&db.snapshot()).expect("its image opens");
+    let r = run(&mut back, "get plain select n order n").unwrap();
+    assert_eq!(ints(&r, 0), [1, 2, 3]);
+}
+
+/// A `nocase` field's text compared as written would find what its fold
+/// does not and miss what it does: every statement over its collection is
+/// refused, an inner `get` too, and so is declaring one. Dropped, the rest
+/// goes on.
+#[cfg(not(feature = "nocase"))]
+#[test]
+fn a_nocase_field_s_collection_is_refused() {
+    let mut db = language_file();
+    for sql in [
+        r#"get users select n where email = "alice@x.com""#,
+        "get users count",
+        r#"put users {email: "carol@x.com", n: 3}"#,
+        "set users {n: 9} where n = 1",
+        "del users where n = 2",
+        "get plain where n in (get users select n)",
+        "get plain lookup users on id = n",
+        "create collection more (email text nocase)",
+        "alter collection plain add field email text nocase",
+    ] {
+        refused(&mut db, sql, "nocase");
+    }
+    run(&mut db, "drop collection users").unwrap();
+    assert_eq!(
+        ints(&run(&mut db, "get plain select n").unwrap(), 0),
+        [1, 2]
+    );
+}
+
+/// A collated field's order needs ICU's tables: a statement over its
+/// collection is refused, as `order ... collate` and declaring one are.
+#[cfg(not(feature = "collate"))]
+#[test]
+fn a_collated_field_s_collection_is_refused() {
+    let mut db = language_file();
+    for sql in [
+        "get people select n order name",
+        r#"put people {name: "ana", n: 3}"#,
+        "get plain select n order tag collate und",
+        "set plain {n: 1} order tag collate tr limit 1",
+        "create collection more (name text collate tr)",
+    ] {
+        refused(&mut db, sql, "collate");
+    }
+}
+
+/// A point is read, written and checked as one; what measures one -- a
+/// radius, a box, `near` -- and its index are refused.
+#[cfg(not(feature = "geo"))]
+#[test]
+fn points_are_kept_and_their_questions_refused() {
+    let mut db = language_file();
+    run(&mut db, "put places {n: 3, loc: [-73.98, 40.75]}").unwrap();
+    let r = run(&mut db, "get places select n order n").unwrap();
+    assert_eq!(ints(&r, 0), [1, 2, 3]);
+    let e = run(&mut db, "put places {n: 4, loc: [200, 0]}").unwrap_err();
+    assert!(e.to_string().contains("180"), "a point is checked: {e}");
+    for sql in [
+        "get places select n where distance(loc, [13.4, 52.5]) < 1000",
+        "get places select n where within(loc, [0, 0, 20, 60])",
+        "get places select n near loc [2.0, 48.0] limit 1",
+        "alter collection places add field to geo; create index on places (to) @geo",
+    ] {
+        refused(&mut db, sql, "geo");
+    }
+}
+
+/// `facet` counts beside the page; a build without it refuses one.
+#[cfg(not(feature = "facets"))]
+#[test]
+fn facets_are_refused() {
+    let mut db = declared();
+    refused(&mut db, "get d select year facet year", "facets");
+    refused(
+        &mut db,
+        "get d select year where year > 2000 limit 1 facet year",
+        "facets",
+    );
+    refused(&mut db, "get d facet year ranges [0, 2000, 3000]", "facets");
+}
+
+/// The aggregates past the plain five are refused by name; those five
+/// group as ever.
+#[cfg(not(feature = "analytics"))]
+#[test]
+fn the_analytics_aggregates_are_refused() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection e (user text, n int, at timestamp)",
+    )
+    .unwrap();
+    run(
+        &mut db,
+        r#"put e [{user: "a", n: 1, at: 1000}, {user: "a", n: 2, at: 2000}, {user: "b", n: 4, at: 3000}]"#,
+    )
+    .unwrap();
+    let r = run(
+        &mut db,
+        "get e select sum(n) as s, count() as c, min(n) as lo, max(n) as hi, avg(n) as a, user \
+         group user order user",
+    )
+    .unwrap();
+    assert_eq!(ints(&r, 0), [3, 4]);
+    for sql in [
+        "get e select count(distinct user)",
+        "get e select first(n by at) group user",
+        "get e select last(n by at) group user",
+        "get e select approx_count_distinct(user)",
+        "get e select hll_accumulate(user)",
+        "get e select bucket(at, 1h) as h, count() group h",
+        "get e select user, count() as c group user having c > 1",
+        "get e select n where hll_estimate(null) = 0",
+    ] {
+        refused(&mut db, sql, "analytics");
+    }
 }

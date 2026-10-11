@@ -24,7 +24,7 @@ default = ["sync"]
 sync = []
 
 [dev-dependencies]
-fenec-core = { workspace = true, features = ["indexes", "std-fs"] }
+fenec-core = { workspace = true, features = ["full", "std-fs"] }
 
 [[test]]
 name = "all"

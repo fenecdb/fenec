@@ -397,7 +397,7 @@ def prev_next(active, base):
 # 684/765/927 KB when the text index went in.
 NOISE_KB = 0.3
 COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all",
-              "kb_lite_gz", "kb_lite_br",
+              "kb_lite_gz", "kb_lite_br", "kb_min_gz", "kb_min_br",
               "kb_app_br", "kb_app_client_br", "kb_studio_gz"}
 # The browser client's modules, each after those it imports: what
 # `@fenecdb/web` ships of JavaScript. client.js is `@fenecdb/web/client`,
@@ -464,7 +464,9 @@ CLAIMS = [
     ("site/content/docs/javascript.html",
      r"<code>sync\(\)</code> loads it too</td><td class=\"n\">(\d+) KB</td>", "kb_br", 0),
     ("site/content/docs/javascript.html",
-     r"make wasm FEATURES=none SCHEMA=0   # nor the schema check: (\d+) KB", "kb_lite_br", 0),
+     r"make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: (\d+) KB", "kb_lite_br", 0),
+    ("site/content/docs/javascript.html",
+     r"make wasm FEATURES=none SCHEMA=0       # no feature at all: (\d+) KB", "kb_min_br", 0),
     ("site/content/docs/javascript.html", r"modules it\s+imports, (\d+) KB brotli", "kb_client_br", 0),
     ("site/content/docs/javascript.html", r"bundles to\s+(\d+) KB brotli through it", "kb_app_client_br", 0),
     ("site/content/docs/javascript.html", r"and to (\d+) KB through <code>@fenecdb/web</code>", "kb_app_br", 0),
@@ -482,13 +484,21 @@ CLAIMS = [
     ("site/content/docs/benchmarks.html",
      r"in an app's bundle, <code>@fenecdb/web/client</code></td><td class=\"n\">(\d+) KB</td>", "kb_app_client_br", 0),
     ("site/content/docs/benchmarks.html",
-     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">(\d+) KB</td>', "kb_lite", 0),
+     r'<code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">(\d+) KB</td>', "kb_lite", 0),
     ("site/content/docs/benchmarks.html",
-     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     r'<code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_lite_br", 0),
     ("site/content/docs/benchmarks.html",
-     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     r'<code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_lite_gz", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">(\d+) KB</td>', "kb_min", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_min_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_min_gz", 0),
     ("README.md", r"`@fenecdb/web/client`, (\d+) KB brotli\s+in its bundle", "kb_app_client_br", 0),
     ("web/README.md", r"`fenec.wasm` \|[^\n]*: (\d+) KB brotli", "kb_br", 0),
     ("web/README.md", r"`@fenecdb/web/client`, (\d+) KB brotli in an app's bundle", "kb_app_client_br", 0),
@@ -663,11 +673,11 @@ def check_claims():
     client_gz, client_br = compressed_bytes(client)
     kb = lambda n: None if n is None else n / 1024
     # The module built without the indexes or the schema check (`make
-    # wasm-lite`, a test build no package ships, whose size the docs quote
-    # as a build option), where it was built: a claim on it when it is
-    # missing says so.
+    # wasm-lite`) and the one with no feature at all (`make wasm-min`),
+    # test builds no package ships, whose sizes the docs quote as build
+    # options, where they were built: a claim on one missing says so.
     other = {}
-    for key, name in (("lite", "fenec-lite.wasm"),):
+    for key, name in (("lite", "fenec-lite.wasm"), ("min", "fenec-min.wasm")):
         if os.path.exists(web(name)):
             gz, br = compressed(web(name))
             other[f"kb_{key}"] = kb(os.path.getsize(web(name)))
@@ -741,6 +751,7 @@ def claims_against(truth, unit, wanted):
         if truth.get(fact) is None:
             why = (
                 "an app's bundle and `esbuild` is not on PATH" if fact.startswith("kb_app")
+                else "a module `make wasm-min` did not build" if fact.startswith("kb_min") and fact not in truth
                 else "a module `make wasm-lite` did not build" if fact not in truth
                 else "a brotli size and `brotli` is not installed"
             )

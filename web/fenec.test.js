@@ -957,6 +957,50 @@ test('near without the graph is the full module\'s near ... exact', {
   assert.equal(compared, decls.length * 4 * 4);
 });
 
+// The module made with no feature at all (`make wasm-min`, as `make wasm
+// FEATURES=none SCHEMA=0`, a test build no package ships) opens a file the
+// full one wrote declaring what it lacks: a collection declaring none of it
+// answers, points read, and what needs a missing feature is refused, the
+// feature named, through the module's own errors as a page meets them.
+const min = await readFile(new URL('./fenec-min.wasm', import.meta.url)).catch(() => null);
+
+test('the module made with no feature opens a file declaring every one', {
+  skip: wasm && min ? false : 'no web/fenec.wasm and web/fenec-min.wasm (make wasm wasm-min)',
+}, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const full = await Fenec.open(wasm);
+  full.run(`create collection users (email text nocase @unique, n int);
+            create collection people (name text collate und @sorted, n int);
+            create collection places (n int, loc geo @geo);
+            create collection plain (n int @hash, tag text @text, at timestamp)`);
+  full.run('put users [{email: "Alice@X.com", n: 1}, {email: "bob@x.com", n: 2}]');
+  full.run('put people [{name: "zoe", n: 1}, {name: "Émile", n: 2}]');
+  await full.from('places').insert([{ n: 1, loc: [13.4, 52.5] }, { n: 2, loc: [2.35, 48.86] }]);
+  full.run('put plain [{n: 1, tag: "a", at: 1000}, {n: 2, tag: "b", at: 2000}, {n: 3, tag: "b", at: 3000}]');
+  const small = await Fenec.open(min);
+  small.load(full.snapshot());
+  assert.deepEqual(small.rows('get plain select n where tag = "b" order n').map((r) => r.n), [2, 3]);
+  assert.deepEqual(small.rows('get plain select tag, count() as c group tag order tag').map((r) => r.c), [1, 2]);
+  assert.deepEqual(small.rows('get places select n order n').map((r) => r.n), [1, 2]);
+  for (const [sql, feature] of [
+    ['get users select n where email = "alice@x.com"', 'nocase'],
+    ['get people select n order name', 'collate'],
+    ['get plain select n order tag collate und', 'collate'],
+    ['get places select n near loc [2.0, 48.0] limit 1', 'geo'],
+    ['get places select n where distance(loc, [13.4, 52.5]) < 1000', 'geo'],
+    ['get plain select n facet tag', 'facets'],
+    ['get plain select count(distinct tag)', 'analytics'],
+    ['get plain select bucket(at, 1h) as b, count() as c group b', 'analytics'],
+    ['create index on plain (n, tag) @sorted', 'composite'],
+    ['create index on plain (tag) @sorted', 'sorted'],
+    ['get plain match tag "b"', 'text'],
+  ]) {
+    assert.throws(() => small.run(sql), new RegExp(`\`${feature}\` feature, which this build was made without`), sql);
+  }
+  full.close();
+  small.close();
+});
+
 test('in (get ...) and @ttl on wasm, and in the module without indexes', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec, from } = await import('./fenec.js');
   const now = 1_800_000_000_000;

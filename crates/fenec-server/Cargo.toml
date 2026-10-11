@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
+fenec-core = { workspace = true, features = ["std-fs", "full"] }
 fenec-http = { workspace = true, features = ["studio"] }
 # `--follow`: a PostgreSQL table mirrored into the file this server serves.
 fenec-import.workspace = true

@@ -17,10 +17,11 @@ and first line: `make agents-md` writes it from `CLAUDE.md`
 ```bash
 make test          # cargo test (no fenec-bench, no examples), fenec-core without its indexes, then the JS tests
 make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
-make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
-make wasm-lite     # the test build without any, to web/fenec-lite.wasm (web/fenec.test.js; shipped by nothing)
-make wasm-sizes    # the module's size with each of the 16 sets of indexes
-make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's)
+make wasm FEATURES="text sorted"   # with those features alone (indexes, language: a group; none: none)
+make wasm-lite     # the test build without the indexes, to web/fenec-lite.wasm (web/fenec.test.js; shipped by nothing)
+make wasm-min      # the test build with no feature at all, to web/fenec-min.wasm (the same)
+make wasm-sizes    # what each feature adds to the module with none, and what leaving it out of the full one saves
+make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's; FEATURES=none: that build's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
 make wasm-exact-speed   # near without the graph (the wasm-lite build), 1k-50k rows x 128/384, against the graph and exact
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
@@ -92,7 +93,8 @@ Single tests:
 cargo test -p fenec-core --test all persist::   # one file of a crate's integration tests (one binary)
 cargo test -p fenec-ql near                      # by name substring (integration: fn name only)
 cargo test -p fenec-core codec::tests            # inline unit tests in a module
-cargo test -p fenec-core --no-default-features --features std-fs --lib --test features   # without the indexes
+cargo test -p fenec-core --no-default-features --features std-fs,language --lib --test features   # without the indexes
+cargo test -p fenec-core --no-default-features --features std-fs --lib --test features   # without any feature
 cargo test -p fenec-import --test all pg:: -- --ignored   # needs a live PostgreSQL
 node --test web/fenec.test.js                    # JS: builder
 node --test --test-name-pattern 'shape' web/fenec.sync.test.js
@@ -2145,11 +2147,11 @@ against four chosen neighbours at once (`any_nearer`), 5 to 9% off a build
 at 768 dimensions. Neither changes a bit of the graph.
 
 **The indexes are features, and a build without one opens a file that
-declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
-four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 180.7 KB
-brotli with all four, 142.1 with none (each with the schema check), and
-`make wasm-sizes` measures the sixteen sets. What stands in for a missing one is a type of no value with
+declares it.** `fenec-core`'s `vector`, `text`, `sparse`, `sorted` and
+`composite` (an index over several fields, which needs `sorted`; the five
+are `indexes`, and with `language` below make `full`, on by default) are
+what a browser module may leave out: `make wasm FEATURES="text sorted"`,
+`FEATURES=none` for none, and `make wasm-sizes` weighs each (below). What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
 places that make one are `cfg`'d (`Collection::new`,
@@ -2168,14 +2170,75 @@ reads vectors out of the store and needs only `text`. The checks for a
 missing index ask `EVERY_INDEX` first: the lookup of a field is a loop the
 compiler cannot prove ends, and one left in cost the full module 197 bytes
 brotli; asked first, `EVERY_INDEX` left it the size it had been before the
-features, to the byte. A crate that depends on `fenec-core` names `indexes`
+features, to the byte. A crate that depends on `fenec-core` names `full`
 itself (the workspace takes it without default features), and `fenec-ql`
 only as a dev dependency -- in its normal ones it would put them back into
-every browser module.
+every browser module. Without `composite` an index over several fields is
+the scan's, and a unique one is asked by reading the rows, as it was
+without `sorted`.
 `tests/features.rs` and the unit tests run without them in `make test`,
 `web/fenec.test.js` hands files between the full module and the one
 `make wasm-lite` makes, both ways, and CI runs clippy over none and each
 alone.
+
+**The rest of the language is features too, and the smallest module is
+145 KB brotli.** `language` is what a page may go without past the
+indexes: `geo` (`distance`, `within`, `near` over a point and `@geo`,
+which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
+(which marks what `match` found, so needs `text`) and `analytics`
+(`count(distinct)`, `first` and `last`, the HLL sketches, `bucket`,
+`having`; `count`, `sum`, `avg`, `min` and `max` by `group` are in every
+build). `make wasm-sizes` builds each added to the module with none
+(431.7 KB, 145.3 brotli, against 689.9 and 229.3 with every one) and left
+out of the full one, brotli added and saved: `vector` 20.7 and 19.0,
+`sorted` 9.0 and 21.3 with `composite`, `composite` beside it 9.0 and
+8.5, `collate` 8.7 and 8.3, `text` 5.6 and 7.4, `facets` 3.9 and 4.5,
+`analytics` 3.6 and 3.1, `highlight` beside `text` 3.5 and 3.1, `nocase`
+2.9 and 2.6, `geo` 2.6 and 5.9 (its index with it), `sparse` 2.5 and 1.3,
+the schema check 9.7 and 9.6. The module with every feature is the code
+it was (`make size-report BASE=main`: 14 bytes less of it, functions moved
+and closures renumbered, brotli within noise), each check for a missing
+one behind `crate::FULL`, a `cfg!` of them all as `EVERY_INDEX` is: a
+message for a function a missing feature brings, asked before the check,
+was 140 bytes of it. The ways a feature goes, each so the compiler sees
+the paths dead rather than skipped: a type of no value where a value
+would carry it -- `CaseFold` an empty enum without `nocase`, so every
+`Option<CaseFold>` is `None` and every folded key, test, order and group
+goes with `case.rs`'s fold; `Test::Distance`, `Within` and
+`Fold::Distinct`, `Pick`, `Hll` `cfg`'d out with their arms, so
+`row_held` is never called -- or the one place that makes one asking the
+feature first: `Collation::compare` answers the bytes' order without
+`collate`, never asked, and `collate::PARTIAL` takes the chunk machinery
+and the module's Latin chunk out with it; `split_facets`, the facet
+counts and `mark_plans` behind `cfg!`; `distance`, `within`, `bucket` and
+`hll_estimate` left unregistered, a call refused by name
+(`missing_function`). A build without one opens every file. A point is
+read, written and checked as one, and a radius, a box or `near` over one
+refused. A `nocase` or collated field's text compared as written would be
+a wrong answer, so every statement over its collection is refused
+(`refuse_unbuilt`, asked in `answered` and `answered_select`, which every
+read, write, inner `get` and `lookup` level passes), as is a `create
+collection` or an `alter` declaring one and `order ... collate`; the
+file's other collections answer, and a drop takes the collection away.
+`facet`, `highlight`, `snippet`, the analytics aggregates and `having` are
+refused where a select is checked, at its parse through `fenec_ql`. The
+parser keeps all of it: its code for these is about 2 KB of the module
+(`facet_list` 1.0, a composite's keys 0.8, `collate` 0.3), well under 1 KB
+brotli, and the engine's refusal names the feature where a parse error
+would not. Measured and left in: `json` -- a path refused and a json
+value with it took 0.6 KB brotli off the module with none and nothing off
+the full one, since a path is read wherever a field is (the filter's
+slots, the aggregate's reader, `order`'s keys, the hash, ordered and
+composite keys) and an object is also a document handed as a parameter --
+and `@ttl`, 0.7 KB, against refusing every collection whose rows expire.
+`tests/features.rs` runs without the indexes (`std-fs,language`) and
+without anything in `make test`, opening `tests/language.fenec`, which
+only a build with the features can write (`tests/language_file.rs` holds
+it to the full build's answers, `FENEC_WRITE_FIXTURE=1` writes it again);
+`web/fenec.test.js` opens the full module's file in the one `make
+wasm-min` makes and holds it to each refusal; CI's clippy runs the module
+with none, each feature alone and each group, a check of no code made,
+about 10 s a set.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
@@ -2183,11 +2246,12 @@ check, 180.6 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
-wasm-lite`, as `make wasm FEATURES=none SCHEMA=0`) was shipped beside it
-and is a test build now -- built in CI, packed and released by nothing --
-because it holds the invariant above: a build without an index opens a
-file that declares one, and `web/fenec.test.js` hands files between it
-and the full module both ways. The client entry is `web/client.js`: the builder (`builder.js`) and the HTTP client
+wasm-lite`, as `make wasm FEATURES=language SCHEMA=0` now) was shipped
+beside it and is a test build now -- built in CI, packed and released by
+nothing -- because it holds the invariant above: a build without an index
+opens a file that declares one, and `web/fenec.test.js` hands files
+between it and the full module both ways. `fenec-min.wasm` (`make
+wasm-min`, no feature at all) is the same kind of test build. The client entry is `web/client.js`: the builder (`builder.js`) and the HTTP client
 (`http.js`) re-exported, the two modules `fenec.js` imports beside its
 glue, persistence and sync. The entry's worth is that it cannot pull in
 the engine, sync or storage, not the bytes: a `connect`-only app never

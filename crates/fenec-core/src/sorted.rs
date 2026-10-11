@@ -334,7 +334,9 @@ impl<T: Entry + Clone> Chunked<T> {
         self.between(self.seek(lo, false), self.seek(hi, false))
     }
 
-    /// [`Self::count`] within bounds as [`Self::range`] takes them.
+    /// [`Self::count`] within bounds as [`Self::range`] takes them: an
+    /// index over several fields' count.
+    #[cfg_attr(not(feature = "composite"), allow(dead_code))]
     pub(crate) fn count_within(&self, lo: &Bound<T>, hi: &Bound<T>) -> usize {
         let a = match lo {
             Bound::Included(x) => self.seek(x, false),
