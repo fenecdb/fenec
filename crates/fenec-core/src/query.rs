@@ -1741,9 +1741,6 @@ impl Select {
                     .into(),
             ));
         }
-        if self.having.is_some() && !cfg!(feature = "analytics") {
-            return Err(crate::error::not_built("`having`", "analytics"));
-        }
         if self.having.is_some() && self.group.is_empty() {
             return Err(Error::Query(
                 "`having` keeps the groups it holds for: it follows `group`".into(),
@@ -2476,13 +2473,18 @@ pub fn documents_in<'p>(
     match params.get(i) {
         None => Err(unbound(i)),
         Some(Value::Object(m)) => Ok(vec![m.as_slice()]),
-        Some(Value::List(items)) => items
-            .iter()
-            .map(|item| match item {
-                Value::Object(m) => Ok(m.as_slice()),
-                other => Err(refused(&format!("a list holding {}", other.type_name()))),
-            })
-            .collect(),
+        Some(Value::List(items)) => {
+            // A loop: collected into a `Result`, the iterator's machinery
+            // was 0.5 KB more of the browser module.
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Object(m) => out.push(m.as_slice()),
+                    other => return Err(refused(&format!("a list holding {}", other.type_name()))),
+                }
+            }
+            Ok(out)
+        }
         Some(other) => Err(refused(other.type_name())),
     }
 }
@@ -2669,6 +2671,22 @@ pub struct ResultSet {
 }
 
 impl ResultSet {
+    /// What `count` answers: one row of one column, and the facets asked
+    /// beside it. Made in one place for its three callers.
+    #[inline(never)]
+    pub(crate) fn counted(n: usize, facets: Vec<FacetValues>) -> ResultSet {
+        ResultSet {
+            columns: vec![COUNT_COLUMN.to_string()],
+            rows: vec![Row {
+                id: 0,
+                values: vec![Value::Int(n as i64)],
+                score: None,
+            }],
+            nested: None,
+            facets,
+        }
+    }
+
     /// The same data as one flat table: the parent columns, then the child's
     /// under `<collection>.<field>`, one row per pair.
     ///

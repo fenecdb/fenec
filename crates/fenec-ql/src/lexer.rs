@@ -181,7 +181,7 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
         let text = src.get(s..i)?;
         v.push(match float {
             true => fenec_core::num::parse_f64(text)? as f32,
-            false => text.parse::<i64>().ok()? as f32,
+            false => fenec_core::num::parse_i64(text)? as f32,
         });
         while space(i) {
             i += 1;
@@ -390,11 +390,13 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                     )));
                 }
                 // Unwrapped, a number past `usize` was a panic.
-                let n: usize = src.get(s..i).unwrap_or_default().parse().map_err(|_| {
-                    Error::Query(format!(
-                        "position {start}: no parameter is numbered that high"
-                    ))
-                })?;
+                let n = fenec_core::num::parse_i64(src.get(s..i).unwrap_or_default())
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or_else(|| {
+                        Error::Query(format!(
+                            "position {start}: no parameter is numbered that high"
+                        ))
+                    })?;
                 if n == 0 {
                     return Err(Error::Query("parameters start at $1".into()));
                 }
@@ -478,7 +480,7 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                         Error::Query(format!("position {start}: invalid decimal number `{text}`"))
                     })?)
                 } else {
-                    Tok::Int(text.parse().map_err(|_| {
+                    Tok::Int(fenec_core::num::parse_i64(text).ok_or_else(|| {
                         Error::Query(format!("position {start}: invalid integer `{text}`"))
                     })?)
                 }
@@ -510,9 +512,14 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                 Tok::Ident(src.get(s..i).unwrap_or_default().to_string())
             }
             other => {
+                // The character as the text holds it: a `char` formatted
+                // was 274 bytes of the browser module for this alone.
+                let other = src
+                    .get(counted..counted + other.len_utf8())
+                    .unwrap_or_default();
                 return Err(Error::Query(format!(
                     "position {start}: unexpected character `{other}`"
-                )))
+                )));
             }
         };
         out.push(Token { tok, pos: start });

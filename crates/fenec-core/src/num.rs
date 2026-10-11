@@ -38,6 +38,38 @@ pub(crate) const POW10: [f64; 23] = [
 /// a rounding decision, so it is dropped and recorded in `truncated`.
 const MAX_DIGITS: usize = 800;
 
+/// `s` as an `i64`, as `str::parse` reads one: a sign, then a digit or
+/// more, and `None` for anything else or a number past the type. The
+/// standard library's was inlined where it was called, a copy of itself at
+/// each -- the JSON reader's, the lexer's, a date's -- 1.2 KB of the browser
+/// module in the one place it stayed whole; this is one function.
+pub fn parse_i64(s: &str) -> Option<i64> {
+    // The magnitude of `i64::MIN`; past a tenth of it another digit would
+    // take any number out of the type, so nothing below can overflow.
+    const MAX: u64 = 1 << 63;
+    let (neg, digits) = match s.as_bytes() {
+        [b'-', rest @ ..] => (true, rest),
+        [b'+', rest @ ..] => (false, rest),
+        all => (false, all),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut n: u64 = 0;
+    for &c in digits {
+        let d = c.wrapping_sub(b'0');
+        if d > 9 || n > MAX / 10 {
+            return None;
+        }
+        n = n * 10 + d as u64;
+    }
+    match neg {
+        true if n <= MAX => Some((n as i64).wrapping_neg()),
+        false if n < MAX => Some(n as i64),
+        _ => None,
+    }
+}
+
 /// Parses a decimal number. `None` for anything that is not one -- the JSON
 /// scanner hands over whatever run of `[0-9.eE+-]` it found, so `1.2.3` and
 /// `--1` do arrive here and have to be rejected rather than guessed at.
@@ -918,6 +950,57 @@ pub fn clinger(b: &[u8], j: &mut usize) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_i64_reads_as_str_parse_reads_it() {
+        let mut cases: Vec<String> = [
+            "",
+            "+",
+            "-",
+            "0",
+            "-0",
+            "+0",
+            "007",
+            "-007",
+            "1_0",
+            " 1",
+            "1 ",
+            "1.0",
+            "1e3",
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "922337203685477580",
+            "9223372036854775799",
+            "00000000000000000000000000000001",
+            "-00000000000000000000009223372036854775808",
+            "18446744073709551615",
+            "18446744073709551616",
+            "99999999999999999999",
+            "--1",
+            "+-1",
+            "٣",
+            "1a",
+            "a1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let n = x as i64 >> (x % 64);
+            cases.push(n.to_string());
+            cases.push(format!("+{}", n.unsigned_abs()));
+            cases.push((x >> (x % 64)).to_string());
+        }
+        for c in &cases {
+            assert_eq!(parse_i64(c), c.parse::<i64>().ok(), "{c:?}");
+        }
+    }
+
     use super::*;
 
     /// Bit-for-bit, so a mismatched sign on a zero or a one-ulp slip in the

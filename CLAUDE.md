@@ -2237,20 +2237,20 @@ without `sorted`.
 alone.
 
 **The rest of the language is features too, and the smallest module is
-145 KB brotli.** `language` is what a page may go without past the
+142 KB brotli.** `language` is what a page may go without past the
 indexes: `geo` (`distance`, `within`, `near` over a point and `@geo`,
 which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
-(which marks what `match` found, so needs `text`) and `analytics`
-(`count(distinct)`, `first` and `last`, the HLL sketches, `bucket`,
-`having`; `count`, `sum`, `avg`, `min` and `max` by `group` are in every
-build). `make wasm-sizes` builds each added to the module with none
-(431.7 KB, 145.3 brotli, against 689.9 and 229.3 with every one) and left
-out of the full one, brotli added and saved: `vector` 20.7 and 19.0,
-`sorted` 9.0 and 21.3 with `composite`, `composite` beside it 9.0 and
-8.5, `collate` 8.7 and 8.3, `text` 5.6 and 7.4, `facets` 3.9 and 4.5,
-`analytics` 3.6 and 3.1, `highlight` beside `text` 3.5 and 3.1, `nocase`
-2.9 and 2.6, `geo` 2.6 and 5.9 (its index with it), `sparse` 2.5 and 1.3,
-the schema check 9.7 and 9.6. The module with every feature is the code
+(which marks what `match` found, so needs `text`) and `analytics` (the
+HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
+`avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
+`having` are in every build). `make wasm-sizes` builds each added to the
+module with none (414.5 KB, 142.4 brotli, against 662.3 and 224.2 with
+every one) and left out of the full one, brotli added and saved:
+`vector` 20.7 and 18.7, `sorted` 8.9 and 21.2 with `composite`,
+`composite` beside it 9.2 and 8.4, `collate` 9.0 and 8.3, `text` 5.7 and
+7.3, `facets` 3.5 and 4.1, `highlight` beside `text` 3.5 and 3.1,
+`nocase` 3.1 and 2.6, `geo` 2.8 and 5.9 (its index with it), `analytics`
+2.7 and 2.1, `sparse` 2.7 and 0.9, the schema check 9.5 and 9.5. The module with every feature is the code
 it was (`make size-report BASE=main`: 14 bytes less of it, functions moved
 and closures renumbered, brotli within noise), each check for a missing
 one behind `crate::FULL`, a `cfg!` of them all as `EVERY_INDEX` is: a
@@ -2259,9 +2259,8 @@ was 140 bytes of it. The ways a feature goes, each so the compiler sees
 the paths dead rather than skipped: a type of no value where a value
 would carry it -- `CaseFold` an empty enum without `nocase`, so every
 `Option<CaseFold>` is `None` and every folded key, test, order and group
-goes with `case.rs`'s fold; `Test::Distance`, `Within` and
-`Fold::Distinct`, `Pick`, `Hll` `cfg`'d out with their arms, so
-`row_held` is never called -- or the one place that makes one asking the
+goes with `case.rs`'s fold; `Test::Distance`, `Within` and `Fold::Hll`
+`cfg`'d out with their arms -- or the one place that makes one asking the
 feature first: `Collation::compare` answers the bytes' order without
 `collate`, never asked, and `collate::PARTIAL` takes the chunk machinery
 and the module's Latin chunk out with it; `split_facets`, the facet
@@ -2275,8 +2274,8 @@ a wrong answer, so every statement over its collection is refused
 read, write, inner `get` and `lookup` level passes), as is a `create
 collection` or an `alter` declaring one and `order ... collate`; the
 file's other collections answer, and a drop takes the collection away.
-`facet`, `highlight`, `snippet`, the analytics aggregates and `having` are
-refused where a select is checked, at its parse through `fenec_ql`. The
+`facet`, `highlight` and `snippet` are refused where a select is checked,
+at its parse through `fenec_ql`, the sketches where their fold is made. The
 parser keeps all of it: its code for these is about 2 KB of the module
 (`facet_list` 1.0, a composite's keys 0.8, `collate` 0.3), well under 1 KB
 brotli, and the engine's refusal names the feature where a parse error
@@ -2302,23 +2301,21 @@ schema check, search -- `match`, `highlight` and `snippet`, facets,
 `near` with its graph, `fuse` -- and the standard query features. A
 plugin is an extra one kind of app needs: geo, sparse vectors, a
 language's collation, `bucket` and the HLL sketches. Held to that rule
-the core is about 210 KB brotli and the extras about 18 together (`geo`
-5.9, `collate` 8.3, `sparse` 1.3, `bucket` and the sketches about 2),
-8% of the full module's 229: too little to pay for modules built ahead
+the core is about 207 KB brotli and the extras about 17 together (`geo`
+5.9, `collate` 8.3, `sparse` 0.9, `bucket` and the sketches 2.1), 8% of
+the full module's 224: too little to pay for modules built ahead
 for sets of features and a choice of one per page, let alone a module a
 plugin loaded beside the engine, which would carry its own copy of the
 standard library's allocator and panic machinery and reach into the write
 path, the undo, the file and replication through a boundary. So
 `@fenecdb/web` ships the one full module, the features stay for a page
 that builds its own and for the tests of the invariant above, and bytes
-are won by making the core smaller: its parser is 52 KB raw, the standard
-library's `Vec`, `String`, sort and `HashMap` 64, the planner 32.
-`count(distinct)`, `having` and `first`/`last` are standard and belong to
-the core; they sit in `analytics` today.
+are won by making the core smaller (below). `count(distinct)`, `having`
+and `first`/`last` are standard, and are in the core.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 180.6 KB brotli) and `@fenecdb/web/client`, so a user has two
+check, 224.2 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
@@ -2420,6 +2417,70 @@ the module with the standard library's `to_lowercase`, `to_uppercase` and
 `contains`, which slice that way. So the browser path slices with `get` and
 `split_at_checked`, case is `case`'s, and `~` searches the folded bytes;
 `make size-report WHY=slice_error_fail` finds a slice that brings it back.
+
+**The core lost what it held twice or for one use.** With every feature
+the module went 689.9 -> 662.3 KB, 229.3 -> 224.2 KB brotli (gzip 277.1
+-> 269.8), and with none 431.7 -> 414.5 KB, 145.3 -> 142.4 brotli, after
+`count(distinct)`, `first`/`last` and `having` came into every build (3.4
+KB of the one with none, 1.2 brotli) and with no feature taken out. A
+function `#[inline(always)]` for a caller the module does not link had two
+it does: `build_index` (`create index` and `alter`, 2.2 KB, 0.4 brotli)
+and `reset_index_structures` (0.6 KB), each inlined natively alone now;
+and `facet`, inlined, was called from two arms of `facets` (2.5 KB, 0.5),
+one call now. Each export's closure was a `LocalKey::with` and a
+`RefCell` borrow of its own, 2.7 KB, 0.7 brotli, until the handles' table
+was reached through a pointer (`fenec-wasm`'s `table`: one thread, and no
+export calls another); `Parser::err` was ten copies of its `format!` (1.0,
+0.3), `Error`'s `Display` a `write!` a kind (0.5); the builtins a type,
+vtable, `arity` and `doc` each (0.9, 0.2), one `Builtin` in a table now --
+its arity kept in the registry as it is registered, or the second
+indirect call took `lower()` over a scan 158 -> 160 ns a row (kept: 156
+-> 152). Standard library code a call brought in for one use:
+`str::parse::<i64>`, inlined at the JSON reader, the lexer and a date
+(1.5 KB with the `Display` of an `i32` a counter's type brought, 0.6
+brotli -- `num::parse_i64`, held to `str::parse` over 60 000 strings);
+`from_utf8_lossy` (0.8 KB, 0.3: `Utf8Error` names the same sequences, held
+to it in `fenec-wasm`'s tests); a float's 8 bytes through
+`try_into().unwrap()`, which kept `Debug` formatting and its `PadAdapter`
+(1.2 KB, 0.3); `clamp`'s check of its bounds, `usize`'s `Debug`, and a
+`char` formatted (0.5). The `in` union's stable sort of ids was there to
+find the runs a bucket already gives (2.8 KB, 0.4): one bucket is its own
+answer now, up to eight are merged where they end and more sorted
+unstable, quicker than it every way (2 runs of 200 random ids 0.5 us
+against 1.6, 2 000 runs of 10 166 us against 233). The collections by name are a
+`Vec` in the order of their names' `Fx` hashes (`Names`, 2.4 KB, 0.3,
+SipHash over text with it) -- searched by the names themselves, every
+statement's look-up compared texts and a read by id over 41 collections
+went 450 -> 514 ns -- and a load's ids a `Vec` (`ById`, 1.7 KB).
+`collect`s into a `Result` -- `near`'s vector and the functions over
+vectors, one `Value::floats` now, bytes from a list, a `put $n`'s
+documents, a list literal's constants, the folds a group's row takes --
+are loops (4.7 KB, 0.9). A derived index is a `OnceCell` in the browser,
+which has one thread to wait for (1.0 KB), and the rest is a few hundred
+bytes each: `fenec_abi::refused` out of line, the search scratch made at
+compile time, the chunks' names a `static`, `count`'s answer made once.
+Tried and left out: `best_first` sorted unstable, a total order (1.1 KB,
+0.1 brotli, `match ... limit 1000` 1.4% slower);
+constructors for an error of a literal (`.into()` is a call already: +0.1
+KB, +0.2 brotli); `index_doc` and `index_vectors_batch` out of line
+(brotli +70 and +180 bytes); `Tok::describe` making one `String`; LLVM's
+inline threshold at 0 and at 25 (+6.9 and +18.8 KB). What is left is each
+crate's: `-Zshare-generics` is the default at opt-level "z" already, and
+`drop_glue<Statement>`, `Expr` and `Select` and the standard library's
+`#[inline]` code are compiled in fenec-ql, fenec-abi and the core each,
+6.7 KB no stable flag merges; dlmalloc's 8.5 KB stays, against an
+allocator of the module's own under memory a page never gets back.
+Measured in turns against main, in process (load 3-5 from another
+agent's YCSB through all of it, on both): a put -0.6 to -4.8%, a read by
+id -1 to -3%, `in` over a hash index -6 to -22%, `lower()` and
+`coalesce()` a row -3 to -4%, `match` -2%, a JSON page of ints -0.4%,
+`make subquery-bench`'s union of 2 000 buckets 0.526 -> 0.444 ms; the
+module in Node, interleaved over 21 rounds: `near`, a build, a filter,
+`match`, a read by id and a page of vectors as JSON within 1.5%, a put
+-3.3%, an `in` -6.1%; `make bench` at 30 000 x 128, twelve runs a side
+twice, its writes and ANN within 1%. The same source took 19.6 KB of code off
+`fenec-server` (2 407.4 -> 2 387.8 KB, `make size-report
+BIN=fenec-server`) and 17.5 KB off the shell (1 526.9 -> 1 509.4).
 
 **A vector goes out as its `f32`s.** JSON writes a vector's components
 and a row's `_score` as the shortest text that reads back as the `f32`

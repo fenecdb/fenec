@@ -257,6 +257,18 @@ impl Value {
         }
     }
 
+    /// A list of numbers as a vector's `f32`s, or the first value that is
+    /// no number, for its caller to name in its own words. One loop for
+    /// `near`'s query and the functions over vectors: each collected into a
+    /// `Result`, the two were 1.1 KB more of the browser module.
+    pub(crate) fn floats(items: &[Value]) -> std::result::Result<Vec<f32>, &Value> {
+        let mut out = Vec::with_capacity(items.len());
+        for v in items {
+            out.push(v.as_f64().ok_or(v)? as f32);
+        }
+        Ok(out)
+    }
+
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Value::Text(s) => Some(s),
@@ -289,23 +301,29 @@ impl Value {
             (DataType::Bytes, Value::Text(s)) => Ok(Value::Bytes(s.into_bytes())),
             // As JSON writes bytes, a list of numbers from 0 to 255 -- read
             // as a vector's `f32`s or exactly, by where it stands -- so a
-            // field read out goes back in: a sketch kept by day.
-            (DataType::Bytes, Value::List(items)) => items
-                .iter()
-                .map(|v| match v {
-                    Value::Int(n @ 0..=255) => Ok(*n as u8),
-                    _ => Err(Error::Type("bytes are numbers from 0 to 255".into())),
-                })
-                .collect::<Result<Vec<u8>>>()
-                .map(Value::Bytes),
-            (DataType::Bytes, Value::Vector(v)) => v
-                .iter()
-                .map(|&f| match f {
-                    f if (0.0..=255.0).contains(&f) && f.fract() == 0.0 => Ok(f as u8),
-                    _ => Err(Error::Type("bytes are numbers from 0 to 255".into())),
-                })
-                .collect::<Result<Vec<u8>>>()
-                .map(Value::Bytes),
+            // field read out goes back in: a sketch kept by day. Loops:
+            // collected into a `Result`, the two were 1.2 KB more of the
+            // browser module.
+            (DataType::Bytes, Value::List(items)) => {
+                let mut b = Vec::with_capacity(items.len());
+                for v in &items {
+                    match v {
+                        Value::Int(n @ 0..=255) => b.push(*n as u8),
+                        _ => return Err(not_bytes()),
+                    }
+                }
+                Ok(Value::Bytes(b))
+            }
+            (DataType::Bytes, Value::Vector(v)) => {
+                let mut b = Vec::with_capacity(v.len());
+                for f in v {
+                    if !(0.0..=255.0).contains(&f) || f.fract() != 0.0 {
+                        return Err(not_bytes());
+                    }
+                    b.push(f as u8);
+                }
+                Ok(Value::Bytes(b))
+            }
             (DataType::Timestamp, Value::Timestamp(ms)) => Ok(Value::Timestamp(ms)),
             // Epoch milliseconds directly; arithmetic results such as
             // `now() - 86400000` also pass through here.
@@ -326,18 +344,12 @@ impl Value {
                 check_sparse_dim(d, e, *dim)
             }
             (DataType::Vector(dim, _), Value::List(items)) => {
-                let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    match it.as_f64() {
-                        Some(f) => out.push(f as f32),
-                        None => {
-                            return Err(Error::Type(format!(
-                                "vector element must be numeric, found {}",
-                                it.type_name()
-                            )))
-                        }
-                    }
-                }
+                let out = Value::floats(&items).map_err(|it| {
+                    Error::Type(format!(
+                        "vector element must be numeric, found {}",
+                        it.type_name()
+                    ))
+                })?;
                 check_dim(out, *dim)
             }
             // On the JSON side an all-numeric array is parsed as a vector
@@ -543,6 +555,10 @@ fn check_sparse_dim(d: u32, e: Vec<(u32, f32)>, dim: usize) -> Result<Value> {
         )));
     }
     Ok(Value::Sparse(d, e))
+}
+
+fn not_bytes() -> Error {
+    Error::Type("bytes are numbers from 0 to 255".into())
 }
 
 fn check_dim(v: Vec<f32>, dim: usize) -> Result<Value> {

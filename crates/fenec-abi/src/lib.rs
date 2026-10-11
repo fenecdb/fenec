@@ -209,8 +209,8 @@ pub fn answer(r: &std::result::Result<Response, Refused>) -> String {
 /// statements before it ran (`"ran"`, left out when none did): the client
 /// runs one again by itself only when nothing before it had. A native
 /// build carries every chunk, and never names one. `at` is the statement
-/// of a text of several that stopped it (`"at"`, from 0).
-#[inline(always)]
+/// of a text of several that stopped it (`"at"`, from 0). Not inlined: the
+/// module answers through it twice, a statement's and `fenec_schema`'s.
 pub fn refused(e: &Error, ran: usize, at: Option<usize>) -> String {
     let mut out = json::error_to_string(e);
     if let Some(at) = at {

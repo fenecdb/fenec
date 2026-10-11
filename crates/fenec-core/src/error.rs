@@ -34,21 +34,24 @@ pub enum Error {
 }
 
 impl fmt::Display for Error {
+    /// The kind, then the message: one `write!` for every kind, where one
+    /// each was 0.6 KB of the browser module.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Type(m) => write!(f, "type error: {m}"),
-            Error::NotFound(m) => write!(f, "not found: {m}"),
-            Error::Exists(m) => write!(f, "already exists: {m}"),
-            Error::Duplicate(m) => write!(f, "duplicate: {m}"),
-            Error::Corrupt(m) => write!(f, "corrupt: {m}"),
-            Error::Query(m) => write!(f, "query error: {m}"),
-            Error::Io(m) => write!(f, "io error: {m}"),
-            Error::Plugin(m) => write!(f, "plugin error: {m}"),
-            Error::ReadOnly(m) => write!(f, "read only: {m}"),
-            Error::Denied(m) => write!(f, "denied: {m}"),
-            Error::Unmet(m) => write!(f, "unmet: {m}"),
-            Error::Quota(m) => write!(f, "quota: {m}"),
-        }
+        let (kind, m) = match self {
+            Error::Type(m) => ("type error", m),
+            Error::NotFound(m) => ("not found", m),
+            Error::Exists(m) => ("already exists", m),
+            Error::Duplicate(m) => ("duplicate", m),
+            Error::Corrupt(m) => ("corrupt", m),
+            Error::Query(m) => ("query error", m),
+            Error::Io(m) => ("io error", m),
+            Error::Plugin(m) => ("plugin error", m),
+            Error::ReadOnly(m) => ("read only", m),
+            Error::Denied(m) => ("denied", m),
+            Error::Unmet(m) => ("unmet", m),
+            Error::Quota(m) => ("quota", m),
+        };
+        write!(f, "{kind}: {m}")
     }
 }
 

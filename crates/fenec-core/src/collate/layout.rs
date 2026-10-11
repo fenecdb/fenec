@@ -2,7 +2,7 @@
 // its tailorings; do not edit. Layout and meaning: collate.rs.
 
 /// The chunks the root collation's entries are cut into, by number.
-pub const CHUNKS: [&str; 12] = [
+pub static CHUNKS: [&str; 12] = [
     "latin",
     "greek",
     "cyrillic",

@@ -574,11 +574,12 @@ fn facets_are_refused() {
     refused(&mut db, "get d facet year ranges [0, 2000, 3000]", "facets");
 }
 
-/// The aggregates past the plain five are refused by name; those five
-/// group as ever.
+/// `count(distinct ...)`, `first`, `last` and `having` are standard and in
+/// every build; `bucket` and the sketches are refused by name without
+/// `analytics`.
 #[cfg(not(feature = "analytics"))]
 #[test]
-fn the_analytics_aggregates_are_refused() {
+fn the_sketches_and_buckets_are_refused_and_the_standard_aggregates_answer() {
     let mut db = Database::new();
     run(
         &mut db,
@@ -597,14 +598,25 @@ fn the_analytics_aggregates_are_refused() {
     )
     .unwrap();
     assert_eq!(ints(&r, 0), [3, 4]);
+    let r = run(&mut db, "get e select count(distinct user) as u").unwrap();
+    assert_eq!(ints(&r, 0), [2]);
+    let r = run(
+        &mut db,
+        "get e select first(n by at) as f, last(n by at) as l, user group user order user",
+    )
+    .unwrap();
+    assert_eq!((ints(&r, 0), ints(&r, 1)), (vec![1, 4], vec![2, 4]));
+    let r = run(
+        &mut db,
+        "get e select user, count() as c group user having c > 1",
+    )
+    .unwrap();
+    assert_eq!(ints(&r, 1), [2]);
     for sql in [
-        "get e select count(distinct user)",
-        "get e select first(n by at) group user",
-        "get e select last(n by at) group user",
         "get e select approx_count_distinct(user)",
         "get e select hll_accumulate(user)",
+        "get e select hll_combine(user)",
         "get e select bucket(at, 1h) as h, count() group h",
-        "get e select user, count() as c group user having c > 1",
         "get e select n where hll_estimate(null) = 0",
     ] {
         refused(&mut db, sql, "analytics");

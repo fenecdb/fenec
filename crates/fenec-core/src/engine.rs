@@ -1236,6 +1236,122 @@ impl HashIndex {
     }
 }
 
+/// Collection name -> collection: a `Vec` in the order of the names'
+/// hashes, searched by halving, rather than a map. A database holds a
+/// handful of collections, and the map -- SipHash and hashbrown's code for
+/// one more key and value -- was 3.4 KB of the browser module; searched by
+/// the names themselves, every statement's look-up compared texts, and a
+/// read by id over 41 collections took 450 -> 514 ns. A name's hash is
+/// `maps::Fx`, a word at a time, and only a name of the same hash is
+/// compared.
+pub struct Names<T>(Vec<(u64, String, T)>);
+
+impl<T> Default for Names<T> {
+    fn default() -> Self {
+        Names(Vec::new())
+    }
+}
+
+/// The hash a collection's name is kept under.
+fn name_hash(name: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = crate::maps::Fx::default();
+    h.write(name.as_bytes());
+    h.finish()
+}
+
+impl<T> Names<T> {
+    /// Where `name` is, or where it would go.
+    fn at(&self, name: &str) -> std::result::Result<usize, usize> {
+        let h = name_hash(name);
+        let mut i = self.0.partition_point(|(k, _, _)| *k < h);
+        while let Some((k, n, _)) = self.0.get(i) {
+            if *k != h {
+                break;
+            }
+            if n == name {
+                return Ok(i);
+            }
+            i += 1;
+        }
+        Err(i)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&T> {
+        let i = self.at(name).ok()?;
+        self.0.get(i).map(|(_, _, v)| v)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut T> {
+        let i = self.at(name).ok()?;
+        self.0.get_mut(i).map(|(_, _, v)| v)
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.at(name).is_ok()
+    }
+
+    /// Puts `v` under `name`, handing back what was there.
+    pub fn insert(&mut self, name: String, v: T) -> Option<T> {
+        match self.at(&name) {
+            Ok(i) => Some(std::mem::replace(&mut self.0[i].2, v)),
+            Err(i) => {
+                self.0.insert(i, (name_hash(&name), name, v));
+                None
+            }
+        }
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<T> {
+        let i = self.at(name).ok()?;
+        Some(self.0.remove(i).2)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.0.iter().map(|(_, _, v)| v)
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.0.iter_mut().map(|(_, _, v)| v)
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut T)> {
+        self.0.iter_mut().map(|(_, k, v)| (&*k, v))
+    }
+}
+
+impl<T, Q: AsRef<str> + ?Sized> std::ops::Index<&Q> for Names<T> {
+    type Output = T;
+
+    fn index(&self, name: &Q) -> &T {
+        self.get(name.as_ref()).expect("no collection by that name")
+    }
+}
+
+/// Collection id -> name, as a load meets the records naming them: a `Vec`
+/// searched by id rather than a map, as [`Fields`] is by name. A file holds
+/// a handful of collections, and the map was 2.1 KB of the browser module.
+#[derive(Default)]
+struct ById(Vec<(u32, String)>);
+
+impl ById {
+    fn get(&self, cid: &u32) -> Option<&String> {
+        self.0.iter().find(|(c, _)| c == cid).map(|(_, n)| n)
+    }
+
+    fn insert(&mut self, cid: u32, name: String) {
+        match self.0.iter_mut().find(|(c, _)| *c == cid) {
+            Some(slot) => slot.1 = name,
+            None => self.0.push((cid, name)),
+        }
+    }
+
+    fn remove(&mut self, cid: &u32) -> Option<String> {
+        let at = self.0.iter().position(|(c, _)| c == cid)?;
+        Some(self.0.swap_remove(at).1)
+    }
+}
+
 /// Field name -> index, in the order the fields were indexed: a `Vec`
 /// searched by name rather than a map, as `sorted` and `sparse` are. A
 /// collection indexes a handful of fields, and each map of them was a copy
@@ -1336,16 +1452,32 @@ impl<T> std::ops::Index<&str> for Fields<T> {
 /// write skips an unbuilt index, since its build reads the documents as
 /// they stand then; a build that fails fails every read after it the same
 /// way, as the documents it could not read are still there.
-pub struct Derived<T>(std::sync::OnceLock<Result<T>>);
+pub struct Derived<T>(Once<Result<T>>);
+
+/// What holds a derived index: a lock natively, where a second reader
+/// waits for the first one's build; a cell in the browser, which has one
+/// thread and so nothing to wait for. Through the lock each index type's
+/// build was a copy of `Once`'s state machine, 2.9 KB of the browser module
+/// in seven.
+#[cfg(not(target_arch = "wasm32"))]
+type Once<T> = std::sync::OnceLock<T>;
+#[cfg(target_arch = "wasm32")]
+type Once<T> = std::cell::OnceCell<T>;
 
 impl<T> Derived<T> {
     /// An index as it stands: a new collection's, or one just built.
     fn new(ix: T) -> Self {
-        Derived(std::sync::OnceLock::from(Ok(ix)))
+        Derived(Once::from(Ok(ix)))
     }
 
     fn unbuilt() -> Self {
-        Derived(std::sync::OnceLock::new())
+        Derived(Once::new())
+    }
+
+    /// An index refused: what every read of it answers.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refused(e: Error) -> Self {
+        Derived(Once::from(Err(e)))
     }
 
     /// The index, if something has built it.
@@ -1491,11 +1623,13 @@ impl Collection {
     /// the graphs empty, for `rebuild_indexes_with` to fill, and the others
     /// unbuilt, for the documents to fill when something reads them.
     ///
-    /// Inlined, as the other two functions [`Database::apply`] shares with the
-    /// write path are: the browser module links no `apply`, and with a
-    /// second caller they were no longer inlined into their first -- 1.1 KB
-    /// of the module for nothing it runs.
-    #[inline(always)]
+    /// Inlined natively, as the other two functions [`Database::apply`]
+    /// shares with the write path are: with a second caller they were no
+    /// longer inlined into their first -- 1.1 KB of the browser module,
+    /// which links no `apply`, for nothing it runs. The module calls it
+    /// twice itself, an alter's and an index's record in a load, and
+    /// inlined into both it was 0.6 KB more.
+    #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
     fn reset_index_structures(&mut self) {
         self.vectors.clear();
         self.hashes.clear();
@@ -2253,6 +2387,45 @@ fn encode_folded(out: &mut Vec<u8>, v: &Value, fold: Option<CaseFold>) {
     }
 }
 
+/// Ascending runs laid end to end, each ending at its place in `ends`,
+/// merged into one ascending list, two runs at a time: a run of one is left
+/// as it is, and k of them take log2(k) passes.
+fn merge_runs(ids: &mut Vec<DocId>, ends: &mut Vec<usize>) {
+    let mut out: Vec<DocId> = Vec::new();
+    while ends.len() > 1 {
+        out.clear();
+        out.reserve(ids.len());
+        let (mut start, mut kept) = (0, 0);
+        for pair in 0..ends.len().div_ceil(2) {
+            let mid = ends[2 * pair];
+            let end = ends.get(2 * pair + 1).copied().unwrap_or(mid);
+            let (mut a, mut b) = (ids[start..mid].iter(), ids[mid..end].iter());
+            let (mut x, mut y) = (a.next(), b.next());
+            while let (Some(&i), Some(&j)) = (x, y) {
+                if j < i {
+                    out.push(j);
+                    y = b.next();
+                } else {
+                    out.push(i);
+                    x = a.next();
+                }
+            }
+            // What is left of either run, after the one that ran out.
+            for (held, rest) in [(x, a), (y, b)] {
+                if let Some(&i) = held {
+                    out.push(i);
+                }
+                out.extend_from_slice(rest.as_slice());
+            }
+            ends[kept] = end;
+            kept += 1;
+            start = end;
+        }
+        ends.truncate(kept);
+        std::mem::swap(ids, &mut out);
+    }
+}
+
 /// The bucket key `v` finds in the hash index on `field`: the value coerced
 /// to the field's type, as the write path filed it, or -- over a `json`
 /// field or a path, whose values have no type -- the value itself where
@@ -2810,7 +2983,7 @@ impl RowAccess for NoRow {
 }
 
 pub struct Database {
-    collections: HashMap<String, Collection>,
+    collections: Names<Collection>,
     order: Vec<String>,
     next_coll_id: u32,
     registry: Registry,
@@ -2971,7 +3144,7 @@ impl Default for Database {
 impl Database {
     pub fn new() -> Database {
         Database {
-            collections: HashMap::new(),
+            collections: Names::default(),
             order: Vec::new(),
             next_coll_id: 1,
             registry: Registry::with_builtins(),
@@ -3517,7 +3690,7 @@ impl Database {
         if bytes.len() < MAGIC.len() {
             return Err(Error::Corrupt("the rewritten file is empty".into()));
         }
-        let mut by_id: HashMap<u32, String> = HashMap::new();
+        let mut by_id = ById::default();
         let mut fresh: HashMap<String, Store> = HashMap::new();
         let mut walk = Walk::new(bytes, MAGIC.len());
         while let Some(r) = walk.next()? {
@@ -3802,7 +3975,7 @@ impl Database {
             return Err(Error::Corrupt("invalid fenecdb signature".into()));
         }
         let pos = MAGIC.len();
-        let mut by_id: HashMap<u32, String> = HashMap::new();
+        let mut by_id = ById::default();
         // Each graph is restored where its last record is, against the
         // documents as they stood when it was written, and the writes after
         // it are applied to it one touched document at a time: a
@@ -4041,7 +4214,7 @@ impl Database {
         kind: u8,
         cid: u32,
         body: &[u8],
-        by_id: &mut HashMap<u32, String>,
+        by_id: &mut ById,
         restored: &mut Vec<(String, String, usize)>,
     ) -> Result<()> {
         if kind == REC_DROP {
@@ -4149,7 +4322,7 @@ impl Database {
         &mut self,
         bytes: &[u8],
         body: &[u8],
-        by_id: &mut HashMap<u32, String>,
+        by_id: &mut ById,
         restored: &mut Vec<(String, String, usize)>,
         touched: &mut Vec<(String, Vec<DocId>)>,
         replay: &mut Replay<'_>,
@@ -4189,7 +4362,7 @@ impl Database {
         bytes: &[u8],
         at: usize,
         len: usize,
-        by_id: &HashMap<u32, String>,
+        by_id: &ById,
         restored: &[(String, String, usize)],
         touched: &mut Vec<(String, Vec<DocId>)>,
         index: Option<&[u8]>,
@@ -6953,6 +7126,7 @@ impl Database {
                 continue;
             };
             let mut union: Vec<DocId> = Vec::new();
+            let mut ends: Vec<usize> = Vec::new();
             let mut whole = true;
             for v in vals {
                 // The same coercion the single equality needs, and for the
@@ -6964,20 +7138,35 @@ impl Database {
                     break;
                 };
                 if let Some(bucket) = map.get(&key) {
+                    // Where the run before ends, from the second bucket on:
+                    // one bucket, the usual list, is its own answer, and
+                    // noting its end was an allocation more a query.
+                    if !union.is_empty() {
+                        ends.push(union.len());
+                    }
                     union.extend(bucket.iter());
                 }
             }
             if !whole {
                 continue;
             }
-            // `sort` rather than `sort_unstable`: the union is k buckets laid
-            // end to end, and a bucket is almost always already ascending
-            // (ids are pushed in insertion order), so the merge sort joins
-            // runs that exist instead of re-sorting them. Over 200 000 rows
-            // where one bucket holds 56 374 of them: `in [2]` 901 -> 394 us,
-            // `in [100]` 1 260 -> 940 us. Pattern-defeating quicksort does
-            // not exploit multiple runs; this is the one place that matters.
-            union.sort();
+            // The union is k buckets laid end to end, each ascending. One is
+            // its own answer; up to eight are merged where they are known to
+            // end, and past that the ids are sorted. The stable sort that
+            // did this found the runs again a comparison at a time, its code
+            // -- a stable sort of ids, for this alone -- 3.4 KB of the
+            // browser module. Over runs of random ids, merged against it and
+            // the unstable sort every other list of ids takes: 2 runs of 200
+            // 0.5 us against 1.6 and 2.2, 8 of 200 6.0 against 14.7 and 9.6,
+            // 12 of 200 21.7 against 26.7 and 14.6, 2 000 of 10 846 against
+            // 233 and 166.
+            if !ends.is_empty() {
+                ends.push(union.len());
+                match ends.len() <= 8 {
+                    true => merge_runs(&mut union, &mut ends),
+                    false => union.sort_unstable(),
+                }
+            }
             // Two elements can coerce to the same key (`year in [2024,
             // 2024.0]`), and a document reached twice would be counted twice
             // by `count` and emitted twice by `get`.
@@ -7345,7 +7534,7 @@ impl Database {
         matches: &dyn Fn(DocId) -> Result<bool>,
         probe: Option<FilterProbe>,
     ) -> Result<Vec<(DocId, f32)>> {
-        let mut tested = 0;
+        let mut tested = 0usize;
         let hits = sp.search(qv, want, ef, &mut |id| {
             tested += 1;
             Ok(c.store.contains(id) && matches(id)?)
@@ -8870,16 +9059,7 @@ impl Database {
         // rows: it returns a single row with a single column.
         if sel.count {
             if let Some(n) = self.count_composed(c, sel, params)? {
-                return Ok(ResultSet {
-                    columns: vec![COUNT_COLUMN.to_string()],
-                    rows: vec![Row {
-                        id: 0,
-                        values: vec![Value::Int(n as i64)],
-                        score: None,
-                    }],
-                    nested: None,
-                    facets: Vec::new(),
-                });
+                return Ok(ResultSet::counted(n, Vec::new()));
             }
             let mut ids = self.matching_ids(&sel.collection, &sel.filter, params)?;
             // `count` reaches here with a `lookup` only when it is
@@ -8894,16 +9074,7 @@ impl Database {
                 true => self.facets(c, sel, &ids, all, &ctx)?,
                 false => Vec::new(),
             };
-            return Ok(ResultSet {
-                columns: vec![COUNT_COLUMN.to_string()],
-                rows: vec![Row {
-                    id: 0,
-                    values: vec![Value::Int(n as i64)],
-                    score: None,
-                }],
-                nested: None,
-                facets,
-            });
+            return Ok(ResultSet::counted(n, facets));
         }
 
         let mut columns = projection_columns(&c.schema, &sel.project);
@@ -9284,13 +9455,20 @@ impl Database {
         // first field that reads them.
         let mut member: Option<Vec<u64>> = None;
         for f in &sel.facets {
-            out.push(match (&f.rest, f.disjunctive) {
+            // One call whichever set it counts: `facet` is inlined, and
+            // called from two arms it was two copies of itself, 2.6 KB of
+            // the browser module.
+            let (own, mut apart);
+            let (set, every, member) = match (&f.rest, f.disjunctive) {
                 (Some(rest), true) => {
-                    let (own, all) = self.facet_set(c, sel, rest, ctx)?;
-                    self.facet(c, f, &own, all, &mut None, ctx.params)?
+                    let every;
+                    (own, every) = self.facet_set(c, sel, rest, ctx)?;
+                    apart = None;
+                    (&own[..], every, &mut apart)
                 }
-                _ => self.facet(c, f, ids, all, &mut member, ctx.params)?,
-            });
+                _ => (ids, all, &mut member),
+            };
+            out.push(self.facet(c, f, set, every, member, ctx.params)?);
         }
         Ok(out)
     }
@@ -10206,9 +10384,11 @@ fn sparse_of(store: &Store, pos: usize) -> Result<SparseIndex> {
 
 /// Builds the index the schema declares on the field at `pos` and fills it
 /// from the collection's documents: what `create index` does, and what a
-/// replica does with the primary's. Inlined for the reason
-/// [`Collection::reset_index_structures`] is.
-#[inline(always)]
+/// replica does with the primary's. Inlined natively for the reason
+/// [`Collection::reset_index_structures`] is; in the browser module both
+/// its callers are linked -- `create index` and `alter collection` -- and
+/// inlined into each it was 2.2 KB more of it.
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
 fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     // An index this build lacks is not built: a file's log replays the
     // `create index` that made it, and the file opens all the same. Asked
@@ -12198,15 +12378,15 @@ fn folded_keys(flat: &mut [Value], keys: &[OrderKey]) -> Vec<OrderKey> {
             std::mem::swap(t, &mut scratch);
         }
     }
-    keys.iter()
-        .map(|(p, asc, t, path)| {
-            let t = TextOrder {
-                coll: t.coll,
-                fold: None,
-            };
-            (*p, *asc, t, path.clone())
-        })
-        .collect()
+    let mut out = Vec::with_capacity(keys.len());
+    for (p, asc, t, path) in keys {
+        let t = TextOrder {
+            coll: t.coll,
+            fold: None,
+        };
+        out.push((*p, *asc, t, path.clone()));
+    }
+    out
 }
 
 /// The first `k` of `count` rows, each `n` keys wide in `flat`, in the
@@ -12261,15 +12441,10 @@ fn near_vector(v: Value) -> Result<Vec<f32>> {
     };
     // A non-numeric component used to silently become 0.0: a result that
     // corrupts the distance without erroring, the worst kind of wrong answer.
-    items
-        .iter()
-        .map(|i| {
-            i.as_f64().map(|f| f as f32).ok_or_else(|| {
-                Error::Type(format!(
-                    "non-numeric value in the near vector: {}",
-                    i.type_name()
-                ))
-            })
-        })
-        .collect()
+    Value::floats(&items).map_err(|i| {
+        Error::Type(format!(
+            "non-numeric value in the near vector: {}",
+            i.type_name()
+        ))
+    })
 }

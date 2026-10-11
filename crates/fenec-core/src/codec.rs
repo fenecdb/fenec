@@ -300,8 +300,11 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
         TAG_INT => Ok(Value::Int(unzigzag(get_uvarint(buf, pos)?))),
         TAG_TIMESTAMP => Ok(Value::Timestamp(unzigzag(get_uvarint(buf, pos)?))),
         TAG_FLOAT => {
-            let raw = take(buf, pos, 8)?;
-            Ok(Value::Float(f64::from_le_bytes(raw.try_into().unwrap())))
+            // As `geo_at` reads its words: `try_into().unwrap()` kept a
+            // failed conversion's `Debug` formatting in the browser module
+            // for a length `take` has already checked.
+            let (word, _) = take(buf, pos, 8)?.as_chunks::<8>();
+            Ok(Value::Float(f64::from_le_bytes(word[0])))
         }
         TAG_GEO => Ok(geo_value(geo_at(take(buf, pos, 16)?))),
         TAG_TEXT => {

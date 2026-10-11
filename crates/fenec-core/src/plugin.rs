@@ -66,6 +66,10 @@ pub trait Hook: Send + Sync {
     }
 }
 
+/// A function as the registry holds it: its name, lowered, the function,
+/// and its arity.
+type Entry = (String, Arc<dyn ScalarFn>, (usize, Option<usize>));
+
 /// Cloned, the functions and hooks are shared: what a pinned read
 /// ([`crate::engine::Pinned`]) calls a row's functions through.
 #[derive(Default, Clone)]
@@ -73,8 +77,11 @@ pub struct Registry {
     /// Name, lowered, -> function: a `Vec` searched by name rather than a
     /// map. Four are built in, a lookup through the map lowered the name
     /// into a new `String` on every call of every row, and the map's code
-    /// was 0.9 KB of the browser module.
-    functions: Vec<(String, Arc<dyn ScalarFn>)>,
+    /// was 0.9 KB of the browser module. Each beside its arity, asked once
+    /// as it is registered: a builtin's `call` is a function pointer behind
+    /// the vtable, and with `arity` asked a call as well, `lower()` over a
+    /// scan took 158 -> 160 ns a row.
+    functions: Vec<Entry>,
     hooks: Vec<Arc<dyn Hook>>,
     plugins: Vec<(String, String)>,
 }
@@ -93,15 +100,16 @@ impl Registry {
         // filter binds them, and `@geo` answers them, as the builtins work
         // them out -- replaced, a row's answer and the index's would part.
         let taken = crate::geo::is_geo_call(name) && self.function(name).is_some();
-        if taken || self.functions.iter().any(|(n, _)| n == name) {
+        if taken || self.functions.iter().any(|(n, ..)| n == name) {
             return Err(Error::Exists(format!(
                 "function `{name}` is already registered"
             )));
         }
         let lowered = name.to_ascii_lowercase();
-        match self.functions.iter_mut().find(|(n, _)| *n == lowered) {
-            Some(slot) => slot.1 = f,
-            None => self.functions.push((lowered, f)),
+        let arity = f.arity();
+        match self.functions.iter_mut().find(|(n, ..)| *n == lowered) {
+            Some(slot) => (slot.1, slot.2) = (f, arity),
+            None => self.functions.push((lowered, f, arity)),
         }
         Ok(())
     }
@@ -111,14 +119,17 @@ impl Registry {
     }
 
     pub fn function(&self, name: &str) -> Option<&Arc<dyn ScalarFn>> {
+        self.entry(name).map(|(_, f, _)| f)
+    }
+
+    fn entry(&self, name: &str) -> Option<&Entry> {
         self.functions
             .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, f)| f)
+            .find(|(n, ..)| n.eq_ignore_ascii_case(name))
     }
 
     pub fn function_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.functions.iter().map(|(n, _)| n.clone()).collect();
+        let mut v: Vec<String> = self.functions.iter().map(|(n, ..)| n.clone()).collect();
         v.sort();
         v
     }
@@ -145,7 +156,7 @@ impl Registry {
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value> {
-        let f = self.function(name).ok_or_else(|| {
+        let (_, f, (lo, hi)) = self.entry(name).ok_or_else(|| {
             if !crate::FULL {
                 if let Some(feature) = missing_function(name) {
                     return crate::error::not_built(&format!("`{name}`"), feature);
@@ -160,7 +171,7 @@ impl Registry {
                 false => Error::Query(format!("unknown function `{name}`")),
             }
         })?;
-        let (lo, hi) = f.arity();
+        let (lo, hi) = (*lo, *hi);
         if args.len() < lo || hi.map(|h| args.len() > h).unwrap_or(false) {
             return Err(Error::Query(format!(
                 "function `{name}` expects {lo}{} argument(s), got {}",
@@ -209,36 +220,52 @@ pub mod builtins {
     use super::*;
     use crate::vector;
 
-    macro_rules! reg {
-        ($r:expr, $name:literal, $lo:expr, $hi:expr, $doc:literal, $f:expr) => {{
-            struct F;
-            impl ScalarFn for F {
-                fn call(&self, args: &[Value]) -> Result<Value> {
-                    let f: fn(&[Value]) -> Result<Value> = $f;
-                    f(args)
-                }
-                fn arity(&self) -> (usize, Option<usize>) {
-                    ($lo, $hi)
-                }
-                fn doc(&self) -> &str {
-                    $doc
-                }
-            }
-            let _ = $r.register_fn($name, Arc::new(F));
-        }};
+    /// A builtin: its function, its arity and what it does. One type for
+    /// all of them, in a table: a type of its own each, made by a macro,
+    /// was 17 vtables and 17 copies of `arity` and `doc`, 0.9 KB of the
+    /// browser module.
+    #[derive(Clone, Copy)]
+    struct Builtin {
+        name: &'static str,
+        lo: usize,
+        hi: Option<usize>,
+        doc: &'static str,
+        f: fn(&[Value]) -> Result<Value>,
+    }
+
+    impl ScalarFn for Builtin {
+        fn call(&self, args: &[Value]) -> Result<Value> {
+            (self.f)(args)
+        }
+        fn arity(&self) -> (usize, Option<usize>) {
+            (self.lo, self.hi)
+        }
+        fn doc(&self) -> &str {
+            self.doc
+        }
+    }
+
+    const fn b(
+        name: &'static str,
+        lo: usize,
+        hi: Option<usize>,
+        doc: &'static str,
+        f: fn(&[Value]) -> Result<Value>,
+    ) -> Builtin {
+        Builtin {
+            name,
+            lo,
+            hi,
+            doc,
+            f,
+        }
     }
 
     fn vec_arg(v: &Value) -> Result<Vec<f32>> {
         match v {
             Value::Vector(x) => Ok(x.clone()),
-            Value::List(items) => items
-                .iter()
-                .map(|i| {
-                    i.as_f64()
-                        .map(|f| f as f32)
-                        .ok_or_else(|| Error::Type("vector element must be numeric".into()))
-                })
-                .collect(),
+            Value::List(items) => Value::floats(items)
+                .map_err(|_| Error::Type("vector element must be numeric".into())),
             other => Err(Error::Type(format!(
                 "expected a vector, found {}",
                 other.type_name()
@@ -246,22 +273,49 @@ pub mod builtins {
         }
     }
 
-    pub fn install(r: &mut Registry) {
-        reg!(r, "lower", 1, Some(1), "lowercases text", |a| {
+    // As PostgreSQL's: nulls are passed over, and null only when every
+    // value is. One function for both, the order its one difference.
+    fn extreme(a: &[Value], larger: bool) -> Value {
+        let mut best: Option<&Value> = None;
+        for v in a.iter().filter(|v| !v.is_null()) {
+            let o = best.map(|b| v.cmp_value(b));
+            let want = if larger {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            };
+            if o.is_none_or(|o| o == want) {
+                best = Some(v);
+            }
+        }
+        best.cloned().unwrap_or(Value::Null)
+    }
+
+    /// Two vectors of one length, as the functions over a pair take them.
+    fn pair(a: &[Value]) -> Result<(Vec<f32>, Vec<f32>)> {
+        let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
+        if x.len() != y.len() {
+            return Err(Error::Type("vector dimensions do not match".into()));
+        }
+        Ok((x, y))
+    }
+
+    static BUILTINS: &[Builtin] = &[
+        b("lower", 1, Some(1), "lowercases text", |a| {
             Ok(match &a[0] {
                 // Unicode, not ASCII: see the note on `query::like_match`
                 // for what the cheaper mapping was measured to cost.
                 Value::Text(s) => Value::Text(crate::case::lower(s)),
                 v => v.clone(),
             })
-        });
-        reg!(r, "upper", 1, Some(1), "uppercases text", |a| {
+        }),
+        b("upper", 1, Some(1), "uppercases text", |a| {
             Ok(match &a[0] {
                 Value::Text(s) => Value::Text(crate::case::upper(s)),
                 v => v.clone(),
             })
-        });
-        reg!(r, "len", 1, Some(1), "length of text/list/vector", |a| {
+        }),
+        b("len", 1, Some(1), "length of text/list/vector", |a| {
             Ok(Value::Int(match &a[0] {
                 Value::Text(s) => s.chars().count() as i64,
                 Value::Bytes(b) => b.len() as i64,
@@ -269,9 +323,8 @@ pub mod builtins {
                 Value::Vector(v) => v.len() as i64,
                 _ => 0,
             }))
-        });
-        reg!(
-            r,
+        }),
+        b(
             "coalesce",
             1,
             None,
@@ -281,90 +334,59 @@ pub mod builtins {
                     .find(|v| !v.is_null())
                     .cloned()
                     .unwrap_or(Value::Null))
-            }
-        );
-        reg!(
-            r,
+            },
+        ),
+        b(
             "cosine",
             2,
             Some(2),
             "cosine similarity between two vectors",
             |a| {
-                let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
-                if x.len() != y.len() {
-                    return Err(Error::Type("vector dimensions do not match".into()));
-                }
+                let (x, y) = pair(a)?;
                 let (nx, ny) = (vector::normalized(&x), vector::normalized(&y));
                 Ok(Value::Float(vector::dot(&nx, &ny) as f64))
-            }
-        );
-        reg!(
-            r,
+            },
+        ),
+        b(
             "l2",
             2,
             Some(2),
             "euclidean distance between two vectors",
             |a| {
-                let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
-                if x.len() != y.len() {
-                    return Err(Error::Type("vector dimensions do not match".into()));
-                }
+                let (x, y) = pair(a)?;
                 Ok(Value::Float(vector::l2_sq(&x, &y).sqrt() as f64))
-            }
-        );
-        reg!(r, "dot", 2, Some(2), "inner product", |a| {
-            let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
-            if x.len() != y.len() {
-                return Err(Error::Type("vector dimensions do not match".into()));
-            }
+            },
+        ),
+        b("dot", 2, Some(2), "inner product", |a| {
+            let (x, y) = pair(a)?;
             Ok(Value::Float(vector::dot(&x, &y) as f64))
-        });
-        reg!(r, "now", 0, Some(0), "current time (UTC)", |_a| {
+        }),
+        b("now", 0, Some(0), "current time (UTC)", |_a| {
             Ok(Value::Timestamp(crate::time::now_ms()?))
-        });
-        reg!(
-            r,
+        }),
+        b(
             "timestamp",
             1,
             Some(1),
             "converts text or epoch milliseconds into a timestamp",
-            |a| { a[0].clone().coerce(&crate::value::DataType::Timestamp) }
-        );
+            |a| a[0].clone().coerce(&crate::value::DataType::Timestamp),
+        ),
         #[cfg(feature = "analytics")]
-        reg!(
-            r,
+        b(
             "bucket",
             2,
             Some(2),
             "the start of the interval a timestamp falls in: bucket(at, 15m)",
-            |a| { crate::query::Interval::of(&a[1])?.truncate(&a[0]) }
-        );
-        // As PostgreSQL's: nulls are passed over, and null only when every
-        // value is. One function for both, the order its one difference.
-        fn extreme(a: &[Value], larger: bool) -> Value {
-            let mut best: Option<&Value> = None;
-            for v in a.iter().filter(|v| !v.is_null()) {
-                let o = best.map(|b| v.cmp_value(b));
-                let want = if larger {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Less
-                };
-                if o.is_none_or(|o| o == want) {
-                    best = Some(v);
-                }
-            }
-            best.cloned().unwrap_or(Value::Null)
-        }
-        reg!(r, "greatest", 1, None, "the largest of its values", |a| {
+            |a| crate::query::Interval::of(&a[1])?.truncate(&a[0]),
+        ),
+        b("greatest", 1, None, "the largest of its values", |a| {
             Ok(extreme(a, true))
-        });
-        reg!(r, "least", 1, None, "the smallest of its values", |a| {
+        }),
+        b("least", 1, None, "the smallest of its values", |a| {
             Ok(extreme(a, false))
-        });
+        }),
         #[cfg(feature = "analytics")]
-        reg!(
-            r,
+        b(
             "hll_estimate",
             1,
             Some(1),
@@ -383,36 +405,39 @@ pub mod builtins {
                         )))
                     }
                 })
-            }
-        );
+            },
+        ),
         #[cfg(feature = "geo")]
-        reg!(
-            r,
+        b(
             "distance",
             2,
             Some(2),
             "the metres between two points [lon, lat], as Redis's GEODIST",
-            crate::geo::distance_fn
-        );
+            crate::geo::distance_fn,
+        ),
         #[cfg(feature = "geo")]
-        reg!(
-            r,
+        b(
             "within",
             2,
             Some(2),
             "whether a point lies in a box [west, south, east, north]",
-            crate::geo::within_fn
-        );
-        reg!(r, "norm", 1, Some(1), "vector length (L2 norm)", |a| {
+            crate::geo::within_fn,
+        ),
+        b("norm", 1, Some(1), "vector length (L2 norm)", |a| {
             Ok(Value::Float(vector::norm(&vec_arg(&a[0])?) as f64))
-        });
-        reg!(
-            r,
+        }),
+        b(
             "normalize",
             1,
             Some(1),
             "scales a vector to unit length",
-            |a| { Ok(Value::Vector(vector::normalized(&vec_arg(&a[0])?))) }
-        );
+            |a| Ok(Value::Vector(vector::normalized(&vec_arg(&a[0])?))),
+        ),
+    ];
+
+    pub fn install(r: &mut Registry) {
+        for f in BUILTINS {
+            let _ = r.register_fn(f.name, Arc::new(*f));
+        }
     }
 }

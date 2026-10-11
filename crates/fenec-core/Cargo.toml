@@ -62,9 +62,9 @@ facets = []
 # `highlight()` and `snippet()`: the spans `match` found in a row's text,
 # which needs `text` as well. Without it a `get` asking one is refused.
 highlight = []
-# The aggregates past `count`, `sum`, `avg`, `min` and `max` over groups:
-# `count(distinct ...)`, `first` and `last ... by`, `approx_count_distinct`
-# and the `hll_*` sketches, `bucket()`, `having`. Without it each is refused.
+# A time series' and a sketch's: `bucket()`, `approx_count_distinct` and
+# the `hll_*` sketches. Without it each is refused. `count(distinct ...)`,
+# `first` and `last ... by` and `having` are standard and in every build.
 analytics = []
 # Text in a language's order (`collate und`, `collate tr`): ICU's tables,
 # the root's Latin chunk in the browser module and the others it is handed.
