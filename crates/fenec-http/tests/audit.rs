@@ -87,7 +87,10 @@ fn verify_nothing(port: u16, cases: &[Case], held: Duration) {
             "{method} {target}, answered {got}, started the count again"
         );
         let head = out.split("\r\n\r\n").next().unwrap_or("");
-        assert!(!head.to_ascii_lowercase().contains("fenec-verified"), "{out}");
+        assert!(
+            !head.to_ascii_lowercase().contains("fenec-verified"),
+            "{out}"
+        );
     }
 }
 
@@ -230,7 +233,13 @@ fn an_answer_that_verified_no_token_starts_no_count_again() {
             // Its method is refused before its token is looked at.
             ("POST", "/_whoami", "", "", 405),
             // A read waiting for a write is held before its token is asked.
-            ("GET", "/notes", "Fenec-After: 99\r\nFenec-Wait: 0\r\n", "", 504),
+            (
+                "GET",
+                "/notes",
+                "Fenec-After: 99\r\nFenec-Wait: 0\r\n",
+                "",
+                504,
+            ),
         ],
         held,
     );
@@ -256,7 +265,13 @@ fn an_answer_that_verified_no_token_starts_no_count_again() {
                 r#"{"query":"set notes {title: \"b\"} where id = 99 require 1"}"#,
                 412,
             ),
-            ("POST", "/query", &root, r#"{"query":"get notes where"}"#, 400),
+            (
+                "POST",
+                "/query",
+                &root,
+                r#"{"query":"get notes where"}"#,
+                400,
+            ),
             ("GET", "/_whoami", &root, "", 200),
         ],
     );
@@ -272,9 +287,8 @@ fn a_server_that_asks_for_no_token_verifies_none() {
     // Open to everyone, but for its replication token: that one guessed,
     // the answers to everything else verified nothing of it.
     let port = serve(
-        Server::new(Arc::new(RwLock::new(Database::new())), cfg).with_replication(
-            Replication::new(Some("repl".into()), None, None),
-        ),
+        Server::new(Arc::new(RwLock::new(Database::new())), cfg)
+            .with_replication(Replication::new(Some("repl".into()), None, None)),
     );
     for _ in 0..2 {
         assert_eq!(ask(port, "GET", "/_replication/status", GUESSED, "").0, 401);
