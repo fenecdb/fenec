@@ -172,6 +172,12 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
   <li><b><code>{ poll }</code> is for a page many view:</b> a stream is a
     server thread and a wake-up at every write, a poll holds nothing between
     rounds (<a href="/docs/http#polling">Polling a read</a>).</li>
+  <li><b><code>{ wait: ms }</code> holds a claim at the server</b> until a
+    job comes, on <code>update</code>, <code>delete</code>,
+    <code>run</code> and <code>batch</code>, and <code>{ signal }</code>
+    gives it up (<a href="/docs/queues#wait">Waiting for a job</a>). A
+    database in the page refuses it: there is no other worker to wait
+    for.</li>
 </ul>
 
 <h2>Opening a database</h2>

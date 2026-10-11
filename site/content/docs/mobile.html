@@ -497,7 +497,12 @@ try await db.withIdempotencyKey(orderID).from("orders").insert(order)</pre>
 <code>db.batch([...], idempotencyKey: id)</code>; all three have
 <code>withIdempotencyKey(key)</code>, a copy whose every write -- the
 builder's too -- carries the key, and <code>seq</code>, the change the last
-write left the server at.</p>
+write left the server at. <code>withWait</code> -- Swift's in seconds,
+Kotlin's in milliseconds, Dart's a <code>Duration</code> -- is a copy whose
+<code>set</code>s and <code>del</code>s the server holds while they write
+nothing, a worker's claim waiting there for a job
+(<a href="/docs/queues#wait">Waiting for a job</a>); cancelling the task or
+the coroutine gives it up.</p>
 
 <h2 id="file">Where the file lives</h2>
 

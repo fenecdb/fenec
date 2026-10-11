@@ -56,6 +56,8 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
   answers them in `Result.Rows`: a job queue's claim is
   `From("jobs").WhereCond(fenecdb.Raw("run_at <= now()")).Order("run_at", "asc").Limit(10).Update(ctx,
   fenecdb.D("owner", me, "run_at", fenecdb.Expr("now() + ?", 30000)), fenecdb.Returning("*"))`.
+  Through `db.Wait(30 * time.Second)` a claim that finds no job is held at the server until one comes, or the
+  wait ends with none (`Fenec-Wait`); the request's context gives it up.
 - To see the text and parameters a chain builds, for logging or a test, `q.ToFenecQL()` returns them and runs
   nothing; a query needs no call to it before it runs.
 

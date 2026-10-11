@@ -33,7 +33,9 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
 
 - `QueryAsync` gives rows as `JsonElement`s, `QueryAsync<T>` maps them to records or classes by property name, any case; `ExecAsync` a write's count and its `Seq`.
 - `BatchAsync([new Statement(q, params), ...])` runs statements as one block: all land, or none.
-- `WithIdempotencyKey(key)` makes a write once; `After(seq)` reads a write on a replica (`Fenec-After`).
+- `WithIdempotencyKey(key)` makes a write once; `After(seq)` reads a write on a replica (`Fenec-After`);
+  `WithWait(TimeSpan.FromSeconds(30))` holds a job queue's claim at the server until a job comes (`Fenec-Wait`),
+  its cancellation token giving it up.
 - `SubscribeAsync(collection, [new("year", "gte.2024")])` is an `IAsyncEnumerable<Event>` of `seed` and `change` events (SSE).
 - `ChangesAsync(since, wait)` reads every write on disk (`/_changes`); `HealthAsync()` asks `/_health`.
 - `FenecClientOptions` takes `Token`, `Tenant` (`/t/<tenant>/`), `Timeout` and an `HttpClient` of your own.
