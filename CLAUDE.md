@@ -48,6 +48,7 @@ make schema-golden    # integrations/schema-golden.json: declarations, FenecQL t
 make docs-types   # every data-lang="ts" example on the site under tsc --strict (web/types/docs.mjs; part of make types-check)
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
+make grafana-check # monitoring/'s compose (Docker): both data dashboards, Infinity's and the Grafana plugin's (integrations/grafana), and its alert rule held to fenec-server
 make grafana-check # monitoring/'s compose (Docker): every panel of the data dashboard (Infinity) asked of Grafana, held to fenec-server's answer
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
@@ -3258,6 +3259,39 @@ its collection and metadata columns in the statement's text, so both are
 checked against FenecQL's name pattern; values always go in as parameters,
 and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
 value and not a list.
+
+**Grafana's data source binds a dashboard's values; it never splices them**
+(`integrations/grafana`, plugin id `fenecdb-datasource`). The Infinity
+plugin wrote variables into a body's text, sorted a frame's columns by name
+and alerted on nothing a browser fills in, so a backend plugin (Go,
+grafana-plugin-sdk-go 0.297, the Go SDK through `replace ../go`) and a
+TypeScript frontend in `@grafana/create-plugin` 7.12.2's layout run the
+queries server side. The backend reads a statement only where it must agree
+with fenec-ql's lexer -- strings, comments, words, a `$` (`fenecql.go`) --
+and makes each name a `$n` after the editor's parameter list: `$__from`,
+`$__to`, `$__interval_ms`, `$__max_data_points` from the request, which an
+alert rule has too, and `$sym` or `${n:int}` from the values the browser
+sends beside the query (`values.ts`), a multi-value one after `in` a bracket
+of them. Only `get`, `select` and `explain` are sent. The answer is read in
+its order (`answer.go`: encoding/json's maps lose it, so the SDK grew
+`QueryRaw`/`BatchRaw` and `IfNoneMatch`) and typed by the
+`collections` schema, kept 30 s, where a column is a field and by its values
+where computed; a group by time and a text column is a series a label (long
+to wide), which a rule evaluates an instance a symbol. One query goes with
+its last answer's `ETag` and a 304 is answered from the kept body: 3-5 ms
+with the server's token against 10-82 ms run, nothing gained with a scoped
+JWT, whose tag the server makes by running the query (`make grafana-check`'s
+stack, `monitoring/grafana/bench.mjs`); several are one read-only `/batch`.
+The client follows no redirect and sends the token alone, to the configured
+URL and the plugin's paths. `monitoring/` builds Grafana with it
+(`integrations/grafana/Dockerfile`), and `make grafana-check` holds every
+panel's, variable's and annotation's frame to fenec-server's own answer, in
+the select list's order, and the provisioned rule's firing instances to the
+server's rows. A jest test importing `datasource.ts` -- `@grafana/runtime`
+and `@grafana/ui` with it -- sat at 0% CPU for ten minutes, so the logic
+jest runs lives in modules importing types alone. `site/build.py` writes
+the editor's FenecQL colours into `src/fenecql/highlight.js` as it writes
+the studio's.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-server` stays on `release`: a

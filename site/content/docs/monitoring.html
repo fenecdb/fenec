@@ -102,23 +102,25 @@ in its stride.</p>
 <h2 id="grafana">Grafana</h2>
 
 <p>The repository's <code>monitoring/</code> folder runs fenec-server with
-Prometheus and Grafana and two dashboards already loaded: the server's
-metrics, and the database's own rows through the Infinity plugin.</p>
+Prometheus and Grafana and the dashboards already loaded: the server's
+metrics, and the database's own rows through fenecdb's data source plugin
+and through the Infinity plugin.</p>
 
 <pre data-lang="bash">FENEC_HTTP_TOKEN=secret FENEC_METRICS_TOKEN=scrape \
 FENEC_JWT_SECRET=$(openssl rand -hex 32) \
-  docker compose -f monitoring/docker-compose.yml up -d
-# metrics: http://127.0.0.1:3000/d/fenecdb     data: http://127.0.0.1:3000/d/fenecdb-data
+  docker compose -f monitoring/docker-compose.yml up -d --build
+# metrics: http://127.0.0.1:3000/d/fenecdb     data: http://127.0.0.1:3000/d/fenecdb-data-plugin
 # Prometheus: http://127.0.0.1:9090
 </pre>
 
 <ul>
   <li><b>The metrics</b> go fenec-server → Prometheus → Grafana, behind the
     admin token: the dashboard is <code>grafana/fenecdb.json</code>.</li>
-  <li><b>The data</b> goes Grafana → Infinity → <code>POST /query</code>,
-    each panel a FenecQL statement with the time range as its parameters,
-    under a token that reads two collections and writes nothing:
-    <a href="/docs/grafana">Grafana</a>.</li>
+  <li><b>The data</b> goes Grafana → the <code>fenecdb-datasource</code>
+    plugin → <code>POST /query</code>, each panel a FenecQL statement with
+    the time range and variables bound as its parameters, under a token
+    that reads two collections and writes nothing, with an alert rule over
+    the same rows: <a href="/docs/grafana">Grafana</a>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -126,7 +128,8 @@ FENEC_JWT_SECRET=$(openssl rand -hex 32) \
 (<code>grafana/fenecdb.json</code>), a Prometheus configuration and a compose
 file that runs fenec-server with both, the dashboard already loaded. The
 same compose seeds a site's events and a week of trades and loads the data
-dashboard (<code>grafana/fenecdb-data.json</code>) beside it.</p>
+dashboards (<code>grafana/fenecdb-data-plugin.json</code> and
+<code>grafana/fenecdb-data.json</code>) beside it.</p>
 
 <p>It opens on the figures that decide whether anything needs doing — the
 version and uptime, whether the disk has refused a write, statements and
