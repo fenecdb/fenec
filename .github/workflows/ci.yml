@@ -434,24 +434,58 @@ jobs:
           ANALYTICS_FENEC_SERVER="$PWD/target/release/fenec-server" ANALYTICS_LIGHTHOUSE=1 \
             CHROME_PATH="$(command -v google-chrome)" examples/run-tests.sh analytics
 
-  # monitoring/'s compose as a user starts it -- fenec-server's image built
-  # from this checkout, the seed, Grafana with the Infinity plugin -- and
-  # every panel of the "fenecdb data" dashboard asked of Grafana and held
-  # to fenec-server's own answer, then what the data source must refuse.
-  # A job of its own: the image's Rust build is most of its time.
+  # fenecdb-datasource (integrations/grafana) as a release would ship it --
+  # its frontend's types, lint, tests and webpack build, its backend built
+  # by mage for linux/amd64 and arm64 -- then monitoring/'s compose as a
+  # user starts it: fenec-server's image and Grafana's with the plugin built
+  # from this checkout, the seed, every panel of both "fenecdb data"
+  # dashboards asked of Grafana (through Infinity and through the plugin)
+  # and held to fenec-server's own answer, the plugin's alert rule
+  # evaluated, and what the data sources must refuse. Last, the backend's
+  # Go tests, against the fenec-server of the image just built.
   grafana:
     name: monitoring (Grafana)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: integrations/grafana/package-lock.json
 
-      - name: The data dashboard end to end
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: integrations/grafana/go.mod
+          cache-dependency-path: integrations/grafana/go.sum
+
+      - name: The plugin's frontend
+        working-directory: integrations/grafana
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm run lint
+          npm run test:ci
+          npm run build
+
+      - name: The plugin's backend for linux/amd64 and arm64
+        working-directory: integrations/grafana
+        run: |
+          go run github.com/magefile/mage@v1.17.2 -v build:linux build:linuxARM64
+          ls -l dist/gpx_fenecdb_linux_amd64 dist/gpx_fenecdb_linux_arm64
+
+      - name: The data dashboards end to end
         run: make grafana-check
+
+      # The image's fenec-server is a static binary: the runner runs it.
+      - name: The plugin's backend tests
+        working-directory: integrations/grafana
+        run: |
+          docker create --name fenec-server fenecdb
+          docker cp fenec-server:/usr/local/bin/fenec-server "$RUNNER_TEMP/fenec-server"
+          FENEC_SERVER="$RUNNER_TEMP/fenec-server" go test -count=1 ./pkg/...
 
   build:
     name: build (release + cli profile)
