@@ -20,7 +20,7 @@ the page does.</p>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">8 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">211 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">225 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
@@ -526,7 +526,12 @@ const top = await db.from(products).select('name').lookup('reviews', { where: { 
 nullable unless <code>.notNull()</code>, FenecQL's <code>required</code>. A
 field takes one index, declared on the column (<code>.unique()</code>) or in
 the third argument; two on one field are refused as the table is declared,
-as is anything FenecQL cannot hold.</p>
+as is anything FenecQL cannot hold. An index over several fields is
+<code>.on()</code> with several columns, each <code>.desc()</code> or
+<code>.asc()</code> as Drizzle writes it, beside a field's own
+(<a href="/docs/fenecql#composite">Indexes over several fields</a>), and
+<code>dropIndex(table, ...fields)</code> is the migration that takes one
+off.</p>
 
 <div class="tbl">
 <table>
@@ -541,6 +546,7 @@ as is anything FenecQL cannot hold.</p>
 <tr><td><code>index().on(t.at)</code></td><td><code>@sorted</code></td></tr>
 <tr><td><code>index().on(t.at).ttl('30d')</code></td><td><code>@ttl(30d)</code></td></tr>
 <tr><td><code>index().using('hash', t.n)</code> / <code>uniqueIndex().on(t.n)</code></td><td><code>@hash</code> / <code>@unique</code></td></tr>
+<tr><td><code>index().on(t.owner, t.at.desc())</code> / <code>uniqueIndex().on(t.org, t.slug)</code></td><td><code>@sorted(owner, at desc)</code> / <code>@unique(org, slug)</code></td></tr>
 <tr><td><code>index().using('hnsw', t.e.op('vector_l2_ops')).with({ m, ef_construction, ef_search, quant })</code></td><td><code>@hnsw(l2, m=.., ...)</code></td></tr>
 <tr><td><code>index().using('bm25', t.body).with({ k1, b, prefix, prefix_min, chars })</code></td><td><code>@text(...)</code></td></tr>
 <tr><td><code>index().using('inverted', t.splade)</code></td><td><code>@inverted</code></td></tr>
@@ -730,7 +736,7 @@ another set is a build option.</p>
 <pre data-lang="bash">make wasm                          # every index: 181 KB brotli
 make wasm FEATURES="text sorted"   # no graph, no sparse index: 160 KB
 make wasm FEATURES=none            # none of the four: 142 KB
-make wasm FEATURES=none SCHEMA=0   # nor the schema check: 159 KB
+make wasm FEATURES=none SCHEMA=0   # nor the schema check: 163 KB
 </pre>
 
 <div class="tbl">

@@ -1,5 +1,6 @@
-// A collection's schema: the statements that make it, its fields, and the
-// changes a person makes to it -- an index, a field added, renamed or
+// A collection's schema: the statements that make it, its fields, its
+// indexes over several fields, and the changes a person makes to it -- an
+// index, one over several fields made or dropped, a field added, renamed or
 // dropped, the collection dropped.
 //
 // Every change is shown before it runs, twice: the exact statement it will
@@ -84,6 +85,7 @@ export function mount(host, ctx) {
       fill(
         actions,
         h('button', { type: 'button', class: 'btn', onclick: () => change('index') }, 'Add index'),
+        h('button', { type: 'button', class: 'btn', onclick: () => change('composite') }, 'Add index over fields'),
         h('button', { type: 'button', class: 'btn', onclick: () => change('add') }, 'Add field'),
         h('button', { type: 'button', class: 'btn ghost danger', onclick: () => change('drop') }, 'Drop collection'),
       );
@@ -120,6 +122,21 @@ export function mount(host, ctx) {
         ),
       );
     });
+    // The indexes over several fields, each as `create collection` writes it.
+    const composites = (c.indexes ?? []).map((ix) => {
+      const fields = ix.keys.map((k) => k.field);
+      const text = `@${ix.kind}(${ix.keys.map((k) => (k.desc ? `${k.field} desc` : k.field)).join(', ')})`;
+      return h(
+        'tr',
+        {},
+        h('td', { class: 'mono sun' }, text),
+        h(
+          'td',
+          { class: 'sc-row-actions' },
+          owner() ? h('button', { type: 'button', class: 'btn ghost small danger', 'aria-label': `Drop ${text}`, onclick: () => change('drop-index', fields) }, 'Drop') : null,
+        ),
+      );
+    });
     fill(
       body,
       h('div', { class: 'sc-head' }, h('h2', {}, 'As FenecQL'), copy, h('button', { type: 'button', class: 'btn ghost small', onclick: () => ctx.query(`get ${name} limit 100`) }, 'Query it')),
@@ -131,6 +148,12 @@ export function mount(host, ctx) {
         h('thead', {}, h('tr', {}, h('th', {}, 'Field'), h('th', {}, 'Type'), h('th', {}, 'Index'), h('th', {}, h('span', { class: 'sr' }, 'Changes')))),
         h('tbody', {}, h('tr', {}, h('td', { class: 'mono' }, 'id'), h('td', { class: 'mono muted' }, 'int'), h('td', { class: 'mono muted' }, 'its own'), h('td')), rows),
       ),
+      composites.length
+        ? [
+            h('h2', {}, 'Indexes over several fields'),
+            h('table', { class: 'sc-fields sc-composites' }, h('thead', {}, h('tr', {}, h('th', {}, 'Index'), h('th', {}, h('span', { class: 'sr' }, 'Changes')))), h('tbody', {}, composites)),
+          ]
+        : null,
     );
   }
 
@@ -139,7 +162,8 @@ export function mount(host, ctx) {
   /**
    * The dialog for one change: its inputs, the statement they make, the
    * plan of it, and -- for a drop -- the name to type. `op` is `index`,
-   * `add`, `rename`, `drop-field` or `drop`.
+   * `composite`, `drop-index`, `add`, `rename`, `drop-field` or `drop`;
+   * `field` a field, or a dropped index's fields.
    */
   function change(op, field = null) {
     const c = collection();
@@ -151,7 +175,11 @@ export function mount(host, ctx) {
     const destructive = op === 'drop' || op === 'drop-field';
     const confirm = h('input', { id: 'sc-confirm', type: 'text', spellcheck: 'false', autocomplete: 'off' });
     const confirmRow = h('div', { class: 'sc-confirm' }, h('label', { for: 'sc-confirm' }));
-    const apply = h('button', { type: 'submit', class: `btn ${destructive ? 'danger' : 'primary'}`, disabled: true }, { index: 'Create index', add: 'Add field', rename: 'Rename field', 'drop-field': 'Drop field', drop: 'Drop collection' }[op]);
+    const apply = h(
+      'button',
+      { type: 'submit', class: `btn ${destructive ? 'danger' : 'primary'}`, disabled: true },
+      { index: 'Create index', composite: 'Create index', 'drop-index': 'Drop index', add: 'Add field', rename: 'Rename field', 'drop-field': 'Drop field', drop: 'Drop collection' }[op],
+    );
     const box = (id, label, el, hint) => h('div', { class: 'form-row' }, h('label', { for: id }, h('span', { class: 'form-name' }, label), hint ? h('span', { class: 'form-type' }, hint) : null), el);
     const select = (id, options, value) => {
       const s = h('select', { id }, options.map((o) => (Array.isArray(o) ? h('option', { value: o[0], selected: o[0] === value }, o[1]) : h('option', { value: o, selected: o === value }, o))));
@@ -174,6 +202,12 @@ export function mount(host, ctx) {
         rows.push(box('sc-kind', 'Index', (v.kindEl = select('sc-kind', kinds.map((k) => [k, `@${k}`]), v.kind))));
         rows.push(...options(v.kind));
         if (!can.length) rows.push(h('p', { class: 'hint' }, 'Every field that takes an index has one.'));
+      } else if (op === 'composite') {
+        rows.push(box('sc-keys', 'Fields', (v.keysEl = h('input', { id: 'sc-keys', type: 'text', value: v.keys ?? '', placeholder: 'owner, created desc', spellcheck: 'false', autocomplete: 'off' })), 'in order, each asc or desc'));
+        rows.push(box('sc-kind', 'Index', (v.kindEl = select('sc-kind', [['sorted', '@sorted'], ['unique', '@unique']], v.kind ?? 'sorted'))));
+        rows.push(h('p', { class: 'hint' }, 'An equality on its first fields and a range or an order on the next one read a run of it, and a limit stops there.'));
+      } else if (op === 'drop-index') {
+        rows.push(h('p', { class: 'hint' }, `The index on (${field.join(', ')}) is taken off. No row changes; a read it answered is answered by another index or the scan.`));
       } else if (op === 'add') {
         rows.push(box('sc-name', 'Name', (v.nameEl = h('input', { id: 'sc-name', type: 'text', value: v.name ?? '', spellcheck: 'false', autocomplete: 'off' }))));
         const types = h('datalist', { id: 'sc-types' }, ['text', 'int', 'float', 'bool', 'timestamp', 'json', 'bytes', '[text]', 'vector<768>', 'sparse<30522>', 'geo'].map((t) => h('option', { value: t })));
@@ -219,7 +253,7 @@ export function mount(host, ctx) {
     };
     /** What the inputs say now, read into `v`. */
     const read = () => {
-      for (const k of ['field', 'kind', 'name', 'type', 'ttl', 'prefix', 'metric', 'quant', 'collate']) {
+      for (const k of ['field', 'kind', 'name', 'type', 'ttl', 'prefix', 'metric', 'quant', 'collate', 'keys']) {
         const el = v[`${k}El`];
         if (el && el.isConnected) v[k] = el.value;
       }
@@ -237,6 +271,13 @@ export function mount(host, ctx) {
             S.addField(c.name, v.name ?? '', v.type ?? '', { index: spec(), collate: v.collate || null }),
             { op, collection: c.name, field: v.name, type: v.type, index: spec(), collate: v.collate || null },
           ];
+        case 'composite': {
+          const keys = S.compositeKeys(v.keys ?? '');
+          const unique = v.kind === 'unique';
+          return [S.createComposite(c.name, keys, unique), { op, collection: c.name, keys, unique }];
+        }
+        case 'drop-index':
+          return [S.dropComposite(c.name, field), { op, collection: c.name, fields: field }];
         case 'rename':
           return [S.renameField(c.name, v.field, v.name ?? ''), { op, collection: c.name, from: v.field, to: v.name }];
         case 'drop-field':
@@ -347,6 +388,8 @@ export function mount(host, ctx) {
     );
     const titles = {
       index: `Add an index to ${c.name}`,
+      composite: `Add an index over several fields of ${c.name}`,
+      'drop-index': `Drop an index of ${c.name}`,
       add: `Add a field to ${c.name}`,
       rename: `Rename a field of ${c.name}`,
       'drop-field': `Drop a field of ${c.name}`,

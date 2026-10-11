@@ -121,6 +121,9 @@ pub struct Options {
     pub casts: Vec<(String, DataType)>,
     /// `--index <field>@hnsw(..)` -- built once the load finishes.
     pub indexes: Vec<(String, IndexKind)>,
+    /// `--index owner,created desc@sorted` -- an index over several fields,
+    /// built once the load finishes too.
+    pub composites: Vec<fenec_core::schema::Composite>,
     /// `--id <column>|none`
     pub id: IdSource,
     /// `--where <expr>` -- a FenecQL filter applied before the row is written.
@@ -144,6 +147,7 @@ impl Options {
             vectors: Vec::new(),
             casts: Vec::new(),
             indexes: Vec::new(),
+            composites: Vec::new(),
             id: IdSource::Auto,
             filter: None,
             limit: None,

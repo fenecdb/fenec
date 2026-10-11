@@ -71,6 +71,8 @@ export function fenecqlOf(collections) {
     const fields = c.fields.map((f) =>
       [f.name, f.type, f.required && 'required', f.collate && `collate ${f.collate}`, f.index && indexText(f.index)].filter(Boolean).join(' '),
     );
+    // An index over several fields, a line of the collection's own.
+    for (const ix of c.indexes ?? []) fields.push(`@${ix.kind}(${ix.keys.map((k) => (k.desc ? `${k.field} desc` : k.field)).join(', ')})`);
     out.push(`create collection ${c.name} (${fields.join(', ')})`);
     for (const f of c.fields) for (const p of f.paths ?? []) out.push(`create index on ${c.name} (${f.name}.${p.path}) ${indexText(p.index)}`);
   }
@@ -87,7 +89,7 @@ function collections(list, described) {
   const byName = new Map((described?.collections ?? []).map((c) => [c.name, c]));
   return list.map((c) => {
     const d = byName.get(c.name);
-    return {
+    const out = {
       name: c.name,
       fields: c.fields.map((f) => {
         const df = d?.fields.find((x) => x.name === f.name);
@@ -98,6 +100,9 @@ function collections(list, described) {
         return out;
       }),
     };
+    // As a server writes them, and only where there are any.
+    if (c.indexes) out.indexes = c.indexes;
+    return out;
   });
 }
 

@@ -448,6 +448,78 @@ impl Field {
     }
 }
 
+/// The most parts an index over several fields takes: past a handful, a key
+/// is wider than the rows a prefix of it narrows to are worth.
+pub const MAX_COMPOSITE_KEYS: usize = 8;
+
+/// An index over several fields: `@sorted(owner, created desc)` in a
+/// `create collection`, or `create index on posts (owner, created desc)
+/// @sorted`. Its keys are compared part by part, each in its field's order
+/// and collation, the way `order owner, created desc` puts two rows -- so
+/// an equality on its first parts and a range or an `order` on the next one
+/// is a run of its entries, and `limit` stops the walk at the page.
+/// `unique` (`@unique(org, slug)`) refuses a second document holding the
+/// same values in every part, a `null` in any part being no value, as a
+/// `@unique` field's is.
+///
+/// A collection's, not a field's: a field keeps its one index of its own
+/// beside the composites it is a part of, and the schema writes them after
+/// its fields ([`Schema::encode`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Composite {
+    /// Each part: a field, or a path into a json field, and whether it
+    /// descends.
+    pub keys: Vec<(String, bool)>,
+    pub unique: bool,
+}
+
+impl Composite {
+    /// What it goes by among a collection's indexes -- the names `warm`
+    /// takes and `unbuilt` lists: its fields joined by `+`, which no field
+    /// name holds. Two composites over the same fields in the same order
+    /// are one, whatever their directions.
+    pub fn name(&self) -> String {
+        let mut s = String::new();
+        for (i, (k, _)) in self.keys.iter().enumerate() {
+            if i > 0 {
+                s.push('+');
+            }
+            s.push_str(k);
+        }
+        s
+    }
+
+    /// Its parts as `create index` writes them: `owner, created desc`.
+    pub fn keys_text(&self) -> String {
+        let mut s = String::new();
+        for (i, (k, desc)) in self.keys.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(k);
+            if *desc {
+                s.push_str(" desc");
+            }
+        }
+        s
+    }
+
+    /// Whether `field` -- a field, or a path into one -- is one of its
+    /// parts, or the field a path part reads into.
+    pub fn reads(&self, field: &str) -> bool {
+        self.keys
+            .iter()
+            .any(|(k, _)| k == field || split_path(k).is_some_and(|(f, _)| f == field))
+    }
+}
+
+/// Whether a field of type `ty` can be a part of an index over several
+/// fields: what `@sorted` orders, and `bool`, whose two values an equality
+/// prefix names -- `(done, created)` is a to-do list's every page.
+pub fn composite_part(ty: &DataType) -> bool {
+    *ty == DataType::Bool || crate::sorted::orderable(ty)
+}
+
 /// Refuses a second `@ttl` among `fields`: a row expires by one time, and
 /// the sweep walks one index for it.
 pub fn one_expiry<'a>(collection: &str, fields: impl Iterator<Item = &'a Field>) -> Result<()> {
@@ -512,6 +584,8 @@ pub struct Schema {
     /// this. Every field after one sits a place further in the documents
     /// than in `fields` ([`Schema::place`]).
     pub dropped: Vec<usize>,
+    /// The indexes over several fields, in the order they were made.
+    pub composites: Vec<Composite>,
 }
 
 /// A name read as a path: the field and the keys past it (`meta` and
@@ -580,7 +654,81 @@ impl Schema {
             fields,
             paths: Vec::new(),
             dropped: Vec::new(),
+            composites: Vec::new(),
         })
+    }
+
+    /// The type of what a composite's part `key` reads: a field's, or
+    /// `json` for a path into one. Refused where there is no such field or
+    /// path.
+    pub fn part_type(&self, key: &str) -> Result<DataType> {
+        if self.path_of(key)?.is_some() {
+            return Ok(DataType::Json);
+        }
+        self.field(key)
+            .map(|f| f.ty.clone())
+            .ok_or_else(|| Error::NotFound(format!("field `{key}` in `{}`", self.name)))
+    }
+
+    /// The checks an index over several fields meets -- each part a field
+    /// or a path there is, of a type with an order, named once, two parts
+    /// at least -- and the composite over the same fields already there,
+    /// if one is.
+    pub fn check_composite(&self, c: &Composite) -> Result<Option<&Composite>> {
+        let n = c.keys.len();
+        if n < 2 {
+            return Err(Error::Query(
+                "an index of one field is that field's own: `@sorted`, which walks both ways, \
+                 or `@unique`"
+                    .into(),
+            ));
+        }
+        if n > MAX_COMPOSITE_KEYS {
+            return Err(Error::Query(format!(
+                "an index takes at most {MAX_COMPOSITE_KEYS} fields, not {n}"
+            )));
+        }
+        for (i, (k, _)) in c.keys.iter().enumerate() {
+            if c.keys[..i].iter().any(|(o, _)| o == k) {
+                return Err(Error::Query(format!("`{k}` is named twice in one index")));
+            }
+            let ty = self.part_type(k)?;
+            if !composite_part(&ty) {
+                return Err(Error::Type(format!(
+                    "`{k}` is {}: an index over several fields orders bool, int, float, \
+                     timestamp, text and json",
+                    ty.name()
+                )));
+            }
+        }
+        Ok(self
+            .composites
+            .iter()
+            .find(|o| o.keys.len() == n && o.keys.iter().zip(&c.keys).all(|(a, b)| a.0 == b.0)))
+    }
+
+    /// Adds an index over several fields, refused where [`Self::check_composite`]
+    /// refuses it or one over the same fields is there.
+    pub fn add_composite(&mut self, c: Composite) -> Result<()> {
+        if self.check_composite(&c)?.is_some() {
+            return Err(Error::Exists(format!(
+                "an index on `{}` ({})",
+                self.name,
+                c.keys_text()
+            )));
+        }
+        self.composites.push(c);
+        Ok(())
+    }
+
+    /// Whether a write is asked for a value another document holds: a
+    /// `@unique` field, path or composite.
+    pub fn has_unique(&self) -> bool {
+        self.fields
+            .iter()
+            .chain(&self.paths)
+            .any(|f| f.index.is_unique())
+            || self.composites.iter().any(|c| c.unique)
     }
 
     /// The field a path reads into, by its position, and the keys past it:
@@ -728,7 +876,8 @@ impl Schema {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         encode_str(&mut out, &self.name);
-        put_uvarint(&mut out, self.width() as u64);
+        let extra = !self.composites.is_empty() as usize;
+        put_uvarint(&mut out, (self.width() + extra) as u64);
         let mut fields = self.fields.iter();
         for at in 0..self.width() {
             // A dropped place where it stands, nameless, behind a type tag
@@ -767,6 +916,23 @@ impl Schema {
                 }
             }
         }
+        // The indexes over several fields, as one place more past the last,
+        // nameless, behind a type tag of its own, as a dropped place is: a
+        // version that knows none refuses the file rather than open it
+        // without them and take a duplicate a unique one would refuse.
+        if !self.composites.is_empty() {
+            encode_str(&mut out, "");
+            out.push(TAG_COMPOSITES);
+            put_uvarint(&mut out, self.composites.len() as u64);
+            for c in &self.composites {
+                out.push(c.unique as u8);
+                put_uvarint(&mut out, c.keys.len() as u64);
+                for (k, desc) in &c.keys {
+                    encode_str(&mut out, k);
+                    out.push(*desc as u8);
+                }
+            }
+        }
         out
     }
 
@@ -776,11 +942,31 @@ impl Schema {
         let mut fields = Vec::with_capacity(n.min(buf.len()));
         let mut paths = Vec::new();
         let mut dropped = Vec::new();
+        let mut composites = Vec::new();
         for at in 0..n {
             let fname = decode_str(buf, pos)?;
             if buf.get(*pos) == Some(&TAG_DROPPED) {
                 *pos += 1;
                 dropped.push(at);
+                continue;
+            }
+            // Nameless, as it is written: a field's type is never this tag.
+            if fname.is_empty() && buf.get(*pos) == Some(&TAG_COMPOSITES) {
+                *pos += 1;
+                let ended = || Error::Corrupt("schema ended early".into());
+                for _ in 0..get_uvarint(buf, pos)? {
+                    let unique = *buf.get(*pos).ok_or_else(ended)? != 0;
+                    *pos += 1;
+                    let parts = get_uvarint(buf, pos)? as usize;
+                    let mut keys = Vec::with_capacity(parts.min(MAX_COMPOSITE_KEYS));
+                    for _ in 0..parts {
+                        let k = decode_str(buf, pos)?;
+                        let desc = *buf.get(*pos).ok_or_else(ended)? != 0;
+                        *pos += 1;
+                        keys.push((k, desc));
+                    }
+                    composites.push(Composite { keys, unique });
+                }
                 continue;
             }
             let collate = match buf.get(*pos) {
@@ -825,6 +1011,7 @@ impl Schema {
             fields,
             paths,
             dropped,
+            composites,
         })
     }
 }

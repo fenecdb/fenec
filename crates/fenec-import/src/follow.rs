@@ -502,6 +502,13 @@ fn resume(source: &Source, db: &mut Database, opts: &Options) -> Result<()> {
             if_not_exists: true,
         })?;
     }
+    for c in &opts.composites {
+        db.execute(&Statement::CreateComposite {
+            collection: opts.into.clone(),
+            index: c.clone(),
+            if_not_exists: true,
+        })?;
+    }
     Ok(())
 }
 

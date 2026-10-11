@@ -256,6 +256,16 @@ test('a schema change names only what FenecQL writes, and checks each option', (
   assert.throws(() => S.addField('orders', 'n', 'int', { collate: 'tr' }), /orders text/);
   assert.deepEqual(S.indexKinds('vector<8>'), ['hnsw']);
   assert.deepEqual(S.indexKinds('json'), []);
+  // An index over several fields: its parts as typed, each name checked.
+  const keys = S.compositeKeys(' owner , at DESC, meta.lang asc');
+  assert.deepEqual(keys, [{ field: 'owner', desc: false }, { field: 'at', desc: true }, { field: 'meta.lang', desc: false }]);
+  assert.equal(S.createComposite('posts', keys, false).text, 'create index on posts (owner, at desc, meta.lang) @sorted');
+  assert.equal(S.createComposite('posts', keys.slice(0, 2), true).text, 'create index on posts (owner, at desc) @unique');
+  assert.equal(S.dropComposite('posts', ['owner', 'at']).text, 'drop index on posts (owner, at)');
+  for (const bad of ['owner', 'owner, owner', 'a b c, d', 'a sideways, b', 'a, b) @hash; drop collection x --', 'a, $1', 'a, b.']) {
+    assert.throws(() => S.compositeKeys(bad), S.StatementError, bad);
+  }
+  assert.throws(() => S.dropComposite('posts', ['owner']), S.StatementError);
 });
 
 test('the plan is asked of the collection as it would be after the change, and of nothing else', () => {

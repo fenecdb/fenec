@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench replica-bench concurrency-bench requests-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench ttl-bench growth-bench search-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench replica-bench concurrency-bench requests-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench ttl-bench growth-bench search-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
@@ -579,6 +579,17 @@ maintenance-bench:
 ## build from before them (the program runs there too, the rest `n/a`).
 search-bench:
 	$(CARGO) run --release -p fenec-core --example search -- 100000
+
+## An index over several fields: a million posts over 10 000 owners, the
+## latest twenty of one owner and a feed over ten, through `@sorted(owner,
+## created desc)` against `created @sorted`, `owner @hash` and the scan; a
+## lone put beside each; `@unique(org, slug)` against `@unique` on the two
+## joined; and the ordered index's own reads and writes (`sorted`), whose
+## chunks the index shares (crates/fenec-core/examples/composite.rs).
+composite-bench:
+	$(CARGO) build --release -p fenec-core --example composite
+	./target/release/examples/composite all 1000000 10000
+	./target/release/examples/composite sorted 1000000
 
 ## `in (get ...)` against the same `in [..]` written out, and against the
 ## `lookup ... required` that asks the same question from the other side:

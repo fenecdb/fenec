@@ -397,12 +397,33 @@ pub fn response_to_string(r: &Response) -> String {
                     );
                     out.push('}');
                 }
-                out.push_str("]}");
+                out.push(']');
+                composites_into(&mut out, s);
+                out.push('}');
             }
             out.push_str("]}");
         }
     }
     out
+}
+
+/// A schema's indexes over several fields as a list of their texts,
+/// `"indexes":["sorted(owner, at desc)","unique(org, slug)"]`, as a field's
+/// own index is written -- and nothing where it has none, so a schema
+/// without one is written as it was.
+pub fn composites_into(out: &mut String, s: &crate::schema::Schema) {
+    if s.composites.is_empty() {
+        return;
+    }
+    out.push_str(",\"indexes\":[");
+    for (i, c) in s.composites.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let kind = if c.unique { "unique(" } else { "sorted(" };
+        escape_into(out, &crate::declared::cat(&[kind, &c.keys_text(), ")"]));
+    }
+    out.push(']');
 }
 
 pub fn error_to_string(e: &Error) -> String {

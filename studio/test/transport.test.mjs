@@ -113,6 +113,13 @@ test('statements: the same rows, counts, messages and refusals', { skip }, async
   await q('del notes where body = $1', ['another']);
   await q('alter collection notes add field stars int');
   await q('create index on notes (stars) @sorted');
+  // An index over several fields: made, read through, refused, dropped.
+  await q('create index on notes (doc, stars desc) @sorted');
+  await q('explain get notes where doc = 1 order stars desc limit 3');
+  await q('get notes select doc, stars where doc = $1 order stars desc limit 3', [1]);
+  await q('create index on notes (doc, body) @unique');
+  await q('collections');
+  await q('describe notes');
 
   // Refusals: their status and their words.
   for (const [text, params, status] of [
@@ -122,6 +129,9 @@ test('statements: the same rows, counts, messages and refusals', { skip }, async
     ['set docs {n: 1} where code = "none" require 1', [], 412],
     ['put docs {n: "not a number"}', [], 400],
     ['create collection docs (a int)', [], 409],
+    ['create index on notes (doc, stars) @sorted', [], 409],
+    ['create index on notes (doc, nope) @sorted', [], 404],
+    ['drop index on notes (stars, doc)', [], 404],
   ]) {
     const r = await q(text, params);
     assert.equal(r.status, status, `${text}: ${JSON.stringify(r)}`);
@@ -158,6 +168,12 @@ test('the schema: described, as FenecQL, and the plan of a change', { skip }, as
   await same('POST', '/_schema/plan', JSON.stringify({ format: 1, collections: [changed] }));
   await same('POST', '/_schema/plan', JSON.stringify({ format: 1, collections: [{ ...docs, fields: docs.fields.slice(1) }] }));
   await same('POST', '/_schema/plan', 'not json');
+  // An index over several fields, made by the plan, and taken off.
+  const notes = described.collections.find((c) => c.name === 'notes');
+  const keyed = structuredClone(notes);
+  keyed.indexes = [...(keyed.indexes ?? []), { kind: 'sorted', keys: [{ field: 'body' }, { field: 'doc', desc: true }] }];
+  await same('POST', '/_schema/plan', JSON.stringify({ format: 1, collections: [keyed] }));
+  await same('POST', '/_schema/plan', JSON.stringify({ format: 1, collections: [{ ...notes, indexes: undefined }] }));
   // What only a server has is not faked: a 404, as an unknown path.
   assert.equal((await local('GET', '/_metrics')).status, 404);
 });

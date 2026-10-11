@@ -168,4 +168,36 @@ fn the_schema_is_described_as_the_statements_that_make_it() {
         mine,
         r#"{"format":1,"fenecql":"create collection todos (title text required, done bool @hash)\n"}"#
     );
+    // An index over several fields: in the text, in `/collections`, and
+    // planned back as nothing to do; one the code lacks, refused with the
+    // migration that drops it.
+    let (status, _) = n.call(
+        ROOT,
+        "POST",
+        "/query",
+        r#"{"query":"create index on todos (done, title desc) @sorted"}"#,
+    );
+    assert_eq!(status, 200);
+    let (_, all) = n.call(ROOT, "GET", "/_schema?as=fenecql", "");
+    assert!(
+        all.contains("create collection todos (title text required, done bool @hash, @sorted(done, title desc))"),
+        "{all}"
+    );
+    let (_, plan) = n.call(ROOT, "POST", "/_schema/plan", &all);
+    assert!(plan.contains(r#""statements":[],"refusals":[]"#), "{plan}");
+    let (_, list) = n.call(ROOT, "GET", "/collections", "");
+    assert!(
+        list.contains(r#""indexes":["sorted(done, title desc)"]"#),
+        "{list}"
+    );
+    let (_, plan) = n.call(
+        ROOT,
+        "POST",
+        "/_schema/plan",
+        r#"{"format":1,"fenecql":"create collection todos (title text required, done bool @hash)"}"#,
+    );
+    assert!(
+        plan.contains("the migration `drop index on todos (done, title)`"),
+        "{plan}"
+    );
 }

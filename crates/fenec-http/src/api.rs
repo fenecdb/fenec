@@ -1312,7 +1312,9 @@ fn schemas_json(list: &[Schema]) -> String {
             }
             out.push('}');
         }
-        out.push_str("]}");
+        out.push(']');
+        json::composites_into(&mut out, s);
+        out.push('}');
     }
     out.push(']');
     out

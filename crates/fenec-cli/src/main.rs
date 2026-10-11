@@ -407,6 +407,11 @@ fn print_response(r: &Response, took: std::time::Duration) {
                     };
                     println!("  {:<14} {:<14}{ix}", f.name, ty);
                 }
+                // The indexes over several fields, as `create collection`
+                // declares them.
+                for c in &s.composites {
+                    println!("  {}", fenec_core::declared::composite_text(c));
+                }
             }
         }
         Response::Rows(rs) => {

@@ -93,8 +93,12 @@ pub fn plan(columns: &[Column], opts: &Options) -> Result<Plan> {
         }
     }
 
+    let schema = Schema::new(opts.into.clone(), fields)?;
+    for c in &opts.composites {
+        schema.check_composite(c)?;
+    }
     Ok(Plan {
-        schema: Schema::new(opts.into.clone(), fields)?,
+        schema,
         targets,
         indexes: opts.indexes.clone(),
         warnings,

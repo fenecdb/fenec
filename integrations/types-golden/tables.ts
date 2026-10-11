@@ -3,7 +3,7 @@
 // The tables are the code's from here on: change them here, and an open
 // with them checks the database against them (Fenec.open's `schema`).
 
-import { fenecTable, text, integer, doublePrecision, boolean, timestamp, bytea, json, vector, halfvec, sparsevec, index } from '@fenecdb/web/schema';
+import { fenecTable, text, integer, doublePrecision, boolean, timestamp, bytea, json, vector, halfvec, sparsevec, index, uniqueIndex } from '@fenecdb/web/schema';
 
 export const articles = fenecTable('articles', {
   title: text().collate('tr').notNull(),
@@ -32,6 +32,8 @@ export const articles = fenecTable('articles', {
   index('articles_tags_idx').using('hash', t.tags),
   index('articles_meta_lang_idx').using('hash', t.meta.path('lang')),
   index('articles_meta_source_rank_idx').on(t.meta.path('source.rank')),
+  index('articles_draft_published_idx').on(t.draft, t.published.desc()),
+  uniqueIndex('articles_year_meta_lang_idx').on(t.year, t.meta.path('lang')),
 ]);
 
 export const product_reviews = fenecTable('product_reviews', {
@@ -40,6 +42,7 @@ export const product_reviews = fenecTable('product_reviews', {
   notes: text().collate('und'),
 }, (t) => [
   index('product_reviews_product_id_idx').using('hash', t.product_id),
+  index('product_reviews_product_id_stars_idx').on(t.product_id, t.stars.desc()),
 ]);
 
 export const ki_iler = fenecTable('kişiler', {

@@ -23,6 +23,7 @@ import {
   rename,
   drop,
   dropTable,
+  dropIndex,
   rebuild,
 } from '../schema.js';
 import { articles, reviews, tables, relations } from './schema-tables.ts';
@@ -70,11 +71,21 @@ const todos = fenecTable(
     index('todos_embed').using('hnsw', t.embed.op('vector_cosine_ops')).with({ m: 16, ef_construction: 200 }),
     index('todos_title').using('bm25', t.title).with({ prefix: 6 }),
     uniqueIndex('todos_lang').on(t.meta.path('lang')),
+    index('todos_open').on(t.done, t.at.desc()),
+    uniqueIndex('todos_title_at').on(t.title, t.meta.path('k').desc(), t.at.asc()),
+    index().using('btree', t.done, t.title),
   ],
 );
+expect<readonly { kind: 'sorted' | 'unique' }[]>(todos.$indexes);
 expect<TableRef<'todos'>>(todos);
 expect<string>(todos.title.name);
-describe({ todos }, [rename(todos, 'name', 'title'), drop('todos', 'old'), dropTable('gone'), rebuild(todos, 'done')]);
+describe({ todos }, [
+  rename(todos, 'name', 'title'),
+  drop('todos', 'old'),
+  dropTable('gone'),
+  rebuild(todos, 'done'),
+  dropIndex(todos, 'done', 'at'),
+]);
 expect<{ title: unknown }>(getColumns(todos));
 
 // @ts-expect-error -- FenecQL has no defaults
@@ -97,6 +108,10 @@ fenecTable('x', { v: vector({ dimensions: 3 }) }, (t) => [index().using('hnsw', 
 fenecTable('x', { v: vector({ dimensions: 3 }) }, (t) => [index().using('hnsw', t.v.op('vector_hamming_ops'))]);
 // @ts-expect-error -- a duration is a number and a unit
 fenecTable('x', { at: timestamp() }, (t) => [index().on(t.at).ttl('soon')]);
+// @ts-expect-error -- an index over several fields is ordered: no hash
+fenecTable('x', { a: text(), b: text() }, (t) => [index().using('hash', t.a, t.b)]);
+// @ts-expect-error -- an index over several fields expires nothing
+fenecTable('x', { a: timestamp(), b: text() }, (t) => [index().on(t.a, t.b).ttl('1h')]);
 
 // --------------------------------------------------------------- opening
 

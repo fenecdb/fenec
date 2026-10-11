@@ -122,6 +122,45 @@ test('every column and modifier declares what FenecQL does', { skip }, async () 
   assert.deepEqual(Object.keys(getColumns(all)), 'abcdefghijkuvw'.split(''));
 });
 
+test('an index over several fields declares what FenecQL does', { skip }, async () => {
+  const posts = fenecTable('posts', { owner: integer(), at: timestamp(), slug: text(), meta: json() }, (t) => [
+    index('posts_feed').on(t.owner, t.at.desc()),
+    uniqueIndex('posts_slug').on(t.owner, t.slug),
+    index().using('btree', t.meta.path('lang'), t.at.desc()),
+  ]);
+  const create =
+    'create collection posts (owner int, at timestamp, slug text, meta json, ' +
+    '@sorted(owner, at desc), @unique(owner, slug), @sorted(meta.lang, at desc))';
+  assert.equal(posts.toFenecQL(), create);
+  assert.deepEqual(await made({ posts }), [create]);
+  assert.deepEqual(JSON.parse(JSON.stringify(posts)).indexes, [
+    { kind: 'sorted', keys: [{ field: 'owner' }, { field: 'at', desc: true }] },
+    { kind: 'unique', keys: [{ field: 'owner' }, { field: 'slug' }] },
+    { kind: 'sorted', keys: [{ field: 'meta.lang' }, { field: 'at', desc: true }] },
+  ]);
+  // Opened with it, the database has them, and opened again plans nothing;
+  // a database without one is planned the `create index` that makes it.
+  const db = await Fenec.open(wasm, { schema: { posts } });
+  try {
+    assert.deepEqual(db.checkSchema(desc({ posts }), 'plan').statements, []);
+    db.run('put posts {owner: 1, at: "2026-01-01", slug: "a"}');
+    await assert.rejects(async () => db.run('put posts {owner: 1, at: "2026-01-02", slug: "a"}'), /is unique/);
+    const plain = fenecTable('posts', { owner: integer(), at: timestamp(), slug: text(), meta: json() });
+    const other = await Fenec.open(wasm, { schema: { posts: plain } });
+    try {
+      assert.deepEqual(other.checkSchema(desc({ posts }), 'plan').statements, [
+        'create index on posts (owner, at desc) @sorted',
+        'create index on posts (owner, slug) @unique',
+        'create index on posts (meta.lang, at desc) @sorted',
+      ]);
+    } finally {
+      other.close();
+    }
+  } finally {
+    db.close();
+  }
+});
+
 test('what fenecdb cannot hold is refused as it is declared', () => {
   const refused = (fn, why) => assert.throws(fn, (e) => e instanceof FenecError && why.test(e.message), String(why));
   refused(() => fenecTable('t', { a: text().unique() }, (t) => [index().on(t.a)]), /two indexes: fenecdb takes one a field/);
@@ -138,7 +177,12 @@ test('what fenecdb cannot hold is refused as it is declared', () => {
   refused(() => json().array(), /json column holding a list/);
   refused(() => vector({ dimensions: 0 }), /dimensions/);
   refused(() => vector({ dimensions: 3 }).op('vector_hamming_ops'), /unknown operator class/);
-  refused(() => fenecTable('t', { a: text(), b: text() }, (t) => [index().on(t.a, t.b)]), /one field/);
+  refused(() => fenecTable('t', { a: text() }, (t) => [index().on(t.a.desc())]), /walked both ways/);
+  refused(() => fenecTable('t', { a: text(), b: text() }, (t) => [index().using('hash', t.a, t.b)]), /is a btree/);
+  refused(() => fenecTable('t', { a: text(), b: bytea() }, (t) => [index().on(t.a, t.b)]), /orders text, int/);
+  refused(() => fenecTable('t', { a: text(), b: text() }, (t) => [index().on(t.a, t.a.desc())]), /named twice/);
+  refused(() => fenecTable('t', { a: text(), b: text() }, (t) => [index().on(t.a, t.b), uniqueIndex().on(t.a, t.b.desc())]), /two indexes on \(a, b\)/);
+  refused(() => fenecTable('t', { a: timestamp(), b: text() }, (t) => [index().on(t.a, t.b).ttl('1h')]), /no options and no ttl/);
   refused(() => fenecTable('t', { a: text() }, (t) => [index().using('gin', t.a)]), /unknown index method/);
   refused(() => fenecTable('t', { a: text() }, (t) => [index().using('hash', t.a).ttl('1h')]), /ttl\(\) expires/);
   refused(() => fenecTable('t', { a: timestamp() }, (t) => [index().on(t.a).ttl('soon')]), /a duration/);

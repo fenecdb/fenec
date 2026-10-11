@@ -185,7 +185,8 @@ pub fn encode(s: &str, out: &mut String) {
 /// has them: a document is its values in field order, and a replica whose
 /// fields drifted would read rows wrong. `@unique` is a plain hash, as on a
 /// replica: a batch lands rows' last states one at a time, and a value
-/// moved between two collided.
+/// moved between two collided -- and so is a unique index over several
+/// fields an ordered one.
 pub fn schema_ddl(schema: &Value) -> Result<String> {
     let name = match member(schema, "name") {
         Some(Value::Text(n)) => ident(n, "collection")?,
@@ -215,6 +216,17 @@ pub fn schema_ddl(schema: &Value) -> Result<String> {
                 }
             }
             fields.push(text);
+        }
+    }
+    if let Some(Value::List(list)) = member(schema, "indexes") {
+        for ix in list {
+            let Some(Value::Text(ix)) = Some(ix) else {
+                continue;
+            };
+            match ix.strip_prefix("unique(") {
+                Some(keys) => fields.push(format!("@sorted({keys}")),
+                None => fields.push(format!("@{ix}")),
+            }
         }
     }
     Ok(format!(
@@ -266,6 +278,17 @@ mod tests {
         assert_eq!(
             ddl,
             "create collection if not exists t (k text required @hash, n text collate tr, e vector<2> @hnsw(cosine, m=16, ef_search=100))"
+        );
+        fenec_ql::parse(&ddl).unwrap();
+        // An index over several fields, a unique one ordered.
+        let s = json::parse_json(
+            r#"{"name":"t","fields":[{"name":"k","type":"text","index":null},{"name":"at","type":"timestamp","index":null}],"indexes":["sorted(k, at desc)","unique(at, k)"]}"#,
+        )
+        .unwrap();
+        let ddl = schema_ddl(&s).unwrap();
+        assert_eq!(
+            ddl,
+            "create collection if not exists t (k text, at timestamp, @sorted(k, at desc), @sorted(at, k))"
         );
         fenec_ql::parse(&ddl).unwrap();
     }

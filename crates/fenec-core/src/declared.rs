@@ -14,7 +14,9 @@
 //!      {"name": "title", "type": "text", "required": true, "collate": "tr",
 //!       "index": {"kind": "text", "prefix": 6}},
 //!      {"name": "meta", "type": "json",
-//!       "paths": [{"path": "lang", "index": {"kind": "hash"}}]}]}],
+//!       "paths": [{"path": "lang", "index": {"kind": "hash"}}]}],
+//!     "indexes": [{"kind": "sorted",
+//!                  "keys": [{"field": "owner"}, {"field": "at", "desc": true}]}]}],
 //!  "migrations": ["alter collection todos rename field name to title",
 //!                 {"rebuild": {"collection": "todos", "field": "done"}}]}
 //! ```
@@ -40,7 +42,8 @@ use crate::collate::Collation;
 use crate::error::{Error, Result};
 use crate::json;
 use crate::schema::{
-    split_path, ttl_text, Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec,
+    split_path, ttl_text, Composite, Field, IndexKind, Metric, Quant, Schema, TextIndexSpec,
+    VectorIndexSpec,
 };
 use crate::value::{DataType, Value, VecPrec};
 
@@ -214,7 +217,7 @@ fn blank(t: &str) -> bool {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn collection(v: &Value) -> Result<Schema> {
     let o = object(v, "a collection")?;
-    only(o, &["name", "fields"], "a collection")?;
+    only(o, &["name", "fields", "indexes"], "a collection")?;
     let cname = name(o, "name", "a collection")?;
     let mut fields = Vec::new();
     let mut paths = Vec::new();
@@ -237,7 +240,40 @@ fn collection(v: &Value) -> Result<Schema> {
         p.index.check(&p.name, &p.ty)?;
         schema.add_path(p);
     }
+    for ix in list(member(o, "indexes"), "indexes")? {
+        schema.add_composite(composite(ix, &cname)?)?;
+    }
     Ok(schema)
+}
+
+/// An index over several fields: `{"kind": "sorted" | "unique", "keys":
+/// [{"field": "owner"}, {"field": "at", "desc": true}]}`.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn composite(v: &Value, at: &str) -> Result<Composite> {
+    let o = object(v, "an index")?;
+    only(o, &["kind", "keys"], at)?;
+    let unique = match member(o, "kind") {
+        Some(Value::Text(k)) if k == "sorted" || k == "unique" => k == "unique",
+        _ => {
+            return Err(bad(
+                at,
+                "has an index over several fields of no kind there is: sorted or unique",
+            ))
+        }
+    };
+    let mut keys = Vec::new();
+    for k in list(member(o, "keys"), "keys")? {
+        let ko = object(k, "a key")?;
+        only(ko, &["field", "desc"], at)?;
+        let field = match member(ko, "field") {
+            Some(Value::Text(f)) if split_path(f).map_or(is_name(f), |(h, _)| is_name(h)) => {
+                f.clone()
+            }
+            _ => return Err(bad(at, "has an index key that names no field")),
+        };
+        keys.push((field, flag(ko, "desc", at)?));
+    }
+    Ok(Composite { keys, unique })
 }
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -563,7 +599,33 @@ pub fn describe<S: Borrow<Schema>>(schemas: &[S]) -> String {
             }
             out.push('}');
         }
-        out.push_str("]}");
+        out.push(']');
+        if !s.composites.is_empty() {
+            out.push_str(",\"indexes\":[");
+            for (j, c) in s.composites.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push_str(match c.unique {
+                    true => "{\"kind\":\"unique\",\"keys\":[",
+                    false => "{\"kind\":\"sorted\",\"keys\":[",
+                });
+                for (k, (field, desc)) in c.keys.iter().enumerate() {
+                    if k > 0 {
+                        out.push(',');
+                    }
+                    out.push_str("{\"field\":");
+                    json::escape_into(&mut out, field);
+                    if *desc {
+                        out.push_str(",\"desc\":true");
+                    }
+                    out.push('}');
+                }
+                out.push_str("]}");
+            }
+            out.push(']');
+        }
+        out.push('}');
     }
     out.push_str("]}");
     out
@@ -702,6 +764,12 @@ fn create_into(s: &Schema, out: &mut Vec<String>) {
         }
         c.push_str(&field_text(f, true));
     }
+    // The indexes over several fields, each a line of the collection's own
+    // after its fields.
+    for comp in &s.composites {
+        c.push_str(", ");
+        c.push_str(&composite_text(comp));
+    }
     c.push(')');
     out.push(c);
     paths_into(s, None, out);
@@ -714,6 +782,26 @@ fn paths_into(s: &Schema, field: Option<&str>, out: &mut Vec<String>) {
             out.push(path_index(&s.name, p));
         }
     }
+}
+
+/// An index over several fields as a `create collection` line declares it:
+/// `@sorted(owner, at desc)`.
+pub fn composite_text(c: &Composite) -> String {
+    let kind = if c.unique { "@unique(" } else { "@sorted(" };
+    cat(&[kind, &c.keys_text(), ")"])
+}
+
+/// The `create index` that makes an index over several fields of `collection`.
+pub fn composite_index(collection: &str, c: &Composite) -> String {
+    let kind = if c.unique { "@unique" } else { "@sorted" };
+    cat(&[
+        "create index on ",
+        collection,
+        " (",
+        &c.keys_text(),
+        ") ",
+        kind,
+    ])
 }
 
 fn path_index(collection: &str, p: &Field) -> String {
@@ -872,6 +960,7 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
             }
         }
     }
+    composites_plan::<FOLLOW>(p, s, d);
     if FOLLOW {
         return;
     }
@@ -916,6 +1005,74 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
                 "the code",
             ),
             fix,
+        );
+    }
+}
+
+/// The indexes over several fields the code declares against the
+/// database's, each found by its fields: one missing is made (or, following,
+/// refused for its owner to make); one whose directions or uniqueness
+/// differ, and -- applying -- one the code does not declare, is refused with
+/// the migration that drops it, after which the plan makes the declared one.
+fn composites_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
+    let c = &d.name;
+    let same = |a: &Composite, b: &Composite| {
+        a.keys.len() == b.keys.len() && a.keys.iter().zip(&b.keys).all(|(x, y)| x.0 == y.0)
+    };
+    let fields = |k: &Composite| {
+        let mut s = String::from("(");
+        for (i, (f, _)) in k.keys.iter().enumerate() {
+            s.push_str(if i > 0 { ", " } else { "" });
+            s.push_str(f);
+        }
+        s.push(')');
+        s
+    };
+    let drop = |k: &Composite| cat(&["the migration `drop index on ", c, " ", &fields(k), "`"]);
+    for want in &d.composites {
+        let at = cat(&["`", c, " ", &fields(want), "`"]);
+        let create = composite_index(c, want);
+        match s.composites.iter().find(|h| same(h, want)) {
+            None if !FOLLOW => p.statements.push(create),
+            None => p.refuse(
+                "index_missing",
+                c,
+                Some(&fields(want)),
+                differs(&at, " has ", "no index", &composite_text(want)),
+                cat(&[
+                    "its owner builds it (`",
+                    &create,
+                    "`), or the code leaves it out",
+                ]),
+            ),
+            Some(had) if had == want => {}
+            Some(had) => p.refuse(
+                "index_changed",
+                c,
+                Some(&fields(want)),
+                differs(&at, " has ", &composite_text(had), &composite_text(want)),
+                match FOLLOW {
+                    true => AS_IT_IS.into(),
+                    false => cat(&[&drop(had), ", after which the plan makes the one declared"]),
+                },
+            ),
+        }
+    }
+    if FOLLOW {
+        return;
+    }
+    for had in s
+        .composites
+        .iter()
+        .filter(|h| !d.composites.iter().any(|w| same(h, w)))
+    {
+        let at = cat(&["`", c, " ", &fields(had), "`"]);
+        p.refuse(
+            "index_removed",
+            c,
+            Some(&fields(had)),
+            differs(&at, " has ", &composite_text(had), "no index"),
+            drop(had),
         );
     }
 }
