@@ -300,6 +300,27 @@ void main() {
     db.close();
   });
 
+  test('a claim held at the server takes the job enqueued meanwhile, and ends on time', () async {
+    final s = await server('held');
+    await s.run('create collection jobs (kind text, run_at timestamp @sorted, owner text)');
+    final db = Fenec.connect(s.url);
+    Future<Rows> claim(FenecRemote c, String owner) =>
+        c.from('jobs').where(Cond.raw('run_at <= now()')).order('run_at').limit(1).updateReturning({
+          'owner': owner,
+          'run_at': Computed.expr('now() + ?', [60000])
+        }, returning: [
+          'kind'
+        ]);
+    final held = claim(db.withWait(const Duration(seconds: 10)), 'w1');
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    await db.execute('put jobs {kind: "mail", run_at: \$1}', [DateTime.now().millisecondsSinceEpoch]);
+    expect([for (final r in await held.timeout(const Duration(seconds: 5))) r['kind']], ['mail']);
+    final began = DateTime.now();
+    expect(await claim(db.withWait(const Duration(milliseconds: 300)), 'w2'), isEmpty);
+    expect(DateTime.now().difference(began).inMilliseconds, greaterThanOrEqualTo(290));
+    db.close();
+  });
+
   test('a server answers marks in the row and facets beside the rows', () async {
     final s = await server('search');
     await s.run('create collection docs (body text @text, kind text)');

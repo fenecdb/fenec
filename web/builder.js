@@ -1270,19 +1270,22 @@ export class Query {
 
   /**
    * `set` -- updates the rows matching the filter. Returns: rows affected,
-   * or with `{ returning }` the rows as written.
+   * or with `{ returning }` the rows as written. Over a server, `{ wait:
+   * ms }` holds one that writes nothing until it can, or that long -- a
+   * claim waiting for a job -- and `{ signal }` gives it up.
    */
   async update(patch, opts = {}) {
-    const r = await this.#exec(...this.toUpdate(patch, opts));
+    const r = await this.#exec(...this.toUpdate(patch, opts), heldOf(opts));
     return opts?.returning ? rowsOf(r) : r.count ?? 0;
   }
 
   /**
    * `del` -- deletes the rows matching the filter. Returns: rows deleted,
-   * or with `{ returning }` the rows as they were.
+   * or with `{ returning }` the rows as they were. `{ wait, signal }` as
+   * `update`'s.
    */
   async delete(opts = {}) {
-    const r = await this.#exec(...this.toDelete(opts));
+    const r = await this.#exec(...this.toDelete(opts), heldOf(opts));
     return opts?.returning ? rowsOf(r) : r.count ?? 0;
   }
 
@@ -1357,16 +1360,25 @@ export class Query {
     return root ? render(root, bind, null) : null;
   }
 
-  #exec(sql, params) {
+  #exec(sql, params, held) {
     if (!this.#s.exec) {
       throw new FenecError(
         'query is not bound to a connection: use db.from(...) or q.bind(db) ' +
           '(toFenecQL() if you only want the text)',
       );
     }
-    return this.#s.exec(sql, params);
+    return held ? this.#s.exec(sql, params, held) : this.#s.exec(sql, params);
   }
 }
+
+/** A write's `{ wait, signal }` for `FenecHttp.run`, null without either. */
+function heldOf(opts) {
+  if (opts?.wait === undefined && opts?.signal === undefined) return null;
+  return { wait: opts.wait, signal: opts.signal };
+}
+
+/** A held write is a server's: a page's queue has the page alone to fill it. */
+export const LOCAL_WAIT = 'wait holds a write at a server: a database in the page has no other worker to wait for';
 
 /** A mark's tags, `{ pre, post }`: both or neither, each text. */
 function tags(opts, what) {

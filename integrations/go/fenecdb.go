@@ -25,8 +25,8 @@ import (
 )
 
 // Client is fenec-server's HTTP endpoint. It is safe for use by several
-// goroutines at once; After and IdempotencyKey hand out copies that share
-// its connections.
+// goroutines at once; After, IdempotencyKey and Wait hand out copies that
+// share its connections.
 type Client struct {
 	root    string // the server's URL
 	base    string // the URL, with /t/<tenant> when one is given
@@ -35,6 +35,7 @@ type Client struct {
 	timeout time.Duration
 	after   uint64
 	key     string
+	wait    time.Duration
 	// The change the last write left the database at (Fenec-Seq), shared
 	// by the copies: a read on a replica sent After it waits for the write.
 	seq *atomic.Uint64
@@ -96,6 +97,22 @@ func (c *Client) IdempotencyKey(key string) *Client {
 	d := *c
 	d.key = key
 	return &d
+}
+
+// Wait is a copy of the client whose set and del statements -- Exec, a
+// Batch's, the builder's Update and Delete -- the server holds while they
+// write nothing, until they can or for d, at most 30 seconds (Fenec-Wait):
+// a worker's claim waits for a job there -- one enqueued, a delayed one
+// come due, a lease lapsed -- rather than sleeping and sending it again.
+// The request's context bounds it as ever; WithTimeout's bound is d longer.
+//
+//	claimed, err := db.Wait(30*time.Second).From("jobs").
+//		WhereCond(Raw("run_at <= now()")).Order("run_at", "asc").Limit(10).
+//		Update(ctx, D("owner", me, "run_at", Expr("now() + ?", 30000)), Returning("*"))
+func (c *Client) Wait(d time.Duration) *Client {
+	e := *c
+	e.wait = d
+	return &e
 }
 
 // Seq is the change the last write through this client, or a copy of it,
@@ -335,7 +352,7 @@ type head struct {
 func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte, extra time.Duration) ([]byte, head, error) {
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.timeout+extra)
+		ctx, cancel = context.WithTimeout(ctx, c.timeout+extra+c.wait)
 		defer cancel()
 	}
 	var rd io.Reader
@@ -384,6 +401,9 @@ func (c *Client) headers(req *http.Request) {
 	}
 	if c.key != "" {
 		req.Header.Set("Idempotency-Key", c.key)
+	}
+	if c.wait > 0 {
+		req.Header.Set("Fenec-Wait", strconv.FormatInt(c.wait.Milliseconds(), 10))
 	}
 }
 

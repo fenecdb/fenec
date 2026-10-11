@@ -26,6 +26,7 @@
 
 import {
   FenecError,
+  LOCAL_WAIT,
   Query,
   checked,
   collation,
@@ -451,7 +452,10 @@ export class Fenec {
   from(name) {
     return new Query({
       collection: ident(nameOf(name), 'collection'),
-      exec: (sql, params) => this.query(sql, params),
+      exec: (sql, params, held) => {
+        if (held?.wait !== undefined) throw new FenecError(LOCAL_WAIT);
+        return this.query(sql, params);
+      },
       // What `useLiveQuery` finds the query's database by.
       context: this,
       rel: declared.get(this)?.relations,
@@ -1399,12 +1403,14 @@ class SyncQuery extends Query {
     return this.context.write('insert', this, docs, opts);
   }
   update(patch, opts = {}) {
+    if (opts?.wait !== undefined) throw new FenecError(LOCAL_WAIT);
     return this.context.write('update', this, patch, opts);
   }
   upsert(docs, patch, opts = {}) {
     return this.context.write('upsert', this, [docs, patch], opts);
   }
   delete(opts = {}) {
+    if (opts?.wait !== undefined) throw new FenecError(LOCAL_WAIT);
     return this.context.write('delete', this, null, opts);
   }
 }
@@ -1604,7 +1610,8 @@ export class FenecSync {
     return new SyncQuery({
       collection,
       context: this,
-      exec: (sql, params) => {
+      exec: (sql, params, held) => {
+        if (held?.wait !== undefined) throw new FenecError(LOCAL_WAIT);
         // A read's `require` inside `batch()` would be the replica's count,
         // and the server the batch lands on never sees it: refused as the
         // native core refuses one beside a synced write.

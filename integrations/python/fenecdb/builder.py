@@ -1299,21 +1299,29 @@ class Query(_Builder):
         all: bool = False,
         require: int | None = None,
         returning: Any = None,
+        wait: float | None = None,
     ) -> Any:
         """`set` over the rows the filter names: how many it changed, or
         with `returning` the rows as written. With no filter it is refused
-        unless `all=True` or a `limit` bounds it."""
+        unless `all=True` or a `limit` bounds it. With `wait`, one that
+        writes nothing is held at the server until it can, or that many
+        seconds: a claim waiting for a job."""
         text = self.to_update(patch, all=all, require=require, returning=returning)
-        return _written(self._client().query(*text), returning)
+        return _written(self._client().query(*text, **_held(wait)), returning)
 
     def delete(
-        self, *, all: bool = False, require: int | None = None, returning: Any = None
+        self,
+        *,
+        all: bool = False,
+        require: int | None = None,
+        returning: Any = None,
+        wait: float | None = None,
     ) -> Any:
         """`del` of the rows the filter names: how many it deleted, or with
         `returning` the rows as they were. With no filter it is refused
-        unless `all=True` or a `limit` bounds it."""
+        unless `all=True` or a `limit` bounds it. `wait` as `update`'s."""
         text = self.to_delete(all=all, require=require, returning=returning)
-        return _written(self._client().query(*text), returning)
+        return _written(self._client().query(*text, **_held(wait)), returning)
 
 
 class AsyncQuery(_Builder):
@@ -1366,15 +1374,27 @@ class AsyncQuery(_Builder):
         all: bool = False,
         require: int | None = None,
         returning: Any = None,
+        wait: float | None = None,
     ) -> Any:
         text = self.to_update(patch, all=all, require=require, returning=returning)
-        return _written(await self._client().query(*text), returning)
+        return _written(await self._client().query(*text, **_held(wait)), returning)
 
     async def delete(
-        self, *, all: bool = False, require: int | None = None, returning: Any = None
+        self,
+        *,
+        all: bool = False,
+        require: int | None = None,
+        returning: Any = None,
+        wait: float | None = None,
     ) -> Any:
         text = self.to_delete(all=all, require=require, returning=returning)
-        return _written(await self._client().query(*text), returning)
+        return _written(await self._client().query(*text, **_held(wait)), returning)
+
+
+def _held(wait: float | None) -> dict:
+    """`wait` for the client's `query`, where it was given one: a client
+    that holds nothing takes the statement alone."""
+    return {} if wait is None else {"wait": wait}
 
 
 # ` require n` for a write's `require=n`: the rows it must write, a whole

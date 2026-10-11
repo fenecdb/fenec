@@ -1144,6 +1144,44 @@ test('a batch over HTTP lands whole, once a key, and names the statement that st
   }
 });
 
+// A claim held at the server until a job comes (`{ wait }`, `Fenec-Wait`):
+// taken by the builder's update and by `run`, ended on time with no row,
+// and given up by an AbortSignal; a database in the page refuses `wait`.
+test('a held claim over HTTP takes the job enqueued meanwhile, and a signal gives it up', { skip: bin ? false : 'no fenec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  const db = client.connect(s.url);
+  try {
+    await db.run('create collection jobs (kind text, run_at timestamp @sorted, owner text)');
+    const ready = () => db.from('jobs').where(client.raw('run_at <= now()')).order('run_at').limit(1);
+    const lease = (owner) => ({ owner, run_at: client.expr('now() + ?', 60000) });
+    const held = ready().update(lease('w1'), { returning: ['kind'], wait: 10000 });
+    await new Promise((r) => setTimeout(r, 200));
+    await db.from('jobs').insert({ kind: 'mail', run_at: Date.now() });
+    assert.deepEqual(await held, [{ kind: 'mail' }]);
+    // Nothing more to take: the wait ends on time, with no row.
+    const began = Date.now();
+    assert.deepEqual(await ready().update(lease('w2'), { returning: true, wait: 300 }), []);
+    assert.ok(Date.now() - began >= 290, `${Date.now() - began} ms`);
+    // A signal gives a held claim up, and the client goes on.
+    const stop = new AbortController();
+    const given = db.run('del jobs where run_at <= now() order run_at limit 1 returning kind', [], { wait: 10000, signal: stop.signal });
+    setTimeout(() => stop.abort(), 100);
+    await assert.rejects(given, (e) => e.name === 'AbortError');
+    assert.equal(await db.from('jobs').count(), 1);
+    await assert.rejects(ready().update(lease('w3'), { wait: -1 }), /wait is milliseconds/);
+  } finally {
+    s.close();
+  }
+  if (wasm) {
+    const local = await Fenec.open(wasm);
+    local.run('create collection q (n int)');
+    await assert.rejects(
+      async () => local.from('q').limit(1).update({ n: 0 }, { wait: 1000 }),
+      /a database in the page/,
+    );
+  }
+});
+
 // sync() opens the full module unless given one, and the module it is
 // given by URL when asked: here the one without indexes, whose `near`
 // measures every vector as `exact` does.

@@ -15,6 +15,8 @@ public final class FenecRemote: @unchecked Sendable {
     private let shared: Shared
     private let session: URLSession
     private let idempotencyKey: String?
+    /// How long the server may hold a write that writes nothing (`withWait`).
+    private let held: Double?
 
     private final class Shared: @unchecked Sendable {
         let lock = NSLock()
@@ -28,13 +30,15 @@ public final class FenecRemote: @unchecked Sendable {
         self.shared = Shared(token: token)
         self.session = session
         self.idempotencyKey = nil
+        self.held = nil
     }
 
-    private init(_ of: FenecRemote, key: String) {
+    private init(_ of: FenecRemote, key: String?, held: Double?) {
         url = of.url
         shared = of.shared
         session = of.session
         idempotencyKey = key
+        self.held = held
     }
 
     /// A fresh token for the requests from here on.
@@ -65,7 +69,21 @@ public final class FenecRemote: @unchecked Sendable {
     ///
     ///     try await db.withIdempotencyKey(orderID).from("orders").insert(order)
     public func withIdempotencyKey(_ key: String) -> FenecRemote {
-        FenecRemote(self, key: key)
+        FenecRemote(self, key: key, held: held)
+    }
+
+    /// A copy whose `set` and `del` statements -- `run`, `batch` and the
+    /// builder's `update`, `delete` and their `Returning` forms -- the
+    /// server holds while they write nothing, until they can or for
+    /// `seconds`, at most 30 (`Fenec-Wait`): a worker's claim waits there
+    /// for a job -- one enqueued, a delayed one come due, a lease lapsed --
+    /// rather than sleeping and claiming again. Cancelling the task gives
+    /// it up.
+    ///
+    ///     let claimed = try await db.withWait(30).from("jobs").where(.raw("run_at <= now()"))
+    ///         .order("run_at").limit(10).updateReturning(claim)
+    public func withWait(_ seconds: Double) -> FenecRemote {
+        FenecRemote(self, key: idempotencyKey, held: seconds)
     }
 
     /// Runs FenecQL on the server with `params` for `$1`, `$2` ...
@@ -131,6 +149,11 @@ public final class FenecRemote: @unchecked Sendable {
         req.setValue(type, forHTTPHeaderField: "content-type")
         if let token = currentToken() { req.setValue("Bearer \(token)", forHTTPHeaderField: "authorization") }
         if let key = key ?? idempotencyKey { req.setValue(key, forHTTPHeaderField: "idempotency-key") }
+        if let held, held > 0 {
+            req.setValue(String(Int(held * 1000)), forHTTPHeaderField: "fenec-wait")
+            // Held that long before the first byte of its answer.
+            req.timeoutInterval = req.timeoutInterval + held
+        }
         req.httpBody = body
         let data: Data
         let response: URLResponse

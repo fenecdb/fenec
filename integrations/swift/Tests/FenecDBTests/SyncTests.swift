@@ -226,6 +226,32 @@
             }
         }
 
+        /// A claim held at the server until a job comes (`withWait`): taken
+        /// once one is enqueued, ended on time with no row, and given up by
+        /// cancelling its task.
+        @Test func connectHoldsAClaimUntilAJobComes() async throws {
+            let s = try await Server("held")
+            defer { s.stop() }
+            try await s.run("create collection jobs (kind text, run_at timestamp @sorted, owner text)")
+            let db = Fenec.connect(url: s.url)
+            @Sendable func claim(_ c: FenecRemote, _ owner: String) async throws -> [Row] {
+                try await c.from("jobs").where(.raw("run_at <= now()")).order("run_at").limit(1)
+                    .updateReturning(["owner": .string(owner), "run_at": .expr("now() + ?", 60000)] as Value, returning: ["kind"])
+            }
+            let held = Task { try await claim(db.withWait(10), "w1") }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try await db.execute(#"put jobs {kind: "mail", run_at: now()}"#)
+            #expect(try await held.value.compactMap { $0["kind"]?.string } == ["mail"])
+            #expect(try await claim(db.withWait(0.3), "w2").isEmpty)
+            let given = Task { try await claim(db.withWait(10), "w3") }
+            try await Task.sleep(nanoseconds: 100_000_000)
+            given.cancel()
+            do {
+                _ = try await given.value
+                Issue.record("a cancelled claim was answered")
+            } catch {}
+        }
+
         /// `/query` answers `{"rows", "facets"}` when facets were asked, and
         /// the bare array otherwise; a mark is a column of the rows either way.
         @Test func connectReadsFacetsAndMarks() async throws {

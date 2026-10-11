@@ -183,6 +183,40 @@ public sealed class ClientTests(Servers servers)
         Assert.Null((await jobs.Where("n", "=", 1).UpdateAsync(new { owner = (string?)null })).Rows);
     }
 
+    // A claim held until a job comes (WithWait): taken once a job is enqueued, ended on time with no row,
+    // and given up by its token.
+    [Fact]
+    public async Task AHeldClaimTakesTheJobEnqueuedMeanwhile()
+    {
+        using var db = Root();
+        var name = Fresh("held");
+        await db.ExecAsync($"create collection {name} (kind text, run_at timestamp @sorted, owner text)");
+        Task<ExecResult> Claim(FenecClient c, string owner, CancellationToken ct = default) =>
+            c.From(name).Where(Cond.Raw("run_at <= now()")).Order("run_at").Limit(1).UpdateAsync(
+                new Dictionary<string, object?> { ["owner"] = owner, ["run_at"] = Computed.Expr("now() + ?", 60000) },
+                returning: ["kind"], cancellationToken: ct);
+        var held = Claim(db.WithWait(TimeSpan.FromSeconds(10)), "w1");
+        await Task.Delay(200);
+        await db.From(name).InsertAsync(new Dictionary<string, object?>
+        {
+            ["kind"] = "mail",
+            ["run_at"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        });
+        var got = await held.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("mail", got.Rows!.Single().GetProperty("kind").GetString());
+        var began = DateTime.UtcNow;
+        Assert.Empty((await Claim(db.WithWait(TimeSpan.FromMilliseconds(300)), "w2")).Rows!);
+        Assert.True(DateTime.UtcNow - began >= TimeSpan.FromMilliseconds(290));
+        // Past the client's own timeout: the wait is added to it.
+        using var shortly = new FenecClient(servers.Primary,
+            new FenecClientOptions { Token = Servers.RootToken, Timeout = TimeSpan.FromMilliseconds(100) });
+        Assert.Empty((await Claim(shortly.WithWait(TimeSpan.FromMilliseconds(400)), "w3")).Rows!);
+        // Its token gives it up.
+        using var gone = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            Claim(db.WithWait(TimeSpan.FromSeconds(10)), "w4", gone.Token));
+    }
+
     [Fact]
     public async Task ABatchLandsWholeOrNotAtAll()
     {

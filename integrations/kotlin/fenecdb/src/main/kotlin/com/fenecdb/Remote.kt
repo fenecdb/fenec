@@ -1,6 +1,8 @@
 package com.fenecdb
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -24,6 +26,8 @@ class FenecRemote private constructor(
     /** The token and the last `Fenec-Seq`, shared with every copy [withIdempotencyKey] makes, as Go's and .NET's copies share theirs. */
     private val shared: Shared,
     private val idempotencyKey: String?,
+    /** How long the server may hold a write that writes nothing, ms ([withWait]). */
+    private val held: Long? = null,
 ) {
     internal constructor(url: String, token: String?) : this(url, Shared(token), null)
 
@@ -53,15 +57,36 @@ class FenecRemote private constructor(
      */
     fun withIdempotencyKey(key: String): FenecRemote {
         require(key.isNotEmpty()) { "an idempotency key is a text, not empty" }
-        return FenecRemote(url, shared, key)
+        return FenecRemote(url, shared, key, held)
+    }
+
+    /**
+     * A copy whose `set` and `del` statements -- [run], [batch] and the
+     * builder's `update`, `delete` and their `Returning` forms -- the server
+     * holds while they write nothing, until they can or for [millis], at
+     * most 30 000 (`Fenec-Wait`): a worker's claim waits there for a job --
+     * one enqueued, a delayed one come due, a lease lapsed -- rather than
+     * sleeping and claiming again. Cancelling the coroutine closes the
+     * connection, which gives the claim up at once.
+     *
+     * ```kotlin
+     * val claimed = db.withWait(30_000).from("jobs").where(Cond.raw("run_at <= now()"))
+     *     .order("run_at").limit(10).updateReturning(claim)
+     * ```
+     */
+    fun withWait(millis: Long): FenecRemote {
+        require(millis >= 0) { "a wait is milliseconds, from 0" }
+        return FenecRemote(url, shared, idempotencyKey, millis)
     }
 
     /** Runs FenecQL on the server with [params] for `$1`, `$2` ... */
     suspend fun run(text: String, vararg params: Any?): Answer = runList(text, params.toList())
 
     /** [run], its parameters as a list. With [idempotencyKey] a write runs once however often it is sent. */
-    suspend fun runList(text: String, params: List<Any?>, idempotencyKey: String? = null): Answer =
-        withContext(Dispatchers.IO) { send(text, params, idempotencyKey) }
+    suspend fun runList(text: String, params: List<Any?>, idempotencyKey: String? = null): Answer {
+        val body = Json.write(mapOf("query" to text, "params" to params.map { Values.normalize(it) }))
+        return answer(posting("/query", "application/json", body, idempotencyKey).first)
+    }
 
     /** The rows a statement answers. */
     suspend fun query(text: String, vararg params: Any?): List<Row> = runList(text, params.toList()).rows
@@ -92,15 +117,27 @@ class FenecRemote private constructor(
      * timeout is answered as the first try was and writes nothing twice; a
      * batch of reads alone takes no key.
      */
-    suspend fun batch(statements: List<Statement>, idempotencyKey: String? = null): BatchAnswer =
-        withContext(Dispatchers.IO) {
-            val lines = statements.joinToString("\n") { s ->
-                Json.write(mapOf("query" to s.text, "params" to s.params.map { Values.normalize(it) }))
-            }
-            val (v, seq, replayed) = post("/batch", "application/x-ndjson", lines, idempotencyKey)
-            val results = ((v as? Row)?.list("results") ?: emptyList()).map { answer(it ?: Row(emptyMap())) }
-            BatchAnswer(results, seq, replayed)
+    suspend fun batch(statements: List<Statement>, idempotencyKey: String? = null): BatchAnswer {
+        val lines = statements.joinToString("\n") { s ->
+            Json.write(mapOf("query" to s.text, "params" to s.params.map { Values.normalize(it) }))
         }
+        val (v, seq, replayed) = posting("/batch", "application/x-ndjson", lines, idempotencyKey)
+        val results = ((v as? Row)?.list("results") ?: emptyList()).map { answer(it ?: Row(emptyMap())) }
+        return BatchAnswer(results, seq, replayed)
+    }
+
+    /**
+     * [post] off the calling thread, as a coroutine that cancelled closes its
+     * connection: a read blocked in `HttpURLConnection` heeds no interrupt,
+     * and a held claim given up went on waiting for the server's answer.
+     */
+    private suspend fun posting(path: String, type: String, payload: String, key: String?): Triple<Any, Long?, Boolean> {
+        val c = withContext(Dispatchers.IO) { open(path, type, key) }
+        return suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { c.disconnect() }
+            Dispatchers.IO.asExecutor().execute { cont.resumeWith(runCatching { exchange(c, payload) }) }
+        }
+    }
 
     private fun send(text: String, params: List<Any?>, key: String?): Answer {
         val body = Json.write(mapOf("query" to text, "params" to params.map { Values.normalize(it) }))
@@ -112,15 +149,24 @@ class FenecRemote private constructor(
      * refusal as a [FenecException] with its status and, for a batch, where
      * it stopped.
      */
-    private fun post(path: String, type: String, payload: String, key: String?): Triple<Any, Long?, Boolean> {
+    private fun post(path: String, type: String, payload: String, key: String?): Triple<Any, Long?, Boolean> =
+        exchange(open(path, type, key), payload)
+
+    private fun open(path: String, type: String, key: String?): HttpURLConnection {
         val c = URL("$url$path").openConnection() as HttpURLConnection
         c.requestMethod = "POST"
         c.connectTimeout = 10_000
-        c.readTimeout = 60_000
+        // A held request is answered once it writes, or at the end of its wait.
+        c.readTimeout = 60_000 + (held ?: 0L).toInt()
         c.setRequestProperty("content-type", type)
         shared.token?.let { c.setRequestProperty("authorization", "Bearer $it") }
         (key ?: idempotencyKey)?.let { c.setRequestProperty("idempotency-key", it) }
+        held?.takeIf { it > 0 }?.let { c.setRequestProperty("fenec-wait", it.toString()) }
         c.doOutput = true
+        return c
+    }
+
+    private fun exchange(c: HttpURLConnection, payload: String): Triple<Any, Long?, Boolean> {
         val (status, body) = try {
             c.outputStream.use { it.write(payload.encodeToByteArray()) }
             val status = c.responseCode
