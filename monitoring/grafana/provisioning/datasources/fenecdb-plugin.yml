@@ -1,0 +1,22 @@
+# fenec-server's own data through fenecdb-datasource, the plugin this
+# checkout builds (integrations/grafana): every panel of
+# fenecdb-data-plugin.json and the rule in ../alerting is FenecQL, Grafana's
+# range, interval and variables bound as parameters by the plugin's backend.
+#
+# The token is the seed's (seed/seed.mjs), the Infinity data source's too,
+# read from the file Grafana alone mounts into the secure settings: Grafana
+# keeps it encrypted and hands it to the plugin's backend, never to a
+# browser. The URL is the one place a request goes; queries only name a
+# statement. policy.txt lets the token read `events` and `ticks`.
+apiVersion: 1
+datasources:
+  - name: fenecdb
+    type: fenecdb-datasource
+    uid: fenecdb
+    url: http://fenecdb:8080
+    access: proxy
+    editable: false
+    jsonData:
+      timeoutSeconds: 30
+    secureJsonData:
+      token: $__file{/run/fenec/grafana.jwt}

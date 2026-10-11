@@ -76,9 +76,11 @@ def main():
     assert re.search(r'"fuse"', build.highlight_js())
     # fenec studio serves the file as the repository holds it: the one
     # build.py writes, or the studio's editor would colour by other rules.
-    kept = open(build.STUDIO_HIGHLIGHT, encoding="utf-8").read()
-    if kept != build.highlight_js():
-        raise SystemExit("studio/highlight.js is not what build.py writes: make studio-highlight")
+    # The Grafana data source's editor is held to the same file.
+    for path in (build.STUDIO_HIGHLIGHT, build.GRAFANA_HIGHLIGHT):
+        kept = open(path, encoding="utf-8").read()
+        if kept != build.highlight_js():
+            raise SystemExit(f"{os.path.relpath(path, build.REPO)} is not what build.py writes: make studio-highlight")
     # Its mirror is made of text nodes: no markup is set from either file.
     for name in ("highlight.js",):
         src = open(os.path.join(ROOT, name), encoding="utf-8").read()

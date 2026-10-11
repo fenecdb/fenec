@@ -4,6 +4,10 @@ target/
 web/fenec.wasm
 pkg/
 node_modules/
+# Every package's, at any depth: integrations/grafana's is 600 MB, and the
+# Grafana image (integrations/grafana/Dockerfile) installs its own.
+**/node_modules/
+integrations/grafana/dist/
 
 # Data and local leftovers
 *.fenec

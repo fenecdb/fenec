@@ -1,0 +1,59 @@
+# An alert rule over fenecdb's rows, through fenecdb-datasource: a rule runs
+# its query in Grafana's backend, with no browser to fill in a value, so the
+# plugin's backend binds the rule's range and interval itself. A group by
+# time and symbol is a series a symbol (long to wide), and the rule an
+# instance a symbol, labelled sym=S01, ...: alerting when the last ten
+# minutes traded more than 2 000 shares of it.
+#
+# Evaluated every 10 s, so `make grafana-check` sees it run: a rule of your
+# own wants a minute or more.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: fenecdb
+    folder: fenecdb
+    interval: 10s
+    rules:
+      - uid: fenecdb-volume
+        title: Volume by symbol, last 10 minutes
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 21600
+              to: 0
+            datasourceUid: fenecdb
+            model:
+              refId: A
+              format: time_series
+              queryText: >-
+                get ticks select bucket(at, $__interval_ms) as time, sym, sum(qty) as volume
+                where at >= $__from and at < $__to group time, sym order time
+              intervalMs: 600000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [2000]
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "{{ $labels.sym }} traded {{ $values.B }} shares in ten minutes"
+        labels:
+          source: fenecdb

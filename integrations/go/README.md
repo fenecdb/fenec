@@ -33,7 +33,11 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
 
 - `Query` gives rows as `[]map[string]any`, `QueryAs[T]` decodes them by `json` tags; `Exec` a write's count and its `Seq`.
 - `Batch(ctx, fenecdb.Stmt(q, params...), ...)` runs statements as one block: all land, or none.
-- `IdempotencyKey(key)` makes a write once; `After(seq)` reads a write on a replica (`Fenec-After`).
+- `IdempotencyKey(key)` makes a write once; `After(seq)` reads a write on a replica (`Fenec-After`), and
+  `Wait(d)` beside it bounds how long the server holds the read for the change.
+- `QueryRaw` and `BatchRaw` hand the answer back as the server wrote it, its columns in the select list's order
+  (a map loses it); `IfNoneMatch(r.ETag).QueryRaw(...)` is answered `NotModified` while nothing the statement
+  reads was written. The tag names a change, not the statement: send it only with the request it came from.
 - `Subscribe(ctx, collection, url.Values{"year": {"gte.2024"}})` is a channel of `seed` and `change` events (SSE).
 - `Changes(ctx, since, wait)` reads every write on disk (`/_changes`); `Health(ctx)` asks `/_health`.
 - `WithTenant("acme")` sends everything under `/t/acme/`; `WithTimeout`, `WithHTTPClient` as they say.

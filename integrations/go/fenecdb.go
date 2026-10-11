@@ -34,8 +34,9 @@ type Client struct {
 	http    *http.Client
 	timeout time.Duration
 	after   uint64
-	key     string
 	wait    time.Duration
+	key     string
+	tag     string
 	// The change the last write left the database at (Fenec-Seq), shared
 	// by the copies: a read on a replica sent After it waits for the write.
 	seq *atomic.Uint64
@@ -105,6 +106,8 @@ func (c *Client) IdempotencyKey(key string) *Client {
 // a worker's claim waits for a job there -- one enqueued, a delayed one
 // come due, a lease lapsed -- rather than sleeping and sending it again.
 // The request's context bounds it as ever; WithTimeout's bound is d longer.
+// Beside After, it is also how long a read waits for the change, five
+// seconds unless given.
 //
 //	claimed, err := db.Wait(30*time.Second).From("jobs").
 //		WhereCond(Raw("run_at <= now()")).Order("run_at", "asc").Limit(10).
@@ -113,6 +116,18 @@ func (c *Client) Wait(d time.Duration) *Client {
 	e := *c
 	e.wait = d
 	return &e
+}
+
+// IfNoneMatch is a copy of the client whose reads carry the ETag an earlier
+// answer to the same statement and parameters gave: QueryRaw then hands
+// back NotModified, with no body, while no write has touched what the
+// statement reads -- unscoped, the server does not run it. The tag names
+// a change, not the statement, so it is sent only with the request it
+// came from.
+func (c *Client) IfNoneMatch(tag string) *Client {
+	d := *c
+	d.tag = tag
+	return &d
 }
 
 // Seq is the change the last write through this client, or a copy of it,
@@ -215,6 +230,63 @@ func (f *Facets) UnmarshalJSON(raw []byte) error {
 	}
 	*f = out
 	return nil
+}
+
+// RawAnswer is an answer as the server wrote it, for a reader that needs what a
+// map loses: the order of a row's columns, which is the select list's.
+type RawAnswer struct {
+	// JSON is the body: a query's rows, {"rows", "facets"}, a write's
+	// object, or a batch's {"ok", "results"}. Nil when NotModified.
+	JSON []byte
+	// ETag is the tag a read was answered with, when IfNoneMatch asked for
+	// one: what to send IfNoneMatch next time.
+	ETag string
+	// NotModified says the server answered 304: the answer IfNoneMatch
+	// named still stands.
+	NotModified bool
+	// Seq is the change a write, or a batch, left the database at.
+	Seq uint64
+}
+
+// QueryRaw runs one FenecQL statement and hands back its answer as the
+// server wrote it. A client made by IfNoneMatch is answered NotModified
+// while the answer it names stands; with no tag, it asks for one ("0"
+// names no answer), so the next request can.
+func (c *Client) QueryRaw(ctx context.Context, text string, params ...any) (RawAnswer, error) {
+	var body bytes.Buffer
+	if err := writeBody(&body, text, params); err != nil {
+		return RawAnswer{}, err
+	}
+	d := *c
+	if d.tag == "" {
+		d.tag = `"0"`
+	}
+	raw, h, err := d.do(ctx, http.MethodPost, "/query", "application/json", body.Bytes(), 0)
+	if err != nil {
+		return RawAnswer{}, err
+	}
+	return RawAnswer{JSON: raw, ETag: h.etag, NotModified: h.notModified, Seq: h.seq}, nil
+}
+
+// BatchRaw runs the statements as Batch does and hands back the answer as
+// the server wrote it: {"ok": n, "results": [...]}, each result a
+// statement's rows in their columns' order. Statements that only read are
+// one snapshot, every read at the one change Seq names.
+func (c *Client) BatchRaw(ctx context.Context, stmts ...Statement) (RawAnswer, error) {
+	var body bytes.Buffer
+	for i, s := range stmts {
+		if i > 0 {
+			body.WriteByte('\n')
+		}
+		if err := writeBody(&body, s.Query, s.Params); err != nil {
+			return RawAnswer{}, err
+		}
+	}
+	raw, h, err := c.do(ctx, http.MethodPost, "/batch", "application/x-ndjson", body.Bytes(), 0)
+	if err != nil {
+		return RawAnswer{}, err
+	}
+	return RawAnswer{JSON: raw, Seq: h.seq}, nil
 }
 
 // Result is what a write answers.
@@ -340,10 +412,12 @@ func (c *Client) query(ctx context.Context, text string, params []any) ([]byte, 
 
 // What a response's head says besides its status.
 type head struct {
-	seq      uint64
-	replayed bool
-	next     uint64
-	hasNext  bool
+	seq         uint64
+	replayed    bool
+	next        uint64
+	hasNext     bool
+	etag        string
+	notModified bool
 }
 
 // do sends one request and reads its answer whole: the body of a 2xx, an
@@ -376,10 +450,15 @@ func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte
 	if err != nil {
 		return nil, head{}, err
 	}
+	// A 304 is an answer only to a request that named one.
+	if res.StatusCode == http.StatusNotModified && c.tag != "" {
+		return nil, head{etag: res.Header.Get("ETag"), notModified: true}, nil
+	}
 	if res.StatusCode >= 300 {
 		return nil, head{}, errorOf(res.StatusCode, raw)
 	}
 	var h head
+	h.etag = res.Header.Get("ETag")
 	if s := res.Header.Get("Fenec-Seq"); s != "" {
 		h.seq, _ = strconv.ParseUint(s, 10, 64)
 		c.noteSeq(h.seq)
@@ -398,6 +477,9 @@ func (c *Client) headers(req *http.Request) {
 	}
 	if c.after > 0 {
 		req.Header.Set("Fenec-After", strconv.FormatUint(c.after, 10))
+	}
+	if c.tag != "" {
+		req.Header.Set("If-None-Match", c.tag)
 	}
 	if c.key != "" {
 		req.Header.Set("Idempotency-Key", c.key)

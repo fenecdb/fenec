@@ -1,11 +1,14 @@
-# fenecdb with Prometheus and Grafana, both dashboards already loaded: the
+# fenecdb with Prometheus and Grafana, the dashboards already loaded: the
 # server's metrics (grafana/fenecdb.json, through Prometheus) and its data
-# (grafana/fenecdb-data.json, through the Infinity plugin and POST /query):
+# twice -- through fenecdb-datasource, the plugin this checkout builds
+# (grafana/fenecdb-data-plugin.json, with an alert rule), and through the
+# Infinity plugin and POST /query (grafana/fenecdb-data.json):
 #
 #   FENEC_HTTP_TOKEN=secret FENEC_METRICS_TOKEN=scrape \
 #   FENEC_JWT_SECRET=$(openssl rand -hex 32) \
-#     docker compose -f monitoring/docker-compose.yml up -d
+#     docker compose -f monitoring/docker-compose.yml up -d --build
 #   open http://127.0.0.1:3000/d/fenecdb
+#   open http://127.0.0.1:3000/d/fenecdb-data-plugin
 #   open http://127.0.0.1:3000/d/fenecdb-data
 #
 # fenec-server serves /_metrics on a listener of its own (--metrics), so the
@@ -97,7 +100,13 @@ services:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
 
   grafana:
-    image: grafana/grafana:13.2.2
+    # Grafana 13.2.2 with fenecdb-datasource built from this checkout: the
+    # frontend with webpack, the backend with mage, unsigned and let in by
+    # name (integrations/grafana/Dockerfile).
+    build:
+      context: ..
+      dockerfile: integrations/grafana/Dockerfile
+    image: fenecdb-grafana
     # The data source reads the token the seed mints, so it waits for it.
     depends_on:
       seed:
@@ -114,6 +123,7 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/fenecdb.json:/var/lib/grafana/dashboards/fenecdb.json:ro
       - ./grafana/fenecdb-data.json:/var/lib/grafana/dashboards/fenecdb-data.json:ro
+      - ./grafana/fenecdb-data-plugin.json:/var/lib/grafana/dashboards/fenecdb-data-plugin.json:ro
       # The data source's token alone, not the secret that signs it.
       - grafana-token:/run/fenec:ro
     ports:

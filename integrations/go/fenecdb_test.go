@@ -635,3 +635,49 @@ func TestASchemaIsComparedAndAppliedOnlyWhenAsked(t *testing.T) {
 	}
 	must(db.Exec(ctx, "drop collection _migrations")).of(t)
 }
+
+func TestARawAnswerKeepsItsColumnsOrderAndItsTag(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	name := fresh("raw")
+	must(db.Exec(ctx, "create collection "+name+" (a int, b text)")).of(t)
+	must(db.Exec(ctx, "put "+name+" {a: 1, b: $1}", "x")).of(t)
+	// The select list's order, which a map would lose: b before a.
+	r := must(db.QueryRaw(ctx, "get "+name+" select b, a")).of(t)
+	if string(r.JSON) != `[{"b":"x","a":1}]` || r.ETag == "" || r.NotModified {
+		t.Fatalf("a raw read answered %+v (%s)", r, r.JSON)
+	}
+	// Asked again with its tag while nothing it reads was written: 304.
+	again := must(db.IfNoneMatch(r.ETag).QueryRaw(ctx, "get "+name+" select b, a")).of(t)
+	if !again.NotModified || again.JSON != nil || again.ETag == "" {
+		t.Fatalf("the same read with its tag answered %+v", again)
+	}
+	must(db.Exec(ctx, "put "+name+" {a: 2, b: $1}", "y")).of(t)
+	after := must(db.IfNoneMatch(r.ETag).QueryRaw(ctx, "get "+name+" select b, a order a")).of(t)
+	if after.NotModified || string(after.JSON) != `[{"b":"x","a":1},{"b":"y","a":2}]` {
+		t.Fatalf("a read after a write answered %+v (%s)", after, after.JSON)
+	}
+
+	// A read-only batch keeps each statement's columns in order too.
+	b := must(db.BatchRaw(ctx, fenecdb.Stmt("get "+name+" select a, b order a limit 1"),
+		fenecdb.Stmt("get "+name+" select b where a = $1", 2))).of(t)
+	if string(b.JSON) != `{"ok":2,"results":[{"rows":[{"a":1,"b":"x"}]},{"rows":[{"b":"y"}]}]}` {
+		t.Fatalf("a raw batch answered %s", b.JSON)
+	}
+}
+
+func TestWaitBoundsAReadAfterAChangeNotYetThere(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	name := fresh("wait")
+	must(db.Exec(ctx, "create collection "+name+" (t text)")).of(t)
+	start := time.Now()
+	_, err := db.Wait(200*time.Millisecond).After(db.Seq()+1000).Query(ctx, "get "+name)
+	if e := statusOf(t, err); e.Status != 504 {
+		t.Fatalf("a read after a change to come: %+v", e)
+	}
+	// The server's own wait is five seconds: Fenec-Wait cut it short.
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("the read waited %v", took)
+	}
+}

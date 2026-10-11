@@ -92,9 +92,9 @@ studio-test: wasm
 	python3 site/build.py
 	cd studio && npm ci --no-audit --no-fund --loglevel=error && npm run e2e
 
-## studio/highlight.js written again: site/highlight.js with build.py's
-## FenecQL rules in it, the query editor's colours (site/test_highlight.py
-## refuses a copy that is not this)
+## studio/highlight.js and the Grafana data source's copy written again:
+## site/highlight.js with build.py's FenecQL rules in it, the query editors'
+## colours (site/test_highlight.py refuses a copy that is not this)
 studio-highlight:
 	python3 site/build.py --studio-highlight
 
@@ -520,19 +520,21 @@ docker-compact:
 docker-down:
 	-docker rm -f fenecdb
 
-## The "fenecdb data" Grafana dashboard end to end (Docker): monitoring/'s
-## compose with fenec-server built from this checkout, under a project and
-## on ports of its own so it runs beside a stack already up; every panel's
-## query and the variable's asked of Grafana's /api/ds/query and held to
-## fenec-server's own answer; then down with its volumes, whatever happened
+## The "fenecdb data" Grafana dashboards end to end (Docker): monitoring/'s
+## compose with fenec-server and Grafana's fenecdb-datasource built from this
+## checkout, under a project and on ports of its own so it runs beside a
+## stack already up; every panel's query and the variables' asked of
+## Grafana's /api/ds/query, through the Infinity data source and through the
+## plugin, and held to fenec-server's own answer, the plugin's alert rule
+## evaluated; then down with its volumes, whatever happened
 GRAFANA_CHECK = FENEC_HTTP_TOKEN=grafana-check FENEC_METRICS_TOKEN=grafana-check-scrape \
 	FENEC_JWT_SECRET=grafana-check-secret-of-32-bytes-at-least \
 	FENEC_PORT=18780 GRAFANA_PORT=13780 PROMETHEUS_PORT=19780 \
 	docker compose -p fenec-grafana-check -f monitoring/docker-compose.yml
 grafana-check:
 	@$(GRAFANA_CHECK) up -d --build && \
-	  GRAFANA_URL=http://127.0.0.1:13780 FENEC_URL=http://127.0.0.1:18780 \
-	    FENEC_HTTP_TOKEN=grafana-check node monitoring/grafana/check.mjs; \
+	  GRAFANA_URL=http://127.0.0.1:13780 FENEC_URL=http://127.0.0.1:18780 FENEC_HTTP_TOKEN=grafana-check \
+	    sh -c 'node monitoring/grafana/check.mjs && node monitoring/grafana/check-plugin.mjs'; \
 	  status=$$?; \
 	  if [ $$status -ne 0 ]; then $(GRAFANA_CHECK) logs --no-color --tail 60; fi; \
 	  $(GRAFANA_CHECK) down -v --remove-orphans; exit $$status
