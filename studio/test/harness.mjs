@@ -41,12 +41,12 @@ export const ROUTER = 'studio-test-router-token';
  * fenec-shard with the studio on, in front of the tenant node at `node`
  * (started with `tenants: true`), and `tenants` placed on it. `token` is
  * the router's own: the nodes' data token makes one token for both, as the
- * admin view's list of tenants needs.
+ * admin view's list of tenants needs. `extra` goes on its command line.
  */
-export async function startRouter(node, tenants, { token = ROUTER } = {}) {
+export async function startRouter(node, tenants, { token = ROUTER, extra = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'fenec-studio-router-'));
   const port = await freePort();
-  const args = ['--listen', `127.0.0.1:${port}`, '--directory', join(dir, 'shard.fenec'), '--token', token, '--auth-delay', '0', '--studio'];
+  const args = ['--listen', `127.0.0.1:${port}`, '--directory', join(dir, 'shard.fenec'), '--token', token, '--auth-delay', '0', '--studio', ...extra];
   const child = spawn(binary('fenec-shard', 'FENEC_SHARD'), args, { stdio: ['ignore', 'ignore', 'pipe'] });
   let log = '';
   child.stderr.on('data', (d) => (log += d));
@@ -67,6 +67,45 @@ export async function startRouter(node, tenants, { token = ROUTER } = {}) {
   for (const t of tenants) {
     const r = await admin('PUT', `/_shard/tenants/${t}`);
     if (!r.ok) throw new Error(`${t} was not placed: ${await r.text()}`);
+  }
+  return {
+    url,
+    async stop() {
+      child.kill('SIGTERM');
+      await new Promise((r) => (child.exitCode !== null ? r() : child.once('exit', r)));
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/**
+ * A standby fenec-shard following a primary router that is not there, so
+ * its directory never arrives: every tenant's request is its 503. `extra`
+ * goes on its command line.
+ */
+export async function startStandby({ extra = [] } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'fenec-studio-standby-'));
+  const port = await freePort();
+  const args = [
+    '--listen', `127.0.0.1:${port}`,
+    '--directory', join(dir, 'shard.fenec'),
+    '--replication-token', 'studio-test-replication',
+    '--replica-of', `http://127.0.0.1:${await freePort()}`,
+    '--auth-delay', '0',
+    ...extra,
+  ];
+  const child = spawn(binary('fenec-shard', 'FENEC_SHARD'), args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  let log = '';
+  child.stderr.on('data', (d) => (log += d));
+  const url = `http://127.0.0.1:${port}`;
+  for (let i = 0; ; i++) {
+    try {
+      if ((await fetch(`${url}/t/any/collections`)).status === 503) break;
+    } catch {
+      /* not yet */
+    }
+    if (child.exitCode !== null || i > 400) throw new Error(`fenec-shard did not start: ${log}`);
+    await new Promise((r) => setTimeout(r, 25));
   }
   return {
     url,
