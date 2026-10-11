@@ -2240,6 +2240,27 @@ wasm-min` makes and holds it to each refusal; CI's clippy runs the module
 with none, each feature alone and each group, a check of no code made,
 about 10 s a set.
 
+**What is core, and why one module ships.** What a general-purpose
+database is expected to do for any app is core and goes in every module:
+storage and FenecQL, the hash, ordered, unique and composite indexes, the
+schema check, search -- `match`, `highlight` and `snippet`, facets,
+`near` with its graph, `fuse` -- and the standard query features. A
+plugin is an extra one kind of app needs: geo, sparse vectors, a
+language's collation, `bucket` and the HLL sketches. Held to that rule
+the core is about 210 KB brotli and the extras about 18 together (`geo`
+5.9, `collate` 8.3, `sparse` 1.3, `bucket` and the sketches about 2),
+8% of the full module's 229: too little to pay for modules built ahead
+for sets of features and a choice of one per page, let alone a module a
+plugin loaded beside the engine, which would carry its own copy of the
+standard library's allocator and panic machinery and reach into the write
+path, the undo, the file and replication through a boundary. So
+`@fenecdb/web` ships the one full module, the features stay for a page
+that builds its own and for the tests of the invariant above, and bytes
+are won by making the core smaller: its parser is 52 KB raw, the standard
+library's `Vec`, `String`, sort and `HashMap` 64, the planner 32.
+`count(distinct)`, `having` and `first`/`last` are standard and belong to
+the core; they sit in `analytics` today.
+
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
 check, 180.6 KB brotli) and `@fenecdb/web/client`, so a user has two
