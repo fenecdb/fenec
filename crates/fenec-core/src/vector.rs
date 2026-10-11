@@ -22,6 +22,8 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 #[cfg(not(target_family = "wasm"))]
 use std::mem::MaybeUninit;
+#[cfg(not(target_family = "wasm"))]
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 #[cfg(not(target_family = "wasm"))]
@@ -3061,6 +3063,17 @@ impl SameTable {
         self.used += 1;
     }
 
+    /// Each slot's half stored where its node is in `halves`: a node has
+    /// one slot at most, so tables read on threads of their own store no
+    /// half twice.
+    fn halves_into(&self, halves: &[AtomicU32]) {
+        for &s in self.slots.iter().filter(|&&s| s != 0) {
+            if let Some(h) = halves.get((s as u32 - 1) as usize) {
+                h.store((s >> 32) as u32, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
     /// The table made again from its slots, a tombstone's left out, with
     /// room for twice the rest.
     #[cold]
@@ -3190,24 +3203,16 @@ impl Same {
     /// node is: in turn, 1.1 million nodes' took 8.3 ms against 2.3, under
     /// the read lock a server keeps its graphs under.
     fn halves_by_node(&self, n: usize) -> Vec<u32> {
-        use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
         let halves: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
-        let read = |table: &SameTable| {
-            for &s in table.slots.iter().filter(|&&s| s != 0) {
-                if let Some(h) = halves.get((s as u32 - 1) as usize) {
-                    h.store((s >> 32) as u32, Relaxed);
-                }
-            }
-        };
-        read(&self.one);
+        self.one.halves_into(&halves);
         match n > SAME_SPLIT {
             true => {
                 let threads = Same::threads().min(self.shards.len());
                 spread(self.shards.len(), &mut vec![(); threads], |_, i| {
-                    read(&self.shards[i])
+                    self.shards[i].halves_into(&halves)
                 });
             }
-            false => self.shards.iter().for_each(read),
+            false => self.shards.iter().for_each(|t| t.halves_into(&halves)),
         }
         halves.into_iter().map(AtomicU32::into_inner).collect()
     }
@@ -4653,7 +4658,7 @@ impl VectorIndex {
         for &k in &self.l0_len {
             out.extend_from_slice(&k.to_le_bytes());
         }
-        self.put_all_lists(n, lw, out);
+        let read = self.put_all_lists(n, lw, out);
         // A tombstone still routes searches, but its document may be gone
         // or hold another vector by now: the vector it was linked with
         // travels with it.
@@ -4665,7 +4670,7 @@ impl VectorIndex {
             put_le(out, node as u64, lw);
             put_le(out, doc, 8);
         }
-        self.put_halves(n, out);
+        self.put_halves(n, read, out);
     }
 
     /// Each of the `n` nodes' hash halves after a [`HALVES`] byte, a
@@ -4674,22 +4679,28 @@ impl VectorIndex {
     /// hashed from the arena, as the table is made where a restore had none
     /// or a bit index coded its vectors. So the record is the same whatever
     /// way the index came to be where it is.
-    fn put_halves(&self, n: usize, out: &mut Vec<u8>) {
+    fn put_halves(&self, n: usize, read: Option<Vec<u32>>, out: &mut Vec<u8>) {
         if n == 0 {
             return;
         }
-        let read;
-        let halves = match (self.same.halves.len() == n, self.same.built) {
-            (true, _) => &self.same.halves,
-            (false, true) => {
-                read = self.same.halves_by_node(n);
-                &read
+        let made;
+        let halves = match (read, self.same.halves.len() == n, self.same.built) {
+            (Some(read), ..) => {
+                made = read;
+                &made
             }
-            (false, false) => {
-                read = self.arena_halves(n);
-                &read
+            (None, true, _) => &self.same.halves,
+            (None, false, true) => {
+                made = self.same.halves_by_node(n);
+                &made
+            }
+            (None, false, false) => {
+                made = self.arena_halves(n);
+                &made
             }
         };
+        // Appended a half at a time: written into room made first, 0.4 KB
+        // of the browser module more.
         out.reserve(1 + 4 * n);
         out.push(HALVES);
         for (h, &dead) in halves.iter().zip(&self.deleted) {
@@ -4732,10 +4743,11 @@ impl VectorIndex {
 
     /// Every node's level-0 list, then every list above, in node order.
     #[cfg(target_family = "wasm")]
-    fn put_all_lists(&self, n: usize, lw: usize, out: &mut Vec<u8>) {
+    fn put_all_lists(&self, n: usize, lw: usize, out: &mut Vec<u8>) -> Option<Vec<u32>> {
         let mut sorted = Vec::with_capacity(self.m0);
         self.put_lists(0..n as u32, true, lw, &mut sorted, out);
         self.put_lists(0..n as u32, false, lw, &mut sorted, out);
+        None
     }
 
     /// Every node's level-0 list, then every list above, in node order:
@@ -4744,19 +4756,39 @@ impl VectorIndex {
     /// under the read lock, which every write waits out, and the lists are
     /// most of the record: 110 000 nodes' took 20.3 ms in turn, and take
     /// 6.0 on an M1's eight cores.
+    ///
+    /// The record ends with each node's hash half ([`HALVES`]), which a
+    /// table split into shards has to be read for: the shards are read by
+    /// the same threads, a share of them a part more, and their halves
+    /// handed back. Read after the lists on threads of their own, they held
+    /// a server's read lock over a graph of 110 000 nodes 6.07-6.34 ms p50
+    /// against 5.85-5.88 without them; beside the lists, 5.83-5.98.
     #[cfg(not(target_family = "wasm"))]
-    fn put_all_lists(&self, n: usize, lw: usize, out: &mut Vec<u8>) {
+    fn put_all_lists(&self, n: usize, lw: usize, out: &mut Vec<u8>) -> Option<Vec<u32>> {
         let parts = n.div_ceil(LIST_PART);
         let threads = Self::threads().min(parts);
         if threads < 2 {
             let mut sorted = Vec::with_capacity(self.m0);
             self.put_lists(0..n as u32, true, lw, &mut sorted, out);
             self.put_lists(0..n as u32, false, lw, &mut sorted, out);
-            return;
+            return None;
         }
+        let shards = &self.same.shards;
+        let read = self.same.built && !shards.is_empty() && self.same.halves.len() != n;
+        let halves: Vec<AtomicU32> = match read {
+            true => (0..n).map(|_| AtomicU32::new(0)).collect(),
+            false => Vec::new(),
+        };
+        let groups = if read { threads } else { 0 };
         let mut states: Vec<Vec<u64>> = (0..threads).map(|_| Vec::with_capacity(self.m0)).collect();
         let mut done: Vec<(Vec<u8>, Vec<u8>)> = vec![Default::default(); parts];
-        let written = spread(parts, &mut states, |sorted, p| {
+        let written = spread(parts + groups, &mut states, |sorted, p| {
+            if p >= parts {
+                let g = p - parts;
+                let these = g * shards.len() / groups..(g + 1) * shards.len() / groups;
+                shards[these].iter().for_each(|t| t.halves_into(&halves));
+                return (p, Vec::new(), Vec::new());
+            }
             let nodes = (p * LIST_PART) as u32..((p + 1) * LIST_PART).min(n) as u32;
             let (mut level0, mut above) = (Vec::new(), Vec::new());
             self.put_lists(nodes.clone(), true, lw, sorted, &mut level0);
@@ -4764,7 +4796,9 @@ impl VectorIndex {
             (p, level0, above)
         });
         for (p, level0, above) in written {
-            done[p] = (level0, above);
+            if p < parts {
+                done[p] = (level0, above);
+            }
         }
         for (level0, _) in &done {
             out.extend_from_slice(level0);
@@ -4772,6 +4806,7 @@ impl VectorIndex {
         for (_, above) in &done {
             out.extend_from_slice(above);
         }
+        read.then(|| halves.into_iter().map(AtomicU32::into_inner).collect())
     }
 
     /// What every layout of a graph record starts with after its version:
