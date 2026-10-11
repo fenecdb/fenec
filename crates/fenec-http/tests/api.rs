@@ -912,7 +912,16 @@ fn the_connection_ceiling_refuses_with_the_cors_headers() {
     let mut first = [0u8; 12];
     held.read_exact(&mut first).unwrap();
     assert_eq!(&first, b"HTTP/1.1 200");
-    let r = get(h.port, "/articles");
+    // The refusal is written as the connection is taken, before a request
+    // is read, and the connection closed: a request written after it can
+    // meet the closed socket. Read alone.
+    let mut refused = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+    refused
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut out = String::new();
+    let _ = refused.read_to_string(&mut out);
+    let r = parse_res(&out);
     assert_eq!(r.status, 503, "{}", r.body);
     assert_eq!(
         r.header("Access-Control-Allow-Origin"),

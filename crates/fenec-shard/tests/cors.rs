@@ -285,7 +285,14 @@ fn the_connection_ceiling_tells_a_page_when_to_come_back() {
     held.read_exact(&mut first).unwrap();
     assert_eq!(&first, b"HTTP/1.1 404");
 
-    let r = ask(port, "GET", "/t/acme/collections", Some(APP), "");
+    // The refusal is written as the connection is taken, before a request
+    // is read, and the connection closed: a request written after it met
+    // the closed socket (`EPIPE`) one run in about sixty. Read alone.
+    let mut refused = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    refused
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let r = read_answer(&mut refused);
     assert_eq!(r.status, 503, "{}", r.body);
     r.tells(APP);
     assert_eq!(r.one("retry-after"), Some("1"));
