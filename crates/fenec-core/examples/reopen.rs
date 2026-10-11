@@ -236,7 +236,7 @@ fn open(path: &str, how: &str, clients: usize, every: Duration) {
     let dim = db.stats()[0].vector_indexes[0].dim;
     let unlinked = db.unlinked();
     println!(
-        "{how:<8} open {:6.2} s   {} documents, {unlinked} vectors not linked",
+        "{how:<8} open {:7.3} s   {} documents, {unlinked} vectors not linked",
         opened.as_secs_f64(),
         db.stats()[0].documents,
     );
