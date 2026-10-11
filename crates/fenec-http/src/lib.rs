@@ -44,6 +44,7 @@ pub mod api;
 pub mod archive;
 pub mod audit;
 pub mod cdc;
+pub mod cors;
 pub mod crypto;
 pub mod held;
 pub mod http;
@@ -353,8 +354,14 @@ impl Server {
                 self.live.fetch_sub(1, Ordering::SeqCst);
                 let mut s = stream;
                 request_id::begin(None);
-                let _ = Response::retry_after(503, "too many connections", 1)
-                    .write(&mut s, false, false);
+                // Told with the CORS headers as every other answer is: a
+                // page on another origin read a refusal without them as
+                // the network failing.
+                let _ = cors(
+                    Response::retry_after(503, "too many connections", 1),
+                    &self.cfg,
+                )
+                .write(&mut s, false, false);
                 request_id::end();
                 continue;
             }
@@ -2231,45 +2238,14 @@ fn error_response(e: &Error) -> Response {
     Response::error(api::status_of(e), msg)
 }
 
-/// Whether `--http-cors` lets `req`'s origin in: `*` lets every one, an
-/// origin itself alone. A preflight from another is answered as before,
-/// after its token.
+/// Whether `--http-cors` lets `req`'s origin in ([`cors::allows`]).
 fn cors_allows(cfg: &Config, req: &Request) -> bool {
-    match cfg.cors.as_deref() {
-        None => false,
-        Some("*") => true,
-        Some(allowed) => req.header("origin") == Some(allowed),
-    }
+    cors::allows(cfg.cors.as_deref(), req)
 }
 
+/// `resp` with the CORS headers `--http-cors` asks for ([`cors::apply`]).
 fn cors(resp: Response, cfg: &Config) -> Response {
-    match &cfg.cors {
-        None => resp,
-        Some(origin) => resp
-            .header("Access-Control-Allow-Origin", origin)
-            .header(
-                "Access-Control-Allow-Methods",
-                "GET, POST, PATCH, DELETE, OPTIONS",
-            )
-            // A page's replica sends each write under an `Idempotency-Key`
-            // and reads the `Fenec-Seq` of its answer, which tells it when a
-            // stream is past the write: refused and unread across origins
-            // before, its retries made a row twice and an insert the shape
-            // did not hold kept its temporary row until the next seed. The
-            // request id goes out too: the studio's query editor, served by
-            // a node and asking a router (`--studio-connect`), shows it
-            // beside an answer so a person can find its lines in the logs.
-            .header(
-                "Access-Control-Allow-Headers",
-                "content-type, authorization, idempotency-key, fenec-after, fenec-wait, if-none-match",
-            )
-            .header(
-                "Access-Control-Expose-Headers",
-                "fenec-seq, fenec-next, idempotent-replayed, etag, x-request-id, fenec-quota, retry-after",
-            )
-            .header("Access-Control-Max-Age", "600")
-            .header("Vary", "Origin"),
-    }
+    cors::apply(resp, cfg.cors.as_deref())
 }
 
 /// The token comparison is constant time: an early-exit comparison leaks the

@@ -72,6 +72,12 @@ pub struct Config {
     /// are this origin's -- a page a node served would be another origin's
     /// to the router, and its tokens' preflights refused there.
     pub studio: Option<Arc<fenec_http::studio::Studio>>,
+    /// `Access-Control-Allow-Origin` (`--http-cors`, `*` or one origin),
+    /// read as a node reads its own ([`fenec_http::cors`]). On every answer
+    /// the router gives, its own and the ones it forwards, whose node's
+    /// CORS headers it replaces; `None` leaves those as the node wrote them
+    /// and sends none of its own.
+    pub cors: Option<String>,
 }
 
 impl Default for Config {
@@ -87,6 +93,7 @@ impl Default for Config {
             replicas: false,
             auto_failover: None,
             studio: None,
+            cors: None,
         }
     }
 }
@@ -189,7 +196,8 @@ impl Router {
                 self.live.fetch_sub(1, Ordering::SeqCst);
                 let mut s = stream;
                 fenec_http::request_id::begin(None);
-                let _ = Response::retry_after(503, "too many connections", 1)
+                let _ = self
+                    .cors(Response::retry_after(503, "too many connections", 1))
                     .write(&mut s, false, false);
                 fenec_http::request_id::end();
                 continue;
@@ -372,6 +380,16 @@ impl Router {
         m
     }
 
+    /// `resp` with the CORS headers `--http-cors` asks for: on every answer
+    /// the router gives itself. Without them a page on another origin read
+    /// a standby's 503, an unknown tenant's 404 or a node's 502 as the
+    /// network failing -- the sync layer and `FenecHttp.live` backed off
+    /// from what was an answer -- while the node's answers through the
+    /// router carried the node's.
+    fn cors(&self, resp: Response) -> Response {
+        fenec_http::cors::apply(resp, self.cfg.cors.as_deref())
+    }
+
     fn read_dir(&self) -> std::sync::RwLockReadGuard<'_, Directory> {
         self.dir.read().unwrap_or_else(|e| e.into_inner())
     }
@@ -397,7 +415,9 @@ impl Router {
                 Ok(None) => return,
                 Err(http::BadRequest(status, msg)) => {
                     fenec_http::request_id::begin(None);
-                    let _ = Response::error(status, &msg).write(&mut out, false, false);
+                    let _ = self
+                        .cors(Response::error(status, &msg))
+                        .write(&mut out, false, false);
                     return;
                 }
             };
@@ -405,6 +425,28 @@ impl Router {
             // (`Pool::send`) and answers with.
             fenec_http::request_id::begin_request(&req);
             let arrived = Instant::now();
+            // A browser's preflight is answered here, as a node answers its
+            // own: before the directory is read, so a tenant the directory
+            // does not hold, a standby whose directory has not arrived or a
+            // node that cannot be reached still lets the page send its
+            // request and read the answer -- forwarded, the preflight to
+            // any of them failed, and the page saw nothing but a network
+            // error. It reads nothing and says only what the headers on
+            // every answer say. No refusal count is touched: a preflight
+            // carrying `Authorization` would otherwise clear its address's.
+            if req.method == Method::Options
+                && fenec_http::cors::allows(self.cfg.cors.as_deref(), &req)
+            {
+                let sent = self
+                    .cors(Response::empty(204))
+                    .write(&mut out, req.keep_alive, false)
+                    .is_ok();
+                metrics::request(route_of(&req), 204, arrived.elapsed());
+                if !(sent && req.keep_alive) {
+                    return;
+                }
+                continue;
+            }
             // Everything but a forwarded request is counted here, as it is
             // answered; `forward` counts its own, a stream at its head.
             let answer = |out: &mut TcpStream, route: Route, resp: Response| {
@@ -427,7 +469,11 @@ impl Router {
                 Some(&"t") => self.forward(&req, &mut out, arrived, peer),
                 Some(&"_replication") => {
                     let Some(repl) = self.repl.clone() else {
-                        let _ = Response::error(404, "this router has no --replication-token")
+                        let _ = self
+                            .cors(Response::error(
+                                404,
+                                "this router has no --replication-token",
+                            ))
                             .write(&mut out, false, false);
                         metrics::request(Route::Replication, 404, arrived.elapsed());
                         return;
@@ -442,23 +488,27 @@ impl Router {
                             metrics::counted(Route::Replication, 200);
                             return;
                         }
-                        Some(resp) => answer(&mut out, Route::Replication, resp),
+                        Some(resp) => answer(&mut out, Route::Replication, self.cors(resp)),
                     }
                 }
-                Some(&"_shard") => answer(&mut out, Route::Shard, self.admin(&req)),
+                Some(&"_shard") => answer(&mut out, Route::Shard, self.cors(self.admin(&req))),
+                // The studio's files go without, as a node's do: pages
+                // opened, never fetched from another origin.
                 Some(&"_studio") => answer(
                     &mut out,
                     Route::Other,
                     fenec_http::studio::handle(self.cfg.studio.as_deref(), &req),
                 ),
-                Some(&"_metrics") => answer(&mut out, Route::Metrics, self.metrics(&req)),
+                Some(&"_metrics") => {
+                    answer(&mut out, Route::Metrics, self.cors(self.metrics(&req)))
+                }
                 _ => answer(
                     &mut out,
                     Route::Other,
-                    Response::error(
+                    self.cors(Response::error(
                         404,
                         "the router serves /t/<tenant>/..., /_shard/ and /_metrics",
-                    ),
+                    )),
                 ),
             };
             if !keep {
@@ -482,7 +532,10 @@ impl Router {
         // A forwarded request is traced, the rest of the router's are not:
         // a scrape or a lease's grant would be most of the spans.
         fenec_http::trace::begin(req);
+        // The router's own answers: a standby's 503, an unknown tenant's
+        // 404, a node's 502.
         let reply = |out: &mut TcpStream, resp: Response| {
+            let resp = self.cors(resp);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
             metrics::request(Route::Tenant, resp.status, arrived.elapsed());
             fenec_http::trace::end(resp.status);
@@ -609,16 +662,23 @@ impl Router {
         // and a token taken starts that address's count again, no other.
         fenec_http::audit::http(req, status, peer);
         let mut head = format!("HTTP/1.1 {status} {}\r\n", http::reason(status));
+        let cors = self.cfg.cors.as_deref();
         for (k, v) in &answer.headers {
             // The node answers with the id it was sent; the router's own
             // goes out in its place all the same, which a node from before
-            // the ids leaves out.
+            // the ids leaves out. So do the router's CORS headers, where it
+            // has its own: a page is told one rule, the one the router's
+            // preflight told it.
             if !hop_by_hop(k)
                 && !k.eq_ignore_ascii_case("content-length")
                 && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
+                && !(cors.is_some() && fenec_http::cors::is_cors_header(k, v))
             {
                 head.push_str(&format!("{k}: {v}\r\n"));
             }
+        }
+        if let Some(origin) = cors {
+            fenec_http::cors::push_into(&mut head, origin);
         }
         fenec_http::request_id::with(|id| {
             head.push_str(fenec_http::request_id::HEADER);
@@ -2033,6 +2093,17 @@ fn names_in(body: &[u8]) -> Vec<String> {
         .map(|n| n.trim().trim_matches('"').to_string())
         .filter(|n| !n.is_empty())
         .collect()
+}
+
+/// The route a request is counted under, by its first segment.
+fn route_of(req: &Request) -> Route {
+    match req.segments().first() {
+        Some(&"t") => Route::Tenant,
+        Some(&"_shard") => Route::Shard,
+        Some(&"_replication") => Route::Replication,
+        Some(&"_metrics") => Route::Metrics,
+        _ => Route::Other,
+    }
 }
 
 /// Headers that describe one connection, not the message: never forwarded.

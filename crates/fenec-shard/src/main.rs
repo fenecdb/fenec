@@ -25,6 +25,13 @@ usage: fenec-shard [options]
                             Data requests pass their own Authorization through
                             to the nodes, which check it against --http-token
       --insecure            allow a non-loopback address without --token
+      --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
+                            https://example.com), as fenec-server takes it:
+                            on every answer the router gives, its own and
+                            the nodes' it forwards, whose CORS headers it
+                            replaces, and a browser's preflight answered
+                            here. Without it, the router sends none of its
+                            own and passes the nodes' through
       --studio              serve fenec studio, the admin pages, at /_studio/:
                             a tenant's collections and rows in a browser,
                             through this router, with the token pasted in.
@@ -114,6 +121,7 @@ fn main() {
             "--directory" | "-d" => path = next(&mut i, "--directory"),
             "--token" => cfg.token = Some(next(&mut i, "--token")),
             "--insecure" => cfg.insecure = true,
+            "--http-cors" => cfg.cors = Some(next(&mut i, "--http-cors")),
             "--studio" => {
                 let s = fenec_http::studio::Studio::new(fenec_http::studio::ASSETS, None)
                     .unwrap_or_else(|e| fail(&e));
