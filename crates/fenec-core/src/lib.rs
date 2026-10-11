@@ -82,3 +82,20 @@ pub mod prelude {
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Whether this build has every feature a build may go without
+/// (`Cargo.toml`'s `full`): where the checks for one it lacks fold away,
+/// so that they cost the full browser module nothing.
+pub(crate) const FULL: bool = cfg!(all(
+    feature = "vector",
+    feature = "text",
+    feature = "sparse",
+    feature = "sorted",
+    feature = "composite",
+    feature = "geo",
+    feature = "nocase",
+    feature = "facets",
+    feature = "highlight",
+    feature = "analytics",
+    feature = "collate"
+));

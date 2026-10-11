@@ -1741,6 +1741,9 @@ impl Select {
                     .into(),
             ));
         }
+        if self.having.is_some() && !cfg!(feature = "analytics") {
+            return Err(crate::error::not_built("`having`", "analytics"));
+        }
         if self.having.is_some() && self.group.is_empty() {
             return Err(Error::Query(
                 "`having` keeps the groups it holds for: it follows `group`".into(),
@@ -1792,6 +1795,17 @@ impl Select {
     /// beside one, they are refused rather than answered for another
     /// question.
     fn check_marks_and_facets(&self) -> Result<()> {
+        if let (Some(m), false) = (self.marks.first(), cfg!(feature = "highlight")) {
+            let what = if m.snippet.is_some() {
+                "`snippet`"
+            } else {
+                "`highlight`"
+            };
+            return Err(crate::error::not_built(what, "highlight"));
+        }
+        if !self.facets.is_empty() && !cfg!(feature = "facets") {
+            return Err(crate::error::not_built("`facet`", "facets"));
+        }
         if let Some(m) = self.marks.first() {
             let why = if self.matcher.is_none() {
                 "the terms `match` found: the query needs `match`"
@@ -2037,6 +2051,10 @@ impl Select {
     /// than kept, which would count it, or dropped, which would drop the
     /// other field's condition. Idempotent: a facet split already stays.
     pub fn split_facets(&mut self) -> Result<()> {
+        // A build without facets refuses them where the query is checked.
+        if !cfg!(feature = "facets") {
+            return Ok(());
+        }
         for i in 0..self.facets.len() {
             if !self.facets[i].disjunctive || self.facets[i].rest.is_some() {
                 continue;

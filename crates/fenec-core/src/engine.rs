@@ -5,7 +5,7 @@ use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
 use crate::collate::{self, Collation, TextOrder};
 use crate::composite::CompositeIndex;
-use crate::error::{Error, Result};
+use crate::error::{not_built, Error, Result};
 use crate::geo::GeoIndex;
 use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
@@ -1414,7 +1414,8 @@ impl Collection {
             feature = "vector",
             feature = "text",
             feature = "sparse",
-            feature = "sorted"
+            feature = "sorted",
+            feature = "geo"
         )),
         allow(unused_mut)
     )]
@@ -1451,7 +1452,7 @@ impl Collection {
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     sparse.push((f.name.clone(), Derived::new(SparseIndex::new())));
                 }
-                #[cfg(feature = "sorted")]
+                #[cfg(all(feature = "sorted", feature = "geo"))]
                 (IndexKind::Geo, DataType::Geo) => {
                     geo.push((f.name.clone(), Derived::new(GeoIndex::new())));
                 }
@@ -1526,7 +1527,7 @@ impl Collection {
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     self.sparse.push((f.name.clone(), Derived::unbuilt()));
                 }
-                #[cfg(feature = "sorted")]
+                #[cfg(all(feature = "sorted", feature = "geo"))]
                 (IndexKind::Geo, DataType::Geo) => {
                     self.geo.push((f.name.clone(), Derived::unbuilt()));
                 }
@@ -1555,10 +1556,14 @@ impl Collection {
     }
 
     /// The index over several fields at `i` among the schema's, built as
-    /// [`Self::hash`] is; `None` in a build without the `sorted` feature,
+    /// [`Self::hash`] is; `None` in a build without the `composite` feature,
     /// whose queries over its fields the scan answers.
     pub fn composite(&self, i: usize) -> Result<Option<&CompositeIndex>> {
-        let Some((c, d)) = self.composites.get(i).filter(|_| cfg!(feature = "sorted")) else {
+        let Some((c, d)) = self
+            .composites
+            .get(i)
+            .filter(|_| cfg!(feature = "composite"))
+        else {
             return Ok(None);
         };
         d.or_build(|| composite_of(&self.store, &self.schema, c))
@@ -1731,7 +1736,7 @@ impl Collection {
                 }
                 // A build without the index reads the rows, as the scan
                 // answers what the index would.
-                #[cfg(not(feature = "sorted"))]
+                #[cfg(not(feature = "composite"))]
                 None => {
                     for d in self.store.iter_ids() {
                         if d != doc.id && self.holds_tuple(d, c, doc)? {
@@ -1739,7 +1744,7 @@ impl Collection {
                         }
                     }
                 }
-                #[cfg(feature = "sorted")]
+                #[cfg(feature = "composite")]
                 None => {}
             }
         }
@@ -1748,7 +1753,7 @@ impl Collection {
 
     /// Whether the stored document `id` holds `doc`'s values in every part
     /// of `c`, each the same value as a bucket finds it ([`hash_key`]).
-    #[cfg(not(feature = "sorted"))]
+    #[cfg(not(feature = "composite"))]
     fn holds_tuple(&self, id: DocId, c: &Composite, doc: &Document) -> Result<bool> {
         for (k, _) in &c.keys {
             let Some((pos, keys)) = source(&self.schema, k) else {
@@ -1833,7 +1838,11 @@ impl Collection {
         }
         // An index over several fields by its fields joined by `+`
         // (`Composite::name`), and none in a build that cannot make one.
-        for (c, d) in self.composites.iter().filter(|_| cfg!(feature = "sorted")) {
+        for (c, d) in self
+            .composites
+            .iter()
+            .filter(|_| cfg!(feature = "composite"))
+        {
             if d.0.get().is_none() {
                 out.push(c.name());
             }
@@ -2230,6 +2239,7 @@ fn encode_folded(out: &mut Vec<u8>, v: &Value, fold: Option<CaseFold>) {
         // it is copied, with no text made in between -- a put of a row
         // whose `@unique` email is written in mixed case went 1 348 ->
         // 1 210 ns, a plain field's 1 230.
+        #[cfg(feature = "nocase")]
         (Value::Text(t), Some(CaseFold::Unicode)) if t.is_ascii() => {
             out.push(crate::codec::TAG_TEXT);
             put_uvarint(out, t.len() as u64);
@@ -2431,15 +2441,39 @@ fn missing_feature(kind: &IndexKind) -> Option<&'static str> {
         IndexKind::Vector(_) if !cfg!(feature = "vector") => Some("vector"),
         IndexKind::Text(_) if !cfg!(feature = "text") => Some("text"),
         IndexKind::Inverted if !cfg!(feature = "sparse") => Some("sparse"),
+        IndexKind::Geo if !cfg!(feature = "geo") => Some("geo"),
         IndexKind::Sorted { .. } | IndexKind::Geo if !cfg!(feature = "sorted") => Some("sorted"),
         _ => None,
     }
 }
 
-fn not_built(what: &str, feature: &str) -> Error {
-    Error::Query(format!(
-        "{what} needs the `{feature}` feature, which this build was made without"
-    ))
+/// What `f` declares that this build was made without and that a
+/// statement over its collection cannot be answered without, and the
+/// feature it needs: a `nocase` field, whose text compared as written
+/// would find what its fold does not and miss what it does, and a collated
+/// one, whose order is ICU's tables. A file declaring one opens all the
+/// same and its other collections answer. A statement that needs another
+/// feature -- a point's distance, a facet, an aggregate -- is refused
+/// where it asks, and the collection stays open to the rest.
+fn unbuilt(f: &crate::schema::Field) -> Option<(String, &'static str)> {
+    if f.nocase && !cfg!(feature = "nocase") {
+        return Some(("nocase".into(), "nocase"));
+    }
+    if let (Some(c), false) = (f.collate, cfg!(feature = "collate")) {
+        return Some((format!("collate {}", c.name()), "collate"));
+    }
+    None
+}
+
+/// Whether `sorts` name a collation (`order name collate und`), which a
+/// build without the `collate` feature cannot order in.
+fn sorts_collate(sorts: &[Sort]) -> bool {
+    sorts.iter().any(|s| s.collate.is_some())
+}
+
+/// The refusal of an `order ... collate` in a build without collations.
+fn collate_refused() -> Error {
+    not_built("`order ... collate`", "collate")
 }
 
 /// Whether this build has every index, which is where the checks for one
@@ -2448,7 +2482,8 @@ const EVERY_INDEX: bool = cfg!(all(
     feature = "vector",
     feature = "text",
     feature = "sparse",
-    feature = "sorted"
+    feature = "sorted",
+    feature = "geo"
 ));
 
 /// The refusal of a `near` or a `match` over `field` when it declares an
@@ -4338,7 +4373,12 @@ impl Database {
             for (_, d) in c.geo.iter_mut() {
                 *d = Derived::unbuilt();
             }
-            let collated = |f: &str| c.schema.field(f).is_some_and(|f| f.collate.is_some());
+            // Without the `collate` feature none is: a statement over a
+            // collated field's collection is refused, and nothing compares
+            // in the collation.
+            let collated = |f: &str| {
+                cfg!(feature = "collate") && c.schema.field(f).is_some_and(|f| f.collate.is_some())
+            };
             for (f, d) in c.sorted.iter_mut() {
                 if !collated(f) {
                     *d = Derived::unbuilt();
@@ -5660,6 +5700,9 @@ impl Database {
         params: &[Value],
     ) -> Result<std::borrow::Cow<'s, Statement>> {
         use std::borrow::Cow;
+        if !crate::FULL {
+            self.refuse_unbuilt(stmt)?;
+        }
         let (collection, filter) = match stmt {
             Statement::Select(sel) => {
                 return Ok(match self.answered_select(sel, params, 0)? {
@@ -5721,7 +5764,8 @@ impl Database {
                 .is_some_and(|l| l.chain().any(|s| self.ttl_of(&s.collection).is_some()));
         // A select built in code, not parsed, has its disjunctive facets
         // split here, before the expiry is ANDed in.
-        let unsplit = sel.facets.iter().any(|f| f.disjunctive && f.rest.is_none());
+        let unsplit = cfg!(feature = "facets")
+            && sel.facets.iter().any(|f| f.disjunctive && f.rest.is_none());
         let timed = || {
             sel.calls_now()
                 && (self.ordered(&sel.collection)
@@ -5733,6 +5777,20 @@ impl Database {
         // included, since each is answered through here too -- and read
         // where the plan reads it (`Count::at`).
         sel.check_counts(params)?;
+        // Every collection a read reads passes here, so here is where one
+        // declaring what this build lacks is refused.
+        if !crate::FULL {
+            self.refuse_unbuilt_in(&sel.collection)?;
+            if !cfg!(feature = "collate") && sorts_collate(&sel.order) {
+                return Err(collate_refused());
+            }
+            for s in sel.lookup.iter().flat_map(|l| l.chain()) {
+                self.refuse_unbuilt_in(&s.collection)?;
+                if !cfg!(feature = "collate") && sorts_collate(&s.order) {
+                    return Err(collate_refused());
+                }
+            }
+        }
         if !expiring && !sel.has_subquery() && !unsplit && !timed() {
             return Ok(std::borrow::Cow::Borrowed(sel));
         }
@@ -5740,6 +5798,71 @@ impl Database {
         sel.split_facets()?;
         sel.each_filter_mut(&mut |collection, f| self.answer_filter(collection, f, params, depth))?;
         Ok(std::borrow::Cow::Owned(sel))
+    }
+
+    /// Refuses a write to a collection that declares what this build was
+    /// made without ([`unbuilt`]), and a `create collection` or an `alter`
+    /// that would declare it; the reads are refused where every `get` is
+    /// answered ([`Self::answered_select`]). A drop, a rename and the
+    /// schema's description stay, so a page can read what a file holds and
+    /// take the field off.
+    fn refuse_unbuilt(&self, stmt: &Statement) -> Result<()> {
+        match stmt {
+            Statement::Update { pick, .. } | Statement::Delete { pick, .. }
+                if !cfg!(feature = "collate")
+                    && pick.as_ref().is_some_and(|p| sorts_collate(&p.order)) =>
+            {
+                Err(collate_refused())
+            }
+            Statement::Put { collection, .. }
+            | Statement::Update { collection, .. }
+            | Statement::Delete { collection, .. } => self.refuse_unbuilt_in(collection),
+            Statement::CreateCollection { schema, .. } => match schema
+                .fields
+                .iter()
+                .find_map(|f| unbuilt(f).map(|u| (u, f)))
+            {
+                Some(((what, feature), f)) => Err(not_built(
+                    &format!("`{what}` on `{}.{}`", schema.name, f.name),
+                    feature,
+                )),
+                None => Ok(()),
+            },
+            Statement::AlterCollection { collection, change } => {
+                let what = match change {
+                    Alter::AddField(f) => unbuilt(f).map(|u| (u, f.name.as_str())),
+                    _ => None,
+                };
+                match what {
+                    Some(((what, feature), field)) => Err(not_built(
+                        &format!("`{what}` on `{collection}.{field}`"),
+                        feature,
+                    )),
+                    None => Ok(()),
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuses a statement over `collection` when its schema declares what
+    /// this build was made without and cannot answer over as written.
+    fn refuse_unbuilt_in(&self, collection: &str) -> Result<()> {
+        let Some(c) = self.collections.get(collection) else {
+            return Ok(());
+        };
+        match c
+            .schema
+            .fields
+            .iter()
+            .find_map(|f| unbuilt(f).map(|u| (u, f)))
+        {
+            Some(((what, feature), f)) => Err(not_built(
+                &format!("`{collection}`, whose `{}` is `{what}`,", f.name),
+                feature,
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Whether `collection` has an ordered index: what a time worked out
@@ -6319,8 +6442,8 @@ impl Database {
         comp: &Composite,
         if_not_exists: bool,
     ) -> Result<Option<Response>> {
-        if !cfg!(feature = "sorted") {
-            return Err(not_built("the index", "sorted"));
+        if !cfg!(feature = "composite") {
+            return Err(not_built("the index", "composite"));
         }
         let c = self.collection(collection)?;
         match c.schema.check_composite(comp)? {
@@ -6883,7 +7006,7 @@ impl Database {
         // Whether it is the answer is its own to say (`Composed::exact`),
         // since the rows apart need a look.
         let mut composed_exact: Option<bool> = None;
-        if cfg!(feature = "sorted") {
+        if cfg!(feature = "composite") {
             let n = c.store.len();
             for at in 0..c.composites.len() {
                 let comp = &c.composites[at].0;
@@ -6984,7 +7107,7 @@ impl Database {
         // key lies in its bounding box, under the same rule as a range:
         // while it stays smaller than what is in hand and than the scan.
         // Never the answer itself: each row's own point is tested.
-        if cfg!(feature = "sorted") && !c.geo.is_empty() {
+        if cfg!(all(feature = "sorted", feature = "geo")) && !c.geo.is_empty() {
             let mut shapes = Vec::new();
             crate::geo::conjunct_shapes(f, params, &mut shapes);
             let n = c.store.len();
@@ -7311,7 +7434,7 @@ impl Database {
         }
         // An index over several fields whose first parts an equality fixes:
         // its spans counted, two searches each.
-        for at in (0..c.composites.len()).filter(|_| cfg!(feature = "sorted")) {
+        for at in (0..c.composites.len()).filter(|_| cfg!(feature = "composite")) {
             if !names_first(Some(f), params, &c.composites[at].0.keys[0].0) {
                 continue;
             }
@@ -7342,7 +7465,7 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Option<Vec<DocId>>> {
-        if cfg!(feature = "sorted") && !c.composites.is_empty() {
+        if cfg!(feature = "composite") && !c.composites.is_empty() {
             if let Some(ids) = self.walk_composite(c, sel, params, ctx)? {
                 return Ok(Some(ids));
             }
@@ -7651,7 +7774,7 @@ impl Database {
         sel: &Select,
         params: &[Value],
     ) -> Result<Option<usize>> {
-        if !cfg!(feature = "sorted")
+        if !cfg!(feature = "composite")
             || c.composites.is_empty()
             || sel.lookup.is_some()
             || !sel.facets.is_empty()
@@ -7694,6 +7817,9 @@ impl Database {
         match c.schema.field(&near.field).map(|f| &f.ty) {
             Some(DataType::Sparse(dim)) => {
                 return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
+            }
+            Some(DataType::Geo) if !cfg!(feature = "geo") => {
+                return Err(not_built("`near` over a point", "geo"));
             }
             Some(DataType::Geo) => return self.run_geo_near(c, sel, near, want, params, ctx),
             _ => {}
@@ -7898,7 +8024,7 @@ impl Database {
     /// same point; a filter that passes almost nothing would have the walk
     /// test the whole collection out of order, so past an eighth of it the
     /// walk gives up, and every row the filter passes is measured instead.
-    #[cfg(feature = "sorted")]
+    #[cfg(all(feature = "sorted", feature = "geo"))]
     #[allow(clippy::too_many_arguments)]
     fn walk_geo_near(
         &self,
@@ -7985,8 +8111,9 @@ impl Database {
         Ok((!gave_up).then_some(out))
     }
 
-    /// A build without ordered indexes has no point index to walk.
-    #[cfg(not(feature = "sorted"))]
+    /// A build without ordered indexes, or without points, has no point
+    /// index to walk.
+    #[cfg(not(all(feature = "sorted", feature = "geo")))]
     #[allow(clippy::too_many_arguments)]
     fn walk_geo_near(
         &self,
@@ -8763,7 +8890,10 @@ impl Database {
             }
             let n = ids.len();
             let all = sel.filter.is_none() && sel.lookup.is_none();
-            let facets = self.facets(c, sel, &ids, all, &ctx)?;
+            let facets = match cfg!(feature = "facets") {
+                true => self.facets(c, sel, &ids, all, &ctx)?,
+                false => Vec::new(),
+            };
             return Ok(ResultSet {
                 columns: vec![COUNT_COLUMN.to_string()],
                 rows: vec![Row {
@@ -8815,7 +8945,7 @@ impl Database {
         // every row of the collection, which a hash index's buckets count
         // without a look at the rows.
         let mut facet_ids: Option<Vec<DocId>> = None;
-        let wants_facets = !sel.facets.is_empty();
+        let wants_facets = cfg!(feature = "facets") && !sel.facets.is_empty();
         let required = sel.lookup.as_ref().is_some_and(|l| l.required);
         let all = sel.filter.is_none() && !required && sel.matcher.is_none();
 
@@ -8850,7 +8980,7 @@ impl Database {
         // Worked out once `match` has run, which refused what it could not
         // search: a field with no text index, a query that is not text.
         let (terms, marks) = match (&sel.matcher, sel.marks.is_empty()) {
-            (Some(m), false) => self.mark_plans(c, sel, m, &ctx)?,
+            (Some(m), false) if cfg!(feature = "highlight") => self.mark_plans(c, sel, m, &ctx)?,
             _ => (None, Vec::new()),
         };
         // Fields alone, in their order, are read in one pass (`one_pass`).
@@ -8888,11 +9018,13 @@ impl Database {
                     Source::Calc(i) if found => calc.env[calcs[*i]].clone(),
                     Source::Calc(_) => Value::Null,
                     // Without the text index no `match` ran, and the marking
-                    // is left out of the build.
-                    Source::Mark(i) => match (&terms, cfg!(feature = "text")) {
-                        (Some(t), true) => marks[*i].value(t, &c.store, id)?,
-                        _ => Value::Null,
-                    },
+                    // is left out of the build, as it is without `highlight`.
+                    Source::Mark(i) => {
+                        match (&terms, cfg!(all(feature = "text", feature = "highlight"))) {
+                            (Some(t), true) => marks[*i].value(t, &c.store, id)?,
+                            _ => Value::Null,
+                        }
+                    }
                 });
             }
             rows.push(Row { id, values, score });
@@ -9963,10 +10095,10 @@ fn sorted_of(
 /// [`hash_of`].
 /// The parts of `c`, an index over several fields of `schema`: each part's
 /// kind by its field's type, its collation and its fold by its field's.
-/// `None` in a build without the `sorted` feature, or where a part names no
+/// `None` in a build without the `composite` feature, or where a part names no
 /// field -- which the schema refuses before it gets here.
 fn composite_parts(schema: &Schema, c: &Composite) -> Option<Vec<crate::composite::Part>> {
-    if !cfg!(feature = "sorted") {
+    if !cfg!(feature = "composite") {
         return None;
     }
     let mut parts = Vec::with_capacity(c.keys.len());
@@ -9994,18 +10126,18 @@ fn composite_key(ix: &CompositeIndex, c: &Composite, doc: &Document) -> crate::c
     ix.key(&vals[..c.keys.len().min(vals.len())])
 }
 
-/// A build without ordered indexes holds none over several fields either.
-#[cfg(not(feature = "sorted"))]
+/// A build without the indexes over several fields holds none to build.
+#[cfg(not(feature = "composite"))]
 fn composite_of(_: &Store, _: &Schema, _: &Composite) -> Result<CompositeIndex> {
-    Err(not_built("the index", "sorted"))
+    Err(not_built("the index", "composite"))
 }
 
 /// The index over the fields of `c` built from the documents: each read
 /// once, the fields its parts read in one pass, and the keys put in order
 /// together ([`CompositeIndex::build`]).
-#[cfg(feature = "sorted")]
+#[cfg(feature = "composite")]
 fn composite_of(store: &Store, schema: &Schema, c: &Composite) -> Result<CompositeIndex> {
-    let parts = composite_parts(schema, c).ok_or_else(|| not_built("the index", "sorted"))?;
+    let parts = composite_parts(schema, c).ok_or_else(|| not_built("the index", "composite"))?;
     let ix = CompositeIndex::new(parts.clone());
     let mut keys = Vec::with_capacity(store.len());
     composite_keys(store, schema, c, &ix, &mut |id, k| keys.push((id, k)))?;
@@ -10015,7 +10147,7 @@ fn composite_of(store: &Store, schema: &Schema, c: &Composite) -> Result<Composi
 /// Each document's key in `ix`, the index over the fields of `c`, handed
 /// to `out` in id order: what a build puts in, and what a build beside the
 /// database copies under the read lock to put in with none held.
-#[cfg(feature = "sorted")]
+#[cfg(feature = "composite")]
 fn composite_keys(
     store: &Store,
     schema: &Schema,
@@ -10125,7 +10257,7 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
 
 /// The point index of the field at `pos`, as [`sorted_of`]: sorted once
 /// from its keys, each row's point read straight off its 16 bytes.
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 fn geo_of(store: &Store, pos: usize) -> Result<GeoIndex> {
     let mut rows = Vec::with_capacity(store.len());
     for id in store.ids() {
@@ -10136,10 +10268,11 @@ fn geo_of(store: &Store, pos: usize) -> Result<GeoIndex> {
     Ok(GeoIndex::build(&mut rows.into_iter()))
 }
 
-/// A build without ordered indexes holds no point index either.
-#[cfg(not(feature = "sorted"))]
+/// A build without ordered indexes, or without points, holds no point
+/// index either.
+#[cfg(not(all(feature = "sorted", feature = "geo")))]
 fn geo_of(_: &Store, _: usize) -> Result<GeoIndex> {
-    Err(not_built("the index", "sorted"))
+    Err(not_built("the index", "geo"))
 }
 
 /// Builds the index the schema declares on the path `path` into a json
@@ -10660,7 +10793,7 @@ fn ranked_rows(sel: &Select, params: &[Value], clause: &str, ceiling: usize) -> 
 /// The most rows `near` over a point measures, every one, when an index
 /// names them for its filter, rather than walk the point index: a few
 /// thousand distances are a fraction of a millisecond.
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 const GEO_SET: usize = 4096;
 
 /// The `want` of `ids` -- ascending -- nearest `from`, in the order of
@@ -11133,6 +11266,7 @@ enum Test<'q> {
     /// works it out, the row's point first when `field_first`, and
     /// compared as a `Cmp` compares it, the call on the left when
     /// `call_first` -- so the answer is `eval`'s, null point and all.
+    #[cfg(feature = "geo")]
     Distance {
         slot: Slot,
         to: (f64, f64),
@@ -11142,6 +11276,7 @@ enum Test<'q> {
         call_first: bool,
     },
     /// `within(<a point field>, <box>)`.
+    #[cfg(feature = "geo")]
     Within(Slot, crate::geo::GeoBox),
     /// A `nocase` field's text against values folded where it is bound,
     /// by its fold.
@@ -11253,6 +11388,7 @@ impl<'q> Filter<'q> {
             Value::Text(t) => Value::Text(crate::case::fold(&t, f).into_owned()),
             v => v,
         };
+        #[cfg(feature = "geo")]
         if let Some(t) = Filter::bind_geo(c, e, &value, &mut slot) {
             return t;
         }
@@ -11323,7 +11459,12 @@ impl<'q> Filter<'q> {
             }
             Expr::Like(a, b) => match (slot(a), value(b)) {
                 (Some(s), Some(Value::Text(t))) if fold_of(Some(s)).is_some() => {
+                    #[cfg(feature = "nocase")]
                     let f = fold_of(Some(s)).unwrap_or(CaseFold::Unicode);
+                    #[cfg(not(feature = "nocase"))]
+                    let Some(f) = fold_of(Some(s)) else {
+                        return Test::Eval(e);
+                    };
                     let needle = crate::case::fold(&t, f).into_owned();
                     Test::Folded(s, f, Box::new(Folded::Like(needle)))
                 }
@@ -11345,6 +11486,7 @@ impl<'q> Filter<'q> {
     /// point read off its bytes with the rest of its fields where `eval`
     /// would look the field up by name and the function by its, and
     /// allocate the call's arguments. `None` for anything else.
+    #[cfg(feature = "geo")]
     fn bind_geo(
         c: &Collection,
         e: &'q Expr,
@@ -11436,7 +11578,10 @@ impl<'q> Filter<'q> {
     fn apart(&self, slot: Slot, t: &Test, v: &Value) -> bool {
         match t {
             Test::Folded(_, f, folded) => self.folded(slot, v, *f, folded),
+            #[cfg(feature = "geo")]
             t => geo_test(t, v),
+            #[cfg(not(feature = "geo"))]
+            _ => false,
         }
     }
 
@@ -11586,9 +11731,12 @@ impl<'q> Filter<'q> {
             // runs: an arm of its own for a `nocase` field's took the
             // browser module's count over 20 000 rows by two numbers, which
             // runs neither, 1.25 -> 1.34 ms.
+            #[cfg(feature = "geo")]
             Test::Distance { slot, .. } | Test::Within(slot, _) | Test::Folded(slot, ..) => {
                 self.apart(*slot, t, get(*slot))
             }
+            #[cfg(not(feature = "geo"))]
+            Test::Folded(slot, ..) => self.apart(*slot, t, get(*slot)),
             Test::Eval(e) => {
                 let mut row = StoreRow {
                     store: &self.c.store,
@@ -11611,6 +11759,7 @@ impl<'q> Filter<'q> {
 /// A row whose latitude alone puts it past a number compares as its
 /// distance would, with no trigonometry (`geo::past`): a scan of a million
 /// rows by a radius went 136 -> 22 ms.
+#[cfg(feature = "geo")]
 #[inline(never)]
 fn geo_test(t: &Test, v: &Value) -> bool {
     match t {

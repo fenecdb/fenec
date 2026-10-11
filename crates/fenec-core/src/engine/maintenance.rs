@@ -78,7 +78,7 @@ struct IndexCopy {
 
 /// An index over several fields' keys, copied: each row's in id order, and
 /// the empty index they go into.
-#[cfg(feature = "sorted")]
+#[cfg(feature = "composite")]
 struct CompositeCopy {
     token: u64,
     cid: u32,
@@ -99,7 +99,7 @@ enum Built {
     #[cfg_attr(not(feature = "sorted"), allow(dead_code))]
     Sorted(SortedIndex),
     Sparse(SparseIndex),
-    #[cfg_attr(not(feature = "sorted"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "sorted", feature = "geo")), allow(dead_code))]
     Geo(GeoIndex),
 }
 
@@ -244,14 +244,14 @@ impl Database {
                 kind,
                 if_not_exists,
             } => index_online(db, collection, field, kind, *if_not_exists, during),
-            #[cfg(feature = "sorted")]
+            #[cfg(feature = "composite")]
             Statement::CreateComposite {
                 collection,
                 index,
                 if_not_exists,
             } => composite_online(db, collection, index, *if_not_exists, during),
             // Refused, the feature named, as `execute` refuses it.
-            #[cfg(not(feature = "sorted"))]
+            #[cfg(not(feature = "composite"))]
             Statement::CreateComposite { .. } => write(db).execute_with(stmt, &[]),
             Statement::Compact(which) => compact_online(db, which.as_deref(), during),
             _ => return None,
@@ -519,7 +519,7 @@ impl Database {
 
     /// The keys of an index over several fields copied under the read lock,
     /// as [`Self::begin_index`] copies a field's values.
-    #[cfg(feature = "sorted")]
+    #[cfg(feature = "composite")]
     fn begin_composite(
         &self,
         collection: &str,
@@ -532,7 +532,7 @@ impl Database {
         }
         let c = &self.collections[collection];
         let keyed = super::empty_composite(&c.schema, comp)
-            .ok_or_else(|| super::not_built("the index", "sorted"))?;
+            .ok_or_else(|| super::not_built("the index", "composite"))?;
         let mut keys = Vec::with_capacity(c.store.len());
         super::composite_keys(&c.store, &c.schema, comp, &keyed, &mut |id, k| {
             keys.push((id, k))
@@ -550,7 +550,7 @@ impl Database {
     /// The index built beside the database put in place under the write
     /// lock, once the writes made meanwhile are in it: each out with the
     /// key the copy saw, in with the one its row holds now.
-    #[cfg(feature = "sorted")]
+    #[cfg(feature = "composite")]
     fn finish_composite(
         &mut self,
         copy: CompositeCopy,
@@ -1195,9 +1195,9 @@ impl IndexCopy {
                 ix.shrink_to_fit();
                 Built::Sparse(ix)
             }
-            #[cfg(not(feature = "sorted"))]
+            #[cfg(not(all(feature = "sorted", feature = "geo")))]
             IndexKind::Geo => unreachable!("`create index` refuses what the build lacks"),
-            #[cfg(feature = "sorted")]
+            #[cfg(all(feature = "sorted", feature = "geo"))]
             IndexKind::Geo => {
                 Built::Geo(GeoIndex::build(&mut self.values.iter().filter_map(
                     |(id, v)| Some((*id, crate::geo::point_in(v.as_ref()?)?)),
@@ -1236,7 +1236,7 @@ fn index_online(
 /// copied under the read lock, put in order with no lock held -- the
 /// inserts are the build -- and the writes made meanwhile caught up with
 /// under the write lock.
-#[cfg(feature = "sorted")]
+#[cfg(feature = "composite")]
 fn composite_online(
     db: &RwLock<Database>,
     collection: &str,

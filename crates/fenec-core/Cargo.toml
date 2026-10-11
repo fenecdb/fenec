@@ -19,20 +19,58 @@ categories.workspace = true
 fenec-ql = { path = "../fenec-ql" }
 
 [features]
-default = ["std-fs", "indexes"]
+default = ["std-fs", "full"]
 # File support (native). The WASM build is made without this feature.
 std-fs = []
-# The indexes a page may go without, and what answers through them: the HNSW
-# graph (`near`, `fuse`), the text index (`match`, and `rerank`, which reads
-# the vectors and needs no graph), the sparse inverted index (`near` over
-# `sparse<N>`) and the ordered index (`@sorted`, whose queries the scan
-# answers the same without it). A file declaring one a build lacks opens all
-# the same, and its documents read and write.
-indexes = ["vector", "text", "sparse", "sorted"]
+# Everything a build may go without (`make wasm-sizes` weighs each in the
+# browser module): the indexes, and the rest of the language a page may not
+# use. A file declaring what a build lacks opens all the same; what needs it
+# is refused, the feature named. A crate that depends on fenec-core names
+# `full` itself, since the workspace takes it without default features.
+full = ["indexes", "language"]
+# The indexes, and what answers through them: the HNSW graph (`near`,
+# `fuse`), the text index (`match`, and `rerank`, which reads the vectors and
+# needs no graph), the sparse inverted index (`near` over `sparse<N>`), the
+# ordered index (`@sorted`, whose queries the scan answers the same without
+# it) and the index over several fields (`@sorted(owner, created desc)`,
+# `@unique(org, slug)`, kept in the ordered index's chunks; without it the
+# scan answers its filters and orders, and a unique one is asked by reading
+# the rows). Without one, a file declaring it opens, its documents read and
+# write, and `create index` of its kind is refused.
+indexes = ["vector", "text", "sparse", "sorted", "composite"]
 vector = []
 text = []
 sparse = []
 sorted = []
+composite = ["sorted"]
+# The rest of the language, each part a page may go without.
+language = ["geo", "nocase", "facets", "highlight", "analytics", "collate"]
+# Points: `distance()`, `within()` and `near` over a `geo` field, and its
+# `@geo` index, whose keys sit in the ordered index's chunks and so needs
+# `sorted` too (without it the scan answers). Without `geo` a point is read,
+# written and checked as one, and the rest is refused.
+geo = []
+# A text compared by its case fold (`email text nocase`). Without it a file
+# declaring one opens, and a statement over that collection is refused --
+# its text compared as written would be a wrong answer -- as is a `create
+# collection` or an `alter` declaring one; the file's other collections
+# answer as ever.
+nocase = []
+# `facet`: value counts, disjunctive facets and ranges beside a page.
+# Without it a `get` asking one is refused.
+facets = []
+# `highlight()` and `snippet()`: the spans `match` found in a row's text,
+# which needs `text` as well. Without it a `get` asking one is refused.
+highlight = []
+# The aggregates past `count`, `sum`, `avg`, `min` and `max` over groups:
+# `count(distinct ...)`, `first` and `last ... by`, `approx_count_distinct`
+# and the `hll_*` sketches, `bucket()`, `having`. Without it each is refused.
+analytics = []
+# Text in a language's order (`collate und`, `collate tr`): ICU's tables,
+# the root's Latin chunk in the browser module and the others it is handed.
+# Without it a file declaring a collated field opens, a statement over that
+# collection is refused, as `nocase`'s is, and so is `order ... collate`.
+collate = []
 
 [[test]]
 name = "all"

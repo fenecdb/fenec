@@ -20,11 +20,15 @@ fenec-ql.workspace = true
 # module 155 bytes larger.
 fenec-abi = { workspace = true, default-features = false }
 
-# A page that needs no vector, text or sparse search, or no ordered index,
-# loads a module built without it: `make wasm FEATURES=...`.
+# A module made for a page leaves out what the page does not use: `make
+# wasm FEATURES=...` names what it keeps. fenec-core's `Cargo.toml` says
+# what each is and what a build without it does with a file or a statement
+# that needs it; `make wasm-sizes` weighs each.
 [features]
-default = ["indexes", "schema"]
-indexes = ["vector", "text", "sparse", "sorted"]
+default = ["full", "schema"]
+full = ["indexes", "language"]
+indexes = ["vector", "text", "sparse", "sorted", "composite"]
+language = ["geo", "nocase", "facets", "highlight", "analytics", "collate"]
 # The check a schema declared in code is opened with (`fenec_schema`,
 # `fenec_core::declared`): 23 KB of the module, 7.5 KB brotli, which a page
 # whose code declares none may leave out.
@@ -33,3 +37,10 @@ vector = ["fenec-core/vector"]
 text = ["fenec-core/text"]
 sparse = ["fenec-core/sparse"]
 sorted = ["fenec-core/sorted"]
+composite = ["sorted", "fenec-core/composite"]
+geo = ["fenec-core/geo"]
+nocase = ["fenec-core/nocase"]
+facets = ["fenec-core/facets"]
+highlight = ["fenec-core/highlight"]
+analytics = ["fenec-core/analytics"]
+collate = ["fenec-core/collate"]

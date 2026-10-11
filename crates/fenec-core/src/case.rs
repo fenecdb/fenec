@@ -119,6 +119,7 @@ pub fn upper(s: &str) -> String {
 /// `upper` and the tokenizer. Nothing is normalised: `é` written as one code
 /// point and as `e` and a combining accent stay two texts, as they do
 /// everywhere else in fenecdb, and a full-width `Ａ` folds to `ａ`, not `a`.
+#[cfg(feature = "nocase")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaseFold {
     /// Unicode's, for every language.
@@ -129,6 +130,31 @@ pub enum CaseFold {
     /// them -- Unicode's own makes `ISTANBUL` `istanbul` and leaves `ı`
     /// alone.
     Turkish,
+}
+
+/// A build without the `nocase` feature folds nothing: a fold of no value,
+/// so that every `Option<CaseFold>` is `None` to the compiler and each
+/// path through one -- the indexes' folded keys, the filter's folded tests,
+/// a folded order, group and facet -- leaves the browser module. A file
+/// declaring a `nocase` field opens all the same, and a statement over its
+/// collection is refused (`Database::refuse_unbuilt`), since its text
+/// compared as written would be a wrong answer.
+#[cfg(not(feature = "nocase"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseFold {}
+
+impl CaseFold {
+    /// Whether it is Turkish's, which folds `I` to `ı`.
+    #[cfg(feature = "nocase")]
+    #[inline]
+    fn turkish(self) -> bool {
+        self == CaseFold::Turkish
+    }
+
+    #[cfg(not(feature = "nocase"))]
+    fn turkish(self) -> bool {
+        match self {}
+    }
 }
 
 /// The code points past ASCII whose fold is not their lowercase, as runs,
@@ -211,14 +237,14 @@ fn unlike_lower(c: char) -> bool {
 fn fold_char(c: char, f: CaseFold) -> ([char; 3], usize) {
     let one = |c| ([c, '\0', '\0'], 1);
     if c.is_ascii() {
-        return match (c, f) {
-            ('I', CaseFold::Turkish) => one('ı'),
+        return match c {
+            'I' if f.turkish() => one('ı'),
             _ => one(c.to_ascii_lowercase()),
         };
     }
-    match (c, f) {
-        ('ı', _) => return one('ı'),
-        ('İ', CaseFold::Turkish) => return one('i'),
+    match c {
+        'ı' => return one('ı'),
+        'İ' if f.turkish() => return one('i'),
         _ => {}
     }
     let (mut out, mut n) = (['\0'; 3], 0);
@@ -290,7 +316,7 @@ pub fn fold_into(s: &str, f: CaseFold, out: &mut String) {
 #[inline]
 fn ascii_run(b: &[u8], f: CaseFold) -> usize {
     b.iter()
-        .position(|&x| x >= 0x80 || (x == b'I' && f == CaseFold::Turkish))
+        .position(|&x| x >= 0x80 || (x == b'I' && f.turkish()))
         .unwrap_or(b.len())
 }
 
@@ -334,13 +360,16 @@ impl Iterator for Folds<'_> {
 /// only as far as the two agree: a scan's row is mostly told apart at its
 /// first character. An ASCII `a` is lowercased byte by byte as it is read,
 /// against `folded`'s bytes, which order as its code points do.
+// Without the `nocase` feature a fold has no value, and what follows its
+// first use is unreachable: the compiler's own proof that none of it runs.
+#[cfg_attr(not(feature = "nocase"), allow(unreachable_code, unused_variables))]
 pub fn cmp_to_folded(a: &str, folded: &str, f: CaseFold) -> std::cmp::Ordering {
     let (x, y) = (a.as_bytes(), folded.as_bytes());
     let mut i = 0;
     // The ASCII `a` starts with, lowercased byte by byte against `folded`'s
     // bytes, which order as their code points do: an ASCII byte against
     // the first of another character's is below it, as the character is.
-    while i < x.len() && i < y.len() && x[i] < 0x80 && (x[i] != b'I' || f == CaseFold::Unicode) {
+    while i < x.len() && i < y.len() && x[i] < 0x80 && (x[i] != b'I' || !f.turkish()) {
         let o = x[i].to_ascii_lowercase().cmp(&y[i]);
         if o != std::cmp::Ordering::Equal {
             return o;
@@ -356,9 +385,10 @@ pub fn cmp_to_folded(a: &str, folded: &str, f: CaseFold) -> std::cmp::Ordering {
 /// `a`'s fold against `b`'s, as their bytes compare -- code point by code
 /// point, which UTF-8 keeps -- with neither written out: the ASCII both
 /// start with compared byte by byte, lowercased as it is read.
+#[cfg_attr(not(feature = "nocase"), allow(unreachable_code, unused_variables))]
 pub fn cmp_folded(a: &str, b: &str, f: CaseFold) -> std::cmp::Ordering {
     let (x, y) = (a.as_bytes(), b.as_bytes());
-    let plain = |c: u8| c < 0x80 && (c != b'I' || f == CaseFold::Unicode);
+    let plain = |c: u8| c < 0x80 && (c != b'I' || !f.turkish());
     let mut i = 0;
     while i < x.len() && i < y.len() && plain(x[i]) && plain(y[i]) {
         let o = x[i].to_ascii_lowercase().cmp(&y[i].to_ascii_lowercase());

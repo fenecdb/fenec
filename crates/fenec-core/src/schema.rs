@@ -460,11 +460,19 @@ impl Field {
 
     /// The fold its text compares by: Turkish's in `collate tr`,
     /// Unicode's otherwise; `None` for a field that is not `nocase`.
+    #[cfg(feature = "nocase")]
     pub fn case_fold(&self) -> Option<CaseFold> {
         self.nocase.then_some(match self.collate {
             Some(Collation::Turkish) => CaseFold::Turkish,
             _ => CaseFold::Unicode,
         })
+    }
+
+    /// None in a build without the `nocase` feature, which has no fold to
+    /// give and refuses the statements over a `nocase` field's collection.
+    #[cfg(not(feature = "nocase"))]
+    pub fn case_fold(&self) -> Option<CaseFold> {
+        None
     }
 
     /// How its text compares wherever it compares.

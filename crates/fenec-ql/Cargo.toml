@@ -17,7 +17,7 @@ fenec-core = { workspace = true, default-features = false }
 # them. The parser needs none, and asking for them here would put them back
 # into a browser module made without them.
 [dev-dependencies]
-fenec-core = { workspace = true, features = ["indexes"] }
+fenec-core = { workspace = true, features = ["full"] }
 
 [features]
 default = []

@@ -31,9 +31,9 @@
 //! that reads it after an open and by `create index`, kept on write, never
 //! in the file.
 
-// Without the `sorted` feature the index's code is here but unused
+// Without the `composite` feature the index's code is here but unused
 // (`off.rs`); the encoding the planner shares stays.
-#![cfg_attr(not(feature = "sorted"), allow(dead_code, unused_imports))]
+#![cfg_attr(not(feature = "composite"), allow(dead_code, unused_imports))]
 use crate::case::CaseFold;
 use crate::collate::{Collation, TextOrder};
 use crate::sorted::{float_key, int_key, json_slot, Chunked, Entry, JsonSlot};
@@ -416,7 +416,7 @@ pub struct PartRange {
 }
 
 /// The index: its parts, and every row's key.
-#[cfg(feature = "sorted")]
+#[cfg(feature = "composite")]
 pub struct CompositeIndex {
     parts: Box<[Part]>,
     keys: Chunked<KeyEntry>,
@@ -429,7 +429,7 @@ pub struct CompositeIndex {
     heap: usize,
 }
 
-#[cfg(feature = "sorted")]
+#[cfg(feature = "composite")]
 impl CompositeIndex {
     pub fn new(parts: Vec<Part>) -> CompositeIndex {
         // The collation passed in says only that the keys compare part by
@@ -701,7 +701,7 @@ impl CompositeIndex {
     }
 }
 
-#[cfg(feature = "sorted")]
+#[cfg(feature = "composite")]
 impl CompositeIndex {
     /// Walks the spans' ids in the order their keys' parts from `fixed` to
     /// `ties` put them -- the parts an `order` reads past the ones the
@@ -822,10 +822,10 @@ fn tighter(b: &Bound<Vec<u8>>, old: &Bound<Vec<u8>>, lower: bool) -> bool {
     (o == Ordering::Greater) == lower
 }
 
-#[cfg(not(feature = "sorted"))]
+#[cfg(not(feature = "composite"))]
 pub use crate::off::CompositeIndex;
 
-#[cfg(all(test, feature = "sorted"))]
+#[cfg(all(test, feature = "composite"))]
 mod tests {
     use super::*;
 
@@ -974,7 +974,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "sorted"))]
+#[cfg(all(test, feature = "composite"))]
 mod build_tests {
     use super::*;
 

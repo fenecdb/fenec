@@ -56,14 +56,18 @@ jobs:
       # std-fs.
       - run: cargo clippy -p fenec-wasm -p fenec-abi -p fenec-core -p fenec-ql --target wasm32-unknown-unknown -- -D warnings
 
-      # A module made without some of the indexes (`make wasm FEATURES=...`)
-      # compiles what the full one does not: the stand-ins in off.rs, and
-      # the engine with its paths through them dead. None of the four, each
-      # alone, and fenec-core's tests and examples without them.
+      # A module made without some of its features (`make wasm FEATURES=...`)
+      # compiles what the full one does not: the stand-ins in off.rs, the
+      # folds of no value, and the engine with its paths through them dead.
+      # None, each feature alone, each group; a set of two is each alone's
+      # code twice over, which these already compile. A check with no code
+      # made: about 10 s a set. And fenec-core's tests and examples without
+      # the indexes, and without anything.
       - run: |
-          for f in "" vector text sparse sorted; do
+          for f in "" vector text sparse sorted composite geo nocase facets highlight analytics collate indexes language; do
             cargo clippy -p fenec-wasm -p fenec-core --target wasm32-unknown-unknown --no-default-features ${f:+--features=$f} -- -D warnings
           done
+      - run: cargo clippy -p fenec-core --no-default-features --features std-fs,language --all-targets -- -D warnings
       - run: cargo clippy -p fenec-core --no-default-features --features std-fs --all-targets -- -D warnings
 
       # The native library with the JNI functions the Kotlin binding calls,
@@ -106,7 +110,7 @@ jobs:
       # full one's files to, and back, and holds its `near` to the full
       # one's `near ... exact`.
       - name: Build WASM
-        run: make wasm wasm-lite
+        run: make wasm wasm-lite wasm-min
 
       # site/build.py holds every size the docs quote against the module just
       # built, and under CI refuses one that drifted. The site is built only

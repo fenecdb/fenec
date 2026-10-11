@@ -6,15 +6,17 @@ CARGO ?= $(shell test -x $(HOME)/.cargo/bin/cargo && echo $(HOME)/.cargo/bin/car
 PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
-# The indexes the browser module is built with: every one unless named --
-# `make wasm FEATURES="text sorted"`, or FEATURES=none for none of them. The
-# check a schema declared in code opens with comes with any set, unless
-# SCHEMA=0: 7.5 KB brotli for a page whose code declares none.
+# What the browser module is built with: every feature unless named --
+# `make wasm FEATURES="text sorted geo"`, FEATURES=indexes or language for a
+# group, FEATURES=none for none of them (fenec-core's Cargo.toml says what
+# each is, `make wasm-sizes` weighs each). The check a schema declared in
+# code opens with comes with any set, unless SCHEMA=0: 7.5 KB brotli for a
+# page whose code declares none.
 FEATURES ?=
 SCHEMA ?= 1
-WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
+WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench replica-bench concurrency-bench requests-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench ttl-bench growth-bench search-bench nocase-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench replica-bench concurrency-bench requests-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench ttl-bench growth-bench search-bench nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
@@ -24,7 +26,8 @@ all: test wasm
 
 ## Rust first: `cargo test` also builds the `fenec-server` binary, and the sync
 ## tests on the JS side run against it (they skip themselves without it).
-## Then fenec-core made without its indexes, as a small browser module is.
+## Then fenec-core made without its indexes, as a small browser module is,
+## and without the rest of the language too: the smallest module there is.
 ## fenec-bench has no tests, and SQLite's C source and the postgres client
 ## under it are the heaviest thing a build compiles; the examples are
 ## measurement programs, a fifth of what `cargo test` compiled. Clippy's
@@ -35,6 +38,7 @@ test:
 	@rm -rf target/sync-scenarios
 	$(CARGO) test --workspace --exclude fenec-bench --lib --bins --tests
 	$(CARGO) test --workspace --exclude fenec-bench --doc
+	$(CARGO) test -p fenec-core --no-default-features --features std-fs,language --lib --test features
 	$(CARGO) test -p fenec-core --no-default-features --features std-fs --lib --test features
 	@$(MAKE) --no-print-directory test-js
 	@if [ -f web/fenec.wasm ] && command -v node >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-scenarios-check; fi
@@ -154,25 +158,35 @@ wasm:
 	@mkdir -p web/collate && rm -f web/collate/*.bin && cp crates/fenec-core/src/collate/*.bin web/collate/
 	@echo "web/fenec.wasm  $$(wc -c < web/fenec.wasm) bytes"
 
-## The module made without an index or the schema check (as `make wasm
-## FEATURES=none SCHEMA=0`), for web/fenec.test.js to hand files between it
-## and the full one, both ways. A test build: no package or release ships
+## The module made without the indexes or the schema check (as `make wasm
+## FEATURES=language SCHEMA=0`), for web/fenec.test.js to hand files between
+## it and the full one, both ways. A test build: no package or release ships
 ## it, since a page either runs its queries on a server (@fenecdb/web/client)
 ## or takes the full module.
 wasm-lite:
-	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm --no-default-features 2>&1 | tail -2
+	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm --no-default-features --features language 2>&1 | tail -2
 	@cp $(WASM_OUT) web/fenec-lite.wasm
 	@echo "web/fenec-lite.wasm  $$(wc -c < web/fenec-lite.wasm) bytes"
+
+## The module made with no feature at all (as `make wasm FEATURES=none
+## SCHEMA=0`), the smallest there is: web/fenec.test.js opens the full
+## one's files in it and holds it to refusing what it lacks. A test build,
+## shipped by nothing, as wasm-lite.
+wasm-min:
+	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm --no-default-features 2>&1 | tail -2
+	@cp $(WASM_OUT) web/fenec-min.wasm
+	@echo "web/fenec-min.wasm  $$(wc -c < web/fenec-min.wasm) bytes"
 
 ## What counting a statement by its shape costs (/_stats/statements,
 ## pg_stat_statements): a million each, by one thread and by eight.
 statements-bench:
 	$(CARGO) run --release -p fenec-http --example statements
 
-## The browser module's size built with each set of the four indexes
-## (vector, text, sparse, sorted): raw, gzip -9 and brotli -q 11, in KB.
+## The browser module's size with every feature, with none, with each alone
+## and with every one but each: raw, gzip -9 and brotli -q 11, in KB, and
+## what each adds and saves. ONLY="geo collate" for those alone.
 wasm-sizes:
-	@python3 crates/fenec-wasm/sizes.py
+	@ONLY="$(ONLY)" python3 crates/fenec-wasm/sizes.py
 
 ## How fast the browser module is, in Node: an HNSW build, `near`, a filter
 ## and an order, `match`, a page of vectors as JSON. A list of .wasm files
@@ -193,8 +207,9 @@ wasm-exact-speed: wasm wasm-lite
 ## WHY=<pattern> names the first of fenec's functions on each way to the
 ## functions matching it: make size-report WHY=flt2dec. BIN=fenec|fenec-server|
 ## fenec-shard reports that native binary's code by crate instead.
+## FEATURES="text geo" measures the module built with those alone (none: none).
 size-report:
-	@python3 crates/fenec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)') $(if $(BIN),--bin $(BIN))
+	@python3 crates/fenec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)') $(if $(BIN),--bin $(BIN)) $(if $(FEATURES),--features '$(if $(filter none,$(FEATURES)),,$(FEATURES))')
 
 ## PyPI's fenecdb and npm's @fenecdb/web and @fenecdb/react as a release
 ## publishes them, installed into a project and a venv of their own and
@@ -713,11 +728,11 @@ sweep:
 
 ## The website and the documentation. Plain static files, stdlib-only
 ## generator; the live console on the home page needs `make wasm` first.
-site: wasm wasm-lite
+site: wasm wasm-lite wasm-min
 	python3 site/build.py
 
 ## Same, on http://localhost:8788
-site-serve: wasm wasm-lite
+site-serve: wasm wasm-lite wasm-min
 	python3 site/build.py --serve --port $(SITE_PORT)
 
 ## Publishes to Cloudflare Workers (fenecdb.com). Needs `wrangler login`
@@ -727,5 +742,5 @@ site-deploy: site
 
 clean:
 	$(CARGO) clean
-	rm -f web/fenec.wasm web/fenec-lite.wasm
+	rm -f web/fenec.wasm web/fenec-lite.wasm web/fenec-min.wasm
 	rm -rf web/collate site/dist

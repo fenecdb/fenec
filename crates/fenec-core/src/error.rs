@@ -62,3 +62,11 @@ impl From<std::io::Error> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The refusal of what needs a feature this build was made without
+/// (`Cargo.toml`): `what` names it, and the message names the feature.
+pub(crate) fn not_built(what: &str, feature: &str) -> Error {
+    Error::Query(format!(
+        "{what} needs the `{feature}` feature, which this build was made without"
+    ))
+}

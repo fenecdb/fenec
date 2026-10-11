@@ -1,11 +1,15 @@
 target/
 pkg/
 *.fenec
+# A file only a build with every feature can write, which the builds
+# without them open (crates/fenec-core/tests/language_file.rs).
+!crates/fenec-core/tests/language.fenec
 .DS_Store
 node_modules/
 web/fenec-schema.d.ts
 web/fenec.wasm
 web/fenec-lite.wasm
+web/fenec-min.wasm
 web/collate/
 site/dist/
 .wrangler/

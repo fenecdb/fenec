@@ -13,7 +13,7 @@ categories.workspace = true
 [dependencies]
 # No external dependencies: the framing is written by hand, and SCRAM's
 # hashing is fenec-http's.
-fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
+fenec-core = { workspace = true, features = ["std-fs", "full"] }
 fenec-http.workspace = true
 
 [[test]]

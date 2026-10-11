@@ -37,8 +37,9 @@
 //! point decides.
 
 // Without the `sorted` feature the keys and covers are here but unused
-// (`off.rs` stands in for the index); the distances and shapes stay.
-#![cfg_attr(not(feature = "sorted"), allow(dead_code))]
+// (`off.rs` stands in for the index); the distances and shapes stay. Without
+// the `geo` feature only a point's reading and checking is used.
+#![cfg_attr(not(all(feature = "sorted", feature = "geo")), allow(dead_code))]
 
 use crate::error::{Error, Result};
 use crate::query::{CmpOp, Expr};
@@ -650,11 +651,11 @@ fn cell_floor((lon, lat): (f64, f64), cos_from: f64, cell: (f64, f64, f64, f64))
 
 // ------------------------------------------------------------------- index
 
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 use crate::sorted::Chunked;
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 use crate::value::DocId;
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 use std::ops::Bound;
 
 /// The index behind `@geo`: each row's point as its key ([`key`]) beside
@@ -663,30 +664,30 @@ use std::ops::Bound;
 /// and `near` passes it over. Derived data, as the other indexes are: built
 /// by the first statement that reads it after an open, kept up on write,
 /// never in the file.
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 pub struct GeoIndex {
     keys: Chunked<(u64, DocId)>,
 }
 
 /// A row's entry, `None` for a row with no point.
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 fn entry(id: DocId, v: Option<&Value>) -> Option<(u64, DocId)> {
     Some((key(point_in(v?)?), id))
 }
 
 /// How many rows a cell of the walk holds before its points are read
 /// rather than it split in four: a split is four counts, two searches each.
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 const LEAF: usize = 16;
 
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 impl Default for GeoIndex {
     fn default() -> Self {
         GeoIndex::new()
     }
 }
 
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 impl GeoIndex {
     pub fn new() -> GeoIndex {
         GeoIndex {
@@ -856,31 +857,31 @@ impl GeoIndex {
 /// points can lie, or a row at its distance. Least first -- the heap is a
 /// max-heap, so the order is turned round -- a cell ahead of a point at
 /// the same distance, and a row ahead of one with a higher id.
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 struct Near {
     at: f64,
     point: bool,
     id: u64,
 }
 
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 impl PartialEq for Near {
     fn eq(&self, o: &Self) -> bool {
         self.cmp(o) == std::cmp::Ordering::Equal
     }
 }
 
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 impl Eq for Near {}
 
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 impl PartialOrd for Near {
     fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(o))
     }
 }
 
-#[cfg(feature = "sorted")]
+#[cfg(all(feature = "sorted", feature = "geo"))]
 impl Ord for Near {
     fn cmp(&self, o: &Self) -> std::cmp::Ordering {
         o.at.total_cmp(&self.at)
@@ -889,7 +890,7 @@ impl Ord for Near {
     }
 }
 
-#[cfg(not(feature = "sorted"))]
+#[cfg(not(all(feature = "sorted", feature = "geo")))]
 pub use crate::off::GeoIndex;
 
 #[cfg(test)]
@@ -1080,7 +1081,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "sorted")]
+    #[cfg(all(feature = "sorted", feature = "geo"))]
     #[test]
     fn the_index_answers_as_every_point_measured() {
         let mut r = rng(17);

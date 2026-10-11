@@ -729,14 +729,15 @@ version's tables is refused: its ranks would mean something else.</p>
 
 <h2 id="features">A smaller module</h2>
 
-<p>A page that does not use every index can load a module built without the
-rest. The release ships <code>fenec.wasm</code> alone, with every index;
-another set is a build option.</p>
+<p>A page that does not use every feature can load a module built without
+the rest. The release ships <code>fenec.wasm</code> alone, with every
+feature; another set is a build option.</p>
 
-<pre data-lang="bash">make wasm                          # every index: 181 KB brotli
-make wasm FEATURES="text sorted"   # no graph, no sparse index: 160 KB
-make wasm FEATURES=none            # none of the four: 142 KB
-make wasm FEATURES=none SCHEMA=0   # nor the schema check: 167 KB
+<pre data-lang="bash">make wasm                              # every feature: 229 KB brotli
+make wasm FEATURES="text sorted"       # those two alone, and the schema check
+make wasm FEATURES=indexes             # the indexes, none of the rest
+make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 167 KB
+make wasm FEATURES=none SCHEMA=0       # no feature at all: 145 KB
 </pre>
 
 <div class="tbl">
@@ -747,6 +748,13 @@ make wasm FEATURES=none SCHEMA=0   # nor the schema check: 167 KB
 <tr><td><code>text</code></td><td><code>match</code>, and the <code>rerank</code> after it, which reads the vectors themselves: BM25 needs the index's statistics, so without it <code>match</code> is refused</td></tr>
 <tr><td><code>sparse</code></td><td>nothing but speed: without it <code>near</code> over a <code>sparse&lt;N&gt;</code> field scores every document, as <code>exact</code> does</td></tr>
 <tr><td><code>sorted</code></td><td>nothing but speed: without it the scan answers a <code>@sorted</code> field's comparisons and orders, with the same rows</td></tr>
+<tr><td><code>composite</code></td><td>nothing but speed: without it the scan answers an index over several fields, <code>@sorted(owner, created desc)</code>, and a <code>@unique(org, slug)</code> is asked by reading the rows; it needs <code>sorted</code></td></tr>
+<tr><td><code>geo</code></td><td><code>distance()</code>, <code>within()</code>, <code>near</code> over a <code>geo</code> field, and its <code>@geo</code> index (with <code>sorted</code>; without it the scan answers): without it a point is read, written and checked, and the rest is refused</td></tr>
+<tr><td><code>nocase</code></td><td>a text compared by its case fold: without it every statement over a collection declaring one is refused, since its text compared as written would be a wrong answer</td></tr>
+<tr><td><code>collate</code></td><td><code>collate und</code> and <code>collate tr</code>, ICU's order: without it a statement over a collection declaring one is refused, as is <code>order ... collate</code></td></tr>
+<tr><td><code>facets</code></td><td><code>facet</code>, its value counts, ranges and disjunctive facets</td></tr>
+<tr><td><code>highlight</code></td><td><code>highlight()</code> and <code>snippet()</code>, which mark what <code>match</code> found and so need <code>text</code> too</td></tr>
+<tr><td><code>analytics</code></td><td><code>count(distinct ...)</code>, <code>first</code> and <code>last</code>, <code>approx_count_distinct</code> and the <code>hll_*</code> sketches, <code>bucket()</code> and <code>having</code>; <code>count</code>, <code>sum</code>, <code>avg</code>, <code>min</code> and <code>max</code> by <code>group</code> are in every module</td></tr>
 </tbody>
 </table>
 </div>
@@ -770,16 +778,21 @@ make wasm FEATURES=none SCHEMA=0   # nor the schema check: 167 KB
 </div>
 
 <details class="deep"><summary>Details</summary>
-<p>The module carries four indexes, and a page that uses fewer can load one
-built without the rest. The release and <code>@fenecdb/web</code> carry
-<code>fenec.wasm</code> alone; another set is a <code>make wasm</code>
-away. What each set weighs is in <a
-href="benchmarks.html#module-features">Benchmarks</a>. The build without
-any is also a test: CI builds it (<code>make wasm-lite</code>) and hands
-files between it and the full module both ways.</p>
+<p>The module carries five indexes and six more parts of the language, and
+a page that uses fewer can load one built without the rest:
+<code>FEATURES</code> names what it keeps, <code>indexes</code> and
+<code>language</code> each group. The release and <code>@fenecdb/web</code>
+carry <code>fenec.wasm</code> alone; another set is a <code>make wasm</code>
+away. What each feature weighs is in <a
+href="benchmarks.html#module-features">Benchmarks</a>. The builds without
+the indexes and without anything are also tests: CI builds them
+(<code>make wasm-lite</code>, <code>make wasm-min</code>) and opens the
+full module's files in them.</p>
 
-<p>Everything else is in every build: documents, filters,
-<code>order</code>, aggregates, <code>lookup</code>, collations, the change
+<p>Everything else is in every build: documents, filters, <code>order</code>,
+<code>count</code>, <code>sum</code>, <code>avg</code>, <code>min</code> and
+<code>max</code> by <code>group</code>, <code>lookup</code>, <code>in (get
+...)</code>, json fields and their paths, <code>@ttl</code>, the change
 feed, persistence and the sync layer.</p>
 
 <p>The file does not change with the build. A collection that declares an
@@ -787,9 +800,11 @@ index the module lacks is made and loaded all the same, and its documents
 are read and written. A <code>near</code> over it measures every vector, a
 sparse one scores every document; a <code>match</code>, or a <code>create
 index</code> of the kind, throws a <code>FenecError</code> naming the
-feature. A module that has the index builds it when it loads what the
-other wrote, so a page can hand a store to the other module and take it
-back.</p>
+feature. A file declaring a <code>nocase</code> or collated field loads too;
+a statement over that collection throws, the feature named, and the file's
+other collections answer. A module that has the feature builds what it
+needs when it loads what the other wrote, so a page can hand a store to the
+other module and take it back.</p>
 </details>
 
 <h2>The query builder</h2>
