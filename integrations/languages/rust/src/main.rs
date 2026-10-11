@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     query("put docs {title: $1, embed: $2}", json!(["Night at the oasis", [0.1, 0.2, 0.3]]))?;
     query("put docs {title: $1, embed: $2}", json!(["Dunes", [0.9, 0.1, 0.0]]))?;
 
-    let rows = query("get docs select title near embed $1 limit 5", json!([[0.1, 0.2, 0.3]]))?;
+    let rows = query("get docs select title near embed $1 limit $2", json!([[0.1, 0.2, 0.3], 5]))?;
     let titles: Vec<&str> = rows
         .as_array()
         .ok_or("near answered no rows")?

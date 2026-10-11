@@ -218,14 +218,16 @@ function read(collection, f, extra = []) {
  * page already read in id order, the rows after its last id (`after`), the
  * id index walked from there rather than the rows before skipped again.
  * `order` is `{field, desc}`: the id, or a `@sorted` field the index walks.
+ * Both counts are parameters, so a jump to any row is the text the last
+ * one was, which the server parsed already.
  */
 export function page(collection, f, { limit, offset = 0, after = null, order = null }) {
   const extra = after !== null && !order ? [['id > $?', after]] : [];
   const { head, params } = read(collection, f, extra);
   let text = head;
   if (order) text += ` order ${name(order.field)} ${order.desc ? 'desc' : 'asc'}`;
-  text += ` limit ${whole(limit, 'limit')}`;
-  if (whole(offset, 'offset') > 0 && after === null) text += ` offset ${offset}`;
+  text += ` limit $${params.push(whole(limit, 'limit'))}`;
+  if (whole(offset, 'offset') > 0 && after === null) text += ` offset $${params.push(offset)}`;
   return { text, params };
 }
 

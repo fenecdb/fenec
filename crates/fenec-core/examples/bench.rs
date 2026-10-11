@@ -169,7 +169,7 @@ fn main() {
                 ef: None,
                 exact: false,
             }),
-            limit: Some(10),
+            limit: Some(Count::N(10)),
             ..Default::default()
         };
         let t = Instant::now();
@@ -211,7 +211,7 @@ fn main() {
                     ef: Some(200),
                     exact: false,
                 }),
-                limit: Some(10),
+                limit: Some(Count::N(10)),
                 ..Default::default()
             };
             let t = Instant::now();
@@ -240,7 +240,7 @@ fn main() {
                 ef: None,
                 exact,
             }),
-            limit: Some(10),
+            limit: Some(Count::N(10)),
             ..Default::default()
         };
         let a = db.execute(&Statement::Select(mk(false))).unwrap();

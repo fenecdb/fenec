@@ -30,7 +30,7 @@ await Query("create collection if not exists docs (title text, embed vector<3> @
 await Query("put docs {title: $1, embed: $2}", "Night at the oasis", new[] { 0.1f, 0.2f, 0.3f });
 await Query("put docs {title: $1, embed: $2}", "Dunes", new[] { 0.9f, 0.1f, 0.0f });
 
-var rows = await Query("get docs select title near embed $1 limit 5", new[] { 0.1f, 0.2f, 0.3f });
+var rows = await Query("get docs select title near embed $1 limit $2", new[] { 0.1f, 0.2f, 0.3f }, 5);
 var titles = rows.EnumerateArray().Select(r => r.GetProperty("title").GetString()).ToArray();
 if (!titles.SequenceEqual(new[] { "Night at the oasis", "Dunes" }))
     throw new Exception($"near answered {string.Join(", ", titles)}");

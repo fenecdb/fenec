@@ -1845,7 +1845,7 @@ impl Sync {
                     Box::new(Expr::Field(field.to_string())),
                     Box::new(Expr::Lit(v)),
                 )),
-                limit: Some(1),
+                limit: Some(Count::N(1)),
                 ..Default::default()
             };
             Ok(match db.execute_with(&Statement::Select(sel), &[])? {

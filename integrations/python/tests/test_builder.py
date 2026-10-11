@@ -182,7 +182,7 @@ def test_a_query_is_immutable_and_can_be_branched():
     b = base.limit(3)
     assert base.to_fenecql() == ("get articles where year >= $1", [2024])
     assert a.to_fenecql()[0] == "get articles where year >= $1 and tags has $2"
-    assert b.to_fenecql()[0] == "get articles where year >= $1 limit 3"
+    assert b.to_fenecql() == ("get articles where year >= $1 limit $2", [2024, 3])
 
 
 def test_an_unbound_query_has_text_but_cannot_run():
@@ -250,7 +250,7 @@ def test_builder_answers_are_the_texts_answers(client, shelf):
         (docs.select("title").where(or_({"lang": "tr"}, {"year": {"lt": 2022}})).order("title"),
          f"get {name} select title where lang = $1 or year < $2 order title asc", ["tr", 2022]),
         (docs.select("title").near("embed", v).limit(2),
-         f"get {name} select title near embed $1 limit 2", [v]),
+         f"get {name} select title near embed $1 limit $2", [v, 2]),
         (docs.select("title").match("body", "oasis stars"),
          f"get {name} select title match body $1", ["oasis stars"]),
         (docs.select("title").where("id", "in", [1, 3]).lookup(notes, on="doc_id", select=["stars"], order=[("stars", "desc")]),

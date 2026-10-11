@@ -121,7 +121,8 @@ test('the typed clause stays inside its parentheses, its parameters first', () =
   assert.deepEqual(f.conditions, ['(total > $1 and note ~ ")(")', '(note ~ $2)', '(total < $3)']);
   assert.deepEqual(f.params, [10, NASTY[0], 100]);
   const p = S.page('orders', f, { limit: 100, offset: 300 });
-  assert.equal(p.text, 'get orders where (total > $1 and note ~ ")(") and (note ~ $2) and (total < $3) limit 100 offset 300');
+  assert.equal(p.text, 'get orders where (total > $1 and note ~ ")(") and (note ~ $2) and (total < $3) limit $4 offset $5');
+  assert.deepEqual(p.params, [10, NASTY[0], 100, 100, 300]);
   for (const bad of ['a = 1) or (true', 'a = 1; del orders', '(a = 1', 'a = "unclosed', 'a = 1)) limit 5 ((']) {
     assert.throws(() => S.filter({ where: bad }), S.StatementError, bad);
   }
@@ -133,14 +134,14 @@ test('the typed clause stays inside its parentheses, its parameters first', () =
 test('a page walks on by id, or by offset under an order', () => {
   const f = S.filter({ quick: [{ field: 'status', type: 'text', input: '=paid' }] });
   assert.deepEqual(S.page('orders', f, { limit: 100, offset: 200, after: 4123 }), {
-    text: 'get orders where (status = $1) and id > $2 limit 100',
-    params: ['paid', 4123],
+    text: 'get orders where (status = $1) and id > $2 limit $3',
+    params: ['paid', 4123, 100],
   });
   assert.deepEqual(S.page('orders', f, { limit: 100, offset: 200, order: { field: 'placed', desc: true } }), {
-    text: 'get orders where (status = $1) order placed desc limit 100 offset 200',
-    params: ['paid'],
+    text: 'get orders where (status = $1) order placed desc limit $2 offset $3',
+    params: ['paid', 100, 200],
   });
-  assert.equal(S.page('orders', S.filter(), { limit: 100 }).text, 'get orders limit 100');
+  assert.equal(S.page('orders', S.filter(), { limit: 100 }).text, 'get orders limit $1');
   assert.throws(() => S.page('orders', S.filter(), { limit: 100, order: { field: 'a b' } }), S.StatementError);
   assert.throws(() => S.page('orders', S.filter(), { limit: -1 }), S.StatementError);
   assert.throws(() => S.page('orders', S.filter(), { limit: '5; del' }), S.StatementError);

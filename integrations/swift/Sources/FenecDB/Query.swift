@@ -365,8 +365,10 @@ enum Builder {
         return name
     }
 
-    /// `limit`, `offset`, `ef` and the rest are literals in FenecQL, never
-    /// parameters: a whole number JavaScript holds exactly.
+    /// A count, a whole number JavaScript holds exactly. `limit`, `offset`
+    /// and a facet's `top` go as parameters, so a page of any size or place
+    /// is one text; `ef`, `candidates`, `k` and a snippet's words are
+    /// written in, as FenecQL takes them.
     static func whole(_ n: Int, _ what: String) throws -> Int {
         guard n >= 0, n <= (1 << 53) - 1 else { throw FenecError.builder("\(what) must be a non-negative integer: \(n)") }
         return n
@@ -1039,15 +1041,15 @@ public struct Query: Sendable {
             if let c = fuse.candidates { sql += " candidates \(c)" }
         }
         sql += Query.orderText(order)
-        if let limit { sql += " limit \(limit)" }
-        if offset > 0 { sql += " offset \(offset)" }
+        if let limit { sql += " limit " + bind.bind(.int(Int64(limit))) }
+        if offset > 0 { sql += " offset " + bind.bind(.int(Int64(offset))) }
         // Before a lookup, whose clauses are the children's.
         sql += requirement
         if count { sql += " count" }
         if !facets.isEmpty {
             let each = facets.map { f -> String in
                 var one = f.field
-                if let top = f.top { one += " top \(top)" }
+                if let top = f.top { one += " top " + bind.bind(.int(Int64(top))) }
                 if let ranges = f.ranges { one += " ranges [" + ranges.joined(separator: ", ") + "]" }
                 if f.disjunctive { one += " disjunctive" }
                 return one
@@ -1063,8 +1065,8 @@ public struct Query: Sendable {
             if let project = l.project { sql += " select " + project.joined(separator: ", ") }
             if let w = try whereOf(l.cond, bind) { sql += " where \(w)" }
             sql += Query.orderText(l.order)
-            if let n = l.limit { sql += " limit \(n)" }
-            if l.offset > 0 { sql += " offset \(l.offset)" }
+            if let n = l.limit { sql += " limit " + bind.bind(.int(Int64(n))) }
+            if l.offset > 0 { sql += " offset " + bind.bind(.int(Int64(l.offset))) }
         }
         return sql
     }
@@ -1121,19 +1123,22 @@ public struct Query: Sendable {
     }
 
     // `require n`: the write is refused, and put back whole, unless it
-    // wrote exactly n rows -- a check and its write in one statement.
+    // wrote exactly n rows -- a check and its write in one statement. A
+    // number written in, never a parameter: the count is what the statement
+    // guards, a constant of the code, where a page's `limit` and `offset`
+    // change with each request and go as parameters.
     private static func requireClause(_ n: Int?) throws -> String {
         guard let n else { return "" }
         if n < 0 { throw FenecError.builder("require takes a count of rows, a whole number from 0 (got \(n))") }
         return " require \(n)"
     }
 
-    // An update's or a delete's ` order ... limit n returning ...`: the rows
+    // An update's or a delete's ` order ... limit $n returning ...`: the rows
     // it picks, and whether it answers them, under the fields named -- `*`
     // for every one.
-    private func pick(_ returning: [String]?) throws -> String {
+    private func pick(_ returning: [String]?, _ bind: Binder) throws -> String {
         var out = Query.orderText(order)
-        if let limit { out += " limit \(limit)" }
+        if let limit { out += " limit " + bind.bind(.int(Int64(limit))) }
         guard let returning else { return out }
         if returning.isEmpty { throw FenecError.builder("returning names the fields it answers, or * for every one") }
         if returning.contains("*") {
@@ -1176,7 +1181,7 @@ public struct Query: Sendable {
         let bind = Binder()
         let body = try Builder.renderDoc(try patch.fenecValue(), bind)
         let filter = try requireFilter("update", all, bind)
-        return ("set \(collection) \(body)\(filter)\(try pick(returning))\(try Query.requireClause(require))", bind.params)
+        return ("set \(collection) \(body)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require))", bind.params)
     }
 
     /// The upsert, `put ... if absent else set {patch}`, not run: a document
@@ -1203,7 +1208,7 @@ public struct Query: Sendable {
         try assertPlain("delete")
         let bind = Binder()
         let filter = try requireFilter("delete", all, bind)
-        return ("del \(collection)\(filter)\(try pick(returning))\(try Query.requireClause(require))", bind.params)
+        return ("del \(collection)\(filter)\(try pick(returning, bind))\(try Query.requireClause(require))", bind.params)
     }
 
     // -------------------------------------------------------------- running

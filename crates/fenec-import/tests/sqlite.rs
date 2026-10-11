@@ -313,7 +313,7 @@ fn blob_vectors_load_and_index() {
                 ef: None,
                 exact: true,
             }),
-            limit: Some(1),
+            limit: Some(Count::N(1)),
             ..Default::default()
         }))
         .unwrap()

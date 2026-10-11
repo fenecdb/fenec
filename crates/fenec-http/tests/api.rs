@@ -1502,3 +1502,83 @@ fn a_json_field_is_native_over_http() {
     ));
     assert_eq!(r.body.trim(), r#"[{"title":"l"},{"title":"p"}]"#);
 }
+
+/// `limit $n`, `offset $n` and `top $n` over `/query` and a `/batch` line
+/// answer what the numbers written answer, through the plain `get`'s JSON
+/// path, `near`, a `lookup` level and a facet; a parameter the number
+/// written would be refused for is refused, 400, in the same words; and a
+/// query string, which has no parameters, says which one it lacks.
+#[test]
+fn a_page_takes_its_counts_as_parameters() {
+    let h = start(Config::default());
+    let post = |body: &str| call(h.port, "POST", "/query", Some(body));
+    // The texts hold no quote to escape.
+    let json_string = |s: &str| format!("\"{s}\"");
+    for (written, with, params) in [
+        (
+            "get articles select title order year limit 2 offset 1",
+            "get articles select title order year limit $1 offset $2",
+            "[2, 1]",
+        ),
+        (
+            "get articles select title where year > 2000 limit 1",
+            "get articles select title where year > $1 limit $2",
+            "[2000, 1]",
+        ),
+        (
+            "get articles select title near embed [1.0, 0.0, 0.0] limit 2 offset 1",
+            "get articles select title near embed $1 limit $2 offset $3",
+            "[[1.0, 0.0, 0.0], 2, 1]",
+        ),
+        (
+            "get articles select title order year limit 2 lookup remarks on article_id order stars limit 1 offset 1",
+            "get articles select title order year limit $1 lookup remarks on article_id order stars limit $2 offset $3",
+            "[2, 1, 1]",
+        ),
+        (
+            "get articles select title limit 0 facet year top 2",
+            "get articles select title limit $1 facet year top $2",
+            "[0, 2.0]",
+        ),
+    ] {
+        let want = post(&format!("{{\"query\":{}}}", json_string(written)));
+        assert_eq!(want.status, 200, "{written}: {}", want.body);
+        let got = post(&format!(
+            "{{\"query\":{},\"params\":{params}}}",
+            json_string(with)
+        ));
+        assert_eq!(got.status, 200, "{with}: {}", got.body);
+        assert_eq!(got.body, want.body, "{with}");
+        let line = format!("{{\"query\":{},\"params\":{params}}}\n", json_string(with));
+        let batch = call(h.port, "POST", "/batch", Some(&line));
+        assert_eq!(batch.status, 200, "{}", batch.body);
+        assert!(batch.body.contains(want.body.trim()), "{}", batch.body);
+    }
+    for (params, says) in [
+        ("[-1]", "`limit` takes a whole number from 0, not -1"),
+        ("[1.5]", "`limit` takes a whole number from 0, not 1.5"),
+        (
+            "[\"3\"]",
+            "`limit` takes a whole number from 0, not \\\"3\\\"",
+        ),
+        ("[null]", "`limit` takes a whole number from 0, not null"),
+        ("[]", "parameter $1 is not bound"),
+    ] {
+        let r = post(&format!(
+            "{{\"query\":\"get articles limit $1\",\"params\":{params}}}"
+        ));
+        assert_eq!(r.status, 400, "{params}: {}", r.body);
+        assert!(r.body.contains(says), "{params}: {}", r.body);
+    }
+    let r = post(r#"{"query":"get articles limit -1"}"#);
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(
+        r.body
+            .contains("`limit` takes a whole number from 0, not -1"),
+        "{}",
+        r.body
+    );
+    let r = get(h.port, "/articles?facet=year%20top%20$1");
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(r.body.contains("parameter $1 is not bound"), "{}", r.body);
+}

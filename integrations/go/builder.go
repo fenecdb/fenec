@@ -356,8 +356,10 @@ func jsNumber(f float64) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
-// whole: limit, offset, ef and the rest are literals in FenecQL, never
-// parameters -- a whole number JavaScript holds exactly.
+// whole: a count, a whole number JavaScript holds exactly. Limit, Offset
+// and a facet's Top go as parameters, so a page of any size or place is
+// one text; ef, candidates, k and a snippet's words are written in, as
+// FenecQL takes them.
 func whole(n int, what string) (int, error) {
 	if n < 0 || int64(n) > 1<<53-1 {
 		return 0, refuse("%s must be a non-negative integer: %d", what, n)
@@ -1569,10 +1571,10 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 	}
 	writeOrder(&sql, b.order)
 	if b.hasLimit {
-		fmt.Fprintf(&sql, " limit %d", b.limit)
+		sql.WriteString(" limit " + bind.bind(b.limit))
 	}
 	if b.offset > 0 {
-		fmt.Fprintf(&sql, " offset %d", b.offset)
+		sql.WriteString(" offset " + bind.bind(b.offset))
 	}
 	// Before a lookup, whose clauses are the children's.
 	sql.WriteString(b.require)
@@ -1587,7 +1589,7 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		}
 		sql.WriteString(f.field)
 		if f.top >= 0 {
-			fmt.Fprintf(&sql, " top %d", f.top)
+			sql.WriteString(" top " + bind.bind(f.top))
 		}
 		if f.ranges != nil {
 			sql.WriteString(" ranges [" + strings.Join(f.ranges, ", ") + "]")
@@ -1618,10 +1620,10 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		}
 		writeOrder(&sql, l.order)
 		if l.hasLimit {
-			fmt.Fprintf(&sql, " limit %d", l.limit)
+			sql.WriteString(" limit " + bind.bind(l.limit))
 		}
 		if l.offset > 0 {
-			fmt.Fprintf(&sql, " offset %d", l.offset)
+			sql.WriteString(" offset " + bind.bind(l.offset))
 		}
 	}
 	return sql.String(), bind.params, nil
@@ -1704,13 +1706,13 @@ func (b *Builder) requireFilter(verb string, options []Opt, bind *binder) (strin
 	return "", refuse("an unfiltered %s covers the whole collection; if you mean it, %s({ all: true })", verb, verb)
 }
 
-// pick is an update's or a delete's " order ... limit n returning ...":
+// pick is an update's or a delete's " order ... limit $n returning ...":
 // the rows it picks, and whether it answers them.
-func (b *Builder) pick(o opts) (string, error) {
+func (b *Builder) pick(o opts, bind *binder) (string, error) {
 	var sql strings.Builder
 	writeOrder(&sql, b.order)
 	if b.hasLimit {
-		fmt.Fprintf(&sql, " limit %d", b.limit)
+		sql.WriteString(" limit " + bind.bind(b.limit))
 	}
 	if !o.returningSet {
 		return sql.String(), nil
@@ -2030,8 +2032,9 @@ func Returning(fields ...string) Opt {
 }
 
 // requireClause is " require n" for Require: a whole number from 0 written
-// into the text -- not a parameter, as limit is not, so a statement keeps
-// its shape.
+// into the text -- FenecQL takes no parameter there: the count is what the
+// statement guards, a constant of the code, where a page's limit and
+// offset change with each request and go as parameters.
 func requireClause(o opts) (string, error) {
 	if o.require == nil {
 		return "", nil
@@ -2102,7 +2105,7 @@ func (b *Builder) ToUpdate(patch any, options ...Opt) (string, []any, error) {
 		return "", nil, err
 	}
 	o := gather(options)
-	pick, err := b.pick(o)
+	pick, err := b.pick(o, bind)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2164,7 +2167,7 @@ func (b *Builder) ToDelete(options ...Opt) (string, []any, error) {
 		return "", nil, err
 	}
 	o := gather(options)
-	pick, err := b.pick(o)
+	pick, err := b.pick(o, bind)
 	if err != nil {
 		return "", nil, err
 	}

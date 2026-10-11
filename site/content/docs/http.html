@@ -190,10 +190,15 @@ Parameters stay parameters.</p>
 
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query":"get articles where year >= $1 limit 10","params":[2024]}'
+  -d '{"query":"get articles where year >= $1 limit $2","params":[2024, 10]}'
 </pre>
 
 <ul>
+  <li><b>A text is parsed once.</b> <code>/query</code> keeps what it
+    parsed by the text, so the values go as parameters — a page's
+    <code>limit</code> and <code>offset</code> too (<a
+    href="/docs/fenecql#paging">Pages by parameters</a>): written into the
+    text, every page was a statement of its own.</li>
   <li><b>The answer is the rows</b>, a JSON array — or, when the query asks
     for <a href="/docs/fenecql#facets">facets</a>,
     <code>{"rows": [...], "facets": {"brand": [{"value": "acme", "count":

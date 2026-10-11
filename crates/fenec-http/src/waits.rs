@@ -262,7 +262,7 @@ pub fn plan(db: &Database, stmts: &[(&Statement, &[Value])], before: i64) {
             project: Some(vec!["id".to_string()]),
             filter,
             order: order.unwrap_or_default(),
-            limit: Some(1),
+            limit: Some(Count::N(1)),
             ..Select::default()
         };
         if !tests.contains(&test) {

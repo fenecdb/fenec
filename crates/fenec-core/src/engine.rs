@@ -5179,10 +5179,10 @@ impl Database {
             clock: self.clock,
         };
         let (ids, _) = self.page_ids(c, sel, params, &ctx, false, true, false)?;
-        let limit = sel.limit.unwrap_or(usize::MAX);
+        let limit = sel.limit.map_or(usize::MAX, |l| l.at(params));
         let mut n = 0;
         out.push('[');
-        for id in ids.into_iter().skip(sel.offset).take(limit) {
+        for id in ids.into_iter().skip(sel.offset.at(params)).take(limit) {
             if n > 0 {
                 out.push(',');
             }
@@ -5426,6 +5426,11 @@ impl Database {
                     || (sel.lookup.as_ref())
                         .is_some_and(|l| l.chain().any(|s| self.ordered(&s.collection))))
         };
+        // `limit $1`: each count a parameter gives checked here, as the
+        // number written would be -- the one place, the inner `get`s'
+        // included, since each is answered through here too -- and read
+        // where the plan reads it (`Count::at`).
+        sel.check_counts(params)?;
         if !expiring && !sel.has_subquery() && !unsplit && !timed() {
             return Ok(std::borrow::Cow::Borrowed(sel));
         }
@@ -5517,7 +5522,7 @@ impl Database {
             && inner.group.is_empty()
             && inner.computed.is_empty()
             && inner.limit.is_none()
-            && inner.offset == 0;
+            && inner.offset.at(params) == 0;
         let items = if plain {
             self.distinct_column(&inner, params)?
         } else {
@@ -5527,7 +5532,9 @@ impl Database {
             // pages, and an aggregate without `group` answers one row.
             if !ranked && (inner.aggregate.is_empty() || !inner.group.is_empty()) {
                 let bound = MAX_SUBQUERY_VALUES + 1;
-                inner.limit = Some(inner.limit.map_or(bound, |l| l.min(bound)));
+                inner.limit = Some(Count::N(
+                    inner.limit.map_or(bound, |l| l.at(params).min(bound)),
+                ));
             }
             let rows = self.select(&inner, params)?.rows;
             let whole = rows.len() <= MAX_SUBQUERY_VALUES;
@@ -6857,7 +6864,8 @@ impl Database {
         if collate.is_some_and(|c| Some(c) != own) {
             return Ok(None);
         }
-        let (Some(ix), Some(limit)) = (c.sorted_index(field)?, sel.limit) else {
+        let (Some(ix), Some(limit)) = (c.sorted_index(field)?, sel.limit.map(|l| l.at(params)))
+        else {
             return Ok(None);
         };
         if ix.has_nan() {
@@ -6871,7 +6879,7 @@ impl Database {
         if sel.lookup.as_ref().is_some_and(|l| l.required) {
             return Ok(None);
         }
-        let want = limit.saturating_add(sel.offset);
+        let want = limit.saturating_add(sel.offset.at(params));
         let mut range = None;
         let mut bare = true;
         if let Some(f) = &sel.filter {
@@ -7413,7 +7421,7 @@ impl Database {
     ) -> Result<Vec<(DocId, f32)>> {
         // Each side ranks its own first `depth`, never fewer than the page:
         // a document neither list reaches cannot be on it.
-        let page = ranked_rows(sel, "fuse", MAX_MATCH_ROWS)?;
+        let page = ranked_rows(sel, params, "fuse", MAX_MATCH_ROWS)?;
         let depth = f.candidates.unwrap_or(DEFAULT_FUSE_CANDIDATES).max(page);
         if depth > MAX_MATCH_ROWS {
             return Err(Error::Query(format!(
@@ -7889,7 +7897,11 @@ impl Database {
             keys.push(order_key(&child.schema, s, &owner)?);
         }
 
-        let limit = l.limit.unwrap_or(usize::MAX);
+        let params = ctx.params;
+        let (limit, offset) = (
+            l.limit.map_or(usize::MAX, |l| l.at(params)),
+            l.offset.at(params),
+        );
         let mut groups = Vec::with_capacity(ids.len());
         let mut bucket: Vec<DocId> = Vec::new();
 
@@ -7931,11 +7943,11 @@ impl Database {
                 // never need an order at all. Elsewhere `order` has no such
                 // guarantee, which is why the engine sorts in full there.
                 kept.sort_unstable();
-                kept = order_ids(&child.store, &kept, &keys, l.offset.saturating_add(limit))?;
+                kept = order_ids(&child.store, &kept, &keys, offset.saturating_add(limit))?;
             }
 
             let mut group = Vec::new();
-            for cid in kept.into_iter().skip(l.offset) {
+            for cid in kept.into_iter().skip(offset) {
                 if group.len() >= limit {
                     break;
                 }
@@ -8084,7 +8096,7 @@ impl Database {
         for e in &exprs {
             calcs.push(calc.bind(e)?);
         }
-        let limit = sel.limit.unwrap_or(usize::MAX);
+        let limit = sel.limit.map_or(usize::MAX, |l| l.at(params));
         let scored: Vec<(DocId, Option<f32>)>;
         // The rows `facet` counts over, when it is asked: every row the
         // filter and `match` select, before `offset` and `limit`. `all`:
@@ -8098,7 +8110,7 @@ impl Database {
         if let (Some(m), Some(near), Some(f)) = (&sel.matcher, &sel.near, &sel.fuse) {
             scored = with_scores(self.run_fuse(c, sel, m, near, f, params, &ctx)?);
         } else if let Some(m) = &sel.matcher {
-            let want = ranked_rows(sel, "match", MAX_MATCH_ROWS)?;
+            let want = ranked_rows(sel, params, "match", MAX_MATCH_ROWS)?;
             scored = with_scores(self.run_match(c, sel, m, want, params, &ctx)?);
             if wants_facets {
                 facet_ids = Some(self.matched_set(c, &sel.filter, m, &ctx)?);
@@ -8112,7 +8124,7 @@ impl Database {
                         .into(),
                 ));
             }
-            let want = ranked_rows(sel, "near", MAX_NEAR_ROWS)?;
+            let want = ranked_rows(sel, params, "near", MAX_NEAR_ROWS)?;
             scored = with_scores(self.run_near(c, sel, near, want, params, &ctx)?);
         } else {
             let (ids, counted) =
@@ -8135,7 +8147,7 @@ impl Database {
         let places = one.unwrap_or_default();
         let mut read = Vec::with_capacity(places.len());
         let mut rows = Vec::new();
-        for (id, score) in scored.into_iter().skip(sel.offset) {
+        for (id, score) in scored.into_iter().skip(sel.offset.at(params)) {
             if rows.len() >= limit {
                 break;
             }
@@ -8232,7 +8244,8 @@ impl Database {
             // and so do facets, which count every one -- the page is then
             // the front of what they count.
             let cap = if sel.order.is_empty() && !required {
-                sel.limit.map(|l| l.saturating_add(sel.offset))
+                sel.limit
+                    .map(|l| l.at(params).saturating_add(sel.offset.at(params)))
             } else {
                 None
             };
@@ -8269,7 +8282,7 @@ impl Database {
                 }
                 let k = sel
                     .limit
-                    .map(|l| l.saturating_add(sel.offset))
+                    .map(|l| l.at(params).saturating_add(sel.offset.at(params)))
                     .unwrap_or(usize::MAX);
                 plan(|| {
                     // Built by hand: `join` brought a 1.2 KB copy of its own
@@ -8426,9 +8439,9 @@ impl Database {
             out.push(match (&f.rest, f.disjunctive) {
                 (Some(rest), true) => {
                     let (own, all) = self.facet_set(c, sel, rest, ctx)?;
-                    self.facet(c, f, &own, all, &mut None)?
+                    self.facet(c, f, &own, all, &mut None, ctx.params)?
                 }
-                _ => self.facet(c, f, ids, all, &mut member)?,
+                _ => self.facet(c, f, ids, all, &mut member, ctx.params)?,
             });
         }
         Ok(out)
@@ -8460,6 +8473,7 @@ impl Database {
 
     /// One facet's counts over `ids`, or every row when `all`.
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     fn facet(
         &self,
         c: &Collection,
@@ -8467,6 +8481,7 @@ impl Database {
         ids: &[DocId],
         all: bool,
         member: &mut Option<Vec<u64>>,
+        params: &[Value],
     ) -> Result<FacetValues> {
         let rows = if all { c.store.len() } else { ids.len() } as u64;
         {
@@ -8589,7 +8604,7 @@ impl Database {
                 flat.push(Value::Int(*k as i64));
                 flat.push(v.clone());
             }
-            let k = f.top.unwrap_or(n).min(n);
+            let k = f.top.map_or(n, |t| t.at(params)).min(n);
             let picked = order_rows(&flat, 2, n, &order, k);
             let mut values = Vec::with_capacity(picked.len());
             for i in picked {
@@ -8755,6 +8770,9 @@ impl Database {
             limit: p.limit,
             ..Default::default()
         };
+        // `limit $1` checked here, where the write's parameters are, as a
+        // `get`'s is where it is answered.
+        sel.check_counts(params)?;
         Ok(self.page_ids(c, &sel, params, &ctx, false, false, false)?.0)
     }
 
@@ -9746,12 +9764,13 @@ fn push_step(line: String) {
 /// ceiling when there is no limit. A request past the ceiling is refused
 /// before anything is scanned -- erroring beats handing back a truncated
 /// ranking.
-fn ranked_rows(sel: &Select, clause: &str, ceiling: usize) -> Result<usize> {
-    let bound = sel.limit.map(|l| l.saturating_add(sel.offset));
-    if bound.unwrap_or(sel.offset) > ceiling {
+fn ranked_rows(sel: &Select, params: &[Value], clause: &str, ceiling: usize) -> Result<usize> {
+    let offset = sel.offset.at(params);
+    let bound = sel.limit.map(|l| l.at(params).saturating_add(offset));
+    if bound.unwrap_or(offset) > ceiling {
         return Err(Error::Query(format!(
             "`{clause}` returns at most {ceiling} rows, {} were requested (limit + offset)",
-            bound.unwrap_or(sel.offset)
+            bound.unwrap_or(offset)
         )));
     }
     Ok(bound.unwrap_or(ceiling).max(1))

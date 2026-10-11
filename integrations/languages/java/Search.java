@@ -37,7 +37,7 @@ public class Search {
             {"query": "put docs {title: $1, embed: $2}", "params": ["Dunes", [0.9, 0.1, 0.0]]}"""));
 
         String rows = ok(query("""
-            {"query": "get docs select title near embed $1 limit 5", "params": [[0.1, 0.2, 0.3]]}"""));
+            {"query": "get docs select title near embed $1 limit $2", "params": [[0.1, 0.2, 0.3], 5]}"""));
         var titles = Pattern.compile("\"title\":\"([^\"]*)\"").matcher(rows).results()
             .map(m -> m.group(1)).toList();
         if (!titles.equals(List.of("Night at the oasis", "Dunes")))

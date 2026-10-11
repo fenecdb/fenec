@@ -7,7 +7,8 @@
 //! the request's first bytes are in, `lap` at the end of each phase -- the
 //! time since the last mark goes to that phase -- and `end` once the
 //! answer is written. `GET /_timing` hands back the mean of each phase over
-//! the requests since `DELETE /_timing`, in microseconds.
+//! the requests since `DELETE /_timing`, in microseconds, and how many of
+//! them parsed their statement rather than found it parsed (`parsed`).
 
 /// A phase of one request, in the order a `/query` goes through them.
 #[derive(Clone, Copy)]
@@ -50,6 +51,7 @@ mod on {
 
     static SUMS: [AtomicU64; PHASES.len()] = [const { AtomicU64::new(0) }; PHASES.len()];
     static COUNT: AtomicU64 = AtomicU64::new(0);
+    static PARSED: AtomicU64 = AtomicU64::new(0);
 
     thread_local! {
         static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -77,16 +79,25 @@ mod on {
         });
     }
 
+    pub fn parsed() {
+        PARSED.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn reset() {
         for s in &SUMS {
             s.store(0, Ordering::Relaxed);
         }
         COUNT.store(0, Ordering::Relaxed);
+        PARSED.store(0, Ordering::Relaxed);
     }
 
     pub fn report() -> String {
         let n = COUNT.load(Ordering::Relaxed).max(1) as f64;
-        let mut out = format!("{{\"requests\":{}", COUNT.load(Ordering::Relaxed));
+        let mut out = format!(
+            "{{\"requests\":{},\"parsed\":{}",
+            COUNT.load(Ordering::Relaxed),
+            PARSED.load(Ordering::Relaxed)
+        );
         for (name, s) in PHASES.iter().zip(&SUMS) {
             out.push_str(&format!(
                 ",\"{name}\":{:.3}",
@@ -112,6 +123,13 @@ pub fn lap(p: Phase) {
     on::lap(p);
     #[cfg(not(feature = "timing"))]
     let _ = p;
+}
+
+/// A statement was parsed, not found in the parse cache.
+#[inline(always)]
+pub fn parsed() {
+    #[cfg(feature = "timing")]
+    on::parsed();
 }
 
 /// The answer is written: one request more.

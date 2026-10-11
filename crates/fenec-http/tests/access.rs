@@ -1380,3 +1380,39 @@ fn a_worker_token_claims_through_its_rules() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body, r#"[{"id":1}]"#);
 }
+
+/// A page's counts as parameters are read after the token's rules are
+/// ANDed in, as numbers written are: a scoped `get ... limit $1 offset $2`
+/// pages through the token's rows alone, and a scoped `set ... order id
+/// limit $1` picks among them.
+#[test]
+fn a_scoped_page_by_parameters_holds_the_token_rules() {
+    let n = start();
+    let (alice, bob) = (n.token(r#"{"sub":"alice"}"#), n.token(r#"{"sub":"bob"}"#));
+    for (who, title) in [
+        (&bob, "b1"),
+        (&alice, "a1"),
+        (&bob, "b2"),
+        (&alice, "a2"),
+        (&alice, "a3"),
+    ] {
+        let body = format!(r#"{{"title":"{title}"}}"#);
+        assert_eq!(n.call(Some(who), "POST", "/notes", &body).0, 201);
+    }
+    let page = "get notes select title order id limit $1 offset $2";
+    let (status, body) = n.query_with(&alice, page, "[2, 1]");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"title":"a2"},{"title":"a3"}]"#);
+    let (_, body) = n.query_with(&bob, page, "[5, 1]");
+    assert_eq!(body, r#"[{"title":"b2"}]"#);
+    let (status, body) = n.query_with(
+        &alice,
+        "set notes {title: $1} order id limit $2 returning title",
+        r#"["mine", 2]"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"title":"mine"},{"title":"mine"}]"#);
+    let (_, rows) = n.call(Some(ROOT), "GET", "/notes?select=title", "");
+    assert_eq!(count(&rows, "\"mine\""), 2, "{rows}");
+    assert!(rows.contains("\"b1\"") && rows.contains("\"a3\""), "{rows}");
+}

@@ -62,6 +62,7 @@ make shard-bench         # router overhead per request, tenant move time, failov
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
+make pages-bench         # pages of every size and place, limit and offset written in against as parameters: the parse cache's hits
 make recon-bench         # a ledger's reconciliation /batch beside transfers and reads: their longest waits
 make roundtrip-bench     # one client's round trip taken apart: the client, the server's phases (--features timing, GET /_timing), PostgreSQL's bind and execute
 make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
@@ -1279,8 +1280,10 @@ no row answered `affected 0` and its `/batch` went on: a transfer's debit
 that found too little money was passed over and the credit made money,
 2 400 transfers taking the sum from 200 000 to 411 409. `put`, `insert`,
 `set` and `del` carry `require: Option<u64>` (the parser's `require` after
-the statement, an integer and never a parameter, so a statement keeps its
-shape), and `execute_inner` hands the answer to `required`, which refuses
+the statement, an integer and never a parameter: the count is what the
+statement guards, a constant of the code that never makes a text of its
+own, where a page's `limit` is a request's data and takes one, below),
+and `execute_inner` hands the answer to `required`, which refuses
 any other count as `Error::Unmet` -- after the writes, which the block they
 are in puts back as it puts back any statement that failed: a lone one's
 block of one, a `/batch` whole, the browser module's `run` of several. A
@@ -1316,6 +1319,48 @@ which answer one row, nor in an inner `get`. Builders have it as a step,
 (`GUARDED`, the browser's `batch()` in the same words): the replica's
 count, which the server landing the batch would never see. The module
 grew 1 017 bytes, 471 brotli.
+
+**`limit`, `offset` and `top` take a parameter, read where the plan reads
+them** (`query::Count`). A page's size and place are a request's data:
+written into the text, each page of a list was a text of its own, which
+`/query`'s parse cache (16 shards of 64, a shard emptied when full) kept
+apart and parsed again once it was gone, and every client spliced a number
+into its statement -- `/_stats/statements` already counted them as one
+shape, a literal being a place there. `limit $n`, `offset $n` and a
+facet's `top $n` parse to `Count::Param` wherever a number goes: a `get`, a
+`lookup` level, an inner `get`, a `set`'s or a `del`'s pick, and a REST
+`facet=` (which has no parameters, and says which one it lacks).
+`answered_select` holds each to what the number written is held to
+(`Select::check_counts`, the inner `get`s' where each is answered,
+`page_of` a pick's): a value `as_count` refuses -- a whole number from 0,
+a float with no fraction its number, past `usize` every row, where `as`
+wrapped a literal `limit 5000000000` to 705 million in the browser module
+-- is refused by `count_refused` in the words the literal is (the parser
+reads one as an operand, so `limit -1` and `limit "x"` say what a
+parameter of -1 or "x" says), and a `top` outside 1 to 10 000 by
+`top_in_range`, `check()`'s for a number written. The plan reads it where
+it reads the number (`Count::at`): the `@sorted` walk's page, the scan's
+stop, `near`'s and `match`'s 10 000 rows, a lookup's page a parent, a
+facet's `top`, `explain`'s steps, `query_json`'s page. Bound into a copy of
+the select instead, a read by id took 472 -> 710 ns in process; read in
+place, 454-468 ns either way (in turns against main), an ordered page 2.63
+-> 2.68 us and a hashed filter's 12.8 -> 13.0 us, where a neutral
+`#[inline(never)]` on main moved the page 0.8% and taking the check out
+left the gap: the code's layout. What judges a statement by its shape
+reads the parameter as there -- `count` and an aggregate refuse `offset $1`
+as they refuse `offset 5`, a sync replica refuses a synced `limit $1` --
+and the pin reads the number it is handed (`Count::of`). Every builder
+sends `limit`, `offset` and `top` as parameters (the golden file's texts
+changed with them), so do the stores and the studio's grid, and Grafana's
+`limit $__max_data_points` is now a statement the server takes. Over 5 000
+rows paged at random in sizes of 10 to 50, 1 050 texts written in, the
+parse cache held 84.2-84.7% of them, its phase 1.36-1.88 us a request,
+against 100% and 0.73-0.84 us as parameters (`make pages-bench`, a
+`--features timing` server); pages a second (105-109k at eight clients on
+a quiet machine) and `make wasm-speed` stayed within the runs' noise
+either way, a parse being a microsecond of a 33 us round trip. The
+browser module grew 2 331 bytes, 947 gzip, 791 brotli: the parser's
+`count`, the check and its refusal, `top_in_range`.
 
 **`put ... if absent else set {..}` is an upsert; `put <c> $n` takes its
 documents from a parameter.** A rollup's row is "made at zero if missing,
