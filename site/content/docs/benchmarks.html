@@ -971,8 +971,11 @@ grows without hashing a key again, for 8 bytes a key. A text index's terms grew 
 written again, was made again from every vector once half full: 242 to
 281 ms at a million vectors of 128 dimensions, 1.45 s at 524 288 of 768.
 It grows from what it holds now, a 256th at a time, and no put waits for
-it; the first write after an open still reads every vector once, on every
-core, 33 to 169 ms over 1.1 million of 128 dimensions against 275 to 441.
+it. The first write after an open made it by reading every vector once —
+275 to 441 ms over 1.1 million of 128 dimensions, 33 to 169 on every core;
+it makes it now from four bytes a vector the file keeps beside the graph,
+and that first write took 16 to 31 ms there, 4.4 to 27 over 300 000 of
+768 against 68 to 312, the open as fast as it was.
 And the two writes still made under the lock —
 the 1 MB buffer's once it is full, and a handover's — waited for the
 disk while the server's periodic fsync held it, 52 ms of macOS's

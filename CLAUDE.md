@@ -1678,8 +1678,9 @@ another holding its vector, and only the last makes it a tombstone
 (`detach`). Over codes the stored codes are compared, which `near` puts in
 order by the documents' own vectors anyway. The level is drawn only for a
 new node, so a graph with no vector twice is byte for byte the graph it
-was. Graph records 9 and 10 carry the aliases after the tombstones; a
-restore checks each alias's document holds the node's vector. Tests whose
+was. Graph records 9 and 10 carry the aliases after the tombstones (and
+natively the copies table's hash halves after those, below); a restore
+checks each alias's document holds the node's vector. Tests whose
 data repeated vectors (`i % 13`) to count nodes and tombstones now write a
 vector a row. The browser module 2.2 KB brotli; builds, searches and
 opens as fast.
@@ -1700,10 +1701,11 @@ a time and 300 000 768-dim ones no put at a doubling took 10 ms. A place
 taken from the half leaves fewer of its bits to tell two vectors apart --
 a slot of another vector at the same place passes the half's test once in
 2^(24 - k) for a shard of 2^k slots, a vector compared for nothing about
-once in 4 000 puts at a million nodes. The first put after an open still
-makes the table from the arena, every vector hashed -- made at the open it
-would cost a database that only reads, and under `--warm` a read-only
-server 16 to 32 bytes a node -- now on every core, `SAME_SHARE` nodes at a
+once in 4 000 puts at a million nodes. Where its graph record carries no
+hash halves (below), the first put after an open makes the table from the
+arena, every vector hashed -- made at the open it would cost a database
+that only reads, and under `--warm` a read-only server 16 to 32 bytes a
+node -- on every core, `SAME_SHARE` nodes at a
 time, through four chains of multiplies and MurmurHash3's finish
 (`hash_lanes`) where one chain waited on its multiply a word (a 768-dim
 vector in cache 1.18 us against 0.17): 275-441 ->
@@ -1716,6 +1718,45 @@ put's p50, a batch's build (100 000 x 128 in 3.63-3.74 s against
 3.72-3.85), `near` and an open of a checkpointed file are as they were.
 The browser module keeps its table and its hash (`cfg`): 618 010 bytes as
 on main, every function the size it was.
+
+**A graph record carries the halves the copies table is made from**
+(`HALVES`, `Same::halves`). The first put after an open read and hashed
+every vector to make the table: 33-169 ms over 1.1 million of 128
+dimensions. Hashed as the restore fills the arena, each vector in cache,
+the table would cost no put, but the open of a checkpointed 100 000 x 128
+took 0.45 ms longer (3.8%) and of 100 000 x 768 2 ms (6.7%), and four
+vectors' chains side by side hashed only 1.65 times as fast. So natively a
+version 9 or 10 record ends with a `HALVES` byte and the top half of each
+node's hash, 4 bytes a node, a tombstone's 0: 0.68% of a 128-dim file,
+0.13% of a 768-dim one. The restore keeps them -- once 64 live nodes
+spread over the arena hash to theirs (`keep_halves`) -- and the first
+vector placed makes the table from them with no vector read, gathered by
+shard and each shard's table filled on whichever core is free
+(`Same::spread`: 1.1 million halves in 4.0-4.4 ms, where put in where
+they fell they took 10.5-10.9). The first put after an open went 4.7-5.5
+-> 3.4-4.2 ms at 100 000 x 128, 12.8-15.8 -> 6.4-9.7 at 100 000 x 768,
+30-244 -> 7.6-8.5 at 300 000 x 768, and in `make growth-bench` 47-160
+-> 16-31 at 1.1 million x 128 and 68-312 -> 4.4-27 at 300 000 x 768;
+the opens as they were, 11.65-11.98 against 11.68-11.83 ms and 28.2-29.1
+against 28.7-30.1 in turns, and the puts after (growth-bench's p50 264
+and 263 us, 690 and 676). What is left is the first growth of the arrays
+a restore sized exactly and the caches an open leaves cold. On this 8 GB
+machine an open that paged the arena out had main's first put, reading
+every vector, bring it all back; now the puts after it fault it in as
+they walk -- 3.4 -> 8.4-9.7 ms p50 at 300 000 x 768 there, the first
+twenty puts 339 -> 224 ms in all. A
+database that is only read keeps the halves, 4 bytes a node -- 0.6% of a
+128-dim index. A writer has them from the restore, or reads them off the
+table's slots on every core past `SAME_SPLIT` nodes (`halves_by_node`:
+8.3 -> 2.3 ms at 1.1 million, under a server's read lock as it keeps its
+graphs), or hashes the arena where neither holds them, so a record is the
+same whatever way its index came to be. The record keeps its version: the
+reader before stops at the aliases, so the browser, whose hash is
+another, and a binary from before read it without them -- this build
+refuses anything else there -- and a record without them, the browser's
+or a binary's from before, has the table made from the arena. The browser
+module is the same code to the byte, and its first put after a load still
+hashes the arena: 12.8-15.0 ms at 20 000 x 384, the puts after it 0.31.
 
 **An archive and a backup can be sealed** (`seal.rs`, `fenec key`,
 `--key-file`). A copy in a bucket is out of reach of the disk's
