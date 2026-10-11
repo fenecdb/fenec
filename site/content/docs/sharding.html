@@ -185,6 +185,9 @@ under <code>/_shard/</code>.</p>
 <ul>
   <li><b>New tenants go to the node with the least data on disk</b>, unless
     you name one.</li>
+  <li><b>A page on another origin needs <code>--http-cors</code> on the
+    router</b>, as it would on a node: <code>fenec-shard --http-cors
+    https://app.example</code>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -219,6 +222,26 @@ does not return them.</p>
 
 <p>Placement goes by disk rather than memory: memory counts only the open
 tenants, and which ones are open depends on who asked last.</p>
+
+<p id="cors">A page on another origin — an app, the <a href="/docs/sync">sync
+layer</a>, <code>FenecHttp.live</code>, the studio served by a node — reaches
+its tenants through the router once the router has
+<code>--http-cors &lt;origin&gt;</code>, read as <code>fenec-server</code>
+reads it (<a href="/docs/http#security">Security</a>): <code>*</code> or one
+origin. The router answers a browser's preflight itself, before it looks the
+tenant up, and puts the CORS headers on every answer it gives. Its own — an
+unknown tenant's <code>404</code>, a standby's <code>503</code>, an
+unreachable node's <code>502</code>, the <code>503</code> past
+<code>--max-connections</code>, the <code>401</code> of <code>/_shard/</code> without its token — reach the
+page as the refusals they are; without the headers a browser hands the page a
+network error for each, and the sync layer backs off from what was an answer.
+On a node's answer the router's headers take the place of the node's, so the
+page is told the rule the router's preflight told it, and never two
+<code>Access-Control-Allow-Origin</code>s, which a browser refuses whole. The
+<code>503</code>s carry their wait as <code>Retry-After</code> and as
+<code>retry_after</code> in the body, as a quota's refusal does. Without the
+flag the router sends none of its own and passes a node's through as the node
+wrote them, and a preflight goes to the node.</p>
 </details>
 
 <h2 id="schema">A tenant with its schema</h2>
