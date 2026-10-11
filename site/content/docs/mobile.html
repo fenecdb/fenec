@@ -314,8 +314,9 @@ static and instance member of one name.</p>
     server's copy takes its place when it arrives.</li>
   <li><b>A refused write is put back.</b> When the server refuses it -- a
     <code>409</code> for a unique value held, a <code>403</code> from a
-    token's rules -- the replica is put back as it was and the app is told:
-    <code>db.replica.refusals</code>.</li>
+    token's rules, a <code>507</code> from a tenant's quota of bytes or rows
+    (<code>quota</code> names it) -- the replica is put back as it was and
+    the app is told: <code>db.replica.refusals</code>.</li>
   <li><b>Offline, writes wait.</b> A write made while the server cannot be
     reached waits in the file, and goes once it can, in order, once each.
     An app closed meanwhile sends it when it opens again.</li>
@@ -360,8 +361,13 @@ block in the file. Writes go one at a time, in order, each under its key, so
 a write whose answer was lost is sent again and answered as the first time,
 not made again. A server's answer of <code>0</code> (no answer),
 <code>408</code>, <code>429</code> or <code>5xx</code> is tried again with
-backoff, 250 ms doubling to 15 s; a <code>401</code> asks for a token; any
-other <code>4xx</code> is a refusal. A change applies in one block with the
+backoff, 250 ms doubling to 15 s, or after the <code>retry_after</code> a
+tenant's quota names where that is longer; a <code>401</code> asks for a
+token; a <code>507</code> naming a tenant's quota, and any other
+<code>4xx</code>, is a refusal, and the writes behind it go on
+(<a href="sync.html#refusals-retries-and-offline">why</a>). The status's
+error names the quota too: a stream refused by the quota of streams leaves
+the replica <code>offline</code>, as the network does. A change applies in one block with the
 shape's cursor, so a crash leaves the two agreeing. A change saying the
 server's schema changed, or rows with a field the replica has not got, has
 the collection made again from <code>GET /collections</code> -- its rows kept
@@ -380,7 +386,7 @@ rows 72 ms (<code>make sync-bench</code>).</p>
 <p>The browser's <code>sync</code> (<a href="sync.html">Sync</a>) is
 written apart -- this core in the browser module was 21 KB brotli more --
 and the two are held to one script: <code>integrations/sync-scenarios.json</code>,
-58 scenarios of shapes, writes, answers and server events, each step's
+68 scenarios of shapes, writes, answers and server events, each step's
 replica, queue and requests stated once and run against both. What is left
 between them is the platforms':</p>
 <ul>

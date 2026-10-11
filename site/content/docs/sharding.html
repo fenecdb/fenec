@@ -299,6 +299,11 @@ Fenec-Quota: rows
     <code>del</code>, a <code>drop</code> — is never refused, and neither is
     a <code>compact</code>, which gives bytes back. A tenant at its quota
     deletes its way under it.</li>
+  <li><b>A replica's sync knows them.</b> A synced write a <code>507</code>
+    refuses is put back on the replica and the app told, the quota named,
+    and the writes behind it -- a delete that makes the room among them --
+    go on; a <code>429</code> is waited out for its <code>Retry-After</code>
+    (<a href="sync.html#refusals-retries-and-offline">Sync</a>).</li>
   <li><b>A full file is compacted by the node</b> once an eighth of its quota
     is dead, where a file of its own waits for 64 MB: deleted rows become room
     without the tenant running <code>compact</code> itself.</li>

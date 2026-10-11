@@ -1424,9 +1424,12 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   locks?: { request(name: string, opts: unknown, fn: () => unknown): Promise<unknown> };
   onError?: (e: unknown) => void;
   /**
-   * Told of each write the server refused -- any 4xx but 401, 408 and 429 --
-   * once it was put back, a write left from a page before among them. A
-   * network failure or a 5xx is no refusal: the write waits and goes again.
+   * Told of each write the server refused -- any 4xx but 401, 408 and 429,
+   * and a 507 naming a tenant's quota of `bytes` or `rows` (`e.quota`),
+   * which waiting would not make room for -- once it was put back, a write
+   * left from a page before among them; the writes behind it go on. A
+   * network failure or a 5xx is no refusal: the write waits and goes
+   * again, after the `Retry-After` a quota's 429 names where it is longer.
    */
   onRefused?: (e: FenecError & { status: number; query: string }) => void;
 }
@@ -1439,6 +1442,11 @@ export interface ShapeStatus {
   /** Writes the server has not answered yet. */
   pending: number;
   error: string | null;
+  /**
+   * The tenant's quota the error names: a stream refused by the quota of
+   * `streams` is not `connected`, as one the network dropped is not.
+   */
+  quota: NonNullable<FenecError['quota']> | null;
   leader: boolean;
 }
 

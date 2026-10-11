@@ -62,9 +62,12 @@ db.replica!!.ready()
 The same `Fenec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while
 the server cannot be reached, under an idempotency key so it lands once --
-and one the server refuses is put back and comes on `replica.refusals`.
+and one the server refuses is put back and comes on `replica.refusals`, a
+tenant's quota of bytes or rows among them (its `quota` named), the writes
+behind it going on; a quota's 429 is waited out for the seconds it names.
 `replica.status` is a `StateFlow`: `ONLINE`, `OFFLINE` or `CATCHING_UP`,
-the writes not yet answered and the last error; call `replica.resume()` in
+the writes not yet answered and the last error, whose `quota` tells a
+stream the quota of streams refused from the network gone; call `replica.resume()` in
 `onStart`. The requests and the stream are `HttpURLConnection`'s, the JVM's
 and Android's own, so a server is reached through TLS (Android refuses
 cleartext by default). `Fenec.connect(url, token)` is a server with no

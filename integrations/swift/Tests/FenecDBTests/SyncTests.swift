@@ -101,10 +101,40 @@
             db.replica!.setOnline(true)
             try await eventually("the refusal") { !refused.get().isEmpty }
             #expect(refused.get().first?.status == 409)
+            #expect(refused.get().first?.quota == nil)
             reader.cancel()
             try await eventually("the write put back") { try await titles(db) == ["one", "two"] }
             #expect(db.replica!.status.error?.status == 409)
             #expect(await db.replica!.refresh().pending == 0)
+            try await db.close()
+        }
+
+        @Test func aWriteATenantsQuotaRefusesIsPutBackAndTheDeleteBehindItGoes() async throws {
+            // A tenant node holding each tenant to the three rows it has.
+            let s = try await Server("quota", tenantRows: 3)
+            defer { s.stop() }
+            let db = try await Fenec.sync(url: s.url, shapes: [open], path: try scratch("sync-quota"))
+            await db.replica!.ready()
+            let refusals = db.replica!.refusals()
+            let refused = Box<[Refusal]>([])
+            let reader = Task {
+                for await r in refusals { refused.set { $0 + [r] } }
+            }
+            // Offline, so both are made before the server answers either.
+            db.replica!.setOnline(false)
+            try await db.from("tasks").insert(["key": "d", "title": "four", "status": "open"] as Value)
+            try await db.from("tasks").where("key", "b").delete()
+            #expect(try await titles(db) == ["four", "one"])
+            db.replica!.setOnline(true)
+            try await eventually("the refusal") { !refused.get().isEmpty }
+            #expect(refused.get().first?.status == 507)
+            #expect(refused.get().first?.quota == "rows")
+            reader.cancel()
+            // The insert put back, and the delete behind it landed.
+            try await eventually("the queue answered") { await db.replica!.refresh().pending == 0 }
+            #expect(try await titles(db) == ["one"])
+            #expect(db.replica!.status.error?.quota == "rows")
+            #expect(try await s.run(#"get tasks where key = "b""#).rows.isEmpty)
             try await db.close()
         }
 

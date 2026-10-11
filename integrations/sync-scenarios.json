@@ -1,8 +1,8 @@
 {
   "about": [
     "One script for both of a replica's syncs: the browser's FenecSync (web/fenec.js, run by web/fenec.sync.scenarios.test.js) and the native core every binding drives (crates/fenec-abi/src/sync, run by crates/fenec-abi/tests/scenarios.rs).",
-    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with it), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
-    "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (the statuses refused writes were told with), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent).",
+    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with its `status` and `body`, {\"error\":\"refused\"} unless given), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
+    "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (each write refused, as it was told: a status alone is one told with no quota, {status, quota} one a tenant's quota refused), quota (the tenant's quota the status's last error names, null for none), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent).",
     "An object expected is a subset of the one that came; a list is whole. A string `<name>` is any value, the same wherever the name comes again and another than every other name's: a key made for an insert, an Idempotency-Key. In a step's data a bound `<name>` stands for its value, so the server's copy of a row carries the key the app made. `@name` in rows or puts is a fixture.",
     "Writes are written with their fields in alphabetical order, as the builders render them in the order given: JavaScript keeps an object's order and the native runner's JSON sorts it. A temporary id is 2^52 = 4503599627370496 and up.",
     "Where the platforms differ on purpose a scenario says why in `differs`, and a step's expect_js / expect_native hold each side's own. Both runners write the names that passed to target/sync-scenarios/, and integrations/sync-scenarios-check.mjs fails unless both ran every one."
@@ -549,6 +549,92 @@
         {"do": "answer", "status": 429, "body": {"error": "slow down"}, "expect": {"refused": [], "waits": [[500, 650]], "pending": 1, "rows": {"tasks": [{"id": 2}]}}},
         {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
         {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0}}
+      ]
+    },
+    {
+      "name": "a write a tenant's bytes quota refuses is put back, told with the quota, and the writes behind it go",
+      "covers": "sync.html#refusals-retries-and-offline, http.html#statuses: 507 naming bytes or rows is a refusal -- waiting makes no room, and a write held for it would hold every write behind it, the delete that would make the room among them",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "a long note"}]}, "expect": {
+          "requests": [{"path": "/query", "key": "<w1>", "body": [{"params": ["open", "a long note", "<k1>"]}]}], "pending": 1}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [], "pending": 2}},
+        {"do": "answer", "status": 507, "body": {"error": "the write would take the tenant's file past its quota of 65536 bytes: delete rows and compact, or raise the quota", "quota": "bytes"}, "expect": {
+          "refused": [{"status": 507, "quota": "bytes"}], "pending": 1, "waits": [], "quota": "bytes",
+          "requests": [{"path": "/query", "key": "<w2>", "body": [{"query": "set tasks {title: $1} where key = $2", "params": ["ONE", "a"]}]}],
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2, "title": "two"}]}}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "refused": [], "requests": [], "streams": []}}
+      ]
+    },
+    {
+      "name": "a delete behind a write the rows quota refused goes, and makes the room the next write takes",
+      "covers": "sync.html#refusals-retries-and-offline: a write that only takes away always lands on a tenant past its quota, so a refusal must not hold the queue",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "three"}]}, "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "b"}}, "expect": {
+          "requests": [], "pending": 2, "rows": {"tasks": [{"id": 1}, {"id": 4503599627370496, "key": "<k1>", "title": "three"}]}}},
+        {"do": "answer", "status": 507, "body": {"error": "the write would take the tenant past its quota of 2 rows: delete rows, or raise the quota", "quota": "rows"}, "expect": {
+          "refused": [{"status": 507, "quota": "rows"}], "pending": 1, "waits": [],
+          "requests": [{"path": "/query", "key": "<w2>", "body": [{"query": "del tasks where key = $1", "params": ["b"]}]}],
+          "rows": {"tasks": [{"id": 1}]}}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "refused": []}},
+        {"do": "change", "seq": 4, "puts": [], "dels": [2], "expect": {"rows": {"tasks": [{"id": 1}]}}},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "three"}]}, "expect": {
+          "requests": [{"path": "/query", "key": "<w3>", "body": [{"params": ["open", "three", "<k2>"]}]}], "pending": 1,
+          "rows": {"tasks": [{"id": 1}, {"id": 4503599627370497, "key": "<k2>", "title": "three"}]}}},
+        {"do": "answer", "status": 200, "seq": 5, "expect": {"pending": 0, "refused": []}},
+        {"do": "change", "seq": 5, "puts": [{"id": 3, "key": "<k2>", "priority": null, "status": "open", "title": "three"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 3, "title": "three"}]}}}
+      ]
+    },
+    {
+      "name": "a 507 naming no quota is the server's own trouble: the write is kept and sent again",
+      "covers": "http.html#statuses: a 507 naming no quota is the server's own ceiling (--max-memory, which a handover or an idle tenant closed brings back under, or an operator raises) or a proxy's; only a tenant's quota, which nothing but its own deletes makes room under, is a refusal",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 507, "body": {"error": "the server holds more than --max-memory"}, "expect": {
+          "refused": [], "pending": 1, "waits": [[250, 325]], "quota": null, "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}]}}},
+        {"do": "fire", "expect": {"requests": [{"path": "/query", "key": "<w1>"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "refused": []}}
+      ]
+    },
+    {
+      "name": "a 429 that says when to come back is waited out, and the network's signal does not cut it short",
+      "covers": "sync.html#refusals-retries-and-offline: retry_after, the seconds Retry-After says, is waited where it is longer than the backoff, with the backoff's 30% jitter on top so the clients a bucket refused at once do not come back at once; online forgets the backoff and lets the streams open, but not the server's word",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 429, "body": {"error": "the tenant writes past its quota of 10 writes a second", "quota": "writes", "retry_after": 3}, "expect": {
+          "refused": [], "pending": 1, "waits": [[3000, 3900]], "quota": "writes", "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}]}}},
+        {"do": "online", "online": false, "expect": {"requests": [], "streams": []}},
+        {"do": "online", "online": true, "expect": {"requests": [], "waits": [], "streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "fire", "expect": {"requests": [{"path": "/query", "key": "<w1>"}]}},
+        {"do": "answer", "status": 429, "body": {"error": "the tenant writes past its quota of 10 writes a second", "quota": "writes", "retry_after": 1}, "expect": {
+          "refused": [], "pending": 1, "waits": [[1000, 1300]]}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "refused": [], "quota": null}}
+      ]
+    },
+    {
+      "name": "a stream the tenant's streams quota refuses waits the server's Retry-After, and the status names the quota",
+      "covers": "sync.html#refusals-retries-and-offline: a 429 on a subscription is backed off by its retry_after, never under it; the replica reads as offline, its error naming the quota, until a stream opens",
+      "steps": [
+        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes, held writes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[1000, 1300]], "token_asked": false, "quota": "streams", "ready": false}},
+        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes, held writes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[1000, 1300]]}},
+        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes, held writes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[1000, 1300]]}},
+        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes, held writes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[2000, 2600]], "quota": "streams"}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [], "quota": null}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}
       ]
     },
     {

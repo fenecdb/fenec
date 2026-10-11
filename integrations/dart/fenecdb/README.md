@@ -48,9 +48,12 @@ await db.replica!.ready();
 The same `Fenec`: reads and live queries are the file's, a write to a
 shape's collection shows at once and is sent -- queued in the file while
 the server cannot be reached, under an idempotency key so it lands once --
-and one the server refuses is put back and comes on `replica.refusals`.
+and one the server refuses is put back and comes on `replica.refusals`, a
+tenant's quota of bytes or rows among them (its `quota` named), the writes
+behind it going on; a quota's 429 is waited out for the seconds it names.
 `replica.status` says `online`, `offline` or `catchingUp`, the writes not
-yet answered and the last error, and `statuses` streams it; call
+yet answered and the last error, whose `quota` tells a stream the quota of
+streams refused from the network gone, and `statuses` streams it; call
 `replica.resume()` on `AppLifecycleState.resumed`. `openSynced`, not
 `sync`: Dart has no static and instance member of one name, and `sync()` is
 the fsync. The requests and the stream are `dart:io`'s `HttpClient`'s, so

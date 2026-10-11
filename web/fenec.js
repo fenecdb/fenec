@@ -1389,6 +1389,28 @@ const PUT_OP = 'put _sync_queue {id: $1, path: $2, body: $3, key: $4, undo: $5, 
 const PUT_TEMP = 'put _sync_temps {id: $1, collection: $2, key: $3, op: $4, until: $5}';
 /** An answer with no `Fenec-Seq`: no stream is known to be past it. */
 const NO_SEQ = Number.MAX_SAFE_INTEGER;
+/** The longest a server's `retry_after` is waited: `setTimeout` fires at once past 2^31 ms. */
+const RETRY_AFTER_MAX_MS = 3_600_000;
+
+/**
+ * What an answer says beyond its words -- the tenant's quota and the
+ * seconds `Retry-After` gives -- read from the body fenec-server writes
+ * beside its headers, as the native core reads it: a page on another
+ * origin reads a header only where the server lists it for CORS.
+ */
+function said(body) {
+  let b = null;
+  try {
+    b = JSON.parse(body);
+  } catch {
+    /* not JSON: nothing said */
+  }
+  const { quota, retry_after: s } = b ?? {};
+  return {
+    quota: typeof quota === 'string' && quota ? quota : null,
+    retryMs: typeof s === 'number' && s > 0 ? Math.min(Math.floor(s * 1000), RETRY_AFTER_MAX_MS) : 0,
+  };
+}
 
 /** A key's text, as the native core writes it: a text as it is, else its JSON. */
 const keyText = (k) => (typeof k === 'string' ? k : JSON.stringify(k));
@@ -1436,8 +1458,10 @@ class SyncQuery extends Query {
  * two are held to one script, `integrations/sync-scenarios.json`: writes go
  * one at a time and in order, each under an `Idempotency-Key` it keeps until
  * the server answers; no answer, a 408, a 429 or a 5xx is tried again with
- * backoff, a 401 asks for a token, and any other 4xx is a refusal, put back.
- * Moving this layer onto that core instead was measured at +21 KB brotli.
+ * backoff -- or after a quota's `retry_after`, where longer -- a 401 asks
+ * for a token, and a 507 naming a tenant's quota and any other 4xx are a
+ * refusal, put back. Moving this layer onto that core instead was measured
+ * at +21 KB brotli.
  */
 export class FenecSync {
   #local;
@@ -1558,6 +1582,9 @@ export class FenecSync {
       connected: s.connected,
       pending: this.#queue.length,
       error: this.#fault?.message ?? (s.error ? String(s.error.message ?? s.error) : null),
+      // The tenant's quota the error names: a stream over the `streams`
+      // quota is not connected, as one the network dropped is not.
+      quota: this.#fault?.quota ?? null,
       leader: this.#leader,
     }));
   }
@@ -1575,8 +1602,9 @@ export class FenecSync {
 
   /**
    * The network is gone (`false`): the streams end and writes wait. Back
-   * (`true`): what waited goes at once, the backoff forgotten. A page has it
-   * from `online` and `offline` on its own.
+   * (`true`): what waited goes at once, the backoff forgotten -- but not a
+   * server's `retry_after`, since the network says nothing of a tenant's
+   * quota. A page has it from `online` and `offline` on its own.
    */
   setOnline(on) {
     if (!on) {
@@ -1586,14 +1614,20 @@ export class FenecSync {
     }
     this.#offline = false;
     this.#sendAttempt = this.#schemaAttempt = 0;
+    for (const w of this.#waits) {
+      if (w.server) continue;
+      clearTimeout(w.t);
+      this.#waits.delete(w);
+    }
+    const held = (what) => [...this.#waits].some((w) => w.what === what);
     for (const s of this.#shapes.values()) {
       s.attempt = 0;
-      s.waiting = false;
+      s.waiting = held(s);
     }
-    this.#sendWaiting = this.#schemaWaiting = false;
-    for (const w of this.#waits) clearTimeout(w.t);
-    this.#waits.clear();
-    this.#flushing = this.#queue.length > 0;
+    this.#sendWaiting = held('send');
+    this.#schemaWaiting = held('schema');
+    // A write the server said to hold back lets the streams open, as its 429 did.
+    this.#flushing = this.#queue.length > 0 && !this.#sendWaiting;
     this.#kick();
   }
 
@@ -1961,11 +1995,17 @@ export class FenecSync {
   /**
    * Waits out the backoff for `attempt` -- 250 ms doubling to 15 s, 30%
    * jitter on top, so a server back up is not met by every client at once
-   * -- then runs `then`. The timer does not hold up a Node process's exit.
+   * -- or the server's `retryMs` where that is longer, never cut to the
+   * 15 s, the jitter on top all the same: the clients a quota refused in
+   * one moment are told one `Retry-After`. Then runs `then`. `what` is the
+   * send, the schema or a shape, which `setOnline` keeps waiting on a
+   * server's word. The timer does not hold up a Node process's exit.
    */
-  #wait(attempt, then) {
-    const base = Math.min(250 * 2 ** Math.min(attempt, 10), 15000);
+  #wait(what, attempt, retryMs, then) {
+    const base = Math.max(Math.min(250 * 2 ** Math.min(attempt, 10), 15000), retryMs);
     const w = {
+      what,
+      server: retryMs > 0,
       t: setTimeout(() => {
         this.#waits.delete(w);
         if (!this.#closed) then();
@@ -1975,8 +2015,8 @@ export class FenecSync {
     this.#waits.add(w);
   }
 
-  #setFault(message, status, connection) {
-    this.#fault = { message, status, connection };
+  #setFault(message, status, connection, quota = null) {
+    this.#fault = { message, status, connection, quota };
   }
 
   #clearConnectionFault() {
@@ -2011,10 +2051,11 @@ export class FenecSync {
       await this.#make(JSON.parse(body));
       this.#schemaAttempt = 0;
     } catch (e) {
-      this.#setFault(String(e.message ?? e), status, true);
+      const s = said(body);
+      this.#setFault(String(e.message ?? e), status, true, s.quota);
       this.#onError?.(e);
       this.#schemaWaiting = true;
-      this.#wait(this.#schemaAttempt++, () => {
+      this.#wait('schema', this.#schemaAttempt++, s.retryMs, () => {
         this.#schemaWaiting = false;
         this.#kick();
       });
@@ -2093,25 +2134,34 @@ export class FenecSync {
     const [status, seq, body] = await this.#call('POST', op.path, op.body, { 'content-type': type, 'idempotency-key': op.key });
     this.#sending = false;
     if (this.#closed) return;
-    if (status >= 200 && status < 300) {
+    const s = status >= 200 && status < 300 ? null : said(body);
+    if (!s) {
       this.#sendAttempt = 0;
       this.#clearConnectionFault();
       this.#landed(op, seq);
     } else if (status === 401) {
       this.#wantToken();
+    } else if (status === 507 && s.quota) {
+      // A tenant past its quota of bytes or rows: waiting makes no room,
+      // deleting does, and a write that only deletes always lands. Held,
+      // this write would hold every write behind it -- the delete that
+      // would make its room among them -- for good, so it is a refusal. A
+      // 507 naming none (past `--max-memory`, or a proxy's) is waited out.
+      this.#refused(op, status, why(status, body), s.quota);
     } else if (status === 0 || status === 408 || status === 429 || status >= 500) {
       // No answer, or one that says to come back: the write stays, and goes
       // again under its key, which the server answers as the first time if
-      // the first reached it.
-      this.#setFault(why(status, body), status, true);
+      // the first reached it -- after the `retry_after` a quota's 429 names,
+      // where that is longer than the backoff.
+      this.#setFault(why(status, body), status, true, s.quota);
       this.#flushing = false;
       this.#sendWaiting = true;
-      this.#wait(this.#sendAttempt++, () => {
+      this.#wait('send', this.#sendAttempt++, s.retryMs, () => {
         this.#sendWaiting = false;
         this.#kick();
       });
     } else {
-      this.#refused(op, status, why(status, body));
+      this.#refused(op, status, why(status, body), s.quota);
     }
     this.#kick();
   }
@@ -2146,8 +2196,12 @@ export class FenecSync {
     op.done?.resolve(op.count);
   }
 
-  /** The server refused `op`: what it did is put back, the last statement's first, and the app told. */
-  #refused(op, status, message) {
+  /**
+   * The server refused `op`: what it did is put back, the last statement's
+   * first, and the app told -- with the tenant's quota where one refused
+   * it, so a page says "storage full" rather than "refused".
+   */
+  #refused(op, status, message, quota = null) {
     const at = this.#queue.indexOf(op);
     if (at < 0) return;
     this.#queue.splice(at, 1);
@@ -2156,9 +2210,9 @@ export class FenecSync {
     const gone = this.#temps.filter((t) => t.op === op.n).map((t) => t.temp);
     this.#deleteLocal('_sync_temps', gone);
     this.#temps = this.#temps.filter((t) => t.op !== op.n);
-    this.#setFault(message, status, false);
-    this.#settled(op, { t: 'ans', key: op.key, status, message });
-    const e = Object.assign(new FenecError(message), { status, query: op.label });
+    this.#setFault(message, status, false, quota);
+    this.#settled(op, { t: 'ans', key: op.key, status, message, quota });
+    const e = Object.assign(new FenecError(message), { status, query: op.label }, quota && { quota });
     if (!op.foreign) this.#onRefused?.(e);
     if (op.done) op.done.reject(e);
   }
@@ -2473,6 +2527,10 @@ export class FenecSync {
 
   async #stream(s, ctl) {
     let reason = 'the server closed it';
+    // A refusal to open: its status, and the tenant's quota and the wait it
+    // names -- a 429 of the `streams` quota is waited out by its
+    // `retry_after`, since asked again sooner it is only refused again.
+    let refusal = { status: 0, quota: null, retryMs: 0 };
     try {
       const res = await this.#fetch(this.#streamUrl(s), { headers: this.#headers(), signal: ctl.signal });
       if (s.stream !== ctl) return;
@@ -2482,7 +2540,9 @@ export class FenecSync {
       }
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => '');
-        throw new FenecError(`could not open the subscription to \`${s.collection}\`: ${why(res.status, text)}`);
+        refusal = { status: res.status, ...said(text) };
+        const e = new FenecError(`could not open the subscription to \`${s.collection}\`: ${why(res.status, text)}`);
+        throw Object.assign(e, { status: refusal.status }, refusal.quota && { quota: refusal.quota });
       }
       s.connected = true;
       s.attempt = 0;
@@ -2505,9 +2565,9 @@ export class FenecSync {
     }
     if (s.stream !== ctl) return;
     this.#cancel(s);
-    this.#setFault(`the subscription to \`${s.collection}\` ended: ${reason}`, 0, true);
+    this.#setFault(`the subscription to \`${s.collection}\` ended: ${reason}`, refusal.status, true, refusal.quota);
     s.waiting = true;
-    this.#wait(s.attempt++, () => {
+    this.#wait(s, s.attempt++, refusal.retryMs, () => {
       s.waiting = false;
       this.#kick();
     });
@@ -2572,7 +2632,7 @@ export class FenecSync {
       const op = this.#queue.find((o) => o.key === msg.key);
       if (!op) return;
       if (msg.status < 300) this.#landed(op, msg.seq);
-      else this.#refused(op, msg.status, msg.message);
+      else this.#refused(op, msg.status, msg.message, msg.quota);
       return;
     }
     const s = this.#shapes.get(msg.c);

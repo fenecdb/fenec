@@ -24,16 +24,25 @@ import kotlin.test.assertTrue
  * binary `cargo build -p fenec-server` makes, named by `fenec.server` (or
  * `FENEC_SERVER`), as `make kotlin-test` passes it.
  */
-class Server(name: String) {
+class Server(name: String, private val tenantRows: Int? = null) {
     private val dir: File = Files.createTempDirectory("fenecdb-kotlin-$name").toFile()
     private val file = File(dir, "server.fenec").path
     private var process: Process? = null
     var port = 0
         private set
-    val url get() = "http://127.0.0.1:$port"
+
+    /** With [tenantRows], a tenant node (`--dir`) holding each tenant to that many rows: tenant `acme`. */
+    val url get() = "http://127.0.0.1:$port" + (if (tenantRows == null) "" else "/t/acme")
 
     init {
         start(0)
+        if (tenantRows != null) {
+            val c = java.net.URL("http://127.0.0.1:$port/_admin/tenants/acme").openConnection() as java.net.HttpURLConnection
+            c.requestMethod = "PUT"
+            c.setRequestProperty("Authorization", "Bearer adm")
+            check(c.responseCode == 201) { "the tenant was not made: ${c.responseCode}" }
+            c.disconnect()
+        }
         run("create collection tasks (key text @unique, title text, status text @hash, priority int)")
         run(
             """put tasks [{key: "a", title: "one", status: "open", priority: 1},
@@ -45,7 +54,11 @@ class Server(name: String) {
     fun start(port: Int) {
         val binary = System.getProperty("fenec.server") ?: System.getenv("FENEC_SERVER")
             ?: File("../../../target/debug/fenec-server").absolutePath
-        val p = ProcessBuilder(binary, "--http", "127.0.0.1:$port", "--file", file, "--sync", "always")
+        val at = when (tenantRows) {
+            null -> listOf("--file", file)
+            else -> listOf("--dir", file, "--admin-token", "adm", "--tenant-max-rows", "$tenantRows")
+        }
+        val p = ProcessBuilder(listOf(binary, "--http", "127.0.0.1:$port", "--sync", "always") + at)
             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
             .start()
         process = p
@@ -174,9 +187,36 @@ class SyncTest {
         db.replica!!.setOnline(true)
         eventually("the refusal") { refused.isNotEmpty() }
         assertEquals(409, refused[0].status)
+        assertEquals(null, refused[0].quota)
         eventually("the write put back") { titles(db) == listOf("one", "two") }
         assertEquals(409, db.replica!!.refresh().error?.status)
         assertEquals(0, db.replica!!.refresh().pending)
+        job.cancel()
+        db.close()
+    }
+
+    @Test
+    fun aWriteATenantsQuotaRefusesIsPutBackAndTheDeleteBehindItGoes() = runBlocking {
+        // A tenant node holding each tenant to the three rows it has.
+        val s = Server("quota", tenantRows = 3).also { servers.add(it) }
+        val db = Fenec.sync(url = s.url, shapes = listOf(open), path = path("quota"))
+        db.replica!!.ready()
+        val refused = Collections.synchronizedList(ArrayList<Refusal>())
+        val job = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) { db.replica!!.refusals.collect { refused.add(it) } }
+        // Offline, so both are made before the server answers either.
+        db.replica!!.setOnline(false)
+        db.from("tasks").insert(mapOf("key" to "d", "title" to "four", "status" to "open"))
+        db.from("tasks").where("key", "b").delete()
+        assertEquals(listOf("four", "one"), titles(db))
+        db.replica!!.setOnline(true)
+        eventually("the refusal") { refused.isNotEmpty() }
+        assertEquals(507, refused[0].status)
+        assertEquals("rows", refused[0].quota)
+        // The insert put back, and the delete behind it landed.
+        eventually("the queue answered") { db.replica!!.refresh().pending == 0 }
+        assertEquals(listOf("one"), titles(db))
+        assertEquals("rows", db.replica!!.refresh().error?.quota)
+        assertTrue(s.run("get tasks where key = \"b\"").rows.isEmpty())
         job.cancel()
         db.close()
     }

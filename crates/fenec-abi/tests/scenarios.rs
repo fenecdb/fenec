@@ -257,7 +257,8 @@ struct Run {
     shapes: Value,
     collections: String,
     up: bool,
-    stream_status: Option<u16>,
+    /// The status and body the next stream opened is answered with.
+    stream_status: Option<(u16, String)>,
     /// Open streams: id -> collection.
     streams: Vec<(u64, String)>,
     posts: VecDeque<u64>,
@@ -351,8 +352,8 @@ impl Run {
                 if !self.up {
                     return sync.closed(&mut self.db, id, "connection refused");
                 }
-                if let Some(s) = self.stream_status.take() {
-                    return sync.opened(&mut self.db, id, s, "{\"error\":\"refused\"}");
+                if let Some((s, body)) = self.stream_status.take() {
+                    return sync.opened(&mut self.db, id, s, &body);
                 }
                 let c = path
                     .trim_start_matches('/')
@@ -371,7 +372,10 @@ impl Run {
                 self.timers.push(id);
                 self.waits.push(Value::Int(int(member(a, "ms"))));
             }
-            "refused" => self.refused.push(Value::Int(int(member(a, "status")))),
+            "refused" => self.refused.push(obj(vec![
+                ("status", Value::Int(int(member(a, "status")))),
+                ("quota", member(a, "quota").cloned().unwrap_or(Value::Null)),
+            ])),
             "token" => self.token_asked = true,
             "changed" | "status" => {}
             other => panic!("an action of no kind: {other}"),
@@ -502,7 +506,13 @@ impl Run {
                 }
             }
             "net" => self.up = matches!(member(step, "up"), Some(Value::Bool(true))),
-            "stream_status" => self.stream_status = Some(int(member(step, "status")) as u16),
+            "stream_status" => {
+                let body = match member(step, "body") {
+                    Some(b) => json::to_string(b),
+                    None => "{\"error\":\"refused\"}".into(),
+                };
+                self.stream_status = Some((int(member(step, "status")) as u16, body));
+            }
             "online" => {
                 let on = matches!(member(step, "online"), Some(Value::Bool(true)));
                 self.sync
@@ -560,8 +570,29 @@ impl Run {
             let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
             matches(e, member(&st, "pending").unwrap(), binds, "pending")?;
         }
-        if let Some(e) = member(expect, "refused") {
-            matches(e, &Value::List(self.refused.clone()), binds, "refused")?;
+        if let Some(Value::List(e)) = member(expect, "refused") {
+            // A status alone is a refusal told with no quota.
+            let e: Vec<Value> = e
+                .iter()
+                .map(|r| match r {
+                    Value::Int(_) => obj(vec![("status", r.clone()), ("quota", Value::Null)]),
+                    r => r.clone(),
+                })
+                .collect();
+            matches(
+                &Value::List(e),
+                &Value::List(self.refused.clone()),
+                binds,
+                "refused",
+            )?;
+        }
+        if let Some(e) = member(expect, "quota") {
+            let st = json::parse_json(&self.sync.as_ref().ok_or("no sync")?.status()).unwrap();
+            let q = member(&st, "error")
+                .and_then(|e| member(e, "quota"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            matches(e, &q, binds, "quota")?;
         }
         if let Some(e) = member(expect, "token_asked") {
             matches(e, &Value::Bool(self.token_asked), binds, "token_asked")?;

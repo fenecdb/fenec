@@ -112,9 +112,9 @@ class Run {
       this.streams.push({ path, auth: h.authorization ?? null });
       if (!this.up) return Promise.reject(new TypeError('connection refused'));
       if (this.streamStatus) {
-        const status = this.streamStatus;
+        const { status, body } = this.streamStatus;
         this.streamStatus = null;
-        return Promise.resolve(new Response('{"error":"refused"}', { status }));
+        return Promise.resolve(new Response(body, { status }));
       }
       const c = path.slice(1).split('/')[0];
       let ctl;
@@ -188,7 +188,7 @@ class Run {
           this.tokenAsked = true;
           return new Promise(() => {});
         },
-        onRefused: (e) => this.refused.push(e.status),
+        onRefused: (e) => this.refused.push({ status: e.status, quota: e.quota ?? null }),
       });
     } catch (e) {
       this.db = null;
@@ -305,7 +305,7 @@ class Run {
         this.up = st.up;
         break;
       case 'stream_status':
-        this.streamStatus = st.status;
+        this.streamStatus = { status: st.status, body: st.body !== undefined ? JSON.stringify(st.body) : '{"error":"refused"}' };
         break;
       case 'online':
         this.db.setOnline(st.online);
@@ -335,7 +335,9 @@ class Run {
     if (e.streams) matches(e.streams, this.streams, binds, 'streams');
     for (const [c, rows] of Object.entries(e.rows ?? {})) matches(rows, this.rows(c), binds, `rows.${c}`);
     if ('pending' in e) matches(e.pending, this.db.status()[0].pending, binds, 'pending');
-    if (e.refused) matches(e.refused, this.refused, binds, 'refused');
+    // A status alone is a refusal told with no quota.
+    if (e.refused) matches(e.refused.map((r) => (typeof r === 'number' ? { status: r, quota: null } : r)), this.refused, binds, 'refused');
+    if ('quota' in e) matches(e.quota, this.db.status()[0].quota, binds, 'quota');
     if ('token_asked' in e) matches(e.token_asked, this.tokenAsked, binds, 'token_asked');
     if (e.waits) {
       assert.equal(this.waits.length, e.waits.length, `waits: ${e.waits.length} expected, ${JSON.stringify(this.waits)} asked`);
