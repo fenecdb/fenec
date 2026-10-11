@@ -235,6 +235,13 @@ impl Database {
             }
         }
         let record = framed(REC_SPILL, 0, &body);
+        // Asked before the spill is written: refused after, its bytes would
+        // stay in the file, dead and past the quota (`limit.rs`).
+        if self.limit.is_some() {
+            let grows = self.grows(b, b.spilled_writes);
+            self.limited(b.grew || grows, record.len() as u64)?;
+            b.grew |= grows;
+        }
         let head = (record.len() - body.len()) as u64;
         let at = *self.appended.get_mut();
         let r = self.sink_mut().append(&record);
@@ -298,15 +305,13 @@ impl Database {
     /// and the record's length. The sink is handed the spills' bodies too,
     /// for a feed to send the block as the one block record it would have
     /// been ([`Sink::land`]).
-    pub(super) fn land_spilled(&mut self, b: &mut Block, seq: u64, at: u64) -> (Result<()>, usize) {
-        let mut body = Vec::new();
-        put_uvarint(&mut body, b.spilled.len() as u64);
-        for &(s, n) in &b.spilled {
-            put_uvarint(&mut body, s);
-            put_uvarint(&mut body, n);
-        }
-        body.extend_from_slice(&b.body_from(b.spilled_writes));
-        let record = framed(REC_LAND, 0, &body);
+    pub(super) fn land_spilled(
+        &mut self,
+        b: &mut Block,
+        seq: u64,
+        at: u64,
+        record: &[u8],
+    ) -> Result<()> {
         let base = b.spill_base.clone();
         let file: &[u8] = base.as_deref().map_or(&[], |m| m.as_ref());
         let spilled: Vec<&[u8]> = b
@@ -314,11 +319,25 @@ impl Database {
             .iter()
             .map(|&(s, n)| file.get(s as usize..(s + n) as usize).unwrap_or(&[]))
             .collect();
-        let r = self.sink_mut().land(seq, &spilled, &record);
+        let r = self.sink_mut().land(seq, &spilled, record);
         if r.is_ok() {
-            note_record(&mut self.landed, &mut self.landed_bytes, at, &record);
+            note_record(&mut self.landed, &mut self.landed_bytes, at, record);
         }
-        (r, record.len())
+        r
+    }
+
+    /// The land record of a block that spilled: its spills by where their
+    /// bodies are, then the writes since the last ([`Self::land_spilled`]).
+    /// Made apart from its append so a quota is asked its length first.
+    pub(super) fn land_record(b: &Block) -> Vec<u8> {
+        let mut body = Vec::new();
+        put_uvarint(&mut body, b.spilled.len() as u64);
+        for &(s, n) in &b.spilled {
+            put_uvarint(&mut body, s);
+            put_uvarint(&mut body, n);
+        }
+        body.extend_from_slice(&b.body_from(b.spilled_writes));
+        framed(REC_LAND, 0, &body)
     }
 
     /// When an open block spills: once its frames amount to `bytes`

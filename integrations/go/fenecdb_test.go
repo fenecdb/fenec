@@ -546,6 +546,42 @@ func TestATenantPath(t *testing.T) {
 	}
 }
 
+// A tenant's quota, as the node's flag sets it and as one set for the
+// tenant over it: the refusal is an *Error naming the quota, and a rate's
+// says how long to wait.
+func TestATenantsQuota(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(scratch, "quotas")
+	os.MkdirAll(dir, 0o700)
+	node, stop := serve("--dir", dir, "--admin-token", "go-admin", "--tenant-max-rows", "2")
+	defer stop()
+	admin := func(method, path, body string) {
+		req, _ := http.NewRequest(method, node+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer go-admin")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil || res.StatusCode >= 300 {
+			t.Fatalf("%s %s: %v %v", method, path, res, err)
+		}
+		res.Body.Close()
+	}
+	admin(http.MethodPut, "/_admin/tenants/acme", "")
+	acme := fenecdb.New(node, fenecdb.WithTenant("acme"))
+	must(acme.Exec(ctx, "create collection notes (t text)")).of(t)
+	must(acme.Exec(ctx, "put notes [{t: $1}, {t: $2}]", "a", "b")).of(t)
+	_, err := acme.Exec(ctx, "put notes {t: $1}", "c")
+	if e := statusOf(t, err); e.Status != 507 || e.Code != fenecdb.CodeFull || e.Quota != fenecdb.QuotaRows || e.RetryAfter != 0 {
+		t.Fatalf("past the rows quota: %+v", e)
+	}
+	// One byte a second: the first write lands and is charged, the next
+	// waits out its debt -- longer than the test runs.
+	admin(http.MethodPut, "/_admin/tenants/acme/quota", `{"rows": 0, "write_bytes": 1}`)
+	must(acme.Exec(ctx, "put notes {t: $1}", "c")).of(t)
+	_, err = acme.Exec(ctx, "put notes {t: $1}", "d")
+	if e := statusOf(t, err); e.Status != 429 || e.Code != fenecdb.CodeTooMany || e.Quota != fenecdb.QuotaWriteBytes || e.RetryAfter < time.Second {
+		t.Fatalf("past the bytes a second: %+v", e)
+	}
+}
+
 func TestAScopedToken(t *testing.T) {
 	ctx := context.Background()
 	out, err := exec.Command(binary, "--jwt-secret", jwtSecret, "--mint-token", `{"sub":"alice"}`).Output()

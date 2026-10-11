@@ -23,6 +23,7 @@
 //! opens the file again.
 
 use crate::lease::Lease;
+use crate::quota::{self, Held as QuotaHeld, Kind, Quota, Set};
 use crate::replication::{fresh_id, Follower, Replication};
 use crate::sse::Hub;
 use fenec_core::prelude::*;
@@ -83,6 +84,8 @@ pub struct Tenant {
     last_used: AtomicU64,
     /// The node's lease, on a node that takes one.
     lease: Option<Arc<Lease>>,
+    /// Its quota and what its requests hold of it now ([`crate::quota`]).
+    pub quota: Arc<QuotaHeld>,
 }
 
 impl Tenant {
@@ -156,6 +159,9 @@ pub struct Tenants {
     checked: AtomicBool,
     /// The derived indexes built as a tenant opens (`--warm`).
     warm: Option<crate::warm::Warm>,
+    /// Every tenant's quota but what its `<tenant>.quota` sets
+    /// (`--tenant-max-bytes` and the rest).
+    quota: Quota,
 }
 
 /// One tenant's open/closed state. Opening and closing a tenant both happen
@@ -190,7 +196,20 @@ impl Tenants {
             lease: None,
             checked: AtomicBool::new(false),
             warm: None,
+            quota: Quota::default(),
         })
+    }
+
+    /// Holds every tenant to `q`, but what a tenant's own quota sets
+    /// ([`Self::set_quota`]): the node's defaults.
+    pub fn with_quota(mut self, q: Quota) -> Tenants {
+        self.quota = q;
+        self
+    }
+
+    /// The node's default quota.
+    pub fn default_quota(&self) -> Quota {
+        self.quota
     }
 
     /// Whether tenant files are mapped, as `fs::open` maps a file, or read
@@ -279,6 +298,31 @@ impl Tenants {
     /// Where a tenant that follows a node of its own keeps that node's URL.
     fn follows_path(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.follows"))
+    }
+
+    /// Where a tenant keeps the quota set for it over the node's.
+    fn quota_path(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}.quota"))
+    }
+
+    /// What is set for a tenant over the node's quota: nothing where no
+    /// file says. A file that does not read keeps the tenant from opening
+    /// rather than open it held to the node's quota alone, which may be
+    /// none.
+    fn quota_set(&self, name: &str) -> std::result::Result<Set, Refused> {
+        match std::fs::read_to_string(self.quota_path(name)) {
+            Ok(text) => Set::parse(&text).map_err(|e| {
+                Refused(
+                    500,
+                    format!("tenant `{name}`'s quota ({name}.quota) does not read: {e}"),
+                )
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Set::default()),
+            Err(e) => Err(Refused(
+                500,
+                format!("tenant `{name}`'s quota could not be read: {e}"),
+            )),
+        }
     }
 
     /// The node a tenant's file follows when it is a replica's: its own,
@@ -604,6 +648,10 @@ impl Tenants {
         if let Some(setup) = &self.setup {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
         }
+        // Its bytes and rows are asked of each block as it lands, where
+        // they are bounded: a tenant with neither has nothing asked.
+        let held = QuotaHeld::new(self.quota_set(name)?.over(&self.quota));
+        db.set_limit(quota::limit(&held));
         if self.checked.load(Ordering::SeqCst) {
             let _ = db.install_plugin(&crate::access::CheckPlugin);
         }
@@ -618,7 +666,12 @@ impl Tenants {
         db.set_change_capacity(self.change_capacity);
         let db = Arc::new(RwLock::new(db));
         crate::link::beside(&format!("tenant `{name}`"), &db);
-        crate::link::keep(&format!("tenant `{name}`"), &db);
+        let bytes = Arc::clone(&held);
+        crate::link::keep_held(
+            &format!("tenant `{name}`"),
+            &db,
+            Some(Arc::new(move || bytes.get(Kind::Bytes))),
+        );
         crate::sweep::watch(&format!("tenant `{name}`"), &db);
         if let Some(w) = &self.warm {
             crate::warm::start(&format!("tenant `{name}`"), &db, w);
@@ -657,7 +710,104 @@ impl Tenants {
             frozen: AtomicBool::new(false),
             last_used: AtomicU64::new(self.now()),
             lease: self.lease.clone(),
+            quota: held,
         }))
+    }
+
+    /// Sets what a tenant's quota is over the node's, kept beside its file
+    /// -- written beside and renamed, whole or not at all -- and held to at
+    /// once where the tenant is open: its next request, and its next block
+    /// as it lands. An empty set leaves the tenant at the node's quota.
+    /// What it is held to now.
+    pub fn set_quota(&self, name: &str, set: Set) -> std::result::Result<Quota, Refused> {
+        check_name(name)?;
+        let quota = set.over(&self.quota);
+        self.with_slot(name, |held| {
+            if !self.path(name).exists() {
+                return Err(Refused(404, format!("no tenant `{name}` on this node")));
+            }
+            let path = self.quota_path(name);
+            let written = match set.is_empty() {
+                true => match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                    _ => Ok(()),
+                },
+                false => {
+                    let tmp = self.dir.join(format!("{name}.quota.writing"));
+                    std::fs::File::create(&tmp)
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            f.write_all(set.json().as_bytes())?;
+                            f.sync_all()
+                        })
+                        .and_then(|_| std::fs::rename(&tmp, &path))
+                }
+            };
+            written.map_err(|e| {
+                Refused(500, format!("could not write tenant `{name}`'s quota: {e}"))
+            })?;
+            if let Held::Open(t) = &*held {
+                t.quota.set(quota);
+                crate::held::write(&t.db).set_limit(quota::limit(&t.quota));
+            }
+            Ok(quota)
+        })
+    }
+
+    /// A tenant's quota and what it uses of it, as JSON: what is set for
+    /// it, what it is held to, and its file's bytes, rows, streams and
+    /// requests in flight now. A tenant that is not open is not opened for
+    /// it: its file's size is the disk's, and its rows unknown (`null`).
+    pub fn quota_report(&self, name: &str) -> std::result::Result<String, Refused> {
+        check_name(name)?;
+        if !self.path(name).exists() {
+            return Err(Refused(404, format!("no tenant `{name}` on this node")));
+        }
+        let set = self.quota_set(name)?;
+        let open = self.open_tenants().into_iter().find(|t| t.name == name);
+        let (quota, usage) = match &open {
+            Some(t) => {
+                let (bytes, rows) = {
+                    let g = t.read();
+                    (g.garbage().file, Some(g.documents()))
+                };
+                // Counted where the quota is set; without one, the
+                // subscriptions its hub counts in any case.
+                let (streams, requests) = t.quota.holding();
+                let streams = match t.quota.get(Kind::Streams) {
+                    0 => t.hub.live() as u64,
+                    _ => streams,
+                };
+                (
+                    t.quota.quota(),
+                    usage_json(bytes, rows, Some(streams), requests),
+                )
+            }
+            None => {
+                let bytes = std::fs::metadata(self.path(name)).map_or(0, |m| m.len());
+                (set.over(&self.quota), usage_json(bytes, None, None, 0))
+            }
+        };
+        let mut out = String::from("{\"tenant\":");
+        fenec_core::json::escape_into(&mut out, name);
+        out.push_str(&format!(
+            ",\"open\":{},\"set\":{},\"quota\":{},\"usage\":{usage}}}",
+            open.is_some(),
+            set.json(),
+            quota.json()
+        ));
+        Ok(out)
+    }
+
+    /// Every tenant's [`Self::quota_report`], a JSON array: what a router
+    /// joins into its list of tenants for the studio. No tenant is opened.
+    pub fn quota_reports(&self) -> String {
+        let reports: Vec<String> = self
+            .names()
+            .iter()
+            .filter_map(|n| self.quota_report(n).ok())
+            .collect();
+        format!("[{}]", reports.join(","))
     }
 
     /// Closes the slot's tenant if nothing but the slot holds it and it is
@@ -891,6 +1041,9 @@ impl Tenants {
             // again under the name that way too.
             let _ = fenec_core::fs::forget_sync_log(&path);
             let _ = std::fs::remove_file(self.follows_path(name));
+            // A tenant made again under the name starts at the node's quota;
+            // a router that keeps one sends it with the tenant.
+            let _ = std::fs::remove_file(self.quota_path(name));
             Ok(())
         })
     }
@@ -1015,6 +1168,16 @@ pub struct Stats {
     /// The open tenants' vectors still to be linked into their graphs
     /// (`link::beside`).
     pub unlinked: usize,
+}
+
+/// What a tenant uses of its quota, as `quota_report` writes it.
+fn usage_json(bytes: u64, rows: Option<u64>, streams: Option<u64>, requests: u64) -> String {
+    let opt = |v: Option<u64>| v.map_or("null".to_string(), |n| n.to_string());
+    format!(
+        "{{\"bytes\":{bytes},\"rows\":{},\"streams\":{},\"requests\":{requests}}}",
+        opt(rows),
+        opt(streams)
+    )
 }
 
 /// `[a-z0-9_-]{1,64}`: safe as a file name everywhere, no traversal, and

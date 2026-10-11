@@ -178,13 +178,10 @@ export class FenecHttp {
     if (!res.ok && !also.includes(res.status)) {
       // The status is the refusal's kind: 412 a write's `require` not met,
       // 409 a value taken, 403 outside the token's rules, 422 a key sent
-      // with another request. A batch says which statement stopped it
-      // (`at`) and how many stayed applied (`completed`).
-      const e = new FenecError(body?.error ?? `HTTP ${res.status}`);
-      e.status = res.status;
-      if (typeof body?.at === 'number') e.at = body.at;
-      if (typeof body?.completed === 'number') e.completed = body.completed;
-      throw e;
+      // with another request, 507 and 429 a tenant's quota. A batch says
+      // which statement stopped it (`at`) and how many stayed applied
+      // (`completed`).
+      throw refused(res, body);
     }
     const got = res.headers?.get?.('fenec-seq');
     const seq = got ? Number(got) : null;
@@ -420,7 +417,7 @@ export class FenecHttp {
         });
         if (res.status === 304) return;
         const got = await res.json();
-        if (!res.ok) throw Object.assign(new FenecError(got?.error ?? `HTTP ${res.status}`), { status: res.status });
+        if (!res.ok) throw refused(res, got);
         tag = res.headers.get('etag') ?? '"0"';
         if (!stop.signal.aborted) cb(rowsOf(Array.isArray(got) ? { rows: got } : got));
       } catch (err) {
@@ -455,8 +452,32 @@ async function refusal(res, collection) {
   } catch {
     // not JSON: the text as it came
   }
-  const e = new FenecError(`could not open the subscription to \`${collection}\`: ${said || `HTTP ${res.status}`}`);
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // no JSON to read a quota from
+  }
+  return refused(res, body, `could not open the subscription to \`${collection}\`: ${said || `HTTP ${res.status}`}`);
+}
+
+/**
+ * A refused request as the error it is: its status, where a batch stopped
+ * and what stayed applied, and where a tenant's quota refused it the quota
+ * (`bytes` and `rows` answer 507; `streams`, `requests`, `writes` and
+ * `write_bytes` 429) and how many seconds to wait before coming back
+ * (`Retry-After`), so a client backs off by what the server says rather
+ * than by a guess.
+ */
+function refused(res, body, message) {
+  const e = new FenecError(message ?? body?.error ?? `HTTP ${res.status}`);
   e.status = res.status;
+  if (typeof body?.at === 'number') e.at = body.at;
+  if (typeof body?.completed === 'number') e.completed = body.completed;
+  const quota = body?.quota ?? res.headers?.get?.('fenec-quota');
+  if (quota) e.quota = quota;
+  const wait = Number(res.headers?.get?.('retry-after') ?? body?.retry_after);
+  if (Number.isFinite(wait) && wait > 0) e.retryAfter = wait;
   return e;
 }
 

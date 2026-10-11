@@ -27,6 +27,10 @@ pub use bucket::Bucket;
 mod garbage;
 #[cfg(not(target_arch = "wasm32"))]
 mod handover;
+#[cfg(not(target_arch = "wasm32"))]
+mod limit;
+#[cfg(not(target_arch = "wasm32"))]
+pub use limit::{Landing, Limit};
 mod maintenance;
 #[cfg(not(target_arch = "wasm32"))]
 mod pinned;
@@ -637,6 +641,11 @@ struct Block {
     /// holding its frames as a block that never spilled does.
     #[cfg(not(target_arch = "wasm32"))]
     unspillable: bool,
+    /// Whether a spill of it wrote more than it took away, which its land
+    /// is judged with ([`Database::set_limit`]): those frames are in the
+    /// file, not here.
+    #[cfg(not(target_arch = "wasm32"))]
+    grew: bool,
 }
 
 /// The nodes a block's `put`s leave waiting before they are linked, a
@@ -735,6 +744,7 @@ impl Block {
             self.spilled_writes = 0;
             self.spill_base = None;
             self.unspillable = false;
+            self.grew = false;
         }
         self
     }
@@ -2572,6 +2582,10 @@ pub struct Database {
     /// the router promotes the tenant elsewhere once it knows the lease has.
     #[cfg(not(target_arch = "wasm32"))]
     fence: Option<Fence>,
+    /// What a block of writes is held to as it lands, on a server holding
+    /// a tenant to a quota ([`Self::set_limit`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    limit: Option<Limit>,
     /// The block of writes running, if one is: its writes are held back
     /// from the sink and the feed until it lands, and put back if it does
     /// not ([`Self::execute_block`]).
@@ -2708,6 +2722,8 @@ impl Database {
             watcher: None,
             #[cfg(not(target_arch = "wasm32"))]
             fence: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            limit: None,
             block: None,
             spare: Block::default(),
             history: History::default(),
@@ -4799,10 +4815,26 @@ impl Database {
         let at = *self.appended.get_mut();
         // A block that spilled lands as the spills it names and the rest.
         #[cfg(not(target_arch = "wasm32"))]
-        let landed = match b.spilled.is_empty() {
+        let land = match b.spilled.is_empty() {
             true => None,
-            false => Some(self.land_spilled(&mut b, seq, at)),
+            false => Some(Self::land_record(&b)),
         };
+        // A quota is asked with the record's length to the byte, before any
+        // of it reaches the file (`limit.rs`).
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.limit.is_some() {
+            let adds = land.as_ref().map_or_else(|| b.record_len(), Vec::len);
+            let grows = b.grew || self.grows(&b, b.spilled_writes);
+            if let Err(e) = self.limited(grows, adds as u64) {
+                self.undo(b);
+                return Err(e);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let landed = land.map(|record| {
+            let r = self.land_spilled(&mut b, seq, at, &record);
+            (r, record.len())
+        });
         #[cfg(target_arch = "wasm32")]
         let landed = None;
         let (r, len) = if let Some(landed) = landed {

@@ -1331,5 +1331,8 @@ pub fn status_of(e: &Error) -> u16 {
         Error::Corrupt(_) | Error::Io(_) | Error::Plugin(_) => 500,
         // As `--http-read-only` answers: the write is not this server's to take.
         Error::ReadOnly(_) | Error::Denied(_) => 403,
+        // Insufficient storage, as --max-memory answers: the write fits
+        // once rows are deleted, not by sending it again.
+        Error::Quota(_) => 507,
     }
 }

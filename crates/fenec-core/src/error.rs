@@ -27,6 +27,10 @@ pub enum Error {
     /// A write's `require <n>` not met: it wrote another number of rows, and
     /// it and its block are put back. 412 over HTTP.
     Unmet(String),
+    /// A block of writes past a quota a server holds the database to --
+    /// a tenant's file bytes or rows (`Database::set_limit`) -- put back.
+    /// 507 over HTTP.
+    Quota(String),
 }
 
 impl fmt::Display for Error {
@@ -43,6 +47,7 @@ impl fmt::Display for Error {
             Error::ReadOnly(m) => write!(f, "read only: {m}"),
             Error::Denied(m) => write!(f, "denied: {m}"),
             Error::Unmet(m) => write!(f, "unmet: {m}"),
+            Error::Quota(m) => write!(f, "quota: {m}"),
         }
     }
 }

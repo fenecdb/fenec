@@ -168,6 +168,16 @@ void main() {
     await db.close();
   });
 
+  test("a tenant's quota refusal names the quota and the wait", () {
+    final rows = FenecRemote.refused(507, {'error': 'past its quota of 5 rows', 'quota': 'rows'}, null);
+    expect((rows.code, rows.status, rows.quota, rows.retryAfter), (FenecCode.quota, 507, 'rows', null));
+    // Its header over its body.
+    final rate = FenecRemote.refused(429, {'error': 'past', 'quota': 'writes', 'retry_after': 1}, '3');
+    expect((rate.quota, rate.retryAfter), ('writes', const Duration(seconds: 3)));
+    final memory = FenecRemote.refused(507, {'error': 'data ceiling'}, null);
+    expect((memory.code, memory.quota), (FenecCode.io, null));
+  });
+
   test('a require not met is refused, and writes nothing', () async {
     final db = await Fenec.memory();
     await db.execute('create collection accounts (balance int)');

@@ -11,6 +11,8 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
         case panic, misuse, locked
         /// A write's `require n` not met: it wrote another count, and was put back.
         case unmet = 14
+        /// A tenant's quota a server holds it to (`quota` names it).
+        case quota = 15
         case builder = 100
     }
 
@@ -25,6 +27,14 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
     /// How many statements of a failed batch stayed applied: 0, since a
     /// batch lands whole, but for one holding a `compact`.
     public let completed: Int?
+    /// The tenant's quota a server refused with (`FenecRemote` to a tenant
+    /// node): "bytes" and "rows" answer 507, and room is made by deleting;
+    /// "streams", "requests", "writes" and "write_bytes" answer 429 with
+    /// `retryAfter`. nil for any other refusal.
+    public let quota: String?
+    /// Seconds to wait before sending again, where the server said
+    /// (`Retry-After`, a quota's 429).
+    public let retryAfter: Double?
     /// The parameters the library asked for again as JSON (`exact`).
     let exact: [Int]?
 
@@ -39,15 +49,22 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.status = nil
         self.at = nil
         self.completed = nil
+        self.quota = nil
+        self.retryAfter = nil
     }
 
-    init(code: Code, message: String, status: Int, at: Int?, completed: Int?) {
+    init(
+        code: Code, message: String, status: Int, at: Int?, completed: Int?,
+        quota: String? = nil, retryAfter: Double? = nil
+    ) {
         self.code = code
         self.message = message
         self.exact = nil
         self.status = status
         self.at = at
         self.completed = completed
+        self.quota = quota
+        self.retryAfter = retryAfter
     }
 
     public var description: String { message }

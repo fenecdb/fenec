@@ -17,6 +17,13 @@
 //! POST   /_admin/tenants/<t>/promote   a replica node takes this tenant's writes
 //! POST   /_admin/tenants/<t>/follow    {from}: follow the node at `from`, or
 //!                                      without it this node's upstream
+//! PUT    /_admin/tenants/<t>/quota     {bytes, rows, streams, requests, writes,
+//!                                      write_bytes}: what is set for the tenant
+//!                                      over the node's quota, kept beside its
+//!                                      file (0 none, left out or null the
+//!                                      node's); the whole set, replaced
+//! GET    /_admin/tenants/<t>/quota     {tenant, open, set, quota, usage}
+//! GET    /_admin/quotas                every tenant's, an array; none opened
 //! POST   /_admin/lease                 {ms, epoch, primaries?}: the router's
 //!                                      lease, on a node started to take one
 //!                                      (412: send the primaries)
@@ -50,6 +57,19 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Get, ["open"]) => Ok(open(tenants)),
         (Method::Get, ["tenants"]) => Ok(names(tenants)),
         (Method::Get, ["sizes"]) => Ok(sizes(tenants)),
+        (Method::Get, ["quotas"]) => Ok(Response::json(200, tenants.quota_reports())),
+        // A tenant's quota is the router's to set, as its placement is: the
+        // node keeps what it is sent, and a move or a failover sends it on.
+        (Method::Put, ["tenants", t, "quota"]) => {
+            crate::quota::Set::parse(&String::from_utf8_lossy(&req.body))
+                .map_err(|e| Refused(400, e))
+                .and_then(|set| tenants.set_quota(t, set))
+                .and_then(|_| tenants.quota_report(t))
+                .map(|report| Response::json(200, report))
+        }
+        (Method::Get, ["tenants", t, "quota"]) => tenants
+            .quota_report(t)
+            .map(|report| Response::json(200, report)),
         (Method::Put, ["tenants", t]) => tenants
             .create(t)
             .map(|_| Response::json(201, format!("{{\"created\":\"{t}\"}}"))),

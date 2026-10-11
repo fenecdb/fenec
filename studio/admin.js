@@ -122,7 +122,7 @@ export function mount(host, ctx) {
       const [st, me, tn] = await Promise.all([
         call(ctx, '/_stats/statements').catch((e) => ({ ok: false, status: 0, text: e.message })),
         call(ctx, '/_metrics', { root: ctx.state.mode !== 'single' }).catch((e) => ({ ok: false, status: 0, text: e.message })),
-        router ? call(ctx, '/_shard/tenants?bytes', { root: true }).catch(() => null) : null,
+        router ? call(ctx, '/_shard/tenants?bytes&quota', { root: true }).catch(() => null) : null,
       ]);
       shapes = st.ok ? st.json?.statements ?? [] : { refused: st };
       drawStatements();
@@ -277,7 +277,21 @@ export function mount(host, ctx) {
       h(
         'table',
         { class: 'ad-table ad-tenants' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Tenant'), h('th', {}, 'Node'), h('th', {}, 'State'), h('th', { class: 'num' }, 'Size'), h('th', {}, 'Replica'))),
+        h(
+          'thead',
+          {},
+          h(
+            'tr',
+            {},
+            h('th', {}, 'Tenant'),
+            h('th', {}, 'Node'),
+            h('th', {}, 'State'),
+            h('th', { class: 'num' }, 'Size'),
+            h('th', { class: 'num' }, 'Rows'),
+            h('th', {}, 'Quota'),
+            h('th', {}, 'Replica'),
+          ),
+        ),
         h(
           'tbody',
           {},
@@ -288,13 +302,47 @@ export function mount(host, ctx) {
               h('td', { class: 'mono' }, t.name),
               h('td', { class: 'mono' }, t.node),
               h('td', { class: t.state === 'moving' ? 'sun' : 'muted' }, t.state),
-              h('td', { class: 'num' }, typeof t.bytes === 'number' ? bytes(t.bytes) : '–'),
+              used(typeof t.bytes === 'number' ? t.bytes : t.usage?.bytes, t.quota?.bytes, bytes),
+              used(t.usage?.rows, t.quota?.rows, number),
+              h('td', { class: 'ad-limits' }, limits(t)),
               h('td', { class: 'mono muted' }, t.replica ?? ''),
             ),
           ),
         ),
       ),
     );
+  }
+
+  /**
+   * What a tenant uses against its quota, where one is set: the figure, and
+   * under it a bar of how full it is -- past nine tenths in the warning
+   * colour, since writes stop at the quota itself.
+   */
+  function used(n, max, show) {
+    const known = typeof n === 'number';
+    if (!max) return h('td', { class: 'num' }, known ? show(n) : '–');
+    const share = known ? Math.min(1, n / max) : 0;
+    return h(
+      'td',
+      { class: `num${share >= 0.9 ? ' bad' : ''}`, title: known ? `${Math.round(share * 100)}% of the quota` : 'not open: its rows are counted once it is' },
+      known ? show(n) : '–',
+      h('span', { class: 'ad-of' }, ` of ${show(max)}`),
+      // A meter rather than a bar sized inline: the page's policy refuses
+      // inline styles, and a meter colours itself past `high`.
+      h('meter', { class: 'ad-meter', min: 0, max: 1, low: 0.75, high: 0.9, optimum: 0, value: share.toFixed(3), 'aria-hidden': 'true' }),
+    );
+  }
+
+  /** The tenant's other quotas, those set: streams and requests held now of their bound, and its rates. */
+  function limits(t) {
+    const q = t.quota ?? {};
+    const u = t.usage ?? {};
+    const parts = [];
+    if (q.streams) parts.push(`${number(u.streams ?? 0)}/${number(q.streams)} streams`);
+    if (q.requests) parts.push(`${number(u.requests ?? 0)}/${number(q.requests)} in flight`);
+    if (q.writes) parts.push(`${number(q.writes)} writes/s`);
+    if (q.write_bytes) parts.push(`${bytes(q.write_bytes)}/s`);
+    return parts.length ? parts.join(' · ') : h('span', { class: 'muted' }, t.quota ? 'none' : '–');
   }
 
   function since(s) {

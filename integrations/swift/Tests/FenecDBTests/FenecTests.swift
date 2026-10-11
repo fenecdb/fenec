@@ -110,6 +110,19 @@ struct Note: Codable, Equatable, FenecValue {
         try await db.close()
     }
 
+    /// A tenant node's quota refusal, as a remote reads it: the quota named,
+    /// and for a rate the wait the server asks for -- its header over its body.
+    @Test func aQuotaRefusalNamesTheQuotaAndTheWait() throws {
+        let rows = FenecRemote.refused(
+            507, try Value.parse(#"{"error":"past its quota of 5 rows","quota":"rows"}"#), retryAfter: nil)
+        #expect(rows.code == .quota && rows.status == 507 && rows.quota == "rows" && rows.retryAfter == nil)
+        let rate = FenecRemote.refused(
+            429, try Value.parse(#"{"error":"past","quota":"writes","retry_after":1}"#), retryAfter: "3")
+        #expect(rate.code == .quota && rate.quota == "writes" && rate.retryAfter == 3)
+        let memory = FenecRemote.refused(507, try Value.parse(#"{"error":"data ceiling"}"#), retryAfter: nil)
+        #expect(memory.quota == nil && memory.code == .io)
+    }
+
     /// `require 1` over a row that is not there is refused as `unmet`, and
     /// the write is put back: nothing of it lands.
     @Test func aRequireNotMetWritesNothing() async throws {

@@ -34,6 +34,27 @@ usage: fenec-server [options]
                             holds only what is derived from them; read it
                             instead over a network file system, or to have
                             --max-memory cover the data as well
+      --tenant-max-bytes <size>  each tenant's quota of file bytes (--dir):
+                            a write that would take its file past it is
+                            refused, 507, before it lands; deletes, drops and
+                            compact still run. A size: 64M, 2G, or bytes
+      --tenant-max-rows <n> each tenant's quota of rows, its own collections'
+                            together: 507 past it, deletes still run
+      --tenant-max-streams <n>  each tenant's subscriptions, /_changes waits,
+                            held writes and Fenec-After waits together: 429
+                            with Retry-After past it
+      --tenant-max-requests <n>  each tenant's requests in flight: 429 with
+                            Retry-After past it, so one tenant cannot hold
+                            every worker thread
+      --tenant-writes-per-sec <n>  each tenant's writes a second, a token
+                            bucket a second deep: 429 with Retry-After
+      --tenant-write-bytes-per-sec <size>  each tenant's bytes written a
+                            second, charged as each write lands: 429 with
+                            Retry-After while it is in debt
+                            Every quota is 0 (none) unless given, and set per
+                            tenant over these with
+                            PUT /_admin/tenants/<t>/quota, which a router
+                            sends with the tenant (PUT /_shard/tenants/<t>/quota)
       --warm <all|off|list> build the hash, text, ordered and sparse indexes
                             after the open, one at a time beside the
                             queries, rather than on the first read of each:
@@ -295,6 +316,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut metrics: Option<String> = None;
+    let mut quota = fenec_http::quota::Quota::default();
     let mut http_cfg = fenec_http::Config {
         token: std::env::var("FENEC_HTTP_TOKEN")
             .ok()
@@ -349,6 +371,38 @@ fn main() {
                 http_cfg.max_memory = mib << 20;
             }
             "--metrics" => metrics = Some(next(&mut i, "--metrics")),
+            flag @ ("--tenant-max-bytes"
+            | "--tenant-max-rows"
+            | "--tenant-max-streams"
+            | "--tenant-max-requests"
+            | "--tenant-writes-per-sec"
+            | "--tenant-write-bytes-per-sec") => {
+                use fenec_http::quota::Kind;
+                let (kind, size) = match flag {
+                    "--tenant-max-bytes" => (Kind::Bytes, true),
+                    "--tenant-max-rows" => (Kind::Rows, false),
+                    "--tenant-max-streams" => (Kind::Streams, false),
+                    "--tenant-max-requests" => (Kind::Requests, false),
+                    "--tenant-writes-per-sec" => (Kind::Writes, false),
+                    _ => (Kind::WriteBytes, true),
+                };
+                let v = next(&mut i, flag);
+                let n = match size {
+                    true => fenec_http::quota::size(&v),
+                    false => v.parse().ok(),
+                };
+                let n = n.unwrap_or_else(|| {
+                    fail(&format!(
+                        "{flag} expects {}, got `{v}`",
+                        if size {
+                            "a size (64M, 2G, bytes)"
+                        } else {
+                            "a number"
+                        }
+                    ))
+                });
+                quota = quota.with(kind, n);
+            }
             "--otlp-endpoint" => tracing.endpoint = Some(next(&mut i, "--otlp-endpoint")),
             "--otlp-header" => {
                 let kv = next(&mut i, "--otlp-header");
@@ -596,6 +650,9 @@ fn main() {
     if lease && dir.is_none() {
         fail("--lease is a tenant node's, whose router grants it: give --dir");
     }
+    if !quota.is_none() && dir.is_none() {
+        fail("the --tenant-* quotas hold a node's tenants: give --dir");
+    }
 
     // `--follow`: the follower writes the file this server serves, the one
     // writer of the collection it mirrors.
@@ -679,6 +736,7 @@ fn main() {
             lease,
             repl,
             warm.flatten(),
+            quota,
         );
     }
 
@@ -863,6 +921,7 @@ fn serve_dir(
     lease: bool,
     repl: Option<fenec_http::tenants::Replicated>,
     warm: Option<fenec_http::warm::Warm>,
+    quota: fenec_http::quota::Quota,
 ) -> ! {
     let tenants = match Tenants::new(dir) {
         Ok(t) => t,
@@ -873,7 +932,8 @@ fn serve_dir(
         .with_max_memory(http_cfg.max_memory)
         .with_checkpoint(checkpoint)
         .with_mmap(mmap)
-        .with_warm(warm);
+        .with_warm(warm)
+        .with_quota(quota);
     let follows = repl.as_ref().and_then(|r| r.upstream.clone());
     if let Some(r) = repl {
         tenants = tenants.with_replication(r);

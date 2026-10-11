@@ -102,6 +102,22 @@ class FenecTest {
         db.close()
     }
 
+    /** A tenant node's quota refusal, as a remote reads it: the quota named, and a rate's wait -- its header over its body. */
+    @Test
+    fun aQuotaRefusalNamesTheQuotaAndTheWait() {
+        val rows = FenecRemote.refused(507, Json.parse("""{"error":"past its quota of 5 rows","quota":"rows"}""") as Row, null)
+        assertEquals(FenecException.Code.QUOTA, rows.code)
+        assertEquals(507, rows.status)
+        assertEquals("rows", rows.quota)
+        assertEquals(null, rows.retryAfter)
+        val rate = FenecRemote.refused(429, Json.parse("""{"error":"past","quota":"writes","retry_after":1}""") as Row, "3")
+        assertEquals("writes", rate.quota)
+        assertEquals(3.0, rate.retryAfter)
+        val memory = FenecRemote.refused(507, Json.parse("""{"error":"data ceiling"}""") as Row, null)
+        assertEquals(null, memory.quota)
+        assertEquals(FenecException.Code.IO, memory.code)
+    }
+
     /** `require 1` over a row that is not there is refused as UNMET, and the write is put back. */
     @Test
     fun aRequireNotMetWritesNothing() = runBlocking {

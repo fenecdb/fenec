@@ -53,8 +53,9 @@ instances:
       # Replication: a primary's replicas, a replica's lag
       - replicas
       - ^replica_.*$
-      # A tenant node (--dir)
+      # A tenant node (--dir), and its tenants' quotas' refusals by quota
       - ^tenants.*$
+      - quota_refused
       # The router (fenec-shard)
       - ^router_.*$
     # Histograms as distributions, so that p50/p95/p99 are taken over every

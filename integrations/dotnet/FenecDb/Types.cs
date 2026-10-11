@@ -132,8 +132,10 @@ public class FenecException : Exception
 
     /// <summary>The status's name: <c>bad_request</c> (400), <c>unauthorized</c> (401), <c>forbidden</c> (403),
     /// <c>not_found</c> (404), <c>conflict</c> (409), <c>gone</c> (410), <c>unmet</c> (412: a write's require
-    /// not met, its batch put back), <c>key_reused</c> (422),
-    /// <c>unavailable</c> (503), <c>timeout</c> (504), <c>storage_full</c> (507), or <c>http_&lt;status&gt;</c>.</summary>
+    /// not met, its batch put back), <c>key_reused</c> (422), <c>too_many</c> (429: a tenant's quota of
+    /// streams, requests or writes a second), <c>unavailable</c> (503), <c>timeout</c> (504),
+    /// <c>storage_full</c> (507: past --max-memory, or a tenant's quota of bytes or rows), or
+    /// <c>http_&lt;status&gt;</c>.</summary>
     public string Code { get; }
 
     /// <summary>How many statements of a failed batch were applied: 0, since a batch lands whole or not at all,
@@ -144,14 +146,25 @@ public class FenecException : Exception
     /// the put whose id was taken. <c>null</c> for anything but a batch's stop.</summary>
     public int? At { get; }
 
+    /// <summary>The tenant's quota that refused the request: <c>bytes</c> and <c>rows</c> answer 507, and room
+    /// is made by deleting; <c>streams</c>, <c>requests</c>, <c>writes</c> and <c>write_bytes</c> answer 429
+    /// with <see cref="RetryAfter"/>. <c>null</c> for any other refusal.</summary>
+    public string? Quota { get; }
+
+    /// <summary>How long to wait before sending again, where the server said (a quota's 429).</summary>
+    public TimeSpan? RetryAfter { get; }
+
     /// <summary>A refusal with its status, message and, for a batch, how many statements were applied and
-    /// which one stopped it.</summary>
-    public FenecException(int status, string message, int completed = 0, int? at = null) : base(message)
+    /// which one stopped it; for a tenant's quota, which quota and how long to wait.</summary>
+    public FenecException(int status, string message, int completed = 0, int? at = null,
+        string? quota = null, TimeSpan? retryAfter = null) : base(message)
     {
         Status = status;
         Code = CodeOf(status);
         Completed = completed;
         At = at;
+        Quota = quota;
+        RetryAfter = retryAfter;
     }
 
     static string CodeOf(int status) => status switch
@@ -164,6 +177,7 @@ public class FenecException : Exception
         410 => "gone",
         412 => "unmet",
         422 => "key_reused",
+        429 => "too_many",
         503 => "unavailable",
         504 => "timeout",
         507 => "storage_full",
@@ -177,9 +191,12 @@ public class FenecException : Exception
             using var doc = JsonDocument.Parse(body);
             var r = doc.RootElement;
             if (r.ValueKind == JsonValueKind.Object && r.TryGetProperty("error", out var e))
+                // The wait Retry-After says, in the body as well: what reads it here has no headers.
                 return new FenecException(status, e.GetString() ?? body,
                     r.TryGetProperty("completed", out var c) ? c.GetInt32() : 0,
-                    r.TryGetProperty("at", out var at) ? at.GetInt32() : null);
+                    r.TryGetProperty("at", out var at) ? at.GetInt32() : null,
+                    r.TryGetProperty("quota", out var q) ? q.GetString() : null,
+                    r.TryGetProperty("retry_after", out var w) ? TimeSpan.FromSeconds(w.GetInt64()) : null);
         }
         catch (JsonException) { }
         return new FenecException(status, body.Trim());

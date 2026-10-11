@@ -666,7 +666,7 @@ test('through a router: the tenant a token names, or the one typed', async () =>
   }
 });
 
-test('through a router whose token is the nodes\': the admin view lists the tenants, their nodes and sizes', async () => {
+test('through a router whose token is the nodes\': the admin view lists the tenants, their nodes, sizes and quotas', async () => {
   const node = await startServer({ tenants: true, studio: false });
   const router = await startRouter(node, ['acme', 'globex'], { token: TOKEN });
   try {
@@ -674,6 +674,13 @@ test('through a router whose token is the nodes\': the admin view lists the tena
       ['acme', 3],
       ['globex', 1],
     ]);
+    // A quota for one of them, set through the router as a SaaS sets it.
+    const set = await fetch(`${router.url}/_shard/tenants/acme/quota`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ rows: 10, writes: 50 }),
+    });
+    assert.equal(set.status, 200, await set.text());
     const p = await page();
     await p.goto(`${router.url}/_studio/`);
     await p.waitForSelector('#token');
@@ -687,6 +694,11 @@ test('through a router whose token is the nodes\': the admin view lists the tena
       ['globex', 'n1', 'active'],
     ]);
     for (const r of rows) assert.match(r[3], /^\d+(\.\d)? (B|KB|MB)$/);
+    // Each tenant's rows against its quota, and the quotas it is held to.
+    assert.deepEqual(rows.map((r) => r.slice(4, 6)), [
+      ['3 of 10', '50 writes/s'],
+      ['1', 'none'],
+    ]);
     // The router's own counts, and the tenant's statements through it.
     await p.waitForFunction(() => /Requests/.test(document.querySelector('.ad-numbers')?.textContent ?? ''), { timeout: 10_000 });
     await p.waitForFunction(() => /get notes/.test(document.querySelector('.ad-statements')?.textContent ?? ''), { timeout: 10_000 });

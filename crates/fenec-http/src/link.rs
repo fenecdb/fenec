@@ -78,8 +78,14 @@ pub fn beside(what: &str, db: &Arc<RwLock<Database>>) {
 /// what a few seconds wrote beyond the due point to link again.
 const KEEP_EVERY: Duration = Duration::from_secs(5);
 
-/// The databases the keeper appends graphs for, each named for the log.
-static KEPT: Mutex<Vec<(String, Weak<RwLock<Database>>)>> = Mutex::new(Vec::new());
+/// A database's byte quota as it stands, 0 for none: a tenant's
+/// (`crate::quota`), read at each look since it may be set meanwhile.
+pub type Bytes = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// The databases the keeper appends graphs for, each named for the log,
+/// with its byte quota where it is held to one.
+type Kept = (String, Weak<RwLock<Database>>, Option<Bytes>);
+static KEPT: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
 static KEEPER: Once = Once::new();
 
 /// Keeps the database's graphs in its file: every few seconds one thread,
@@ -89,9 +95,18 @@ static KEEPER: Once = Once::new();
 /// thread holds a database only while it looks, so a tenant closed
 /// meanwhile is let go of.
 pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
-    KEPT.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((what.to_string(), Arc::downgrade(db)));
+    keep_held(what, db, None);
+}
+
+/// [`keep`], for a database held to a byte quota: compacted once its file
+/// nears the quota and an eighth of the quota is dead ([`quota_policy`]),
+/// as well as by the policy every file is.
+pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
+    KEPT.lock().unwrap_or_else(|e| e.into_inner()).push((
+        what.to_string(),
+        Arc::downgrade(db),
+        bytes,
+    ));
     COMPACTER.call_once(|| {
         let started = std::thread::Builder::new()
             .name("fenec-compact".into())
@@ -101,8 +116,10 @@ pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
                     continue;
                 };
                 let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                for (what, db) in kept {
+                for (what, db, bytes) in kept {
                     if let Some(db) = db.upgrade() {
+                        let quota = bytes.map_or(0, |b| b());
+                        let policy = quota_policy(&db, quota).unwrap_or(policy);
                         compact(&what, &db, &policy);
                     }
                 }
@@ -118,10 +135,10 @@ pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
                 std::thread::sleep(KEEP_EVERY);
                 let kept = {
                     let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
-                    kept.retain(|(_, db)| db.strong_count() > 0);
+                    kept.retain(|(_, db, _)| db.strong_count() > 0);
                     kept.clone()
                 };
-                for (what, db) in kept {
+                for (what, db, _) in kept {
                     if let Some(db) = db.upgrade() {
                         save(&what, &db);
                     }
@@ -185,6 +202,24 @@ pub static AUTO_COMPACTIONS: AtomicU64 = AtomicU64::new(0);
 /// that they never are.
 pub fn auto_compact(policy: Option<CompactPolicy>) {
     *POLICY.lock().unwrap_or_else(|e| e.into_inner()) = policy;
+}
+
+/// When a file held to a byte quota of `quota` is compacted, where it is
+/// held to one: once it stands within a quarter of the quota and an eighth
+/// of the quota is dead. The policy every file has waits for 64 MB dead,
+/// and a tenant's writes refused at a 10 MB quota would have waited for a
+/// compact that never came, however much it deleted; an eighth keeps a
+/// compact from rewriting the file for a few bytes. `None` leaves the file
+/// to the policy every file has.
+pub fn quota_policy(db: &RwLock<Database>, quota: u64) -> Option<CompactPolicy> {
+    if quota == 0 {
+        return None;
+    }
+    let file = db.read().unwrap_or_else(|e| e.into_inner()).garbage().file;
+    (file >= quota - quota / 4).then_some(CompactPolicy {
+        ratio: f64::MIN_POSITIVE,
+        floor: (quota / 8).max(1),
+    })
 }
 
 /// Compacts `db` beside the queries if its dead records are past the
