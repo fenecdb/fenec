@@ -803,3 +803,28 @@ fn a_durable_write_is_answered_once_its_replicas_streams_have_sent_it() {
         );
     }
 }
+
+/// A claim is a write, so a replica refuses it as it refuses any (403) --
+/// at once, held or not: what a held claim waits for is the primary's.
+#[test]
+fn a_held_claim_on_a_replica_is_refused_at_once() {
+    let d = dir("held");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    let r = replica(&d.join("r.fenec"), p.port);
+    query(&p, SCHEMA);
+    caught_up(&r, &p);
+    let started = Instant::now();
+    let (status, _, body) = raw(
+        r.port,
+        "POST",
+        "/query",
+        "Fenec-Wait: 5000\r\n",
+        "{\"query\":\"set items {n: 1} where n = 999 order n limit 1 returning id\"}",
+    );
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}

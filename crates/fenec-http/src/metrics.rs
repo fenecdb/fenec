@@ -388,6 +388,25 @@ fn render(source: Source) -> String {
         &[],
         CONNECTIONS.load(Ordering::Relaxed),
     );
+    let held = crate::waits::totals();
+    out.family(
+        "fenec_held_requests",
+        "gauge",
+        "Writes held now until they can write (Fenec-Wait), each a connection.",
+    );
+    out.sample("fenec_held_requests", &[], held.held);
+    out.family(
+        "fenec_held_looks_total",
+        "counter",
+        "Looks under the read lock by the first of each group of held writes, at a write or a row's time.",
+    );
+    out.sample("fenec_held_looks_total", &[], held.looks);
+    out.family(
+        "fenec_held_runs_total",
+        "counter",
+        "Held writes run again after a look found a row for them.",
+    );
+    out.sample("fenec_held_runs_total", &[], held.runs);
     crate::trace::metrics(&mut out);
 
     match source {

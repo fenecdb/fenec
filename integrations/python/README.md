@@ -79,9 +79,15 @@ from fenecdb import expr, inc, raw
 
 claimed = (
     db.collection("jobs").where(raw("run_at <= now()")).order("run_at").limit(10)
-    .update({"owner": me, "run_at": expr("now() + ?", 30000), "attempts": inc(1)}, returning=True)
+    .update({"owner": me, "run_at": expr("now() + ?", 30000), "attempts": inc(1)}, returning=True, wait=30)
 )
 ```
+
+With `wait` (seconds, at most 30) a claim that finds no job is held at
+the server until one comes -- enqueued, a delayed one due, a lease
+lapsed -- rather than sent again every few: answered with the jobs it
+took, or with none at the end of the wait. `query` and `batch` take it
+too, and `AsyncClient`'s give a held request up when cancelled.
 
 To see the text and parameters a chain builds, for logging or a test,
 `to_fenecql()` returns them and runs nothing:

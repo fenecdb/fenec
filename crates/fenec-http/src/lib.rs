@@ -61,6 +61,7 @@ pub mod sweep;
 pub mod tenants;
 pub mod timing;
 pub mod trace;
+pub mod waits;
 pub mod warm;
 
 use access::Who;
@@ -273,6 +274,18 @@ impl Server {
         match &self.backend {
             Backend::Single { hub, .. } => hub.live(),
             Backend::Tenants(_) | Backend::Metrics { .. } => 0,
+        }
+    }
+
+    /// What the writes held on a single database (`Fenec-Wait`) did.
+    pub fn waits(&self) -> waits::Stats {
+        match &self.backend {
+            Backend::Single { hub, .. } => hub.waits().stats(),
+            Backend::Tenants(_) | Backend::Metrics { .. } => waits::Stats {
+                held: 0,
+                looks: 0,
+                runs: 0,
+            },
         }
     }
 
@@ -772,13 +785,29 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         }
         timing::lap(timing::Phase::Route);
         let started = std::time::Instant::now();
-        let resp = match &tenant {
+        let run = || match &tenant {
             None => handle(db, cfg, &req),
             Some(t) => handle_tenant(t, cfg, &req),
         };
+        // A client gone while its request was held: a peek finds the
+        // connection closed and nothing more of it read.
+        let gone = || {
+            let s = reader.get_ref();
+            if !reader.buffer().is_empty() || s.set_nonblocking(true).is_err() {
+                return false;
+            }
+            let closed = matches!(s.peek(&mut [0u8; 1]), Ok(0));
+            let _ = s.set_nonblocking(false);
+            closed
+        };
+        let (resp, waited, held) = respond(run, hub, db, &req, gone);
         // A preflight is the browser's, not a statement.
         if req.method != Method::Options {
-            let (took, failed) = (started.elapsed(), resp.status >= 400);
+            // A held request's time is its runs', not its wait: the slow
+            // log and the statements' counts would hold every claim that
+            // waited for a job.
+            let took = started.elapsed().saturating_sub(waited);
+            let failed = resp.status >= 400;
             let what = describe(&req);
             let name = tenant.as_ref().map(|t| t.name());
             metrics::record(took, failed, name, || what.clone());
@@ -802,6 +831,9 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         let resp = cors(resp, cfg);
         timing::lap(timing::Phase::Books);
         let written = resp.write(&mut out, keep_alive, head_only);
+        if held {
+            waits::answered();
+        }
         trace::end(resp.status);
         if written.is_err() || !keep_alive {
             return;
@@ -810,6 +842,69 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         timing::lap(timing::Phase::Write);
         timing::end();
     }
+}
+
+/// A request's answer, run again while `Fenec-Wait` holds it ([`waits`]):
+/// the answer, how long it was held, and whether it was. Each run is the
+/// whole of `run` -- the token asked again, a tenant's gate entered and let
+/// go -- so a held request holds no tenant against a move, and a token
+/// past its `exp` is refused at the run after.
+fn respond(
+    run: impl Fn() -> Response,
+    hub: &Arc<Hub>,
+    db: &RwLock<Database>,
+    req: &Request,
+    gone: impl Fn() -> bool,
+) -> (Response, Duration, bool) {
+    // A plan left by a caller of `handle` that holds nothing is not this
+    // request's.
+    drop(waits::planned());
+    let mut resp = run();
+    let Some(plan) = waits::planned() else {
+        return (resp, Duration::ZERO, false);
+    };
+    // Asked again: a server going down holds nothing more.
+    let Ok(Some(wait)) = waits::asked(req) else {
+        return (resp, Duration::ZERO, false);
+    };
+    let held = std::time::Instant::now();
+    let until = held + wait;
+    let waiting = trace::span("fenec.wait_for_rows");
+    let ticket = waits::Ticket::join(hub, plan);
+    let mut ran = Duration::ZERO;
+    loop {
+        match ticket.next(until, db) {
+            waits::Next::Run => {
+                // Its client went away: the row goes to the next, at once.
+                if gone() {
+                    ticket.leave(true);
+                    break;
+                }
+                let t = std::time::Instant::now();
+                resp = run();
+                ran += t.elapsed();
+                match waits::planned() {
+                    Some(plan) => ticket.again(plan),
+                    None => {
+                        ticket.leave(resp.status < 300);
+                        break;
+                    }
+                }
+            }
+            waits::Next::End => {
+                ticket.leave(false);
+                break;
+            }
+            waits::Next::Closed => {
+                ticket.leave(false);
+                resp = Response::error(503, "the tenant was closed on this node; retry shortly")
+                    .header("Retry-After", "1");
+                break;
+            }
+        }
+    }
+    drop(waiting);
+    (resp, held.elapsed().saturating_sub(ran), true)
 }
 
 /// How long a request sent with `Fenec-After` waits for the write it names,
@@ -1327,6 +1422,17 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     if !stmt.is_read_only() {
         metrics::wrote();
     }
+    // `Fenec-Wait`: a `set` or a `del` that writes nothing is held until it
+    // can ([`waits`]). Asked of the statement as the token runs it.
+    let wait = match waits::asked(req) {
+        Err(why) => return Response::error(400, &why),
+        Ok(w) => w.is_some() && !stmt.is_read_only(),
+    };
+    if wait {
+        if let Err(e) = waits::holdable(&stmt, &params) {
+            return error_response(&e);
+        }
+    }
 
     if !stmt.is_read_only() {
         let guard = db.read().unwrap_or_else(|e| e.into_inner());
@@ -1335,7 +1441,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
     }
     if let Some(k) = &key {
-        return keyed_query(db, cfg, who, k, &stmt, &params);
+        return keyed_query(db, cfg, who, k, &stmt, &params, wait);
     }
     // The change a write left the database at, for `Fenec-Seq`.
     let mut seq = None;
@@ -1460,9 +1566,13 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         built
     } else {
         let mut guard = held::write(db);
+        let before = waits::now_ms();
         let running = trace::span("execute");
         let r = access::within(who, || guard.execute_with(&stmt, &params));
         drop(running);
+        if wait && waits::wrote_nothing(&stmt, &r) {
+            waits::plan(&guard, &[(&stmt, &params)], before);
+        }
         seq = Some(guard.change_seq());
         let durability = match r {
             Ok(_) => match flush_for(cfg, &mut guard) {
@@ -1595,6 +1705,7 @@ fn keyed_query(
     key: &idempotent::Key,
     stmt: &Statement,
     params: &[fenec_core::value::Value],
+    wait: bool,
 ) -> Response {
     let mut guard = held::write(db);
     let ttl = cfg.idempotency_ttl.as_millis() as i64;
@@ -1604,6 +1715,7 @@ fn keyed_query(
     if let Err(e) = guard.begin() {
         return error_response(&e);
     }
+    let before = waits::now_ms();
     let running = trace::span("execute");
     let result = access::within(who, || guard.execute_with(stmt, params));
     drop(running);
@@ -1614,6 +1726,15 @@ fn keyed_query(
         }
         Err(e) => error_response(e),
     };
+    // Held, a run that wrote nothing keeps no key: the run that writes
+    // keeps it with its rows, and one sent again with the key meanwhile
+    // waits as this one does.
+    if wait && waits::wrote_nothing(stmt, &result) {
+        guard.rollback();
+        waits::plan(&guard, &[(stmt, params)], before);
+        let seq = guard.change_seq();
+        return with_seq(resp, Some(seq));
+    }
     if let Err(e) = keyed(&mut guard, key, &resp, result.is_ok(), ttl) {
         return error_response(&e);
     }
@@ -1680,6 +1801,23 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     if !writes {
         return read_batch(db, &stmts, who);
     }
+    // `Fenec-Wait`: a batch whose writes are `set`s and `del`s, held while
+    // it writes nothing ([`waits`]).
+    let wait = match waits::asked(req) {
+        Err(why) => return Response::error(400, &why),
+        Ok(w) => w.is_some(),
+    };
+    if wait {
+        for (s, p) in &stmts {
+            if let Err(e) = waits::holdable(s, p) {
+                return error_response(&e);
+            }
+        }
+    }
+    let held_plan = |guard: &Database, before: i64| {
+        let pairs: Vec<(&Statement, &[Value])> = stmts.iter().map(|(s, p)| (s, &p[..])).collect();
+        waits::plan(guard, &pairs, before);
+    };
     let key = match idempotent::key(req, who) {
         Ok(k) => k,
         Err(refusal) => return refusal,
@@ -1704,6 +1842,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             return error_response(&e);
         }
     }
+    let before = waits::now_ms();
     let mut results = Vec::with_capacity(stmts.len());
     let running = trace::span("execute");
     running.attr("fenec.statements", stmts.len() as i64);
@@ -1724,6 +1863,10 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             Err((status, why)) if block => {
                 // Nothing of the block reached the file: none of it is left.
                 guard.rollback();
+                // A `require` unmet wrote nothing: held, it waits.
+                if wait && status == 412 {
+                    held_plan(&guard, before);
+                }
                 let at = results.len();
                 return api::render_batch_stop(status, &why, 0, at, fenec_core::VERSION);
             }
@@ -1741,6 +1884,19 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
     }
     drop(running);
+    // Held, a batch whose writes all wrote nothing is put back, its key
+    // kept by none, and waits.
+    if wait
+        && stmts
+            .iter()
+            .zip(&results)
+            .all(|((s, _), r)| waits::nothing_written(s, r))
+    {
+        guard.rollback();
+        held_plan(&guard, before);
+        let seq = Some(guard.change_seq());
+        return with_seq(api::render_batch(&results, fenec_core::VERSION), seq);
+    }
     let kept = match &key {
         Some(k) => {
             let resp = api::render_batch(&results, fenec_core::VERSION);

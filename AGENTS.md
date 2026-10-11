@@ -79,7 +79,7 @@ make growth-bench        # indexes growing a put at a time, the longest (a table
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 make geo-bench           # a million points: radii, the nearest, through @geo and by the scan, against PostGIS and Redis in Docker (GEO_ARGS)
-make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set
+make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; `held` (or `held pickup|delayed|idle|busy`): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims
 ```
 
 Single tests:
@@ -1405,6 +1405,81 @@ increment 1.15 us against 1.16-1.18, a lock renewed 2.15 against
 the time's check out did not move (0.61-0.62) -- where the code lands; a
 `set` over 100 000 rows 1-2% slower in `make counters-bench`, whose runs
 of one build move as much, and `make requests-bench` inside its spread.
+
+**`Fenec-Wait` holds a `set` or a `del` that writes nothing until it
+can** (`fenec_http::waits`, `Database::wakes_at` in `engine/wake.rs`). A
+worker whose claim found no job slept and claimed again: late by its
+sleep, or a claim under the write lock every few milliseconds a worker.
+Sent to `/query` or `/batch` with `Fenec-Wait: <ms>` (30 s at most; beside
+`Fenec-After` the header stays that read's wait), a request whose `set`s
+and `del`s wrote nothing -- no row, or a `require` unmet, its block put
+back -- is held and run again once it may write: the same request at a
+later moment, answered with what it wrote, or at the end of the wait with
+what it answered last. A header, not a clause: a statement runs under the
+write lock, where nothing may wait, and a page's or an app's database has
+no other worker to wait for, so the builders refuse `wait` there
+(`LOCAL_WAIT`) and no builder's text changed. A `put` in the request, or a
+filter reading the time other than as a field compared with `now()` plus
+or minus integers and parameters (`bucket(now(), ..)`, `run_at + 1000 <=
+now()`, `= now()`), is refused before it runs (400, `holdable`,
+`engine::placeable`). Two things wake one: a write to a collection it
+reads -- `Hub::notify` under the write lock, a load when nothing is held
+-- and the time reaching a row's moment, which nothing announces:
+`wakes_at` (native only) takes each such comparison anywhere in the filter,
+inner `get`s too, and each `@ttl`, and asks the least value past the bound
+(`get c select f where f > bound order f limit 1`, a step of `@sorted`),
+the run's own time the bound so a row due between the run and the
+question wakes it at once. Every living row's value counts: counted among
+the rows the other `and`s let through it was exact, and walked the index
+past every one they refused -- a claim held on an empty queue beside
+200 000 jobs scanned them at each look, the busy workers beside it 144 000
+-> 20 200 jobs a second. `tests/wakes.rs` walks generated filters and rows
+moment to moment and holds the matching set unchanged between two. Held
+requests are grouped by what they would pick -- each `set`/`del` as the
+`get` of one row it amounts to, scope and parameters bound in -- and only
+a group's head, the one held longest, is woken: it looks under the read
+lock (the collections written since it last looked, then the gets), runs
+the request only when a get finds a row, and having written has the next
+look at once; one that found nothing is the group's answer, so a job goes
+to the worker held longest, as Redis serves `BLPOP`, and a write costs a
+group a look, not a run a worker (20 held, one job: one run, at most
+three looks). A
+look that found nothing is not repeated for `LOOK_GAP` (1 ms) however many
+writes land, a write in the gap a counter: beside 16 claims held on an
+empty queue, 16 busy HTTP workers took 148 000 jobs a second against
+150 600 with none held, the heads looking 730 times a second, where woken
+at every write they looked 3 400 times and the workers took 142 000. A
+held request runs `handle` whole each time -- its token asked again, a
+tenant's gate entered and let go, so a freeze goes through beside it --
+and its time is out of the slow log; a tenant closed answers it 503 with `Retry-After`, a SIGTERM
+answers every one at once with its last answer before the sync
+(`end_all`, `HELD_GRACE`), a client gone hands the row to the next (a
+`peek` before each run), a keyed one keeps no key while it writes nothing
+(sent again it waits again), a replica refuses it as any write, and the
+router waits `--upstream-timeout` plus the wait (`Pool::send_held`: cut
+at the timeout, a 502 while the node leased the job to no one). `/_metrics`
+counts `fenec_held_requests` and the heads' looks and runs. A job
+enqueued reached one of 8 held workers in 0.38 ms p50, 0.76 p99, against
+0.83/10.1 polling every 10 ms (ten times the claims) and 15.5/85.8 every
+100 ms; a delayed job 0.04/1.9 ms after its time against 1.2/8.4 and
+45.8/99.4. A thousand claims held ten seconds on an empty queue took no
+measurable CPU and 46 KB of memory and a thread each -- a subscription's
+45 KB, a connection counted against `--max-connections` -- where a
+thousand polling every 100 ms took 86% of a core. Each claim sent with the
+header on a busy queue: 150 000 jobs a second either way; `make
+requests-bench` in ABBA turns against main inside its spread (a row by id
+0.021 ms p50 both, eight clients 125-134k a second against main's
+123-149k). The browser
+module compiles none of it: the same size to the byte, 149 bytes moved
+where `engine.rs`'s panics carry their line numbers (`mod wake` declared
+at the file's end, identical). The JS client grew 0.6 KB brotli (`wait`,
+`signal`, the page's refusal). Every client has it: JS `{ wait, signal }` on `run`, `batch`, `update` and
+`delete`, Python `wait=` seconds (the socket's timeout that much longer;
+`AsyncClient` closes a cancelled one's connection, whose answer would be
+the next request's), Go `db.Wait(d)` and .NET `WithWait(d)` copies under
+the context or token, Swift `withWait(seconds)`, Kotlin `withWait(ms)` (a
+cancelled coroutine disconnects the `HttpURLConnection`, whose read heeds
+no interrupt) and Dart `withWait(Duration)`.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from

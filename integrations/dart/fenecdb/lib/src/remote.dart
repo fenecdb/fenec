@@ -43,15 +43,20 @@ class FenecRemote {
   final _Shared _shared;
   final String? _idempotencyKey;
 
+  /// How long the server may hold a write that writes nothing ([withWait]).
+  final Duration? _wait;
+
   FenecRemote(String url, {String? token})
       : url = url.endsWith('/') ? url.substring(0, url.length - 1) : url,
         _shared = _Shared(token),
-        _idempotencyKey = null;
+        _idempotencyKey = null,
+        _wait = null;
 
-  FenecRemote._keyed(FenecRemote of, String key)
+  FenecRemote._copy(FenecRemote of, String? key, Duration? wait)
       : url = of.url,
         _shared = of._shared,
-        _idempotencyKey = key;
+        _idempotencyKey = key,
+        _wait = wait;
 
   /// The token the requests carry; set a fresh one for the requests from
   /// here on.
@@ -73,7 +78,23 @@ class FenecRemote {
   /// ```
   FenecRemote withIdempotencyKey(String key) {
     if (key.isEmpty) throw FenecException(FenecCode.misuse, 'an idempotency key is a text, not empty');
-    return FenecRemote._keyed(this, key);
+    return FenecRemote._copy(this, key, _wait);
+  }
+
+  /// A copy whose `set` and `del` statements -- [run], [batch] and the
+  /// builder's `update`, `delete` and their `Returning` forms -- the server
+  /// holds while they write nothing, until they can or for [wait], at most
+  /// 30 seconds (`Fenec-Wait`): a worker's claim waits there for a job --
+  /// one enqueued, a delayed one come due, a lease lapsed -- rather than
+  /// sleeping and claiming again.
+  ///
+  /// ```dart
+  /// final claimed = await db.withWait(const Duration(seconds: 30)).from('jobs')
+  ///     .where(Cond.raw('run_at <= now()')).order('run_at').limit(10).updateReturning(claim);
+  /// ```
+  FenecRemote withWait(Duration wait) {
+    if (wait.isNegative) throw FenecException(FenecCode.misuse, 'a wait is not negative');
+    return FenecRemote._copy(this, _idempotencyKey, wait);
   }
 
   /// Runs FenecQL on the server with [params] for `$1`, `$2` ... A key for
@@ -116,6 +137,8 @@ class FenecRemote {
       if (t != null) req.headers.set('authorization', 'Bearer $t');
       final k = key ?? _idempotencyKey;
       if (k != null) req.headers.set('idempotency-key', k);
+      final w = _wait;
+      if (w != null && w > Duration.zero) req.headers.set('fenec-wait', '${w.inMilliseconds}');
       // fenec-server reads a body by its length: a chunked one is refused.
       final bytes = utf8.encode(payload);
       req.contentLength = bytes.length;

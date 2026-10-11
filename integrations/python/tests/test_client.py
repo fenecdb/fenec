@@ -2,8 +2,8 @@
 
 import pytest
 
-from conftest import fresh
-from fenecdb import FenecError
+from conftest import TOKEN, URL, fresh
+from fenecdb import Client, FenecError, expr, raw
 
 
 def test_a_statement_and_a_batch(client):
@@ -239,3 +239,48 @@ def test_a_request_sent_is_never_sent_again():
     assert len(seen) == 2
     assert c.query("put t {n: 3}") == {"affected": 1}
     assert len(seen) == 3
+
+
+def _jobs(client):
+    name = fresh("jobs")
+    client.query(f"create collection {name} (kind text, run_at timestamp @sorted, owner text)")
+    return name
+
+
+def test_a_held_claim_takes_the_job_enqueued_meanwhile(client):
+    import threading
+    import time
+
+    name = _jobs(client)
+    try:
+        jobs = client.collection(name).where(raw("run_at <= now()")).order("run_at").limit(1)
+
+        def lease(owner):
+            return {"owner": owner, "run_at": expr("now() + ?", 60000)}
+
+        got = {}
+
+        def worker():
+            got["rows"] = Client(URL, TOKEN).collection(name).where(
+                raw("run_at <= now()")
+            ).order("run_at").limit(1).update(lease("w1"), returning=["kind"], wait=10)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        time.sleep(0.3)
+        client.collection(name).insert({"kind": "mail", "run_at": int(time.time() * 1000)})
+        t.join(10)
+        assert got["rows"] == [{"kind": "mail"}]
+        # Nothing to take: the wait ends on time, with no row.
+        began = time.monotonic()
+        assert jobs.update(lease("w2"), returning=True, wait=0.3) == []
+        assert 0.3 <= time.monotonic() - began < 3
+        # Longer than the client's own timeout: the socket waits it out too.
+        slow = Client(URL, TOKEN, timeout=0.2)
+        assert slow.query(
+            f"del {name} where run_at <= now() and kind = $1 limit 1 returning kind",
+            ["none"],
+            wait=0.5,
+        ) == []
+    finally:
+        client.query(f"drop collection if exists {name}")

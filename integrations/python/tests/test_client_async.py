@@ -100,3 +100,29 @@ def test_calls_at_once_over_one_client_and_a_closed_connection():
 def test_not_an_http_url():
     with pytest.raises(ValueError):
         AsyncClient("postgres://127.0.0.1:5433")
+
+
+def test_a_held_claim_given_up_closes_its_connection():
+    """A held claim cancelled -- `wait_for` past it -- leaves no answer on
+    the connection for the next request to read: it is closed, and the next
+    one opens another."""
+
+    async def go():
+        async with AsyncClient(URL, TOKEN) as db:
+            name = fresh("ajobs")
+            await db.query(f"create collection {name} (run_at timestamp @sorted, owner text)")
+            try:
+                claim = f"set {name} {{owner: $1}} where run_at <= now() limit 1 returning id"
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(db.query(claim, ["w1"], wait=5), 0.2)
+                assert await db.query(f"get {name} count") == [{"count": 0}]
+                held = asyncio.ensure_future(
+                    AsyncClient(URL, TOKEN).query(claim, ["w2"], wait=10)
+                )
+                await asyncio.sleep(0.3)
+                await db.query(f"put {name} {{run_at: 1}}")
+                assert len(await held) == 1
+            finally:
+                await db.query(f"drop collection if exists {name}")
+
+    run(go())

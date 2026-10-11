@@ -244,6 +244,17 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   db.from('articles').order('year', 'desc').limit(1).toDelete({ returning: ['id'], require: 1 });
   // @ts-expect-error -- returning is true or the fields
   db.from('articles').where('id', 1).toDelete({ returning: 'id' });
+  // A claim held at a server until a row comes, and given up by a signal.
+  const giveUp = new AbortController();
+  const held = await db
+    .from('articles')
+    .where(raw('year <= ?', 2024))
+    .order('year')
+    .limit(1)
+    .update({ title: 'taken' }, { returning: true, wait: 30000, signal: giveUp.signal });
+  expect<string>(held[0].title);
+  // @ts-expect-error -- wait is milliseconds
+  db.from('articles').order('id').limit(1).delete({ wait: '30s' });
 
   const [sql, params] = db.from('articles').where('year', 2024).toFenecQL();
   expect<string>(sql);

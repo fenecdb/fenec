@@ -15,3 +15,4 @@ mod replication;
 mod require;
 mod schema;
 mod server;
+mod waits;

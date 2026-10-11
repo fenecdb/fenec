@@ -51,5 +51,6 @@ mod synclog;
 mod ttl;
 mod unique;
 mod upsert;
+mod wakes;
 mod within;
 mod writes;

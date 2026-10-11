@@ -469,7 +469,7 @@ export function first(field: string, by?: string): Expression;
 export function last(field: string, by?: string): Expression;
 
 /** Executor: `(sql, params)` -> response. A `Fenec` instance also works. */
-export type Exec = (sql: string, params: unknown[]) => unknown;
+export type Exec = (sql: string, params: unknown[], held?: { wait?: number; signal?: AbortSignal }) => unknown;
 
 export declare class FenecError extends Error {
   /**
@@ -531,9 +531,17 @@ export interface BatchResult {
  * `{ idempotencyKey }`: a write sent again with the key is answered as it
  * was the first time and not made twice; the key with another request is
  * refused (422).
+ *
+ * `{ wait }`, over a server: a `set` or a `del` that writes nothing is held
+ * there until it can -- a job enqueued, a delayed one come due, a lease
+ * lapsed -- or for that many milliseconds, at most 30 000, and answered
+ * then: a claim waiting for a job (`Fenec-Wait`). A database in the page
+ * refuses it. `{ signal }` gives the request up, as `fetch`'s.
  */
 export interface WriteOptions {
   idempotencyKey?: string;
+  wait?: number;
+  signal?: AbortSignal;
 }
 
 /**

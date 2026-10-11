@@ -173,3 +173,75 @@ fn ping_asks_the_http_listener() {
     assert_eq!(ping(&[]), Some(1));
     assert_eq!(ping(&secret), Some(1));
 }
+
+/// Claims held until a job comes (`Fenec-Wait`) are answered at SIGTERM,
+/// with the nothing they found, before the process ends: a worker learns
+/// of the shutdown from an answer, not from a broken connection. A file's
+/// server and a node of tenants alike.
+#[test]
+fn sigterm_answers_held_claims_at_once() {
+    for dir in [false, true] {
+        let path = tmp("shutdown", if dir { "held-dir" } else { "held.fenec" });
+        let flag = if dir { "--dir" } else { "--file" };
+        let server = start(&[
+            flag,
+            path.to_str().unwrap(),
+            "--sync",
+            "off",
+            "--admin-token",
+            "adm",
+        ]);
+        let prefix = if dir { "/t/acme" } else { "" };
+        let mut c = server.http().with_token("adm");
+        if dir {
+            let a = c.ask("PUT", "/_admin/tenants/acme", "");
+            assert!(a.status < 300, "{}", a.body);
+        }
+        c.query_at(
+            prefix,
+            "create collection jobs (run_at timestamp @sorted, owner text)",
+        )
+        .unwrap();
+        let port = server.port;
+        let target = format!("{prefix}/query");
+        let held: Vec<_> = (0..10)
+            .map(|w| {
+                let target = target.clone();
+                std::thread::spawn(move || {
+                    let claim = format!(
+                        "set jobs {{owner: \\\"w{w}\\\", run_at: now() + 60000}} \
+                         where run_at <= now() order run_at limit 1 returning id"
+                    );
+                    let body = format!("{{\"query\": \"{claim}\"}}");
+                    let mut c = crate::support::Http::open(port);
+                    let a = c
+                        .try_ask("POST", &target, &body, &[("Fenec-Wait", "30000")])
+                        .expect("answered before the process ended");
+                    (a.status, a.body, Instant::now())
+                })
+            })
+            .collect();
+        // Held: the metric says so.
+        let t = Instant::now();
+        loop {
+            let m = c.ask("GET", "/_metrics", "").body;
+            if m.contains("fenec_held_requests 10") {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "{m}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let signalled = Instant::now();
+        let (code, log) = server.terminate();
+        assert_eq!(code, 0, "{log}");
+        for h in held {
+            let (status, body, at) = h.join().unwrap();
+            assert_eq!((status, body.as_str()), (200, "[]"));
+            let after = at - signalled;
+            assert!(
+                after < Duration::from_secs(1),
+                "answered {after:?} after SIGTERM"
+            );
+        }
+    }
+}

@@ -274,10 +274,13 @@ geo-bench:
 ## A job queue's claim over a million jobs (JOBS=200000 for fewer): one
 ## worker's claim of ten through @sorted and through a scan, 16 threads
 ## and 16 HTTP clients claiming and acking every job, and the read,
-## compare-and-set and read back a client sends without `returning`.
+## compare-and-set and read back a client sends without `returning`; then
+## a claim held until a job comes (Fenec-Wait) against polling -- a job's
+## pickup, a delayed one's, 100 and 1 000 held on an empty queue, a busy
+## queue beside held claims. QUEUE_ARGS="held busy" runs one part.
 queue-bench:
 	$(CARGO) build --release -p fenec-server
-	$(CARGO) run --release -p fenec-bench --bin queue
+	$(CARGO) run --release -p fenec-bench --bin queue -- $(QUEUE_ARGS)
 
 ## A ledger's reconciliation beside its transfers: four clients sending
 ## transfer batches for 10 s, alone and beside a /batch of reads a second

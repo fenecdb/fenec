@@ -535,25 +535,33 @@ impl Router {
                 None => forwarding.attr("server.address", addr.clone()),
             }
         }
-        let answer =
-            match self
-                .pool
-                .send(&addr, req.method.name(), &req.target, &headers, &req.body)
-            {
-                Ok(a) => a,
-                Err(e) => {
-                    forwarding.error(e.to_string());
-                    drop(forwarding);
-                    metrics::unreachable(&node);
-                    return reply(
-                        out,
-                        Response::error(
-                            502,
-                            &format!("node `{node}` ({addr}) did not answer: {e}"),
-                        ),
-                    );
-                }
-            };
+        // A request the node may hold -- `Fenec-Wait`, for a claim or for
+        // `Fenec-After` -- is waited for as long besides the timeout.
+        let held = req
+            .header("fenec-wait")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(Duration::ZERO, |ms| {
+                Duration::from_millis(ms).min(fenec_http::waits::LONGEST)
+            });
+        let answer = match self.pool.send_held(
+            &addr,
+            req.method.name(),
+            &req.target,
+            &headers,
+            &req.body,
+            held,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                forwarding.error(e.to_string());
+                drop(forwarding);
+                metrics::unreachable(&node);
+                return reply(
+                    out,
+                    Response::error(502, &format!("node `{node}` ({addr}) did not answer: {e}")),
+                );
+            }
+        };
 
         let status = answer.status;
         forwarding.attr("http.response.status_code", status);

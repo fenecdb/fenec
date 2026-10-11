@@ -62,6 +62,8 @@ pub struct Hub {
     /// have to be told to let go, or a moved tenant's old copy would keep
     /// answering from a file that is no longer authoritative.
     closed: AtomicBool,
+    /// Writes held until they can write (`Fenec-Wait`): woken here too.
+    waits: crate::waits::Waits,
 }
 
 impl Watcher for Hub {
@@ -73,6 +75,8 @@ impl Watcher for Hub {
         let mut g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
         *g = seq;
         self.cv.notify_all();
+        drop(g);
+        self.waits.wrote();
     }
 }
 
@@ -121,12 +125,19 @@ impl Hub {
         self.closed.store(true, Ordering::SeqCst);
         let _g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
         self.cv.notify_all();
+        self.waits.close();
     }
 
     /// Takes subscriptions again after a `close` whose reason fell through:
     /// a tenant delete that gave up with 409 keeps the tenant.
     pub fn reopen(&self) {
         self.closed.store(false, Ordering::SeqCst);
+        self.waits.reopen();
+    }
+
+    /// The writes held here until they can write.
+    pub fn waits(&self) -> &crate::waits::Waits {
+        &self.waits
     }
 
     pub fn is_closed(&self) -> bool {

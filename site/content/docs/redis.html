@@ -203,6 +203,11 @@ del jobs where id = 1 and owner = "w1" require 1                       -- → 1:
   <li><b>Costs,</b> over a million jobs: a claim of ten 18.7 us; sixteen
     threads claimed and acked them all in 5.4 s, 185 800 jobs a second,
     and sixteen HTTP clients at 138 500.</li>
+  <li><b><code>BLPOP</code>:</b> sent over HTTP with
+    <code>Fenec-Wait</code>, a claim that finds no job is held at the
+    server until one is enqueued, a delayed one comes due or a lease
+    lapses, and handed to the worker that has waited longest (<a
+    href="/docs/queues#wait">Waiting for a job</a>).</li>
   <li><b>Retries with a backoff, dead letters, delays and priorities</b>
     are on their own page, <a href="/docs/queues">Job queues</a>.</li>
 </ul>
@@ -255,11 +260,6 @@ get sicily select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 
     the file and moves the change counter; there is no fire-and-forget
     channel. For messages that need not be kept, a row with a short
     <code>@ttl</code> and a subscription is the nearest.</li>
-  <li><b>A blocking claim</b> — <code>BLPOP</code>, a worker waiting on an
-    empty list and handed the next job. A claim of an empty queue answers no
-    rows at once; a worker sleeps, or holds a subscription to the queue and
-    claims when it hears a write (<a href="/docs/queues">Job
-    queues</a>).</li>
   <li><b>Sub-millisecond latency across a network</b> as Redis's design
     goal: a write here is durable by the server's <code>--sync</code>
     policy, and a request is HTTP.</li>

@@ -36,6 +36,14 @@ is refused (422):
     db.batch([debit, credit], idempotency_key=transfer_id)
     db.with_idempotency_key(order_id).collection("orders").insert(order)
 
+A worker's claim that finds no job can wait for one at the server
+(`Fenec-Wait`): with `wait` a `set` or `del` that writes nothing is held
+until it can -- a job enqueued, a delayed one come due, a lease lapsed --
+or for that many seconds, at most 30, rather than sent again every few:
+
+    jobs = db.collection("jobs").where(raw("run_at <= now()")).order("run_at").limit(10)
+    claimed = jobs.update(claim, returning=True, wait=30)
+
 `AsyncClient` is the same over asyncio, for an event loop a blocking
 request would stall:
 
@@ -216,17 +224,25 @@ class Client:
         *,
         after: int | None = None,
         idempotency_key: str | None = None,
+        wait: float | None = None,
     ) -> Any:
         """Runs one FenecQL statement. Values go in as `$1`, `$2`, ... and
         never into the text. With `after` -- a primary's `seq` -- a replica
         answers once it holds that write. With `idempotency_key` a write
-        runs once however often it is sent (`replayed`). A read answers its
-        rows, a list; one with a `facet` clause a `Rows`, the counts as its
-        `facets`."""
+        runs once however often it is sent (`replayed`). With `wait` a
+        `set` or `del` that writes nothing is held at the server until it
+        can, or that many seconds -- a claim waiting for a job. A read
+        answers its rows, a list; one with a `facet` clause a `Rows`, the
+        counts as its `facets`."""
         body = {"query": fenecql, "params": list(params or [])}
         return _faceted(
             self._post(
-                "/query", json.dumps(body).encode(), "application/json", after, key=idempotency_key
+                "/query",
+                json.dumps(body).encode(),
+                "application/json",
+                after,
+                key=idempotency_key,
+                wait=wait,
             )
         )
 
@@ -235,6 +251,7 @@ class Client:
         statements: Iterable[tuple[str, Sequence[Any]]],
         *,
         idempotency_key: str | None = None,
+        wait: float | None = None,
     ) -> Any:
         """Runs statements in order under one write lock, as one block:
         their writes -- a create, a drop or a `create index` among them --
@@ -245,10 +262,15 @@ class Client:
         a statement's `{"affected": n}` or `{"rows": [...]}` each, and
         leaves the change it wrote at in `seq`. With `idempotency_key` it
         lands once however often it is sent (`replayed`); a batch of reads
-        alone takes no key."""
+        alone takes no key. With `wait` one whose `set`s and `del`s write
+        nothing is held until they can, as `query`'s."""
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
         return self._post(
-            "/batch", "\n".join(lines).encode(), "application/x-ndjson", key=idempotency_key
+            "/batch",
+            "\n".join(lines).encode(),
+            "application/x-ndjson",
+            key=idempotency_key,
+            wait=wait,
         )
 
     def schema(
@@ -341,6 +363,7 @@ class Client:
         after: int | None = None,
         accept: int = 0,
         key: str | None = None,
+        wait: float | None = None,
     ) -> Any:
         headers = {"Content-Type": content_type}
         if self.token:
@@ -350,7 +373,11 @@ class Client:
         key = key or self.idempotency_key
         if key:
             headers["Idempotency-Key"] = key
-        status, seq, replayed, raw = self._send("POST", self._base + path, body, headers)
+        if wait:
+            headers["Fenec-Wait"] = _wait_ms(wait)
+        status, seq, replayed, raw = self._send(
+            "POST", self._base + path, body, headers, self.timeout + (wait or 0)
+        )
         if 200 <= status < 300:
             # A replayed batch's answer carries no `Fenec-Seq`: `seq` stays
             # where the last write that sent one left it.
@@ -362,7 +389,9 @@ class Client:
             return json.loads(raw)
         return _answer(status, raw)
 
-    def _send(self, method: str, path: str, body: bytes, headers: dict) -> tuple:
+    def _send(
+        self, method: str, path: str, body: bytes, headers: dict, timeout: float | None = None
+    ) -> tuple:
         """A request over this thread's connection: its status, `Fenec-Seq`,
         whether it was replayed (`Idempotent-Replayed`) and body. A kept connection the server closed while it was idle is
         found so before the request goes -- its socket reads as ready, the
@@ -376,6 +405,11 @@ class Client:
         if conn is None:
             conn = self._connect()
         try:
+            # A request the server may hold (`wait`) is waited for that much
+            # longer than the client's timeout.
+            if conn.sock is None:
+                conn.connect()
+            conn.sock.settimeout(timeout or self.timeout)
             conn.request(method, path, body, headers)
             resp = conn.getresponse()
             raw = resp.read()
@@ -404,6 +438,13 @@ class Client:
         if conn is not None:
             conn.close()
             self._local.conn = None
+
+
+def _wait_ms(wait: float) -> str:
+    """`Fenec-Wait` for `wait` seconds: milliseconds, as the header is."""
+    if isinstance(wait, bool) or not isinstance(wait, (int, float)) or wait < 0:
+        raise ValueError(f"wait is seconds, a number from 0 (got {wait!r})")
+    return str(int(wait * 1000))
 
 
 def _seg(name: str) -> str:
@@ -511,12 +552,14 @@ class AsyncClient:
         params: Sequence[Any] | None = None,
         *,
         idempotency_key: str | None = None,
+        wait: float | None = None,
     ) -> Any:
-        """One FenecQL statement, as `Client.query`."""
+        """One FenecQL statement, as `Client.query`; a held one is
+        cancelled as any task is, its connection closed with it."""
         body = {"query": fenecql, "params": list(params or [])}
         return _faceted(
             await self._post(
-                "/query", json.dumps(body).encode(), "application/json", idempotency_key
+                "/query", json.dumps(body).encode(), "application/json", idempotency_key, wait
             )
         )
 
@@ -525,11 +568,12 @@ class AsyncClient:
         statements: Iterable[tuple[str, Sequence[Any]]],
         *,
         idempotency_key: str | None = None,
+        wait: float | None = None,
     ) -> Any:
         """Statements under one write lock, as one block, as `Client.batch`."""
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
         return await self._post(
-            "/batch", "\n".join(lines).encode(), "application/x-ndjson", idempotency_key
+            "/batch", "\n".join(lines).encode(), "application/x-ndjson", idempotency_key, wait
         )
 
     async def close(self) -> None:
@@ -549,9 +593,15 @@ class AsyncClient:
         await self.close()
 
     async def _post(
-        self, path: str, body: bytes, content_type: str, key: str | None = None
+        self,
+        path: str,
+        body: bytes,
+        content_type: str,
+        key: str | None = None,
+        wait: float | None = None,
     ) -> Any:
         key = key or self.idempotency_key
+        held = _wait_ms(wait) if wait else None
         async with self._s.lock:
             # A kept connection the server closed meanwhile fails on its first
             # use: the request goes once more over a fresh one. A request
@@ -559,7 +609,8 @@ class AsyncClient:
             for fresh in (self._s.conn is None, True):
                 try:
                     status, headers, raw = await asyncio.wait_for(
-                        self._exchange(path, body, content_type, key), self.timeout
+                        self._exchange(path, body, content_type, key, held),
+                        self.timeout + (wait or 0),
                     )
                     if 200 <= status < 300:
                         if "fenec-seq" in headers:
@@ -573,10 +624,21 @@ class AsyncClient:
                 except asyncio.TimeoutError:
                     await self.close()
                     raise
+                except asyncio.CancelledError:
+                    # Cancelled under way -- a held claim given up: its
+                    # answer, still to come, must not be the next request's.
+                    self._drop()
+                    raise
             raise AssertionError("unreachable")
 
+    def _drop(self) -> None:
+        if self._s.conn:
+            _, writer = self._s.conn
+            self._s.conn = None
+            writer.close()
+
     async def _exchange(
-        self, path: str, body: bytes, content_type: str, key: str | None
+        self, path: str, body: bytes, content_type: str, key: str | None, held: str | None = None
     ) -> tuple[int, dict, bytes]:
         if self._s.conn is None:
             self._s.conn = await asyncio.open_connection(
@@ -594,6 +656,8 @@ class AsyncClient:
             head.append(f"Authorization: Bearer {self.token}")
         if key:
             head.append(f"Idempotency-Key: {key}")
+        if held:
+            head.append(f"Fenec-Wait: {held}")
         writer.write(("\r\n".join(head) + "\r\n\r\n").encode() + body)
         await writer.drain()
 

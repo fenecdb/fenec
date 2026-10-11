@@ -49,10 +49,23 @@ impl Http {
         content_type: &str,
         body: &[u8],
     ) -> (u16, &[u8]) {
+        self.request_with(method, path, content_type, "", body)
+    }
+
+    /// [`Http::request`] with header lines of its own, each ending in
+    /// `\r\n`.
+    pub fn request_with(
+        &mut self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        headers: &str,
+        body: &[u8],
+    ) -> (u16, &[u8]) {
         self.head.clear();
         write!(
             self.head,
-            "{method} {path} HTTP/1.1\r\nHost: bench\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: bench\r\nContent-Type: {content_type}\r\n{headers}Content-Length: {}\r\n\r\n",
             body.len()
         )
         .unwrap();
@@ -106,6 +119,24 @@ impl Http {
             (t2 - t1).as_nanos() as u64,
             (t3 - t2).as_nanos() as u64,
         ]
+    }
+
+    /// `POST /query` of `text` with `params` and header lines of its own.
+    pub fn query_with(&mut self, text: &str, params: &str, headers: &str) -> &[u8] {
+        let body = format!("{{\"query\":{},\"params\":[{params}]}}", json_string(text));
+        let (status, out) = self.request_with(
+            "POST",
+            "/query",
+            "application/json",
+            headers,
+            body.as_bytes(),
+        );
+        assert!(
+            (200..300).contains(&status),
+            "POST /query: {status} {}",
+            String::from_utf8_lossy(out)
+        );
+        out
     }
 
     /// `POST /query` of `text` with `params`, a JSON array's insides.
@@ -203,8 +234,14 @@ pub fn json_string(s: &str) -> String {
 
 /// The `id`s of an answer's rows, in their order: `[{"id":3,..},..]`.
 pub fn ids(body: &[u8]) -> Vec<i64> {
+    ints(body, "id")
+}
+
+/// The integers of an answer's rows under `key`, in their order.
+pub fn ints(body: &[u8], key: &str) -> Vec<i64> {
     let text = std::str::from_utf8(body).unwrap();
-    text.match_indices("\"id\":")
+    let key = format!("\"{key}\":");
+    text.match_indices(key.as_str())
         .filter_map(|(at, key)| {
             let rest = &text[at + key.len()..];
             let end = rest

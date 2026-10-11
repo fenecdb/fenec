@@ -404,6 +404,31 @@ waits for it as after the first answer.</p>
 second over HTTP against 18 300 without.</p>
 </details>
 
+<h2 id="wait">Holding a write until it can write</h2>
+
+<p>Send <code>Fenec-Wait: &lt;ms&gt;</code> with a <code>set</code> or a
+<code>del</code> on <code>/query</code> or <code>/batch</code>, and while it
+would write nothing the server holds it, answering the moment it writes —
+or at the end of the wait, 30 seconds at most, as it would have answered
+at once. A job queue's claim waits for a job that way (<a
+href="/docs/queues#wait">Waiting for a job</a>).</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query -H 'Fenec-Wait: 30000' \
+  -d '{"query":"del tasks where run_at &lt;= now() order run_at limit 1 returning *"}'
+</pre>
+
+<ul>
+  <li><b>What wakes it:</b> a write to a collection it reads, and the time
+    reaching a row's moment — a field compared with <code>now()</code>, a
+    <code>@ttl</code>. A filter that reads the time any other way is
+    refused (400), as is a request holding a <code>put</code>.</li>
+  <li><b>Wrote nothing</b> means no row written, or a
+    <code>require</code> not met; any other refusal is answered at
+    once.</li>
+  <li><b>With <code>Fenec-After</code></b> the header is that wait's, as
+    below, and holds no write.</li>
+</ul>
+
 <h2>The data ceiling</h2>
 
 <p>With <code>--max-memory</code>, writes that would grow the data past the
@@ -827,8 +852,9 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     <code>Event.Status</code>). Without it a stream outlived its token, and
     a member taken off a team heard the team until the client went away.
     No other request is held open past its token: a read sent with
-    <code>Fenec-After</code> is checked again once its wait ends, and
-    <code>/_changes</code> takes no scoped token.</li>
+    <code>Fenec-After</code> is checked again once its wait ends, a write
+    held by <code>Fenec-Wait</code> asks its token again each time it runs,
+    and <code>/_changes</code> takes no scoped token.</li>
   <li><b>Refusals</b> tell a scoped token only what it may read: a
     <code>@unique</code> clash (409) names the field, not the document
     holding the value nor the value, since that row is another user's.</li>

@@ -337,6 +337,53 @@ func TestAClaimAnswersTheRowsItTook(t *testing.T) {
 	}
 }
 
+// A claim held until a job comes (Wait): taken once a job is enqueued,
+// ended on time with no row, and given up by its context.
+func TestAHeldClaimTakesTheJobEnqueuedMeanwhile(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	name := fresh("held")
+	must(db.Exec(ctx, "create collection "+name+" (kind text, run_at timestamp @sorted, owner text)")).of(t)
+	claim := func(c *fenecdb.Client, ctx context.Context, owner string) (fenecdb.Result, error) {
+		return c.From(name).WhereCond(fenecdb.Raw("run_at <= now()")).Order("run_at", "asc").Limit(1).Update(ctx,
+			fenecdb.D("owner", owner, "run_at", fenecdb.Expr("now() + ?", 60000)), fenecdb.Returning("kind"))
+	}
+	got := make(chan fenecdb.Result, 1)
+	go func() {
+		r, err := claim(db.Wait(10*time.Second), ctx, "w1")
+		if err != nil {
+			t.Error(err)
+		}
+		got <- r
+	}()
+	time.Sleep(200 * time.Millisecond)
+	must(db.From(name).Insert(ctx, fenecdb.D("kind", "mail", "run_at", time.Now().UnixMilli()))).of(t)
+	select {
+	case r := <-got:
+		if len(r.Rows) != 1 || r.Rows[0]["kind"] != "mail" {
+			t.Fatalf("the held claim: %+v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held claim was not answered")
+	}
+	began := time.Now()
+	r := must(claim(db.Wait(300*time.Millisecond), ctx, "w2")).of(t)
+	if len(r.Rows) != 0 || time.Since(began) < 290*time.Millisecond {
+		t.Fatalf("a wait with nothing to take: %+v after %v", r, time.Since(began))
+	}
+	// Past the client's own timeout: the wait is added to it.
+	short := fenecdb.New(primary, fenecdb.WithToken(rootToken), fenecdb.WithTimeout(100*time.Millisecond))
+	if r := must(claim(short.Wait(400*time.Millisecond), ctx, "w3")).of(t); len(r.Rows) != 0 {
+		t.Fatalf("a held claim past the client's timeout: %+v", r)
+	}
+	// Its context gives it up.
+	gone, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if _, err := claim(db.Wait(10*time.Second), gone, "w4"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a held claim's context ended: %v", err)
+	}
+}
+
 func TestAnIdempotencyKeyIsReplayed(t *testing.T) {
 	ctx := context.Background()
 	db := root()

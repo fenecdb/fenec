@@ -41,7 +41,7 @@ open http://127.0.0.1:8080/_studio/
 <code>studio/</code> folder, with the HTTP client and query builder of
 <code>@fenecdb/web/client</code> beside them — no framework and no build
 step. The server embeds the files, so the binary is all you deploy. Its
-first load is 61 KB of JavaScript and CSS, gzipped, its modules preloaded
+first load is 62 KB of JavaScript and CSS, gzipped, its modules preloaded
 together from the page; the query editor, the schema, the live rows and the
 admin view are fetched the first time each is opened, 7 to 19 KB more. The server sends the
 files as they are, uncompressed; a proxy in front may compress them.</p>

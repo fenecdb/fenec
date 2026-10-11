@@ -26,8 +26,8 @@ public sealed class FenecClientOptions
 /// <summary>
 /// fenec-server's HTTP endpoint. A statement is one <c>POST /query</c>, several are one
 /// <c>POST /batch</c> under one write lock; values go in as <c>$1</c>, <c>$2</c>, ... and never
-/// into the text. Safe to use from several threads at once; <see cref="After"/> and
-/// <see cref="WithIdempotencyKey"/> hand out copies that share its connections.
+/// into the text. Safe to use from several threads at once; <see cref="After"/>,
+/// <see cref="WithIdempotencyKey"/> and <see cref="WithWait"/> hand out copies that share its connections.
 /// </summary>
 public sealed partial class FenecClient : IDisposable
 {
@@ -42,6 +42,7 @@ public sealed partial class FenecClient : IDisposable
     readonly SeqBox _seq;
     readonly long _after;
     readonly string? _key;
+    readonly TimeSpan _wait;
 
     sealed class SeqBox
     {
@@ -74,11 +75,11 @@ public sealed partial class FenecClient : IDisposable
         _seq = new SeqBox();
     }
 
-    FenecClient(FenecClient from, long after, string? key)
+    FenecClient(FenecClient from, long after, string? key, TimeSpan wait)
     {
         (_http, _owns, _root, _base, _token, _timeout, _seq) =
             (from._http, false, from._root, from._base, from._token, from._timeout, from._seq);
-        (_after, _key) = (after, key);
+        (_after, _key, _wait) = (after, key, wait);
     }
 
     /// <summary>The change the last write through this client, or a copy of it, left the database at; 0 before any.</summary>
@@ -87,12 +88,24 @@ public sealed partial class FenecClient : IDisposable
     /// <summary>A copy whose requests the server answers only once it holds change <paramref name="seq"/> --
     /// a write's <see cref="ExecResult.Seq"/> on the primary, read on a replica -- or with a 504 after five seconds.
     /// Never from before the write.</summary>
-    public FenecClient After(long seq) => new(this, seq, _key);
+    public FenecClient After(long seq) => new(this, seq, _key, _wait);
 
     /// <summary>A copy whose writes carry the key: sent again after a timeout, a write is answered as the first
     /// time and not made twice (<see cref="ExecResult.Replayed"/>). One key per write; the same key with another
     /// request is a 422.</summary>
-    public FenecClient WithIdempotencyKey(string key) => new(this, _after, key);
+    public FenecClient WithIdempotencyKey(string key) => new(this, _after, key, _wait);
+
+    /// <summary>A copy whose <c>set</c> and <c>del</c> statements -- <see cref="ExecAsync"/>, a batch's, the
+    /// builder's <c>UpdateAsync</c> and <c>DeleteAsync</c> -- the server holds while they write nothing, until
+    /// they can or for <paramref name="wait"/>, at most 30 seconds (<c>Fenec-Wait</c>): a worker's claim waits
+    /// for a job there -- one enqueued, a delayed one come due, a lease lapsed -- rather than sleeping and
+    /// sending it again. The cancellation token gives it up as ever; the client's Timeout is <paramref name="wait"/>
+    /// longer for it.</summary>
+    public FenecClient WithWait(TimeSpan wait)
+    {
+        if (wait < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(wait), "a wait is not negative");
+        return new(this, _after, _key, wait);
+    }
 
     /// <summary>The query builder over a collection: chain <c>Select</c>, <c>Where</c>, <c>Near</c>, <c>Order</c>,
     /// <c>Limit</c> ... and end with <c>RowsAsync</c>, <c>FirstAsync</c>, <c>CountAsync</c>, or a write --
@@ -296,7 +309,7 @@ public sealed partial class FenecClient : IDisposable
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         if (_timeout != System.Threading.Timeout.InfiniteTimeSpan && _timeout > TimeSpan.Zero)
-            cts.CancelAfter(_timeout + extra);
+            cts.CancelAfter(_timeout + extra + _wait);
         return cts;
     }
 
@@ -306,6 +319,8 @@ public sealed partial class FenecClient : IDisposable
         if (_token is not null) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
         if (_after > 0) req.Headers.TryAddWithoutValidation("Fenec-After", _after.ToString());
         if (_key is not null) req.Headers.TryAddWithoutValidation("Idempotency-Key", _key);
+        if (_wait > TimeSpan.Zero)
+            req.Headers.TryAddWithoutValidation("Fenec-Wait", ((long)_wait.TotalMilliseconds).ToString());
         return req;
     }
 

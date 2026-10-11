@@ -12,6 +12,14 @@ import { FenecError, Query, checked, declared, ident, nameOf, normalize, rowsOf,
 // wasm and HTTP unchanged. The REST surface (`GET /<name>?year=gte.2024`)
 // is for driverless clients; the builder does not use it.
 
+/** `Fenec-Wait` for `{ wait }`: milliseconds from 0, 30 000 at most at the server. */
+function held(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+    throw new FenecError(`wait is milliseconds, a number from 0 (got ${ms})`);
+  }
+  return Math.floor(ms);
+}
+
 export class FenecHttp {
   #url;
   #token;
@@ -73,7 +81,11 @@ export class FenecHttp {
    * Runs FenecQL. The return shape matches `run` on the wasm path; a write
    * also says the change it left the database at (`seq`) and whether the
    * answer is the one kept for its key (`replayed`). `{ idempotencyKey }`
-   * sends one with this statement.
+   * sends one with this statement. `{ wait: ms }` holds a `set` or a `del`
+   * that writes nothing at the server until it can -- a job enqueued, a
+   * delayed one come due, a lease lapsed -- or for that long, at most
+   * 30 000: a claim waiting for a job (`Fenec-Wait`). `{ signal }` gives
+   * it up, as any `fetch`.
    */
   async run(sql, params = [], opts = {}) {
     const { body, seq, replayed } = await this.#send(
@@ -81,6 +93,8 @@ export class FenecHttp {
       'application/json',
       JSON.stringify({ query: sql, params: params.map((p) => normalize(p)) }),
       opts.idempotencyKey ?? this.#key,
+      [],
+      opts,
     );
     // The endpoint returns rows as a plain array; the builder expects `{rows}`.
     // A write's (`returning`) says the change it left the database at too.
@@ -105,7 +119,8 @@ export class FenecHttp {
    * statement's place (from 0), `status` the refusal's kind -- 412 a
    * write's `require` not met -- and `completed` how many stayed applied:
    * none, but for a batch holding a `compact`, whose statements run on
-   * their own.
+   * their own. `{ wait, signal }` as `run`'s: held while its `set`s and
+   * `del`s write nothing.
    */
   async batch(items, opts = {}) {
     if (!Array.isArray(items) || items.length === 0) {
@@ -120,6 +135,8 @@ export class FenecHttp {
       'application/x-ndjson',
       lines.join('\n'),
       opts.idempotencyKey ?? this.#key,
+      [],
+      opts,
     );
     return { results: body?.results ?? [], seq, replayed };
   }
@@ -143,11 +160,14 @@ export class FenecHttp {
    * A POST: its JSON answer, the change a write left the database at, and
    * whether the answer is the one kept for `key`.
    */
-  async #send(path, type, payload, key, also = []) {
+  async #send(path, type, payload, key, also = [], { wait, signal } = {}) {
     const headers = { 'content-type': type };
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
     if (key) headers['idempotency-key'] = key;
-    const res = await this.#request(`${this.#url}${path}`, { method: 'POST', headers, body: payload });
+    if (wait !== undefined && wait !== null) headers['fenec-wait'] = String(held(wait));
+    const init = { method: 'POST', headers, body: payload };
+    if (signal) init.signal = signal;
+    const res = await this.#request(`${this.#url}${path}`, init);
     const text = await res.text();
     let body;
     try {
@@ -191,7 +211,7 @@ export class FenecHttp {
   from(name) {
     return new Query({
       collection: ident(nameOf(name), 'collection'),
-      exec: (sql, params) => this.run(sql, params),
+      exec: (sql, params, opts) => this.run(sql, params, opts),
       // What `useLiveQuery` finds the query's endpoint by.
       context: this,
       rel: declared.get(this)?.relations,

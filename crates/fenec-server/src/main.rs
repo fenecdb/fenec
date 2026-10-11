@@ -920,6 +920,7 @@ fn serve_dir(
     loop {
         std::thread::sleep(tick);
         if durability::shutdown_requested() {
+            fenec_http::waits::end_all(durability::HELD_GRACE);
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             fenec_http::trace::flush(Duration::from_secs(2));

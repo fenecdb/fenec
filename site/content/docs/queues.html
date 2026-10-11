@@ -77,11 +77,113 @@ set jobs {owner: "w3", run_at: now() + 30000, attempts: attempts + 1} where run_
     <code>returning</code> the answer is the count.</li>
   <li><b><code>limit 1 require 1</code></b> is one job or a refusal (412):
     <code>require</code> counts the rows the claim answers.</li>
-  <li><b>An empty queue answers no rows.</b> Nothing waits for a job to
-    come: a worker sleeps and claims again, or holds a
-    <a href="/docs/http#subscriptions">subscription</a> to the queue and
-    claims when it hears a write.</li>
+  <li><b>An empty queue answers no rows</b> at once — or, sent over HTTP
+    with <code>Fenec-Wait</code>, holds the claim at the server until a job
+    comes (<a href="#wait">Waiting for a job</a>).</li>
 </ul>
+
+<h2 id="wait">Waiting for a job</h2>
+
+<p>A worker whose claim finds nothing need not sleep and claim again. Sent
+with <code>Fenec-Wait</code>, milliseconds, the claim is held at the server
+while it would take nothing, and answered the moment it takes a job — one
+enqueued, a delayed one come due, a lease lapsed — or at the end of the
+wait with no row: Redis's <code>BLPOP</code>, SQS's long poll.</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query -H 'Fenec-Wait: 30000' \
+  -d '{"query": "set jobs {owner: $1, run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order run_at limit 10 returning *", "params": ["w1:1842"]}'
+</pre>
+
+<ul>
+  <li><b>A job enqueued</b> reaches a waiting worker in 0.38 ms at the
+    median and 0.76 at p99, where a worker polling every 10 ms took 0.83
+    and 10.1 and every 100 ms 15.5 and 85.8 — and polling every 10 ms sent
+    ten times the claims (<a
+    href="#costs">costs</a>).</li>
+  <li><b>Time wakes it too.</b> No write announces a delayed job's
+    <code>run_at</code> or a lease's end, so the server works the moment
+    out from the claim's filter: <code>run_at &lt;= now()</code> changes
+    its answer only as the time passes a job's <code>run_at</code>, and the
+    next one is a step of the <code>@sorted</code> index past now. The
+    claim is held until that moment and runs then, never before.</li>
+  <li><b>One job, many workers:</b> it goes to the worker that has waited
+    longest, and the others stay held. Claims that would take the same
+    jobs — the same filter, scope and parameters in it, whatever they
+    write — wait in line, and only the first is woken to look; having
+    taken a job it hands the turn to the next, since more may be ready.
+    A write to the queue costs one look under the read lock, not a claim
+    a worker.</li>
+  <li><b>At most 30 seconds</b>, and the answer is then what the claim
+    answers on an empty queue: <code>[]</code>, or a
+    <code>require</code>'s 412. A worker sends the next.</li>
+  <li><b>A <code>set</code> or a <code>del</code></b>, alone or in a
+    <code>/batch</code> beside reads: a <code>put</code> writes every time,
+    and a request holding one is refused (400), as is a filter that reads
+    the time other than as a field compared with <code>now()</code> give or
+    take a number — <code>bucket(now(), 60000)</code> — since nothing says
+    when its answer changes.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A held claim is the same request run at a later moment: the first
+moment it would write something, or the end of the wait.</p>
+
+<ul>
+  <li><b>When it runs again.</b> A write to a collection it reads wakes the
+    first claim of its line, which looks under the read lock whether a job
+    is there to take — the claim's own filter as a <code>get</code> of one
+    row — and runs the claim only if one is. A look that found nothing is
+    not repeated for a millisecond, however many writes land meanwhile:
+    beside sixteen claims held on a queue that stayed empty, sixteen busy
+    workers took 148 000 jobs a second against 150 600 with none held, the
+    held ones looking 730 times a second; woken at every write they looked
+    3 400 times and the workers took 142 000. A job enqueued in that
+    millisecond is taken at most that much later. The time wakes
+    it at the next row's moment: each comparison of a field with
+    <code>now()</code> plus or minus a number, wherever it is in the
+    filter, and a <code>@ttl</code> field's expiry; every row's value
+    counts, so one queue among several in a collection may be woken by
+    another's delayed jobs, to find nothing and sleep to the next.</li>
+  <li><b>A delayed job</b> was held by a waiting worker 0.04 ms after its
+    time at the median and 1.9 at p99, against 1.2 and 8.4 polling every
+    10 ms; with nothing due and nothing written, a held claim does
+    nothing at all: a thousand held for ten seconds took no measurable
+    CPU, where a thousand polling every 100 ms took 86% of a core, and a
+    hundred 11%.</li>
+  <li><b>Each held claim is a connection</b> and its thread, as a
+    subscription is: 46 KB of the server's memory each at a thousand,
+    against a subscription's 45. They count against
+    <code>--max-connections</code>, which a server with many waiting
+    workers raises.</li>
+  <li><b>Under an <code>Idempotency-Key</code></b> a claim that waited and
+    then took jobs keeps them under the key: sent again, it is answered
+    those rows and takes none. While it takes nothing it keeps no key, so
+    a retry after a timeout waits again.</li>
+  <li><b>A worker's token</b> waits as it claims: what a look reads is the
+    claim as the token runs it, its rules ANDed in, so it wakes for jobs
+    it could take and no others, and each run asks the token again — one
+    that expired meanwhile is refused (401).</li>
+  <li><b>A client gone</b> before a job came hands the job to the next
+    waiting worker, rather than leasing it to no one.</li>
+  <li><b>Tenants and the router.</b> Under <code>/t/&lt;t&gt;/</code> a
+    held claim holds nothing of its tenant between its runs, so a move
+    goes on; a tenant moved away or deleted answers its held claims 503
+    with <code>Retry-After</code>, to come back through the router, which
+    waits for a held request its wait longer than
+    <code>--upstream-timeout</code>.</li>
+  <li><b>Shutdown.</b> At SIGTERM every held claim is answered at once,
+    with the nothing it found, before the server syncs and exits.</li>
+  <li><b>A replica</b> refuses a claim as it refuses every write (403),
+    held or not.</li>
+  <li><b>With <code>Fenec-After</code></b> the header is that read's wait,
+    as before, and holds no write.</li>
+  <li><b>Not in a page or an app's library.</b> A database in the page,
+    or one an app opens through the native library, has no other worker to
+    wait for, and the builders refuse <code>wait</code> there: an app that
+    queues work for itself knows when it enqueues, and a live query of the
+    queue runs again at every write.</li>
+</ul>
+</details>
 
 <h2 id="ack">Ack, extend</h2>
 
@@ -168,8 +270,8 @@ set tasks {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run
 
 <h2 id="workers">A worker</h2>
 
-<p>The loop, in JavaScript over HTTP: claim a batch, run each job, ack it
-or fail it, and wait a little when there was none.</p>
+<p>The loop, in JavaScript over HTTP: claim a batch — held at the server
+until there is one — run each job, and ack it or fail it.</p>
 
 <pre data-lang="ts">import { connect, expr, inc, raw } from '@fenecdb/web/client';
 
@@ -187,11 +289,10 @@ for (;;) {
     .where(raw('run_at &lt;= now()'))
     .order('run_at')
     .limit(10)
-    .update({ owner, run_at: expr('now() + ?', 30000), attempts: inc(1) }, { returning: true });
-  if (claimed.length === 0) {
-    await new Promise((r) =&gt; setTimeout(r, 500));
-    continue;
-  }
+    .update(
+      { owner, run_at: expr('now() + ?', 30000), attempts: inc(1) },
+      { returning: true, wait: 30000 },
+    );
   for (const job of claimed) {
     try {
       await send((job.payload as { to: string }).to);
@@ -214,6 +315,15 @@ for (;;) {
     <code>Result.Rows</code>, .NET's <code>UpdateAsync(patch, returning:
     ["*"])</code>, and Swift's, Kotlin's and Dart's
     <code>updateReturning</code> — held to the same text.</li>
+  <li><b>And waits for a job</b> the client's way: JavaScript's
+    <code>{ wait: 30000 }</code> beside <code>{ signal }</code>, Python's
+    <code>wait=30</code> (seconds), Go's <code>db.Wait(30 *
+    time.Second)</code> under the request's context, .NET's
+    <code>db.WithWait(TimeSpan.FromSeconds(30))</code> under its
+    cancellation token, and Swift's, Kotlin's and Dart's
+    <code>withWait</code>. Each client waits for the answer as much
+    longer than its own timeout, and gives the request up when it is
+    cancelled.</li>
   <li><b>Over HTTP</b> the claim is a <code>POST /query</code>; sent
     under an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>,
     a retry after a timeout is answered the jobs the first try took, and
@@ -286,9 +396,6 @@ for (;;) {
 <h2 id="not-covered">What this does not cover</h2>
 
 <ul>
-  <li><b>A blocking claim</b> — a worker held until a job arrives, as
-    <code>BLPOP</code> holds one. A subscription wakes a worker on a write;
-    the claim does not wait.</li>
   <li><b>Exactly once.</b> A lease that lapses under a slow worker hands
     its job to another; the work's own check makes the second run
     harmless.</li>

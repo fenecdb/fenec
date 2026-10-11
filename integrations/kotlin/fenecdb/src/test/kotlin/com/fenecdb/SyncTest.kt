@@ -2,6 +2,8 @@ package com.fenecdb
 
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -289,6 +291,29 @@ class SyncTest {
             db.runList("""put tasks {key: "i"}""", emptyList(), idempotencyKey = "put-1")
         }
         assertEquals(listOf<Any?>(422, null), listOf(reused.status, reused.at))
+    }
+
+    /** A claim held at the server until a job comes ([FenecRemote.withWait]): taken once one is enqueued, ended on time with no row, and given up by cancelling its coroutine. */
+    @Test
+    fun connectHoldsAClaimUntilAJobComes() = runBlocking {
+        val s = server("held")
+        s.run("create collection jobs (kind text, run_at timestamp @sorted, owner text)")
+        val db = Fenec.connect(s.url)
+        suspend fun claim(c: FenecRemote, owner: String) = c.from("jobs").where(Cond.raw("run_at <= now()"))
+            .order("run_at").limit(1)
+            .updateReturning(mapOf("owner" to owner, "run_at" to Computed.expr("now() + ?", 60000)), returning = listOf("kind"))
+        val held = async(Dispatchers.Default) { claim(db.withWait(10_000), "w1") }
+        delay(200)
+        db.execute("put jobs {kind: \"mail\", run_at: $1}", System.currentTimeMillis())
+        assertEquals(listOf("mail"), withTimeout(5_000) { held.await() }.map { it.string("kind") })
+        val began = System.nanoTime()
+        assertTrue(claim(db.withWait(300), "w2").isEmpty())
+        assertTrue(System.nanoTime() - began >= 290_000_000L)
+        val given = async(Dispatchers.Default) { claim(db.withWait(10_000), "w3") }
+        delay(100)
+        val t = System.nanoTime()
+        given.cancelAndJoin()
+        assertTrue(System.nanoTime() - t < 2_000_000_000L, "a cancelled claim let go at once")
     }
 
     /** `/query` answers `{"rows": [...], "facets": {...}}` when the query asked facets, the bare array otherwise. */
