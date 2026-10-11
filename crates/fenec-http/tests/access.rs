@@ -362,6 +362,37 @@ fn a_rule_over_a_collated_field_checks_writes_in_its_order() {
     assert!(rows.contains("çay"), "{rows}");
 }
 
+/// A rule over a `nocase` field compares by its fold, a write's check as a
+/// read's filter: a token for `Alice@X.com` reads and writes the rows of
+/// `alice@x.com`, which are its own, and none of bob's.
+#[test]
+fn a_rule_over_a_nocase_field_compares_its_fold() {
+    let n = start_with(
+        "mail  read,write  where owner = $jwt.sub\n",
+        &[
+            "create collection mail (owner text nocase @hash, n int)",
+            r#"put mail [{owner: "ALICE@x.com", n: 1}, {owner: "bob@x.com", n: 2}]"#,
+        ],
+    );
+    let t = n.token(r#"{"sub":"Alice@X.com"}"#);
+    let (status, body) = n.query(&t, "get mail select n");
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("\"n\":1") && !body.contains("\"n\":2"),
+        "{body}"
+    );
+    let (status, body) = n.query(&t, r#"put mail {owner: "alice@x.COM", n: 3}"#);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(n.query(&t, r#"put mail {owner: "bob@x.com", n: 4}"#).0, 403);
+    let (_, body) = n.query(&t, "get mail select n order n");
+    assert!(body.contains("\"n\":3"), "{body}");
+    // What a replica is made from says so, and so does the schema's text.
+    let (_, list) = n.call(Some(ROOT), "GET", "/collections", "");
+    assert!(list.contains("\"nocase\":true"), "{list}");
+    let (_, text) = n.call(Some(ROOT), "GET", "/_schema?as=fenecql", "");
+    assert!(text.contains("owner text nocase @hash"), "{text}");
+}
+
 /// An inner `get` reads its collection as any `get` does: held to the
 /// token's rules, so the list it makes holds only rows the token may read,
 /// and a token learns nothing of the others through what the outer query

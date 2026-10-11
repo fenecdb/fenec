@@ -68,6 +68,7 @@ class Column {
     this.kind = kind;
     this.required = false;
     this.collation = null;
+    this.folded = false;
     this.index = null;
     this.name = null;
     this.table = null;
@@ -86,9 +87,19 @@ class Column {
     if (this.type !== 'text' && this.type !== '[text]') throw new FenecError('collate orders text: the column is not text');
     return copy(this, { collation: c });
   }
+  /**
+   * `nocase`: compared by its case fold wherever it is compared -- `=`, its
+   * indexes, `order`, `group` -- and kept as written, as PostgreSQL's
+   * `citext` is. A text's alone, not a list's.
+   */
+  nocase() {
+    if (this.type !== 'text') throw new FenecError('nocase compares a text by its case fold: the column is not text');
+    return copy(this, { folded: true });
+  }
   /** `[type]`: a list of the type, as Drizzle's `.array()`. */
   array() {
     if (this.kind === 'json') throw new FenecError('a list of json is a json column holding a list');
+    if (this.folded) throw new FenecError('nocase compares a text by its case fold: a list is not one');
     if (this.type.startsWith('[')) throw new FenecError('a list of lists has no FenecQL type');
     return copy(this, { type: `[${this.type}]`, kind: 'array' });
   }
@@ -133,6 +144,7 @@ class Column {
     const out = { name: this.name, type: this.type };
     if (this.required) out.required = true;
     if (this.collation) out.collate = this.collation;
+    if (this.folded) out.nocase = true;
     if (this.index) out.index = this.index;
     if (this.paths?.length) out.paths = this.paths;
     return out;
@@ -409,6 +421,7 @@ class Table {
       let f = `${c.name} ${c.type}`;
       if (c.required) f += ' required';
       if (c.collation) f += ` collate ${c.collation}`;
+      if (c.folded) f += ' nocase';
       if (c.index) f += ` ${indexText(c.index)}`;
       return f;
     });

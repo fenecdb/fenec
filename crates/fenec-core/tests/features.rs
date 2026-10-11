@@ -389,3 +389,45 @@ fn an_index_over_several_fields_declared_is_answered_by_the_scan() {
     run(&mut back, "drop index on p (owner, slug)").unwrap();
     run(&mut back, r#"put p {owner: 2, at: 4, slug: "b"}"#).unwrap();
 }
+
+#[test]
+fn a_nocase_field_is_its_fold_without_the_indexes() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection u (email text nocase @unique, name text nocase @sorted, n int, \
+         org text nocase, @unique(org, n))",
+    )
+    .expect("a collection declaring them is made");
+    for (i, (e, name)) in [
+        ("Alice@X.com", "Straße"),
+        ("bob@x.com", "ömer"),
+        ("CAROL@x.com", "STRASSE"),
+        ("dave@x.com", "Ömer"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        run(
+            &mut db,
+            &format!(r#"put u {{email: "{e}", name: "{name}", n: {i}, org: "ACME"}}"#),
+        )
+        .unwrap();
+    }
+    let r = run(&mut db, r#"get u select n where email = "alice@x.COM""#).unwrap();
+    assert_eq!(ints(&r, 0), [0]);
+    let r = run(&mut db, r#"get u select n where name = "strasse" order n"#).unwrap();
+    assert_eq!(ints(&r, 0), [0, 2]);
+    // The scan orders by the fold, ties by id: `ömer` and `Ömer` together,
+    // `Straße` and `STRASSE` together.
+    let r = run(&mut db, "get u select n order name, id").unwrap();
+    assert_eq!(ints(&r, 0), [0, 2, 1, 3]);
+    let e = run(&mut db, r#"put u {email: "ALICE@x.com", n: 9}"#).unwrap_err();
+    assert!(matches!(e, Error::Duplicate(_)), "{e}");
+    let e = run(&mut db, r#"put u {email: "eve@x.com", n: 1, org: "acme"}"#).unwrap_err();
+    assert!(matches!(e, Error::Duplicate(_)), "{e}");
+    let mut back = Database::new();
+    back.load(&db.snapshot()).expect("the image opens");
+    let r = run(&mut back, r#"get u select n where email = "carol@X.COM""#).unwrap();
+    assert_eq!(ints(&r, 0), [2]);
+}

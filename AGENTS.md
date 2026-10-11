@@ -77,6 +77,7 @@ make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server 
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
+make nocase-bench        # a `nocase` field against a plain one over 100 000 rows: a put asking @unique, lookups, scans, `~`, an order, group and facet (ARGS=scan for some)
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M
 make growth-bench        # indexes growing a put at a time, the longest (a table's growth), p50/p99.99: @unique to 4M keys, @text to 4M terms, @hnsw to 1.1M x 128 and 300k x 768; then builds, lookups, match, near, the first put after an open (GROWTH=unique|text|vector)
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
@@ -2580,10 +2581,10 @@ ICU's normalisation and discontiguous contractions find and fenecdb does
 not -- and to `Intl.Collator` in `web/fenec.test.js`.
 `order name collate und` names it for one key; a field declared `name text
 collate und` has it wherever its text compares -- `order` naming none, `<`
-and `>` in `where` (`RowAccess::collation`), `min` and `max`, and a
+and `>` in `where` (`RowAccess::text_order`), `min` and `max`, and a
 `@sorted` index over it, whose chunks order through `sorted::Entry` with the
-collation passed in. Equality stays the bytes'. The schema writes a collated
-field behind type tag 11 (`TAG_COLLATED`) and the collation's code (1 `tr`,
+collation passed in. Equality stays the bytes' (a `nocase` field's is its
+fold's, below). The schema writes a collated field behind type tag 11 (`TAG_COLLATED`) and the collation's code (1 `tr`,
 2 `und`), which an older binary refuses rather than read the field in byte
 order; `\d` shows `tr-x-icu` and `und-x-icu`. A native build carries every
 chunk. The browser module carries `latin` (9 KB) and is handed the rest
@@ -2599,6 +2600,56 @@ A chunk carries the tables' stamp, and another version's is refused. The
 root cost the browser module 17.5 KB, 8.2 KB gzip and 6.8 KB brotli,
 over the 10.4 KB `tr` and the field had; the other chunks are 145 KB, 67
 KB gzip, 61 KB brotli, where plain words were 102 and 90.
+
+**`nocase` is a text compared by its case fold wherever it is compared.**
+`email text nocase` (`Field::nocase`, schema tag 17 before the type,
+`TAG_NOCASE`, so a binary from before refuses the file rather than take a
+second `Alice@x.com` its `@unique` refuses): `=`, `!=`, `in`, `<` and
+`>`, `~`, the keys of `@hash`, `@unique`, `@sorted` and a composite's part,
+`order`, `group`, `count(distinct)`, `approx_count_distinct`, `facet`,
+`min`, `max`, `first ... by`, a `lookup`'s child key and a scoped token's
+rules all go through one rule (`Field::text_order`, a `collate::TextOrder`
+of a collation and a `case::CaseFold`) -- an index option alone would have
+left `=` comparing bytes beside a `@unique` that folds, and a `lookup` on
+it finding what `where` did not. The text is kept as written; a group's
+and a facet's value is the first row holding its fold, in id order (the
+bucket's first member, read). The fold is Unicode's full case folding,
+CaseFolding.txt's C and F -- Python's `str.casefold()`, which
+`tests/nocase.rs` holds it to at every code point (`tests/casefold.txt`,
+`tools/casefold.py`) -- with Turkish's T mappings under `collate tr`
+(`ISTANBUL` is `ıstanbul`, `İSTANBUL` is `istanbul`). Full rather than
+simple: simple folding keeps `ß` apart from `SS`, and would be a table of
+its own, where the full one is the standard library's lowercase mapping,
+already in the browser module -- and for the 297 code points whose fold is
+not their lowercase (`UNLIKE_LOWER`, 41 runs, which a test derives from
+the standard library again), its lowercase, uppercase and lowercase again,
+`ı` left alone and Cherokee's small letters made its capitals. Nothing is
+normalised: `é` and `e` with a combining accent stay apart, and a
+full-width letter is not ASCII. A collated `nocase` field orders by the
+collation over the folds, which ties exactly the texts that fold to one,
+so its order and its equality agree. The indexes hold folds
+(`HashIndex::key`, `folded_key`, `encode_folded` writing an ASCII text's
+lowercased as it copies it; `sorted::Ordered`'s `fold`; `composite::Part`'s);
+the bound `Filter` folds a value once a query and a row as it compares it
+(`Test::Folded`, `case::cmp_to_folded`: the ASCII both start with byte by
+byte, the rest a character at a time until the two part): folded whole as
+a row was read, a scan for one name over 100 000 rows, a third past ASCII,
+went 5.4 -> 17.0 ms, and goes to 6.8. An order folds its `nocase` keys
+once a row in a pass after the reading (`folded_keys`, so an order over
+none reads as it did), 8.5 -> 16.2 ms, where folding both sides at every
+comparison was 17.4; a `@sorted` one is walked. A collection without a
+`nocase` field reads and writes as it did (`make nocase-bench`'s plain
+column against main's, in turns). Made `nocase` or no longer, a field is
+rebuilt -- the declared schema's `nocase_changed` refusal names
+`rebuild`, which a `@unique` refuses where two values become one. A
+text's alone: a list's elements meet `has`, an index each and a facet a
+value at a time. `fenec import` takes PostgreSQL's `citext` and SQLite's
+`COLLATE NOCASE` as it. The browser module grew 11.5 KB, 3.7 KB brotli
+(the engine's paths 6.4 KB, `case` 2.1); its scans of a plain field moved
+within 2% of main's under load, once a `nocase` field's tests shared a
+point's out-of-line arm of `Filter::test` and `compare` stopped asking the
+order of a text `=` (an arm of their own and that question were 5 and 7%
+of a count by numbers and by a text over 20 000 rows).
 
 **`lookup` chains, and the chain is still positional.** `lookup a ... lookup b
 ...` hangs `b` off `a`'s rows: what follows a `lookup` binds to *its*

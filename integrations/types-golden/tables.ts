@@ -19,7 +19,7 @@ export const articles = fenecTable('articles', {
   splade: sparsevec({ dimensions: 30522 }),
   tags: text().array(),
   counts: integer().array().notNull(),
-  slug: text().unique(),
+  slug: text().nocase().unique(),
 }, (t) => [
   index('articles_title_idx').using('bm25', t.title).with({ prefix: 6, chars: true }),
   index('articles_year_idx').using('hash', t.year),

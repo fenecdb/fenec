@@ -13,6 +13,7 @@
 //!    {"name": "todos", "fields": [
 //!      {"name": "title", "type": "text", "required": true, "collate": "tr",
 //!       "index": {"kind": "text", "prefix": 6}},
+//!      {"name": "email", "type": "text", "nocase": true, "index": {"kind": "unique"}},
 //!      {"name": "meta", "type": "json",
 //!       "paths": [{"path": "lang", "index": {"kind": "hash"}}]}],
 //!     "indexes": [{"kind": "sorted",
@@ -30,8 +31,8 @@
 //! adds -- a collection, a field, an index on a field or a path that has
 //! none -- comes back as the statements that make it; what would lose data
 //! or could mean two things -- a field the code lacks (dropped, or renamed?),
-//! a type, a collation or a `required` changed, an index changed or taken
-//! off -- comes back as a refusal saying what differs and how to resolve it.
+//! a type, a collation, `nocase` or a `required` changed, an index changed
+//! or taken off -- comes back as a refusal saying what differs and how to resolve it.
 //! The resolution is a migration: FenecQL, run once and recorded in
 //! `_migrations` by whoever applies the plan (`fenec-abi`), since running a
 //! statement takes the parser, which this crate does not have.
@@ -76,8 +77,9 @@ pub enum Migration {
     /// FenecQL statements, run as written.
     Text(String),
     /// A field made again as the description declares it -- its type,
-    /// collation and index -- and its values copied over: what resolves a
-    /// changed index or collation, which no statement changes in place.
+    /// collation, `nocase` and index -- and its values copied over: what
+    /// resolves a changed index, collation or `nocase`, which no statement
+    /// changes in place.
     Rebuild { collection: String, field: String },
 }
 
@@ -109,7 +111,8 @@ pub struct Plan {
 pub struct Refusal {
     /// What kind: `field_not_declared`,
     /// `type_changed`, `required_changed`, `required_added`,
-    /// `collate_changed`, `index_changed`, `index_removed`, and under
+    /// `collate_changed`, `nocase_changed`, `index_changed`,
+    /// `index_removed`, and under
     /// [`Mode::Follow`] `collection_missing`, `field_missing`,
     /// `index_missing`.
     pub kind: &'static str,
@@ -281,7 +284,9 @@ fn field(collection: &str, v: &Value) -> Result<(Field, Vec<Field>)> {
     let o = object(v, "a field")?;
     only(
         o,
-        &["name", "type", "required", "collate", "index", "paths"],
+        &[
+            "name", "type", "required", "collate", "nocase", "index", "paths",
+        ],
         "a field",
     )?;
     let fname = name(o, "name", "a field")?;
@@ -300,6 +305,9 @@ fn field(collection: &str, v: &Value) -> Result<(Field, Vec<Field>)> {
             f = f.collated(Collation::named(c).unwrap_or(Collation::Root))
         }
         Some(_) => return Err(bad(&at, "has a collation there is not: tr or und")),
+    }
+    if flag(o, "nocase", &at)? {
+        f = f.nocase();
     }
     if let Some(ix) = member(o, "index").filter(|v| !matches!(v, Value::Null)) {
         f = f.indexed(index(ix, &at)?);
@@ -578,6 +586,9 @@ pub fn describe<S: Borrow<Schema>>(schemas: &[S]) -> String {
                 out.push_str(",\"collate\":");
                 json::escape_into(&mut out, c.name());
             }
+            if f.nocase {
+                out.push_str(",\"nocase\":true");
+            }
             if f.index != IndexKind::None {
                 out.push_str(",\"index\":");
                 index_json(&mut out, &f.index);
@@ -737,6 +748,9 @@ pub fn field_text(f: &Field, required: bool) -> String {
     if let Some(c) = f.collate {
         s.push_str(" collate ");
         s.push_str(c.name());
+    }
+    if f.nocase {
+        s.push_str(" nocase");
     }
     if let Some(ix) = index_text(&f.index) {
         s.push(' ');
@@ -941,6 +955,18 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
                 c,
                 Some(&f.name),
                 differs(&at, "'s collation is ", name(g.collate), name(f.collate)),
+                fix_rebuild::<FOLLOW>(c, &f.name),
+            );
+        }
+        // Equality and every index's keys change with it: two rows that
+        // were apart may be one value, which a `@unique` one would refuse.
+        if g.nocase != f.nocase {
+            let name = |n: bool| if n { "nocase" } else { "case-sensitive" };
+            p.refuse(
+                "nocase_changed",
+                c,
+                Some(&f.name),
+                differs(&at, " is ", name(g.nocase), name(f.nocase)),
                 fix_rebuild::<FOLLOW>(c, &f.name),
             );
         }
@@ -1340,7 +1366,7 @@ mod tests {
                 {"name":"h","type":"vector<4, f16>","index":{"kind":"hnsw","metric":"l2","m":8,"ef_construction":50,"ef_search":33,"quant":"int8"}},
                 {"name":"i","type":"sparse<100>","index":{"kind":"inverted"}},
                 {"name":"j","type":"[text]","index":{"kind":"hash"}},
-                {"name":"u","type":"text","index":{"kind":"unique"}},
+                {"name":"u","type":"text","nocase":true,"index":{"kind":"unique"}},
                 {"name":"v","type":"vector<3>","index":{"kind":"hnsw"}}]}]}"#,
         );
         let s = &d.collections[0];
@@ -1352,7 +1378,7 @@ mod tests {
             "create collection t (a text required collate tr @text(k1=0.9, b=0.4, prefix=6, chars), \
              b int @hash, c float @sorted, d bool, e timestamp @ttl(90m), f bytes, g json, \
              h vector<4, f16> @hnsw(l2, m=8, ef_construction=50, ef_search=33, quant=int8), \
-             i sparse<100> @inverted, j [text] @hash, u text @unique, \
+             i sparse<100> @inverted, j [text] @hash, u text nocase @unique, \
              v vector<3> @hnsw(cosine, m=16, ef_construction=200, ef_search=100))"
         );
         assert_eq!(made[1], "create index on t (g.lang) @hash");
@@ -1394,6 +1420,14 @@ mod tests {
             (
                 r#"{"format":1,"collections":[{"name":"t","fields":[{"name":"id","type":"int"}]}]}"#,
                 "reserved",
+            ),
+            (
+                r#"{"format":1,"collections":[{"name":"t","fields":[{"name":"a","type":"int","nocase":true}]}]}"#,
+                "case fold",
+            ),
+            (
+                r#"{"format":1,"collections":[{"name":"t","fields":[{"name":"a","type":"text","nocase":1}]}]}"#,
+                "not true or false",
             ),
             (
                 r#"{"format":1,"collections":[{"name":"t","fields":[{"name":"a","type":"int"}]},{"name":"t","fields":[{"name":"a","type":"int"}]}]}"#,
@@ -1464,6 +1498,28 @@ mod tests {
         // The same schema plans nothing.
         let same: Vec<&Schema> = code.iter().collect();
         assert_eq!(plan(&same, &code, Mode::Apply), Plan::default());
+        // A field made `nocase`, or no longer, is rebuilt: its equality and
+        // its index's keys change, and a `@unique` one may hold two rows
+        // that become one value.
+        let db = schemas(
+            r#"[{"name":"u","fields":[{"name":"e","type":"text","index":{"kind":"unique"}}]}]"#,
+        );
+        let code = schemas(
+            r#"[{"name":"u","fields":[{"name":"e","type":"text","nocase":true,"index":{"kind":"unique"}}]}]"#,
+        );
+        let db: Vec<&Schema> = db.iter().collect();
+        let p = plan(&db, &code, Mode::Apply);
+        assert_eq!(p.refusals.len(), 1, "{p:?}");
+        assert_eq!(p.refusals[0].kind, "nocase_changed");
+        assert!(p.refusals[0]
+            .message
+            .contains("case-sensitive in the database and nocase"));
+        assert!(p.refusals[0].fix.contains("rebuild"), "{:?}", p.refusals[0]);
+        assert_eq!(
+            rebuild(&code[0], "e").unwrap(),
+            "alter collection u add field e__rebuilt text nocase @unique; set u {e__rebuilt: e}; \
+             alter collection u drop field e; alter collection u rename field e__rebuilt to e"
+        );
     }
 
     #[test]

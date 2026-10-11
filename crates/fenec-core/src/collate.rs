@@ -40,6 +40,7 @@
 //! chunks named, rather than answered in that order -- the client adds them
 //! ([`add_chunk`]) and runs it again.
 
+use crate::case::CaseFold;
 use crate::value::Value;
 use std::cmp::Ordering;
 use std::str::Chars;
@@ -189,6 +190,59 @@ impl Collation {
         match (a, b) {
             (Value::Text(x), Value::Text(y)) => self.compare(x, y),
             (Value::List(x), Value::List(y)) => {
+                for (p, q) in x.iter().zip(y) {
+                    let o = self.compare_values(p, q);
+                    if o != Ordering::Equal {
+                        return o;
+                    }
+                }
+                x.len().cmp(&y.len())
+            }
+            _ => a.cmp_value(b),
+        }
+    }
+}
+
+/// How a field's text compares wherever it compares: in a collation's
+/// order or its bytes', over the text as written or over its case fold
+/// (`nocase`). A `nocase` field in a collation orders by the collation over
+/// the folds -- `collate tr nocase` puts `ılık` before `İnce` and finds
+/// `ince` equal to the second -- so the two agree on equality: a collation
+/// tells every two different texts apart, and so it ties exactly the texts
+/// that fold to one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextOrder {
+    pub coll: Option<Collation>,
+    pub fold: Option<CaseFold>,
+}
+
+impl TextOrder {
+    /// The bytes', as written.
+    pub const BYTES: TextOrder = TextOrder {
+        coll: None,
+        fold: None,
+    };
+
+    pub fn is_bytes(self) -> bool {
+        self.coll.is_none() && self.fold.is_none()
+    }
+
+    /// `a` against `b` in this order.
+    pub fn compare(self, a: &str, b: &str) -> Ordering {
+        match (self.fold, self.coll) {
+            (None, None) => a.cmp(b),
+            (None, Some(c)) => c.compare(a, b),
+            (Some(f), None) => crate::case::cmp_folded(a, b, f),
+            (Some(f), Some(c)) => c.compare(&crate::case::fold(a, f), &crate::case::fold(b, f)),
+        }
+    }
+
+    /// Two values as this order puts them: text and lists of it as
+    /// [`TextOrder::compare`] does, anything else as [`Value::cmp_value`].
+    pub fn compare_values(self, a: &Value, b: &Value) -> Ordering {
+        match (a, b) {
+            (Value::Text(x), Value::Text(y)) => self.compare(x, y),
+            (Value::List(x), Value::List(y)) if !self.is_bytes() => {
                 for (p, q) in x.iter().zip(y) {
                     let o = self.compare_values(p, q);
                     if o != Ordering::Equal {

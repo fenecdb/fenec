@@ -59,6 +59,12 @@ pub const TAG_GEO: u8 = 15;
 /// that knows none meets an unknown type tag and refuses the file, rather
 /// than open it without them -- and take a duplicate a unique one refuses.
 pub const TAG_COMPOSITES: u8 = 16;
+/// Never a value's: a schema writes it before the type of a text field that
+/// compares by its case fold (`email text nocase`), after the collation's
+/// tag where it has one. A version that knows no `nocase` meets an unknown
+/// type tag and refuses the file, rather than open it comparing the bytes
+/// -- and take a second `Alice@x.com` a `@unique` one refuses.
+pub const TAG_NOCASE: u8 = 17;
 
 // ------------------------------------------------------- half precision
 //

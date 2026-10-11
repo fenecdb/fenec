@@ -19,7 +19,8 @@
 // Without the `sorted` feature the index's code is here but unused (`off.rs`);
 // the keys and ranges the planner builds stay.
 #![cfg_attr(not(feature = "sorted"), allow(dead_code, unused_imports))]
-use crate::collate::Collation;
+use crate::case::CaseFold;
+use crate::collate::{Collation, TextOrder};
 use crate::value::{DataType, DocId, Value};
 use std::cmp::Ordering;
 use std::ops::Bound;
@@ -75,18 +76,23 @@ pub struct Ordered<K> {
     /// key -- kept as a running sum: `memory_bytes` is read before every
     /// write under `--max-memory`, and must not walk the entries to answer.
     heap: usize,
+    /// The fold a `nocase` field's text is keyed by: its keys are folds,
+    /// so the order is the fold's and the texts that fold to one are one
+    /// run of keys, in id order, as `=` finds them.
+    fold: Option<CaseFold>,
 }
 
 impl<K: Ord + Clone + Default> Ordered<K>
 where
     (K, DocId): Entry,
 {
-    fn new(coll: Option<Collation>) -> Self {
+    fn new(order: TextOrder) -> Self {
         Ordered {
-            keys: Chunked::new(coll),
+            keys: Chunked::new(order.coll),
             nulls: Chunked::new(None),
             nans: Chunked::new(None),
             heap: 0,
+            fold: order.fold,
         }
     }
 }
@@ -411,17 +417,17 @@ impl SortedIndex {
         orderable(ty)
     }
 
-    /// An empty index over a field of type `ty`, its text in `coll` when
-    /// the field names one.
-    pub fn new(ty: &DataType, coll: Option<Collation>) -> SortedIndex {
+    /// An empty index over a field of type `ty`, its text compared as the
+    /// field's is: in its collation, and by its fold where it is `nocase`.
+    pub fn new(ty: &DataType, order: TextOrder) -> SortedIndex {
         match ty {
-            DataType::Text => SortedIndex::Text(Ordered::new(coll)),
+            DataType::Text => SortedIndex::Text(Ordered::new(order)),
             DataType::Json => SortedIndex::Json(Box::new(JsonOrdered {
-                num: Ordered::new(None),
-                text: Ordered::new(None),
+                num: Ordered::new(TextOrder::BYTES),
+                text: Ordered::new(TextOrder::BYTES),
                 apart: Chunked::new(None),
             })),
-            _ => SortedIndex::Num(Ordered::new(None)),
+            _ => SortedIndex::Num(Ordered::new(TextOrder::BYTES)),
         }
     }
 
@@ -430,15 +436,16 @@ impl SortedIndex {
     /// `dyn` so that the two callers share one copy of this.
     pub fn build(
         ty: &DataType,
-        coll: Option<Collation>,
+        order: TextOrder,
         rows: &mut dyn Iterator<Item = (DocId, Option<Value>)>,
     ) -> Self {
+        let coll = order.coll;
         match ty {
             // Rows a write at a time: a path's index is built under the
             // write lock in one pass, and a sort of its own for each part
             // would be more code in the browser module for little.
             DataType::Json => {
-                let mut ix = SortedIndex::new(ty, None);
+                let mut ix = SortedIndex::new(ty, TextOrder::BYTES);
                 for (id, v) in rows {
                     ix.insert(id, v.as_ref());
                 }
@@ -448,7 +455,7 @@ impl SortedIndex {
                 let (mut keys, mut nulls) = (Vec::new(), Vec::new());
                 let mut heap = 0;
                 for (id, v) in rows {
-                    match text_slot(v.as_ref()) {
+                    match text_slot(v.as_ref(), order.fold) {
                         Slot::Key(k) => {
                             heap += k.len();
                             keys.push((k, id));
@@ -461,7 +468,7 @@ impl SortedIndex {
                 let by = |a: &(Box<str>, DocId), b: &(Box<str>, DocId)| a.order(b, coll);
                 keys.sort_unstable_by(by);
                 nulls.sort_unstable_by(by);
-                SortedIndex::Text(Ordered::from_sorted(keys, nulls, Vec::new(), heap, coll))
+                SortedIndex::Text(Ordered::from_sorted(keys, nulls, Vec::new(), heap, order))
             }
             _ => {
                 let (mut keys, mut nulls, mut nans) = (Vec::new(), Vec::new(), Vec::new());
@@ -475,7 +482,7 @@ impl SortedIndex {
                 for v in [&mut keys, &mut nulls, &mut nans] {
                     radix_sort(v);
                 }
-                SortedIndex::Num(Ordered::from_sorted(keys, nulls, nans, 0, None))
+                SortedIndex::Num(Ordered::from_sorted(keys, nulls, nans, 0, TextOrder::BYTES))
             }
         }
     }
@@ -510,7 +517,7 @@ impl SortedIndex {
                     o.nans.insert((0, id));
                 }
             },
-            SortedIndex::Text(o) => match text_slot(v) {
+            SortedIndex::Text(o) => match text_slot(v, o.fold) {
                 Slot::Key(k) => {
                     let len = k.len();
                     if o.keys.insert((k, id)) {
@@ -556,7 +563,7 @@ impl SortedIndex {
                     o.nans.remove(&(0, id));
                 }
             },
-            SortedIndex::Text(o) => match text_slot(v) {
+            SortedIndex::Text(o) => match text_slot(v, o.fold) {
                 Slot::Key(k) => {
                     let len = k.len();
                     if o.keys.remove(&(k, id)) {
@@ -605,10 +612,14 @@ impl SortedIndex {
     }
 
     /// The key a literal compares as against this field, when the key space
-    /// can say it exactly -- the same answer `cmp_value` gives. `None` means
-    /// the comparison has to be evaluated row by row.
-    pub fn bound(ty: &DataType, v: &Value) -> Option<Key> {
+    /// can say it exactly -- the same answer `cmp_value` gives, or a
+    /// `nocase` field's comparison of folds (`fold`). `None` means the
+    /// comparison has to be evaluated row by row.
+    pub fn bound(ty: &DataType, fold: Option<CaseFold>, v: &Value) -> Option<Key> {
         match (ty, v) {
+            (DataType::Text, Value::Text(t)) if fold.is_some() => {
+                Some(Key::Text(crate::case::fold(t, fold?).into()))
+            }
             (DataType::Int, Value::Int(i)) => Some(Key::Num(int_key(*i))),
             (DataType::Timestamp, Value::Timestamp(ms)) => Some(Key::Num(int_key(*ms))),
             // `cmp_value` meets a timestamp and an int as two f64s, exact
@@ -870,13 +881,14 @@ where
         nulls: Vec<(K, DocId)>,
         nans: Vec<(K, DocId)>,
         heap: usize,
-        coll: Option<Collation>,
+        order: TextOrder,
     ) -> Self {
         Ordered {
-            keys: Chunked::from_sorted(keys, coll),
+            keys: Chunked::from_sorted(keys, order.coll),
             nulls: Chunked::from_sorted(nulls, None),
             nans: Chunked::from_sorted(nans, None),
             heap,
+            fold: order.fold,
         }
     }
 
@@ -1016,9 +1028,10 @@ fn num_slot(v: Option<&Value>) -> Slot<u64> {
     }
 }
 
-fn text_slot(v: Option<&Value>) -> Slot<Box<str>> {
-    match v {
-        Some(Value::Text(t)) => Slot::Key(t.as_str().into()),
+fn text_slot(v: Option<&Value>, fold: Option<CaseFold>) -> Slot<Box<str>> {
+    match (v, fold) {
+        (Some(Value::Text(t)), None) => Slot::Key(t.as_str().into()),
+        (Some(Value::Text(t)), Some(f)) => Slot::Key(crate::case::fold(t, f).into()),
         _ => Slot::Null,
     }
 }
@@ -1277,7 +1290,7 @@ mod tests {
             (4, None),
             (5, Some(Value::Int(7))),
         ];
-        let ix = SortedIndex::build(&DataType::Int, None, &mut rows.into_iter());
+        let ix = SortedIndex::build(&DataType::Int, TextOrder::BYTES, &mut rows.into_iter());
         let walk = |desc| {
             let mut out = Vec::new();
             ix.walk(desc, None, |id| {

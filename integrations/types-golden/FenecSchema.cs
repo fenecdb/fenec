@@ -24,7 +24,7 @@ public sealed record Articles(
     /* sparse<30522> @inverted */ [property: JsonPropertyName("splade")] string? Splade,
     /* [text] @hash */ [property: JsonPropertyName("tags")] string[]? Tags,
     /* [int] required */ [property: JsonPropertyName("counts")] long[] Counts,
-    /* text @unique */ [property: JsonPropertyName("slug")] string? Slug);
+    /* text nocase @unique */ [property: JsonPropertyName("slug")] string? Slug);
 
 /// <summary>A row of <c>product_reviews</c>.</summary>
 public sealed record ProductReviews(

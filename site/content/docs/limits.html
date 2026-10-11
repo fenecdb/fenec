@@ -413,6 +413,17 @@ what you might expect.</p>
     declared in the collation has both. In the browser a statement that needs
     a script's weights the module has not been handed is refused until it has
     them (<a href="javascript.html#collation">JavaScript</a>).</li>
+  <li><b><code>nocase</code> folds case, and only case.</b> Unicode's full
+    case folding (Turkish's in <code>collate tr</code>), with no
+    normalisation: <code>é</code> as one code point and as <code>e</code>
+    and a combining accent are two texts, as are <code>résumé</code> and
+    <code>resume</code>, and a full-width letter is not its ASCII one. It is
+    a text field's alone, not a list's or a <code>json</code> field's, and a
+    field is made <code>nocase</code>, or no longer, by being built again, not
+    in place. A scan over one folds each row as far as it is compared — a
+    name by the scan 5.5 → 6.8 ms over 100 000 rows — and an order without a
+    <code>@sorted</code> index folds each row's key once, 8.5 → 16.2 ms
+    (<a href="fenecql.html#nocase">Case-insensitive text</a>).</li>
   <li><code>near</code> and <code>order</code> cannot be used together;
     <code>near</code> determines the ordering by similarity.</li>
   <li>A query vector can be given three ways: a vector, a list, or pgvector's

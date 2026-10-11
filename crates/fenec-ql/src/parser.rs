@@ -2,7 +2,7 @@
 //!
 //! Language summary
 //! ```text
-//! create collection [if not exists] <name> ( <field> <type> [required] [collate und|tr] [@index], ... )
+//! create collection [if not exists] <name> ( <field> <type> [required] [collate und|tr] [nocase] [@index], ... )
 //!        type:  bool int float text bytes timestamp vector<N[, f16]> sparse<N> [type] json
 //!        index: @hash @unique @sorted @ttl(30m) @hnsw(..) @text(..) @inverted (a sparse<N> field's)
 //!        and among the fields: @sorted(<field> [desc], ...) | @unique(<field>, ...)
@@ -587,6 +587,12 @@ impl Parser {
             // does.
             if let Some(c) = self.collate()? {
                 field = field.collated(c);
+                continue;
+            }
+            // `email text nocase`: compared by its case fold wherever it is
+            // compared, as PostgreSQL's `citext` is, and kept as written.
+            if self.eat_kw("nocase") {
+                field = field.nocase();
                 continue;
             }
             if matches!(self.peek(), Tok::At) {

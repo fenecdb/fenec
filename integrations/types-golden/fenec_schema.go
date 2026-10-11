@@ -22,7 +22,7 @@ type Articles struct {
 	Splade    *string         `json:"splade"`    // sparse<30522> @inverted
 	Tags      []string        `json:"tags"`      // [text] @hash
 	Counts    []int64         `json:"counts"`    // [int] required
-	Slug      *string         `json:"slug"`      // text @unique
+	Slug      *string         `json:"slug"`      // text nocase @unique
 }
 
 // ProductReviews is a row of `product_reviews`.

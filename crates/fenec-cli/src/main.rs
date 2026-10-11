@@ -37,6 +37,7 @@ FenecQL summary
 
 Types     bool  int  float  text  bytes  vector<N>  [type]  json
 Paths     meta.source.rank reads into a json field, where a field goes
+Case      email text nocase -- compared by its case fold everywhere, kept as written
 Operators = != < <= > >=   ~ (text contains)   has (list contains)   in [..]
           and  or  not  is null  is not null
 "#;
@@ -401,10 +402,13 @@ fn print_response(r: &Response, took: std::time::Duration) {
                         IndexKind::Inverted => "  @inverted".into(),
                         IndexKind::Geo => "  @geo".into(),
                     };
-                    let ty = match f.collate {
+                    let mut ty = match f.collate {
                         Some(c) => format!("{} collate {}", f.ty.name(), c.name()),
                         None => f.ty.name().to_string(),
                     };
+                    if f.nocase {
+                        ty.push_str(" nocase");
+                    }
                     println!("  {:<14} {:<14}{ix}", f.name, ty);
                 }
                 // The indexes over several fields, as `create collection`

@@ -199,6 +199,24 @@ test('a collated field syncs in its collation, the replica handed the data it ne
   }
 });
 
+test('a nocase field syncs compared by its fold, as the server compares it', opts, async () => {
+  const s = await server();
+  await s.run('create collection users (key text @hash, email text nocase @unique, n int)');
+  await s.run('put users [{key: "1", email: "Straße@X.com", n: 1}, {key: "2", email: "bob@x.com", n: 2}]');
+  const db = await sync({ url: s.url, local: await Fenec.open(wasm), leader: false, shapes: [{ collection: 'users', key: 'key' }] });
+  try {
+    await db.ready();
+    // The replica's `=` and its `@unique` index fold as the server's: a
+    // replica made of a plain text field found nothing here.
+    const row = await db.from('users').where('email', 'STRASSE@x.COM').first();
+    assert.equal(row?.email, 'Straße@X.com', 'kept as written');
+    assert.deepEqual((await db.from('users').select('n').order('email').rows()).map((r) => r.n), [2, 1]);
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
 test('a write on the server lands on the subscriber', opts, async () => {
   const s = await server();
   const db = await open(s.url);

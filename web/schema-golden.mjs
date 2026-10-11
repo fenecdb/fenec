@@ -46,6 +46,7 @@ d('every type', `fenecTable('t', {
 d('a required field', `fenecTable('t', { title: text().notNull(), n: integer().notNull() })`);
 d('a collation', `fenecTable('t', { a: text().collate('tr'), b: text().collate('und').notNull(), c: text().collate('und').array() })`);
 d('a unique column', `fenecTable('t', { email: text().unique().notNull() })`);
+d('a column without case', `fenecTable('t', { email: text().nocase().unique().notNull(), name: text().collate('tr').nocase() })`);
 d('an ordered index', `fenecTable('t', { at: timestamp() }, (t) => [index('t_at').on(t.at)])`);
 d('a btree is ordered', `fenecTable('t', { n: integer() }, (t) => [index('t_n').using('btree', t.n)])`);
 d('a hash index', `fenecTable('t', { n: integer() }, (t) => [index('t_n').using('hash', t.n)])`);
@@ -105,6 +106,8 @@ d('bm25 over a number', `fenecTable('t', { n: integer() }, (t) => [index().using
 d('an inverted index over a vector', `fenecTable('t', { e: vector({ dimensions: 3 }) }, (t) => [index().using('inverted', t.e)])`);
 d('a bad duration', `fenecTable('t', { at: timestamp() }, (t) => [index().on(t.at).ttl('soon')])`);
 d('a collation there is not', `fenecTable('t', { a: text().collate('fr') })`);
+d('a number without case', `fenecTable('t', { n: integer().nocase() })`);
+d('a list without case', `fenecTable('t', { a: text().nocase().array() })`);
 d('a dimension of none', `fenecTable('t', { e: vector({ dimensions: 0 }) })`);
 d('an option hnsw takes not', `fenecTable('t', { e: vector({ dimensions: 3 }) }, (t) => [index().using('hnsw', t.e).with({ prefix: 3 })])`);
 
@@ -133,6 +136,8 @@ x('an expiry of a number', 'create collection t (a int @ttl(1h))');
 x('hnsw over text', 'create collection t (a text @hnsw(cosine))');
 x('a bad duration', 'create collection t (a timestamp @ttl(soon))');
 x('a collation there is not', 'create collection t (a text collate fr)');
+x('fields without case', 'create collection u (email text nocase @unique, name text collate tr nocase @sorted, org text nocase, @unique(org, name))');
+x('a number without case', 'create collection t (n int nocase)');
 x('a write in a schema', 'create collection t (a int)\nput t {a: 1}');
 x('a path into a number', 'create collection t (a int)\ncreate index on t (a.b) @hash');
 x('indexes over several fields', 'create collection t (a int, b text, m json, @sorted(a, b desc))\ncreate index on t (b, m.k) @unique');
@@ -165,6 +170,11 @@ p('a field made required', ['create collection todos (title text, done bool @has
 p('a field no longer required', [TODOS], `{ todos: fenecTable('todos', { title: text(), done: boolean() }, (t) => [index().using('hash', t.done)]) }`);
 p('a required field added', [TODOS], `{ todos: fenecTable('todos', { title: text().notNull(), done: boolean(), due: timestamp().notNull() }, (t) => [index().using('hash', t.done)]) }`);
 p('a collation changed', [TODOS], `{ todos: fenecTable('todos', { title: text().notNull().collate('tr'), done: boolean() }, (t) => [index().using('hash', t.done)]) }`);
+const USERS = 'create collection users (email text @unique)';
+const users = `{ users: fenecTable('users', { email: text().nocase().unique() }) }`;
+p('a field made nocase', [USERS], users);
+p('a field made nocase, rebuilt', [USERS, 'put users [{email: "ada@x.com"}, {email: "Bob@x.com"}]'], users, ["rebuild('users', 'email')"]);
+p('a field made nocase over two spellings of a value', [USERS, 'put users [{email: "ada@x.com"}, {email: "ADA@x.com"}]'], users, ["rebuild('users', 'email')"]);
 p('an index taken off', [TODOS], `{ todos: fenecTable('todos', { title: text().notNull(), done: boolean() }) }`);
 p('an index changed', [TODOS], `{ todos: fenecTable('todos', { title: text().notNull(), done: boolean().unique() }) }`);
 p('an index changed, rebuilt', [TODOS, 'put todos [{title: "a", done: true}, {title: "b", done: false}]'], `{ todos: fenecTable('todos', { title: text().notNull(), done: boolean().unique() }) }`, [

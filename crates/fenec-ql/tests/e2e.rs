@@ -1229,6 +1229,47 @@ fn collate_in_an_order_key() {
     }
 }
 
+/// `nocase` is a text field's, among its other words in any order, and
+/// refused on any other type when the collection is made.
+#[test]
+fn nocase_in_a_field_declaration() {
+    let fields = |sql: &str| match fenec_ql::parse_one(sql).unwrap() {
+        Statement::CreateCollection { schema, .. } => schema.fields,
+        other => panic!("{other:?}"),
+    };
+    for sql in [
+        "create collection u (email text nocase required collate tr @unique)",
+        "create collection u (email text required collate tr nocase @unique)",
+        "create collection u (email text NOCASE collate tr required @unique)",
+    ] {
+        let f = &fields(sql)[0];
+        assert!(
+            f.nocase && f.required && f.collate == Some(Collation::Turkish),
+            "{sql}"
+        );
+        assert_eq!(f.index, IndexKind::UNIQUE, "{sql}");
+    }
+    assert!(!fields("create collection u (email text @unique)")[0].nocase);
+    // A field may be called `nocase`, as any word.
+    assert_eq!(
+        fields("create collection u (nocase text nocase)")[0].name,
+        "nocase"
+    );
+    for bad in [
+        "create collection u (n int nocase)",
+        "create collection u (tags [text] nocase)",
+        "create collection u (m json nocase)",
+    ] {
+        let e = fenec_ql::parse(bad).unwrap_err().to_string();
+        assert!(e.contains("case fold"), "`{bad}` -> {e}");
+    }
+    let mut db = Database::new();
+    run(&mut db, "create collection u (email text nocase @unique)");
+    run(&mut db, r#"put u {email: "Ada@X.com"}"#);
+    let n = run(&mut db, r#"get u where email = "ADA@x.COM" count"#);
+    assert_eq!(n.rows().unwrap().rows[0].values[0], Value::Int(1));
+}
+
 /// `order id` must work: `id` is not a schema field but is sortable. It
 /// errored because the field lookup happened before the `id` check.
 #[test]

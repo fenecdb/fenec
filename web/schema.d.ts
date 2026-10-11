@@ -65,6 +65,12 @@ export type Col<T, NN extends boolean, K extends Kind> = Column<T, NN, K> &
     ? {
         /** `collate tr` or `collate und`: the order its text compares in. */
         collate(collation: Collation): Col<T, NN, K>;
+        /**
+         * `nocase`: compared by its case fold wherever it is compared --
+         * `=`, its indexes, `order`, `group` -- and kept as written:
+         * `Alice@x.com` and `alice@X.COM` are one `@unique` value.
+         */
+        nocase(): Col<T, NN, K>;
         array(): Col<T[], NN, 'array'>;
       }
     : K extends 'json'

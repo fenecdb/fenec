@@ -104,6 +104,280 @@ pub fn upper(s: &str) -> String {
     out
 }
 
+/// The case fold a `nocase` field's text is compared by (`email text
+/// nocase`): what its `=`, its indexes, its order and its groups see in
+/// place of the text, which it keeps as written.
+///
+/// Unicode's full case folding, CaseFolding.txt's C and F mappings, which
+/// Python's `str.casefold()` is too: `ß`, `ẞ` and `SS` fold to `ss`, `ς` to
+/// `σ`, `ﬁ` to `fi`, `İ` to `i` and a combining dot above. Full rather than
+/// simple (C and S, one code point to one): simple folding keeps `ß` apart
+/// from `ss`, which ICU's case-insensitive comparison and every German
+/// reader find equal, and it would be a table of its own -- where the full
+/// fold is the standard library's own lowercase and uppercase mappings,
+/// composed (`fold_char`), already in the browser module for `lower`,
+/// `upper` and the tokenizer. Nothing is normalised: `é` written as one code
+/// point and as `e` and a combining accent stay two texts, as they do
+/// everywhere else in fenecdb, and a full-width `Ａ` folds to `ａ`, not `a`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseFold {
+    /// Unicode's, for every language.
+    Unicode,
+    /// Turkish's, a `collate tr` field's: CaseFolding.txt's T mappings over
+    /// Unicode's, `I` folding to `ı` and `İ` to `i`, so `ISTANBUL` is
+    /// `ıstanbul` and `İSTANBUL` is `istanbul`, as a Turkish reader writes
+    /// them -- Unicode's own makes `ISTANBUL` `istanbul` and leaves `ı`
+    /// alone.
+    Turkish,
+}
+
+/// The code points past ASCII whose fold is not their lowercase, as runs,
+/// first and last: `µ`, `ß`, `ŉ`, `ſ`, `ǰ`, the combining iota, Greek's
+/// final sigma, its symbol letters and its letters with a subscript iota,
+/// `և`, Cyrillic's old letter forms, `ẖ`..`ẛ`, `ẞ`, Cherokee, the Latin
+/// and Armenian ligatures. Every other folds by one lookup of its
+/// lowercase, where the three of [`fold_char`]'s composition, for every
+/// character, took a scan for one name over 100 000 rows, a third of them
+/// past ASCII, to 8.3 ms against 6.7, an order by it to 20.1 against 16.2
+/// (`make nocase-bench`). `the_unlike_runs_are_the_standard_library_s`
+/// derives them from the standard library's mappings, and prints them
+/// again after a toolchain moves to a new Unicode.
+const UNLIKE_LOWER: [(u16, u16); 41] = [
+    (0xb5, 0xb5),
+    (0xdf, 0xdf),
+    (0x149, 0x149),
+    (0x17f, 0x17f),
+    (0x1f0, 0x1f0),
+    (0x345, 0x345),
+    (0x390, 0x390),
+    (0x3b0, 0x3b0),
+    (0x3c2, 0x3c2),
+    (0x3d0, 0x3d1),
+    (0x3d5, 0x3d6),
+    (0x3f0, 0x3f1),
+    (0x3f5, 0x3f5),
+    (0x587, 0x587),
+    (0x13a0, 0x13f5),
+    (0x13f8, 0x13fd),
+    (0x1c80, 0x1c88),
+    (0x1e96, 0x1e9b),
+    (0x1e9e, 0x1e9e),
+    (0x1f50, 0x1f50),
+    (0x1f52, 0x1f52),
+    (0x1f54, 0x1f54),
+    (0x1f56, 0x1f56),
+    (0x1f80, 0x1faf),
+    (0x1fb2, 0x1fb4),
+    (0x1fb6, 0x1fb7),
+    (0x1fbc, 0x1fbc),
+    (0x1fbe, 0x1fbe),
+    (0x1fc2, 0x1fc4),
+    (0x1fc6, 0x1fc7),
+    (0x1fcc, 0x1fcc),
+    (0x1fd2, 0x1fd3),
+    (0x1fd6, 0x1fd7),
+    (0x1fe2, 0x1fe4),
+    (0x1fe6, 0x1fe7),
+    (0x1ff2, 0x1ff4),
+    (0x1ff6, 0x1ff7),
+    (0x1ffc, 0x1ffc),
+    (0xab70, 0xabbf),
+    (0xfb00, 0xfb06),
+    (0xfb13, 0xfb17),
+];
+
+/// Whether `c`'s fold is not its lowercase ([`UNLIKE_LOWER`]).
+fn unlike_lower(c: char) -> bool {
+    let c = c as u32;
+    (0xb5..=0xfb17).contains(&c) && {
+        let i = UNLIKE_LOWER.partition_point(|r| (r.1 as u32) < c);
+        UNLIKE_LOWER.get(i).is_some_and(|r| c >= r.0 as u32)
+    }
+}
+
+/// `c`'s fold: one to three characters, in the array's front.
+///
+/// Mostly its lowercase ([`UNLIKE_LOWER`]). Where it is not, the standard
+/// library's lowercase, then uppercase, then lowercase again: a capital's
+/// lowercase is mostly its fold already, the uppercase finds the characters
+/// lowercase leaves alone that fold to another (`ς`, `ſ`, `ß` through
+/// `SS`, `ﬁ` through `FI`), and the first lowercase is what takes `ẞ` to
+/// `ß` before the uppercase takes it to `SS`. Two places differ from
+/// CaseFolding.txt, and are written down: the dotless `ı`, which no mapping
+/// folds but whose uppercase is `I`, and Cherokee, whose capitals were
+/// encoded first and are what its letters fold to. Held to
+/// `str.casefold()` at every code point (`tests/nocase.rs`).
+#[inline]
+fn fold_char(c: char, f: CaseFold) -> ([char; 3], usize) {
+    let one = |c| ([c, '\0', '\0'], 1);
+    if c.is_ascii() {
+        return match (c, f) {
+            ('I', CaseFold::Turkish) => one('ı'),
+            _ => one(c.to_ascii_lowercase()),
+        };
+    }
+    match (c, f) {
+        ('ı', _) => return one('ı'),
+        ('İ', CaseFold::Turkish) => return one('i'),
+        _ => {}
+    }
+    let (mut out, mut n) = (['\0'; 3], 0);
+    if !unlike_lower(c) {
+        for x in c.to_lowercase() {
+            if n < 3 {
+                out[n] = x;
+                n += 1;
+            }
+        }
+        return (out, n);
+    }
+    for l in c.to_lowercase() {
+        for u in l.to_uppercase() {
+            for x in u.to_lowercase() {
+                let x = match x as u32 {
+                    // Cherokee's small letters fold to its capitals.
+                    0xAB70..=0xABBF => char::from_u32(x as u32 - 0xAB70 + 0x13A0).unwrap_or(x),
+                    0x13F8..=0x13FD => char::from_u32(x as u32 - 8).unwrap_or(x),
+                    _ => x,
+                };
+                // Three at most at every code point, as CaseFolding.txt's
+                // longest; the test holds every code point to it.
+                if n < 3 {
+                    out[n] = x;
+                    n += 1;
+                }
+            }
+        }
+    }
+    (out, n)
+}
+
+/// `s`'s fold: `s` itself when it is ASCII with no capital, the commonest
+/// key of all -- an email, a handle, a code -- in either fold.
+pub fn fold(s: &str, f: CaseFold) -> std::borrow::Cow<'_, str> {
+    if s.is_ascii() && !s.bytes().any(|b| b.is_ascii_uppercase()) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    fold_into(s, f, &mut out);
+    std::borrow::Cow::Owned(out)
+}
+
+/// `s`'s fold, appended to `out`.
+pub fn fold_into(s: &str, f: CaseFold, out: &mut String) {
+    let mut rest = s;
+    while !rest.is_empty() {
+        // The ASCII up to the next character that is not, lowercased as a
+        // run -- `I` with the rest in Turkish.
+        let n = ascii_run(rest.as_bytes(), f);
+        let (run, after) = rest.split_at_checked(n).unwrap_or((rest, ""));
+        out.push_str(run);
+        let at = out.len() - run.len();
+        if let Some(t) = out.get_mut(at..) {
+            t.make_ascii_lowercase();
+        }
+        let mut chars = after.chars();
+        if let Some(c) = chars.next() {
+            let (cs, n) = fold_char(c, f);
+            out.extend(&cs[..n]);
+        }
+        rest = chars.as_str();
+    }
+}
+
+/// How many bytes of `b` from its start are ASCII the fold lowercases as
+/// ASCII: all of it but a Turkish `I`.
+#[inline]
+fn ascii_run(b: &[u8], f: CaseFold) -> usize {
+    b.iter()
+        .position(|&x| x >= 0x80 || (x == b'I' && f == CaseFold::Turkish))
+        .unwrap_or(b.len())
+}
+
+/// The characters of a text's fold, one at a time, so two texts are
+/// compared by their folds with neither written out.
+struct Folds<'a> {
+    chars: std::str::Chars<'a>,
+    f: CaseFold,
+    held: [char; 3],
+    at: usize,
+    len: usize,
+}
+
+impl<'a> Folds<'a> {
+    fn new(s: &'a str, f: CaseFold) -> Folds<'a> {
+        Folds {
+            chars: s.chars(),
+            f,
+            held: ['\0'; 3],
+            at: 0,
+            len: 0,
+        }
+    }
+}
+
+impl Iterator for Folds<'_> {
+    type Item = char;
+    #[inline]
+    fn next(&mut self) -> Option<char> {
+        if self.at == self.len {
+            (self.held, self.len) = fold_char(self.chars.next()?, self.f);
+            self.at = 0;
+        }
+        self.at += 1;
+        Some(self.held[self.at - 1])
+    }
+}
+
+/// `a`'s fold against `folded`, a text that is a fold already -- a filter's
+/// value, folded where it was bound -- as their bytes compare, `a` folded
+/// only as far as the two agree: a scan's row is mostly told apart at its
+/// first character. An ASCII `a` is lowercased byte by byte as it is read,
+/// against `folded`'s bytes, which order as its code points do.
+pub fn cmp_to_folded(a: &str, folded: &str, f: CaseFold) -> std::cmp::Ordering {
+    let (x, y) = (a.as_bytes(), folded.as_bytes());
+    let mut i = 0;
+    // The ASCII `a` starts with, lowercased byte by byte against `folded`'s
+    // bytes, which order as their code points do: an ASCII byte against
+    // the first of another character's is below it, as the character is.
+    while i < x.len() && i < y.len() && x[i] < 0x80 && (x[i] != b'I' || f == CaseFold::Unicode) {
+        let o = x[i].to_ascii_lowercase().cmp(&y[i]);
+        if o != std::cmp::Ordering::Equal {
+            return o;
+        }
+        i += 1;
+    }
+    // From the first character that is not, where both are at a
+    // character's start: every byte before it was ASCII on both sides.
+    let (a, folded) = (a.get(i..).unwrap_or(""), folded.get(i..).unwrap_or(""));
+    Folds::new(a, f).cmp(folded.chars())
+}
+
+/// `a`'s fold against `b`'s, as their bytes compare -- code point by code
+/// point, which UTF-8 keeps -- with neither written out: the ASCII both
+/// start with compared byte by byte, lowercased as it is read.
+pub fn cmp_folded(a: &str, b: &str, f: CaseFold) -> std::cmp::Ordering {
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    let plain = |c: u8| c < 0x80 && (c != b'I' || f == CaseFold::Unicode);
+    let mut i = 0;
+    while i < x.len() && i < y.len() && plain(x[i]) && plain(y[i]) {
+        let o = x[i].to_ascii_lowercase().cmp(&y[i].to_ascii_lowercase());
+        if o != std::cmp::Ordering::Equal {
+            return o;
+        }
+        i += 1;
+    }
+    let (a, b) = (a.get(i..).unwrap_or(""), b.get(i..).unwrap_or(""));
+    Folds::new(a, f).cmp(Folds::new(b, f))
+}
+
+/// Whether `a` and `b` fold to one text: [`cmp_folded`]'s answer, whose
+/// ASCII path is `eq_ignore_ascii_case`'s -- a walk of its own was 254
+/// bytes of the browser module.
+pub fn eq_folded(a: &str, b: &str, f: CaseFold) -> bool {
+    cmp_folded(a, b, f) == std::cmp::Ordering::Equal
+}
+
 /// Whether the first character not case-ignorable is cased.
 fn cased_first(mut chars: impl Iterator<Item = char>) -> bool {
     chars.find(|&c| !case_ignorable(c)).is_some_and(cased)
@@ -208,6 +482,39 @@ mod tests {
             table == CASE_IGNORABLE,
             "CASE_IGNORABLE is now ({} bytes): {table:?}",
             table.len()
+        );
+    }
+
+    #[test]
+    fn the_unlike_runs_are_the_standard_library_s() {
+        // The code points whose lowercase, uppercase and lowercase again
+        // are not their lowercase: `ı` aside, and Cherokee's capitals,
+        // whose composition is their lowercase and their fold not.
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        for c in (0x80..0x11_0000).filter_map(char::from_u32) {
+            let lower: String = c.to_lowercase().collect();
+            let composed: String = c
+                .to_lowercase()
+                .flat_map(char::to_uppercase)
+                .flat_map(char::to_lowercase)
+                .collect();
+            let cherokee = matches!(c as u32, 0x13A0..=0x13F5 | 0x13F8..=0x13FD | 0xAB70..=0xABBF);
+            if (composed == lower && !cherokee) || c == 'ı' {
+                continue;
+            }
+            match runs.last_mut() {
+                Some(r) if r.1 + 1 == c as u32 => r.1 = c as u32,
+                _ => runs.push((c as u32, c as u32)),
+            }
+        }
+        let table: Vec<(u32, u32)> = UNLIKE_LOWER
+            .iter()
+            .map(|r| (r.0 as u32, r.1 as u32))
+            .collect();
+        assert!(
+            table == runs,
+            "UNLIKE_LOWER is now ({} runs): {runs:x?}",
+            runs.len()
         );
     }
 

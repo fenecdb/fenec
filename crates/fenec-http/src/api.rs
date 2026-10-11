@@ -1310,6 +1310,10 @@ fn schemas_json(list: &[Schema]) -> String {
                 out.push_str(",\"collate\":");
                 json::escape_into(&mut out, c.name());
             }
+            // A replica made from this compares as the server does.
+            if f.nocase {
+                out.push_str(",\"nocase\":true");
+            }
             out.push('}');
         }
         out.push(']');

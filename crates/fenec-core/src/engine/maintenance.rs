@@ -70,9 +70,9 @@ struct IndexCopy {
     pos: usize,
     kind: IndexKind,
     ty: DataType,
-    /// The field's collation, which a `@sorted` index orders its text in.
-    #[cfg_attr(not(feature = "sorted"), allow(dead_code))]
-    collate: Option<Collation>,
+    /// How the field's text compares: the collation a `@sorted` index
+    /// orders its text in, and the fold a `nocase` field's keys are.
+    order: TextOrder,
     values: Vec<(DocId, Option<Value>)>,
 }
 
@@ -391,7 +391,7 @@ impl Database {
             pos,
             kind: kind.resolved(),
             ty: c.schema.fields[pos].ty.clone(),
-            collate: c.schema.fields[pos].collate,
+            order: c.schema.fields[pos].text_order(),
             values,
         }))
     }
@@ -440,15 +440,20 @@ impl Database {
             Built::Hash(mut ix) => {
                 for id in ids {
                     if let Some(v) = old(id) {
-                        ix.remove(&hash_key(v), id);
+                        ix.remove(&ix.key(v), id);
                     }
                     if let Some(v) = c.store.read_field(id, pos)? {
-                        ix.add(hash_key(&v), id);
+                        ix.add(ix.key(&v), id);
                     }
                 }
                 // Asked of the index as it stands once the writes made
-                // meanwhile are in: one of them may be the second holder.
+                // meanwhile are in: one of them may be the second holder,
+                // named as it wrote the value -- a `nocase` key is a fold.
                 if let (true, Some((v, a, b))) = (copy.kind.is_unique(), ix.shared()) {
+                    let v = match copy.order.fold {
+                        Some(_) => c.store.read_field(a, pos)?.unwrap_or(v),
+                        None => v,
+                    };
                     return Err(Error::Duplicate(format!(
                         "`{}.{}` cannot be unique: documents {a} and {b} both hold {}",
                         copy.collection,
@@ -744,7 +749,7 @@ impl Database {
                     pos,
                     kind: c.schema.fields[pos].index.clone(),
                     ty: c.schema.fields[pos].ty.clone(),
-                    collate: None,
+                    order: TextOrder::BYTES,
                     values,
                 });
             }
@@ -1154,10 +1159,10 @@ impl IndexCopy {
                 Built::Vector(ix)
             }
             IndexKind::Hash { .. } => {
-                let mut ix = HashIndex::default();
+                let mut ix = HashIndex::folding(self.order.fold);
                 for (id, v) in &self.values {
                     if let Some(v) = v {
-                        ix.add(hash_key(v), *id);
+                        ix.add(ix.key(v), *id);
                     }
                 }
                 Built::Hash(ix)
@@ -1177,7 +1182,7 @@ impl IndexCopy {
             #[cfg(feature = "sorted")]
             IndexKind::Sorted { .. } => Built::Sorted(SortedIndex::build(
                 &self.ty,
-                self.collate,
+                self.order,
                 &mut self.values.iter().map(|(id, v)| (*id, v.clone())),
             )),
             IndexKind::Inverted => {

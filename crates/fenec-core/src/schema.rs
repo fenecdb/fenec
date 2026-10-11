@@ -1,5 +1,6 @@
+use crate::case::CaseFold;
 use crate::codec::*;
-use crate::collate::Collation;
+use crate::collate::{Collation, TextOrder};
 use crate::error::{Error, Result};
 use crate::value::{DataType, MAX_PATH_KEYS};
 
@@ -422,6 +423,10 @@ pub struct Field {
     /// than the order of its bytes. Equality stays the bytes', since the
     /// collation tells every two different strings apart.
     pub collate: Option<Collation>,
+    /// `nocase`: its text compares by its case fold wherever it compares
+    /// -- `=` and `in`, every index's keys, `order`, `group`, `facet` --
+    /// and is kept as written. A text field's alone ([`Schema::new`]).
+    pub nocase: bool,
 }
 
 impl Field {
@@ -432,6 +437,7 @@ impl Field {
             index: IndexKind::None,
             required: false,
             collate: None,
+            nocase: false,
         }
     }
     pub fn indexed(mut self, kind: IndexKind) -> Field {
@@ -445,6 +451,28 @@ impl Field {
     pub fn collated(mut self, c: Collation) -> Field {
         self.collate = Some(c);
         self
+    }
+    /// `nocase`.
+    pub fn nocase(mut self) -> Field {
+        self.nocase = true;
+        self
+    }
+
+    /// The fold its text compares by: Turkish's in `collate tr`,
+    /// Unicode's otherwise; `None` for a field that is not `nocase`.
+    pub fn case_fold(&self) -> Option<CaseFold> {
+        self.nocase.then_some(match self.collate {
+            Some(Collation::Turkish) => CaseFold::Turkish,
+            _ => CaseFold::Unicode,
+        })
+    }
+
+    /// How its text compares wherever it compares.
+    pub fn text_order(&self) -> TextOrder {
+        TextOrder {
+            coll: self.collate,
+            fold: self.case_fold(),
+        }
     }
 }
 
@@ -641,6 +669,17 @@ impl Schema {
                 return Err(Error::Query(format!(
                     "`collate {}` orders text; `{}` is {}",
                     c.name(),
+                    f.name,
+                    f.ty.name()
+                )));
+            }
+            // A text's alone: a list's elements are met by `has`, each
+            // index's per element and a facet's a value at a time, places
+            // a fold would have to reach one by one for no key anyone asked
+            // for -- `email`, `handle`, `slug` are one text each.
+            if f.nocase && f.ty != DataType::Text {
+                return Err(Error::Query(format!(
+                    "`nocase` compares a text by its case fold; `{}` is {}",
                     f.name,
                     f.ty.name()
                 )));
@@ -894,6 +933,9 @@ impl Schema {
                 out.push(TAG_COLLATED);
                 out.push(c.code());
             }
+            if f.nocase {
+                out.push(TAG_NOCASE);
+            }
             encode_type(&mut out, &f.ty);
             out.push(f.required as u8);
             encode_index(&mut out, &f.index);
@@ -982,6 +1024,8 @@ impl Schema {
                 }
                 _ => None,
             };
+            let nocase = buf.get(*pos) == Some(&TAG_NOCASE);
+            *pos += nocase as usize;
             let ty = decode_type(buf, pos)?;
             let required = *buf
                 .get(*pos)
@@ -1004,6 +1048,7 @@ impl Schema {
                 index,
                 required,
                 collate,
+                nocase,
             });
         }
         Ok(Schema {

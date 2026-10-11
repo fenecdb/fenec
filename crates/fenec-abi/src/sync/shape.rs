@@ -206,6 +206,10 @@ pub fn schema_ddl(schema: &Value) -> Result<String> {
             if let Some(Value::Text(c)) = member(f, "collate") {
                 text.push_str(&format!(" collate {c}"));
             }
+            // The replica's `=` and its indexes compare as the server's.
+            if let Some(Value::Bool(true)) = member(f, "nocase") {
+                text.push_str(" nocase");
+            }
             if let Some(Value::Bool(true)) = member(f, "required") {
                 text.push_str(" required");
             }
@@ -271,13 +275,13 @@ mod tests {
     #[test]
     fn a_server_schema_is_made_as_it_is() {
         let s = json::parse_json(
-            r#"{"name":"t","fields":[{"name":"k","type":"text","index":"unique","required":true},{"name":"n","type":"text","index":null,"required":false,"collate":"tr"},{"name":"e","type":"vector<2>","index":"hnsw(cosine, m=16, ef_search=100)","required":false}]}"#,
+            r#"{"name":"t","fields":[{"name":"k","type":"text","index":"unique","required":true,"nocase":true},{"name":"n","type":"text","index":null,"required":false,"collate":"tr"},{"name":"e","type":"vector<2>","index":"hnsw(cosine, m=16, ef_search=100)","required":false}]}"#,
         )
         .unwrap();
         let ddl = schema_ddl(&s).unwrap();
         assert_eq!(
             ddl,
-            "create collection if not exists t (k text required @hash, n text collate tr, e vector<2> @hnsw(cosine, m=16, ef_search=100))"
+            "create collection if not exists t (k text nocase required @hash, n text collate tr, e vector<2> @hnsw(cosine, m=16, ef_search=100))"
         );
         fenec_ql::parse(&ddl).unwrap();
         // An index over several fields, a unique one ordered.

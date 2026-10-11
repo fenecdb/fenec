@@ -1359,8 +1359,10 @@ impl Scope {
 }
 
 /// A document being written, read as the filter reads a stored one: a
-/// field in a collation compares in it here too, or a token could write a
-/// row it would not be shown.
+/// field in a collation compares in it here too, and a `nocase` one by its
+/// fold, or a token could write a row it would not be shown -- `owner =
+/// $jwt.email` holding `Alice@x.com` reads a row of `alice@x.com`, and so
+/// writes one.
 struct Written<'a>(&'a Document, &'a Schema);
 
 impl RowAccess for Written<'_> {
@@ -1373,8 +1375,10 @@ impl RowAccess for Written<'_> {
         }
         Ok(self.0.get(name).cloned().unwrap_or(Value::Null))
     }
-    fn collation(&self, name: &str) -> Option<Collation> {
-        self.1.field(name).and_then(|f| f.collate)
+    fn text_order(&self, name: &str) -> fenec_core::collate::TextOrder {
+        self.1
+            .field(name)
+            .map_or(fenec_core::collate::TextOrder::BYTES, |f| f.text_order())
     }
 }
 

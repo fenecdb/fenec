@@ -31,7 +31,7 @@ class Articles {
   final List<String>? tags;
   /// [int] required
   final List<int> counts;
-  /// text @unique
+  /// text nocase @unique
   final String? slug;
 
   const Articles({required this.id, required this.title, this.year, this.score, required this.draft, this.published, this.cover, this.meta, this.loc, this.embed, this.small, this.splade, this.tags, required this.counts, this.slug});

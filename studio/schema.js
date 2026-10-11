@@ -107,7 +107,7 @@ export function mount(host, ctx) {
         'tr',
         { dataset: { field: f.name } },
         h('td', { class: 'mono' }, f.name),
-        h('td', { class: 'mono muted' }, f.type, f.collate ? ` collate ${f.collate}` : '', f.required ? ' required' : ''),
+        h('td', { class: 'mono muted' }, f.type, f.collate ? ` collate ${f.collate}` : '', f.nocase ? ' nocase' : '', f.required ? ' required' : ''),
         h('td', { class: 'mono sun' }, idx ?? '', paths.length ? h('span', { class: 'sc-paths' }, paths.join(', ')) : null),
         h(
           'td',
@@ -221,7 +221,10 @@ export function mount(host, ctx) {
         if (v.kind && !kinds.includes(v.kind)) v.kind = '';
         rows.push(box('sc-kind', 'Index', (v.kindEl = select('sc-kind', [['', 'none'], ...kinds.map((k) => [k, `@${k}`])], v.kind ?? ''))));
         rows.push(...options(v.kind));
-        if ((v.type ?? 'text').trim() === 'text') rows.push(box('sc-collate', 'Collation', (v.collateEl = select('sc-collate', [['', 'bytes'], ['und', 'und, ICU’s root'], ['tr', 'tr, Turkish']], v.collate ?? ''))));
+        if ((v.type ?? 'text').trim() === 'text') {
+          rows.push(box('sc-collate', 'Collation', (v.collateEl = select('sc-collate', [['', 'bytes'], ['und', 'und, ICU’s root'], ['tr', 'tr, Turkish']], v.collate ?? ''))));
+          rows.push(box('sc-nocase', 'Case', h('label', { class: 'sc-check' }, (v.nocaseEl = h('input', { id: 'sc-nocase', type: 'checkbox', checked: !!v.nocase })), ' compared by its case fold (nocase)')));
+        }
       } else if (op === 'rename') {
         v.field ??= field ?? c.fields[0]?.name;
         rows.push(box('sc-field', 'Field', (v.fieldEl = select('sc-field', fieldsWith(() => true), v.field))));
@@ -258,6 +261,7 @@ export function mount(host, ctx) {
         if (el && el.isConnected) v[k] = el.value;
       }
       if (v.charsEl?.isConnected) v.chars = v.charsEl.checked;
+      if (v.nocaseEl?.isConnected) v.nocase = v.nocaseEl.checked;
     };
     const spec = () => (v.kind ? { kind: v.kind, ttl: v.ttl, prefix: v.prefix, chars: v.chars, metric: v.metric, quant: v.quant } : null);
     /** The statement, and the change the plan is asked of. */
@@ -268,8 +272,8 @@ export function mount(host, ctx) {
           return [S.createIndex(c.name, v.field, spec()), { op, collection: c.name, field: v.field, index: spec() }];
         case 'add':
           return [
-            S.addField(c.name, v.name ?? '', v.type ?? '', { index: spec(), collate: v.collate || null }),
-            { op, collection: c.name, field: v.name, type: v.type, index: spec(), collate: v.collate || null },
+            S.addField(c.name, v.name ?? '', v.type ?? '', { index: spec(), collate: v.collate || null, nocase: !!v.nocase }),
+            { op, collection: c.name, field: v.name, type: v.type, index: spec(), collate: v.collate || null, nocase: !!v.nocase },
           ];
         case 'composite': {
           const keys = S.compositeKeys(v.keys ?? '');

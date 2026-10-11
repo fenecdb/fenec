@@ -110,7 +110,7 @@ export class Sidebar {
               'li',
               { role: 'treeitem', tabindex: had === `f:${c.name}.${f.name}` ? '0' : '-1', class: 'field', dataset: { key: `f:${c.name}.${f.name}`, name: c.name } },
               h('span', { class: 'field-name' }, f.name),
-              h('span', { class: 'field-type' }, f.type, f.collate ? ` collate ${f.collate}` : '', f.required ? ' required' : ''),
+              h('span', { class: 'field-type' }, f.type, f.collate ? ` collate ${f.collate}` : '', f.nocase ? ' nocase' : '', f.required ? ' required' : ''),
               f.index ? h('span', { class: 'field-index' }, indexLabel(f.index)) : null,
             ),
           ),

@@ -17,7 +17,8 @@
     clippy::ptr_arg
 )]
 
-use crate::collate::Collation;
+use crate::case::CaseFold;
+use crate::collate::TextOrder;
 use crate::error::Result;
 use crate::schema::{TextIndexSpec, VectorIndexSpec};
 use crate::sorted::{Key, Range};
@@ -299,12 +300,12 @@ impl SortedIndex {
     pub fn supports(ty: &DataType) -> bool {
         crate::sorted::orderable(ty)
     }
-    pub fn new(ty: &DataType, coll: Option<Collation>) -> SortedIndex {
+    pub fn new(ty: &DataType, order: TextOrder) -> SortedIndex {
         absent("sorted")
     }
     pub fn build(
         ty: &DataType,
-        coll: Option<Collation>,
+        order: TextOrder,
         rows: &mut dyn Iterator<Item = (DocId, Option<Value>)>,
     ) -> Self {
         absent("sorted")
@@ -324,7 +325,7 @@ impl SortedIndex {
     pub fn memory_bytes(&self) -> usize {
         match *self {}
     }
-    pub fn bound(ty: &DataType, v: &Value) -> Option<Key> {
+    pub fn bound(ty: &DataType, fold: Option<CaseFold>, v: &Value) -> Option<Key> {
         None
     }
     pub fn range_ids(&self, r: &Range, cap: usize) -> Option<Vec<DocId>> {
