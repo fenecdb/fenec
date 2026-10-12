@@ -335,7 +335,7 @@ def read_page(path):
                 k, v = line.split(":", 1)
                 meta[k.strip()] = v.strip()
         raw = raw[m.end():]
-    return meta, raw
+    return meta, ycsb_redis(raw)
 
 
 def nav_html(active, base):
@@ -559,16 +559,23 @@ YCSB_RESULTS = os.path.join(REPO, "crates", "fenec-bench", "ycsb", "results.tsv"
 YCSB_SUPERSEDED = os.path.join(REPO, "crates", "fenec-bench", "ycsb", "superseded.tsv")
 
 
-def ycsb_facts():
-    """Each YCSB cell's median ops/s, as `ycsb report` takes it: the upper
-    of the two middle runs when there are an even number."""
+YCSB_WORKLOADS = ("A", "B", "C", "D", "E", "F")
+YCSB_OPS = ("READ", "UPDATE", "INSERT", "SCAN", "RMW")
+
+
+def ycsb_cells():
+    """Each line `ycsb` wrote -- a cell, a load, a size, a memory -- as the
+    median of its runs, by `(system, mode, workload, threads)`: `ops_s`,
+    `ops` (where a size or a memory line keeps its bytes) and each
+    operation's `<OP>_p50` and `<OP>_p99`, each column's median on its own
+    as `ycsb report` takes them, the upper of the two middle runs when there
+    are an even number. A run's cell measured again (a run cut short,
+    completed later under its own id) counts once, as its last line."""
     if not os.path.exists(YCSB_RESULTS):
         return {}
     lines = open(YCSB_RESULTS, encoding="utf-8").read().splitlines()
     head = lines[0].split("\t")
     col = {name: i for i, name in enumerate(head)}
-    # A run's cell measured again (a run cut short, completed later under
-    # its own id) counts once, as its last line, as `ycsb report` takes it.
     superseded = set()
     if os.path.exists(YCSB_SUPERSEDED):
         for line in open(YCSB_SUPERSEDED, encoding="utf-8").read().splitlines()[1:]:
@@ -577,16 +584,206 @@ def ycsb_facts():
     latest = {}
     for line in lines[1:]:
         f = line.split("\t")
-        if f[col["workload"]] not in ("A", "B", "C", "D", "E", "F"):
-            continue
         if (f[col["run"]], f[col["system"]]) in superseded:
             continue
-        key = "ycsb:" + ":".join(f[col[c]] for c in ("system", "mode", "workload", "threads"))
-        latest[(key, f[col["run"]])] = float(f[col["ops_s"]])
+        key = tuple(f[col[c]] for c in ("system", "mode", "workload", "threads"))
+        latest[(key, f[col["run"]])] = f
     runs = {}
-    for (key, _), ops in latest.items():
-        runs.setdefault(key, []).append(ops)
-    return {k: sorted(v)[len(v) // 2] for k, v in runs.items()}
+    for (key, _), f in latest.items():
+        runs.setdefault(key, []).append(f)
+    names = ["ops_s", "ops"] + [f"{op}_{q}" for op in YCSB_OPS for q in ("p50", "p99")]
+    out = {}
+    for key, fs in runs.items():
+        cell = {}
+        for name in names:
+            vals = []
+            for f in fs:
+                try:
+                    vals.append(float(f[col[name]]))
+                except (IndexError, ValueError):
+                    pass  # a size line stops at the probe's column
+            if vals:
+                cell[name] = sorted(vals)[len(vals) // 2]
+        out[key] = cell
+    return out
+
+
+def ycsb_facts():
+    """Each YCSB cell's median ops/s, as `ycsb report` takes it."""
+    return {"ycsb:" + ":".join(key): cell["ops_s"] for key, cell in ycsb_cells().items()
+            if key[2] in YCSB_WORKLOADS}
+
+
+# ---- Redis on benchmarks.html#ycsb
+#
+# Redis's part of the YCSB section is in the page only once the results hold
+# a Redis cell: until then there is no Redis column at all, rather than an
+# empty one. Its prose is the page's, between `<!-- ycsb redis: begin -->`
+# and `<!-- ycsb redis: end -->` (a span or several, all kept or all taken
+# out), and its figures are written in at `<!-- ycsb redis: tables -->`,
+# `lost`, `memory` and `grid` from the medians -- so each is the median, and
+# the full grid's claims, which read the page as built, hold it so.
+
+REDIS_SPAN = re.compile(r"<!-- ycsb redis: begin -->([\s\S]*?)<!-- ycsb redis: end -->")
+REDIS_MARK = re.compile(r"<!-- ycsb redis: (tables|lost|memory|grid) -->")
+YCSB_LABELS = {
+    "A": "A: 50% read, 50% update",
+    "B": "B: 95% read, 5% update",
+    "C": "C: 100% read",
+    "D": "D: 95% read the latest, 5% insert",
+    "E": "E: 95% scan, 5% insert",
+    "F": "F: 50% read, 50% read-modify-write",
+}
+
+
+def kops(ops):
+    """Operations a second as the YCSB tables write them: thousands, to
+    three figures."""
+    k = ops / 1000
+    return f"{k:.2f}" if k < 10 else f"{k:.1f}" if k < 100 else f"{k:.0f}"
+
+
+def ms(us):
+    """A latency in microseconds as the YCSB tables write it, in ms."""
+    m = us / 1000
+    if m < 1:
+        return f"{m:.2f}"
+    if m < 100:
+        return f"{m:.1f}"
+    return f"{m:,.0f}".replace(",", " ")
+
+
+def megabytes(n):
+    return f"{n / 1e6:,.0f}".replace(",", " ") + " MB"
+
+
+def slowest_p99(cell):
+    """The p99 of a cell's slowest operation, which the tables put under it."""
+    return max(cell[f"{op}_p99"] for op in YCSB_OPS if f"{op}_p99" in cell)
+
+
+def redis_figure(cell, bold):
+    if cell is None:
+        return '<td class="n">&nbsp;</td>'
+    figure = f"{kops(cell['ops_s'])} k"
+    if bold:
+        figure = f"<b>{figure}</b>"
+    return f'<td class="n">{figure}<br><small>p99 {ms(slowest_p99(cell))} ms</small></td>'
+
+
+def redis_tables(cells):
+    """fenec-server in Docker beside Redis, mode for mode, at 1 and 16
+    clients, each pair's leader in bold; Redis's snapshots alone beside the
+    buffered pair, against neither."""
+    get = lambda system, mode, wl, n: cells.get((system, mode, wl, str(n)))
+    out = []
+    for mode, caption, extra in (
+        ("durable", "<p>Durable: fenec-server's <code>--sync always</code> against Redis's "
+                    "<code>appendfsync always</code>, an fsync before each answer, both in "
+                    "Docker's virtual machine:</p>", None),
+        ("buffered", "<p>Buffered, both in Docker as well: <code>--sync 250</code> against <code>appendfsync "
+                     "everysec</code>, and beside them Redis with its snapshots alone, which "
+                     "nothing here is measured against:</p>", "snapshot"),
+    ):
+        head = []
+        for n in (1, 16):
+            clients = "1 client" if n == 1 else f"{n} clients"
+            head.append(f'<th class="n">fenec-server, {clients}</th><th class="n">Redis, {clients}</th>')
+            if extra:
+                head.append(f'<th class="n">Redis, snapshots, {clients}</th>')
+        rows = []
+        for wl in YCSB_WORKLOADS:
+            tds = []
+            for n in (1, 16):
+                ours, theirs = get("server-docker", mode, wl, n), get("redis", mode, wl, n)
+                lead = ours and theirs and (ours["ops_s"] >= theirs["ops_s"])
+                tds.append(redis_figure(ours, bool(lead)))
+                tds.append(redis_figure(theirs, bool(ours and theirs and not lead)))
+                if extra:
+                    tds.append(redis_figure(get("redis", extra, wl, n), False))
+            if all(t == '<td class="n">&nbsp;</td>' for t in tds):
+                continue  # C writes nothing and is measured buffered alone
+            rows.append(f"<tr><td>{YCSB_LABELS[wl]}</td>{''.join(tds)}</tr>")
+        if rows:
+            out.append(f'{caption}\n<div class="tbl">\n<table>\n<thead><tr><th>{mode}</th>'
+                       f'{"".join(head)}</tr></thead>\n<tbody>\n' + "\n".join(rows)
+                       + "\n</tbody>\n</table>\n</div>")
+    return "\n".join(out)
+
+
+def redis_lost(cells):
+    """Every cell in which Redis does more operations a second than
+    fenec-server in Docker, the same mode against the same mode."""
+    lost, compared = [], 0
+    for mode in ("durable", "buffered"):
+        for wl in YCSB_WORKLOADS:
+            for n in sorted({int(k[3]) for k in cells if k[0] == "redis" and k[1] == mode}):
+                ours = cells.get(("server-docker", mode, wl, str(n)))
+                theirs = cells.get(("redis", mode, wl, str(n)))
+                if not ours or not theirs:
+                    continue
+                compared += 1
+                if theirs["ops_s"] > ours["ops_s"]:
+                    clients = "one client" if n == 1 else f"{n} clients"
+                    lost.append(f"<li>{mode} {wl}, {clients}: {kops(ours['ops_s'])} k against "
+                                f"{kops(theirs['ops_s'])} k, p99 {ms(slowest_p99(ours))} ms against "
+                                f"{ms(slowest_p99(theirs))} ms</li>")
+    if not lost:
+        return f"<p>None of the {compared} cells measured both ways.</p>"
+    return (f"<p>{len(lost)} of the {compared} cells measured both ways:</p>\n<ul>\n"
+            + "\n".join(lost) + "\n</ul>")
+
+
+def redis_memory(cells):
+    """What each server held after A, B, C, F and D, on disk and in memory
+    (its container's anonymous and shared memory), mode by mode."""
+    systems = (("server-docker", "fenec-server in Docker"), ("redis", "Redis"),
+               ("pg", "PostgreSQL"), ("mongo", "MongoDB"))
+    modes = [m for m in ("durable", "buffered", "snapshot")
+             if any(k[1] == m and k[2] == "memory-ABCFD" for k in cells)]
+    head = "".join(f'<th class="n">{m}, on disk</th><th class="n">{m}, in memory</th>' for m in modes)
+    rows = []
+    for system, name in systems:
+        tds = []
+        for m in modes:
+            for what in ("size", "memory"):
+                cell = cells.get((system, m, f"{what}-ABCFD", "1"))
+                tds.append(f'<td class="n">{megabytes(cell["ops"])}</td>' if cell and "ops" in cell
+                           else '<td class="n">&nbsp;</td>')
+        if any("MB" in t for t in tds):
+            rows.append(f"<tr><td>{name}</td>{''.join(tds)}</tr>")
+    if not rows:
+        return ""
+    return (f'<div class="tbl">\n<table>\n<thead><tr><th>after A to F</th>{head}</tr></thead>\n'
+            f'<tbody>\n' + "\n".join(rows) + "\n</tbody>\n</table>\n</div>")
+
+
+def redis_grid(cells):
+    """Redis's rows of the full grid, as the others' are written."""
+    order = {"durable": 0, "buffered": 1, "snapshot": 2}
+    keys = sorted((k for k in cells if k[0] == "redis" and k[2] in YCSB_WORKLOADS),
+                  key=lambda k: (order.get(k[1], 3), k[2], int(k[3])))
+    rows = []
+    for k in keys:
+        cell = cells[k]
+        ops = "; ".join(f"{op.lower()} {ms(cell[f'{op}_p50'])} ms / {ms(cell[f'{op}_p99'])} ms"
+                        for op in YCSB_OPS if f"{op}_p50" in cell and f"{op}_p99" in cell)
+        rows.append(f'<tr><td>Redis</td><td>{k[1]}</td><td>{k[2]}</td><td class="n">{k[3]}</td>'
+                    f'<td class="n">{kops(cell["ops_s"])} k</td><td>{ops}</td></tr>')
+    return "\n".join(rows)
+
+
+def ycsb_redis(body):
+    """The page with Redis's part of the YCSB section written in where the
+    results hold a Redis cell, and taken out where they hold none."""
+    if "<!-- ycsb redis:" not in body:
+        return body
+    cells = ycsb_cells()
+    if not any(k[0] == "redis" and k[2] in YCSB_WORKLOADS for k in cells):
+        return REDIS_MARK.sub("", REDIS_SPAN.sub("", body))
+    made = {"tables": redis_tables, "lost": redis_lost, "memory": redis_memory, "grid": redis_grid}
+    body = REDIS_SPAN.sub(lambda m: m.group(1), body)
+    return REDIS_MARK.sub(lambda m: made[m.group(1)](cells), body)
 
 
 def glue_lines():
@@ -722,7 +919,8 @@ def check_claims():
 
 # The names benchmarks.html#ycsb's full grid gives each system.
 YCSB_NAMES = {"fenec": "fenecdb", "sqlite": "SQLite", "server": "fenec-server",
-              "server-docker": "fenec-server in Docker", "pg": "PostgreSQL", "mongo": "MongoDB"}
+              "server-docker": "fenec-server in Docker", "pg": "PostgreSQL", "mongo": "MongoDB",
+              "redis": "Redis"}
 
 
 def ycsb_grid_claims(truth):
@@ -748,7 +946,8 @@ def claims_against(truth, unit, wanted):
         path = os.path.join(REPO, rel)
         if not os.path.exists(path):
             continue  # AGENTS.md is optional
-        body = open(path, encoding="utf-8").read()
+        # As built: Redis's YCSB rows are written into the page then.
+        body = ycsb_redis(open(path, encoding="utf-8").read())
         found = list(re.finditer(pattern, body, re.MULTILINE))
         if not found:
             problems.append(f"{rel}: nothing matched /{pattern}/ -- reworded?")

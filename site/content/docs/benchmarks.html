@@ -304,7 +304,7 @@ ordinary database: the six core workloads of YCSB, the Yahoo! Cloud
 Serving Benchmark, over a million records of ten 100-character fields —
 reads of a whole record, updates of one field, inserts, short scans — in
 process against SQLite, and <code>fenec-server</code> over HTTP against
-PostgreSQL and MongoDB. Each figure is the median of three runs:
+PostgreSQL and MongoDB<!-- ycsb redis: begin -->, and beside Redis<!-- ycsb redis: end -->. Each figure is the median of three runs:
 operations a second, and under it the p99 of the workload's slowest
 operation. fenecdb compacts its file on its own, in process and in the
 server, as it ships. Every cell is below, the ones fenecdb
@@ -437,6 +437,84 @@ loses too.</p>
     and each waits for <code>F_FULLFSYNC</code>, 3.9 ms on this disk; it is
     beside the Docker columns, not against them.</li>
 </ul>
+
+<!-- ycsb redis: begin -->
+<h3 id="ycsb-redis">Beside Redis</h3>
+
+<p>Redis 7.4, the official <code>redis:7</code> image, in a container of its
+own in the systems' turns, asked over redis-rs 1.7.1 by a connection a
+client thread, in the same cells as fenec-server in Docker. It is another
+kind of system from the rest, and the tables read with that in mind:</p>
+<ul>
+  <li><b>Everything is in memory.</b> Redis holds the whole data set in its
+    memory and answers from it; nothing is read from disk, and a data set
+    larger than the memory is not an option. fenec-server reads its file
+    through the page cache, PostgreSQL and MongoDB through their buffers.
+    What each held is the last table below.</li>
+  <li><b>One thread runs the commands.</b> Every command runs on Redis's
+    main thread, one after another, however many clients there are
+    (<code>io-threads</code> is 1 as it comes, and raised it threads the
+    sockets' reading and writing, not the commands). fenec-server reads on
+    a thread a connection under a shared lock and writes under an exclusive
+    one.</li>
+  <li><b>Its durability is a setting of its own,</b> and each mode is
+    Redis's own terms for it. <i>durable</i> is the append-only file with
+    <code>appendfsync always</code>: the writes are in the file and fsynced
+    before the answers go out, one fsync for the writes of every client
+    that landed meanwhile. <i>buffered</i> is <code>appendfsync
+    everysec</code>, the policy Redis suggests and its default once the file
+    is on: a thread fsyncs once a second, and a crash loses up to a second
+    of answered writes, two if the disk is slow, where fenec-server's
+    <code>--sync 250</code> loses 250 ms. <i>snapshot</i> is the image as it
+    comes: no append-only file, a snapshot of the data set after 3 600 s
+    and a write, 300 s and 100 writes, or 60 s and 10 000, so a crash loses
+    every write since the last one, minutes of them. Nothing else here is
+    measured that way: it is a column beside the others, not against them.
+    The snapshots stay on in the other two modes, as Redis's
+    <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/">persistence
+    page</a> advises both "if you want a degree of data safety comparable
+    to what PostgreSQL can provide you"; each snapshot and each rewrite of
+    the append-only file is a fork, and its copied pages and its writing
+    fall inside the cells.</li>
+  <li><b>A record is a hash, and a scan needs an index of its own.</b> Each
+    is as YCSB's own Redis binding has it
+    (<a href="https://github.com/brianfrankcooper/YCSB/blob/master/redis/src/main/java/site/ycsb/db/RedisClient.java">RedisClient.java</a>):
+    a hash a record, read whole by <code>HGETALL</code>, an update an
+    <code>HSET</code> of its one field, and every key a member of a sorted
+    set, <code>_indices</code>, from which a scan takes its keys
+    (<code>ZRANGEBYSCORE</code>) before it reads their records. Three things
+    differ, each in Redis's favour or neither's: a key's score is the key,
+    where the binding scatters keys by a hash of their text, so a scan reads
+    keys in order from its own as every other system's does; an insert's
+    <code>HSET</code> and <code>ZADD</code> are one <code>MULTI</code>/<code>EXEC</code>,
+    one round trip and one fsync, where the binding sends them apart; and a
+    scan's records come in one pipeline, where the binding asks for them one
+    at a time, so a scan of 50 records is two round trips rather than 51.</li>
+  <li><b>Both are behind Docker's network,</b> about a quarter of a
+    millisecond a request, most of a read by key: fenec-server in Docker is
+    the like-for-like, and the server on the Mac is not set against Redis
+    in a container.</li>
+</ul>
+
+<!-- ycsb redis: tables -->
+
+<p><b>Where fenec-server loses to Redis.</b> Every cell in which Redis does
+more operations a second than fenec-server in Docker, the same mode against
+the same mode, at 1, 4 and 16 clients:</p>
+<!-- ycsb redis: lost -->
+
+<p><b>What each holds.</b> On disk and in memory after A, B, C, F and D:
+the memory is the container's own, its processes' anonymous memory and
+shared memory from its cgroup, the page cache of its files apart, and
+Redis's is read with no snapshot or rewrite running. fenec-server's file
+is in the page cache, not in this column, as PostgreSQL's and MongoDB's
+files beyond their buffers are; Redis's data set is in it whole.</p>
+<!-- ycsb redis: memory -->
+
+<p><code>--verify</code> held every Redis answer to what was written, in the
+three modes (<code>crates/fenec-bench/ycsb/verify.tsv</code>, run
+<code>rv</code>), and the runs are <code>crates/fenec-bench/ycsb/run-redis.sh</code>.</p>
+<!-- ycsb redis: end -->
 
 <h3 id="round-trip">One request's round trip, taken apart</h3>
 <p>A YCSB read by key (a 1 KB record of ten fields) and an update of one
@@ -855,6 +933,7 @@ p50 and p99, is below; the runs themselves are
 <tr><td>MongoDB</td><td>buffered</td><td>F</td><td class="n">1</td><td class="n">1.51 k</td><td>read 0.40 ms / 1.4 ms; rmw 0.80 ms / 2.1 ms</td></tr>
 <tr><td>MongoDB</td><td>buffered</td><td>F</td><td class="n">4</td><td class="n">4.01 k</td><td>read 0.49 ms / 2.1 ms; rmw 1.0 ms / 3.9 ms</td></tr>
 <tr><td>MongoDB</td><td>buffered</td><td>F</td><td class="n">16</td><td class="n">6.66 k</td><td>read 1.2 ms / 9.0 ms; rmw 2.4 ms / 14.1 ms</td></tr>
+<!-- ycsb redis: grid -->
 </tbody>
 </table>
 </div>

@@ -1,5 +1,5 @@
-//! YCSB's core workloads, fenecdb against SQLite, PostgreSQL and MongoDB:
-//! `make ycsb`.
+//! YCSB's core workloads, fenecdb against SQLite, PostgreSQL, MongoDB and
+//! Redis: `make ycsb`.
 //!
 //! Written here rather than run through the Java YCSB, keeping its
 //! definitions: a record is a key and ten fields of 100 random characters
@@ -42,7 +42,15 @@
 //!   * `pg`: PostgreSQL 17 in a container, prepared statements,
 //!     `synchronous_commit` on or off;
 //!   * `mongo`: MongoDB 8 in a container, the official driver, `j: true`
-//!     or `w: 1, j: false`.
+//!     or `w: 1, j: false`;
+//!   * `redis`: Redis 7 in a container, redis-rs, a record mapped as YCSB's
+//!     own Redis binding maps it (`RedisClient`, below): `appendfsync
+//!     always` or `everysec` with the append-only file on, and a third
+//!     mode, `snapshot`, its image as it comes -- RDB snapshots alone,
+//!     which no other system has, since a crash loses minutes of writes.
+//!
+//! A system runs the modes it has among those asked for (`System::modes`),
+//! and C, which writes nothing, in one of them: buffered where it runs.
 //!
 //! The load is timed apart, batches of 1 000 records from one client, each
 //! system's documented bulk path. Each cell runs a 5 s warm-up and 30 s
@@ -53,7 +61,10 @@
 //! (under 1.6% off), the longest kept exact.
 //!
 //! Each cell's line goes to a TSV file (`--out`); `ycsb report <file>`
-//! prints the median of the runs of each cell.
+//! prints the median of the runs of each cell. After each phase a system
+//! that can be measured so adds its bytes on disk (`size-<phase>`) and,
+//! one in a container, the memory the container holds of its own
+//! (`memory-<phase>`), each in the `ops` column.
 //!
 //! `--verify <file>` logs every operation and what it was answered, and
 //! after each cell holds every read, scan and write to what was written
@@ -85,6 +96,8 @@ const SEED: u64 = 0x5943_5342; // "YCSB"
 const LOAD_BATCH: usize = 1_000;
 const PG_URL: &str = "host=127.0.0.1 port=55433 user=postgres password=fenec dbname=ycsb";
 const MONGO_URL: &str = "mongodb://127.0.0.1:27018/?maxPoolSize=64";
+// Apart from `make geo-bench`'s Redis (56379), so the two never meet.
+const REDIS_URL: &str = "redis://127.0.0.1:56380/";
 
 // ------------------------------------------------------------ randomness
 
@@ -451,6 +464,11 @@ trait Client: Send {
 enum Mode {
     Durable,
     Buffered,
+    /// Redis as its image comes: RDB snapshots alone, no append-only file.
+    /// Not durable in any sense the other two are -- a crash loses the
+    /// writes since the last snapshot, minutes of them -- so it is a mode
+    /// of its own, which no other system has, rather than Redis's buffered.
+    Snapshot,
 }
 
 impl Mode {
@@ -458,6 +476,7 @@ impl Mode {
         match self {
             Mode::Durable => "durable",
             Mode::Buffered => "buffered",
+            Mode::Snapshot => "snapshot",
         }
     }
 }
@@ -469,11 +488,47 @@ trait System {
     fn load(&mut self, records: u64);
     fn set_mode(&mut self, mode: Mode);
     fn client(&self) -> Box<dyn Client>;
+    /// The modes it has; a run asking for others passes them over.
+    fn modes(&self) -> &'static [Mode] {
+        &[Mode::Durable, Mode::Buffered]
+    }
     /// The bytes the data takes on disk, where they can be read: an
     /// engine that writes a record again elsewhere grows by every update.
     fn size(&self) -> Option<u64> {
         None
     }
+    /// The memory its container holds of its own (`container_memory`),
+    /// for a system in one.
+    fn memory(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// What a container holds of its own -- its processes' anonymous memory
+/// and the shared memory PostgreSQL's buffers are, which neither can give
+/// back -- from its cgroup (`memory.stat`), the page cache of its files
+/// apart: as `make scale-bench` reads PostgreSQL's. Read by a container
+/// sharing its processes, through the first one's root, since
+/// fenec-server's image is empty but for the binary and has no `cat`.
+fn container_memory(name: &str) -> Option<u64> {
+    let out = std::process::Command::new("docker")
+        .args(["run", "--rm", &format!("--pid=container:{name}")])
+        // Reading another user's `/proc/<pid>/root` is a ptrace's right.
+        .args(["--cap-add", "SYS_PTRACE", "alpine"])
+        .args(["cat", "/proc/1/root/sys/fs/cgroup/memory.stat"])
+        .output()
+        .ok()?;
+    memory_stat(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `anon` and `shmem` of a cgroup's `memory.stat`, summed.
+fn memory_stat(text: &str) -> Option<u64> {
+    let get = |key: &str| -> Option<u64> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(' '))
+            .and_then(|v| v.trim().parse().ok())
+    };
+    Some(get("anon")? + get("shmem")?)
 }
 
 /// A record's values: the same for every system, drawn from its key.
@@ -1047,13 +1102,31 @@ impl System for Server {
         }
     }
     fn size(&self) -> Option<u64> {
-        // The container's file is in the VM's volume, out of reach here.
         match self.docker {
-            true => None,
+            // The container's file is in the VM's volume: its length read
+            // by a container mounting the volume beside the server.
+            true => {
+                let out = std::process::Command::new("docker")
+                    .args(["run", "--rm", "-v", &format!("{DOCKER_VOLUME}:/data")])
+                    .args(["alpine", "du", "-b", "/data/ycsb.fenec"])
+                    .output()
+                    .ok()?;
+                String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .next()?
+                    .parse()
+                    .ok()
+            }
             false => std::fs::metadata(self.dir.join("ycsb-server.fenec"))
                 .ok()
                 .map(|m| m.len()),
         }
+    }
+    fn memory(&self) -> Option<u64> {
+        // The mapped file's pages are the page cache's, not the server's.
+        self.docker
+            .then(|| container_memory(DOCKER_SERVER))
+            .flatten()
     }
     fn load(&mut self, records: u64) {
         if self.docker {
@@ -1095,6 +1168,7 @@ impl System for Server {
         self.start(match mode {
             Mode::Durable => "always",
             Mode::Buffered => "250",
+            Mode::Snapshot => unreachable!("not a mode of the server's"),
         });
     }
     fn client(&self) -> Box<dyn Client> {
@@ -1222,7 +1296,7 @@ fn json_rows(body: &[u8]) -> Vec<(u64, [u64; FIELDS])> {
 struct Pg {
     url: String,
     durable: bool,
-    _container: Option<Container>,
+    container: Option<Container>,
 }
 
 /// PostgreSQL 17 as its docs tune it for this machine's Docker VM (3.8 GB):
@@ -1307,6 +1381,9 @@ impl System for Pg {
             .ok()?
             .get(0);
         Some(n as u64)
+    }
+    fn memory(&self) -> Option<u64> {
+        container_memory(&self.container.as_ref()?.0)
     }
     fn load(&mut self, records: u64) {
         let mut c = postgres::Client::connect(&self.url, postgres::NoTls).unwrap();
@@ -1449,7 +1526,7 @@ use mongodb::options::{Acknowledgment, CollectionOptions, WriteConcern};
 struct Mongo {
     client: mongodb::sync::Client,
     durable: bool,
-    _container: Option<Container>,
+    container: Option<Container>,
 }
 
 impl Mongo {
@@ -1493,6 +1570,9 @@ impl System for Mongo {
             _ => 0,
         };
         Some(num("storageSize") + num("totalIndexSize"))
+    }
+    fn memory(&self) -> Option<u64> {
+        container_memory(&self.container.as_ref()?.0)
     }
     fn load(&mut self, records: u64) {
         let coll = self.coll(false);
@@ -1588,6 +1668,385 @@ impl Client for MongoClient {
                 (d.get_i64("_id").map(|k| k as u64).unwrap_or(u64::MAX), out)
             })
             .collect()
+    }
+}
+
+// ---- Redis
+
+/// Redis 7 as its image comes but for persistence: one thread executing
+/// commands (`io-threads 1`), the data set in memory, the snapshots of its
+/// default `save 3600 1 300 100 60 10000` on in every mode -- Redis's
+/// persistence page has the append-only file and the snapshots both for
+/// "a degree of data safety comparable to what PostgreSQL can provide".
+/// It loads with the append-only file fsynced once a second, as
+/// fenec-server loads under `--sync 250`, and `set_mode` sets the mode
+/// over it. Its data in a volume, as PostgreSQL's and MongoDB's are.
+const REDIS_RUN: &[&str] = &[
+    "-p",
+    "127.0.0.1:56380:6379",
+    "-v",
+    "fenecycsb-redis:/data",
+    "redis:7",
+    "redis-server",
+    "--appendonly",
+    "yes",
+    "--appendfsync",
+    "everysec",
+];
+
+/// The sorted set of every key YCSB's binding keeps for its scans, under
+/// the binding's name for it (`INDEX_KEY`).
+const REDIS_INDEX: &str = "_indices";
+
+/// A record as YCSB's own Redis binding keeps it (`redis/src/main/java/
+/// site/ycsb/db/RedisClient.java` in brianfrankcooper/YCSB): a hash a key,
+/// a field of it each, read whole by `HGETALL` and written by `HSET`
+/// (`HMSET` there, the name it had before Redis 4), every key also a
+/// member of the sorted set `_indices`, and a scan the members from the
+/// key's score on (`ZRANGEBYSCORE ... LIMIT 0 n`) and then each one's
+/// record by `HGETALL`. The key is the integer every system here keys by,
+/// and its score is the key itself, where the binding scores a key by
+/// Java's `hashCode` of it -- "scattered along the whole space of doubles",
+/// its comment says, adding that a real one would use the keys' own
+/// values: so a scan reads the keys from its own in order, as every other
+/// system's does. Two things go as Redis's docs would have them rather
+/// than as the binding sends them: an insert's `HSET` and `ZADD` are one
+/// `MULTI`/`EXEC`, where the binding sends two commands and a scan could
+/// meet the key before its record -- one round trip and one fsync, as
+/// every other system's insert is one statement -- and a scan asks for
+/// its records in one pipeline, where the binding asks one at a time, a
+/// round trip each.
+struct Redis {
+    url: String,
+    /// Started afresh for each load and removed with its volume, so a load
+    /// begins from nothing on disk or in memory; `None` for a server of
+    /// the reader's own (`FENECBENCH_YCSB_REDIS`), which a load empties.
+    container: Option<Container>,
+    own: bool,
+}
+
+/// A connection with `TCP_NODELAY`, which redis-rs leaves off unless told:
+/// a pipeline written in pieces would wait on the ACK of the first.
+/// Waits for the server: Docker's port takes a connection before Redis
+/// listens, so a `PING` answered is the sign.
+fn redis_connect(url: &str) -> redis::Connection {
+    use redis::IntoConnectionInfo as _;
+    let info = url
+        .into_connection_info()
+        .unwrap()
+        .set_tcp_settings(redis::io::tcp::TcpSettings::default().set_nodelay(true));
+    let client = redis::Client::open(info).unwrap();
+    let until = Instant::now() + Duration::from_secs(120);
+    loop {
+        let c = client.get_connection().and_then(|mut c| {
+            redis::cmd("PING").query::<String>(&mut c)?;
+            Ok(c)
+        });
+        match c {
+            Ok(c) => return c,
+            Err(e) => {
+                assert!(Instant::now() < until, "Redis did not start: {e}");
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+}
+
+/// One field of `INFO <section>`.
+fn redis_info(c: &mut redis::Connection, section: &str, field: &str) -> String {
+    let info: String = redis::cmd("INFO").arg(section).query(c).unwrap();
+    info.lines()
+        .find_map(|l| l.strip_prefix(field)?.strip_prefix(':'))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// Waits for Redis's child process, a snapshot or a rewrite of the
+/// append-only file, to end and for none to be due: the load's end, and
+/// what is measured after a phase, are the server's own and not a fork's
+/// copy of its pages or a file half written.
+fn redis_idle(c: &mut redis::Connection) {
+    let until = Instant::now() + Duration::from_secs(1200);
+    loop {
+        let info: String = redis::cmd("INFO").arg("persistence").query(c).unwrap();
+        let busy = [
+            "rdb_bgsave_in_progress:1",
+            "aof_rewrite_in_progress:1",
+            "aof_rewrite_scheduled:1",
+        ]
+        .iter()
+        .any(|f| info.lines().any(|l| l.trim() == *f));
+        if !busy {
+            return;
+        }
+        assert!(Instant::now() < until, "Redis's child did not end");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Runs a background job -- `BGSAVE`, `BGREWRITEAOF` -- to its end, and
+/// holds its status to `ok`.
+fn redis_background(c: &mut redis::Connection, cmd: &str, status: &str) {
+    redis_idle(c);
+    redis::cmd(cmd).query::<String>(c).unwrap();
+    redis_idle(c);
+    assert_eq!(redis_info(c, "persistence", status), "ok", "{cmd}");
+}
+
+impl Redis {
+    fn connect(&self) -> redis::Connection {
+        redis_connect(&self.url)
+    }
+}
+
+impl System for Redis {
+    fn name(&self) -> &'static str {
+        "redis"
+    }
+    fn modes(&self) -> &'static [Mode] {
+        &[Mode::Durable, Mode::Buffered, Mode::Snapshot]
+    }
+    fn size(&self) -> Option<u64> {
+        // The snapshot and the append-only file's parts in the volume,
+        // with no rewrite's file half written beside them.
+        let name = &self.container.as_ref()?.0;
+        redis_idle(&mut self.connect());
+        let out = std::process::Command::new("docker")
+            .args(["exec", name, "du", "-sb", "/data"])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    }
+    fn memory(&self) -> Option<u64> {
+        let name = &self.container.as_ref()?.0;
+        let mut c = self.connect();
+        redis_idle(&mut c);
+        eprintln!(
+            "redis: used_memory {} MB, rss {} MB, by its own count",
+            redis_info(&mut c, "memory", "used_memory")
+                .parse::<u64>()
+                .unwrap_or(0)
+                >> 20,
+            redis_info(&mut c, "memory", "used_memory_rss")
+                .parse::<u64>()
+                .unwrap_or(0)
+                >> 20
+        );
+        container_memory(name)
+    }
+    fn load(&mut self, records: u64) {
+        if self.own {
+            // The last load's container and volume go first. The second
+            // the new one takes to start is in the load's time, which is
+            // tens of seconds at a million records.
+            self.container = None;
+            self.container = Some(Container::start("redis", REDIS_RUN));
+        }
+        let mut c = self.connect();
+        if !self.own {
+            redis::cmd("FLUSHALL").query::<String>(&mut c).unwrap();
+            for (k, v) in [("appendonly", "yes"), ("appendfsync", "everysec")] {
+                redis::cmd("CONFIG")
+                    .arg("SET")
+                    .arg(k)
+                    .arg(v)
+                    .query::<String>(&mut c)
+                    .unwrap();
+            }
+        }
+        // Pipelined, Redis's bulk path (its docs' "mass insertion" is the
+        // protocol written ahead of the answers): a batch's records and
+        // one `ZADD` of their keys, sent before any answer is read.
+        let fields: Vec<String> = (0..FIELDS).map(|i| format!("field{i}")).collect();
+        let mut key = 1;
+        let mut pipe = redis::pipe();
+        while key <= records {
+            let end = (key + LOAD_BATCH as u64).min(records + 1);
+            pipe.clear();
+            let mut zadd = redis::cmd("ZADD");
+            zadd.arg(REDIS_INDEX);
+            for k in key..end {
+                let mut hset = redis::cmd("HSET");
+                hset.arg(k);
+                for (f, v) in fields.iter().zip(record_values(k)) {
+                    hset.arg(f).arg(v);
+                }
+                pipe.add_command(hset);
+                zadd.arg(k).arg(k);
+            }
+            pipe.add_command(zadd);
+            let added: Vec<i64> = pipe.query(&mut c).unwrap();
+            let (zadded, hsets) = added.split_last().unwrap();
+            assert!(hsets.iter().all(|&n| n == FIELDS as i64), "a record twice");
+            assert_eq!(*zadded, (end - key) as i64);
+            key = end;
+        }
+        // The load on disk, as the others' is, in both of Redis's forms
+        // -- a snapshot, and the append-only file rewritten from the data
+        // -- so no fork the load made due runs in the first cell.
+        redis_background(&mut c, "BGSAVE", "rdb_last_bgsave_status");
+        redis_background(&mut c, "BGREWRITEAOF", "aof_last_bgrewrite_status");
+        let n: u64 = redis::cmd("DBSIZE").query(&mut c).unwrap();
+        assert_eq!(n, records + 1, "the records and the index");
+    }
+    fn set_mode(&mut self, mode: Mode) {
+        let mut c = self.connect();
+        let set = |c: &mut redis::Connection, k: &str, v: &str| {
+            redis::cmd("CONFIG")
+                .arg("SET")
+                .arg(k)
+                .arg(v)
+                .query::<String>(c)
+                .unwrap();
+        };
+        match mode {
+            // An fsync of the append-only file before each answer.
+            Mode::Durable => set(&mut c, "appendfsync", "always"),
+            // An fsync a second, on a thread of its own.
+            Mode::Buffered => set(&mut c, "appendfsync", "everysec"),
+            // No append-only file: the snapshots alone, as the image comes.
+            Mode::Snapshot => set(&mut c, "appendonly", "no"),
+        }
+        let get = |c: &mut redis::Connection, k: &str| -> String {
+            let v: Vec<String> = redis::cmd("CONFIG").arg("GET").arg(k).query(c).unwrap();
+            v.get(1).cloned().unwrap_or_default()
+        };
+        eprintln!(
+            "redis {}: appendonly {}, appendfsync {}, save \"{}\", io-threads {}",
+            mode.name(),
+            get(&mut c, "appendonly"),
+            get(&mut c, "appendfsync"),
+            get(&mut c, "save"),
+            get(&mut c, "io-threads")
+        );
+    }
+    fn client(&self) -> Box<dyn Client> {
+        let mut insert = redis::pipe();
+        insert.atomic();
+        Box::new(RedisClient {
+            c: self.connect(),
+            fields: (0..FIELDS).map(|i| format!("field{i}")).collect(),
+            insert,
+            scan: redis::pipe(),
+            last: Vec::new(),
+            affected: 0,
+        })
+    }
+}
+
+struct RedisClient {
+    c: redis::Connection,
+    fields: Vec<String>,
+    /// An insert's `MULTI`/`EXEC`, and a scan's pipeline of `HGETALL`s.
+    insert: redis::Pipeline,
+    scan: redis::Pipeline,
+    /// The last read's or scan's answer: each key and its `HGETALL` reply.
+    last: Vec<(u64, redis::Value)>,
+    /// What the last write said it wrote, in records (`Client::affected`).
+    affected: u64,
+}
+
+/// An `HGETALL` reply's field-value pairs, a flat array under RESP2 and a
+/// map under RESP3.
+fn redis_pairs(v: &redis::Value) -> Vec<(&redis::Value, &redis::Value)> {
+    match v {
+        redis::Value::Array(a) => a.as_chunks::<2>().0.iter().map(|[k, v]| (k, v)).collect(),
+        redis::Value::Map(m) => m.iter().map(|(k, v)| (k, v)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A record's fields' digests from its `HGETALL` reply, 0 for a field it
+/// did not hold.
+fn redis_digests(v: &redis::Value) -> [u64; FIELDS] {
+    let mut d = [0; FIELDS];
+    for (k, v) in redis_pairs(v) {
+        let (redis::Value::BulkString(k), redis::Value::BulkString(v)) = (k, v) else {
+            continue;
+        };
+        let f: Option<usize> = k
+            .strip_prefix(b"field")
+            .and_then(|f| std::str::from_utf8(f).ok()?.parse().ok());
+        if let Some(f) = f.filter(|f| *f < FIELDS) {
+            d[f] = digest(v);
+        }
+    }
+    d
+}
+
+impl Client for RedisClient {
+    fn ping(&mut self) -> bool {
+        redis::cmd("PING").query::<String>(&mut self.c).unwrap();
+        true
+    }
+    fn read(&mut self, key: u64) {
+        let v: redis::Value = redis::cmd("HGETALL").arg(key).query(&mut self.c).unwrap();
+        assert_eq!(redis_pairs(&v).len(), FIELDS, "the record {key}");
+        self.last.clear();
+        self.last.push((key, v));
+    }
+    fn update(&mut self, key: u64, field: usize, value: &str) {
+        // `HSET` answers the fields it added: none where the record held
+        // the field, and one where there was no record to write over.
+        let added: i64 = redis::cmd("HSET")
+            .arg(key)
+            .arg(&self.fields[field])
+            .arg(value)
+            .query(&mut self.c)
+            .unwrap();
+        assert_eq!(added, 0, "no record {key} to update");
+        self.affected = 1;
+    }
+    fn insert(&mut self, key: u64, values: &[String]) {
+        let mut hset = redis::cmd("HSET");
+        hset.arg(key);
+        for (f, v) in self.fields.iter().zip(values) {
+            hset.arg(f).arg(v);
+        }
+        self.insert.clear();
+        self.insert.add_command(hset);
+        self.insert.cmd("ZADD").arg(REDIS_INDEX).arg(key).arg(key);
+        let (fields, indexed): (i64, i64) = self.insert.query(&mut self.c).unwrap();
+        assert!(
+            fields == FIELDS as i64 && indexed == 1,
+            "insert of {key}: {fields} fields, {indexed} indexed"
+        );
+        self.affected = 1;
+    }
+    fn scan(&mut self, key: u64, len: u64) {
+        let keys: Vec<u64> = redis::cmd("ZRANGEBYSCORE")
+            .arg(REDIS_INDEX)
+            .arg(key)
+            .arg("+inf")
+            .arg("LIMIT")
+            .arg(0)
+            .arg(len)
+            .query(&mut self.c)
+            .unwrap();
+        assert!(!keys.is_empty());
+        self.scan.clear();
+        for k in &keys {
+            self.scan.cmd("HGETALL").arg(*k);
+        }
+        let rows: Vec<redis::Value> = self.scan.query(&mut self.c).unwrap();
+        self.last.clear();
+        self.last.extend(keys.into_iter().zip(rows));
+    }
+    fn got(&mut self) -> Vec<(u64, [u64; FIELDS])> {
+        // A key the index named with no record behind it is a row of no
+        // fields, which the check finds not as written.
+        self.last
+            .iter()
+            .map(|(k, v)| (*k, redis_digests(v)))
+            .collect()
+    }
+    fn affected(&mut self) -> u64 {
+        self.affected
     }
 }
 
@@ -2203,7 +2662,7 @@ fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
             Box::new(Pg {
                 url,
                 durable: false,
-                _container: container,
+                container,
             })
         }
         "mongo" => {
@@ -2233,10 +2692,31 @@ fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
             Box::new(Mongo {
                 client,
                 durable: false,
-                _container: container,
+                container,
             })
         }
-        other => panic!("no system `{other}`: fenec, sqlite, server, server-docker, pg, mongo"),
+        "redis" => {
+            let (url, own) = match std::env::var("FENECBENCH_YCSB_REDIS") {
+                Ok(url) => (url, false),
+                Err(_) => (REDIS_URL.to_string(), true),
+            };
+            // Started now to say which Redis it is, and again by each load.
+            let container = own.then(|| Container::start("redis", REDIS_RUN));
+            let mut c = redis_connect(&url);
+            eprintln!(
+                "redis: Redis {}, {}",
+                redis_info(&mut c, "server", "redis_version"),
+                redis_info(&mut c, "memory", "mem_allocator")
+            );
+            Box::new(Redis {
+                url,
+                container,
+                own,
+            })
+        }
+        other => {
+            panic!("no system `{other}`: fenec, sqlite, server, server-docker, pg, mongo, redis")
+        }
     }
 }
 
@@ -2246,7 +2726,18 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
     let mut sys = make_system(name, &dir, cfg);
     assert_eq!(sys.name(), name);
     let mut pinged = false;
-    for &mode in &cfg.modes {
+    let modes: Vec<Mode> = cfg
+        .modes
+        .iter()
+        .copied()
+        .filter(|m| sys.modes().contains(m))
+        .collect();
+    // C writes nothing: one mode measures it, buffered where it runs.
+    let c_mode = match modes.contains(&Mode::Buffered) {
+        true => Some(Mode::Buffered),
+        false => modes.first().copied(),
+    };
+    for &mode in &modes {
         // YCSB's own sequence: load, then A, B, C, F and D over that
         // data, then load afresh for E. Run after the others, E's scans
         // read records an update rewrote somewhere else -- fenecdb writes
@@ -2257,10 +2748,7 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
             let order: Vec<&Workload> = phase
                 .chars()
                 .filter(|c| cfg.workloads.contains(c))
-                // C writes nothing: one mode measures it.
-                .filter(|c| {
-                    !(*c == 'C' && mode == Mode::Durable && cfg.modes.contains(&Mode::Buffered))
-                })
+                .filter(|c| *c != 'C' || c_mode == Some(mode))
                 .map(|c| WORKLOADS.iter().find(|w| w.name == c).unwrap())
                 .collect();
             if order.is_empty() {
@@ -2345,6 +2833,17 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
                     &cfg.out,
                     &format!(
                         "{}\t{name}\t{}\tsize-{phase}\t1\t{records}\t0\t{bytes}\t0\t0",
+                        cfg.run_id,
+                        mode.name()
+                    ),
+                );
+            }
+            if let Some(bytes) = sys.memory() {
+                eprintln!("{name}: {} MB in memory after {phase}", bytes >> 20);
+                append(
+                    &cfg.out,
+                    &format!(
+                        "{}\t{name}\t{}\tmemory-{phase}\t1\t{records}\t0\t{bytes}\t0\t0",
                         cfg.run_id,
                         mode.name()
                     ),
@@ -2545,8 +3044,9 @@ fn main() {
         run: Duration::from_secs(30),
         threads: vec![1, 4, 16],
         workloads: "ABCDEF".chars().collect(),
-        modes: vec![Mode::Durable, Mode::Buffered],
-        systems: list("fenec,sqlite,server,pg,mongo", str::to_string),
+        // `snapshot` is Redis's alone; the others pass it over.
+        modes: vec![Mode::Durable, Mode::Buffered, Mode::Snapshot],
+        systems: list("fenec,sqlite,server,pg,mongo,redis", str::to_string),
         out: PathBuf::from("ycsb.tsv"),
         runs: 1,
         probe_base: None,
@@ -2575,7 +3075,8 @@ fn main() {
                 cfg.modes = list(&v, |x| match x {
                     "durable" => Mode::Durable,
                     "buffered" => Mode::Buffered,
-                    _ => panic!("--modes durable,buffered"),
+                    "snapshot" => Mode::Snapshot,
+                    _ => panic!("--modes durable,buffered,snapshot"),
                 })
             }
             "--systems" => cfg.systems = list(&v, str::to_string),
@@ -2729,5 +3230,39 @@ mod tests {
         }
         body.push_str("}]");
         assert_eq!(json_rows(body.as_bytes()), vec![(3, base_digests(3))]);
+    }
+
+    #[test]
+    fn redis_hashes_are_read_as_written_in_either_protocol() {
+        use redis::Value::{Array, BulkString, Map};
+        let v = record_values(3);
+        let pairs: Vec<(redis::Value, redis::Value)> = v
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, f)| {
+                (
+                    BulkString(format!("field{i}").into_bytes()),
+                    BulkString(f.clone().into_bytes()),
+                )
+            })
+            .collect();
+        let flat = Array(
+            pairs
+                .iter()
+                .flat_map(|(k, v)| [k.clone(), v.clone()])
+                .collect(),
+        );
+        assert_eq!(redis_digests(&flat), base_digests(3));
+        assert_eq!(redis_digests(&Map(pairs)), base_digests(3));
+        // No record: no field holds a value.
+        assert_eq!(redis_digests(&Array(Vec::new())), [0; FIELDS]);
+    }
+
+    #[test]
+    fn a_containers_memory_is_its_anonymous_and_shared_memory() {
+        let stat = "anon 8740864\nfile 458752\nkernel 1\nshmem 4096\nfile_mapped 0\n";
+        assert_eq!(memory_stat(stat), Some(8740864 + 4096));
+        assert_eq!(memory_stat("file 1\n"), None);
     }
 }

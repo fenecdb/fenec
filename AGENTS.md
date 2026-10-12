@@ -76,7 +76,7 @@ make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
 make scale-bench         # fenec-server over HTTP against pgvector at scale: load, memory, recall, latency, filters (pgvector-up first)
-make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server vs PostgreSQL and MongoDB in Docker, durable and buffered (YCSB_ARGS)
+make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server vs PostgreSQL, MongoDB and Redis in Docker, durable and buffered (YCSB_ARGS; ycsb/run-redis.sh the Redis runs)
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
@@ -1144,6 +1144,24 @@ terms (a flush and its durability, `synchronous=FULL` with `fullfsync`,
 (`--sync 250`, `NORMAL`, `off`, `j: false`); C writes nothing and runs
 once. A server switching modes is stopped with SIGTERM, which syncs: a
 kill lost the last 250 ms of the load, and the next update found no row.
+Redis 7 (`redis`, redis-rs 1.7.1, a connection a thread) keeps a record
+as YCSB's own binding does -- a hash a key, `HGETALL` and `HSET`, every
+key in the `_indices` sorted set a scan reads by `ZRANGEBYSCORE` -- but
+scored by the key, not a hash of its text, so a scan reads keys in order
+as elsewhere, an insert's `HSET` and `ZADD` one `MULTI`/`EXEC` and a
+scan's `HGETALL`s one pipeline. Durable is `appendfsync always`,
+buffered `everysec`, and `snapshot` -- its image as it comes, RDB
+snapshots alone, minutes of writes a crash loses -- a mode of its own
+the others pass over (`System::modes`); the default snapshots stay on in
+all three, as Redis's persistence page advises. Its container starts
+afresh for each load, which ends with a `BGSAVE` and a `BGREWRITEAOF`
+run out, so no fork the load made due falls in a cell. After each phase
+a container's memory -- `anon` and `shmem` of its cgroup, read through a
+container sharing its processes, fenec-server's image having no `cat` --
+is a `memory-<phase>` line beside the size. benchmarks.html's Redis part
+sits between `ycsb redis` markers that `site/build.py` takes out until
+the results hold a Redis cell, its figures written in from the medians
+(`ycsb_redis`); `ycsb/run-redis.sh` is its run, a `--verify` pass first.
 Each cell is 30 s after a 5 s warm-up, and starts once a one-core probe
 runs within 4% of its idle time (`cool`), the probe's ratio written with
 the cell; the systems take turns with three idle minutes between them.

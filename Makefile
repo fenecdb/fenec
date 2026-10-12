@@ -722,14 +722,16 @@ scale-bench:
 	./target/release/scale $(SCALE_ROWS) $(SCALE_DIM) $(SCALE_ARGS)
 
 ## YCSB's core workloads A-F (crates/fenec-bench/src/bin/ycsb.rs): fenecdb in
-## process against SQLite, fenec-server over HTTP against PostgreSQL 17 and
-## MongoDB 8, each in a container the bench starts and removes in its turn.
-## 1 000 000 records, 1/4/16 threads, durable and buffered, 30 s a cell after
-## a 5 s warm-up, each cell after the CPU has cooled; a line a cell into
-## ycsb.tsv, `./target/release/ycsb report ycsb.tsv` the medians. Narrow it
-## with YCSB_ARGS, e.g. "--records 100000 --systems fenec,sqlite --workloads
-## AC --threads 1,16 --runs 3". --systems server-docker runs the server in a
+## process against SQLite, fenec-server over HTTP against PostgreSQL 17,
+## MongoDB 8 and Redis 7, each in a container the bench starts and removes in
+## its turn. 1 000 000 records, 1/4/16 threads, durable and buffered (and
+## Redis's snapshots alone, `snapshot`), 30 s a cell after a 5 s warm-up,
+## each cell after the CPU has cooled; a line a cell into ycsb.tsv,
+## `./target/release/ycsb report ycsb.tsv` the medians. Narrow it with
+## YCSB_ARGS, e.g. "--records 100000 --systems fenec,sqlite --workloads AC
+## --threads 1,16 --runs 3". --systems server-docker runs the server in a
 ## container too, from `docker build -t fenecdb-ycsb .`.
+## crates/fenec-bench/ycsb/run-redis.sh is the Redis comparison's run.
 ycsb:
 	$(CARGO) build --release -p fenec-server -p fenec-bench --bin fenec-server --bin ycsb
 	./target/release/ycsb $(YCSB_ARGS)

@@ -26,6 +26,10 @@ mongodb = { version = "3.9", default-features = false, features = ["compat-3-0-0
 # Its blocking API runs a Tokio runtime it makes with `Runtime::new`, which
 # needs this feature and does not ask for it.
 tokio = { version = "1", features = ["rt-multi-thread"] }
+# redis-rs, its synchronous connection, for YCSB's Redis arm. Pinned to the
+# patch: the site names the client a figure was measured with, and none of
+# the default features (ACL, streams, scripts, big numbers) is asked for.
+redis = { version = "=1.7.1", default-features = false }
 
 [[bin]]
 name = "fenec-bench"
