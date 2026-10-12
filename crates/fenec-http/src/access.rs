@@ -108,14 +108,18 @@
 //! ```
 //!
 //! lets a customer read the position of the courier carrying their order.
-//! The inner `get` reads `orders` as the token's own `get` would, held to
-//! its rules there ([`Scope::held`]: none granting `read` is no row, as
-//! PostgreSQL's row security lets a policy's subquery see no row of a table
-//! no policy grants), and it is answered under the lock that runs each
-//! statement, before it runs ([`Scope::bound`]) -- a write's `WITH CHECK`
-//! tests a document on its own, where no query runs, and a `/batch`
-//! answers it again for each statement, since the one before may have
-//! changed what it reads. Its list is held to [`MAX_CLAIM_VALUES`], as a
+//! The inner `get` reads the rows of `orders` the token's own `get` would,
+//! held to its rules there ([`Scope::held`]: none granting `read` is no
+//! row, as PostgreSQL's row security lets a policy's subquery see no row
+//! of a table no policy grants); the fields it reads are the policy's, not
+//! held to the token's field lists, since its list is never shown, only
+//! what it admits. It is answered under the lock that runs each statement,
+//! before it runs ([`Scope::bound`]) -- a write's `WITH CHECK` tests a
+//! document on its own, where no query runs, as a row's mask asks which
+//! rules admit it (`fields`) -- and a `/batch` answers it again for each
+//! statement, since the one before may have changed what it reads. A rule
+//! naming the fields it shows may read another collection as any other.
+//! Its list is held to [`MAX_CLAIM_VALUES`], as a
 //! list claim is, and refused past it rather than cut. Rules that read each
 //! other's collections, at any depth and whatever their roles, are refused
 //! at startup: none of them could be answered first. A scoped subscription

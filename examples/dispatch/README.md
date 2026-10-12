@@ -462,10 +462,10 @@ since, and say how.
    each customer, which hears the courier's row at every beat beside the
    order's and answers the rule again at every beat of any courier, since
    each writes `orders`. A beat carrying an order beside 10, 50 and 200
-   customers following theirs took 66, 149 and 574 us p50 and 0.13, 0.64
-   and 3.65 ms of the process's CPU, the customers' streams sent 202 to
-   208 bytes a beat, where following `positions` took 104, 323 and 1 476
-   us, 0.33, 1.89 and 9.55 ms, 399 to 409 bytes (`make policy-bench
+   customers following theirs took 67, 156 and 574 us p50 and 0.13, 0.69
+   and 3.73 ms of the process's CPU, the customers' streams sent 202 to
+   208 bytes a beat, where following `positions` took 107, 316 and 1 480
+   us, 0.36, 1.94 and 10.06 ms, 399 to 409 bytes (`make policy-bench
    ARGS=beats`, in process and in turns). What the rule is for here is
    who the courier is: the tracking page reads the customer's courier by
    name under their own token, `couriers read(user, name, vehicle) where

@@ -764,7 +764,16 @@ collections it reads or writes (`statement_reads`) are answered as the
 `run_bound`): the statement then holds lists the engine reads as any, and
 `within` installs the bound scope, so `Check` -- an insert's document, an
 update's pair, a transition's, an upsert's row written over, `answering`
--- tests by them. The rewrite before the lock stays, with the rules
+-- tests by them; and the mask (`fields::hold`'s `showing_f` guards and
+`case` wraps, made by `rewrite_with` over the bound rules) and its
+application (`Scope::shown`, called on the bound scope), a stream's view
+and digests, are the bound scope's too: a rule naming fields that reads
+another collection shows each row the fields of the rules admitting it as
+their lists stand, where unanswered `eval` refuses the `InSelect` and the
+rule admits no row asked of alone (`tests/reach.rs` fails with either the
+statement's or the stream's bound scope taken out). The inner `get`'s own
+fields are the policy's, not held to the token's field lists: its list is
+never shown, only what it admits. The rewrite before the lock stays, with the rules
 unanswered: it refuses a scoped schema change before `Database::maintain`
 could build it beside the database, and it is what a held write is planned
 from (`waits::plan`), so its look reads what the rule reads and a write
@@ -782,24 +791,28 @@ against what it sent (`enter_and_leave`), a row leaving a deletion only of
 a row it was sent: a customer's stream gains the courier as the order is
 claimed and loses them at the delivery, no write to `positions` between.
 It costs one inner `get` a statement -- `make policy-bench`, a crew's
-bucket: a `set` 1.9 us over a plain rule in process, 3.9 against 2.0, a
-read by id 1.9 (3.2 against 1.4), 4.4-4.7 us over HTTP, 31.4 against
-27.0 -- and a stream one at each write to what its rules read: beside 10
-and 100 scoped streams a write, half of them to `orders`, took 221 us
-and 1.94 ms of the process's CPU against 181 us and 1.62 ms under a rule
+bucket of two: a `set` 2.1 us over a plain rule in process, 4.1 against
+2.0, a read by id 1.7 (3.9 against 2.2), over HTTP 4.7 and 4.3 us of 32.0
+and 30.6 -- and a stream one at each write to what its rules read: beside
+10 and 100 scoped streams a write, half of them to `orders`, took 162 us
+and 1.89 ms of the process's CPU against 129 us and 1.65 ms under a rule
 naming the courier as a claim (`ARGS=streams`), every scoped stream
 looking at every write either way; examples/dispatch's beat, which writes
-`orders`, beside 50 customers following `positions` so took 1.89 ms
-against 0.64 with the courier's point on the order, so Plover keeps
-`courier_loc` and reads the courier's name through such a rule
-(`ARGS=beats`). A token with no such rule runs as it did:
-`Who::reaches_out` is a field read and the rest is untouched -- the
-policy bench's common sides in four ABBA quartets against main, the
-server token in process 1 320-1 394 ns against 1 329-1 370 and a plain
-rule 1 985-2 086 against 1 998-2 041, over HTTP 23.1-25.3 us p50 against
-24.7-25.3, and `make requests-bench`'s one client the same to the
-microsecond, eight inside the spread -- and nothing below fenec-http
-changed: the browser module is the same to the byte.
+`orders`, beside 50 customers following `positions` so took 1.94 ms
+against 0.69 with the courier's point on the order, so Plover keeps
+`courier_loc` and reads the courier's name through such a rule, its code
+withheld by a field list (`ARGS=beats`). A token with no such rule runs
+as it did: `Who::reaches_out` is a field read and the rest is untouched
+-- the policy bench's common sides in four ABBA quartets against main on
+a quiet machine, a `set` in process 1 313-1 335 ns against 1 312-1 327
+under the server's token and 1 975-2 012 against 1 976-2 014 under a
+plain rule, over HTTP 25.1-25.4 us p50 against 24.8-25.3 and a read by
+id 23.7-23.9 either way; `make requests-bench` in three quartets, one
+client the same to the microsecond and eight inside the spread. A read
+in process moved 1-1.5% either way as the bench's own functions were
+laid out (the server token's reaches nothing this changed, only
+`Database::query`), and nothing below fenec-http changed: the browser
+module is the same to the byte.
 
 **A token is bound to the tenant it names** (`Scope::reaches`,
 `route_tenant`). The policy is the node's, not a tenant's, so `owner =

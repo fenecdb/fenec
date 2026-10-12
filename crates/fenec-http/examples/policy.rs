@@ -112,19 +112,24 @@ fn statement(returning: bool) -> String {
     }
 }
 
-/// The crews a rule reading another collection reads: both couriers led
-/// by the token's subject, so that its rule admits the rows the other
-/// sides' do.
-const CREWS: &str = "create collection crews (courier text, lead text @hash)";
-const CREWED: &str = r#"put crews [{courier: "c1", lead: "c1"}, {courier: "c2", lead: "c1"}]"#;
+/// The crews a rule reading another collection reads, both couriers led by
+/// the token's subject, so that its rule admits the rows the other sides'
+/// do: made after the orders, and only where such a side runs, the other
+/// sides' database the one the build before measured them over.
+fn crewed(db: &mut Database) {
+    for sql in [
+        "create collection crews (courier text, lead text @hash)",
+        r#"put crews [{courier: "c1", lead: "c1"}, {courier: "c2", lead: "c1"}]"#,
+    ] {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+}
 
-/// The orders, every one the courier's.
-fn orders() -> Database {
+/// The orders, every one the courier's, and the crews where `crews`.
+fn orders(crews: bool) -> Database {
     let mut db = Database::new();
     for sql in [
         "create collection orders (courier text, run_at timestamp, n int)".to_string(),
-        CREWS.to_string(),
-        CREWED.to_string(),
         format!(
             "put orders [{}]",
             (0..ROWS)
@@ -134,6 +139,9 @@ fn orders() -> Database {
         ),
     ] {
         db.execute(&fenec_ql::parse_one(&sql).unwrap()).unwrap();
+    }
+    if crews {
+        crewed(&mut db);
     }
     db
 }
@@ -180,7 +188,7 @@ fn engine(rounds: usize, only: &[String]) {
     let sides = sides(only);
     // One database for every side: each turn writes the same store, grown
     // by every side alike.
-    let mut db = orders();
+    let mut db = orders(sides.iter().any(|s| s.2.reaches_out()));
     db.install_plugin(&CheckPlugin).unwrap();
     let stmts: Vec<Statement> = sides
         .iter()
@@ -305,14 +313,15 @@ impl Client {
 fn http(rounds: usize, only: &[String]) {
     let sides = sides(only);
     let mut clients = Vec::new();
-    for (_, access, _, _) in &sides {
+    for (_, access, who, _) in &sides {
         let cfg = fenec_http::Config {
             addr: "127.0.0.1:0".into(),
             token: Some(ROOT.into()),
             access: access.clone(),
             ..fenec_http::Config::default()
         };
-        let server = fenec_http::Server::new(Arc::new(RwLock::new(orders())), cfg);
+        let db = orders(who.reaches_out());
+        let server = fenec_http::Server::new(Arc::new(RwLock::new(db)), cfg);
         let listener = server.bind().unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         std::thread::spawn(move || {
@@ -378,8 +387,9 @@ const READ_SIDES: [(&str, Option<&str>); 4] = [
     ("reach", Some(REACH)),
 ];
 
-/// Orders of two couriers in turn, with what one shows the other.
-fn shared_orders() -> Database {
+/// Orders of two couriers in turn, with what one shows the other, and the
+/// crews where `crews`.
+fn shared_orders(crews: bool) -> Database {
     let mut db = Database::new();
     let rows: Vec<String> = (0..ROWS)
         .map(|i| {
@@ -393,11 +403,12 @@ fn shared_orders() -> Database {
         "create collection orders (courier text, run_at timestamp, n int, customer text, \
          dropoff text)"
             .to_string(),
-        CREWS.to_string(),
-        CREWED.to_string(),
         format!("put orders [{}]", rows.join(", ")),
     ] {
         db.execute(&fenec_ql::parse_one(&sql).unwrap()).unwrap();
+    }
+    if crews {
+        crewed(&mut db);
     }
     db
 }
@@ -429,14 +440,6 @@ fn read_sides(only: &[String]) -> Vec<(&'static str, Option<Arc<Access>>, Who)> 
 fn answered(who: &Who, db: &Database, stmt: &Statement, params: &[Value], out: &mut String) {
     let resp = match who.scope() {
         None => db.query(stmt, params).unwrap(),
-        Some(_) if who.reaches_out() => {
-            let (stmt, bound, mask) = bound_masked(who, db, stmt, params);
-            let mut resp = db.query(&stmt, params).unwrap();
-            if let (Some(m), Some(s)) = (&mask, bound.scope()) {
-                s.shown(m, db, &mut resp);
-            }
-            resp
-        }
         Some(s) => {
             let mut mask = None;
             let stmt = s.rewrite_with(stmt.clone(), params, &mut mask).unwrap();
@@ -453,9 +456,25 @@ fn answered(who: &Who, db: &Database, stmt: &Statement, params: &[Value], out: &
     }
 }
 
+/// [`answered`] for a token whose rules read another collection: bound
+/// under the lock first, as a server binds them. A function of its own, so
+/// that `answered` is the build before's line for line: the other sides'
+/// reads in process move a percent or two with how the bench is laid out.
+fn answered_bound(who: &Who, db: &Database, stmt: &Statement, params: &[Value], out: &mut String) {
+    let (stmt, bound, mask) = bound_masked(who, db, stmt, params);
+    let mut resp = db.query(&stmt, params).unwrap();
+    if let (Some(m), Some(s)) = (&mask, bound.scope()) {
+        s.shown(m, db, &mut resp);
+    }
+    out.clear();
+    if let Response::Rows(rs) = &resp {
+        fenec_core::json::rows_array_into(out, rs);
+    }
+}
+
 fn read_engine(rounds: usize, only: &[String]) {
     let sides = read_sides(only);
-    let db = shared_orders();
+    let db = shared_orders(sides.iter().any(|s| s.2.reaches_out()));
     for (what, sql) in READS {
         let stmt = fenec_ql::parse_one(sql).unwrap();
         let mut times = vec![Vec::new(); sides.len()];
@@ -467,7 +486,11 @@ fn read_engine(rounds: usize, only: &[String]) {
                 let t = Instant::now();
                 for _ in 0..TURN {
                     id = (id + 7) % (ROWS - 25) + 1;
-                    answered(&sides[side].2, &db, &stmt, &[Value::Int(id)], &mut out);
+                    let who = &sides[side].2;
+                    match who.reaches_out() {
+                        false => answered(who, &db, &stmt, &[Value::Int(id)], &mut out),
+                        true => answered_bound(who, &db, &stmt, &[Value::Int(id)], &mut out),
+                    }
                 }
                 times[side].push(t.elapsed().as_nanos() as f64 / TURN as f64);
             }
@@ -490,14 +513,15 @@ fn read_engine(rounds: usize, only: &[String]) {
 fn read_http(rounds: usize, only: &[String]) {
     let sides = read_sides(only);
     let mut clients = Vec::new();
-    for (_, access, _) in &sides {
+    for (_, access, who) in &sides {
         let cfg = fenec_http::Config {
             addr: "127.0.0.1:0".into(),
             token: Some(ROOT.into()),
             access: access.clone(),
             ..fenec_http::Config::default()
         };
-        let server = fenec_http::Server::new(Arc::new(RwLock::new(shared_orders())), cfg);
+        let db = shared_orders(who.reaches_out());
+        let server = fenec_http::Server::new(Arc::new(RwLock::new(db)), cfg);
         let listener = server.bind().unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         std::thread::spawn(move || {
