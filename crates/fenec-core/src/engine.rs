@@ -5979,7 +5979,9 @@ impl Database {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
                         let at = at.min(c.composites.len());
-                        SchemaCell::make_mut(&mut c.schema).composites.insert(at, b.0.clone());
+                        SchemaCell::make_mut(&mut c.schema)
+                            .composites
+                            .insert(at, b.0.clone());
                         c.composites.insert(at, *b);
                     }
                 }
@@ -7104,7 +7106,9 @@ impl Database {
         }
         let c = self.collections.get_mut(collection).unwrap();
         let cid = c.id;
-        SchemaCell::make_mut(&mut c.schema).composites.push(comp.clone());
+        SchemaCell::make_mut(&mut c.schema)
+            .composites
+            .push(comp.clone());
         c.fit_composites();
         // Before the build, which a block that does not land -- or a build
         // that fails -- puts back with it.
@@ -7325,7 +7329,10 @@ impl Database {
         let unique = schema.has_unique();
         // Without a clock -- the browser module handed none -- no row is
         // past its time for a write, as before.
-        let expiry = match (insert || unique).then(|| self.ttl_of(collection)).flatten() {
+        let expiry = match (insert || unique)
+            .then(|| self.ttl_of(collection))
+            .flatten()
+        {
             Some((f, ttl)) => self.now().ok().map(|now| {
                 let cut = now.saturating_sub(ttl.min(i64::MAX as u64) as i64);
                 (schema.field_pos(f).unwrap_or(0), cut)

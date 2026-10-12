@@ -601,7 +601,9 @@ impl Database {
             return Err(super::composite_shared(c, &index, a, b));
         }
         let text = index.keys_text();
-        crate::schema::SchemaCell::make_mut(&mut c.schema).composites.push(index.clone());
+        crate::schema::SchemaCell::make_mut(&mut c.schema)
+            .composites
+            .push(index.clone());
         c.composites.push((index, Derived::new(built)));
         let encoded = c.schema.encode();
         self.wal(REC_ALTER, cid, &encoded)?;

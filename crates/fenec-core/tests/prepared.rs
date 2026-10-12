@@ -401,7 +401,10 @@ fn readers_beside_prepared_blocks_see_each_whole_or_not_at_all() {
     const BLOCKS: i64 = 300;
     let path = tmp("readers");
     let mut db = open_mapped(&path).unwrap();
-    run(&mut db, "create collection b (block int @hash, i int, note text)");
+    run(
+        &mut db,
+        "create collection b (block int @hash, i int, note text)",
+    );
     // Handed over every few blocks, so the readers meet that too.
     db.set_handover(64 << 10);
     let db = Arc::new(RwLock::new(db));
@@ -446,7 +449,13 @@ fn readers_beside_prepared_blocks_see_each_whole_or_not_at_all() {
         let mut good = 0;
         for k in 0..BLOCKS {
             let args: Vec<[Value; 3]> = (0..ROWS)
-                .map(|i| [Value::Int(k), Value::Int(i), Value::Text(format!("n{k}-{i}"))])
+                .map(|i| {
+                    [
+                        Value::Int(k),
+                        Value::Int(i),
+                        Value::Text(format!("n{k}-{i}")),
+                    ]
+                })
                 .collect();
             let mut stmts: Vec<(&Statement, &[Value])> =
                 args.iter().map(|a| (&put, &a[..])).collect();
