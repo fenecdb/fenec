@@ -1383,18 +1383,24 @@ impl Parser {
         Ok(l)
     }
 
-    /// `order`, or `(org, order)`: a name, or names in parentheses.
+    /// `order`, or `(org, order)`: a name, or names in parentheses. One
+    /// call of `ident` for both, which is inlined where it is called.
     fn names(&mut self) -> Result<Vec<String>> {
-        if !matches!(self.peek(), Tok::LParen) {
-            return Ok(vec![self.ident()?]);
-        }
-        self.next();
-        let mut out = vec![self.ident()?];
-        while matches!(self.peek(), Tok::Comma) {
+        let listed = matches!(self.peek(), Tok::LParen);
+        if listed {
             self.next();
-            out.push(self.ident()?);
         }
-        self.expect(Tok::RParen)?;
+        let mut out = Vec::new();
+        loop {
+            out.push(self.ident()?);
+            if !listed || !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        if listed {
+            self.expect(Tok::RParen)?;
+        }
         Ok(out)
     }
 
