@@ -661,7 +661,8 @@ write, the rest taken as passing (`Scope::answerable`) and asked of each
 row as written by `Hook::answering`, which the engine's `returned` calls
 -- a row the token may not read refuses the statement (403), as
 PostgreSQL makes its `SELECT` policies `WITH CHECK` options on an
-`UPDATE ... RETURNING`'s new row "rather than silently dropping rows".
+`UPDATE ... RETURNING`'s new row, an error rather than a row dropped
+unseen.
 ANDed in whole, the read rules judged the row before: a courier, who
 reads the orders they carry, claiming a ready order with `returning *`
 took nothing and was told nothing. `Scope::admits` asks the rules one
