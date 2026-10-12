@@ -1911,8 +1911,19 @@ impl Collection {
     /// document keeping its own value is not a second one. A field without
     /// `@unique` costs the look at its index kind.
     fn unique_clash(&self, doc: &Document) -> Result<()> {
-        let at = |k: &str| crate::json::to_string(doc.at(k).unwrap_or(&Value::Null));
-        match self.unique_holders(doc)?.first() {
+        let holders = self.unique_holders(doc)?;
+        let Some((_, other)) = holders.first() else {
+            return Ok(());
+        };
+        // The value as the row holding it stores it: under `nocase` the
+        // spelling written is not always the one stored, and the message
+        // named `SAMI.lindqvist@...` where the row held `sami.lindqvist@...`.
+        let held = self.store.read(&self.schema, *other)?;
+        let at = |k: &str| {
+            let v = held.as_ref().and_then(|d| d.at(k)).or_else(|| doc.at(k));
+            crate::json::to_string(v.unwrap_or(&Value::Null))
+        };
+        match holders.first() {
             Some((Unique::Field(f), other)) => Err(Error::Duplicate(format!(
                 "`{}.{}` is unique, and document {other} holds {} already",
                 self.schema.name,

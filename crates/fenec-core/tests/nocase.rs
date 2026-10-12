@@ -603,10 +603,38 @@ fn a_unique_nocase_field_refuses_another_spelling() {
         &[Value::Text(shouted.clone())],
     )
     .unwrap_err();
+    // ... and the value as that row holds it, not the spelling written.
+    let stored = fenec_core::json::to_string(&Value::Text(email.clone()));
     assert!(
-        e.to_string().contains(&format!("document {id} holds")),
+        e.to_string()
+            .contains(&format!("document {id} holds {stored} already")),
         "{e}"
     );
+    if email != shouted {
+        let written = fenec_core::json::to_string(&Value::Text(shouted.clone()));
+        assert!(!e.to_string().contains(&written), "{e}");
+    }
+    // A composite's parts as well.
+    let pair = answer(&db, "get users select org, slug order id limit 1", &[]);
+    let (org, slug) = (
+        text(&pair.rows[0].values[0]).to_string(),
+        text(&pair.rows[0].values[1]).to_string(),
+    );
+    let e = exec(
+        &mut db,
+        "put users {email: \"another@x\", org: $1, slug: $2, n: 0}",
+        &[
+            Value::Text(org.to_ascii_uppercase()),
+            Value::Text(slug.to_ascii_uppercase()),
+        ],
+    )
+    .unwrap_err();
+    let parts = format!(
+        "[{}, {}]",
+        fenec_core::json::to_string(&Value::Text(org)),
+        fenec_core::json::to_string(&Value::Text(slug))
+    );
+    assert!(e.to_string().contains(&parts), "{e}");
     let found = answer(
         &db,
         "get users where email = $1",
