@@ -3885,6 +3885,8 @@ before the router starts so no request but the test's meets the node's
 two `setsockopt`s every exchange made, 0.67 us, are gone from a reused
 connection: the write timeout is set at the connect, the read timeout
 only when it changes (a `Fenec-Wait`), kept with the pooled connection.
+`make shard-bench`'s added p50 stayed 23.3 us against main's 23.3, six
+runs each in ABBA turns (23.1-24.8 and 20.0-24.4).
 
 **A schema declared in code is checked at every open, in the engine.**
 Two front ends compile to one description (`fenec_core::declared`,
