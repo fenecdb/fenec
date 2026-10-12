@@ -271,6 +271,9 @@ each row, such as each product's latest reviews.</p>
   <li><b>Prefix the child's options</b> with its name:
     <code>reviews.on</code>, <code>reviews.limit</code>.</li>
   <li><b>Chain levels</b> with a comma: <code>lookup=orders,lines</code>.</li>
+  <li><b>A key over several fields</b> lists a field of each side:
+    <code>lines.on=org,order&amp;lines.parent=org,id</code>, FenecQL's
+    <code>on (org, order) = (org, id)</code>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
