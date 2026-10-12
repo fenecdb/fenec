@@ -185,11 +185,31 @@ struct Target {
 
 /// What asking one tenant came to.
 enum Got {
-    /// The node's answer.
-    Rows(Vec<u8>),
+    /// The node's answer, read for the merge.
+    Rows(Read),
     Failed(Failure),
-    /// Not asked: the query had failed already, or passed a bound.
+    /// Not asked, or not kept: the query had failed already, or passed a
+    /// bound.
     Unasked,
+}
+
+/// A tenant's answer, read on the worker that fetched it, beside the calls
+/// still out: read on the request's thread once every answer was in, 2 000
+/// rows held it 0.4 to 0.7 ms after the last one. Its text, where each row
+/// lies, and what the merge takes of each row.
+struct Read {
+    text: String,
+    rows: Vec<Range<usize>>,
+    took: Took,
+}
+
+enum Took {
+    /// Whether each row holds no member at all.
+    Concat(Vec<bool>),
+    Order(Keyed),
+    /// The columns the rows hold, in the order the first row holds them,
+    /// and each row's values by them.
+    Fold(Vec<(String, Role)>, Vec<Folding>),
 }
 
 struct Failure {
@@ -205,10 +225,24 @@ struct Shared {
     /// The asking stops: a failure without `partial`, or a bound passed.
     stop: AtomicBool,
     bytes: AtomicUsize,
+    rows: AtomicUsize,
     /// The bound passed, in words, where one was.
     over: Mutex<Option<String>>,
     /// Each node's calls: asked, failed, and when the last was answered.
     nodes: Mutex<HashMap<String, (u64, u64, Instant)>>,
+}
+
+impl Shared {
+    fn new() -> Shared {
+        Shared {
+            next: AtomicUsize::new(0),
+            stop: AtomicBool::new(false),
+            bytes: AtomicUsize::new(0),
+            rows: AtomicUsize::new(0),
+            over: Mutex::new(None),
+            nodes: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 /// Whether `req` is a query across tenants: `POST /_shard/query`.
@@ -248,13 +282,7 @@ impl Router {
             .iter()
             .filter_map(|n| trace::remote().map(|r| (n.to_string(), r)))
             .collect();
-        let shared = Shared {
-            next: AtomicUsize::new(0),
-            stop: AtomicBool::new(false),
-            bytes: AtomicUsize::new(0),
-            over: Mutex::new(None),
-            nodes: Mutex::new(HashMap::new()),
-        };
+        let shared = Shared::new();
         let got = self.gather(&targets, &ask, deadline, &shared, &spans);
         let nodes = std::mem::take(&mut *shared.nodes.lock().unwrap_or_else(|e| e.into_inner()));
         for (node, span) in spans {
@@ -281,56 +309,50 @@ impl Router {
             fanning.error(bound.clone());
             return refused(Response::error(413, &bound));
         }
-        let (mut answers, mut failures, mut unasked) = (Vec::new(), Vec::new(), 0usize);
+        let (mut reads, mut failures, mut unasked) = (Vec::new(), Vec::new(), 0usize);
         for (t, g) in targets.iter().zip(got) {
             match g {
-                Got::Rows(body) => answers.push((t.tenant.as_str(), body)),
+                Got::Rows(read) => reads.push((t.tenant.as_str(), read)),
                 Got::Failed(f) => failures.push(f),
                 Got::Unasked => unasked += 1,
             }
         }
         let asked = targets.len();
-        let answer = match failures.is_empty() || ask.partial {
-            true => merged(&ask, limits, answers, &mut failures),
-            false => Ok(None),
-        };
-        let rows = match answer {
-            Err(Refusal(status, why)) => {
-                fanning.error(why.clone());
-                return refused(Response::error(status, &why));
-            }
-            Ok(rows) => rows,
-        };
         let failed = failures.len() as u64;
-        let answered = (asked - failures.len() - unasked) as u64;
+        let answered = reads.len() as u64;
         if trace::recording() {
             fanning.attr("fenec.answered", answered as i64);
             fanning.attr("fenec.failed", failed as i64);
         }
-        let ms = arrived.elapsed().as_millis();
-        let rows = match rows {
-            Some(rows) if failures.is_empty() || ask.partial => rows,
-            _ => {
-                // A tenant failed and no partial answer was asked for: the
-                // query fails, naming every tenant that did, and how many
-                // were never asked once the first had.
-                fanning.error(format!("{failed} tenants failed"));
-                drop(fanning);
-                metrics::fanned(Fanned::Failed, arrived.elapsed(), answered, failed);
-                let first = &failures[0];
-                let mut body = String::from("{\"error\":");
-                let why = format!(
-                    "{failed} of {asked} tenants failed, the first `{}` on `{}`: {} \
-                     (send \"partial\": true for the others' rows)",
-                    first.tenant, first.node, first.why
-                );
-                fenec_core::json::escape_into(&mut body, &why);
-                body.push_str(&format!(",\"tenants\":{asked},\"failed\":"));
-                failures_into(&mut body, &failures);
-                body.push_str(&format!(",\"not_asked\":{unasked},\"ms\":{ms}}}"));
-                return Response::json(status_of(&failures), body);
+        if !failures.is_empty() && !ask.partial {
+            // A tenant failed and no partial answer was asked for: the
+            // query fails, naming every tenant that did, and how many were
+            // never asked once the first had.
+            fanning.error(format!("{failed} tenants failed"));
+            drop(fanning);
+            metrics::fanned(Fanned::Failed, arrived.elapsed(), answered, failed);
+            let first = &failures[0];
+            let mut body = String::from("{\"error\":");
+            let why = format!(
+                "{failed} of {asked} tenants failed, the first `{}` on `{}`: {} \
+                 (send \"partial\": true for the others' rows)",
+                first.tenant, first.node, first.why
+            );
+            fenec_core::json::escape_into(&mut body, &why);
+            body.push_str(&format!(",\"tenants\":{asked},\"failed\":"));
+            failures_into(&mut body, &failures);
+            let ms = arrived.elapsed().as_millis();
+            body.push_str(&format!(",\"not_asked\":{unasked},\"ms\":{ms}}}"));
+            return Response::json(status_of(&failures), body);
+        }
+        let rows = match merged(&ask, &reads) {
+            Ok(rows) => rows,
+            Err(Refusal(status, why)) => {
+                fanning.error(why.clone());
+                return refused(Response::error(status, &why));
             }
         };
+        let ms = arrived.elapsed().as_millis();
         drop(fanning);
         let how = match failures.is_empty() {
             true => Fanned::Done,
@@ -520,7 +542,10 @@ impl Router {
                 }
             };
             let (status, why) = match called {
-                Ok(Some(body)) => return Got::Rows(body),
+                Ok(Some(body)) => {
+                    let max = self.cfg.fanout.max_rows;
+                    return read_answer(ask, max, shared, &t.tenant, &node, body);
+                }
                 Ok(None) => return Got::Unasked,
                 Err(failed) => failed,
             };
@@ -904,66 +929,81 @@ fn read_merge(v: Value) -> std::result::Result<Merge, String> {
 /// A query refused as a whole once the answers are in: its status and why.
 struct Refusal(u16, String);
 
-/// The rows, merged, as a JSON array: `None` where nothing is merged
-/// because the query fails. A tenant whose answer does not fit the merge
-/// -- not rows, not in the order asked, a column the merge does not name
-/// -- joins `failures`, its rows in nothing.
-fn merged(
+/// What a tenant's answer comes to, read where it arrived: its rows read
+/// for the merge; a failure (400) where it does not fit the merge -- not
+/// rows, not in the order asked, a column the merge does not name -- its
+/// rows in nothing; or nothing kept where its rows took those gathered past
+/// their bound, which stops the asking.
+fn read_answer(
     ask: &Ask,
-    limits: &Limits,
-    answers: Vec<(&str, Vec<u8>)>,
-    failures: &mut Vec<Failure>,
-) -> std::result::Result<Option<String>, Refusal> {
-    // Each answer's rows, found where they lie in its text.
-    let mut read: Vec<(&str, String, Vec<Range<usize>>)> = Vec::with_capacity(answers.len());
-    let mut rows = 0usize;
-    for (tenant, body) in answers {
-        let text = match String::from_utf8(body) {
-            Ok(t) => t,
-            Err(_) => {
-                failures.push(failed(tenant, "its answer is not UTF-8"));
-                continue;
-            }
-        };
-        match scan::elements(&text) {
-            Ok(list) => {
-                rows += list.len();
-                if rows > limits.max_rows {
-                    return Err(Refusal(
-                        413,
-                        format!(
-                            "the query gathered more than {} rows from its tenants \
-                             (--fanout-max-rows): narrow it, give each tenant's statement a \
-                             limit, or ask fewer tenants",
-                            limits.max_rows
-                        ),
-                    ));
-                }
-                read.push((tenant, text, list));
-            }
-            Err(_) => failures.push(failed(
-                tenant,
-                "its answer is not a list of rows: a query across tenants merges rows, and \
-                 a facet's counts or a statement's message do not merge",
-            )),
-        }
-    }
-    let out = match &ask.merge {
-        Merge::Concat => concat(&ask.column, &read, failures),
-        Merge::Order { keys, limit } => ordered(&ask.column, keys, *limit, &read, failures),
-        Merge::Fold(fold) => folded(fold, &read, failures)?,
+    max_rows: usize,
+    shared: &Shared,
+    tenant: &str,
+    node: &str,
+    body: Vec<u8>,
+) -> Got {
+    let failed = |why: String| {
+        Got::Failed(Failure {
+            tenant: tenant.to_string(),
+            node: node.to_string(),
+            status: 400,
+            why,
+        })
     };
-    Ok(Some(out))
+    let Ok(text) = String::from_utf8(body) else {
+        return failed("its answer is not UTF-8".into());
+    };
+    let Ok(rows) = scan::elements(&text) else {
+        return failed(
+            "its answer is not a list of rows: a query across tenants merges rows, and a \
+             facet's counts or a statement's message do not merge"
+                .into(),
+        );
+    };
+    let gathered = shared.rows.fetch_add(rows.len(), Ordering::Relaxed) + rows.len();
+    if gathered > max_rows {
+        over(
+            shared,
+            format!(
+                "the query gathered more than {max_rows} rows from its tenants \
+                 (--fanout-max-rows): narrow it, give each tenant's statement a limit, or \
+                 ask fewer tenants"
+            ),
+        );
+        return Got::Unasked;
+    }
+    let took = match &ask.merge {
+        Merge::Concat => members_of(&ask.column, &text, &rows).map(Took::Concat),
+        Merge::Order { keys, .. } => keyed(&ask.column, keys, &text, &rows).map(Took::Order),
+        Merge::Fold(fold) => {
+            let mut columns = Vec::new();
+            let mut folding = Vec::with_capacity(rows.len());
+            let mut each = Ok(());
+            for r in &rows {
+                match fold_row(fold, &text, r.clone(), &mut columns) {
+                    Ok(f) => folding.push(f),
+                    Err(why) => {
+                        each = Err(why);
+                        break;
+                    }
+                }
+            }
+            each.map(|_| Took::Fold(columns, folding))
+        }
+    };
+    match took {
+        Ok(took) => Got::Rows(Read { text, rows, took }),
+        Err(why) => failed(why),
+    }
 }
 
-/// A failure the merge found in a tenant's answer.
-fn failed(tenant: &str, why: &str) -> Failure {
-    Failure {
-        tenant: tenant.to_string(),
-        node: String::new(),
-        status: 400,
-        why: why.to_string(),
-    }
+/// The rows of the tenants that answered, merged, as a JSON array.
+fn merged(ask: &Ask, reads: &[(&str, Read)]) -> std::result::Result<String, Refusal> {
+    Ok(match &ask.merge {
+        Merge::Concat => concat(&ask.column, reads),
+        Merge::Order { keys, limit } => ordered(&ask.column, keys, *limit, reads),
+        Merge::Fold(fold) => folded(fold, reads)?,
+    })
 }
 
 /// Whether each row holds no member at all, each checked to be an object
@@ -1017,27 +1057,19 @@ fn row_into(
     }
 }
 
-fn concat(
-    column: &str,
-    read: &[(&str, String, Vec<Range<usize>>)],
-    failures: &mut Vec<Failure>,
-) -> String {
-    let mut out = String::with_capacity(read.iter().map(|(_, t, _)| t.len() + 64).sum());
+fn concat(column: &str, reads: &[(&str, Read)]) -> String {
+    let mut out = String::with_capacity(reads.iter().map(|(_, r)| r.text.len() + 64).sum());
     out.push('[');
     let mut first = true;
-    for (tenant, text, rows) in read {
-        let members = match members_of(column, text, rows) {
-            Ok(m) => m,
-            Err(why) => {
-                failures.push(failed(tenant, &why));
-                continue;
-            }
+    for (tenant, read) in reads {
+        let Took::Concat(empties) = &read.took else {
+            continue;
         };
-        for (row, empty) in rows.iter().zip(members) {
+        for (row, empty) in read.rows.iter().zip(empties) {
             if !std::mem::take(&mut first) {
                 out.push(',');
             }
-            row_into(&mut out, column, tenant, text, row, empty);
+            row_into(&mut out, column, tenant, &read.text, row, *empty);
         }
     }
     out.push(']');
@@ -1203,16 +1235,16 @@ fn ordered(
     column: &str,
     keys: &[(String, bool)],
     limit: Option<usize>,
-    read: &[(&str, String, Vec<Range<usize>>)],
-    failures: &mut Vec<Failure>,
+    reads: &[(&str, Read)],
 ) -> String {
-    let mut lists: Vec<(usize, Keyed)> = Vec::new();
-    for (i, (tenant, text, rows)) in read.iter().enumerate() {
-        match keyed(column, keys, text, rows) {
-            Ok(k) => lists.push((i, k)),
-            Err(why) => failures.push(failed(tenant, &why)),
-        }
-    }
+    let lists: Vec<(usize, &Keyed)> = reads
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, read))| match &read.took {
+            Took::Order(k) => Some((i, k)),
+            _ => None,
+        })
+        .collect();
     let limit = limit.unwrap_or(usize::MAX);
     let mut pos = vec![0usize; lists.len()];
     let mut heap: Vec<usize> = (0..lists.len())
@@ -1229,17 +1261,18 @@ fn ordered(
     let mut taken = 0;
     while taken < limit {
         let Some(&l) = heap.first() else { break };
-        let (tenant, text, rows) = &read[lists[l].0];
+        let (tenant, read) = &reads[lists[l].0];
         if taken > 0 {
             out.push(',');
         }
+        let empty = lists[l].1[pos[l]].1;
         row_into(
             &mut out,
             column,
             tenant,
-            text,
-            &rows[pos[l]],
-            lists[l].1[pos[l]].1,
+            &read.text,
+            &read.rows[pos[l]],
+            empty,
         );
         taken += 1;
         pos[l] += 1;
@@ -1294,47 +1327,45 @@ enum Slot {
 /// value and text, in the row's order.
 type Folding = Vec<(usize, Value, Range<usize>)>;
 
-fn folded(
-    fold: &Fold,
-    read: &[(&str, String, Vec<Range<usize>>)],
-    failures: &mut Vec<Failure>,
-) -> std::result::Result<String, Refusal> {
+fn folded(fold: &Fold, reads: &[(&str, Read)]) -> std::result::Result<String, Refusal> {
     // The output's columns, in the order the first row holds them.
     let mut columns: Vec<(String, Role)> = Vec::new();
     let mut groups: Vec<(Vec<Value>, Vec<Slot>)> = Vec::new();
     let mut by_key: HashMap<String, usize> = HashMap::new();
-    for (tenant, text, rows) in read {
-        // Read whole before any of it is folded: a tenant found wrong
-        // halfway would otherwise leave its first rows in the sums.
-        let mut taken: Vec<Folding> = Vec::with_capacity(rows.len());
-        let mut why = None;
-        for r in rows {
-            match fold_row(fold, text, r.clone(), &mut columns) {
-                Ok(row) => taken.push(row),
-                Err(w) => {
-                    why = Some(w);
-                    break;
-                }
-            }
-        }
-        if let Some(w) = why {
-            failures.push(failed(tenant, &w));
+    for (_, read) in reads {
+        // Read whole on its worker before any of it is folded: a tenant
+        // found wrong halfway leaves none of its rows in the sums.
+        let Took::Fold(local, taken) = &read.took else {
             continue;
-        }
+        };
+        // Its columns by the output's.
+        let at: Vec<usize> = local
+            .iter()
+            .map(
+                |(name, role)| match columns.iter().position(|(c, _)| c == name) {
+                    Some(c) => c,
+                    None => {
+                        columns.push((name.clone(), *role));
+                        columns.len() - 1
+                    }
+                },
+            )
+            .collect();
+        let text = &read.text;
         for row in taken {
             let mut key = String::new();
             let mut values = Vec::with_capacity(fold.group.len());
             for g in &fold.group {
                 let (_, v, _) = row
                     .iter()
-                    .find(|(c, _, _)| columns[*c].0 == *g)
+                    .find(|(c, _, _)| columns[at[*c]].0 == *g)
                     .expect("a row holds every column the merge names");
                 fenec_core::json::value_into(&mut key, v);
                 key.push('\0');
                 values.push(v.clone());
             }
-            let at = match by_key.get(&key) {
-                Some(&at) => at,
+            let group = match by_key.get(&key) {
+                Some(&g) => g,
                 None => {
                     let slots = columns
                         .iter()
@@ -1355,9 +1386,10 @@ fn folded(
                     groups.len() - 1
                 }
             };
-            let slots = &mut groups[at].1;
+            let slots = &mut groups[group].1;
             for (c, v, r) in row {
-                let raw = &text[r];
+                let c = at[*c];
+                let raw = &text[r.clone()];
                 match &mut slots[c] {
                     Slot::Key(k) => {
                         if k.is_empty() {
@@ -1372,7 +1404,7 @@ fn folded(
                     } => match v {
                         Value::Int(n) => {
                             *any = true;
-                            *ints = ints.checked_add(n).ok_or_else(|| {
+                            *ints = ints.checked_add(*n).ok_or_else(|| {
                                 Refusal(
                                     400,
                                     format!(
@@ -1391,18 +1423,18 @@ fn folded(
                     },
                     Slot::Least(best) => {
                         if !matches!(v, Value::Null)
-                            && best.as_ref().is_none_or(|(b, _)| cmp(&v, b) == Order::Less)
+                            && best.as_ref().is_none_or(|(b, _)| cmp(v, b) == Order::Less)
                         {
-                            *best = Some((v, raw.to_string()));
+                            *best = Some((v.clone(), raw.to_string()));
                         }
                     }
                     Slot::Most(best) => {
                         if !matches!(v, Value::Null)
                             && best
                                 .as_ref()
-                                .is_none_or(|(b, _)| cmp(&v, b) == Order::Greater)
+                                .is_none_or(|(b, _)| cmp(v, b) == Order::Greater)
                         {
-                            *best = Some((v, raw.to_string()));
+                            *best = Some((v.clone(), raw.to_string()));
                         }
                     }
                 }
@@ -1678,6 +1710,7 @@ mod scan {
     }
 
     /// The members of the object `range` holds, their keys decoded.
+    #[cfg(test)]
     pub fn members(text: &str, range: Range<usize>) -> Result<Members, String> {
         let mut out = Vec::new();
         each(text, range, &mut |k, v| {
@@ -1753,7 +1786,7 @@ mod scan {
             assert_eq!(m[0].0, "a");
             assert_eq!(&t[m[0].1.clone()], r#"[1,{"c":"\"]"}]"#);
             assert!(members(t, rows[2].clone()).unwrap().is_empty());
-            // A key with an escape in it is decoded: `e` is an `e`.
+            // A key holding an escape is decoded.
             let escaped = format!("{{\"t{}u0065nant\":2}}", '\\');
             let k = members(&escaped, 0..escaped.len()).unwrap();
             assert_eq!(k[0].0, "tenant");
@@ -1828,11 +1861,19 @@ mod tests {
         read_ask(body.as_bytes(), &Limits::default()).unwrap()
     }
 
-    fn read(answers: &[(&'static str, &str)]) -> Vec<(&'static str, String, Vec<Range<usize>>)> {
-        answers
-            .iter()
-            .map(|(t, a)| (*t, a.to_string(), scan::elements(a).unwrap()))
-            .collect()
+    /// The answers as the workers read them: those that fit the merge, and
+    /// the failures of those that do not.
+    fn read<'a>(a: &Ask, answers: &[(&'a str, &str)]) -> (Vec<(&'a str, Read)>, Vec<Failure>) {
+        let shared = Shared::new();
+        let (mut reads, mut failures) = (Vec::new(), Vec::new());
+        for (t, body) in answers {
+            match read_answer(a, usize::MAX, &shared, t, "n1", body.as_bytes().to_vec()) {
+                Got::Rows(r) => reads.push((*t, r)),
+                Got::Failed(f) => failures.push(f),
+                Got::Unasked => panic!("no bound here"),
+            }
+        }
+        (reads, failures)
     }
 
     #[test]
@@ -1841,31 +1882,43 @@ mod tests {
         let Merge::Order { keys, limit } = &a.merge else {
             panic!()
         };
-        let r = read(&[
-            ("acme", r#"[{"id":4,"at":9},{"id":1,"at":5}]"#),
-            (
-                "beta",
-                r#"[{"id":2,"at":9},{"id":3,"at":7},{"id":9,"at":1}]"#,
-            ),
-            ("gamma", "[]"),
-        ]);
-        let mut f = Vec::new();
-        let out = ordered("tenant", keys, *limit, &r, &mut f);
+        let (r, f) = read(
+            &a,
+            &[
+                ("acme", r#"[{"id":4,"at":9},{"id":1,"at":5}]"#),
+                (
+                    "beta",
+                    r#"[{"id":2,"at":9},{"id":3,"at":7},{"id":9,"at":1}]"#,
+                ),
+                ("gamma", "[]"),
+            ],
+        );
         assert!(f.is_empty());
+        let out = ordered("tenant", keys, *limit, &r);
         assert_eq!(
             out,
             r#"[{"tenant":"beta","id":2,"at":9},{"tenant":"acme","id":4,"at":9},{"tenant":"beta","id":3,"at":7}]"#
         );
         // A tenant out of order is named, and none of its rows merged.
-        let r = read(&[
-            ("acme", r#"[{"id":1,"at":1},{"id":2,"at":5}]"#),
-            ("beta", r#"[{"id":3,"at":2}]"#),
-        ]);
-        let out = ordered("tenant", keys, None, &r, &mut f);
+        let (r, f) = read(
+            &a,
+            &[
+                ("acme", r#"[{"id":1,"at":1},{"id":2,"at":5}]"#),
+                ("beta", r#"[{"id":3,"at":2}]"#),
+            ],
+        );
+        let out = ordered("tenant", keys, None, &r);
         assert_eq!(out, r#"[{"tenant":"beta","id":3,"at":2}]"#);
-        assert_eq!(f[0].tenant, "acme");
+        assert_eq!((f[0].tenant.as_str(), f[0].status), ("acme", 400));
         assert!(
             f[0].why.contains("not in the merge's order"),
+            "{}",
+            f[0].why
+        );
+        // So is one whose rows hold a column by the tenant's column's name.
+        let (_, f) = read(&a, &[("acme", r#"[{"id":1,"at":1,"tenant":"x"}]"#)]);
+        assert!(
+            f[0].why.contains("`tenant` column of their own"),
             "{}",
             f[0].why
         );
@@ -1877,49 +1930,57 @@ mod tests {
         let Merge::Fold(fold) = &a.merge else {
             panic!()
         };
-        let r = read(&[
-            (
-                "acme",
-                r#"[{"day":"2026-10-01T00:00:00Z","n":2,"total":1.5,"last":"2026-10-01T09:00:00Z"},
-                    {"day":"2026-10-02T00:00:00Z","n":1,"total":null,"last":"2026-10-02T00:00:00.250Z"}]"#,
-            ),
-            (
-                "beta",
-                r#"[{"day":"2026-10-02T00:00:00Z","n":4,"total":2,"last":"2026-10-02T00:00:00Z"}]"#,
-            ),
-        ]);
-        let mut f = Vec::new();
-        let out = folded(fold, &r, &mut f).ok().unwrap();
+        let (r, f) = read(
+            &a,
+            &[
+                (
+                    "acme",
+                    r#"[{"day":"2026-10-01T00:00:00Z","n":2,"total":1.5,"last":"2026-10-01T09:00:00Z"},
+                        {"day":"2026-10-02T00:00:00Z","n":1,"total":null,"last":"2026-10-02T00:00:00.250Z"}]"#,
+                ),
+                (
+                    "beta",
+                    r#"[{"n":4,"day":"2026-10-02T00:00:00Z","last":"2026-10-02T00:00:00Z","total":2}]"#,
+                ),
+            ],
+        );
         assert!(f.is_empty());
+        // beta's columns come in another order, and are matched by name.
+        let out = folded(fold, &r).ok().unwrap();
         assert_eq!(
             out,
             r#"[{"day":"2026-10-01T00:00:00Z","n":2,"total":1.5,"last":"2026-10-01T09:00:00Z"},{"day":"2026-10-02T00:00:00Z","n":5,"total":2,"last":"2026-10-02T00:00:00.250Z"}]"#
         );
         // A column the merge does not name fails its tenant, whose rows
         // stay out of every sum.
-        let r = read(&[
-            (
-                "acme",
-                r#"[{"day":1,"n":1,"total":1,"last":1},{"day":1,"n":1,"total":1,"last":1,"x":0}]"#,
-            ),
-            ("beta", r#"[{"day":1,"n":2,"total":0,"last":3}]"#),
-        ]);
-        let out = folded(fold, &r, &mut f).ok().unwrap();
+        let (r, f) = read(
+            &a,
+            &[
+                (
+                    "acme",
+                    r#"[{"day":1,"n":1,"total":1,"last":1},{"day":1,"n":1,"total":1,"last":1,"x":0}]"#,
+                ),
+                ("beta", r#"[{"day":1,"n":2,"total":0,"last":3}]"#),
+            ],
+        );
+        let out = folded(fold, &r).ok().unwrap();
         assert_eq!(out, r#"[{"day":1,"n":2,"total":0,"last":3}]"#);
         assert_eq!(f[0].tenant, "acme");
-        let too_much = read(&[
-            ("a", r#"[{"n":9223372036854775807}]"#),
-            ("b", r#"[{"n":1}]"#),
-        ]);
         let just = ask(r#"{"sum":["n"]}"#);
         let Merge::Fold(sum) = &just.merge else {
             panic!()
         };
-        assert!(folded(sum, &too_much, &mut Vec::new()).is_err());
-        assert_eq!(
-            folded(sum, &[], &mut Vec::new()).ok().unwrap(),
-            r#"[{"n":null}]"#
+        let (too_much, _) = read(
+            &just,
+            &[
+                ("a", r#"[{"n":9223372036854775807}]"#),
+                ("b", r#"[{"n":1}]"#),
+            ],
         );
+        assert!(folded(sum, &too_much).is_err());
+        assert_eq!(folded(sum, &[]).ok().unwrap(), r#"[{"n":null}]"#);
+        let (_, f) = read(&just, &[("a", r#"[{"n":"seven"}]"#)]);
+        assert!(f[0].why.contains("no number"), "{}", f[0].why);
     }
 
     #[test]
