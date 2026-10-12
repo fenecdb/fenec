@@ -849,9 +849,11 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
     // it cannot answer.
     let transition = filter.as_ref().is_some_and(names_new);
     if transition && ops != UPDATE {
-        return Err("a rule naming `new.` judges an update -- the row before it and the row it \
+        return Err(
+            "a rule naming `new.` judges an update -- the row before it and the row it \
                     leaves -- and grants `update` alone"
-            .into());
+                .into(),
+        );
     }
     let before = match (transition, &filter) {
         (true, Some(f)) => relaxed(f, &|name| name.starts_with(NEW)),
@@ -1508,7 +1510,10 @@ impl Scope {
             if r.transition {
                 // `new.` reads the row after, a bare name the row before.
                 let pair = |f: &Expr| eval(f, &mut Pair(old, doc, schema), &ctx);
-                if r.filter.as_ref().map_or(Ok(true), |f| pair(f).map(|v| truthy(&v)))? {
+                if r.filter
+                    .as_ref()
+                    .map_or(Ok(true), |f| pair(f).map(|v| truthy(&v)))?
+                {
                     return Ok(());
                 }
                 continue;
@@ -2019,6 +2024,119 @@ mod tests {
             .unwrap();
         assert!(admin.writable("secrets", DELETE).is_ok());
         assert!(admin.writable("journal", DELETE).is_err());
+    }
+
+    /// What a transition asks of the row before, written out.
+    #[test]
+    fn a_transition_picks_by_what_the_row_before_can_answer() {
+        let before = |filter: &str| {
+            let r = rule(&format!("orders update where {filter}")).unwrap();
+            assert!(r.transition, "{filter}");
+            r.before.map(|e| format!("{e:?}"))
+        };
+        let get = |filter: &str| {
+            let Statement::Select(s) =
+                fenec_ql::parse_one(&format!("get _ where {filter}")).unwrap()
+            else {
+                unreachable!()
+            };
+            Some(format!("{:?}", s.filter.unwrap()))
+        };
+        assert_eq!(
+            before(r#"status = "ready" and new.status = "cancelled""#),
+            get(r#"status = "ready""#)
+        );
+        assert_eq!(
+            before(r#"(status = "a" and new.status = "b") or (status = "c" and new.status = "d")"#),
+            get(r#"status = "a" or status = "c""#)
+        );
+        assert_eq!(
+            before(r#"not (status = "a" or new.status = "b") and owner = "u""#),
+            get(r#"not (status = "a") and owner = "u""#)
+        );
+        // Nothing of the row before asked: every row.
+        assert_eq!(before(r#"new.x = 1 or owner = "u""#), None);
+        assert_eq!(before(r#"new.status = "x""#), None);
+        assert_eq!(before(r#"not (new.status = "x")"#), None);
+        // A term reading both rows is the pair's.
+        assert_eq!(before("new.n = n + 1 and run_at <= 5"), get("run_at <= 5"));
+        // A rule naming no `new.` is no transition.
+        assert!(
+            !rule(r#"orders update where status = "new.x""#)
+                .unwrap()
+                .transition
+        );
+    }
+
+    /// A row the pair admits is never left out by what the row before
+    /// answers: every filter of up to three levels over two terms of the
+    /// row before, two of the row after and one of both, against every
+    /// assignment of 0, 1 and null to the four fields.
+    #[test]
+    fn what_the_row_before_answers_admits_every_row_the_pair_does() {
+        struct Row([Value; 4]);
+        impl RowAccess for Row {
+            fn id(&self) -> DocId {
+                1
+            }
+            fn field(&mut self, name: &str) -> Result<Value> {
+                let at = ["a", "b", "new.n", "new.m"].iter().position(|f| *f == name);
+                Ok(self.0[at.unwrap()].clone())
+            }
+        }
+        let terms: Vec<Expr> = ["a = 1", "b = 1", "new.n = 1", "new.m = 1", "a = new.m"]
+            .iter()
+            .map(|t| {
+                let Statement::Select(s) =
+                    fenec_ql::parse_one(&format!("get _ where {t}")).unwrap()
+                else {
+                    unreachable!()
+                };
+                s.filter.unwrap()
+            })
+            .collect();
+        let not = |e: &Expr| Expr::Not(Box::new(e.clone()));
+        let mut one: Vec<Expr> = terms.iter().cloned().collect();
+        one.extend(terms.iter().map(not));
+        let mut two = Vec::new();
+        for x in &one {
+            for y in &one {
+                two.push(Expr::And(Box::new(x.clone()), Box::new(y.clone())));
+                two.push(Expr::Or(Box::new(x.clone()), Box::new(y.clone())));
+            }
+        }
+        let negated: Vec<Expr> = two.iter().map(not).collect();
+        two.extend(negated);
+        let mut every = one.clone();
+        every.extend(two.iter().cloned());
+        for x in &two {
+            for y in &terms {
+                every.push(Expr::And(Box::new(x.clone()), Box::new(y.clone())));
+                every.push(Expr::Or(Box::new(y.clone()), Box::new(x.clone())));
+            }
+        }
+        let registry = Registry::with_builtins();
+        let ctx = EvalCtx {
+            params: &[],
+            registry: &registry,
+            clock: None,
+        };
+        let values = [Value::Int(0), Value::Int(1), Value::Null];
+        for e in &every {
+            let loose = relaxed(e, &|name| name.starts_with(NEW));
+            for k in 0..81 {
+                let v = |i: u32| values[(k / 3usize.pow(i)) % 3].clone();
+                let mut row = Row([v(0), v(1), v(2), v(3)]);
+                if !truthy(&eval(e, &mut row, &ctx).unwrap()) {
+                    continue;
+                }
+                let admitted = match &loose {
+                    None => true,
+                    Some(l) => truthy(&eval(l, &mut row, &ctx).unwrap()),
+                };
+                assert!(admitted, "{e:?} as {loose:?} over {:?}", row.0);
+            }
+        }
     }
 
     /// `in $jwt.rooms` takes a list claim's values, and a token listing
