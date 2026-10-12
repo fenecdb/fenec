@@ -43,8 +43,9 @@
 //! **One held request looks for every group.** Each head woken to look
 //! for itself, an order placed beside a thousand couriers' claims, each a
 //! group, woke a thousand threads, each taking the mutex, the read lock
-//! and its whole pick in turn: 19 ms from the put to the nearest courier,
-//! and 165 ms of the server's CPU an order. So the looks are one held
+//! and its whole pick in turn: 20 ms from the put to the nearest courier,
+//! and 175 ms of the server's CPU an order -- 1.7 and 3.2 ms with the two
+//! below (`make queue-bench`'s `held nearest`). So the looks are one held
 //! request's -- whichever waits when none looks, until it leaves for its
 //! run or its answer and hands them to another ([`resign`]) -- made for
 //! every group a write, a moment or a run's end left to look, under one

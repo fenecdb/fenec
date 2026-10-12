@@ -1943,6 +1943,71 @@ km further and two runs an order (`held nearest`, in turns) -- the
 price every courier's look, 2-2.8, 14-17 and 160-168 ms of the server's
 CPU an order.
 
+**One held request looks for every group, and a group that found
+nothing looks among the rows written since** (`waits::look_all`,
+`Known`; `Database::written_since`, `passing_among`, `picked_among` in
+`engine/wake.rs`). Each head woken to look for itself, an order placed
+beside 1 000 couriers' claims woke 1 000 threads, each taking the mutex,
+the read lock and its whole pick -- 80-86 us a claim in process, the
+point index walked past 2 000 leased orders -- 20-21 ms from the put and
+174-179 ms of the server's CPU an order (`held nearest`, in turns). Now
+the first held request to wait while none does is the leader
+(`State::leader`): it takes every group with a look to make (`jobs`:
+told to, its moment come, a write past its gap), looks for each under one
+read lock -- let go each `LOOK_HOLD` (2 ms), so a writer waits out a part
+-- records the bids and settles once, and sleeps to the next moment, gap
+end or rate's pause (`deadline`); a head is woken only when its group's
+bid won or its own wait ends, and the leader hands the looks on as it
+leaves (`resign`, to any request waiting but a head about to run). A
+write, a release, a join that brings a moment sooner or a pause tells it
+(`kick`), a group in its gap only at the first write in it: told of each,
+a claim held beside a busy queue would wake it at every write. It asks a
+timed wait for two thirds of the way (`asked_for`): macOS runs one late
+by half again, 3 ms took 4.5 every time, and a delayed job went from 0.2
+ms after its time to 1.3 at the median, 29 at p99, until it did. A look
+knows what its group's one test passes (`Known`: no row after a whole
+pick that found none, every row a look among rows found, up to `AMONG`)
+at its change, its writes' epoch and its time, and until the test's next
+moment (`wakes_at`, each index step asked once a batch, `Moments`) no
+row starts or stops passing but by a write; so the next look tests those
+rows and the ring's rows written since alone, as a scan tests a row
+(`Filter`, the time folded as `answered` folds it) and in its order
+(`order_ids_by`, `order_ids`; one row needs none), the rows a filter
+passes found once for every group of it (`Passed`, four filters a
+batch). The whole pick runs where that cannot be shown the same: a ring
+that no longer reaches back, a schema mark, a load, a compact or a
+maintenance (`epoch`, moved by `wrote(None)`), a collection made again
+(`cid`), more than 32 rows, an inner `get`, `@ttl` or `expired()`, a
+time in the order, two tests, the clock set back, a moment come, an
+error (the whole pick's to meet). A test holds it
+(`waits::tests::a_look_among_the_rows_written_picks_as_the_whole_pick`)
+over 3 000 generated waves -- points, radii, kinds, priorities, `or`s,
+orders by distance, a field, an expression and two keys, ties of each,
+couriers' tokens' rules, orders placed, moved and cancelled, rounds of
+winners taking theirs, the time past moments and back, bursts past 32,
+alters, compacts, inner `get`s -- to the whole pick's row and rank, what it then knows to every row the
+test passes in the test's order, and each row's winner to the whole
+picks' arbiter's: 35 000 looks among rows beside 10 300 whole picks, two
+mutations of it (the known rows left out, the moment ignored) each
+failing within two seeds. One order to couriers each claiming the
+nearest: 0.18, 0.31-0.32 and 1.67-1.68 ms from the put at 10, 100 and
+1 000 against 0.27, 1.42-1.52 and 20.0-20.7, the server's CPU an order
+0.2, 0.4-0.5 and 3.1-3.2 ms against 1.2, 13.4-16.8 and 174-179; a look
+among rows 1.1 us in process, 2.1 before a filter's rows were shared and
+one row went unordered. One job to claims of their own (`held
+contested`): 0.30-0.39, 0.75-0.80 and 2.4 ms against 0.38-0.49,
+0.86-0.91 and 9.9-12.5, the CPU 0.7-0.9, 1.8-2.3 and 5.9 ms against
+1.9-2.3, 12.3-13.2 and 110-126, at 29, 298 and 2 540 looks a job
+against 27, 205 and 1 290-1 470: a claim behind the winner looks again at
+once, and again after the ack, each among rows. A line of one claim is
+served as before -- a job to one of eight 0.31-0.34 ms either way; 16
+busy workers beside 16 claims 149 000-167 000 jobs a second against
+146 000, the claims looking 670-830 times a second against 770 -- a put
+of another collection beside 150 claims 23 us either way, a delayed job
+p99 0.0 ms after its time against 1.5-2.2, and a thousand held claims
+use no CPU and 46 KB each against 63, their threads no longer each
+running a pick.
+
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
 before refuses the file rather than open it as a plain hash and take the
