@@ -20,6 +20,7 @@
 //   {"$inc": n}                                           inc(n), a value
 //   {"$expr": [text, param, ...]}                         expr(), a value or a column
 //   {"$bucket": [field, interval]}                        bucket(field, interval)
+//   {"$bucket": [field, interval, zone]}                  bucket(field, interval, zone)
 //   {"$countDistinct": field}                             countDistinct(field)
 //   {"$distance": [field, [lon, lat]]}                    distance(field, point)
 //   {"$first": [field]}, {"$first": [field, by]}          first(field [, by]); "$last" too
@@ -336,6 +337,8 @@ c('one-minute bars', ticks, ['select', { $as: [{ $bucket: ['at', '1m'] }, 'minut
 c('first and last without by, as written', ticks, ['select', 'first(px)', 'LAST(px)', { $first: ['meta.px'] }], Q);
 c('vwap: an expression over aggregates', ticks, ['select', 'sym', { $as: [{ $expr: ['sum(px * qty) / sum(qty)'] }, 'vwap'] }], ['group', 'sym'], ['order', 'vwap', 'desc'], Q);
 c('distinct users an hour', ['from', 'events'], ['select', { $as: [{ $bucket: ['at', '1h'] }, 'hour'] }, { $countDistinct: 'user' }], ['where', 'at', '>=', { $date: '2026-09-19T00:00:00.000Z' }], ['group', 'hour'], ['order', 'count(distinct user)', 'desc'], Q);
+c('a day by a zone\'s clock, the zone a parameter', ['from', 'orders'], ['select', { $as: [{ $bucket: ['at', '1d', 'Europe/Istanbul'] }, 'day'] }, 'count(*)'], ['where', 'status', 'done'], ['group', 'day'], ['order', 'day'], Q);
+c('a bucket\'s zone is a name or an offset', ['from', 'orders'], ['select', { $as: [{ $bucket: ['at', '1d', ''] }, 'day'] }, 'count(*)'], ['group', 'day'], Q);
 c('group by several keys and an expression', ['from', 'events'], ['select', 'name', 'country', 'count(*)'], ['group', 'name', 'country', { $bucket: ['at', '1d'] }], Q);
 c('group by a list of keys', ['from', 'events'], ['select', 'name', 'count(*)'], ['group', ['name', 'meta.plan']], Q);
 c('an expression in group takes its values bound', ['from', 'events'], ['select', 'count(*)'], ['where', 'name', 'buy'], ['group', { $expr: ['coalesce(country, ?)', 'none'] }], Q);

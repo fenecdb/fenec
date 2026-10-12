@@ -364,19 +364,28 @@ export function expr(sql, ...params) {
 const INTERVAL = /^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$/;
 
 /**
- * `bucket(field, interval)`: the start of the interval a timestamp falls
- * in -- `'15m'`, `'1h'`, `'1d'`, `'1w'` (from a Monday), `'1mo'`, `'1y'`,
- * in UTC -- for a select list or a group:
+ * `bucket(field, interval [, zone])`: the start of the interval a timestamp
+ * falls in -- `'15m'`, `'1h'`, `'1d'`, `'1w'` (from a Monday), `'1mo'`,
+ * `'1y'`, in UTC -- for a select list or a group:
  *
  *   from('ticks').select(bucket('at', '1m').as('minute'), 'count(*)').group('minute')
+ *
+ * Given a zone -- an IANA name, `'Europe/Istanbul'`, or an offset,
+ * `'+03:00'` -- by its clock: a day from local midnight, 23 or 25 hours
+ * where it changes to or from daylight time. It goes as a parameter, so a
+ * page passes its own: `Intl.DateTimeFormat().resolvedOptions().timeZone`.
  */
-export function bucket(field, interval) {
+export function bucket(field, interval, zone) {
   if (typeof interval !== 'string' || !INTERVAL.test(interval)) {
     throw new FenecError(
       `bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': ${JSON.stringify(interval)}`,
     );
   }
-  return new Computed(`bucket(${path(field)}, ${interval})`, []);
+  if (zone === undefined) return new Computed(`bucket(${path(field)}, ${interval})`, []);
+  if (typeof zone !== 'string' || zone === '') {
+    throw new FenecError(`bucket() takes a zone's name, such as 'Europe/Istanbul', or an offset, such as '+03:00': ${JSON.stringify(zone)}`);
+  }
+  return new Computed(`bucket(${path(field)}, ${interval}, ?)`, [zone]);
 }
 
 /**

@@ -475,10 +475,12 @@ export interface Named<N extends string> extends Expression {
 export type Interval = `${number}${'ms' | 's' | 'm' | 'h' | 'd' | 'w' | 'mo' | 'y'}`;
 
 /**
- * `bucket(field, interval)`: the start of the interval a timestamp falls
- * in, in UTC -- weeks from a Monday, months and years by the calendar.
+ * `bucket(field, interval [, zone])`: the start of the interval a timestamp
+ * falls in, in UTC -- weeks from a Monday, months and years by the
+ * calendar -- or by a zone's clock: an IANA name, `'Europe/Istanbul'`, or
+ * an offset, `'+03:00'`, bound as a parameter.
  */
-export function bucket(field: string, interval: Interval): Expression;
+export function bucket(field: string, interval: Interval, zone?: string): Expression;
 
 /** `count(distinct field)`: how many distinct values the rows hold. */
 export function countDistinct(field: string): Expression;
