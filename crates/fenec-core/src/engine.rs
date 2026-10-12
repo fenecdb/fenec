@@ -2802,11 +2802,14 @@ impl Step<'_> {
         }
     }
 
-    /// [`Step::any`] for a row of a level above that answered groups.
-    fn any_of(&self, row: &[Value], mut pred: impl FnMut(DocId) -> Result<bool>) -> Result<bool> {
+    /// [`Step::any`] for a row of a level above that answered groups. The
+    /// test by reference and out of line: its two callers each held a copy,
+    /// 0.8 KB of the browser module.
+    #[inline(never)]
+    fn any_of(&self, row: &[Value], pred: &mut dyn FnMut(DocId) -> Result<bool>) -> Result<bool> {
         match &self.probe {
             Probe::Tuple(t) => match t.prefix_of(row) {
-                Some(k) => t.any(self.child, &k, &mut pred),
+                Some(k) => t.any(self.child, &k, pred),
                 None => Ok(false),
             },
             p => p.any(self.child, &column(row, self.parent_pos), pred),

@@ -1226,7 +1226,7 @@ impl Database {
         };
         let mut keep = |row: &[Value]| -> Result<bool> {
             let steps = steps.as_deref().unwrap_or_default();
-            steps[0].any_of(row, |cid| survives(steps, 0, cid, &ctx))
+            steps[0].any_of(row, &mut |cid| survives(steps, 0, cid, &ctx))
         };
         let required = steps.as_ref().is_some_and(|s| s[0].l.required);
         let keep: Keep = match required {
@@ -1299,7 +1299,7 @@ impl Database {
         let below = steps.get(depth + 1).filter(|s| s.l.required);
         let mut keep = |row: &[Value]| -> Result<bool> {
             match below {
-                Some(s) => s.any_of(row, |cid| survives(steps, depth + 1, cid, ctx)),
+                Some(s) => s.any_of(row, &mut |cid| survives(steps, depth + 1, cid, ctx)),
                 None => Ok(true),
             }
         };
