@@ -259,6 +259,16 @@ c('a distance needs a comparison', places, ['where', { loc: { distance: { from: 
 c('a distance field is a field', places, ['select', { $distance: ['loc; del places', [1, 2]] }], Q);
 c('match', docs, ['match', 'body', 'business trip'], ['limit', 10], Q);
 c('match with a filter', docs, ['select', 'title'], ['where', 'year', '>=', 2023], ['match', 'body', 'rust'], Q);
+c('match fuzzy', docs, ['match', 'body', 'databse', { fuzzy: true }], ['limit', 10], Q);
+c('match fuzzy of one edit', docs, ['match', 'body', 'databse', { fuzzy: 1 }], Q);
+c('match prefix', docs, ['match', 'body', 'datab', { prefix: true }], ['limit', 10], Q);
+c('match fuzzy and prefix', docs, ['select', 'title'], ['highlight', 'body'], ['match', 'body', 'datbas', { fuzzy: 2, prefix: true }], ['limit', 5], Q);
+c('match fuzzy and prefix off write nothing', docs, ['match', 'body', 'x', { fuzzy: false, prefix: false }], Q);
+c('match fuzzy of no edit', docs, ['match', 'body', 'x', { fuzzy: 0 }], Q);
+c('fuzzy past two edits is refused', docs, ['match', 'body', 'x', { fuzzy: 3 }], Q);
+c('fuzzy of negative edits is refused', docs, ['match', 'body', 'x', { fuzzy: -1 }], Q);
+c('fuzzy is true, false or a number of edits', docs, ['match', 'body', 'x', { fuzzy: 'yes' }], Q);
+c('prefix is true or false', docs, ['match', 'body', 'x', { prefix: 1 }], Q);
 c('match and near need fuse', docs, ['match', 'body', 'x'], ['near', 'embed', [1]], Q);
 c('fuse ranks by match and near', docs, ['match', 'body', 'rust wasm'], ['near', 'embed', [1, 0, 0]], ['fuse'], ['limit', 10], Q);
 c('fuse with k and candidates', docs, ['where', 'lang', 'en'], ['match', 'body', 'rust'], ['near', 'embed', [1, 0, 0]], ['fuse', { k: 20, candidates: 50 }], ['limit', 10], Q);

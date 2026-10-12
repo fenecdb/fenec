@@ -777,8 +777,17 @@ export declare class Query<
     opts?: { ef?: number; exact?: boolean },
   ): Query<F, P & { _score: number }, L, Rel, At, Fa>;
 
-  /** Full-text search over a `@text` index; `_score` is added to the result. */
-  match(field: TextKey<F>, query: string): Query<F, P & { _score: number }, L, Rel, At, Fa>;
+  /**
+   * Full-text search over a `@text` index; `_score` is added to the result.
+   * `fuzzy: true` matches each word within the edits its length allows
+   * (none under 5 characters, one up to 8, two from 9), `fuzzy: 1` one at
+   * most; `prefix: true` matches the last word as the start of a word too.
+   */
+  match(
+    field: TextKey<F>,
+    query: string,
+    opts?: { fuzzy?: boolean | 0 | 1 | 2; prefix?: boolean },
+  ): Query<F, P & { _score: number }, L, Rel, At, Fa>;
 
   /**
    * With both `match` and `near`: ranks by both. Each side takes its own

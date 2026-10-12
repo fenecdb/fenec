@@ -92,7 +92,7 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
       ('near', _) =>
         q.near(a[0] as String, value(a[1]), ef: opt(a, 2, 'ef') as int?, exact: opt(a, 2, 'exact') as bool? ?? false),
       ('rerank', _) => q.rerank(a[0] as String, value(a[1]), candidates: opt(a, 2, 'candidates') as int?),
-      ('match', _) => q.match(a[0] as String, a[1] as String),
+      ('match', _) => q.match(a[0] as String, a[1] as String, fuzzy: opt(a, 2, 'fuzzy'), prefix: opt(a, 2, 'prefix')),
       ('fuse', _) => q.fuse(k: opt(a, 0, 'k') as int?, candidates: opt(a, 0, 'candidates') as int?),
       ('highlight', _) => q.highlight(a[0] as String, pre: opt(a, 1, 'pre'), post: opt(a, 1, 'post')),
       ('snippet', _) => q.snippet(a[0] as String, a[1] as int,

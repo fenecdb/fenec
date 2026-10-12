@@ -765,6 +765,8 @@ type Opt func(*opts)
 type opts struct {
 	ef, k, candidates, limit, offset *int
 	exact, required, all, ifAbsent   bool
+	fuzzy                            *int
+	prefix                           bool
 	collate                          *string
 	on, parentKey                    []string
 	parentSet                        bool
@@ -815,6 +817,13 @@ func Required() Opt           { return func(o *opts) { o.required = true } }
 func Limit(n int) Opt         { return func(o *opts) { o.limit = intp(n) } }
 func Offset(n int) Opt        { return func(o *opts) { o.offset = intp(n) } }
 func Top(n int) Opt           { return func(o *opts) { o.top = intp(n) } }
+
+// Fuzzy is a Match's `fuzzy N`: each word within N edits of a word of the
+// index at most, 0 to 2, and within what its length allows.
+func Fuzzy(n int) Opt { return func(o *opts) { o.fuzzy = intp(n) } }
+
+// Prefix is a Match's `prefix`: the last word matches the words it begins.
+func Prefix() Opt { return func(o *opts) { o.prefix = true } }
 
 // On names a Lookup's child field, or one for each part of a key over
 // several fields: On("org", "order").
@@ -948,7 +957,7 @@ type Builder struct {
 	group      []selectItem
 	cond       []*node
 	near       *vectorClause
-	match      *[2]any
+	match      *matchClause
 	rerank     *vectorClause
 	fuse       *[2]int // k, candidates; -1 when not given
 	order      []sortKey
@@ -1238,12 +1247,37 @@ func (b *Builder) Near(field string, vector any, options ...Opt) *Builder {
 	})
 }
 
-// Match is `match field $n`: BM25 over a @text index.
-func (b *Builder) Match(field, query string) *Builder {
+// A Match's field, its words, and how loosely it reads them: the most
+// edits a word may take (-1 for none written) and whether the last word
+// is a prefix.
+type matchClause struct {
+	field  string
+	query  any
+	fuzzy  int
+	prefix bool
+}
+
+// Match is `match field $n [fuzzy N] [prefix]`: BM25 over a @text index.
+// Option Fuzzy(2) matches each word within the edits its length allows --
+// none under 5 characters, one up to 8, two from 9 -- Fuzzy(1) one at most;
+// Prefix() matches the last word as the start of a word too, as a search
+// box is typed into.
+func (b *Builder) Match(field, query string, options ...Opt) *Builder {
 	return b.step(func(d *Builder) error {
 		f, err := ident(field, "field")
-		d.match = &[2]any{f, query}
-		return err
+		if err != nil {
+			return err
+		}
+		o := gather(options)
+		m := &matchClause{field: f, query: query, fuzzy: -1, prefix: o.prefix}
+		if o.fuzzy != nil {
+			if *o.fuzzy < 0 || *o.fuzzy > 2 {
+				return refuse("fuzzy is true, false or 0 to 2 edits: %d", *o.fuzzy)
+			}
+			m.fuzzy = *o.fuzzy
+		}
+		d.match = m
+		return nil
 	})
 }
 
@@ -1603,7 +1637,13 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		}
 	}
 	if m := b.match; m != nil {
-		sql.WriteString(" match " + m[0].(string) + " " + bind.bind(m[1]))
+		sql.WriteString(" match " + m.field + " " + bind.bind(m.query))
+		if m.fuzzy >= 0 {
+			fmt.Fprintf(&sql, " fuzzy %d", m.fuzzy)
+		}
+		if m.prefix {
+			sql.WriteString(" prefix")
+		}
 	}
 	if r := b.rerank; r != nil {
 		sql.WriteString(" rerank " + r.field + " " + bind.bind(r.vector))

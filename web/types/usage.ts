@@ -90,6 +90,10 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   await db.from('articles').match('body', 'rust').near('embed', [0.1]).fuse({ candidates: 40 }).rows();
   // @ts-expect-error -- `match` takes a text field
   db.from('articles').match('year', 'x');
+  await db.from('articles').match('body', 'datab', { fuzzy: true, prefix: true }).limit(10).rows();
+  await db.from('articles').match('body', 'databse', { fuzzy: 1 }).rows();
+  // @ts-expect-error -- two edits at most
+  db.from('articles').match('body', 'x', { fuzzy: 3 });
 
   // Marks answer under their labels, typed by their tags; facets beside
   // the rows, typed by the field's values -- a list's one by one.

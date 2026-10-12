@@ -832,9 +832,22 @@ export class Query {
     });
   }
 
-  /** `match field $n` -- BM25 over a `@text` index. */
-  match(field, query) {
-    return this.#with({ match: { field: ident(field), query } });
+  /**
+   * `match field $n [fuzzy N] [prefix]` -- BM25 over a `@text` index.
+   * `fuzzy: true` (2) matches each word within the edits its length
+   * allows (none under 5 characters, one up to 8, two from 9), `fuzzy: 1`
+   * one at most; `prefix: true` matches the last word as the start of a
+   * word too, as a search box is typed into.
+   *
+   *   db.from('products').match('title', input, { fuzzy: true, prefix: true }).limit(10)
+   */
+  match(field, query, opts = {}) {
+    const { fuzzy = false, prefix = false } = opts;
+    if (fuzzy !== true && fuzzy !== false && !(Number.isInteger(fuzzy) && fuzzy >= 0 && fuzzy <= 2)) {
+      throw new FenecError(`fuzzy is true, false or 0 to 2 edits: ${fuzzy}`);
+    }
+    if (typeof prefix !== 'boolean') throw new FenecError(`prefix is true or false: ${prefix}`);
+    return this.#with({ match: { field: ident(field), query, fuzzy, prefix } });
   }
 
   /**
@@ -1143,6 +1156,9 @@ export class Query {
     }
     if (match) {
       sql += ` match ${match.field} ${bind(match.query, match.field)}`;
+      // Written with its number, `true` as 2: what every builder writes.
+      if (match.fuzzy !== false) sql += ` fuzzy ${match.fuzzy === true ? 2 : match.fuzzy}`;
+      if (match.prefix) sql += ' prefix';
     }
     if (rerank) {
       sql += ` rerank ${rerank.field} ${bind(rerank.vector, rerank.field)}`;
