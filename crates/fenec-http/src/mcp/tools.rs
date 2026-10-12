@@ -198,7 +198,7 @@ pub(super) fn list_into(out: &mut String, opts: &Options) {
     defs.push(format!(
         r#"{{"name":"search","title":"Search a collection","description":"Rows ranked best first: by words over an @text field (BM25), by an embedding over an @hnsw vector field, or both fused (reciprocal rank fusion). Each row has its id, its fields but the vectors, `_score`, and for a search by words a `snippet` with the words found in **bold**. Embeddings are yours to compute, with the model and dimension the collection was filled with; without one, search by words. At most {rows} rows."#
     ) + &format!(
-        r#"","inputSchema":{{"type":"object","properties":{{"collection":{{"type":"string"}},"text":{{"type":"string","description":"The words to search for"}},"vector":{{"type":"array","items":{{"type":"number"}},"description":"A query embedding, of the vector field's dimension"}},"filter":{{"type":"string","description":"A FenecQL condition every row must meet, its values as $1, $2 in params: year >= $1 and tags has $2"}},"params":{{"type":"array","description":"The filter's values, $1 first"}},"limit":{{"type":"integer","minimum":1,"maximum":{rows},"default":10}},"fields":{{"type":"array","items":{{"type":"string"}},"description":"The fields to return; every one but vectors when absent"}},"text_field":{{"type":"string","description":"The @text field to search, where there are several"}},"vector_field":{{"type":"string","description":"The vector field to search, where there are several"}}}},"required":["collection"],"additionalProperties":false}},"annotations":{READS}}}"#
+        r#"","inputSchema":{{"type":"object","properties":{{"collection":{{"type":"string"}},"text":{{"type":"string","description":"The words to search for"}},"fuzzy":{{"type":"boolean","description":"Words within a typo of the index's match too -- one edit for words of 5 to 8 letters, two from 9 -- for words a user may have misspelt; the words as typed rank first"}},"prefix":{{"type":"boolean","description":"The last word also matches the words it begins, as a search box sends what is being typed"}},"vector":{{"type":"array","items":{{"type":"number"}},"description":"A query embedding, of the vector field's dimension"}},"filter":{{"type":"string","description":"A FenecQL condition every row must meet, its values as $1, $2 in params: year >= $1 and tags has $2"}},"params":{{"type":"array","description":"The filter's values, $1 first"}},"limit":{{"type":"integer","minimum":1,"maximum":{rows},"default":10}},"fields":{{"type":"array","items":{{"type":"string"}},"description":"The fields to return; every one but vectors when absent"}},"text_field":{{"type":"string","description":"The @text field to search, where there are several"}},"vector_field":{{"type":"string","description":"The vector field to search, where there are several"}}}},"required":["collection"],"additionalProperties":false}},"annotations":{READS}}}"#
     ));
     defs.push(format!(
         r#"{{"name":"query","title":"Run a FenecQL read","description":"Runs one FenecQL read and answers its rows: get <collection> [select a, b] [where <condition>] [order <field> [desc]] [limit n]; aggregates (get orders select status, count(*), sum(total) group status); get <collection> where ... count; lookup <collection> on <field> for related rows; explain get .... Values go in params as $1, $2. An answer of more than {rows} rows or {bytes} bytes is refused, not cut: add a limit or narrow the where. Vector fields are left out unless include_vectors."#
@@ -934,9 +934,17 @@ fn search(ctx: &Ctx, args: Args) -> Checked<String> {
             "fields",
             "text_field",
             "vector_field",
+            "fuzzy",
+            "prefix",
         ],
     )?;
     let collection = name(needed(args, "collection")?, "collection")?;
+    let flag = |name: &str| match arg(args, name) {
+        None | Some(Value::Bool(false)) => Ok(false),
+        Some(Value::Bool(true)) => Ok(true),
+        Some(_) => Err(Outcome::refused(400, format!("`{name}` is true or false"))),
+    };
+    let (fuzzy, prefix) = (flag("fuzzy")?, flag("prefix")?);
     let words = text(args, "text")?.map(str::trim).filter(|t| !t.is_empty());
     let embedding = vector(args, "vector")?;
     if words.is_none() && embedding.is_none() {
@@ -978,6 +986,12 @@ fn search(ctx: &Ctx, args: Args) -> Checked<String> {
     if let (Some(t), Some(f)) = (words, &tf) {
         params.push(Value::Text(t.to_string()));
         sql.push_str(&format!(" match {f} ${}", params.len()));
+        if fuzzy {
+            sql.push_str(" fuzzy");
+        }
+        if prefix {
+            sql.push_str(" prefix");
+        }
     }
     if let (Some(v), Some(f)) = (embedding, &vf) {
         params.push(Value::Vector(v));

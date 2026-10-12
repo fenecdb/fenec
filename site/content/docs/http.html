@@ -184,8 +184,11 @@ the one <code>f32</code> an <code>f64</code> would round away,
 <code>@text</code> field ranks the same request, and the two rankings are
 fused by reciprocal rank (<a href="fenecql.html#hybrid">fuse</a>).
 <code>match_field</code> names the text field when there are several;
-<code>fuse_k</code> and <code>candidates</code> are the rank offset and how
-many candidates each side ranks.</p>
+<code>match_fuzzy</code> (<code>true</code>, or 0 to 2 edits) and
+<code>match_prefix</code> read its words as <a
+href="fenecql.html#typos"><code>match ... fuzzy</code> and
+<code>prefix</code></a> do; <code>fuse_k</code> and <code>candidates</code>
+are the rank offset and how many candidates each side ranks.</p>
 
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/articles/near -d '{
   "vector": [0.1, 0.2, 0.3],

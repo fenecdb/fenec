@@ -270,6 +270,46 @@ fn near_with_match_is_fused() {
     assert_eq!(rows(&same.body), 3);
     let bad = r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "match_field": "nope"}"#;
     assert_eq!(call(h.port, "POST", "/notes/near", Some(bad)).status, 400);
+
+    // `match_fuzzy` and `match_prefix` are `match`'s `fuzzy N` and `prefix`:
+    // the same rows as the statement, a typo and a word begun among them.
+    for (body, query) in [
+        (
+            r#"{"vector": [0.0, 1.0, 0.0], "match": "gardenig", "match_fuzzy": true, "limit": 3}"#,
+            r#"get notes match body "gardenig" fuzzy near e [0.0, 1.0, 0.0] fuse limit 3"#,
+        ),
+        (
+            r#"{"vector": [0.0, 1.0, 0.0], "match": "gard", "match_prefix": true, "limit": 3}"#,
+            r#"get notes match body "gard" prefix near e [0.0, 1.0, 0.0] fuse limit 3"#,
+        ),
+    ] {
+        let r = call(h.port, "POST", "/notes/near", Some(body));
+        assert_eq!(r.status, 200, "{}", r.body);
+        let mut q = String::from("{\"query\": ");
+        fenec_core::json::escape_into(&mut q, query);
+        q.push('}');
+        let same = call(h.port, "POST", "/query", Some(&q));
+        assert_eq!(r.body, same.body, "{query}");
+    }
+    let plain = call(
+        h.port,
+        "POST",
+        "/notes/near",
+        Some(r#"{"vector": [0.0, 1.0, 0.0], "match": "gardenig", "limit": 3}"#),
+    );
+    let fuzzy = call(
+        h.port,
+        "POST",
+        "/notes/near",
+        Some(r#"{"vector": [0.0, 1.0, 0.0], "match": "gardenig", "match_fuzzy": 2, "limit": 3}"#),
+    );
+    assert_ne!(plain.body, fuzzy.body, "the typo found the gardens");
+    for bad in [
+        r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "match_fuzzy": 3}"#,
+        r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "match_prefix": "yes"}"#,
+    ] {
+        assert_eq!(call(h.port, "POST", "/notes/near", Some(bad)).status, 400, "{bad}");
+    }
 }
 
 #[test]

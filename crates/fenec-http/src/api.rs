@@ -846,12 +846,30 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
                 Some(_) => return Err(Error::Query("`match_field` must be text".into())),
                 None => default_text_field(schema)?,
             };
+            // `match_fuzzy`: true, or the most edits a word may take;
+            // `match_prefix`: the last word a prefix -- `match`'s `fuzzy N`
+            // and `prefix`.
+            let fuzzy = match get("match_fuzzy") {
+                None | Some(Value::Null) | Some(Value::Bool(false)) => 0,
+                Some(Value::Bool(true)) => fenec_core::query::MAX_FUZZY,
+                Some(Value::Int(n @ 0..=2)) => *n as u8,
+                Some(_) => {
+                    return Err(Error::Query(
+                        "`match_fuzzy` must be true, false or 0 to 2 edits".into(),
+                    ))
+                }
+            };
+            let prefix = match get("match_prefix") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => return Err(Error::Query("`match_prefix` must be true or false".into())),
+            };
             sel.matcher = Some(Match {
                 field: text_field,
                 query: Expr::Lit(Value::Text(q.clone())),
                 within: false,
-                fuzzy: 0,
-                prefix: false,
+                fuzzy,
+                prefix,
             });
             sel.fuse = Some(Fuse {
                 k: as_usize("fuse_k")?.map(|k| k.min(u32::MAX as usize) as u32),
