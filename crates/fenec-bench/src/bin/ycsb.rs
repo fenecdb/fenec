@@ -1841,7 +1841,9 @@ impl System for Redis {
     }
     fn load(&mut self, records: u64) {
         if self.own {
-            // The last load's container and volume go first.
+            // The last load's container and volume go first. The second
+            // the new one takes to start is in the load's time, which is
+            // tens of seconds at a million records.
             self.container = None;
             self.container = Some(Container::start("redis", REDIS_RUN));
         }
@@ -2704,7 +2706,7 @@ fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
             eprintln!(
                 "redis: Redis {}, {}",
                 redis_info(&mut c, "server", "redis_version"),
-                redis_info(&mut c, "server", "mem_allocator")
+                redis_info(&mut c, "memory", "mem_allocator")
             );
             Box::new(Redis {
                 url,
