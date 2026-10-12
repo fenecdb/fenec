@@ -58,8 +58,9 @@
 //! starts to pass but by a write. So its next look tests those rows and the
 //! rows written since alone ([`Database::written_since`], the change ring)
 //! with its own filter, and puts them in its own order
-//! ([`Database::pick_among`]): the row a whole pick would give, at a few
-//! rows' cost. A write the ring no longer reaches back to, a schema
+//! ([`Database::passing_among`], [`Database::picked_among`]): the row a
+//! whole pick would give, at a few rows' cost, the rows a filter passes
+//! found once for every group of it. A write the ring no longer reaches back to, a schema
 //! change, a load or a compact, more rows than [`AMONG`], an inner `get`,
 //! rows that expire, a time in the order, two tests, or a moment come:
 //! the whole pick, as before.
@@ -705,12 +706,19 @@ impl<'h> Ticket<'h> {
             Some(g) => {
                 g.queue.push_back(Arc::clone(&turn));
                 // Its run may have seen a moment the group's last look had
-                // not: the earlier of the two is kept.
-                g.at = match (g.at, plan.at) {
+                // not: the earlier of the two is kept, and the looks told
+                // of it.
+                let at = match (g.at, plan.at) {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (a, b) => a.or(b),
                 };
-                g.id
+                let sooner = at != g.at;
+                g.at = at;
+                let id = g.id;
+                if sooner {
+                    kick(&st);
+                }
+                id
             }
             None => {
                 st.next += 1;
@@ -1189,7 +1197,7 @@ fn deadline(st: &State, now: Instant) -> Option<Duration> {
     let mut least: Option<Duration> = None;
     let mut keep = |d: Duration| least = Some(least.map_or(d, |l| l.min(d)));
     for g in &st.groups {
-        if let Some(back) = g.back {
+        if let Some(back) = g.back.filter(|_| !g.running && !g.go) {
             keep(back.saturating_duration_since(now));
             continue;
         }
@@ -1303,6 +1311,20 @@ fn look_all(db: &RwLock<Database>, jobs: Vec<Job>, waits: &Waits) -> Vec<(u64, L
 /// [`Database::written_since`] gave them, by the change and the collection.
 type Written = (u64, String, Option<(u32, Vec<DocId>)>);
 
+/// The rows of `ids` the filter of a group's one test let through: what
+/// the next group of the same filter and rows is answered, a thousand
+/// couriers' `run_at <= now()` asked once of the one order written.
+struct Passed {
+    tests: Arc<Vec<Select>>,
+    ids: Vec<DocId>,
+    kept: Vec<DocId>,
+}
+
+/// How many filters' answers [`Passed`] keeps a batch: each group asks
+/// them all before its own, so groups of as many filters as groups ask
+/// past a few for nothing.
+const PASSED: usize = 4;
+
 /// Looks under one read lock, at the time `t` read before it: what one
 /// asks of the database as it stands, the others ask again for nothing --
 /// the collections written since a change, the rows, an index's step.
@@ -1313,6 +1335,7 @@ struct Looks<'d> {
     seq: u64,
     changed: Vec<(u64, Option<Vec<String>>)>,
     written: Vec<Written>,
+    passed: Vec<Passed>,
     moments: Moments,
     /// Whole picks run.
     picks: u64,
@@ -1327,6 +1350,7 @@ impl<'d> Looks<'d> {
             seq: db.change_seq(),
             changed: Vec::new(),
             written: Vec::new(),
+            passed: Vec::new(),
             moments: Moments::default(),
             picks: 0,
         }
@@ -1408,7 +1432,30 @@ impl<'d> Looks<'d> {
         ids.dedup();
         let cid = *cid;
         // An error the whole pick meets, or not, as it plans: it answers.
-        let rs = self.db.pick_among(test, &ids, self.t).ok()??;
+        let shared = self.passed.iter().find(|p| {
+            let t = &p.tests[0];
+            t.collection == test.collection && t.filter == test.filter && p.ids == ids
+        });
+        let kept = match shared {
+            Some(p) => p.kept.clone(),
+            None => {
+                let kept = self
+                    .db
+                    .passing_among(&test.collection, test.filter.as_ref(), &ids, self.t)
+                    .ok()??;
+                let p = Passed {
+                    tests: Arc::clone(&job.tests),
+                    ids,
+                    kept: kept.clone(),
+                };
+                if self.passed.len() == PASSED {
+                    self.passed.remove(0);
+                }
+                self.passed.push(p);
+                kept
+            }
+        };
+        let rs = self.db.picked_among(test, kept).ok()??;
         let until = self
             .db
             .wakes_at_with(

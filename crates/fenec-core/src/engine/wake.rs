@@ -36,8 +36,8 @@
 //! the time reaches its next moment, the rows it passes are among those
 //! written since ([`Database::written_since`], the change ring), so its
 //! pick is that filter and that order over those rows alone
-//! ([`Database::pick_among`]): the same test a scan gives a row, the same
-//! order a page is put in.
+//! ([`Database::passing_among`], [`Database::picked_among`]): the same
+//! test a scan gives a row, the same order a page is put in.
 
 use super::*;
 
@@ -199,20 +199,75 @@ impl Database {
         }
     }
 
+    /// The rows of `ids` -- ascending -- `filter` lets through over
+    /// `collection`, at `now` unless the database's clock says otherwise:
+    /// each tested as a scan tests it ([`Filter`], what an index's answer
+    /// is held to row for row), the time folded first where `answered`
+    /// folds it. `None` for a filter it does not answer so: an inner `get`,
+    /// which reads another collection, `expired()`, or rows that expire.
+    /// Held writes' picks of one filter -- a thousand couriers' `run_at <=
+    /// now()` -- ask it once for the rows written since, each then putting
+    /// them in its own order ([`Self::picked_among`]).
+    pub fn passing_among(
+        &self,
+        collection: &str,
+        filter: Option<&Expr>,
+        ids: &[DocId],
+        now: i64,
+    ) -> Result<Option<Vec<DocId>>> {
+        let Some(c) = self.collections.get(collection) else {
+            return Ok(None);
+        };
+        if self.ttl_of(collection).is_some()
+            || filter.is_some_and(|f| f.has_subquery() || f.asks_expired())
+        {
+            return Ok(None);
+        }
+        let ctx = EvalCtx {
+            params: &[],
+            registry: &self.registry,
+            clock: self.clock.or(Some(now)),
+        };
+        // As `answered` runs it: the time made a literal where an ordered
+        // index could take it for a range.
+        let folded;
+        let filter = match filter {
+            Some(f) if f.calls_now() && self.ordered(collection) => {
+                let now = eval(&Expr::Call("now".into(), Vec::new()), &mut NoRow, &ctx)?;
+                let mut f = f.clone();
+                f.fold_now(&now, &[]);
+                folded = f;
+                Some(&folded)
+            }
+            f => f,
+        };
+        let test = filter.map(|f| Filter::new(c, f, &ctx));
+        let mut kept = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if !c.store.contains(id) {
+                continue;
+            }
+            if let Some(t) = &test {
+                if !t.matches(id, &ctx)? {
+                    continue;
+                }
+            }
+            kept.push(id);
+        }
+        Ok(Some(kept))
+    }
+
     /// What `sel` -- a held write's pick as a `get`: a filter, an order,
-    /// its columns -- answers among `ids` alone, ascending, at `now` unless
-    /// the database's clock says otherwise: every row of them its filter
-    /// lets through, in its order and the page's `limit` aside, each with
-    /// its columns. Where `ids` hold every row the filter lets through, the
-    /// first is the row the `get` picks: each row is tested as a scan tests
-    /// it ([`Filter`], what an index's answer is held to row for row), the
-    /// time folded first where `answered` folds it, and put in order as a
-    /// page is ([`Self::order_ids_by`], `order_ids`), ties in id order as
-    /// a scan leaves them. `None` for a `get` it does not answer so: an
-    /// inner `get`, which reads another collection, rows that expire, a
-    /// time read in the order or a column, a `near`, an aggregate, an
-    /// `offset`.
-    pub fn pick_among(&self, sel: &Select, ids: &[DocId], now: i64) -> Result<Option<ResultSet>> {
+    /// its columns -- answers over `passing`, the rows of its collection
+    /// its filter let through as [`Self::passing_among`] found them, with
+    /// the database as it stands: every one, in its order and the page's
+    /// `limit` aside, each with its columns. Where they are every row the
+    /// filter lets through, the first is the row the `get` picks: put in
+    /// order as a page is ([`Self::order_ids_by`], `order_ids`), ties in id
+    /// order as a scan leaves them. `None` for a `get` it does not answer
+    /// so: a time read in the order or a column, a `near`, an aggregate,
+    /// an `offset`.
+    pub fn picked_among(&self, sel: &Select, passing: Vec<DocId>) -> Result<Option<ResultSet>> {
         let plain = sel.near.is_none()
             && sel.matcher.is_none()
             && sel.rerank.is_none()
@@ -231,11 +286,6 @@ impl Database {
             return Ok(None);
         };
         if !plain
-            || self.ttl_of(&sel.collection).is_some()
-            || sel
-                .filter
-                .as_ref()
-                .is_some_and(|f| f.has_subquery() || f.asks_expired())
             || sel.order.iter().filter_map(|s| s.expr.as_ref()).any(timed)
             || sel.computed.iter().any(|k| timed(&k.expr))
         {
@@ -248,47 +298,20 @@ impl Database {
         if sel.reads_vectors() {
             self.refuse_inexact(&Statement::Select(sel.clone()), &[])?;
         }
-        let ctx = EvalCtx {
-            params: &[],
-            registry: &self.registry,
-            clock: self.clock.or(Some(now)),
-        };
-        // As `answered` runs it: the time made a literal where an ordered
-        // index could take it for a range.
-        let folded;
-        let filter = match &sel.filter {
-            Some(f) if f.calls_now() && self.ordered(&sel.collection) => {
-                let now = eval(&Expr::Call("now".into(), Vec::new()), &mut NoRow, &ctx)?;
-                let mut f = f.clone();
-                f.fold_now(&now, &[]);
-                folded = f;
-                Some(&folded)
-            }
-            f => f.as_ref(),
-        };
-        let test = filter.map(|f| Filter::new(c, f, &ctx));
-        let mut kept = Vec::with_capacity(ids.len());
-        for &id in ids {
-            if !c.store.contains(id) {
-                continue;
-            }
-            if let Some(t) = &test {
-                if !t.matches(id, &ctx)? {
-                    continue;
-                }
-            }
-            kept.push(id);
-        }
-        let kept = if sel.order.iter().any(|s| s.expr.is_some()) {
-            self.order_ids_by(c, &sel.order, &kept, usize::MAX, &[])?
+        // One row is in its order: a look finds the one order written
+        // since, most often, and ordering it was a third of the look.
+        let kept = if passing.len() < 2 {
+            passing
+        } else if sel.order.iter().any(|s| s.expr.is_some()) {
+            self.order_ids_by(c, &sel.order, &passing, usize::MAX, &[])?
         } else if !sel.order.is_empty() {
             let mut keys = Vec::with_capacity(sel.order.len());
             for s in &sel.order {
                 keys.push(order_key(&c.schema, s, "")?);
             }
-            order_ids(&c.store, &kept, &keys, usize::MAX)?
+            order_ids(&c.store, &passing, &keys, usize::MAX)?
         } else {
-            kept
+            passing
         };
         let columns = projection_columns(&c.schema, &sel.project);
         let mut sources = Vec::with_capacity(columns.len());
