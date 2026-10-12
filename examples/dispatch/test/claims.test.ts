@@ -16,7 +16,7 @@ let world: World;
 const t = cast(tandem);
 
 before(async () => {
-  world = await startWorld({ basePort: 18410 });
+  world = await startWorld();
   // Tandem keeps its plan, 600 rows a second: a held claim that looks or
   // runs and takes nothing writes nothing, and costs nothing. Charged a
   // write each time a write woke it, written or not, 50 couriers waiting

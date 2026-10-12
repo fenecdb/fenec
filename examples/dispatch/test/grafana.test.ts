@@ -12,7 +12,7 @@ import { nodeFetch } from '../lib/fetch';
 
 let world: World;
 before(async () => {
-  world = await startWorld({ basePort: 18450, historyDays: 2 });
+  world = await startWorld({ historyDays: 2 });
 });
 after(async () => {
   await world?.stop();

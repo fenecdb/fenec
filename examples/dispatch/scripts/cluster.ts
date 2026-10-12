@@ -1,6 +1,10 @@
 // `npm run cluster`: two tenant nodes and the router over data/dev, for
 // development, until Ctrl-C. `npm run setup` then places the tenants and
 // fills them; `npm run simulate` sets the city moving.
+//
+// The router on PLOVER_ROUTER_PORT (8090) and the nodes on the two ports
+// after it; 0 has each take a port the system picks, which scripts/ci.sh
+// asks for and reads off the `router <url>, ...` line this prints.
 import { join } from 'node:path';
 import { Cluster } from '../lib/cluster';
 import { DATA_DIR, OPERATOR_TOKEN, SHARD_TOKEN, SITE_ORIGIN } from '../lib/config';
@@ -8,7 +12,7 @@ import { DATA_DIR, OPERATOR_TOKEN, SHARD_TOKEN, SITE_ORIGIN } from '../lib/confi
 const base = Number(process.env.PLOVER_ROUTER_PORT ?? 8090);
 const cluster = new Cluster({
   dir: join(DATA_DIR, 'dev'),
-  basePort: base,
+  basePort: base || undefined,
   nodes: 2,
   cors: SITE_ORIGIN,
   operatorToken: OPERATOR_TOKEN,

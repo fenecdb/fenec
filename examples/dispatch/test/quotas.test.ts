@@ -25,7 +25,7 @@ const hp = cast(hopper);
 before(async () => {
   // One node for both: what one tenant takes of a node is what the other
   // would feel.
-  world = await startWorld({ basePort: 18430, node: 'n1' });
+  world = await startWorld({ node: 'n1' });
 });
 after(async () => {
   await world?.stop();

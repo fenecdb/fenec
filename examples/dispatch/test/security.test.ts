@@ -25,7 +25,7 @@ let theirs: Job; // claimed by courier 1
 let ready: number; // nobody's yet
 
 before(async () => {
-  world = await startWorld({ basePort: 18440 });
+  world = await startWorld();
   const doors = addresses();
   for (let i = 0; i < 6; i++) {
     const shop = tn.merchants[i];
