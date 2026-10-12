@@ -301,8 +301,8 @@ From the tests, on the same machine:
 
 What fenecdb made awkward, slow or impossible here, the most important
 first, each with the statement that showed it and what Plover does
-instead. None was fixed in the example's own change; 4 and 5 are fixed
-since, and say how.
+instead. None was fixed in the example's own change; 4, 5 and 8 are
+fixed since, and say how.
 
 1. **A claim cannot pick the nearest row.** A job queue's claim picks its
    rows with `order` over fields; a courier's is "the nearest ready order":
@@ -436,22 +436,31 @@ since, and say how.
    41st to 45th 429). Smallest: `retry_after_ms` in the body beside the
    header's whole seconds; charge a held write's token when it runs.
 
-8. **The router answers 502 for a connection the node closed while idle
-   (macOS).** A request through the router after a minute of quiet:
+8. **Fixed: the router answered 502 for a connection the node closed
+   while idle (macOS).** A request through the router after a minute of
+   quiet:
 
    ```
    502 {"error":"node `n1` (127.0.0.1:8091) did not answer: Invalid argument (os error 22)"}
    ```
 
-   `Pool::send_held` (`crates/fenec-shard/src/upstream.rs`) retries a
+   `Pool::send_held` (`crates/fenec-shard/src/upstream.rs`) retried a
    pooled connection the node closed while idle (`--idle-timeout`, 60 s)
-   when the first read sees EOF, a broken pipe or a reset; on macOS
+   when the first read saw EOF, a broken pipe or a reset; on macOS
    `setsockopt` refuses a socket its peer closed with EINVAL, which
-   `set_read_timeout` returns before anything is written -- `InvalidInput`,
-   not retried. Reproduced every time with a request, 65 s of silence, and
-   the same request. A one-line fix (`InvalidInput` among the retried
-   kinds) in a crate another change is reworking, so not made here; Plover's
-   nodes run with `--idle-timeout 0`.
+   `set_read_timeout` returned before anything was written --
+   `InvalidInput`, not retried. Reproduced every time with a request, 65 s
+   of silence, and the same request, and Plover's nodes ran with
+   `--idle-timeout 0`. The one-line fix this said (`InvalidInput` among the
+   retried kinds) would have kept a retry that was wrong besides: it sent a
+   request again whenever its connection ended before an answer, which a
+   node that ran a `put` and went down before answering looks like too --
+   the `put` made twice. Now the router looks at a pooled connection before
+   it writes (a read that does not wait) and lets go of one the node closed
+   or reset; a request is sent again on a fresh connection when it failed
+   before its last byte went out, and after it only when it is a read or
+   carries an `Idempotency-Key`. Plover's nodes keep the default idle
+   timeout.
 
 9. **An insert cannot answer the id it made.** `insert orders {...}
    returning id` is `unknown command returning`, and `POST /orders`

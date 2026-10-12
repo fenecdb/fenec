@@ -3847,6 +3847,47 @@ what it did: `make shard-bench`'s added p50 22.6 us against main's 23.3,
 six runs each in ABBA turns (20.7-25.2 and 20.5-25.7); on, 24.3
 (21.9-27.6), six header lines more in every answer.
 
+**The router looks at a pooled connection before it writes, and sends a
+request again only where the node cannot have run it or may run it
+twice** (`fenec-shard/src/upstream.rs`). A node closes a keep-alive
+connection silent past `--idle-timeout`, and on macOS the router's end is
+reset about a minute after the node's FIN (`setsockopt` fine 59 s after
+the close, refused 62 s after; `net.inet.tcp.fin_timeout` is 60 s), after
+which XNU's `setsockopt` refuses it with EINVAL: `set_read_timeout`
+returned that before a byte was written, the retry knew EOF, a broken
+pipe and a reset, and a request after a quiet minute was answered 502
+(the dispatch example ran its nodes with `--idle-timeout 0` for it). A
+pooled connection is looked at first (`open`: a `recv` of `MSG_PEEK |
+MSG_DONTWAIT`, declared by hand) -- 0 is the node's FIN, an error its
+reset, a byte an answer nobody asked for, each let go of and the next
+looked at -- and a failure is judged by how far the exchange got
+(`Stage`), not by the errno, which each system names its own way (one
+reset connection: EINVAL then EPIPE on macOS, EPIPE or ECONNRESET on
+Linux). Failing before the request's last byte was handed to the system
+-- the read timeout's `setsockopt`, a write, not a write's timeout -- the
+node never read a whole request, so it goes again on a fresh connection
+whatever it is. Written whole, with the connection ending before the
+first byte of an answer, the node may have run it: a node that ran a
+`put` and went down looks just like a close on its way, so only a `GET`,
+`HEAD`, `OPTIONS` or a request carrying an `Idempotency-Key` goes again
+(Go `net/http`'s rule), anything else is the client's 502. The retry it
+replaced sent every request again on that EOF, and made such a `put`
+twice. What the look cannot see is a close in the microseconds between
+it and the node's read; a bound on how long the pool keeps a connection
+would need each node's `--idle-timeout`, which the router is not told,
+and a guessed one below the default narrows nothing for a node set
+lower. `tests/upstream.rs` puts a relay between the router and a node
+that passes the node's close on as a reset (`SO_LINGER` 0, macOS's state
+a minute on) or as the FIN, or swallows an answer, the directory written
+before the router starts so no request but the test's meets the node's
+200 ms idle timeout. The look is one system call, 0.31 us on an M1
+(`set_nonblocking`, `peek` and `set_nonblocking` again 0.74), and the
+two `setsockopt`s every exchange made, 0.67 us, are gone from a reused
+connection: the write timeout is set at the connect, the read timeout
+only when it changes (a `Fenec-Wait`), kept with the pooled connection.
+`make shard-bench`'s added p50 stayed 23.3 us against main's 23.3, six
+runs each in ABBA turns (23.1-24.8 and 20.0-24.4).
+
 **A schema declared in code is checked at every open, in the engine.**
 Two front ends compile to one description (`fenec_core::declared`,
 versioned JSON: `{"format": 1, "collections": [...] | "fenecql": "...",

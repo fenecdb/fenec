@@ -197,6 +197,17 @@ a length is read and passed back on a kept-alive connection; one without is a
 subscription, copied as it arrives until either side closes, so the stream
 format lives in one place, the node.</p>
 
+<p>Connections to a node are kept and reused, and each is looked at before a
+request goes out on it: one the node closed for its silence
+(<code>--idle-timeout</code>) is let go of. A request that fails before it is
+wholly sent goes again on a fresh connection. One sent whole whose connection
+ends before an answer goes again only where running it twice is harmless — a
+<code>GET</code>, <code>HEAD</code> or <code>OPTIONS</code>, or a write with an
+<code>Idempotency-Key</code>, which the node makes once
+(<a href="/docs/http#idempotency">Retrying a write</a>). Any other write is
+answered <code>502</code>, since the node may have run it: a client that sends
+it again should send it with a key.</p>
+
 <p>Its only state is the <b>directory</b>: two collections in a fenecdb file of
 its own, <code>nodes</code> and <code>tenants</code>. Every change is written and
 synced before it takes effect, and a tenant's node and state change in one

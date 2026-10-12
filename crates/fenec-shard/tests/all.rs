@@ -9,3 +9,4 @@ mod leases;
 mod replicas;
 mod router;
 mod standby;
+mod upstream;
