@@ -2943,7 +2943,10 @@ impl<'a> Tuple<'a> {
     /// The prefix the row `id` of the level above probes with: its fields'
     /// values, each made its child field's type, or `None` where one is
     /// null -- a NULL key matches nothing, as a single key's -- or cannot
-    /// be.
+    /// be. Out of line, as `ids` is, so the single key's probe each parent
+    /// runs stays the code it was: inlined there, a page of 20 x 3 x 5 by
+    /// one `@hash` field took 1% longer.
+    #[inline(never)]
     fn prefix(&self, parent: &Collection, id: DocId) -> Result<Option<crate::composite::KeyBytes>> {
         let mut vals = Vec::with_capacity(self.parts.len());
         for (pos, ty) in &self.parts {
@@ -2995,6 +2998,19 @@ impl<'a> Tuple<'a> {
     /// The run of entries `key` is the prefix of.
     fn span(&self, key: &[u8]) -> crate::composite::Span {
         self.ix.span(key, self.parts.len(), None)
+    }
+
+    /// [`Probe::ids`] over the run `key` names: in the index's order, put in
+    /// id order, the order a bucket holds them in and a tie goes by.
+    #[inline(never)]
+    fn ids(&self, child: &Collection, key: &[u8], out: &mut Vec<DocId>) {
+        let _ = self.ix.run(key, &mut |id| {
+            if child.store.contains(id) {
+                out.push(id);
+            }
+            Ok(true)
+        });
+        out.sort_unstable();
     }
 
     /// [`Probe::any`] over the run `key` names, as it lies, as a bucket is
@@ -3097,18 +3113,7 @@ impl<'a> Probe<'a> {
     fn ids(&self, child: &Collection, key: &Key, out: &mut Vec<DocId>) {
         out.clear();
         let key = match (self, key) {
-            (Probe::Tuple(t), Key::Parts(Some(k))) => {
-                // In the index's order: put in id order, the order a bucket
-                // holds them in and a tie goes by.
-                let _ = t.ix.run(k, &mut |id| {
-                    if child.store.contains(id) {
-                        out.push(id);
-                    }
-                    Ok(true)
-                });
-                out.sort_unstable();
-                return;
-            }
+            (Probe::Tuple(t), Key::Parts(Some(k))) => return t.ids(child, k, out),
             (_, Key::One(v)) => v,
             _ => return,
         };
