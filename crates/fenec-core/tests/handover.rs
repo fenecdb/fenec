@@ -409,20 +409,28 @@ fn a_handover_is_put_off_while_the_file_is_fsynced() {
 /// Small documents reach the write count long before the bytes: a
 /// handover's pause is a document's work each, so 16 MB of them held the
 /// write lock 16 ms. 70 blocks of 1 000 rows of an int are 70 000 writes and
-/// under a megabyte; the handover after the 66th leaves four blocks held.
+/// under a megabyte; the handover after the 68th -- every 17th hands over
+/// -- leaves two blocks held.
 #[test]
 fn small_documents_are_handed_over_by_their_count() {
     let path = tmp("count");
     let mut db = open_mapped(&path).unwrap();
     run(&mut db, "create collection c (n int)");
     let put = fenec_ql::parse_one("put c {n: $1}").unwrap();
+    let mut held_at = Vec::new();
     for b in 0..70i64 {
         let args: Vec<[Value; 1]> = (0..1000).map(|i| [Value::Int(b * 1000 + i)]).collect();
         let stmts: Vec<(&Statement, &[Value])> = args.iter().map(|a| (&put, &a[..])).collect();
         db.execute_block(&stmts).unwrap();
+        held_at.push(held(&db));
     }
-    let per_block = held(&db) / 4;
-    assert!(per_block > 0 && per_block < 20_000, "{}", held(&db));
+    // Handed over as the 17th, the 34th, the 51st and the 68th landed.
+    for b in [16, 33, 50, 67] {
+        assert_eq!(held_at[b], 0, "{held_at:?}");
+    }
+    let one = held_at[68];
+    assert!(one > 0 && one < 20_000, "{one}");
+    assert_eq!(held_at[69], 2 * one);
     assert_eq!(
         answer(&db, "get c count").rows[0].values[0],
         Value::Int(70_000)
