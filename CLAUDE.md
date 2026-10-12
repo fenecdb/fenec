@@ -2501,10 +2501,10 @@ which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (417.0 KB, 143.4 brotli, against 670.8 and 227.4 with
+module with none (421.3 KB, 144.9 brotli, against 675.1 and 228.8 with
 every one) and left out of the full one, brotli added and saved:
-`vector` 20.7 and 18.7, `sorted` 8.9 and 23.5 with `composite`,
-`composite` beside it 11.5 and 10.7, `collate` 9.0 and 8.3, `text` 5.7 and
+`vector` 20.7 and 18.7, `sorted` 8.8 and 23.4 with `composite`,
+`composite` beside it 11.5 and 10.5, `collate` 9.0 and 8.3, `text` 5.7 and
 7.3, `facets` 3.5 and 4.1, `highlight` beside `text` 3.5 and 3.1,
 `nocase` 3.1 and 2.6, `geo` 2.8 and 5.9 (its index with it), `analytics`
 2.7 and 2.1, `sparse` 2.7 and 0.9, the schema check 9.5 and 9.5. The module with every feature is the code
@@ -2558,9 +2558,9 @@ schema check, search -- `match`, `highlight` and `snippet`, facets,
 `near` with its graph, `fuse` -- and the standard query features. A
 plugin is an extra one kind of app needs: geo, sparse vectors, a
 language's collation, `bucket` and the HLL sketches. Held to that rule
-the core is about 210 KB brotli and the extras about 17 together (`geo`
-5.9, `collate` 8.3, `sparse` 0.9, `bucket` and the sketches 2.1), 8% of
-the full module's 227: too little to pay for modules built ahead
+the core is about 212 KB brotli and the extras about 17 together (`geo`
+5.9, `collate` 8.3, `sparse` 0.9, `bucket` and the sketches 2.1), 7% of
+the full module's 229: too little to pay for modules built ahead
 for sets of features and a choice of one per page, let alone a module a
 plugin loaded beside the engine, which would carry its own copy of the
 standard library's allocator and panic machinery and reach into the write
@@ -2572,7 +2572,7 @@ and `first`/`last` are standard, and are in the core.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 227.4 KB brotli) and `@fenecdb/web/client`, so a user has two
+check, 228.8 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
@@ -2586,9 +2586,9 @@ wasm-min`, no feature at all) is the same kind of test build. The client entry i
 glue, persistence and sync. The entry's worth is that it cannot pull in
 the engine, sync or storage, not the bytes: a `connect`-only app never
 fetched the `.wasm` through `fenec.js` either (only `Fenec.open` does),
-and bundling `connect` and a builder query's rows is 5.7 KB brotli
-through the entry against 8.2 through `fenec.js` (7.5 on main before
-`FenecHttp.live`), whose `Fenec` class a bundler cannot drop -- its static
+and bundling `connect` and a builder query's rows is 8.8 KB brotli
+through the entry against 11.7 through `fenec.js` (5.7 against 8.2 when
+the entry was made, 7.5 through `fenec.js` before `FenecHttp.live`), whose `Fenec` class a bundler cannot drop -- its static
 block is a side effect. `web/fenec.client.test.js` walks the client's imports and fails
 if they reach anything but those three files or hold the module's glue,
 `FenecSync`, IndexedDB or files. `FenecHttp.live` is `Fenec.live`'s
@@ -3208,8 +3208,8 @@ sorted for three. A single key's page as it was: 89.2 us on main and 90.2
 here at the quiet runs' median, their instructions retired within 0.2% (the
 key a value or an index's bytes through one enum, it was 1 to 2% slower:
 `Step::ids`, `Step::any` ask a `Tuple` apart). The browser module grew 8.5
-KB, 3.2 KB brotli (`Tuple::resolve` the most of it, 1.7 KB), the one without
-the indexes 2.5 KB, 0.9 KB brotli, and the one with no feature 2.5 KB, 1.1
+KB, 3.1 KB brotli (`Tuple::resolve` the most of it, 1.7 KB), the one without
+the indexes 2.5 KB, 0.8 KB brotli, and the one with no feature 2.5 KB, 0.9
 KB brotli: the parse, the check and the refusal by name.
 
 **`match` prunes with MaxScore.** The exhaustive merge is not selective --

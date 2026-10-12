@@ -7,10 +7,10 @@ npm, and the `fenec-web` bundle of each release.
 | --- | --- |
 | `fenec.js` | the client: the module's glue, persistence and the sync layer, a dependency-free ES module that imports and re-exports the two below |
 | `builder.js`, `http.js` | the query builder and the HTTP client |
-| `client.js` | the two of them, and nothing that could pull in the engine, sync or storage: `@fenecdb/web/client`, 8 KB brotli in an app's bundle |
+| `client.js` | the two of them, and nothing that could pull in the engine, sync or storage: `@fenecdb/web/client`, 9 KB brotli in an app's bundle |
 | `fenec.d.ts`, `client.d.ts` | their types |
 | `schema.js`, `schema.d.ts` | a schema declared in code, Drizzle's way: `@fenecdb/web/schema` |
-| `fenec.wasm` | the engine with every index and the schema check: 226 KB brotli |
+| `fenec.wasm` | the engine with every index and the schema check: 229 KB brotli |
 | `collate/` | the collation data the module fetches beside it, a chunk a group of scripts |
 
 ```js
@@ -20,8 +20,8 @@ const db = await Fenec.open('./fenec.wasm');
 
 A page whose queries run on a server never fetches the module -- only
 `Fenec.open` does -- and can import the client entry, which holds nothing of
-the engine, the sync layer or storage (8 KB brotli bundled through
-`@fenecdb/web`, 6 through it):
+the engine, the sync layer or storage (12 KB brotli bundled through
+`@fenecdb/web`, 9 through it):
 
 ```js
 import { connect } from '@fenecdb/web/client';   // or './client.js', beside builder.js and http.js
