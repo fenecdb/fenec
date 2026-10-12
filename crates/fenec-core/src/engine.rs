@@ -9035,11 +9035,12 @@ impl Database {
         let within = allowed.as_deref().filter(|_| m.within);
 
         let Some(rr) = &sel.rerank else {
-            let hits = ix.search_within(&query, want, accept, within);
+            let hits = search(ix, m, &query, want, accept, within)?;
             plan(|| {
                 format!(
-                    "match: the text index on {}, {} ranked",
+                    "match: the text index on {}{}, {} ranked",
                     m.field,
+                    loosely(m),
                     hits.len()
                 )
             });
@@ -9081,11 +9082,12 @@ impl Database {
                 qv.len()
             )));
         }
-        let hits = ix.search_within(&query, candidates, accept, within);
+        let hits = search(ix, m, &query, candidates, accept, within)?;
         plan(|| {
             format!(
-                "match: the text index on {}, {} candidates",
+                "match: the text index on {}{}, {} candidates",
                 m.field,
+                loosely(m),
                 hits.len()
             )
         });
@@ -10036,7 +10038,14 @@ impl Database {
         ) else {
             return Ok((None, Vec::new()));
         };
-        let terms = crate::highlight::Terms::new(&query, *spec);
+        let mut terms = crate::highlight::Terms::new(&query, *spec);
+        if m.fuzzy > 0 || m.prefix {
+            if let Some(ix) = c.text(&m.field)? {
+                for w in ix.loose_words(&query, m.loose())? {
+                    terms.add(w);
+                }
+            }
+        }
         let text = |e: &Expr, what: &str| -> Result<String> {
             match eval(e, &mut NoRow, ctx)? {
                 Value::Text(t) => Ok(t),
@@ -10097,7 +10106,10 @@ impl Database {
             Value::Text(t) => t,
             _ => return Ok(Vec::new()),
         };
-        let mut ids = ix.matching(&query);
+        let mut ids = match m.fuzzy == 0 && !m.prefix {
+            true => ix.matching(&query),
+            false => ix.matching_loose(&query, m.loose())?,
+        };
         if let Some(f) = filter {
             let test = Filter::new(c, f, ctx);
             let mut kept = Vec::with_capacity(ids.len());
@@ -11719,6 +11731,37 @@ fn push_step(line: String) {
             steps.push(line);
         }
     });
+}
+
+/// `match`'s first `k`: a plain one down the path it always took, one
+/// reading its words loosely (`fuzzy`, `prefix`) through their variants.
+fn search<F>(
+    ix: &TextIndex,
+    m: &Match,
+    query: &str,
+    k: usize,
+    accept: F,
+    within: Option<&[DocId]>,
+) -> Result<Vec<(DocId, f32)>>
+where
+    F: Fn(DocId) -> bool,
+{
+    match m.fuzzy == 0 && !m.prefix {
+        true => Ok(ix.search_within(query, k, accept, within)),
+        false => ix.search_loose(query, k, accept, within, m.loose()),
+    }
+}
+
+/// How `explain` says a `match` reads its words, as the clause wrote it.
+fn loosely(m: &Match) -> &'static str {
+    match (m.fuzzy, m.prefix) {
+        (0, false) => "",
+        (0, true) => ", prefix",
+        (1, false) => ", fuzzy 1",
+        (1, true) => ", fuzzy 1, prefix",
+        (_, false) => ", fuzzy",
+        (_, true) => ", fuzzy, prefix",
+    }
 }
 
 /// How many rows a ranked clause has to produce: `limit + offset`, or the

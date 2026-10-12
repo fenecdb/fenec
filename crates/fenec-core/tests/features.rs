@@ -119,6 +119,7 @@ fn what_needs_a_missing_index_is_refused() {
     };
     for (sql, feature) in [
         (r#"get d match title "rust""#, "`text`"),
+        (r#"get d match title "rsut" fuzzy prefix"#, "`text`"),
         (r#"get d select highlight(title) match title "rust""#, marks),
         (
             r#"get d select snippet(title, 3) match title "rust" facet year"#,

@@ -25,6 +25,7 @@ mod explain;
 mod facets;
 mod filtered;
 mod fuse;
+mod fuzzy;
 mod geo;
 mod geo_docs;
 mod handover;

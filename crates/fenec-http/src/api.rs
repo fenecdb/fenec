@@ -850,6 +850,8 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
                 field: text_field,
                 query: Expr::Lit(Value::Text(q.clone())),
                 within: false,
+                fuzzy: 0,
+                prefix: false,
             });
             sel.fuse = Some(Fuse {
                 k: as_usize("fuse_k")?.map(|k| k.min(u32::MAX as usize) as u32),
