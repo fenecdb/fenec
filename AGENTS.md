@@ -1743,7 +1743,7 @@ machine: a scan of 50 000 matches put in order 6.70 and 6.68 ms against
 a read by id inside their spread; `make wasm-speed` the same or a little
 quicker in every column. With a `put`'s `returning` (below), the exact
 walk and a clash's stored value, the browser module grew 4.4 KB, 1.9 KB
-gzip, 1.6 KB brotli -- `order_ids_by` 1.3 KB of it, the parser's clauses
+gzip, 1.5 KB brotli -- `order_ids_by` 1.3 KB of it, the parser's clauses
 0.4 -- after the distance walk and the refusals' long texts came out.
 
 **A `put` answers the rows it wrote with `returning`.** An app inserting
