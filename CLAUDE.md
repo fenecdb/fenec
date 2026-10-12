@@ -1880,7 +1880,7 @@ took a put of `positions` beside them from 22 us p50 to 50-95 and from
 (`make queue-bench`'s `held other`, in turns). The engine tells its
 watcher the change a block landed from (`Watcher::landed`, a default
 method calling `notify`; native only, so the browser module, which holds
-no write, is the same size to the byte, 190 bytes moved where
+no write, is the same size to the byte, 196 bytes moved where
 `engine.rs`'s panics carry their line numbers); `Hub::landed` asks
 `changed_collections_since(before)` only while something is held
 (`Waits::holds`), and `Waits::wrote` marks stale and wakes the groups
