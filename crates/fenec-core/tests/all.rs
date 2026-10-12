@@ -19,6 +19,7 @@ mod composite;
 mod counts;
 mod crash;
 mod derived;
+mod exact_places;
 mod explain;
 mod facets;
 mod filtered;

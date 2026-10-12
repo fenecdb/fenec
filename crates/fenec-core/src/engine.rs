@@ -10552,23 +10552,61 @@ impl Database {
         }
     }
 
-    /// What of `stmt` a json field needs read as written ([`Exactly`]).
+    /// What of `stmt` a json field needs read as written ([`Exactly`]):
+    /// every collection it reads by its own schema -- an inner `get`'s at
+    /// any depth, each `lookup` level's. A collection it names that is not
+    /// here asks nothing: the statement is refused for it when it runs.
     pub fn exactly(&self, stmt: &Statement) -> Exactly {
-        let mut out = match self.collection(stmt_collection(stmt)) {
-            Ok(c) => exactly_for(&c.schema, stmt),
-            Err(_) => Exactly::default(),
+        let mut out = Exactly::default();
+        let of = |name: &str| match self.collections.get(name) {
+            Some(c) => Known::of(&c.schema),
+            None => Known::Missing,
         };
-        // Each `lookup` level's filter, by its own collection.
-        if let Statement::Select(s) | Statement::Explain(s) = stmt {
-            let mut level = s.lookup.as_ref();
-            while let Some(l) = level {
-                if let (Some(f), Ok(c)) = (&l.filter, self.collection(&l.collection)) {
-                    filter_needs(&c.schema, f, &mut out);
-                }
-                level = l.next.as_deref();
-            }
-        }
+        statement_needs(&of, stmt, &mut out);
         out
+    }
+}
+
+/// What [`exactly_for`]'s walk knows of a collection a statement reads.
+#[derive(Clone, Copy)]
+enum Known<'a> {
+    /// Its schema, and whether a field of it keeps a list of numbers as
+    /// written: a collection with none is asked of no comparison.
+    Schema(&'a Schema, bool),
+    /// Another collection than the one [`exactly_for`] was handed: every
+    /// field is taken to keep numbers, so its lists are read as written --
+    /// slower for a vector, never wrong.
+    Unknown,
+    /// None by that name: the statement is refused for it as it runs.
+    Missing,
+}
+
+impl<'a> Known<'a> {
+    fn of(schema: &'a Schema) -> Known<'a> {
+        Known::Schema(schema, schema.fields.iter().any(|f| f.ty.keeps_numbers()))
+    }
+
+    /// Whether `name` keeps a list of numbers as written ([`names_json`]).
+    fn keeps(self, name: &str) -> bool {
+        match self {
+            Known::Schema(schema, true) => names_json(schema, name),
+            Known::Unknown => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `e` is such a field.
+    fn field(self, e: &Expr) -> bool {
+        matches!(e, Expr::Field(n) if self.keeps(n))
+    }
+
+    /// Whether `field` is a point: `near` over it takes one.
+    fn geo(self, field: &str) -> bool {
+        match self {
+            Known::Schema(schema, _) => schema.field(field).is_some_and(|f| f.ty == DataType::Geo),
+            Known::Unknown => true,
+            Known::Missing => false,
+        }
     }
 }
 
@@ -10586,39 +10624,115 @@ fn stmt_collection(stmt: &Statement) -> &str {
 /// What of `stmt`, a statement over a collection of `schema`, a json field
 /// or a point needs read as written ([`Exactly`]): what a json or `geo`
 /// field is given or compared with, a point or a box given to `distance`
-/// or `within` anywhere, and the point of a `near` over a `geo` field.
+/// or `within` anywhere, and the point of a `near` over a `geo` field. An
+/// inner `get` or a `lookup` level over another collection, whose schema
+/// it has not got, has every list of numbers in it read as written
+/// ([`Known::Unknown`]): a REST `where=` and an MCP tool's filter, which
+/// read the text alone, take it that way.
 pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
     let mut out = Exactly::default();
-    geo_needs(schema, stmt, &mut out);
-    if !schema.fields.iter().any(|f| f.ty.keeps_numbers()) {
-        return out;
-    }
-    // The value first: a key is looked up only for a list of numbers or a
-    // parameter, so a `put` of 1 000 rows looks up the vector field's name
-    // and none of the others.
-    let mut pair = |(k, e): &(String, Expr)| {
-        if (matches!(e, Expr::Param(_)) || e.reads_vectors()) && names_json(schema, k) {
-            given(e, &mut out);
-        }
+    let of = |name: &str| match name == schema.name {
+        true => Known::of(schema),
+        false => Known::Unknown,
     };
-    let filter = match stmt {
+    statement_needs(&of, stmt, &mut out);
+    out
+}
+
+/// [`exactly_for`]'s walk, each collection known through `of`.
+fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &mut Exactly) {
+    let k = of(stmt_collection(stmt));
+    if matches!(k, Known::Missing) {
+        return;
+    }
+    // The value given first: a key is looked up only for a list of numbers
+    // or a parameter, so a `put` of 1 000 rows looks up the vector field's
+    // name and none of the others.
+    let mut pair = |(key, e): &(String, Expr)| {
+        if (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
+            given(e, out);
+        }
+        expr_needs(of, k, e, out);
+    };
+    match stmt {
         Statement::Put { docs, else_set, .. } => {
             docs.iter().flatten().for_each(&mut pair);
             else_set.iter().flatten().for_each(&mut pair);
-            None
         }
         Statement::Update { set, filter, .. } => {
             set.iter().for_each(&mut pair);
-            filter.as_ref()
+            filter.iter().for_each(|f| expr_needs(of, k, f, out));
         }
-        Statement::Delete { filter, .. } => filter.as_ref(),
-        Statement::Select(s) | Statement::Explain(s) => s.filter.as_ref(),
-        _ => None,
-    };
-    if let Some(f) = filter {
-        json_needs(schema, f, &mut out);
+        Statement::Delete { filter, .. } => {
+            filter.iter().for_each(|f| expr_needs(of, k, f, out));
+        }
+        Statement::Select(s) | Statement::Explain(s) => select_needs(of, s, out),
+        _ => {}
     }
-    out
+}
+
+/// What a `get` needs, by its collection's schema: every expression it
+/// holds -- its filter, a disjunctive facet's, `having`, `group`, each item
+/// of its list -- the point of a `near` over a point,
+/// and each `lookup` level's filter by the level's own collection. An
+/// inner `get` is walked where it is met, by its own.
+fn select_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, s: &Select, out: &mut Exactly) {
+    let k = of(&s.collection);
+    if matches!(k, Known::Missing) {
+        return;
+    }
+    // Loops rather than a chain of the lists: each `Chain` was a copy of
+    // its own in the browser module.
+    let mut each = |e: &Expr| expr_needs(of, k, e, out);
+    s.filter.iter().for_each(&mut each);
+    s.having.iter().for_each(&mut each);
+    s.group.iter().for_each(&mut each);
+    for c in s.aggregate.iter().chain(&s.computed) {
+        each(&c.expr);
+    }
+    for f in &s.facets {
+        if let Some(Some(rest)) = &f.rest {
+            each(rest);
+        }
+    }
+    if let Some(n) = &s.near {
+        if k.geo(&n.field) {
+            given(&n.vector, out);
+        }
+    }
+    let mut level = s.lookup.as_ref();
+    while let Some(l) = level {
+        let lk = of(&l.collection);
+        if let (Some(f), false) = (&l.filter, matches!(lk, Known::Missing)) {
+            expr_needs(of, lk, f, out);
+        }
+        level = l.next.as_deref();
+    }
+}
+
+/// What an expression over a collection known as `k` needs, at every
+/// depth: each argument of a `distance` or `within`, each value compared
+/// with a json field or a point, or with a path into one -- under a `case`
+/// or any call as much as in an `and` chain -- and each inner `get`, by its
+/// own collection.
+fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &mut Exactly) {
+    match e {
+        Expr::Call(name, args) if crate::geo::is_geo_call(name) => {
+            args.iter().for_each(|a| given(a, out));
+        }
+        Expr::Cmp(_, a, b) | Expr::Has(a, b) => {
+            if k.field(a) {
+                given(b, out);
+            }
+            if k.field(b) {
+                given(a, out);
+            }
+        }
+        Expr::In(a, items) if k.field(a) => items.iter().for_each(|i| given(i, out)),
+        Expr::InSelect(_, sel) => select_needs(of, sel, out),
+        _ => {}
+    }
+    e.each_child(&mut |c| expr_needs(of, k, c, out));
 }
 
 /// Whether `name` is a json field of `schema` or a path into one, or a
@@ -10629,99 +10743,15 @@ fn names_json(schema: &Schema, name: &str) -> bool {
     schema.field(field).is_some_and(|f| f.ty.keeps_numbers())
 }
 
-/// What the points and boxes of `stmt` need: each argument of a
-/// `distance` or `within` call, wherever one is -- a filter, an item of
-/// the select list, a value set -- and the point of a `near` over a point
-/// field. Asked of a statement only once a list of numbers is in it.
-fn geo_needs(schema: &Schema, stmt: &Statement, out: &mut Exactly) {
-    let mut each = |e: &Expr| geo_args(e, &mut |a| given(a, out));
-    match stmt {
-        Statement::Put { docs, else_set, .. } => {
-            for (_, e) in docs.iter().flatten().chain(else_set.iter().flatten()) {
-                each(e);
-            }
-        }
-        Statement::Update { set, filter, .. } => {
-            set.iter().for_each(|(_, e)| each(e));
-            filter.iter().for_each(&mut each);
-        }
-        Statement::Delete { filter, .. } => filter.iter().for_each(&mut each),
-        Statement::Select(s) | Statement::Explain(s) => {
-            // Loops rather than a chain of the lists: each `Chain` was a
-            // copy of its own in the browser module.
-            s.filter.iter().for_each(&mut each);
-            s.having.iter().for_each(&mut each);
-            s.group.iter().for_each(&mut each);
-            for c in s.aggregate.iter().chain(&s.computed) {
-                each(&c.expr);
-            }
-            if let Some(n) = &s.near {
-                if schema
-                    .field(&n.field)
-                    .is_some_and(|f| f.ty == DataType::Geo)
-                {
-                    given(&n.vector, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Calls `given` on each argument of each `distance` and `within` in `e`.
-fn geo_args(e: &Expr, given: &mut dyn FnMut(&Expr)) {
-    if let Expr::Call(name, args) = e {
-        if crate::geo::is_geo_call(name) {
-            args.iter().for_each(&mut *given);
-        }
-    }
-    e.each_child(&mut |c| geo_args(c, given));
-}
-
-/// What a value given a json field, or compared with one, needs.
+/// What a value given a json field, or compared with one, needs: a
+/// parameter by its place, once, or the text where a literal holds a list
+/// of numbers.
 fn given(e: &Expr, out: &mut Exactly) {
     match e {
-        Expr::Param(i) => out.params.push(*i),
+        Expr::Param(i) if !out.params.contains(i) => out.params.push(*i),
+        Expr::Param(_) => {}
         e => out.text |= e.reads_vectors(),
     }
-}
-
-/// What a `lookup` level's filter over a collection of `schema` needs
-/// ([`Exactly`]): each argument of a `distance` or `within`, and what
-/// [`json_needs`] names.
-fn filter_needs(schema: &Schema, filter: &Expr, out: &mut Exactly) {
-    geo_args(filter, &mut |a| given(a, out));
-    json_needs(schema, filter, out);
-}
-
-/// What a filter over a collection of `schema` needs for its json fields
-/// and points: each value compared with one, or with a path into one.
-fn json_needs(schema: &Schema, filter: &Expr, out: &mut Exactly) {
-    if !schema.fields.iter().any(|f| f.ty.keeps_numbers()) {
-        return;
-    }
-    let json = |name: &str| names_json(schema, name);
-    fn walk(e: &Expr, json: &dyn Fn(&str) -> bool, given: &mut dyn FnMut(&Expr)) {
-        let field = |e: &Expr| matches!(e, Expr::Field(n) if json(n));
-        match e {
-            Expr::And(a, b) | Expr::Or(a, b) => {
-                walk(a, json, given);
-                walk(b, json, given);
-            }
-            Expr::Not(a) => walk(a, json, given),
-            Expr::Cmp(_, a, b) | Expr::Has(a, b) => {
-                if field(a) {
-                    given(b);
-                }
-                if field(b) {
-                    given(a);
-                }
-            }
-            Expr::In(a, items) if field(a) => items.iter().for_each(given),
-            _ => {}
-        }
-    }
-    walk(filter, &json, &mut |e| given(e, out));
 }
 
 /// Sets `k` of `doc` to `v`: a field, coerced to its type, or a path into
