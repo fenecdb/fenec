@@ -53,7 +53,7 @@ import Testing
     static func column(_ v: Value) throws -> Column {
         if let name = v.string { return Column(name) }
         if let e = v["$expr"]?.array { return .expr(e[0].string!, e.dropFirst().map(value)) }
-        if let b = v["$bucket"]?.array { return try .bucket(b[0].string!, b[1].string!) }
+        if let b = v["$bucket"]?.array { return try .bucket(b[0].string!, b[1].string!, b.count > 2 ? b[2].string! : nil) }
         if let f = v["$countDistinct"]?.string { return try .countDistinct(f) }
         if let d = v["$distance"]?.array { return try .distance(d[0].string!, value(d[1])) }
         if let f = v["$first"]?.array { return try .first(f[0].string!, by: f.count > 1 ? f[1].string! : nil) }
@@ -125,9 +125,11 @@ import Testing
         case ("lookup", _):
             // A name, or a list of them: a key over several fields too.
             let names = { (v: Value?) in v.map { $0.string.map { [$0] } ?? $0.array!.map { $0.string! } } }
-            let select: [String]? = names(opt(a, 1, "select"))
+            // A column as itself, or a list of them: an aggregate, an expression too.
+            let columns = { (v: Value?) throws -> [Column]? in try v.map { try $0.array?.map(column) ?? [column($0)] } }
             return try q.lookup(
-                a[0].string!, on: names(opt(a, 1, "on")) ?? [], parentKey: names(opt(a, 1, "parentKey")), select: select,
+                a[0].string!, on: names(opt(a, 1, "on")) ?? [], parentKey: names(opt(a, 1, "parentKey")),
+                select: columns(opt(a, 1, "select")), group: columns(opt(a, 1, "group")),
                 where: opt(a, 1, "where").map(cond), required: opt(a, 1, "required")?.bool ?? false,
                 order: sortKeys(opt(a, 1, "order")), limit: opt(a, 1, "limit")?.int, offset: opt(a, 1, "offset")?.int)
         default:
