@@ -16,7 +16,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench nocase-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
@@ -638,6 +638,13 @@ maintenance-bench:
 ## build from before them (the program runs there too, the rest `n/a`).
 search-bench:
 	$(CARGO) run --release -p fenec-core --example search -- 100000
+
+## `match ... fuzzy` and `match ... prefix` over 100 000 documents of
+## made-up words: the sorted words' build and size, the walk alone at one
+## edit and two, and a query plain, with a typo and half typed. BEIR=<dir>
+## times the walk over that dataset's words as well.
+fuzzy-bench:
+	$(CARGO) run --release -p fenec-core --example fuzzy -- 100000 $(BEIR)
 
 ## A `nocase` field against a plain one over 100 000 rows: a put asking
 ## `@unique`, an equality by the index and by the scan, `~`, an order, a

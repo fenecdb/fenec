@@ -505,6 +505,9 @@ data class Statement(val text: String, val params: List<Any?>)
 class Query private constructor(private val s: State) {
     private class VectorClause(val field: String, val vector: Any?, val n: Long?, val exact: Boolean)
 
+    // A match's field, its words, the most edits a word may take and whether the last word is a prefix.
+    private class MatchClause(val field: String, val query: String, val fuzzy: Long?, val prefix: Boolean)
+
     private class Key(val field: String, val asc: Boolean, val collate: String?)
 
     /** A highlight (no [words]) or a snippet of a field, in the select list. */
@@ -528,7 +531,7 @@ class Query private constructor(private val s: State) {
         val group: List<Any>? = null, // each a name or a Computed
         val cond: List<Node> = emptyList(),
         val near: VectorClause? = null,
-        val match: Pair<String, String>? = null,
+        val match: MatchClause? = null,
         val rerank: VectorClause? = null,
         val fuse: Pair<Long?, Long?>? = null,
         val order: List<Key> = emptyList(),
@@ -626,8 +629,30 @@ class Query private constructor(private val s: State) {
     fun near(field: String, vector: Any?, ef: Long? = null, exact: Boolean = false): Query =
         Query(s.copy(near = VectorClause(Builder.ident(field), vector, ef?.let { Builder.whole(it, "ef") }, exact)))
 
-    /** `match field $n`: BM25 over a `@text` index. */
-    fun match(field: String, query: String): Query = Query(s.copy(match = Builder.ident(field) to query))
+    /**
+     * `match field $n [fuzzy N] [prefix]`: BM25 over a `@text` index.
+     * `fuzzy = 2` matches each word within the edits its length allows --
+     * none under 5 characters, one up to 8, two from 9 -- `fuzzy = 1` one at
+     * most; `prefix = true` matches the last word as the start of a word
+     * too, as a search box is typed into.
+     */
+    @JvmOverloads
+    fun match(field: String, query: String, fuzzy: Long? = null, prefix: Boolean = false): Query =
+        matchOf(field, query, fuzzy, prefix)
+
+    /** [match] over options of any type, as the golden file holds them, so a refusal of one is the JS builder's. */
+    internal fun matchOf(field: String, query: String, fuzzy: Any?, prefix: Any?): Query {
+        val f = Builder.ident(field)
+        val edits = when (fuzzy) {
+            null, false -> null
+            true -> 2L
+            is Long, is Int -> (fuzzy as Number).toLong().takeIf { it in 0L..2L }
+                ?: throw refuse("fuzzy is true, false or 0 to 2 edits: $fuzzy")
+            else -> throw refuse("fuzzy is true, false or 0 to 2 edits: $fuzzy")
+        }
+        if (prefix != null && prefix !is Boolean) throw refuse("prefix is true or false: $prefix")
+        return Query(s.copy(match = MatchClause(f, query, edits, prefix == true)))
+    }
 
     /** `fuse [k N] [candidates N]`: with both [match] and [near], ranks by both. */
     @JvmOverloads
@@ -903,7 +928,11 @@ class Query private constructor(private val s: State) {
             n.n?.let { sql.append(" ef $it") }
             if (n.exact) sql.append(" exact")
         }
-        s.match?.let { (f, q) -> sql.append(" match $f ${bind.bind(q)}") }
+        s.match?.let { m ->
+            sql.append(" match ${m.field} ${bind.bind(m.query)}")
+            m.fuzzy?.let { sql.append(" fuzzy $it") }
+            if (m.prefix) sql.append(" prefix")
+        }
         s.rerank?.let { r ->
             sql.append(" rerank ${r.field} ${bind.bind(r.vector)}")
             r.n?.let { sql.append(" candidates $it") }

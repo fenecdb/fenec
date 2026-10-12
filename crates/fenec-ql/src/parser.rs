@@ -1130,10 +1130,33 @@ impl Parser {
             if self.eat_kw("match") {
                 let field = self.ident()?;
                 let query = self.expr()?;
+                // `fuzzy [N]` and `prefix`, in either order: neither can
+                // continue the text's expression, so where it ends is not
+                // in doubt.
+                let (mut fuzzy, mut prefix) = (0, false);
+                loop {
+                    if self.eat_kw("fuzzy") {
+                        fuzzy = MAX_FUZZY;
+                        if matches!(self.peek(), Tok::Int(_) | Tok::Minus) {
+                            match self.int() {
+                                Ok(n @ 0..=2) => fuzzy = n as u8,
+                                _ => return self.err(FUZZY_RANGE),
+                            }
+                        }
+                        continue;
+                    }
+                    if self.eat_kw("prefix") {
+                        prefix = true;
+                        continue;
+                    }
+                    break;
+                }
                 sel.matcher = Some(Match {
                     field,
                     query,
                     within: false,
+                    fuzzy,
+                    prefix,
                 });
                 continue;
             }

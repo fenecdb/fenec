@@ -119,7 +119,7 @@ public sealed class BuilderTests(Servers servers)
         "orWhere" => q.OrWhere(Condition(a[0])),
         "near" => q.Near(a[0].GetString()!, Value(a[1]), Long(Opt(a, 2, "ef")), Opt(a, 2, "exact")?.GetBoolean() ?? false),
         "rerank" => q.Rerank(a[0].GetString()!, Value(a[1]), Long(Opt(a, 2, "candidates"))),
-        "match" => q.Match(a[0].GetString()!, a[1].GetString()!),
+        "match" => q.Matched(a[0].GetString()!, a[1].GetString()!, Arg(a, 2, "fuzzy"), Arg(a, 2, "prefix")),
         "fuse" => q.Fuse(Long(Opt(a, 0, "k")), Long(Opt(a, 0, "candidates"))),
         "group" => q.Group(a.Select(Value).ToArray()),
         "order" => q.Order(a[0].GetString()!, a.Length > 1 ? a[1].GetString()! : "asc", Opt(a, 2, "collate")?.GetString()),

@@ -35,6 +35,7 @@ pub mod composite;
 pub mod declared;
 pub mod engine;
 pub mod error;
+pub mod fuzzy;
 pub mod geo;
 pub mod highlight;
 pub mod history;

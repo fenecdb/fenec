@@ -25,6 +25,9 @@
 // tokenizer stays, for what else splits text.
 #![cfg_attr(not(feature = "text"), allow(dead_code, unused_imports))]
 
+use crate::error::{Error, Result};
+#[cfg(feature = "text")]
+use crate::fuzzy::{typos, Dictionary};
 use crate::maps::{Map, Sharded};
 use crate::schema::TextIndexSpec;
 #[cfg(feature = "text")]
@@ -32,6 +35,57 @@ use crate::store::DocMap;
 use crate::value::DocId;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+
+/// How loosely a `match` reads its query's words: `match body $1 fuzzy`,
+/// `fuzzy 1`, `prefix`. Plain -- no edits, no prefix -- is a `match` as it
+/// always was, down the same code.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Loose {
+    /// The most edits a word may take, 0 to 2, each word held besides to
+    /// what its length allows ([`crate::fuzzy::typos`]): `fuzzy` alone is
+    /// 2, so the length decides.
+    pub fuzzy: u8,
+    /// The query's last word also matches the words it begins: what a
+    /// search box sends as it is typed into.
+    pub prefix: bool,
+}
+
+impl Loose {
+    pub fn is_plain(&self) -> bool {
+        self.fuzzy == 0 && !self.prefix
+    }
+}
+
+/// The most words of an index one word of a query may reach through
+/// `fuzzy` or `prefix`, itself among them. Past it the query is refused,
+/// never cut: a word read as the first 10 000 of its 30 000 completions is
+/// a wrong answer believed right. 10 000 as `near` and `match` answer at
+/// most 10 000 rows: FiQA's 80 426 words hold no prefix of one letter
+/// reaching more (`s` reaches 7 020, `co` 2 245, `con` 794), so a search
+/// box is refused only at a first letter over a larger vocabulary. Each
+/// word reached is a list merged into its word's: over 100 000 documents of
+/// 60 000 made-up words a word's first two letters took 3.0 ms, its first
+/// three 0.44 (`make fuzzy-bench`).
+pub const MAX_EXPANSIONS: usize = 10_000;
+
+/// What a word found near a query's word counts for, by its distance: one
+/// it begins (`prefix`), one edit away, two. Of the weight the word's
+/// variants of that distance carry together, as one term (`Reach`).
+/// Measured on BEIR with a typo in each query (`make beir`, nDCG@10), a
+/// word one edit away is the word meant -- at the whole weight SciFact's
+/// typed queries went 0.636 -> 0.663, at half 0.657 -- and two away is as
+/// often another word: at the whole weight FiQA's went 0.2125 -> 0.2261, at
+/// a quarter 0.2292.
+#[cfg(feature = "text")]
+const NEAR_WEIGHT: [f32; 3] = [1.0, 1.0, 0.25];
+
+/// What a derived index of the text index's is held in: a lock natively,
+/// a second reader waiting for the first one's build, a cell in the
+/// browser, which has one thread -- as `engine::Derived` holds an index.
+#[cfg(all(feature = "text", not(target_arch = "wasm32")))]
+type Lazy<T> = std::sync::OnceLock<T>;
+#[cfg(all(feature = "text", target_arch = "wasm32"))]
+type Lazy<T> = std::cell::OnceCell<T>;
 
 /// Calls `f` with every term in `text`, lowercased and I-folded.
 ///
@@ -352,6 +406,15 @@ pub struct TextIndex {
     /// it, kept as they change: summed over every term it cost 0.42 ms at
     /// 200 000 documents, and `--max-memory` asks before every write.
     heap: usize,
+    /// The words in order, for `fuzzy` and `prefix`: sorted by the first
+    /// `match` that asks either, kept up by the writes from then on, as a
+    /// derived index is ([`crate::fuzzy`]). An index no `match` reads
+    /// loosely never makes it.
+    words: Lazy<Dictionary>,
+    /// The most terms a document has held: the longest a document can be,
+    /// below which a word's own term outscores its variants (`Reach`).
+    /// Only ever raised, as `Postings::max_tf` is.
+    longest: u32,
 }
 
 #[cfg(feature = "text")]
@@ -363,7 +426,15 @@ impl TextIndex {
             lengths: DocMap::default(),
             total_terms: 0,
             heap: 0,
+            words: Lazy::new(),
+            longest: 0,
         }
+    }
+
+    /// The words in order, sorted the first time they are asked for.
+    fn dictionary(&self) -> &Dictionary {
+        self.words
+            .get_or_init(|| Dictionary::of(self.postings.iter().map(|(t, _)| t.as_str())))
     }
 
     pub fn len(&self) -> usize {
@@ -383,9 +454,10 @@ impl TextIndex {
     }
 
     /// Postings, the term dictionary and the length table, as they sit in
-    /// memory. Not RSS -- the same caveat as `Database::memory_bytes`.
+    /// memory, and the sorted words once a `match` has asked for them. Not
+    /// RSS -- the same caveat as `Database::memory_bytes`.
     pub fn memory_bytes(&self) -> usize {
-        self.heap + self.lengths.bytes()
+        self.heap + self.lengths.bytes() + self.words.get().map_or(0, Dictionary::bytes)
     }
 
     /// What one term costs: its dictionary entry and its postings.
@@ -413,12 +485,16 @@ impl TextIndex {
                     p.bump(doc);
                     self.heap += t.len() + 32 + p.bytes();
                     self.postings.insert(t.to_string(), p);
+                    if let Some(words) = self.words.get_mut() {
+                        words.add(t);
+                    }
                 }
             }
         });
         if n == 0 {
             return;
         }
+        self.longest = self.longest.max(n);
         if let Some(old) = self.lengths.insert(doc, n) {
             self.total_terms -= old as u64;
         }
@@ -439,6 +515,9 @@ impl TextIndex {
                 if list.is_empty() {
                     self.heap -= TextIndex::term_bytes(t, list);
                     self.postings.remove(t);
+                    if let Some(words) = self.words.get_mut() {
+                        words.remove(t);
+                    }
                 }
             }
         });
@@ -470,6 +549,8 @@ impl TextIndex {
         self.lengths.clear();
         self.total_terms = 0;
         self.heap = 0;
+        self.words = Lazy::new();
+        self.longest = 0;
     }
 
     fn avgdl(&self) -> f32 {
@@ -499,6 +580,14 @@ impl TextIndex {
     /// already, so one alone is copied as it is; more are put together
     /// through the engine's one sort of ids.
     pub fn matching(&self, query: &str) -> Vec<DocId> {
+        self.matching_loose(query, Loose::default())
+            .unwrap_or_default()
+    }
+
+    /// [`Self::matching`] with the query's words read loosely: every
+    /// document holding a term of the query or a variant of one of its
+    /// words, what `facet` counts beside a loose `match`.
+    pub fn matching_loose(&self, query: &str, loose: Loose) -> Result<Vec<DocId>> {
         let mut lists: Vec<&Postings> = Vec::new();
         for_each_indexed_term(query, &self.spec, |t| {
             if let Some(list) = self.postings.get(t) {
@@ -507,6 +596,12 @@ impl TextIndex {
                 }
             }
         });
+        if !loose.is_plain() {
+            // A variant is no term of the query's own, so no list twice.
+            for r in self.reach(query, loose, &self.query_terms(query))? {
+                lists.extend(r.found.iter().map(|f| f.2));
+            }
+        }
         let mut out: Vec<DocId> = Vec::new();
         for l in &lists {
             out.extend_from_slice(&l.docs);
@@ -515,7 +610,7 @@ impl TextIndex {
             out.sort_unstable();
             out.dedup();
         }
-        out
+        Ok(out)
     }
 
     /// Top `k` documents for `query`, best first.
@@ -551,8 +646,22 @@ impl TextIndex {
         // The browser holds no scoped token to ask for it: left in, the
         // counting was 151 bytes brotli of its module.
         let within = within.filter(|_| cfg!(not(target_arch = "wasm32")));
-        // Repeated query terms fold into a weight. Scoring the same postings
-        // list twice would give the same answer for twice the walk.
+        let qtf = self.query_terms(query);
+        let (n, avgdl) = self.counted(within);
+        let mut cursors: Vec<Cursor> = Vec::with_capacity(qtf.len());
+        for (term, count) in &qtf {
+            if let Some(list) = self.postings.get(term.as_str()) {
+                cursors.extend(self.cursor(list, *count as f32, n, within));
+            }
+        }
+        self.ranked(cursors, k, accept, avgdl)
+    }
+
+    /// The terms of `query` as the index reads them, each with how often
+    /// the query holds it. Repeated query terms fold into a weight: scoring
+    /// the same postings list twice would give the same answer for twice
+    /// the walk.
+    fn query_terms(&self, query: &str) -> Map<String, u32> {
         let mut qtf: Map<String, u32> = Map::default();
         for_each_indexed_term(query, &self.spec, |t| match qtf.get_mut(t) {
             Some(c) => *c += 1,
@@ -560,36 +669,238 @@ impl TextIndex {
                 qtf.insert(t.to_string(), 1);
             }
         });
+        qtf
+    }
 
-        let (n, avgdl) = self.counted(within);
+    /// A walk through `list` weighted `times` its idf, or none where
+    /// `within` holds none of its documents and the term is passed over,
+    /// its list unwalked.
+    fn cursor<'a>(
+        &self,
+        list: &'a Postings,
+        times: f32,
+        n: usize,
+        within: Option<&[DocId]>,
+    ) -> Option<Cursor<'a>> {
+        let df = match within {
+            None => list.len(),
+            Some(w) => held_by(&list.docs, w),
+        };
+        if df == 0 {
+            return None;
+        }
         let (k1, b) = (self.spec.k1(), self.spec.b());
-        let mut cursors: Vec<Cursor> = Vec::with_capacity(qtf.len());
-        for (term, count) in &qtf {
-            if let Some(list) = self.postings.get(term) {
-                let df = match within {
-                    None => list.len(),
-                    Some(w) => held_by(&list.docs, w),
-                };
-                if df == 0 {
+        let weight = times * idf(n, df);
+        // The most this term can ever add to a document: its largest `tf`,
+        // against the most generous length normalisation there is (`dl` ->
+        // 0). An over-estimate is what makes it safe.
+        let tf = list.max_tf as f32;
+        Some(Cursor {
+            at: 0,
+            list,
+            weight,
+            ceiling: weight * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b)),
+        })
+    }
+
+    /// [`Self::search_within`] with the query's words read loosely
+    /// ([`Loose`]): each word's variants of one distance -- the words
+    /// `fuzzy` finds within its edits, the words `prefix` finds the last
+    /// word begins -- ranked as one more term, a list of the documents any
+    /// of them holds, each document's counts summed ([`union`]). A
+    /// document holding three spellings of a word scores as one holding
+    /// the word three times, BM25's saturation and all, not three words
+    /// over; and the term's idf is the union's, so a rare misspelling the
+    /// corpus holds twice ranks no higher than the word it misspells.
+    ///
+    /// **A word's own term outranks its variants.** Their weights are
+    /// scaled, where they would reach it, below the least the word itself
+    /// adds to a document -- one occurrence in the longest document there
+    /// is -- so of two documents, one holding a word of the query as typed
+    /// and one only a variant of it, the first scores more from that word:
+    /// a one-word query ranks every document holding it above every
+    /// document holding only what is near it. A word no document holds
+    /// as typed -- the typo, the half-typed word -- ranks by its variants
+    /// alone: a completion of a prefix and a word one edit away at the
+    /// whole weight, two edits away at a quarter (`NEAR_WEIGHT`).
+    ///
+    /// The variants are cursors as any term's, their ceilings their own,
+    /// so MaxScore is as safe over them as over a plain query, which
+    /// `pruning_never_changes_a_loose_answer` holds it to.
+    pub fn search_loose<F>(
+        &self,
+        query: &str,
+        k: usize,
+        accept: F,
+        within: Option<&[DocId]>,
+        loose: Loose,
+    ) -> Result<Vec<(DocId, f32)>>
+    where
+        F: Fn(DocId) -> bool,
+    {
+        if loose.is_plain() {
+            return Ok(self.search_within(query, k, accept, within));
+        }
+        if k == 0 || self.lengths.len() == 0 {
+            return Ok(Vec::new());
+        }
+        let within = within.filter(|_| cfg!(not(target_arch = "wasm32")));
+        let qtf = self.query_terms(query);
+        let reach = self.reach(query, loose, &qtf)?;
+        let (n, avgdl) = self.counted(within);
+        let unions = unions(&reach);
+        let cursors = self.loose_cursors(&qtf, &reach, &unions, n, avgdl, within);
+        Ok(self.ranked(cursors, k, accept, avgdl))
+    }
+
+    /// What each word of `query` reaches read loosely, the words the query
+    /// holds as terms of its own left out; a word whose variants pass
+    /// [`MAX_EXPANSIONS`] refuses the query.
+    fn reach<'a>(
+        &'a self,
+        query: &str,
+        loose: Loose,
+        qtf: &Map<String, u32>,
+    ) -> Result<Vec<Reach<'a>>> {
+        let mut words: Vec<(String, u32)> = Vec::new();
+        let mut last = 0;
+        terms(query, self.spec.chars, &mut |t, _, _| {
+            last = match words.iter().position(|w| w.0 == t) {
+                Some(i) => {
+                    words[i].1 += 1;
+                    i
+                }
+                None => {
+                    words.push((t.to_string(), 1));
+                    words.len() - 1
+                }
+            };
+        });
+        let mut out = Vec::new();
+        let mut near: Vec<(&str, u8)> = Vec::new();
+        for (i, (w, count)) in words.iter().enumerate() {
+            let k = typos(w.chars().count()).min(loose.fuzzy);
+            let prefix = loose.prefix && i == last;
+            if k == 0 && !prefix {
+                continue;
+            }
+            near.clear();
+            if !self
+                .dictionary()
+                .near(w, k, prefix, MAX_EXPANSIONS, &mut near)
+            {
+                let how = if prefix { "prefix" } else { "fuzzy" };
+                return Err(Error::Query(format!(
+                    "`match ... {how}` reads `{w}` as more than {MAX_EXPANSIONS} words of the \
+                     index, and a word reaches {MAX_EXPANSIONS} at most: refused rather than cut"
+                )));
+            }
+            let mut found = Vec::new();
+            for &(t, d) in &near {
+                if t == w || qtf.contains_key(t) {
                     continue;
                 }
-                let weight = *count as f32 * idf(n, df);
-                // The most this term can ever add to a document: its largest
-                // `tf`, against the most generous length normalisation there
-                // is (`dl` -> 0). An over-estimate is what makes it safe.
-                let tf = list.max_tf as f32;
-                let ceiling = weight * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b));
-                cursors.push(Cursor {
-                    at: 0,
-                    list,
-                    weight,
-                    ceiling,
-                });
+                if let Some(list) = self.postings.get(t) {
+                    found.push((t, d, list));
+                }
+            }
+            out.push(Reach {
+                count: *count,
+                own: self.postings.get(w.as_str()),
+                found,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The query's own terms' cursors, then each word's variants', a
+    /// distance a cursor, scaled below the word's own (`search_loose`).
+    #[allow(clippy::too_many_arguments)]
+    fn loose_cursors<'a>(
+        &'a self,
+        qtf: &Map<String, u32>,
+        reach: &[Reach<'a>],
+        unions: &'a [Postings],
+        n: usize,
+        avgdl: f32,
+        within: Option<&[DocId]>,
+    ) -> Vec<Cursor<'a>> {
+        let mut cursors: Vec<Cursor> = Vec::with_capacity(qtf.len() + 3 * reach.len());
+        for (term, count) in qtf {
+            if let Some(list) = self.postings.get(term.as_str()) {
+                cursors.extend(self.cursor(list, *count as f32, n, within));
             }
         }
+        let (k1, b) = (self.spec.k1(), self.spec.b());
+        let mut next = unions.iter();
+        for r in reach {
+            let mark = cursors.len();
+            for (d, scale) in NEAR_WEIGHT.iter().enumerate() {
+                let lists = r.of(d as u8);
+                let list = match lists.len() {
+                    0 => continue,
+                    1 => lists[0],
+                    _ => match next.next() {
+                        Some(u) => u,
+                        None => continue,
+                    },
+                };
+                cursors.extend(self.cursor(list, r.count as f32 * scale, n, within));
+            }
+            let Some(own) = r
+                .own
+                .and_then(|l| self.cursor(l, r.count as f32, n, within))
+            else {
+                continue;
+            };
+            // The least the word's own term adds to a document holding it:
+            // once, in the longest document there is. A hundredth below it
+            // survives the scores' rounding to `f32`.
+            let longest = self.longest.max(1) as f32;
+            let floor =
+                0.99 * own.weight * (k1 + 1.0) / (1.0 + k1 * (1.0 - b + b * longest / avgdl));
+            let most: f32 = cursors[mark..].iter().map(|c| c.ceiling).sum();
+            if most > floor {
+                for c in &mut cursors[mark..] {
+                    c.weight *= floor / most;
+                    c.ceiling *= floor / most;
+                }
+            }
+        }
+        cursors
+    }
+
+    /// The words `query` reaches read loosely besides its own terms: what
+    /// `highlight()` marks beside them.
+    pub fn loose_words(&self, query: &str, loose: Loose) -> Result<Vec<&str>> {
+        if loose.is_plain() {
+            return Ok(Vec::new());
+        }
+        let qtf = self.query_terms(query);
+        let reach = self.reach(query, loose, &qtf)?;
+        let mut out = Vec::new();
+        for r in &reach {
+            for f in &r.found {
+                out.push(f.0);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The first `k` documents `cursors` reach, best first. Natively in
+    /// line with each caller, as the walk was before a loose `match` shared
+    /// it: called, FiQA's `match` took 0.261 -> 0.269 ms p50; in line, 0.257.
+    /// The browser module's `match` moved by noise alone either way, so it
+    /// keeps one copy.
+    #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+    fn ranked<F>(&self, cursors: Vec<Cursor>, k: usize, accept: F, avgdl: f32) -> Vec<(DocId, f32)>
+    where
+        F: Fn(DocId) -> bool,
+    {
         if cursors.is_empty() {
             return Vec::new();
         }
+        let (k1, b) = (self.spec.k1(), self.spec.b());
 
         // MaxScore (Turtle & Flood). Sorted by ceiling, `reach[i]` is the most
         // the first `i` terms can contribute together. Once the heap is full,
@@ -689,6 +1000,101 @@ impl TextIndex {
         out.sort_by(best_first);
         out
     }
+}
+
+/// One word of a loose `match`'s query and what it reaches.
+#[cfg(feature = "text")]
+struct Reach<'a> {
+    /// How often the query holds the word.
+    count: u32,
+    /// The word's own list, where the index holds it.
+    own: Option<&'a Postings>,
+    /// Each variant, its distance and its list.
+    found: Vec<(&'a str, u8, &'a Postings)>,
+}
+
+#[cfg(feature = "text")]
+impl<'a> Reach<'a> {
+    /// The lists of its variants `d` edits away.
+    fn of(&self, d: u8) -> Vec<&'a Postings> {
+        self.found
+            .iter()
+            .filter(|f| f.1 == d)
+            .map(|f| f.2)
+            .collect()
+    }
+}
+
+/// Each word's variants of one distance as one list where there are
+/// several, in the order [`TextIndex::loose_cursors`] takes them.
+#[cfg(feature = "text")]
+fn unions(reach: &[Reach]) -> Vec<Postings> {
+    let mut out = Vec::new();
+    for r in reach {
+        for d in 0..NEAR_WEIGHT.len() as u8 {
+            let lists = r.of(d);
+            if lists.len() > 1 {
+                out.push(union(&lists));
+            }
+        }
+    }
+    out
+}
+
+/// The documents any of `lists` holds, ascending, each with its counts
+/// there summed: merged two at a time, a level at a time, so a word
+/// reaching `n` lists costs the postings `log n` times over.
+#[cfg(feature = "text")]
+fn union(lists: &[&Postings]) -> Postings {
+    let none = Postings::default();
+    let mut level: Vec<Postings> = Vec::with_capacity(lists.len().div_ceil(2));
+    for p in lists.chunks(2) {
+        level.push(merged(p[0], p.get(1).copied().unwrap_or(&none)));
+    }
+    while level.len() > 1 {
+        let mut up = Vec::with_capacity(level.len().div_ceil(2));
+        for p in level.chunks(2) {
+            up.push(merged(&p[0], p.get(1).unwrap_or(&none)));
+        }
+        level = up;
+    }
+    level.pop().unwrap_or_default()
+}
+
+#[cfg(feature = "text")]
+fn merged(a: &Postings, b: &Postings) -> Postings {
+    let mut out = Postings {
+        docs: Vec::with_capacity(a.len() + b.len()),
+        tfs: Vec::with_capacity(a.len() + b.len()),
+        max_tf: 0,
+    };
+    let (mut i, mut j) = (0, 0);
+    loop {
+        let (doc, tf) = match (a.docs.get(i), b.docs.get(j)) {
+            (Some(&x), Some(&y)) if x == y => {
+                i += 1;
+                j += 1;
+                (x, a.tfs[i - 1] + b.tfs[j - 1])
+            }
+            (Some(&x), Some(&y)) if x < y => {
+                i += 1;
+                (x, a.tfs[i - 1])
+            }
+            (Some(&x), None) => {
+                i += 1;
+                (x, a.tfs[i - 1])
+            }
+            (_, Some(&y)) => {
+                j += 1;
+                (y, b.tfs[j - 1])
+            }
+            (None, None) => break,
+        };
+        out.docs.push(doc);
+        out.tfs.push(tf);
+        out.max_tf = out.max_tf.max(tf);
+    }
+    out
 }
 
 /// Robertson/Sparck-Jones idf of a term `df` of `n` documents hold, the
@@ -834,9 +1240,43 @@ impl TextIndex {
                 });
             }
         }
+        self.ranked_unpruned(cursors, k, accept, avgdl)
+    }
+
+    /// [`Self::search_loose`] with the pruning switched off: the same
+    /// cursors, variants and all, every one driving the frontier.
+    fn search_loose_unpruned<F>(
+        &self,
+        query: &str,
+        k: usize,
+        accept: F,
+        loose: Loose,
+    ) -> Vec<(DocId, f32)>
+    where
+        F: Fn(DocId) -> bool,
+    {
+        let qtf = self.query_terms(query);
+        let reach = self.reach(query, loose, &qtf).unwrap();
+        let (n, avgdl) = self.counted(None);
+        let unions = unions(&reach);
+        let cursors = self.loose_cursors(&qtf, &reach, &unions, n, avgdl, None);
+        self.ranked_unpruned(cursors, k, accept, avgdl)
+    }
+
+    fn ranked_unpruned<F>(
+        &self,
+        cursors: Vec<Cursor>,
+        k: usize,
+        accept: F,
+        avgdl: f32,
+    ) -> Vec<(DocId, f32)>
+    where
+        F: Fn(DocId) -> bool,
+    {
         if cursors.is_empty() {
             return Vec::new();
         }
+        let (k1, b) = (self.spec.k1(), self.spec.b());
         let mut cursors = by_ceiling(&cursors);
         let mut heap: BinaryHeap<ByScore> = BinaryHeap::with_capacity(k + 1);
         loop {
@@ -1269,5 +1709,301 @@ mod tests {
             once.iter().map(|h| h.0).collect::<Vec<_>>(),
             twice.iter().map(|h| h.0).collect::<Vec<_>>()
         );
+    }
+
+    fn fuzzy() -> Loose {
+        Loose {
+            fuzzy: 2,
+            prefix: false,
+        }
+    }
+
+    fn ids(hits: &[(DocId, f32)]) -> Vec<DocId> {
+        hits.iter().map(|h| h.0).collect()
+    }
+
+    /// Words over five letters, five to eleven of them, each a third of the
+    /// time a typo of one before it and a third that one with letters
+    /// after: many are an edit or two from another, and many begin another.
+    fn near_words(rng: &mut Rng, n: usize) -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(n);
+        while out.len() < n {
+            let w = match (out.is_empty(), rng.upto(3)) {
+                (false, 0) => {
+                    let w = out[rng.upto(out.len())].clone();
+                    misspelt(rng, &w)
+                }
+                (false, 1) => {
+                    let mut w = out[rng.upto(out.len())].clone();
+                    w.extend((0..1 + rng.upto(3)).map(|_| b"abcde"[rng.upto(5)] as char));
+                    w
+                }
+                _ => {
+                    let len = 5 + rng.upto(7);
+                    (0..len).map(|_| b"abcde"[rng.upto(5)] as char).collect()
+                }
+            };
+            if !out.contains(&w) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
+    /// A word with a typo at one place past the first: a letter dropped,
+    /// doubled, changed, or swapped with the next.
+    fn misspelt(rng: &mut Rng, w: &str) -> String {
+        let mut c: Vec<char> = w.chars().collect();
+        let at = 1 + rng.upto(c.len() - 1);
+        match rng.upto(4) {
+            0 => {
+                c.remove(at);
+            }
+            1 => c.insert(at, c[at]),
+            2 => c[at] = b"abcde"[rng.upto(5)] as char,
+            _ if at + 1 < c.len() => c.swap(at, at + 1),
+            _ => {}
+        }
+        c.into_iter().collect()
+    }
+
+    /// A word misspelt finds the documents holding it; a word begun finds
+    /// the documents holding what it begins; plain, neither does.
+    #[test]
+    fn a_typo_and_a_word_begun_find_the_word() {
+        let mut ix = TextIndex::new(spec());
+        ix.insert(1, "a database of documents");
+        ix.insert(2, "databases and their indexes");
+        ix.insert(3, "nothing to see");
+        let begun = Loose {
+            fuzzy: 0,
+            prefix: true,
+        };
+        let loose = |q: &str, l: Loose| ids(&ix.search_loose(q, 10, |_| true, None, l).unwrap());
+        assert!(ix.search("databse", 10, |_| true).is_empty());
+        // Seven letters take one edit: `databases` is two away.
+        assert_eq!(loose("databse", fuzzy()), [1]);
+        assert_eq!(loose("databasse", fuzzy()), [1, 2], "nine letters take two");
+        assert_eq!(loose("datab", begun), [1, 2]);
+        assert_eq!(loose("indexes datab", begun), [2, 1]);
+        // Only the last word is a prefix.
+        assert_eq!(loose("datab nothing", begun), [3]);
+        // A word under five letters takes no edit; a typo in the first
+        // letter counts two.
+        assert!(loose("seee", fuzzy()).is_empty());
+        let one = Loose {
+            fuzzy: 1,
+            prefix: false,
+        };
+        assert!(loose("tatabases", one).is_empty());
+        assert_eq!(
+            loose("tatabases", fuzzy()),
+            [2],
+            "two edits from nine letters"
+        );
+        // A misspelt word begun.
+        let both = Loose {
+            fuzzy: 2,
+            prefix: true,
+        };
+        assert_eq!(loose("datbas", both), [1, 2]);
+        assert_eq!(ix.matching_loose("databasse", fuzzy()).unwrap(), [1, 2]);
+        let mut words = ix.loose_words("databasse indexes", fuzzy()).unwrap();
+        words.sort_unstable();
+        assert_eq!(words, ["database", "databases"]);
+    }
+
+    /// For a one-word query, every document holding the word as typed
+    /// ranks above every document holding only a variant of it, however
+    /// often and in however short a document -- over generated corpora,
+    /// with `fuzzy`, `prefix` and both.
+    #[test]
+    fn a_word_as_typed_outranks_its_variants() {
+        let mut checked = 0;
+        for seed in 1..=60u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let n = 40 + rng.upto(80);
+            let vocab = near_words(&mut rng, n);
+            let mut ix = TextIndex::new(spec());
+            let mut docs: Vec<Vec<&str>> = Vec::new();
+            for id in 0..(30 + rng.upto(200)) as u64 {
+                let len = 1 + rng.upto(40);
+                let words: Vec<&str> = (0..len)
+                    .map(|_| vocab[rng.upto(vocab.len())].as_str())
+                    .collect();
+                ix.insert(id, &words.join(" "));
+                docs.push(words);
+            }
+            for _ in 0..20 {
+                let w = &vocab[rng.upto(vocab.len())];
+                let loose = Loose {
+                    fuzzy: [0, 1, 2][rng.upto(3)],
+                    prefix: rng.upto(2) == 0,
+                };
+                // Sometimes the word itself, sometimes a typo no document
+                // may hold, sometimes a word begun.
+                let q = match rng.upto(3) {
+                    0 => w.clone(),
+                    1 => misspelt(&mut rng, w),
+                    _ => w.chars().take(2 + rng.upto(w.len() - 1)).collect(),
+                };
+                let hits = ix.search_loose(&q, 1_000, |_| true, None, loose).unwrap();
+                let holds = |d: DocId| docs[d as usize].contains(&q.as_str());
+                let first_variant = hits.iter().position(|h| !holds(h.0)).unwrap_or(hits.len());
+                assert!(
+                    hits[first_variant..].iter().all(|h| !holds(h.0)),
+                    "seed {seed} {q:?} {loose:?}: {hits:?}"
+                );
+                if first_variant > 0 && first_variant < hits.len() {
+                    assert!(hits[first_variant - 1].1 > hits[first_variant].1);
+                    checked += 1;
+                }
+                // And every document holding it is found.
+                let n = (0..docs.len() as DocId).filter(|&d| holds(d)).count();
+                assert_eq!(first_variant, n, "seed {seed} {q:?}");
+            }
+        }
+        assert!(checked > 100, "{checked}");
+    }
+
+    /// MaxScore over a loose query's cursors -- the variants' unions among
+    /// them -- returns what the exhaustive walk over the same cursors does.
+    #[test]
+    fn pruning_never_changes_a_loose_answer() {
+        let mut queries = 0;
+        for seed in 1..=120u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let n = 30 + rng.upto(120);
+            let vocab = near_words(&mut rng, n);
+            let mut ix = TextIndex::new(spec());
+            for id in 1..=(40 + rng.upto(160)) as u64 {
+                let len = 3 + rng.upto(25);
+                let words: Vec<&str> = (0..len)
+                    .map(|_| match rng.upto(10) < 5 {
+                        true => vocab[rng.upto(3)].as_str(),
+                        false => vocab[rng.upto(vocab.len())].as_str(),
+                    })
+                    .collect();
+                ix.insert(id, &words.join(" "));
+            }
+            for _ in 0..20 {
+                let qlen = 1 + rng.upto(4);
+                let q: Vec<String> = (0..qlen)
+                    .map(|_| {
+                        let w = &vocab[rng.upto(vocab.len())];
+                        match rng.upto(3) {
+                            0 => w.clone(),
+                            1 => misspelt(&mut rng, w),
+                            _ => w.chars().take(3).collect(),
+                        }
+                    })
+                    .collect();
+                let query = q.join(" ");
+                let loose = Loose {
+                    fuzzy: [0, 1, 2][rng.upto(3)],
+                    prefix: rng.upto(2) == 0,
+                };
+                for k in [1usize, 3, 10, 50] {
+                    let odd = rng.upto(4) == 0;
+                    let accept = |d: DocId| !odd || d.is_multiple_of(2);
+                    let want = ix.search_loose_unpruned(&query, k, accept, loose);
+                    let got = ix.search_loose(&query, k, accept, None, loose).unwrap();
+                    assert_eq!(
+                        ids(&want),
+                        ids(&got),
+                        "seed {seed} k {k} {query:?} {loose:?}"
+                    );
+                    for (w, g) in want.iter().zip(&got) {
+                        assert!((w.1 - g.1).abs() <= 1e-5 * w.1.abs().max(1.0));
+                    }
+                    queries += !want.is_empty() as usize;
+                }
+            }
+        }
+        assert!(queries > 5_000, "{queries}");
+    }
+
+    /// Past the bound a word is refused, never read as some of what it
+    /// reaches.
+    #[test]
+    fn a_word_reaching_too_many_is_refused() {
+        let mut ix = TextIndex::new(spec());
+        for i in 0..MAX_EXPANSIONS as u64 {
+            ix.insert(i, &format!("pre{i}"));
+        }
+        let prefix = Loose {
+            fuzzy: 0,
+            prefix: true,
+        };
+        let hits = ix.search_loose("pre", 5, |_| true, None, prefix).unwrap();
+        assert_eq!(hits.len(), 5);
+        ix.insert(MAX_EXPANSIONS as u64, "prez");
+        let e = ix
+            .search_loose("pre", 5, |_| true, None, prefix)
+            .unwrap_err();
+        assert!(e.to_string().contains("refused rather than cut"), "{e}");
+        assert!(ix.matching_loose("pre", prefix).is_err());
+        assert!(ix.search_loose("pre1", 5, |_| true, None, prefix).is_ok());
+    }
+
+    /// The sorted words, once a loose `match` has made them, are kept up
+    /// by the writes: an index written to after it answers as one built
+    /// from the documents as they stand.
+    #[test]
+    fn the_words_are_kept_up_by_the_writes() {
+        for seed in 1..=30u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let vocab = near_words(&mut rng, 200);
+            let text = |rng: &mut Rng| {
+                (0..1 + rng.upto(6))
+                    .map(|_| vocab[rng.upto(vocab.len())].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let mut ix = TextIndex::new(spec());
+            let mut docs: Vec<(DocId, String)> = Vec::new();
+            for id in 0..50 {
+                let t = text(&mut rng);
+                ix.insert(id, &t);
+                docs.push((id, t));
+            }
+            ix.search_loose("abcde", 10, |_| true, None, fuzzy())
+                .unwrap();
+            for round in 0..300u64 {
+                let at = rng.upto(docs.len());
+                if rng.upto(3) == 0 {
+                    let (id, old) = docs.remove(at);
+                    ix.remove(id, &old);
+                } else {
+                    let t = text(&mut rng);
+                    ix.insert(1_000 + round, &t);
+                    docs.push((1_000 + round, t));
+                }
+            }
+            let mut fresh = TextIndex::new(spec());
+            for (id, t) in &docs {
+                fresh.insert(*id, t);
+            }
+            assert_eq!(
+                ix.dictionary().len(),
+                fresh.dictionary().len(),
+                "seed {seed}"
+            );
+            let both = Loose {
+                fuzzy: 1,
+                prefix: true,
+            };
+            for _ in 0..20 {
+                let w = &vocab[rng.upto(vocab.len())];
+                let q = misspelt(&mut rng, w);
+                for loose in [fuzzy(), both] {
+                    let mut a = ix.loose_words(&q, loose).unwrap();
+                    let mut b = fresh.loose_words(&q, loose).unwrap();
+                    a.sort_unstable();
+                    b.sort_unstable();
+                    assert_eq!(a, b, "seed {seed} {q:?}");
+                }
+            }
+        }
     }
 }

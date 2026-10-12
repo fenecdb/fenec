@@ -81,6 +81,7 @@ make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server 
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
+make fuzzy-bench         # match ... fuzzy and prefix over 100 000 documents: the sorted words' build and size, the walk at one edit and two, a query plain, with a typo and half typed (BEIR=dir: its words too)
 make nocase-bench        # a `nocase` field against a plain one over 100 000 rows: a put asking @unique, lookups, scans, `~`, an order, group and facet (ARGS=scan for some)
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M
 make growth-bench        # indexes growing a put at a time, the longest (a table's growth), p50/p99.99: @unique to 4M keys, @text to 4M terms, @hnsw to 1.1M x 128 and 300k x 768; then builds, lookups, match, near, the first put after an open (GROWTH=unique|text|vector)
@@ -2807,11 +2808,11 @@ which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (432.1 KB, 148.7 brotli, against 694.4 and 235.9 with
+module with none (432.6 KB, 149.1 brotli, against 711.1 and 241.7 with
 every one) and left out of the full one, brotli added and saved:
 `vector` 20.7 and 18.7, `sorted` 8.8 and 23.4 with `composite`,
-`composite` beside it 11.5 and 10.5, `collate` 9.0 and 8.3, `text` 5.7 and
-7.3, `facets` 3.5 and 4.1, `highlight` beside `text` 3.5 and 3.1,
+`composite` beside it 11.5 and 10.5, `collate` 9.0 and 8.3, `text` 10.8
+and 12.8 with `fuzzy` and `prefix` (5.7 and 7.3 before), `facets` 3.5 and 4.1, `highlight` beside `text` 3.5 and 3.1,
 `nocase` 3.1 and 2.6, `geo` 2.8 and 5.9 (its index with it), `analytics`
 2.7 and 2.1, `sparse` 2.7 and 0.9, the schema check 9.5 and 9.5. The module with every feature is the code
 it was (`make size-report BASE=main`: 14 bytes less of it, functions moved
@@ -2878,7 +2879,7 @@ and `first`/`last` are standard, and are in the core.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 235.9 KB brotli) and `@fenecdb/web/client`, so a user has two
+check, 241.7 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
@@ -3602,6 +3603,55 @@ about it reaches the file, so there is no validation path and no stale-index
 case to handle. It is shrunk to fit where it is known complete (its build,
 `create index`); live ingest keeps `Vec` growth slack. Its term map grows a
 256th at a time, as a hash index's does (`maps::Sharded`, above).
+
+**`match ... fuzzy` and `prefix` walk a sorted copy of the index's words**
+(`fuzzy.rs`, `TextIndex::search_loose`). `fuzzy [N]` reads a query's word
+within the edits its length allows -- none under 5 characters, one up to 8,
+two from 9, Meilisearch's bounds, `N` lowering them -- in restricted
+Damerau distance (a swap one edit, as Lucene, Elasticsearch and Meilisearch
+count it), an edit touching a word's first character counting two
+(Meilisearch's rule: allowed at one, the walk took 4.6x the nodes for 9%
+more words, mostly words no one meant); `prefix` reads the last word as the
+start of one too. The words are a `Dictionary`: the index's terms but the
+`^` ones, in byte order, in chunks of up to 256 a byte arena and their ends
+each (1.3 MB for 60 000 words, where a `Box<str>` a word was twice that and
+25% slower to walk), sorted by the first loose `match` -- a `OnceLock`, a
+`OnceCell` in the browser, as `Derived` is -- and kept up by every write
+after it, never in the file. A prefix is a range of it; the words within
+`k` edits are found walking it as the trie it is, a row of the table a
+character banded to `2k + 1` cells, a node's children by binary search --
+only the query's characters near the depth where any other would end the
+row -- and a branch with no edit left looked up as the rest of the query
+rather than walked (a swap, counted from the row above, keeps it walking
+one row more). Over FiQA's 135 500 words, 2 000 typo'd words a bound: 14 us
+a word at one edit, 120 at two, 4 a prefix; SymSpell's deletions 9 us but
+304 MB and 2 s to build, an index of trigrams 8.4 MB and 316 us and no
+prefixes, the table over every word 4.3 ms; comparing through `memcmp` was
+a third of the walk. Each word's variants of one distance are one more
+term -- their lists merged two at a time (`union`), a document's counts
+summed, so BM25 saturates over them and their idf is theirs together, a
+rare misspelling ranking no higher than its word -- at the word's weight
+one edit away or begun, a quarter two away (`NEAR_WEIGHT`: on BEIR with a
+typo in each query, the whole weight for one edit took SciFact 0.636 ->
+0.663 where half took it to 0.657, a quarter for two took FiQA 0.213 ->
+0.229 where the whole took it to 0.226). Where the index holds the word as
+typed, its variants together are scaled below the least it adds to a
+document -- once, in the longest document there is (`longest`, only
+raised) -- so a one-word query ranks every document holding it first, and
+queries written whole lose nothing (0.662 -> 0.665 and 0.232 -> 0.233;
+unscaled, at half the weight a word one edit away, 0.656 and 0.229). They
+are cursors as any term's, so MaxScore stays rank-safe
+(`pruning_never_changes_a_loose_answer`). A word reaching
+more than `MAX_EXPANSIONS` (10 000) words is refused, never cut: FiQA's
+80 426 words hold no one-letter prefix past 7 020. `highlight()` marks the
+variants (`Terms::add`), `facet` counts their rows (`matching_loose`). A
+plain `match` takes the path it did, `search_within` split into
+`query_terms`, `cursor` and `ranked`, the last in line natively: FiQA's
+0.261 ms p50 on main, 0.257 here (0.269 called), SciFact's 0.042 either
+way, `make search-bench`'s 0.056 ms and `make wasm-speed`'s `match` 0.81 ms
+either way. Core, in `text` and no feature of its own -- a search box is no
+domain's extra: the browser module grew 17.1 KB, 6.0 KB brotli, the
+standard library's sort for `&[u8]` (3.7 KB) a merge of its own there.
 
 **An open builds no hash, text, ordered or sparse index.** Each is a
 `Derived` -- a `OnceLock` of the index or of the error its build met -- which

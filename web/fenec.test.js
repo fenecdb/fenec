@@ -220,6 +220,20 @@ test('match, on its own and with a filter', () => {
   assert.deepEqual(p2, [2023, 'rust']);
 });
 
+test('match reads its words loosely when asked', () => {
+  assert.deepEqual(q().match('body', 'databse', { fuzzy: true }).toFenecQL(), [
+    'get articles match body $1 fuzzy 2',
+    ['databse'],
+  ]);
+  assert.equal(
+    q().match('body', 'datab', { fuzzy: 1, prefix: true }).limit(5).toFenecQL()[0],
+    'get articles match body $1 fuzzy 1 prefix limit $2',
+  );
+  assert.equal(q().match('body', 'x', { fuzzy: false }).toFenecQL()[0], 'get articles match body $1');
+  assert.throws(() => q().match('body', 'x', { fuzzy: 3 }), /0 to 2 edits/);
+  assert.throws(() => q().match('body', 'x', { prefix: 'yes' }), /prefix is true or false/);
+});
+
 test('rerank rides on match and takes a candidate budget', () => {
   const [sql, p] = q()
     .match('body', 'rust')
@@ -1574,6 +1588,50 @@ test('highlight, snippet and facet on wasm', { skip: wasm ? false : 'no web/fene
   // Refused where there is nothing to mark, or nothing a facet could count.
   assert.throws(() => db.run('get p select highlight(title)'), /needs `match`/);
   assert.throws(() => db.run('get p facet brand, brand'), /asked twice/);
+  db.close();
+});
+
+// The browser module reads a `match` loosely as a server does: a typo, a
+// word begun, the marks on what they matched, the refusal past the bound
+// -- and its sorted words kept up by the writes after the first.
+test('fuzzy and prefix on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection p (title text @text, n int)');
+  await db.from('p').insert([
+    { title: 'a database of documents', n: 0 },
+    { title: 'databases and their indexes', n: 1 },
+    { title: 'İstanbul has a database too', n: 2 },
+    { title: 'nothing to see here', n: 3 },
+  ]);
+  const ns = async (text, opts) =>
+    (await db.from('p').select('n').match('title', text, opts).limit(10).rows()).map((r) => r.n);
+  assert.deepEqual(await ns('databse'), []);
+  assert.deepEqual(await ns('databse', { fuzzy: true }), [0, 2]);
+  assert.deepEqual((await ns('databasse', { fuzzy: true })).sort(), [0, 1, 2]);
+  assert.deepEqual(await ns('İSTANBL', { fuzzy: true }), [2]);
+  assert.deepEqual((await ns('datab', { prefix: true })).sort(), [0, 1, 2]);
+  assert.deepEqual((await ns('nothing docu', { prefix: true })).sort(), [0, 3]);
+  const marked = await db
+    .from('p')
+    .select('n')
+    .highlight('title', { pre: '[', post: ']' })
+    .match('title', 'indexs docum', { fuzzy: true, prefix: true })
+    .rows();
+  assert.deepEqual(
+    marked.map((r) => r['highlight(title)']).sort(),
+    ['a database of [documents]', 'databases and their [indexes]'],
+  );
+  // Written after the words were sorted, a word is found as one before.
+  await db.from('p').insert({ title: 'a telescope', n: 4 });
+  assert.deepEqual(await ns('telescpoe', { fuzzy: true }), [4]);
+  db.run('del p where n = 4');
+  assert.deepEqual(await ns('telescpoe', { fuzzy: true }), []);
+  // Past the bound a word is refused, not cut.
+  const many = Array.from({ length: 10_001 }, (_, i) => ({ title: `pre${i}`, n: 10 + i }));
+  await db.from('p').insert(many);
+  assert.throws(() => db.run('get p match title "pre" prefix limit 3'), /refused rather than cut/);
+  assert.equal(db.rows('get p match title "pre19" prefix limit 3').length, 3);
   db.close();
 });
 

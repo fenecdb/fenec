@@ -955,7 +955,33 @@ pub struct Match {
     /// collection, alice's own memo scored 9.87 and then 4.79 once bob
     /// wrote 200 private ones holding the same word.
     pub within: bool,
+    /// `fuzzy [N]`: the most edits a word of the query may take to match a
+    /// word of the index, 0 to 2 -- `fuzzy` alone 2 -- each word held
+    /// besides to what its length allows: none under 5 characters, one up
+    /// to 8 ([`crate::fuzzy::typos`]). 0 reads every word as typed.
+    pub fuzzy: u8,
+    /// `prefix`: the query's last word also matches the words it begins,
+    /// as a search box is typed into.
+    pub prefix: bool,
 }
+
+impl Match {
+    /// How loosely it reads its words.
+    pub fn loose(&self) -> crate::text::Loose {
+        crate::text::Loose {
+            fuzzy: self.fuzzy,
+            prefix: self.prefix,
+        }
+    }
+}
+
+/// The most edits `fuzzy N` takes: past two, a word of nine letters is a
+/// third rewritten, and the walk for one reaches most of a dictionary.
+pub const MAX_FUZZY: u8 = 2;
+
+/// What a `fuzzy` past [`MAX_FUZZY`] is refused with, by the parser and
+/// the engine in the same words.
+pub const FUZZY_RANGE: &str = "`fuzzy` takes 0 to 2 edits a word";
 
 /// The `rerank` clause: reorder what `match` found by exact vector distance.
 ///
@@ -1870,6 +1896,9 @@ impl Select {
             return Err(Error::Query(
                 "`match` cannot be combined with `order`: match orders results by relevance".into(),
             ));
+        }
+        if self.matcher.as_ref().is_some_and(|m| m.fuzzy > MAX_FUZZY) {
+            return Err(Error::Query(FUZZY_RANGE.into()));
         }
         // `rerank` reorders candidates; without `match` there are none. An
         // exact scan over a vector field is `near ... exact`, which says so.
@@ -3126,6 +3155,8 @@ mod tests {
                     field: "body".into(),
                     query: Expr::Param(0),
                     within: false,
+                    fuzzy: 0,
+                    prefix: false,
                 })
             }),
             ("count", |s: &mut Select| s.count = true),

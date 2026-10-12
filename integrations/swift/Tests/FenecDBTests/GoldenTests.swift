@@ -100,7 +100,8 @@ import Testing
         case ("near", _):
             return try q.near(a[0].string!, value(a[1]), ef: opt(a, 2, "ef")?.int, exact: opt(a, 2, "exact")?.bool ?? false)
         case ("rerank", _): return try q.rerank(a[0].string!, value(a[1]), candidates: opt(a, 2, "candidates")?.int)
-        case ("match", _): return try q.match(a[0].string!, a[1].string!)
+        case ("match", _):
+            return try q.match(a[0].string!, a[1].string!, fuzzyValue: opt(a, 2, "fuzzy"), prefixValue: opt(a, 2, "prefix"))
         case ("fuse", _): return try q.fuse(k: opt(a, 0, "k")?.int, candidates: opt(a, 0, "candidates")?.int)
         // One key as itself, several (or none) as the list they are.
         case ("group", 1): return try q.group(a[0].array.map { try $0.map(column) } ?? [column(a[0])])

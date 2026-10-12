@@ -511,7 +511,9 @@ class Query {
   final List<Object>? _group; // each a name or a Computed
   final List<Node> _cond;
   final _Vector? _near;
-  final (String, String)? _match;
+
+  /// The field, the words, the most edits a word may take and whether the last word is a prefix.
+  final (String, String, int?, bool)? _match;
   final _Vector? _rerank;
   final (int?, int?)? _fuse;
   final List<_Key> _order;
@@ -531,7 +533,7 @@ class Query {
       List<Object>? group,
       List<Node> cond = const [],
       _Vector? near,
-      (String, String)? match,
+      (String, String, int?, bool)? match,
       _Vector? rerank,
       (int?, int?)? fuse,
       List<_Key> order = const [],
@@ -593,7 +595,7 @@ class Query {
           group: identical(group, _keep) ? _group : group as List<Object>?,
           cond: cond ?? _cond,
           near: identical(near, _keep) ? _near : near as _Vector?,
-          match: identical(match, _keep) ? _match : match as (String, String)?,
+          match: identical(match, _keep) ? _match : match as (String, String, int?, bool)?,
           rerank: identical(rerank, _keep) ? _rerank : rerank as _Vector?,
           fuse: identical(fuse, _keep) ? _fuse : fuse as (int?, int?)?,
           order: order ?? _order,
@@ -669,8 +671,22 @@ class Query {
   Query near(String field, Object? vector, {int? ef, bool exact = false}) =>
       _with(near: _Vector(_identOf(field), vector, ef == null ? null : _whole(ef, 'ef'), exact));
 
-  /// `match field $n`: BM25 over a `@text` index.
-  Query match(String field, String query) => _with(match: (_identOf(field), query));
+  /// `match field $n [fuzzy N] [prefix]`: BM25 over a `@text` index.
+  /// `fuzzy: true` (2) matches each word within the edits its length
+  /// allows -- none under 5 characters, one up to 8, two from 9 -- `fuzzy:
+  /// 1` one at most; `prefix: true` matches the last word as the start of a
+  /// word too, as a search box is typed into.
+  Query match(String field, String query, {Object? fuzzy, Object? prefix}) {
+    final f = _identOf(field);
+    final int? edits = switch (fuzzy) {
+      null || false => null,
+      true => 2,
+      int n when n >= 0 && n <= 2 => n,
+      _ => throw _refuse('fuzzy is true, false or 0 to 2 edits: $fuzzy'),
+    };
+    if (prefix != null && prefix is! bool) throw _refuse('prefix is true or false: $prefix');
+    return _with(match: (f, query, edits, prefix == true));
+  }
 
   /// `fuse [k N] [candidates N]`: with both [match] and [near], ranks by both.
   Query fuse({int? k, int? candidates}) =>
@@ -939,7 +955,11 @@ class Query {
       if (_near.n != null) sql.write(' ef ${_near.n}');
       if (_near.exact) sql.write(' exact');
     }
-    if (_match != null) sql.write(' match ${_match.$1} ${bind(_match.$2)}');
+    if (_match case (final f, final q, final edits, final prefix)) {
+      sql.write(' match $f ${bind(q)}');
+      if (edits != null) sql.write(' fuzzy $edits');
+      if (prefix) sql.write(' prefix');
+    }
     if (_rerank != null) {
       sql.write(' rerank ${_rerank.field} ${bind(_rerank.vector)}');
       if (_rerank.n != null) sql.write(' candidates ${_rerank.n}');

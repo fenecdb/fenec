@@ -135,8 +135,10 @@ func loadGolden(t *testing.T) []golden {
 // untypable are the cases whose chain a Go caller cannot write: the
 // compiler refuses them before the builder could.
 var untypable = map[string]string{
-	"range bounds are numbers": "Ranges takes float64s",
-	"disjunctive is a boolean": "Disjunctive takes no value",
+	"range bounds are numbers":                  "Ranges takes float64s",
+	"disjunctive is a boolean":                  "Disjunctive takes no value",
+	"fuzzy is true, false or a number of edits": "Fuzzy takes an int",
+	"prefix is true or false":                   "Prefix takes no value",
 }
 
 // value is an argument as a Go caller would hand it over.
@@ -321,6 +323,19 @@ func options(o object) []fenecdb.Opt {
 		case "exact":
 			if v.(bool) {
 				out = append(out, fenecdb.Exact())
+			}
+		// JavaScript's true is 2 edits, false none written.
+		case "fuzzy":
+			if b, ok := v.(bool); ok {
+				if b {
+					out = append(out, fenecdb.Fuzzy(2))
+				}
+			} else {
+				out = append(out, fenecdb.Fuzzy(v.(int)))
+			}
+		case "prefix":
+			if v.(bool) {
+				out = append(out, fenecdb.Prefix())
 			}
 		case "k":
 			out = append(out, fenecdb.K(v.(int)))
@@ -536,7 +551,7 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 		case "rerank":
 			q = q.Rerank(a[0].(string), value(a[1]), options(optsOf(a, 2))...)
 		case "match":
-			q = q.Match(a[0].(string), a[1].(string))
+			q = q.Match(a[0].(string), a[1].(string), options(optsOf(a, 2))...)
 		case "fuse":
 			q = q.Fuse(options(optsOf(a, 0))...)
 		case "lookup":

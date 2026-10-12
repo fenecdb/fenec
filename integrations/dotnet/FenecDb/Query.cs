@@ -671,7 +671,7 @@ public sealed class Query
         public IReadOnlyList<SelectItem>? Group { get; init; }
         public IReadOnlyList<Node> Cond { get; init; } = [];
         public VectorClause? Near { get; init; }
-        public (string Field, object? Query)? Match { get; init; }
+        public (string Field, object? Query, long? Fuzzy, bool Prefix)? Match { get; init; }
         public VectorClause? Rerank { get; init; }
         public (long? K, long? Candidates)? Fuse { get; init; }
         public IReadOnlyList<(string Field, bool Asc, string? Collate)> Order { get; init; } = [];
@@ -751,8 +751,37 @@ public sealed class Query
     public Query Near(string field, object? vector, long? ef = null, bool exact = false) =>
         new(_s with { Near = new(Builder.Ident(field), vector, ef is { } n ? Builder.Whole(n, "ef") : null, exact) });
 
-    /// <summary><c>match field $n</c>: BM25 over a <c>@text</c> index.</summary>
-    public Query Match(string field, string query) => new(_s with { Match = (Builder.Ident(field), query) });
+    /// <summary>
+    /// <c>match field $n [fuzzy N] [prefix]</c>: BM25 over a <c>@text</c> index. <c>fuzzy: 2</c> matches each
+    /// word within the edits its length allows -- none under 5 characters, one up to 8, two from 9 --
+    /// <c>fuzzy: 1</c> one at most; <c>prefix: true</c> matches the last word as the start of a word too, as a
+    /// search box is typed into.
+    /// </summary>
+    public Query Match(string field, string query, int? fuzzy = null, bool prefix = false) =>
+        Matched(field, query, fuzzy, prefix);
+
+    // Match over values of any type, as the JS builder takes them: the golden file hands a fuzzy that is not a
+    // number and a prefix that is not a boolean, and the refusal has to be the JS builder's word for word.
+    internal Query Matched(string field, string query, object? fuzzy, object? prefix)
+    {
+        var f = Builder.Ident(field);
+        long? edits = fuzzy switch
+        {
+            null or false => null,
+            true => 2,
+            int n when n is >= 0 and <= 2 => n,
+            long n when n is >= 0 and <= 2 => n,
+            double n when n is 0 or 1 or 2 => (long)n,
+            _ => throw Builder.Refuse($"fuzzy is true, false or 0 to 2 edits: {fuzzy}"),
+        };
+        var p = prefix switch
+        {
+            null or false => false,
+            true => true,
+            _ => throw Builder.Refuse($"prefix is true or false: {prefix}"),
+        };
+        return new(_s with { Match = (f, query, edits, p) });
+    }
 
     /// <summary><c>fuse [k N] [candidates N]</c>: with both Match and Near, ranks by both, a document scoring
     /// <c>1 / (k + rank)</c> from each list it is on.</summary>
@@ -1027,7 +1056,12 @@ public sealed class Query
             if (near.N is { } ef) sql.Append($" ef {ef}");
             if (near.Exact) sql.Append(" exact");
         }
-        if (s.Match is { } match) sql.Append($" match {match.Field} {bind.Bind(match.Query)}");
+        if (s.Match is { } match)
+        {
+            sql.Append($" match {match.Field} {bind.Bind(match.Query)}");
+            if (match.Fuzzy is { } edits) sql.Append($" fuzzy {edits}");
+            if (match.Prefix) sql.Append(" prefix");
+        }
         if (s.Rerank is { } rerank)
         {
             sql.Append($" rerank {rerank.Field} {bind.Bind(rerank.Vector)}");

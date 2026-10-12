@@ -57,8 +57,8 @@ href="javascript.html#packages">Which package</a>).</p>
 <table>
 <thead><tr><th>What the page loads</th><th class="n">brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td>The WebAssembly module, <code>fenec.wasm</code></td><td class="n"><b>236 KB</b></td><td class="n">285 KB</td></tr>
-<tr><td>The JavaScript client, <code>fenec.js</code> and its modules</td><td class="n">48 KB</td><td class="n">56 KB</td></tr>
+<tr><td>The WebAssembly module, <code>fenec.wasm</code></td><td class="n"><b>242 KB</b></td><td class="n">292 KB</td></tr>
+<tr><td>The JavaScript client, <code>fenec.js</code> and its modules</td><td class="n">48 KB</td><td class="n">57 KB</td></tr>
 <tr><td>The client alone in an app's bundle, <code>@fenecdb/web/client</code></td><td class="n">9 KB</td><td class="n">—</td></tr>
 </tbody>
 </table>
@@ -1350,6 +1350,43 @@ both.</p>
 </table>
 </div>
 
+<p id="typos">With a typo in each query, and with each query's last word
+half typed, as a search box sends it: <code>fuzzy</code> and
+<code>prefix</code> take back most of what is lost, and leave the queries
+written whole where they were.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">SciFact</th><th class="n">FiQA</th><th class="n">FiQA p50</th></tr></thead>
+<tbody>
+<tr><td><code>match</code>, as written</td><td class="n">0.662</td><td class="n">0.232</td><td class="n">0.26 ms</td></tr>
+<tr><td><code>match … fuzzy</code>, as written</td><td class="n">0.665</td><td class="n">0.233</td><td class="n">0.74 ms</td></tr>
+<tr><td><code>match … prefix</code>, as written</td><td class="n">0.663</td><td class="n">0.234</td><td class="n">0.32 ms</td></tr>
+<tr><td><code>match</code>, a typo</td><td class="n">0.636</td><td class="n">0.213</td><td class="n">0.24 ms</td></tr>
+<tr><td><code>match … fuzzy</code>, a typo</td><td class="n">0.663</td><td class="n">0.229</td><td class="n">0.71 ms</td></tr>
+<tr><td><code>match … fuzzy 1</code>, a typo</td><td class="n"><b>0.666</b></td><td class="n">0.231</td><td class="n">0.53 ms</td></tr>
+<tr><td><code>match</code>, the last word half typed</td><td class="n">0.616</td><td class="n">0.188</td><td class="n">0.26 ms</td></tr>
+<tr><td><code>match … prefix</code>, half typed</td><td class="n">0.655</td><td class="n">0.208</td><td class="n">0.60 ms</td></tr>
+<tr><td><code>match … fuzzy prefix</code>, half typed</td><td class="n">0.658</td><td class="n">0.210</td><td class="n">1.09 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>How the typos were made</summary>
+<p>One typo a query, by a generator seeded by the query's place
+(<code>crates/fenec-bench/src/bin/beir.rs</code>): in one word of four
+letters or more, a letter dropped, a key beside it on the keyboard typed as
+well or instead, or two letters swapped — the four kinds Damerau found four
+misspellings in five to be — and in the first letter 7% of the time, as
+Pollock and Zamora found it. SciFact's 300 test queries hold 297 such
+words, FiQA's 648 hold 644. Half typed is the last word cut to half its
+letters, rounded up. A word of under five letters takes no edit, which is
+most of what <code>fuzzy</code> leaves unrecovered; with one typo a query,
+<code>fuzzy 1</code> does a little better than the two edits nine letters
+allow, which pay where a long word holds two. The p50s are the whole
+query's, the words found and their lists merged included.</p>
+</details>
+
 <details class="deep"><summary>Method and details</summary>
 <pre data-lang="bash">cd crates/fenec-bench/beir &amp;&amp; npm install
 node embed.mjs path/to/scifact     # dense: all-MiniLM-L6-v2, 90 MB
@@ -1443,7 +1480,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <h2 id="binary-size">Binary size</h2>
 
 <p>How large each build is. For the module and the client together, what
-the browser pays is <b>284 KB brotli</b>; for an app whose queries run on a
+the browser pays is <b>291 KB brotli</b>; for an app whose queries run on a
 server, the client alone in its bundle.</p>
 
 <div class="tbl">
@@ -1454,10 +1491,10 @@ server, the client alone in its bundle.</p>
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1607 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1525 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1331 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>694 KB</b></td><td class="n"><b>236 KB</b></td><td class="n">285 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>711 KB</b></td><td class="n"><b>242 KB</b></td><td class="n">292 KB</td></tr>
 <tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">493 KB</td><td class="n">172 KB</td><td class="n">205 KB</td></tr>
-<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">432 KB</td><td class="n">149 KB</td><td class="n">177 KB</td></tr>
-<tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">185 KB</td><td class="n">48 KB</td><td class="n">56 KB</td></tr>
+<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">433 KB</td><td class="n">149 KB</td><td class="n">177 KB</td></tr>
+<tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">185 KB</td><td class="n">48 KB</td><td class="n">57 KB</td></tr>
 <tr><td><code>@fenecdb/web/client</code> in an app's bundle, esbuild, minified</td><td class="n">16 KB</td><td class="n">6 KB</td><td class="n">6 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -1467,7 +1504,7 @@ server, the client alone in its bundle.</p>
 <details class="deep"><summary>Method and details</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>284 KB brotli</b> for both together. A binary you execute and an image
+<b>291 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 

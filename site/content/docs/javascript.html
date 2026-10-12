@@ -20,7 +20,7 @@ the page does.</p>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">9 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">236 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">242 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
@@ -1008,7 +1008,7 @@ async function search(words: string, brand: string | null = null) {
   let q = db.from('products')
     .select('name', 'price')
     .highlight('name')
-    .match('name', words)
+    .match('name', words, { fuzzy: true, prefix: true })
     .facet('brand', { top: 10 })
     .facet('color')
     .limit(20);
@@ -1030,6 +1030,11 @@ async function search(words: string, brand: string | null = null) {
 </pre>
 
 <ul>
+  <li><b>It finds what is being typed</b>: <code>fuzzy</code> reads each
+    word within a typo or two, <code>prefix</code> the last word as the
+    start of one — <code>databse</code> and <code>datab</code> both find
+    <code>database</code>, and the marks fall on it (<a
+    href="/docs/fenecql#typos">Typos and words begun</a>).</li>
   <li><b>The offsets are a JavaScript string's own</b> (UTF-16), so
     <code>text.slice(start, end)</code> is the marked word, past an emoji
     or an accent.</li>

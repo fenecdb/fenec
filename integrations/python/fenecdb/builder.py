@@ -802,9 +802,26 @@ class _Builder:
             near=(_ident(field), vector, None if ef is None else _whole(ef, "ef"), bool(exact))
         )
 
-    def match(self: Q, field: str, query: str) -> Q:
-        """`match field $n`: BM25 over a `@text` index."""
-        return self._with(match=(_ident(field), query))
+    def match(
+        self: Q, field: str, query: str, *, fuzzy: bool | int = False, prefix: bool = False
+    ) -> Q:
+        """`match field $n [fuzzy N] [prefix]`: BM25 over a `@text` index.
+        `fuzzy=True` (2) matches each word within the edits its length allows
+        -- none under 5 characters, one up to 8, two from 9 -- `fuzzy=1` one at
+        most; `prefix=True` matches the last word as the start of a word too,
+        as a search box is typed into."""
+        # `True` is an `int` too: asked first, it is 2 and never 1.
+        if fuzzy is True:
+            edits = 2
+        elif fuzzy is False:
+            edits = None
+        elif isinstance(fuzzy, int) and 0 <= fuzzy <= 2:
+            edits = fuzzy
+        else:
+            raise _err(f"fuzzy is true, false or 0 to 2 edits: {fuzzy}")
+        if not isinstance(prefix, bool):
+            raise _err(f"prefix is true or false: {prefix}")
+        return self._with(match=(_ident(field), query, edits, prefix))
 
     def fuse(self: Q, *, k: int | None = None, candidates: int | None = None) -> Q:
         """`fuse [k N] [candidates N]`: with both `match` and `near`, ranks by
@@ -1011,6 +1028,10 @@ class _Builder:
                 sql += " exact"
         if match:
             sql += f" match {match[0]} {bind(match[1], match[0])}"
+            if match[2] is not None:
+                sql += f" fuzzy {match[2]}"
+            if match[3]:
+                sql += " prefix"
         if rerank:
             sql += f" rerank {rerank[0]} {bind(rerank[1], rerank[0])}"
             if rerank[2] is not None:

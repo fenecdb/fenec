@@ -209,6 +209,33 @@ impl TextIndex {
     pub fn matching(&self, query: &str) -> Vec<DocId> {
         match self.never {}
     }
+    pub fn search_loose<F>(
+        &self,
+        query: &str,
+        k: usize,
+        accept: F,
+        within: Option<&[DocId]>,
+        loose: crate::text::Loose,
+    ) -> crate::error::Result<Vec<(DocId, f32)>>
+    where
+        F: Fn(DocId) -> bool,
+    {
+        match self.never {}
+    }
+    pub fn matching_loose(
+        &self,
+        query: &str,
+        loose: crate::text::Loose,
+    ) -> crate::error::Result<Vec<DocId>> {
+        match self.never {}
+    }
+    pub fn loose_words(
+        &self,
+        query: &str,
+        loose: crate::text::Loose,
+    ) -> crate::error::Result<Vec<&str>> {
+        match self.never {}
+    }
 }
 
 pub struct SparseIndex {

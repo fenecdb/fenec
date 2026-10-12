@@ -109,6 +109,114 @@ fn documents(text: &str) -> HashMap<String, String> {
     out
 }
 
+/// A seeded generator, a query's own: the same typo for the same query in
+/// every run.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn upto(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+/// The keys beside each letter on a QWERTY keyboard: what a finger lands
+/// on instead of the one it meant.
+fn beside(c: char) -> &'static str {
+    match c {
+        'q' => "wa",
+        'w' => "qeas",
+        'e' => "wrsd",
+        'r' => "etdf",
+        't' => "ryfg",
+        'y' => "tugh",
+        'u' => "yihj",
+        'i' => "uojk",
+        'o' => "ipkl",
+        'p' => "ol",
+        'a' => "qwsz",
+        's' => "awedxz",
+        'd' => "serfcx",
+        'f' => "drtgvc",
+        'g' => "ftyhbv",
+        'h' => "gyujnb",
+        'j' => "huikmn",
+        'k' => "jiolm",
+        'l' => "kop",
+        'z' => "asx",
+        'x' => "zsdc",
+        'c' => "xdfv",
+        'v' => "cfgb",
+        'b' => "vghn",
+        'n' => "bhjm",
+        'm' => "njk",
+        _ => "",
+    }
+}
+
+/// `query` with one typo, as a person makes one (Damerau 1964): in one
+/// word of four letters or more, a letter dropped, one beside it on the
+/// keyboard typed as well or instead, or two letters swapped -- and in the
+/// first letter only 7% of the time, as Pollock and Zamora found it in 50
+/// 000 misspellings. A query with no such word is left as it is.
+fn typo(query: &str, seed: u64) -> String {
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut words: Vec<Vec<char>> = query.split(' ').map(|w| w.chars().collect()).collect();
+    let long: Vec<usize> = (0..words.len())
+        .filter(|&i| words[i].iter().filter(|c| c.is_ascii_lowercase()).count() >= 4)
+        .collect();
+    if long.is_empty() {
+        return query.to_string();
+    }
+    let w = &mut words[long[rng.upto(long.len())]];
+    let letters: Vec<usize> = (0..w.len())
+        .filter(|&i| w[i].is_ascii_alphabetic())
+        .collect();
+    let at = match rng.upto(100) < 7 {
+        true => letters[0],
+        false => letters[1 + rng.upto(letters.len() - 1)],
+    };
+    let c = w[at].to_ascii_lowercase();
+    let near = beside(c).as_bytes();
+    let key = match near.is_empty() {
+        true => c,
+        false => near[rng.upto(near.len())] as char,
+    };
+    match rng.upto(4) {
+        0 => {
+            w.remove(at);
+        }
+        1 => w.insert(at + rng.upto(2), key),
+        2 => w[at] = key,
+        _ => match at + 1 < w.len() {
+            true => w.swap(at, at + 1),
+            false => w.swap(at - 1, at),
+        },
+    }
+    let out: Vec<String> = words.iter().map(|w| w.iter().collect()).collect();
+    out.join(" ")
+}
+
+/// `query` as a search box holds it while its last word is being typed:
+/// that word cut to half its letters, rounded up.
+fn half_typed(query: &str) -> String {
+    let trimmed = query.trim_end_matches(|c: char| !c.is_alphanumeric());
+    let start = (trimmed.char_indices().rev())
+        .find(|(_, c)| !c.is_alphanumeric())
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let last: Vec<char> = trimmed[start..].chars().collect();
+    let keep = last.len().div_ceil(2);
+    format!(
+        "{}{}",
+        &trimmed[..start],
+        last[..keep].iter().collect::<String>()
+    )
+}
+
 fn ndcg10(ranked: &[String], rels: &HashMap<String, u32>) -> f64 {
     let gain = |i: usize, rel: u32| rel as f64 / (i as f64 + 2.0).log2();
     let dcg: f64 = ranked
@@ -280,10 +388,51 @@ fn main() {
         .map(|l| (json_str(l, "_id"), json_str(l, "text")))
         .collect();
 
+    // Each query as typed with a typo ($4), and with its last word half
+    // typed ($5), beside it as written ($1).
     let mut methods: Vec<(String, String)> = vec![(
         "match (BM25)".into(),
         "get d select doc match body $1 limit 10".into(),
     )];
+    for (name, sql) in [
+        (
+            "match fuzzy",
+            "get d select doc match body $1 fuzzy limit 10",
+        ),
+        (
+            "match fuzzy 1",
+            "get d select doc match body $1 fuzzy 1 limit 10",
+        ),
+        ("match, a typo", "get d select doc match body $4 limit 10"),
+        (
+            "match fuzzy, a typo",
+            "get d select doc match body $4 fuzzy limit 10",
+        ),
+        (
+            "match fuzzy 1, a typo",
+            "get d select doc match body $4 fuzzy 1 limit 10",
+        ),
+        (
+            "match prefix",
+            "get d select doc match body $1 prefix limit 10",
+        ),
+        (
+            "match, half typed",
+            "get d select doc match body $5 limit 10",
+        ),
+        (
+            "match prefix, half typed",
+            "get d select doc match body $5 prefix limit 10",
+        ),
+        (
+            "match prefix fuzzy, half typed",
+            "get d select doc match body $5 prefix fuzzy limit 10",
+        ),
+    ] {
+        if fenec_ql::parse_one(sql).is_ok() {
+            methods.push((name.into(), sql.into()));
+        }
+    }
     let dense_methods = methods.len();
     methods.push((
         "near, the graph".into(),
@@ -326,11 +475,32 @@ fn main() {
         ));
     }
 
-    println!("{:<36} {:>8} {:>10}", "", "nDCG@10", "p50 ms");
+    // The typos made, to say how many queries one changed.
+    let typod: HashMap<&String, String> = qids
+        .iter()
+        .enumerate()
+        .map(|(i, q)| (q, typo(&qtext[q], i as u64)))
+        .collect();
+    let changed = qids
+        .iter()
+        .filter(|q| qrels.contains_key(*q) && typod[q] != qtext[*q])
+        .count();
+    eprintln!("a typo in {changed} of {} queries", qrels.len());
+
+    // `FENECBENCH_ONLY=match`: the methods whose names begin so, to time
+    // one against another build.
+    if let Ok(only) = std::env::var("FENECBENCH_ONLY") {
+        methods.retain(|(name, _)| name.starts_with(&only));
+    }
+    println!(
+        "{:<36} {:>8} {:>10} {:>10}",
+        "", "nDCG@10", "p50 ms", "p99 ms"
+    );
     for (name, sql) in &methods {
         let stmt = fenec_ql::parse_one(sql).unwrap();
         let mut total = 0.0;
         let mut times = Vec::with_capacity(qids.len());
+        let mut refused = 0;
         for (i, qid) in qids.iter().enumerate() {
             let Some(rels) = qrels.get(qid) else { continue };
             let params = [
@@ -343,9 +513,16 @@ fn main() {
                     Some(q) => Value::Sparse(VOCAB, q[i].clone()),
                     None => Value::Null,
                 },
+                Value::Text(typod[qid].clone()),
+                Value::Text(half_typed(&qtext[qid])),
             ];
             let t = Instant::now();
-            let r = db.query(&stmt, &params).unwrap();
+            // A word half typed may reach more words than a query takes:
+            // refused, it finds nothing.
+            let Ok(r) = db.query(&stmt, &params) else {
+                refused += 1;
+                continue;
+            };
             times.push(t.elapsed().as_secs_f64() * 1e3);
             let ranked: Vec<String> = r
                 .rows()
@@ -361,9 +538,14 @@ fn main() {
         }
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         println!(
-            "{name:<36} {:>8.4} {:>10.3}",
+            "{name:<36} {:>8.4} {:>10.3} {:>10.3}{}",
             total / qrels.len() as f64,
-            times[times.len() / 2]
+            times[times.len() / 2],
+            times[times.len() * 99 / 100],
+            match refused {
+                0 => String::new(),
+                n => format!("  ({n} refused)"),
+            }
         );
     }
 }

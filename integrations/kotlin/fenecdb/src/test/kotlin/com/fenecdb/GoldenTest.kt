@@ -86,7 +86,7 @@ class GoldenTest {
             op == "orWhere" -> q.orWhere(cond(a[0]))
             op == "near" -> q.near(a[0] as String, value(a[1]), opt(a, 2, "ef") as Long?, opt(a, 2, "exact") as Boolean? ?: false)
             op == "rerank" -> q.rerank(a[0] as String, value(a[1]), opt(a, 2, "candidates") as Long?)
-            op == "match" -> q.match(a[0] as String, a[1] as String)
+            op == "match" -> q.matchOf(a[0] as String, a[1] as String, opt(a, 2, "fuzzy"), opt(a, 2, "prefix"))
             op == "fuse" -> q.fuse(opt(a, 0, "k") as Long?, opt(a, 0, "candidates") as Long?)
             // One key as itself, several (or none) as the list they are.
             op == "group" && a.size == 1 -> (value(a[0]) as Any).let { if (it is List<*>) q.group(it.map { k -> k!! }) else q.group(it) }

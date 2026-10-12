@@ -641,7 +641,7 @@ public struct Query: Sendable {
     var group: [Column]?
     var cond: [Node] = []
     var near: VectorClause?
-    var match: (field: String, query: Value)?
+    var match: (field: String, query: Value, fuzzy: Int?, prefix: Bool)?
     var rerank: VectorClause?
     var fuse: (k: Int?, candidates: Int?)?
     var order: [(field: String, asc: Bool, collate: String?)] = []
@@ -872,10 +872,44 @@ public struct Query: Sendable {
         return with { $0.near = clause }
     }
 
-    /// `match field $n`: BM25 over a `@text` index.
-    public func match(_ field: String, _ query: String) throws -> Query {
+    /// `match field $n [fuzzy N] [prefix]`: BM25 over a `@text` index.
+    /// `fuzzy: 2` matches each word within the edits its length allows --
+    /// none under 5 characters, one up to 8, two from 9 -- `fuzzy: 1` one
+    /// at most; `prefix: true` matches the last word as the start of a word
+    /// too, as a search box is typed into.
+    public func match(_ field: String, _ query: String, fuzzy: Int? = nil, prefix: Bool = false) throws -> Query {
+        try match(field, query, fuzzyValue: fuzzy.map { .int(Int64($0)) }, prefixValue: .bool(prefix))
+    }
+
+    /// `match`, its options as the golden file holds them -- a fuzzy that
+    /// is not a number, a prefix that is not a boolean -- so a refusal of
+    /// one is the JS builder's.
+    func match(_ field: String, _ query: String, fuzzyValue: Value?, prefixValue: Value?) throws -> Query {
         let f = try Builder.ident(field)
-        return with { $0.match = (f, .string(query)) }
+        // As JavaScript writes a value into its message.
+        func shown(_ v: Value) -> String {
+            switch v {
+            case .string(let s): return s
+            case .int(let n): return String(n)
+            case .double(let d): return Builder.jsNumber(d)
+            case .bool(let b): return b ? "true" : "false"
+            default: return v.json
+            }
+        }
+        var edits: Int?
+        switch fuzzyValue {
+        case nil, .null?, .bool(false)?: edits = nil
+        case .bool(true)?: edits = 2
+        case .int(let n)? where (0...2).contains(n): edits = Int(n)
+        case let v?: throw FenecError.builder("fuzzy is true, false or 0 to 2 edits: \(shown(v))")
+        }
+        var prefix = false
+        switch prefixValue {
+        case nil, .null?: prefix = false
+        case .bool(let b)?: prefix = b
+        case let v?: throw FenecError.builder("prefix is true or false: \(shown(v))")
+        }
+        return with { $0.match = (f, .string(query), edits, prefix) }
     }
 
     /// `fuse [k N] [candidates N]`: with both `match` and `near`, ranks by
@@ -1099,7 +1133,11 @@ public struct Query: Sendable {
             if let ef = near.n { sql += " ef \(ef)" }
             if near.exact { sql += " exact" }
         }
-        if let match { sql += " match \(match.field) \(bind.bind(match.query))" }
+        if let match {
+            sql += " match \(match.field) \(bind.bind(match.query))"
+            if let edits = match.fuzzy { sql += " fuzzy \(edits)" }
+            if match.prefix { sql += " prefix" }
+        }
         if let rerank {
             sql += " rerank \(rerank.field) \(bind.bind(rerank.vector))"
             if let c = rerank.n { sql += " candidates \(c)" }

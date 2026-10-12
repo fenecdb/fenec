@@ -45,6 +45,15 @@ impl Terms {
         Terms { spec, terms }
     }
 
+    /// One more term to mark: a word `fuzzy` or `prefix` found near one of
+    /// the query's (`TextIndex::loose_words`), marked where the text holds
+    /// it as the index holds it -- `databse` marks `database`.
+    pub fn add(&mut self, term: &str) {
+        if !self.terms.contains_key(term) {
+            self.terms.insert(term.to_string(), 1);
+        }
+    }
+
     /// The spans of `text` a term of the query was read from, in order, an
     /// overlap or two that touch made one (a run of Han read in pairs is one
     /// span, not a pair each), each widened to whole characters with their
