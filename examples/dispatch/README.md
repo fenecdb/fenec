@@ -238,9 +238,9 @@ the router as the app reaches it:
 | the same, 10 waiting | 0.42 ms | 2.7 ms | the nearest took it 10%; the one who did a median of 2.0 km further |
 | the same, 50 waiting | 0.46 ms | 11.0 ms | the nearest 2%; 2.6 km further |
 | the same, 100 waiting | 0.64 ms | 14.6 ms | the nearest 1%; 2.5 km further |
-| Claim the nearest, orders ready: 1 courier | 0.42 ms | 1.3 ms | the read and the `/batch` |
-| the same, 16 couriers at once | 2.4 ms | 6.2 ms | 1.2 candidates tried a claim |
-| the same, 50 couriers at once | 7.6 ms | 15.5 ms | 1.5 candidates tried a claim |
+| Claim the nearest, orders ready: 1 courier | 0.20 ms | 0.35 ms | one statement; the three steps it replaced 0.41 ms, 0.59 |
+| the same, 16 couriers at once | 1.44 ms | 6.1 ms | the three steps 2.84 ms, 7.4 |
+| the same, 50 couriers at once | 5.2 ms | 28 ms | the three steps 8.2 ms, 28 |
 | The 10 nearest idle couriers: 60 on the map | 0.15 ms | 0.18 ms | `near loc $1 limit 10` |
 | the same, 1 000 | 0.22 ms | 2.1 ms | |
 | the same, 10 000 | 0.23 ms | 0.88 ms | |
@@ -271,9 +271,13 @@ same medians for the waits and the reads but a claim among 50 couriers at
   every waiting courier's claim is its own group (its point and its `sub`
   are in it), each group's head is woken by the insert, and whichever runs
   first takes it (gap 3).
-- **Claiming the nearest from a crowd costs the contention**: 50 couriers
-  claiming at once wait for each other's batches under the one writer, and
-  1.5 candidates are tried a claim.
+- **Claiming the nearest is one statement**, half the three steps' time
+  alone and still a third less among 50 couriers at once, who wait for
+  each other's claims under the one writer. The claim rows were measured
+  again on their own, the one statement and the three steps in turns over
+  one cluster (one-minute load 2.9 to 3.5), when the claim became one
+  statement: the full bench, run then, met other builds past a load of 18
+  and its other rows are the ones from before.
 - **The nearest couriers are a walk of `@geo`**: about 0.2 ms over HTTP
   whether 60 or 10 000 couriers are on the map; the radius count reads
   every position in it.
