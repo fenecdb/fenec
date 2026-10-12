@@ -813,3 +813,98 @@ fn a_write_wakes_only_the_claims_reading_what_it_wrote() {
     }
     assert!(node.server.waits().looks > after.looks);
 }
+
+/// A claim every job matches, a group of each worker's own: its third
+/// parameter, a bound every job's `attempts` is under, differs worker by
+/// worker as a courier's point does.
+const OWN: &str = "set jobs {owner: $1, run_at: now() + 60000, attempts: attempts + 1} \
+                   where run_at <= now() and attempts < $2 order run_at limit 1 \
+                   returning id, owner";
+
+fn own_claim(port: u16, w: usize) -> std::thread::JoinHandle<Answer> {
+    std::thread::spawn(move || {
+        Conn::open(port).post(
+            "/query",
+            &line(OWN, &format!("[\"w{w}\", {}]", 1000 + w)),
+            &[("Fenec-Wait", "20000")],
+        )
+    })
+}
+
+/// A job every held claim would take goes to the claim held longest, each
+/// a group of its own -- as couriers' claims are -- and is run for once:
+/// raced, whichever head ran first took it, and every head that found it
+/// ran the request under the write lock for nothing.
+#[test]
+fn a_job_many_groups_would_take_goes_to_the_one_held_longest() {
+    const N: usize = 12;
+    let node = start();
+    let port = node.port;
+    let mut held = Vec::new();
+    for w in 0..N {
+        held.push(own_claim(port, w));
+        // In order, so the longest held is known.
+        until_held(&node, w + 1);
+    }
+    let before = node.server.waits();
+    for (w, h) in held.into_iter().enumerate() {
+        let id = put(port, "mail", now_ms() - 1);
+        let a = h.join().unwrap();
+        assert_eq!(a.status, 200, "{}", a.body);
+        let got = rows(&a.body);
+        assert_eq!(got.len(), 1, "{}", a.body);
+        assert_eq!(int(&got[0]["id"]), id, "the claim held longest takes it");
+        until_held(&node, N - w - 1);
+    }
+    let s = node.server.waits();
+    assert_eq!(
+        s.runs - before.runs,
+        N as u64,
+        "one run a job: {before:?} -> {s:?}"
+    );
+    assert_eq!(s.held, 0);
+}
+
+/// A burst of jobs to as many claims, each a group of its own, all of
+/// which would take the oldest: each is served in the order it came, the
+/// oldest job to the claim held longest, and the burst costs a look and a
+/// run a claim or so, not a round of every claim's looks a job.
+#[test]
+fn a_burst_goes_to_held_claims_in_the_order_they_came() {
+    const N: usize = 16;
+    let node = start();
+    let port = node.port;
+    let mut held = Vec::new();
+    for w in 0..N {
+        held.push(own_claim(port, w));
+        until_held(&node, w + 1);
+    }
+    let before = node.server.waits();
+    let at = now_ms() - 1000;
+    let docs: Vec<String> = (0..N)
+        .map(|i| format!("{{kind: \"mail\", run_at: {}, attempts: 0}}", at + i as i64))
+        .collect();
+    let a = Conn::open(port).query(&format!("put jobs [{}]", docs.join(", ")), "[]");
+    assert_eq!(a.status, 200, "{}", a.body);
+    let mut ids = Vec::new();
+    for h in held {
+        let a = h.join().unwrap();
+        let got = rows(&a.body);
+        assert_eq!(got.len(), 1, "{}", a.body);
+        ids.push(int(&got[0]["id"]));
+    }
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        ids, sorted,
+        "the oldest job to the claim held longest, and on"
+    );
+    let s = node.server.waits();
+    assert_eq!(s.runs - before.runs, N as u64, "{before:?} -> {s:?}");
+    // Each claim looks for its first bid, and then once as its turn in the
+    // line comes; a round of every claim's looks a job would be N * N.
+    assert!(
+        s.looks - before.looks <= 3 * N as u64,
+        "{before:?} -> {s:?}"
+    );
+}
