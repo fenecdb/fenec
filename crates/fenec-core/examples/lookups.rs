@@ -268,7 +268,11 @@ fn run(ways: &[&Way], per_shop: usize, per_order: usize) {
         }
         pages.push(answers);
         counts.push(counted);
-        let n = 5_000;
+        // LOOKUPS_N runs the page as many times, for a profiler to sample.
+        let n = std::env::var("LOOKUPS_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000);
         let p50 = timed(&db, &page, n, &|i| vec![org(i)]);
         let rq = timed(&db, &required, n / 50, &|i| {
             vec![Value::Int((i % SKUS) as i64)]

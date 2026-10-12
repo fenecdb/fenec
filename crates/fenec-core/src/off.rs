@@ -427,6 +427,9 @@ impl CompositeIndex {
     pub fn ids(&self, s: &crate::composite::Span, cap: usize, out: &mut Vec<DocId>) -> bool {
         match *self {}
     }
+    pub fn run(&self, prefix: &[u8], emit: &mut dyn FnMut(DocId) -> Result<bool>) -> Result<()> {
+        match *self {}
+    }
     pub fn walk(
         &self,
         spans: &[crate::composite::Span],

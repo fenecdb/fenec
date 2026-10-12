@@ -3008,16 +3008,10 @@ impl<'a> Tuple<'a> {
         pred: &mut dyn FnMut(DocId) -> Result<bool>,
     ) -> Result<bool> {
         let mut found = false;
-        self.ix.walk(
-            &[self.span(key)],
-            self.parts.len(),
-            false,
-            usize::MAX,
-            &mut |id| {
-                found = child.store.contains(id) && pred(id)?;
-                Ok(!found)
-            },
-        )?;
+        self.ix.run(key, &mut |id| {
+            found = child.store.contains(id) && pred(id)?;
+            Ok(!found)
+        })?;
         Ok(found)
     }
 }
@@ -3106,8 +3100,12 @@ impl<'a> Probe<'a> {
             (Probe::Tuple(t), Key::Parts(Some(k))) => {
                 // In the index's order: put in id order, the order a bucket
                 // holds them in and a tie goes by.
-                t.ix.ids(&t.span(k), usize::MAX, out);
-                out.retain(|id| child.store.contains(*id));
+                let _ = t.ix.run(k, &mut |id| {
+                    if child.store.contains(id) {
+                        out.push(id);
+                    }
+                    Ok(true)
+                });
                 out.sort_unstable();
                 return;
             }
@@ -9310,12 +9308,20 @@ impl Database {
             let mut kept: Vec<DocId> = Vec::new();
             if let Some((t, (back, ties))) = walk {
                 if let (Key::Parts(Some(k)), true) = (&key, want > 0) {
-                    t.ix.walk(&[t.span(k)], t.parts.len(), back, ties, &mut |cid| {
+                    let mut take = |cid| {
                         if child.store.contains(cid) && survives(steps, depth, cid, ctx)? {
                             kept.push(cid);
                         }
                         Ok(kept.len() < want)
-                    })?;
+                    };
+                    // Forwards over every part, the run is in the order as
+                    // it lies, ties and all; the rest a walk puts in order.
+                    match !back && ties >= t.ix.parts().len() {
+                        true => t.ix.run(k, &mut take)?,
+                        false => {
+                            t.ix.walk(&[t.span(k)], t.parts.len(), back, ties, &mut take)?
+                        }
+                    }
                 }
             } else {
                 probe.ids(child, &key, &mut bucket);
