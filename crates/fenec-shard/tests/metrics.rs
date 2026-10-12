@@ -141,6 +141,18 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         root,
     );
     assert_eq!(r.0, 404, "{}", r.1);
+    // Queries across tenants: one answered whole, one with a tenant on the
+    // dead node named beside the other's rows, one failing on it, one
+    // refused before anything was asked.
+    for (body, want) in [
+        (r#"{"query":"collections","tenants":["acme"]}"#, 200),
+        (r#"{"query":"collections","partial":true}"#, 200),
+        (r#"{"query":"collections","tenants":["lost"]}"#, 502),
+        (r#"{"query":"collections","merge":{"avg":["n"]}}"#, 400),
+    ] {
+        let r = call(port, "POST", "/_shard/query", body, root);
+        assert_eq!(r.0, want, "{}", r.1);
+    }
 
     // The router's token, as /_shard/ takes it: the scrape names the nodes.
     assert_eq!(call(port, "GET", "/_metrics", "", None).0, 401);
@@ -169,16 +181,26 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         ),
         (
             "fenec_router_requests_total{route=\"shard\",code=\"2xx\"}",
-            "2",
+            "4",
         ),
         (
             "fenec_router_requests_total{route=\"shard\",code=\"4xx\"}",
-            "1",
+            "2",
         ),
         (
             "fenec_router_requests_total{route=\"shard\",code=\"5xx\"}",
-            "1",
+            "2",
         ),
+        ("fenec_router_fanouts_total{outcome=\"done\"}", "1"),
+        ("fenec_router_fanouts_total{outcome=\"partial\"}", "1"),
+        ("fenec_router_fanouts_total{outcome=\"failed\"}", "1"),
+        ("fenec_router_fanouts_total{outcome=\"refused\"}", "1"),
+        ("fenec_router_fanout_duration_seconds_count", "4"),
+        (
+            "fenec_router_fanout_tenants_total{outcome=\"answered\"}",
+            "2",
+        ),
+        ("fenec_router_fanout_tenants_total{outcome=\"failed\"}", "2"),
         (
             "fenec_router_requests_total{route=\"metrics\",code=\"4xx\"}",
             "1",
