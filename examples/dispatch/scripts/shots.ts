@@ -4,7 +4,7 @@
 // browser library to install). CHROME_PATH names the browser; PLOVER_ORIGIN
 // the site.
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { demoAccounts } from '../lib/demo';
@@ -15,11 +15,15 @@ const site = process.env.PLOVER_ORIGIN ?? 'http://localhost:3000';
 const chrome = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 mkdirSync(out, { recursive: true });
 
-const port = 9334;
-const proc = spawn(chrome, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), 'plover-chrome-'))}`, '--hide-scrollbars', 'about:blank'], { stdio: 'ignore' });
+// DevTools on port 0: Chrome takes a port the system picks and writes it,
+// a line of its own, into DevToolsActivePort in its profile -- a fixed one
+// met any other Chrome, or anything else, on it.
+const profile = mkdtempSync(join(tmpdir(), 'plover-chrome-'));
+const proc = spawn(chrome, ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--hide-scrollbars', 'about:blank'], { stdio: 'ignore' });
 let targets: { type: string; webSocketDebuggerUrl: string }[] = [];
 for (let i = 0; i < 100 && !targets.length; i++) {
   try {
+    const port = /^(\d+)\n/.exec(readFileSync(join(profile, 'DevToolsActivePort'), 'utf8'))![1];
     targets = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).filter((t: { type: string }) => t.type === 'page');
   } catch {
     await new Promise((r) => setTimeout(r, 100));
