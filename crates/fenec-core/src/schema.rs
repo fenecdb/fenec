@@ -599,6 +599,43 @@ pub fn collatable(t: &DataType) -> bool {
     }
 }
 
+/// A collection's schema as its collection holds it: natively an `Arc`, so
+/// a write takes it for its statement by a count -- `put`, `set` and `del`
+/// each copied it whole, its fields' names and all, 17% of a put's time in
+/// a block of 1 000 -- and a block prepared beside the readers knows its
+/// schema is the one it was prepared against: the preparation holds it, so
+/// a change copies it ([`std::sync::Arc::make_mut`]) and the two are no
+/// longer one. In the browser a plain value, as it was: its module the
+/// same, with no preparation to hold one.
+#[cfg(not(target_arch = "wasm32"))]
+pub type SchemaCell = std::sync::Arc<Schema>;
+
+/// [`SchemaCell`] in the browser: the schema itself, behind the calls an
+/// `Arc` answers.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone)]
+pub struct SchemaCell(Schema);
+
+#[cfg(target_arch = "wasm32")]
+impl SchemaCell {
+    pub fn new(s: Schema) -> SchemaCell {
+        SchemaCell(s)
+    }
+
+    pub fn make_mut(this: &mut SchemaCell) -> &mut Schema {
+        &mut this.0
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Deref for SchemaCell {
+    type Target = Schema;
+
+    fn deref(&self) -> &Schema {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
     pub name: String,

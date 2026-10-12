@@ -53,6 +53,14 @@ pub trait Hook: Send + Sync {
     fn before_write(&self, _schema: &Schema, _op: WriteOp, _doc: &mut Document) -> Result<()> {
         Ok(())
     }
+    /// Whether [`Self::before_write`] may change the document. A `put`
+    /// whose documents were encoded before the write lock
+    /// (`Database::prepare`) writes those bytes only where no hook may;
+    /// a hook that only judges says so, and a block it judges is encoded
+    /// beside the readers as well.
+    fn rewrites(&self) -> bool {
+        true
+    }
     /// Called after [`Self::before_write`] for a write over a document the
     /// collection holds -- a `set`'s row, a `put` naming its id -- with the
     /// document as it was: what the write changes is the difference.

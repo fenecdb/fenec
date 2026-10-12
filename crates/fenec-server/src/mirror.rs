@@ -67,6 +67,10 @@ impl Hook for Guard {
     fn name(&self) -> &str {
         "mirror"
     }
+    /// It refuses a write and changes nothing of one.
+    fn rewrites(&self) -> bool {
+        false
+    }
     fn before_write(&self, schema: &Schema, _op: WriteOp, _doc: &mut Document) -> Result<()> {
         self.check(&schema.name)
     }

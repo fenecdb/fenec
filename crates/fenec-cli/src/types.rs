@@ -139,7 +139,7 @@ pub fn read(path: &str) -> std::result::Result<Vec<Schema>, String> {
     let mut schemas = Vec::new();
     for n in db.collection_names() {
         let c = db.collection(&n).map_err(|e| format!("{n}: {e}"))?;
-        schemas.push(c.schema.clone());
+        schemas.push(fenec_core::schema::Schema::clone(&c.schema));
     }
     Ok(schemas)
 }

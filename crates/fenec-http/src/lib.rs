@@ -1524,7 +1524,7 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
             .filter_map(|n| {
                 let c = db.collection(n).ok()?;
                 let shown = who.scope().and_then(|s| s.shown_schema(&c.schema));
-                Some(shown.unwrap_or_else(|| c.schema.clone()))
+                Some(shown.unwrap_or_else(|| fenec_core::schema::Schema::clone(&c.schema)))
             })
             .collect()
     };
