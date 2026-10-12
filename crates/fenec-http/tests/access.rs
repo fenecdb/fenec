@@ -1783,7 +1783,7 @@ fn returning_answers_rows_as_the_write_leaves_them() {
     );
     assert_eq!(status, 403, "{body}");
     assert!(
-        body.contains("may not read") && body.contains("archived = false"),
+        body.contains("rows this token may read") && body.contains("archived = false"),
         "{body}"
     );
     assert_eq!(rows(), start);

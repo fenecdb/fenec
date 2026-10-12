@@ -1716,14 +1716,21 @@ impl Hook for Check {
         }
         scope.overwrites(schema, old, doc, &self.registry)
     }
-    fn answering(&self, schema: &Schema, doc: &Document) -> Result<()> {
+    fn answering(&self, schema: &Schema, op: WriteOp, doc: &Document) -> Result<()> {
+        // A delete's rows were picked through the read rules as they stood
+        // ([`Scope::returning`]), and are answered so: asked again here, a
+        // rule reading `now()` could find a row picked a moment before
+        // past it.
+        if op == WriteOp::Delete {
+            return Ok(());
+        }
         let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
             return Ok(());
         };
         if scope.admits(schema, READ, doc, &self.registry)? {
             return Ok(());
         }
-        // The token knows the row: it may update it, and wrote it so. What
+        // The token knows the row: it may write it, and wrote it so. What
         // it may read is its own rules, which `/_whoami` shows it.
         let rules: Vec<&str> = scope
             .rules
@@ -1733,9 +1740,8 @@ impl Hook for Check {
             .filter_map(|r| r.text.as_deref())
             .collect();
         Err(denied(format!(
-            "`returning` would answer a row of `{}` this token may not read as written \
-             (read where {}): nothing is written; without `returning` the write is \
-             answered by its count",
+            "`returning` answers the rows this token may read, and the write leaves a row of \
+             `{}` outside them (read where {}): nothing was written",
             schema.name,
             rules.join(" or ")
         )))

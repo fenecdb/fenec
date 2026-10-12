@@ -9777,7 +9777,12 @@ impl Database {
         let out = self.update_rows(collection, set, &ids, &registry, params);
         self.registry = registry;
         match (out, pick.and_then(|p| p.returning.as_ref())) {
-            (Ok(_), Some(list)) => Ok(Response::Rows(self.returned(collection, list, &ids)?)),
+            (Ok(_), Some(list)) => Ok(Response::Rows(self.returned(
+                collection,
+                list,
+                &ids,
+                WriteOp::Update,
+            )?)),
             (out, _) => out.map(Response::Affected),
         }
     }
@@ -9832,13 +9837,15 @@ impl Database {
     /// What a write's `returning` answers: each of `ids` read out of the
     /// store as it stands -- a `set`'s rows as written, a `del`'s before
     /// they go -- under the columns `select` names in a `get`, `list`
-    /// every field after the id when `None`.
+    /// every field after the id when `None`. Each is handed to the hooks
+    /// first (`Hook::answering`), as the write `op` answers it.
     #[inline(never)]
     fn returned(
         &self,
         collection: &str,
         list: &Option<Vec<String>>,
         ids: &[DocId],
+        op: WriteOp,
     ) -> Result<ResultSet> {
         let c = self.collection(collection)?;
         let columns = projection_columns(&c.schema, list);
@@ -9857,7 +9864,7 @@ impl Database {
                 continue;
             };
             for h in self.registry.hooks() {
-                h.answering(&c.schema, &doc)?;
+                h.answering(&c.schema, op, &doc)?;
             }
             // A loop rather than a `map` and `collect`: a copy of the
             // adapter of its own, 249 bytes of the browser module.
@@ -9991,7 +9998,7 @@ impl Database {
         }
         // Read before they go: what a pop hands back.
         let rows = match pick.and_then(|p| p.returning.as_ref()) {
-            Some(list) => Some(self.returned(collection, list, &ids)?),
+            Some(list) => Some(self.returned(collection, list, &ids, WriteOp::Delete)?),
             None => None,
         };
         let schema = self.collection(collection)?.schema.clone();
