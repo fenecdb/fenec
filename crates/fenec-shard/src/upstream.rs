@@ -447,15 +447,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_look_tells_an_open_connection_from_a_closed_or_reset_one() {
-        let (ours, theirs) = pair();
-        assert!(open(&ours));
-        drop(theirs);
-        assert_eq!(arrived(&ours).unwrap(), 0);
-        assert!(!open(&ours));
-
-        // Closed with a byte it never read, the node's end resets.
+    /// A connection the node's end reset, once the reset has arrived:
+    /// closed with a byte it never read, a socket resets its connection.
+    fn reset() -> TcpStream {
         let (mut ours, theirs) = pair();
         ours.write_all(b"x").unwrap();
         // The byte is there before the close, or the close would be a FIN.
@@ -466,12 +460,54 @@ mod tests {
         drop(theirs);
         let reset = arrived(&ours).unwrap_err();
         assert_eq!(reset.kind(), io::ErrorKind::ConnectionReset, "{reset}");
+        ours
+    }
+
+    #[test]
+    fn the_look_tells_an_open_connection_from_a_closed_or_reset_one() {
+        let (ours, theirs) = pair();
+        assert!(open(&ours));
+        drop(theirs);
+        assert_eq!(arrived(&ours).unwrap(), 0);
         assert!(!open(&ours));
+
+        assert!(!open(&reset()));
 
         // Bytes no request asked for.
         let (ours, mut theirs) = pair();
         theirs.write_all(b"HTTP/1.1 200 OK\r\n").unwrap();
         assert_eq!(arrived(&ours).unwrap(), 1);
         assert!(!open(&ours));
+    }
+
+    /// How far a request of one write got over `s`. Of two, the node's
+    /// end could answer the first with its reset before the second, which
+    /// the request not wholly sent rightly makes unsent.
+    fn stage(pool: &Pool, s: TcpStream, set: Option<Duration>) -> &'static str {
+        let head = b"DELETE /t/acme/notes/1 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+        match pool.exchange("node", s, set, head, b"", Duration::ZERO) {
+            Ok(_) => "answered",
+            Err(Failure(Stage::Unsent, _)) => "unsent",
+            Err(Failure(Stage::Unanswered, _)) => "unanswered",
+            Err(Failure(Stage::Other, e)) => panic!("{e}"),
+        }
+    }
+
+    /// What the look cannot see -- a close on its way -- is staged by how
+    /// far the request got, whatever each system calls the failure.
+    #[test]
+    fn a_failed_exchange_is_staged_by_how_far_the_request_got() {
+        let pool = Pool::new(Duration::from_secs(10));
+        // Reset: nothing goes out. macOS refuses the read timeout's
+        // `setsockopt` (EINVAL) and the write (EPIPE); Linux takes the
+        // first and refuses the write (EPIPE, or the reset itself).
+        assert_eq!(stage(&pool, reset(), None), "unsent");
+        assert_eq!(stage(&pool, reset(), Some(pool.timeout)), "unsent");
+        // Closed: the system takes the request, and the answer is the
+        // connection's end, or the reset the node's end answered it with.
+        let (ours, theirs) = pair();
+        drop(theirs);
+        assert_eq!(arrived(&ours).unwrap(), 0);
+        assert_eq!(stage(&pool, ours, Some(pool.timeout)), "unanswered");
     }
 }
