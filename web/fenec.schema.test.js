@@ -214,6 +214,63 @@ test('a relation is a lookup, its key and kind its own', () => {
   });
 });
 
+test('a relation over several fields is a lookup on a key of several', () => {
+  const refused = (fn, why) => assert.throws(fn, (e) => e instanceof FenecError && why.test(e.message), String(why));
+  const orders = fenecTable('orders', { org: integer(), ref: text() });
+  const lines = fenecTable('lines', { org: integer(), order: integer(), n: integer() }, (t) => [
+    index().on(t.order, t.org, t.n.desc()),
+  ]);
+  const relations = defineRelations({ orders, lines }, (r) => ({
+    orders: {
+      lines: r.many.lines({ from: [r.orders.org, r.orders.id], to: [r.lines.org, r.lines.order] }),
+      // One field leading an index over several is a key as well.
+      byOrder: r.many.lines({ from: r.orders.id, to: r.lines.order }),
+    },
+  }));
+  assert.deepEqual(relations, {
+    orders: {
+      lines: { collection: 'lines', on: ['org', 'order'], parentKey: ['org', 'id'] },
+      byOrder: { collection: 'lines', on: 'order' },
+    },
+  });
+  // Fields no index leads with, or as many on neither side, are refused.
+  refused(
+    () => defineRelations({ orders, lines }, (r) => ({ orders: { l: r.many.lines({ from: [r.orders.org, r.orders.id], to: [r.lines.org, r.lines.n] }) } })),
+    /no index whose first fields are org, n/,
+  );
+  refused(
+    () => defineRelations({ orders, lines }, (r) => ({ orders: { l: r.many.lines({ from: [r.orders.org], to: [r.lines.org, r.lines.order] }) } })),
+    /a column of each side a part/,
+  );
+  refused(
+    () => defineRelations({ orders, lines }, (r) => ({ orders: { l: r.many.lines({ from: [r.orders.org, r.lines.n], to: [r.lines.org, r.lines.order] }) } })),
+    /from is a column of orders/,
+  );
+});
+
+test('a relation over several fields is looked up by its name', { skip }, async () => {
+  const orders = fenecTable('orders', { org: integer(), ref: text() });
+  const lines = fenecTable('lines', { org: integer(), order: integer(), n: integer() }, (t) => [
+    index().on(t.org, t.order, t.n.desc()),
+  ]);
+  const relations = defineRelations({ orders, lines }, (r) => ({
+    orders: { lines: r.many.lines({ from: [r.orders.org, r.orders.id], to: [r.lines.org, r.lines.order] }) },
+  }));
+  const db = await Fenec.open(wasm, { schema: { orders, lines }, relations });
+  db.run('put orders [{org: 1, ref: "a"}, {org: 2, ref: "b"}]');
+  db.run('put lines [{org: 1, order: 1, n: 1}, {org: 1, order: 1, n: 3}, {org: 2, order: 1, n: 9}, {org: 2, order: 2, n: 4}]');
+  const q = db.from(orders).select('ref').lookup('lines', { select: 'n', order: [['n', 'desc']], limit: 2 });
+  assert.deepEqual(q.toFenecQL(), [
+    'get orders select ref lookup lines on (org, order) = (org, id) select n order n desc limit $1',
+    [2],
+  ]);
+  assert.deepEqual(await q.rows(), [
+    { ref: 'a', lines: [{ n: 3 }, { n: 1 }] },
+    { ref: 'b', lines: [{ n: 4 }] },
+  ]);
+  db.close();
+});
+
 test('a relation is looked up by its name, on a database opened with it', { skip }, async () => {
   const products = fenecTable('products', { name: text() });
   const reviews = fenecTable('reviews', { productId: integer(), stars: integer() }, (t) => [index().using('hash', t.productId)]);

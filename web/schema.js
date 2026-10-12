@@ -508,12 +508,15 @@ export const rebuild = (table, field) => ({ rebuild: { collection: name(nameOf(t
 
 /**
  * Drizzle 1.0's `defineRelations`, answered by `lookup`: a relation is
- * `on <to> = <from>`, so `to` is the child's key -- `id`, or a field with a
- * hash or unique index -- and a relation `lookup` cannot answer is refused
- * here. `many` attaches every child, `one` the first.
+ * `on <to> = <from>`, so `to` is the child's key -- `id`, a field with a
+ * hash or unique index, or the first fields of an index over several --
+ * and a relation `lookup` cannot answer is refused here. `many` attaches
+ * every child, `one` the first. A key over several fields lists a column
+ * of each side for each part, paired in order, as Drizzle's do.
  *
  *   const relations = defineRelations({ products, reviews }, (r) => ({
  *     products: { reviews: r.many.reviews({ from: r.products.id, to: r.reviews.productId }) },
+ *     orders: { lines: r.many.lines({ from: [r.orders.org, r.orders.id], to: [r.lines.org, r.lines.order] }) },
  *   }));
  */
 export function defineRelations(tables, fn) {
@@ -534,7 +537,7 @@ export function defineRelations(tables, fn) {
     if (!from) throw new FenecError(`relations of ${key}, which is not among the tables`);
     out[from.$name] = {};
     for (const [rel, made] of Object.entries(rels)) {
-      if (made.from.table !== from) throw new FenecError(`${key}.${rel}: from is a column of ${key}`);
+      if (made.from.some((c) => c.table !== from)) throw new FenecError(`${key}.${rel}: from is a column of ${key}`);
       out[from.$name][rel] = made.lookup;
     }
   }
@@ -543,18 +546,31 @@ export function defineRelations(tables, fn) {
 
 function relation(target, kind, spec) {
   const { from, to } = spec ?? {};
-  if (!from?.table || !to?.table || Array.isArray(from) || Array.isArray(to)) {
-    throw new FenecError('a relation is { from: r.a.col, to: r.b.col }: one column each, as lookup takes one key');
+  const [froms, tos] = [[from].flat(), [to].flat()];
+  if (!tos.length || froms.length !== tos.length || ![...froms, ...tos].every((c) => c?.table)) {
+    throw new FenecError('a relation is { from: r.a.col, to: r.b.col }, or a column of each side a part: { from: [r.a.x, r.a.y], to: [r.b.x, r.b.y] }');
   }
-  if (to.table !== target) throw new FenecError(`a relation to ${target.$name} reaches it by one of its columns`);
-  const key = to.name === 'id' || ['hash', 'unique'].includes(target[to.name]?.index?.kind);
-  if (!key) {
+  if (tos.some((c) => c.table !== target)) throw new FenecError(`a relation to ${target.$name} reaches it by one of its columns`);
+  const names = tos.map((c) => c.name);
+  // The first fields of an index over several, in any order, answer a key
+  // of as many fields; one field also by `id` or its own hash or unique index.
+  const leads = target.$indexes.some(
+    (ix) => ix.keys.length >= names.length && ix.keys.slice(0, names.length).every((k) => names.includes(k.field)),
+  );
+  const [one] = names;
+  if (names.length === 1 && !leads && one !== 'id' && !['hash', 'unique'].includes(target[one]?.index?.kind)) {
     throw new FenecError(
-      `${target.$name}.${to.name} has no hash or unique index: lookup finds children by \`id\` or by one, never by a scan`,
+      `${target.$name}.${one} has no hash or unique index: lookup finds children by \`id\` or by one, never by a scan`,
     );
   }
-  const lookup = { collection: target.$name, on: to.name };
-  if (from.name !== 'id') lookup.parentKey = from.name;
+  if (names.length > 1 && !leads) {
+    throw new FenecError(
+      `${target.$name} has no index whose first fields are ${names.join(', ')}: lookup finds children by one, never by a scan`,
+    );
+  }
+  const lookup = { collection: target.$name, on: names.length === 1 ? one : names };
+  if (names.length > 1) lookup.parentKey = froms.map((c) => c.name);
+  else if (froms[0].name !== 'id') lookup.parentKey = froms[0].name;
   if (kind === 'one') lookup.limit = 1;
-  return { from, lookup: Object.freeze(lookup) };
+  return { from: froms, lookup: Object.freeze(lookup) };
 }

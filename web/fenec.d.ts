@@ -258,9 +258,12 @@ export type Collation = 'und' | 'tr';
 
 /**
  * The child side of a `lookup`. `on` is the child's field; the parent's key
- * is `id` unless `parentKey` names another. `order` takes `[field, dir]`
- * pairs -- `{ collate }` third, as `order()` takes it -- or a bare field name
- * for one ascending key.
+ * is `id` unless `parentKey` names another. A key over several fields names
+ * a field of each side for each part, in order -- `on: ['org', 'order'],
+ * parentKey: ['org', 'id']` -- which an index over several fields led by the
+ * child's answers. `order` takes `[field, dir]` pairs -- `{ collate }`
+ * third, as `order()` takes it -- or a bare field name for one ascending
+ * key.
  *
  * With no `C` every name is a plain `string`, which is the honest default:
  * the builder carries one collection's fields, so the child's are only
@@ -268,8 +271,8 @@ export type Collation = 'und' | 'tr';
  * reason from the other side.
  */
 export interface LookupOptions<C extends Fields = Fields> {
-  on: keyof Row<C> & string;
-  parentKey?: string;
+  on: ChildKey<C> | ChildKey<C>[];
+  parentKey?: string | string[];
   /**
    * Drop a parent that no child matches — "products that have a five-star
    * review" rather than "products, with their five-star reviews". Tested

@@ -877,6 +877,14 @@ export class Query {
    * `parentKey` says otherwise. `order` takes `[field, dir]` pairs, or a
    * bare field name for one ascending key.
    *
+   * A key over several fields names a field of each side for each part,
+   * paired in order -- `on (org, order) = (org, id)`, a tenant's order's
+   * lines -- which an index over several fields led by the child's answers:
+   *
+   *   db.from('orders')
+   *     .lookup('lines', { on: ['org', 'order'], parentKey: ['org', 'id'],
+   *                        order: [['line', 'desc']], limit: 5 })
+   *
    * `required: true` drops a parent no child matches -- "products that have
    * a five-star review" rather than "products, with their five-star
    * reviews". It is tested before `limit`, so the page still comes back
@@ -904,10 +912,18 @@ export class Query {
       throw new FenecError('lookup needs `on`: the child field holding the key');
     }
     const select = opts.select === undefined ? null : [opts.select].flat();
+    const on = [opts.on].flat().map((f) => ident(f));
+    const parent = opts.parentKey === undefined ? [] : [opts.parentKey].flat().map((f) => ident(f));
+    if (!on.length) throw new FenecError('lookup needs `on`: the child field holding the key');
+    // One child field alone pairs with `id` unless named; several, each
+    // with its own.
+    if ((on.length > 1 || parent.length) && parent.length !== on.length) {
+      throw new FenecError(`lookup pairs ${on.length} child fields with ${parent.length} parent fields`);
+    }
     const level = {
       collection: ident(name, 'collection'),
-      on: ident(opts.on),
-      parent: opts.parentKey === undefined ? null : ident(opts.parentKey),
+      on,
+      parent,
       project:
         select === null || select.includes('*')
           ? null
@@ -1113,9 +1129,10 @@ export class Query {
     // Terminal, so every clause after it belongs to the child -- and being
     // emitted last, its parameters land after the parent's, which is the
     // order `bind` numbered them in.
+    const side = (names) => (names.length > 1 ? `(${names.join(', ')})` : names[0]);
     for (const lookup of lookups) {
-      sql += ` lookup ${lookup.collection} on ${lookup.on}`;
-      if (lookup.parent) sql += ` = ${lookup.parent}`;
+      sql += ` lookup ${lookup.collection} on ${side(lookup.on)}`;
+      if (lookup.parent.length) sql += ` = ${side(lookup.parent)}`;
       // Early rather than trailing like `exact`: this one changes which rows
       // come back, so it should be read before the clauses that only shape
       // the children.
