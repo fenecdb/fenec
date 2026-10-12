@@ -343,10 +343,19 @@ func options(o object) []fenecdb.Opt {
 			} else {
 				out = append(out, fenecdb.Returning(strs(v)...))
 			}
+		// A field, or a list of them: a key over several fields.
 		case "on":
-			out = append(out, fenecdb.On(v.(string)))
+			if s, ok := v.(string); ok {
+				out = append(out, fenecdb.On(s))
+			} else {
+				out = append(out, fenecdb.On(strs(v)...))
+			}
 		case "parentKey":
-			out = append(out, fenecdb.ParentKey(v.(string)))
+			if s, ok := v.(string); ok {
+				out = append(out, fenecdb.ParentKey(s))
+			} else {
+				out = append(out, fenecdb.ParentKey(strs(v)...))
+			}
 		case "required":
 			if v.(bool) {
 				out = append(out, fenecdb.Required())

@@ -36,6 +36,20 @@ public readonly record struct SortKey(string Field, string Direction = "asc", st
     public static implicit operator SortKey(string field) => new(field);
 }
 
+/// <summary>One side of a lookup's key: a field, or one for each part of a key over several fields --
+/// <c>new[] { "org", "order" }</c>, <c>on (org, order) = (org, id)</c>. A string is the one field.</summary>
+public sealed class Fields(params string[] names)
+{
+    /// <summary>The fields, in the key's order.</summary>
+    public IReadOnlyList<string> Names { get; } = names;
+
+    /// <summary>One field.</summary>
+    public static implicit operator Fields(string name) => new(name);
+
+    /// <summary>A field for each part.</summary>
+    public static implicit operator Fields(string[] names) => new(names);
+}
+
 /// <summary>
 /// A condition: what <see cref="Or"/>, <see cref="And"/>, <see cref="Not"/>, <see cref="Raw"/>,
 /// <see cref="Cmp"/> and <see cref="Fields"/> make. A <c>Dictionary&lt;string, object?&gt;</c> is one too, the JS
@@ -631,7 +645,8 @@ public sealed class Query
 {
     sealed record VectorClause(string Field, object? Vector, long? N, bool Exact);
 
-    sealed record Level(string Collection, string On, string? Parent, IReadOnlyList<string>? Project,
+    sealed record Level(string Collection, IReadOnlyList<string> On, IReadOnlyList<string> Parent,
+        IReadOnlyList<string>? Project,
         IReadOnlyList<Node> Cond, bool Required, IReadOnlyList<(string Field, bool Asc, string? Collate)> Order,
         long? Limit, long Offset);
 
@@ -854,19 +869,24 @@ public sealed class Query
 
     /// <summary>
     /// <c>lookup name on child [= parent] ...</c>: each row's children, attached to it. <paramref name="on"/>
-    /// names the child's field, <paramref name="parentKey"/> the parent's (<c>id</c> unless given); the rest
-    /// binds to the looked-up collection, and <paramref name="limit"/> counts children per parent.
+    /// names the child's field, <paramref name="parentKey"/> the parent's (<c>id</c> unless given) -- or each a
+    /// field for each part of a key over several fields, <c>on (org, order) = (org, id)</c>; the rest binds to
+    /// the looked-up collection, and <paramref name="limit"/> counts children per parent.
     /// <paramref name="required"/> drops a parent no child matches. Called again, it chains onto the collection
     /// the call before named.
     /// </summary>
-    public Query Lookup(string name, string? on = null, string? parentKey = null, IEnumerable<string>? select = null,
+    public Query Lookup(string name, Fields? on = null, Fields? parentKey = null, IEnumerable<string>? select = null,
         Cond? where = null, bool required = false, IEnumerable<SortKey>? order = null, long? limit = null,
         long? offset = null)
     {
-        if (string.IsNullOrEmpty(on)) throw Builder.Refuse("lookup needs `on`: the child field holding the key");
+        if (on is null || on.Names.Count == 0 || string.IsNullOrEmpty(on.Names[0]))
+            throw Builder.Refuse("lookup needs `on`: the child field holding the key");
         var collection = Builder.Ident(name, "collection");
-        var child = Builder.Ident(on);
-        var parent = parentKey is null ? null : Builder.Ident(parentKey);
+        var child = on.Names.Select(f => Builder.Ident(f)).ToList();
+        var parent = parentKey?.Names.Select(f => Builder.Ident(f)).ToList() ?? [];
+        // One child field alone pairs with `id` unless named; several, each with its own.
+        if ((child.Count > 1 || parentKey is not null) && parent.Count != child.Count)
+            throw Builder.Refuse($"lookup pairs {child.Count} child fields with {parent.Count} parent fields");
         var cols = select?.ToList();
         var project = cols is null || cols.Contains("*") ? null : cols.Select(Builder.FieldPath).ToList();
         var keys = (order ?? []).Select(k =>
@@ -1007,8 +1027,8 @@ public sealed class Query
         // parent's.
         foreach (var l in s.Lookups)
         {
-            sql.Append($" lookup {l.Collection} on {l.On}");
-            if (l.Parent is not null) sql.Append($" = {l.Parent}");
+            sql.Append($" lookup {l.Collection} on {Side(l.On)}");
+            if (l.Parent.Count > 0) sql.Append($" = {Side(l.Parent)}");
             if (l.Required) sql.Append(" required");
             if (l.Project is not null) sql.Append(" select ").Append(string.Join(", ", l.Project));
             if (WhereOf(l.Cond, bind) is { } w) sql.Append(" where ").Append(w);
@@ -1017,6 +1037,9 @@ public sealed class Query
             if (l.Offset > 0) sql.Append(" offset ").Append(bind.Bind(l.Offset));
         }
         return (sql.ToString(), bind.Params);
+
+        static string Side(IReadOnlyList<string> names) =>
+            names.Count > 1 ? $"({string.Join(", ", names)})" : names[0];
     }
 
     static void AppendOrder(StringBuilder sql, IReadOnlyList<(string Field, bool Asc, string? Collate)> keys)
