@@ -177,7 +177,7 @@ func value(x any) any {
 		}
 		if b, ok := v.get("$bucket"); ok {
 			list := strs(b)
-			return fenecdb.Bucket(list[0], list[1])
+			return fenecdb.Bucket(list[0], list[1], list[2:]...)
 		}
 		if f, ok := v.get("$countDistinct"); ok {
 			return fenecdb.CountDistinct(f.(string))
@@ -393,7 +393,13 @@ func options(o object) []fenecdb.Opt {
 			if s, ok := v.(string); ok {
 				out = append(out, fenecdb.Select(s))
 			} else {
-				out = append(out, fenecdb.Select(strs(v)...))
+				out = append(out, fenecdb.Select(value(v).([]any)...))
+			}
+		case "group":
+			if s, ok := v.(string); ok {
+				out = append(out, fenecdb.Group(s))
+			} else {
+				out = append(out, fenecdb.Group(value(v).([]any)...))
 			}
 		case "order":
 			if s, ok := v.(string); ok {

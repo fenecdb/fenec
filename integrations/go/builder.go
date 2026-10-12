@@ -768,8 +768,8 @@ type opts struct {
 	collate                          *string
 	on, parentKey                    []string
 	parentSet                        bool
-	sel                              []string
-	selSet                           bool
+	sel, group                       []any
+	selSet, groupSet                 bool
 	where                            *Cond
 	sort                             []sortOpt
 	top                              *int
@@ -851,9 +851,19 @@ func Tags(pre, post string) Opt {
 // Ellipsis is what Snippet writes where its window leaves text out.
 func Ellipsis(text any) Opt { return func(o *opts) { o.ellipsis, o.ellipsisSet = text, true } }
 
-// Select names a lookup's fields; "*" or none is every field.
-func Select(cols ...string) Opt {
+// Select names a lookup's fields; "*" or none is every field. It may
+// aggregate, as the query's own list does -- Select("count(*)",
+// "sum(total)"), an Expr(...).As(name) -- each parent's children folded,
+// one row a parent, or with Group one a group, ordered and paged a parent
+// at a time; ungrouped, Sort, Limit and Offset pick the children folded.
+func Select(cols ...any) Opt {
 	return func(o *opts) { o.sel, o.selSet = cols, true }
+}
+
+// Group is a lookup's `group`, over an aggregating Select: a row a group
+// of each parent's children.
+func Group(keys ...any) Opt {
+	return func(o *opts) { o.group, o.groupSet = keys, true }
 }
 
 // Where is a lookup's filter, over the looked-up collection.
@@ -887,7 +897,8 @@ func (k sortKey) String() string {
 type lookupLevel struct {
 	collection string
 	on, parent []string
-	project    []string
+	project    []selectItem
+	group      []selectItem
 	cond       []*node
 	required   bool
 	order      []sortKey
@@ -1312,14 +1323,35 @@ func (b *Builder) Lookup(name string, options ...Opt) *Builder {
 		if (len(l.on) > 1 || o.parentSet) && len(l.parent) != len(l.on) {
 			return refuse("lookup pairs %d child fields with %d parent fields", len(l.on), len(l.parent))
 		}
-		if o.selSet && !slices.Contains(o.sel, "*") {
-			for _, c := range o.sel {
-				p, err := fieldPath(c)
-				if err != nil {
-					return err
-				}
-				l.project = append(l.project, p)
+		aggregate := false
+		star := func(c any) bool { s, ok := c.(string); return ok && s == "*" }
+		if o.selSet && !slices.ContainsFunc(o.sel, star) {
+			if l.project, aggregate, err = columns(flat(o.sel), false); err != nil {
+				return err
 			}
+		}
+		if o.groupSet {
+			if l.group, _, err = columns(flat(o.group), true); err != nil {
+				return err
+			}
+			if len(l.group) == 0 {
+				return refuse("group takes at least one key")
+			}
+			// The engine refuses it too; failing here never sends a query.
+			if !aggregate {
+				keys := make([]string, len(l.group))
+				for i, k := range l.group {
+					keys[i] = k.text
+					if k.expr != nil {
+						keys[i] = k.expr.sql
+					}
+				}
+				return refuse("group %s needs an aggregate in select: 'count(*)'", strings.Join(keys, ", "))
+			}
+		}
+		// A level selects its children's fields, or aggregates of them.
+		if !aggregate && slices.ContainsFunc(l.project, func(c selectItem) bool { return c.expr != nil }) {
+			return refuse("a lookup selects its children's fields, or aggregates of them")
 		}
 		if o.where != nil {
 			if o.where.err != nil {
@@ -1328,7 +1360,8 @@ func (b *Builder) Lookup(name string, options ...Opt) *Builder {
 			l.cond = []*node{o.where.node()}
 		}
 		for _, s := range o.sort {
-			k, err := sortKeyOf(s.field, s.dir, s.collate, false)
+			// Over groups a key may name an aggregate of the list.
+			k, err := sortKeyOf(s.field, s.dir, s.collate, true)
 			if err != nil {
 				return err
 			}
@@ -1431,16 +1464,13 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 			clash = "near"
 		case b.match != nil:
 			clash = "match"
-		case len(b.lookups) > 0:
-			clash = "lookup"
-		case b.count:
+		// Ungrouped, Order, Limit and Offset pick the rows folded; a
+		// lookup hangs off the groups, keyed by a column.
+		case b.count && len(b.group) == 0:
 			clash = "count"
 		}
 		if clash != "" {
 			return "", nil, refuse("aggregates cannot be combined with %s", clash)
-		}
-		if len(b.group) == 0 && (len(b.order) > 0 || b.hasLimit || b.offset > 0) {
-			return "", nil, refuse("aggregates answer one row; group makes a row per value")
 		}
 		if len(b.group) == 0 && b.require != "" {
 			return "", nil, refuse("require counts the rows a query answers, and an aggregate answers one")
@@ -1636,7 +1666,13 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 			sql.WriteString(" required")
 		}
 		if len(l.project) > 0 {
-			sql.WriteString(" select " + strings.Join(l.project, ", "))
+			items := make([]string, len(l.project))
+			for i, c := range l.project {
+				if items[i], err = c.render(bind); err != nil {
+					return "", nil, err
+				}
+			}
+			sql.WriteString(" select " + strings.Join(items, ", "))
 		}
 		where, err := whereOf(l.cond, bind)
 		if err != nil {
@@ -1644,6 +1680,15 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		}
 		if where != "" {
 			sql.WriteString(" where " + where)
+		}
+		if len(l.group) > 0 {
+			keys := make([]string, len(l.group))
+			for i, k := range l.group {
+				if keys[i], err = k.render(bind); err != nil {
+					return "", nil, err
+				}
+			}
+			sql.WriteString(" group " + strings.Join(keys, ", "))
 		}
 		writeOrder(&sql, l.order)
 		if l.hasLimit {
@@ -1907,12 +1952,22 @@ var interval = regexp.MustCompile(`^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$`)
 // "1d", "1w" (from a Monday), "1mo", "1y", in UTC -- for Select or Group:
 //
 //	db.From("ticks").Select(fenecdb.Bucket("at", "1m").As("minute"), "count(*)").Group("minute")
-func Bucket(field, every string) Computed {
+//
+// Given a zone -- an IANA name, "Europe/Istanbul", or an offset, "+03:00"
+// -- by its clock: a day from local midnight, 23 or 25 hours where it
+// changes to or from daylight time. The zone goes as a parameter.
+func Bucket(field, every string, zone ...string) Computed {
 	if !interval.MatchString(every) {
 		return Computed{err: refuse("bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': %s", jsQuote(every))}
 	}
 	f, err := fieldPath(field)
-	return Computed{kind: "expr", sql: "bucket(" + f + ", " + every + ")", err: err}
+	if len(zone) == 0 {
+		return Computed{kind: "expr", sql: "bucket(" + f + ", " + every + ")", err: err}
+	}
+	if len(zone) > 1 || zone[0] == "" {
+		return Computed{err: refuse("bucket() takes a zone's name, such as 'Europe/Istanbul', or an offset, such as '+03:00': %s", jsQuote(strings.Join(zone, ",")))}
+	}
+	return Computed{kind: "expr", sql: "bucket(" + f + ", " + every + ", ?)", params: []any{zone[0]}, err: err}
 }
 
 // CountDistinct is count(distinct field): how many distinct values the
