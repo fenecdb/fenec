@@ -114,8 +114,9 @@ pub const FENEC_OPEN_NO_SYNC: u32 = 1;
 pub const FENEC_OPEN_IN_MEMORY: u32 = 2;
 /// No compact on its own. Without it a thread looks at the file every 5 s
 /// and compacts it beside the calls once half of it is dead records -- the
-/// versions updates and deletes leave behind -- and at least 64 MB, as a
-/// server does: an app that updates its rows grew its file without bound.
+/// versions updates and deletes leave behind -- and at least 64 MB, or
+/// sooner as it nears the memory the device has for its pages, as a server
+/// does: an app that updates its rows grew its file without bound.
 pub const FENEC_OPEN_NO_AUTO_COMPACT: u32 = 4;
 
 /// When a file opened without `FENEC_OPEN_NO_AUTO_COMPACT` is compacted, and
@@ -125,6 +126,7 @@ static AUTO_COMPACT: Mutex<(CompactPolicy, std::time::Duration)> = Mutex::new((
     CompactPolicy {
         ratio: fenec_core::engine::AUTO_COMPACT_RATIO,
         floor: fenec_core::engine::AUTO_COMPACT_FLOOR,
+        memory: true,
     },
     fenec_core::engine::AUTO_COMPACT_EVERY,
 ));

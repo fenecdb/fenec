@@ -55,6 +55,8 @@ pub mod value;
 pub mod vector;
 
 #[cfg(feature = "std-fs")]
+pub mod cache;
+#[cfg(feature = "std-fs")]
 pub mod fs;
 #[cfg(all(feature = "std-fs", unix))]
 mod synclog;

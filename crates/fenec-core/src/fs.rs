@@ -804,6 +804,32 @@ pub struct SideFile {
     path: PathBuf,
     out: FileImage,
     adopted: bool,
+    /// On Linux, whether the file is written past the page cache
+    /// ([`Self::past_cache`]), and how far it has been synced and its
+    /// pages let go of.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    past: bool,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    dropped: u64,
+}
+
+/// How much of a side file written past the cache is written before it is
+/// synced and its pages let go of, on Linux: the pages of a written file
+/// stay in the cache until they are on disk, so they go a stretch at a
+/// time rather than all at the end.
+#[cfg(all(
+    unix,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "android")
+))]
+const PAST_STEP: u64 = 64 << 20;
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+extern "C" {
+    #[cfg(target_vendor = "apple")]
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
 }
 
 #[cfg(all(unix, target_pointer_width = "64"))]
@@ -822,6 +848,10 @@ impl SideFile {
                 at: 0,
             },
             adopted: false,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            past: false,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            dropped: 0,
         })
     }
 
@@ -829,11 +859,43 @@ impl SideFile {
         &self.path
     }
 
+    /// Has what is written from here on kept out of the page cache, where
+    /// the system lets a file ask: a compact whose new file would not fit
+    /// in memory beside the old one ([`crate::cache::room`]). Written
+    /// through the cache, its pages pushed out the old file's, which every
+    /// read and update needs until the swap: a container held to 2 GB
+    /// compacting a 1.5 GB file into 1.1 ran its writer at 5 to 6k updates
+    /// a second through the compact, 8k with the pages dropped once the
+    /// image was written, and 18 to 25k with them dropped as it went.
+    /// macOS's `F_NOCACHE`; on Linux the file synced and its pages dropped
+    /// (`POSIX_FADV_DONTNEED`) every [`PAST_STEP`].
+    pub fn past_cache(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            self.past = true;
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            use std::os::fd::AsRawFd;
+            const F_NOCACHE: i32 = 48;
+            // Advice: refused, the file is written through the cache.
+            unsafe { fcntl(self.out.w.get_ref().as_raw_fd(), F_NOCACHE, 1i32) };
+        }
+    }
+
     /// Pushes what is written to disk: the image, before the lock is taken
     /// for the rest, so that the fsync under it covers only that.
     pub fn sync(&mut self) -> Result<()> {
         self.out.w.flush()?;
         self.out.w.get_ref().sync_data()?;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if self.past {
+            use std::os::fd::AsRawFd;
+            const POSIX_FADV_DONTNEED: i32 = 4;
+            // The pages are on disk now, and dropping them is advice too.
+            unsafe { posix_fadvise(self.out.w.get_ref().as_raw_fd(), 0, 0, POSIX_FADV_DONTNEED) };
+            self.dropped = self.out.at;
+        }
         Ok(())
     }
 
@@ -855,7 +917,12 @@ impl SideFile {
 #[cfg(all(unix, target_pointer_width = "64"))]
 impl ImageOut for SideFile {
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.out.write(bytes)
+        self.out.write(bytes)?;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if self.past && self.out.at - self.dropped >= PAST_STEP {
+            self.sync()?;
+        }
+        Ok(())
     }
     fn at(&self) -> u64 {
         self.out.at()

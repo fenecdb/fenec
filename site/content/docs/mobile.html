@@ -534,7 +534,9 @@ keeps <code>&lt;name&gt;.lock</code> while it is open.</p>
     file's end; a thread of the library's looks every 5 s and compacts the
     file beside your calls once half of it is versions updates and deletes
     left behind, and at least 64 MB, so a file you keep updating stays under
-    about twice what it holds. Open with <code>.noAutoCompact</code>
+    about twice what it holds -- sooner once it reaches three quarters of
+    the memory the device has for its pages, so its reads stay in
+    memory. Open with <code>.noAutoCompact</code>
     (<code>NO_AUTO_COMPACT</code>, <code>noAutoCompact</code>) to compact
     only when you run <code>compact</code>.</li>
 </ul>

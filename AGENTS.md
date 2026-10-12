@@ -948,24 +948,83 @@ the side file's fsync and the rename, 6.1-12.6 ms over a 1 GB file and
 million 1 KB records from one writer, buffered, the file 1.03 -> 2.1-3.0 ->
 1.1-1.6 GB three or four times where it reached 6.2 GB without, and after
 the updates 435k reads/s from the first second where the 6.2 GB file
-started at 19k and took 25 s to 400k). What a compact still costs that
-writer is the page cache's, not its own: beside this Mac's apps the cache
-holds about 2 GB of the file, the size at which a compact comes due, and
-past it the updates read most rows from the disk whether one runs or not --
-28-46k a second at 2.25-2.75 GB with the compactor off, 24-32k while a
-compact writes its image. Over nine runs each in turns, the median 100 ms
-of a compact went 27.1k -> 30.6k, its worst 1.1k -> 3.6k, a compact 10.9 ->
-7.8 s, the reads during it p99 2.3-6.5 -> 1.3-5.3 ms; at 250 000 records,
-whose file fits, 143k -> 153k, the worst 16.9k -> 129k against 180k with
-none, a compact 1.0 -> 0.3 s, the reads p99 0.5-1.3 -> 0.14-0.35 ms and 52
--> 18 ms at most. Paced to half and to a quarter of its speed a compact
-left the writer where it was (30-35k) and took 56 and 95 s against 10; at
-utility QoS its reads were throttled behind the writer's and it took 138
-s; with its side file uncached (`F_NOCACHE`), or at utility QoS for the CPU
-alone, nothing moved. A database read into
-memory compacts beside itself too, the live records copied into fresh
-segments with no lock held; it used to copy them under the read lock and
-build every index again, though the indexes are keyed by id.
+started at 19k and took 25 s to 400k). Over nine runs each in turns, the
+median 100 ms of a compact went 27.1k -> 30.6k, its worst 1.1k -> 3.6k, a
+compact 10.9 -> 7.8 s, the reads during it p99 2.3-6.5 -> 1.3-5.3 ms; at
+250 000 records, whose file fits, 143k -> 153k, the worst 16.9k -> 129k
+against 180k with none, a compact 1.0 -> 0.3 s, the reads p99 0.5-1.3 ->
+0.14-0.35 ms and 52 -> 18 ms at most. Paced to half and to a quarter of its
+speed a compact left the writer where it was (30-35k) and took 56 and 95 s
+against 10; at utility QoS its reads were throttled behind the writer's and
+it took 138 s; with its side file uncached (`F_NOCACHE`) in a compact that
+began once the file had outgrown the cache (below), or at utility QoS for
+the CPU alone, nothing moved. A database
+read into memory compacts beside itself too, the live records copied into
+fresh segments with no lock held; it used to copy them under the read lock
+and build every index again, though the indexes are keyed by id.
+
+**A file is compacted before it outgrows the page cache** (`cache.rs`,
+`CompactPolicy::memory`, `due_in`). There is no cache of fenecdb's own, so
+what the reads need in memory is the file's pages holding a live record --
+and under updates at uniform keys that is every page until a compact: a
+million 1 KB records updated until the file stood at 2.1 GB left one on
+every 16 KB page and 94% of 4 KB ones (a simulation of the bench's keys).
+Past the cache every read and update waits for the disk in turn, whatever
+is dead: in a container held to 2 GB (`docker run --memory 2g`), at half
+the file dead, the file stood over 2 GB 69-74% of the time and 5M updates
+took 358-511 s, 3.5-4.1k a second at the median 100 ms against 79k while
+it fitted, 0.81-0.90M major faults, compacts of 38-99 s; on this Mac beside
+1 GB wired by a ballast (`mlock`), 82-535 s. So a file is compacted too
+once a third of what the compact writes is dead -- four bytes written a
+byte updated at most, against two -- where its live records fit the room
+the page cache has for it (`cache::room`) and either the file has reached
+three quarters of that room (`ROOM_SHARE`) or the process takes 500 major
+faults a second (`cache::faulting`, `getrusage`, over a second or more).
+The room is exact on Linux -- `MemAvailable`, and a cgroup's limit less
+what the group holds that is not file pages, from its own group up -- and
+not on macOS, whose figure (physical memory less the apps', wired and
+compressed pages) grows under the pressure as it compresses the apps:
+2.4-2.9 GB while a 1.5 GB file was read from the disk at 5-7k faults a
+second. The faults are the macOS half: beside the ballast, the rule
+without them took 226-361 s, with them 191-260. A compact's own
+faults -- the old file's records read, the new file read in -- are
+forgotten once it is done (`cache::forget_faults`): counted, the next
+look found the process faulting, and a 1.6 GB file that took none was
+compacted every 6 s. A compact whose old and new files would not fit
+together, or that starts while the process faults, writes the new one past
+the cache (`SideFile::past_cache`: `F_NOCACHE`, or synced and
+`POSIX_FADV_DONTNEED` every 64 MB, since written pages stay until they are
+on disk) and reads it in after the swap rather than before: through the
+cache its pages pushed out the old file's, which the reads need until the
+swap, and the writer ran at 5-6k updates a second through a compact, 8k
+with the pages dropped once the image was written, 18-25k dropped as it
+went; read in before the swap, the writer ran at 6.2k a second through
+a compact and the swap held the lock 24-60 ms, after it 18.6k and 6-14 ms.
+With all of it the container's 5M updates took 80-100 s against 358-511,
+the file at most 1.9 GB, 34-39k major faults against 0.81-0.90M, compacts
+of 3-6 s, the reads during them p99 0.44-0.49 ms against 4.6-6.5 (max
+113-517 ms against 220-534: a read meeting the new file as it comes in
+after the swap), for 3.0-3.2 bytes written a byte updated against 1.9-2.0;
+on the Mac, 191-260 s against 82-535 and 3.3-3.6 bytes written a byte --
+macOS gives a growing file more of the machine as it compresses the apps,
+which main's 82 s run had and its 535 s one did not, and a file kept small
+is not given it: steadier, never the best case. A file that fits moves
+nothing: 250 000 records (29-31 s, the median 100 ms 174-181k, through a
+compact 153-156k), YCSB A, B and F in process (with the memory free A at
+16 threads 82-92k -> 133k, the rest within the runs' spread; beside the
+ballast B 23.5k -> 63.5k, F at 16 23.6k -> 48.5k, A at 1 29.7k -> 24.1k),
+`make concurrency-bench` and `make requests-bench` in ABBA turns as on
+main, the browser module byte for byte (`cache.rs` is `std-fs`'s). Rejected: `MADV_RANDOM` (Linux reads 128 KB
+around a fault, the neighbours the next reads want: 806-811 s, 561-608
+with the rule), a look every second rather than 5 s (13 compacts for 10,
+3.8 bytes written a byte, no faster), writing an update over its old
+record (its torn write is no torn tail to cut but a corrupt record mid-file,
+and a pin, a handover's `Landed`, the sync log, a replica's apply and the
+archive all take the file as only growing), dropping the pages only dead
+records hold (none, by the count above), a compact ordering the records by
+heat (a uniform workload has none; YCSB's hottest quarter of 16 KB pages
+takes 77% of reads in id order against 96% by heat, which matters only
+once the live records outgrow memory, and E's scans want id order).
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty

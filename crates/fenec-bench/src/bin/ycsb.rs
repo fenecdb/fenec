@@ -2082,6 +2082,31 @@ struct Cell {
     ops: u64,
     hist: BTreeMap<Op, Hist>,
     logs: Vec<Vec<Entry>>,
+    /// The process's major faults over the measured window -- a page the
+    /// kernel read from the disk, the in-process systems' -- and the
+    /// largest the system's files stood, sampled every 100 ms.
+    majflt: u64,
+    largest: u64,
+}
+
+/// The process's major faults so far (`getrusage`), `rusage`'s layout on
+/// Linux and macOS alike: two `timeval`s and fourteen longs.
+fn major_faults() -> u64 {
+    #[repr(C)]
+    struct Rusage {
+        times: [i64; 4],
+        rest: [i64; 14],
+    }
+    extern "C" {
+        fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+    }
+    let mut r = Rusage {
+        times: [0; 4],
+        rest: [0; 14],
+    };
+    // RUSAGE_SELF.
+    unsafe { getrusage(0, &mut r) };
+    r.rest[5] as u64
 }
 
 fn run_cell(
@@ -2108,6 +2133,8 @@ fn run_cell(
         ops: 0,
         hist: BTreeMap::new(),
         logs: Vec::new(),
+        majflt: 0,
+        largest: 0,
     };
     let t0 = Instant::now();
     std::thread::scope(|s| {
@@ -2243,7 +2270,13 @@ fn run_cell(
             .collect();
         std::thread::sleep(cfg.warmup);
         measuring.store(true, Ordering::Relaxed);
-        std::thread::sleep(cfg.run);
+        let faults = major_faults();
+        let ends = Instant::now() + cfg.run;
+        while Instant::now() < ends {
+            std::thread::sleep(Duration::from_millis(100).min(ends - Instant::now().min(ends)));
+            cell.largest = cell.largest.max(sys.size().unwrap_or(0));
+        }
+        cell.majflt = major_faults() - faults;
         measuring.store(false, Ordering::Relaxed);
         stop.store(true, Ordering::Relaxed);
         for h in handles {
@@ -2936,10 +2969,12 @@ fn write_cell(
     }
     append(&cfg.out, &line);
     eprintln!(
-        "run {run} {name} {} {} x{threads}: {:.0} ops/s{summary} (probe {ratio:.2})",
+        "run {run} {name} {} {} x{threads}: {:.0} ops/s{summary} (probe {ratio:.2}), {} major faults, the file {} MB at the most",
         mode.name(),
         w.name,
-        cell.ops as f64 / secs
+        cell.ops as f64 / secs,
+        cell.majflt,
+        cell.largest >> 20
     );
 }
 

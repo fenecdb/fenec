@@ -56,10 +56,26 @@ impl Garbage {
 /// under twice what the last compact left it at -- each compact writing the
 /// live records once for as many bytes of updates -- and the floor keeps a
 /// small database from being rewritten for a few megabytes.
+///
+/// With `memory`, also once the file nears what the page cache can hold of
+/// it ([`ROOM_SHARE`] of [`crate::cache::room`]) or the process waits for
+/// the disk ([`crate::cache::faulting`]), where its live records fit there
+/// and a third of what the compact writes is dead
+/// ([`CompactPolicy::due_in`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactPolicy {
     pub ratio: f64,
     pub floor: u64,
+    pub memory: bool,
+}
+
+/// What the system says of the memory a file's pages have: the bytes the
+/// page cache could hold of it ([`crate::cache::room`]), and whether the
+/// process is waiting for the disk ([`crate::cache::faulting`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Memory {
+    pub room: Option<u64>,
+    pub faulting: bool,
 }
 
 /// The share of the file [`CompactPolicy::default`] lets be dead.
@@ -73,11 +89,18 @@ pub const AUTO_COMPACT_FLOOR: u64 = 64 << 20;
 /// most a few seconds' writes past the point it was due.
 pub const AUTO_COMPACT_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The share of the page cache's room for a file ([`crate::cache::room`])
+/// at which [`CompactPolicy::due_in`] compacts it: the rest is what the
+/// file grows by while the compact runs, which writes the new file past the
+/// cache where the two do not fit together.
+pub const ROOM_SHARE: f64 = 0.75;
+
 impl Default for CompactPolicy {
     fn default() -> Self {
         CompactPolicy {
             ratio: AUTO_COMPACT_RATIO,
             floor: AUTO_COMPACT_FLOOR,
+            memory: true,
         }
     }
 }
@@ -98,10 +121,56 @@ impl CompactPolicy {
         })
     }
 
-    /// Whether a compact is due for a file holding `g`.
+    /// Whether a compact is due for a file holding `g`, by its dead bytes
+    /// alone.
     pub fn due(&self, g: Garbage) -> bool {
+        self.due_in(g, Memory::default())
+    }
+
+    /// Whether a compact is due for a file holding `g` beside the memory
+    /// `m` says its pages have: by its dead bytes, or with `memory` once
+    /// the file stands at [`ROOM_SHARE`] of the room or the process waits
+    /// for the disk, its live records fit in the room, and a third of what
+    /// the compact would write is dead.
+    ///
+    /// Every page holding a live record is one the reads need, and under
+    /// updates at uniform keys that is every page of the file until a
+    /// compact: a million 1 KB records updated until the file stood at 1.5
+    /// GB left a live record on every 16 KB page and 99.6% of 4 KB ones, at
+    /// 2.1 GB on 100% and 93.6%. So once the file outgrows the room every
+    /// read and update waits for the disk in turn, whatever is dead: in a
+    /// container held to 2 GB, at half the file dead, the file stood at
+    /// 2.1 to 2.3 GB for 70% of the run and the updates ran at 3 to 4k a
+    /// second through it, 14k on average against 79k while it fitted.
+    ///
+    /// The room is where Linux says it, a cgroup's limit and what it holds
+    /// counted exactly; the faults are where macOS does not, which keeps
+    /// the apps' memory before the file's and, under the pressure,
+    /// compresses it and reports the room grown -- 2.4 to 2.9 GB while a
+    /// file of 1.5 GB and more was read from the disk.
+    ///
+    /// The third bounds what this costs: a compact writes the live records
+    /// for at least a third as many bytes of updates, four bytes written a
+    /// byte updated at the most where half the file dead writes two. Past
+    /// the room, the live records alone do not fit and a file kept smaller
+    /// is still read from the disk; the rule leaves it to the dead bytes.
+    pub fn due_in(&self, g: Garbage, m: Memory) -> bool {
         let dead = g.dead();
-        dead >= self.floor && dead as f64 >= self.ratio * g.file as f64
+        if dead < self.floor {
+            return false;
+        }
+        if dead as f64 >= self.ratio * g.file as f64 {
+            return true;
+        }
+        let writes = g.live + g.kept;
+        match m.room {
+            Some(room) if self.memory => {
+                writes <= room
+                    && (m.faulting || g.file as f64 >= ROOM_SHARE * room as f64)
+                    && dead.saturating_mul(3) >= writes
+            }
+            _ => false,
+        }
     }
 }
 
@@ -167,6 +236,13 @@ impl Database {
     /// Whether `policy` asks for a compact of this database now: dead bytes
     /// enough, a file to write, no maintenance running and no storage error.
     pub fn compact_due(&self, policy: &CompactPolicy) -> bool {
+        self.compact_due_in(policy, memory(policy))
+    }
+
+    /// [`Self::compact_due`] beside the memory `m` says the file's pages
+    /// have: what a host looking at many files asks the system once a pass
+    /// ([`memory`]).
+    pub fn compact_due_in(&self, policy: &CompactPolicy, m: Memory) -> bool {
         self.failed.is_none()
             && !self.maintaining()
             && self
@@ -175,8 +251,23 @@ impl Database {
                 .unwrap_or_else(|e| e.into_inner())
                 .side()
                 .is_some()
-            && policy.due(self.garbage())
+            && policy.due_in(self.garbage(), m)
     }
+}
+
+/// What the system says of the memory a file's pages have, where the
+/// policy asks ([`crate::cache`]); nothing where it does not, or the
+/// system does not say.
+pub fn memory(policy: &CompactPolicy) -> Memory {
+    #[cfg(feature = "std-fs")]
+    if policy.memory {
+        return Memory {
+            room: crate::cache::room(),
+            faulting: crate::cache::faulting(),
+        };
+    }
+    let _ = policy;
+    Memory::default()
 }
 
 /// Runs a compact of `db` beside it if `policy` says one is due: looked at
@@ -196,10 +287,20 @@ impl Database {
 /// few seconds, or starts a [`Compactor`]; the browser module has neither
 /// threads nor a file to write beside, and compacts when its page says so.
 pub fn compact_when_due(db: &RwLock<Database>, policy: &CompactPolicy) -> Option<Result<Response>> {
+    compact_when_due_in(db, policy, memory(policy))
+}
+
+/// [`compact_when_due`] beside the memory `m` says the file's pages have
+/// ([`memory`]).
+pub fn compact_when_due_in(
+    db: &RwLock<Database>,
+    policy: &CompactPolicy,
+    m: Memory,
+) -> Option<Result<Response>> {
     let due = db
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .compact_due(policy);
+        .compact_due_in(policy, m);
     if !due {
         return None;
     }

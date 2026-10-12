@@ -72,7 +72,8 @@ asks from one of its own:</p>
 
 let db = Arc::new(RwLock::new(fenec_core::fs::open("app.fenec")?));
 // Looks every 5 s; compacts beside the queries once half the file is dead
-// and at least 64 MB. Stops when dropped.
+// and at least 64 MB, or sooner as the file nears the memory the system
+// has for its pages. Stops when dropped.
 let _compactor = Compactor::start(&amp;db, CompactPolicy::default())?;
 // Or, from a thread you already have:
 compact_when_due(&amp;db, &amp;CompactPolicy::default());</pre>

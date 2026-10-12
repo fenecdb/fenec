@@ -165,6 +165,13 @@ struct Beside {
     /// file once the side file is.
     landed: Vec<super::handover::Landed>,
     landed_bytes: u64,
+    /// Whether the new file would not fit in memory beside the old one --
+    /// or the old one does not fit already, the process waiting for the
+    /// disk: written past the page cache, and its pages read in once it is
+    /// the database's file rather than before ([`Beside::write`]). The
+    /// file it becomes, to read in then.
+    past: bool,
+    after: Option<crate::store::Base>,
 }
 
 /// One collection of a [`Beside`], as it stood.
@@ -854,6 +861,8 @@ impl Database {
             body_at: 0,
             landed: Vec::new(),
             landed_bytes: 0,
+            past: false,
+            after: None,
         }))
     }
 
@@ -1122,8 +1131,18 @@ impl Beside {
         // fault, the read p50 went from 2 to 100 us for two seconds and the
         // updates from 150k to 4k a second. Touched here a fault at a time,
         // 1.2 GB took 3 s; asked for ahead ([`crate::fs::touch`]), 0.7.
-        if self.mapped {
-            crate::fs::touch(&base);
+        //
+        // Unless the two files do not fit in memory together: read in now,
+        // the new file's pages push out the old one's, which the reads and
+        // the writes need until the swap -- so they are read in after it,
+        // the old file's pages gone with it. In a container held to 2 GB,
+        // compacting at 1.4-1.9 GB into 1.1, read in before the swap the
+        // writer ran at 6.2k updates a second through a compact and the
+        // swap held the lock 24-60 ms, its last writes' pages pushed out;
+        // after it, 18.6k and 6-14 ms, 5M updates in 85 s against 170.
+        match self.past {
+            false => crate::fs::touch(&base),
+            true => self.after = Some(base.clone()),
         }
         for (p, at) in self.parts.iter_mut().zip(placed) {
             match at {
@@ -1350,8 +1369,19 @@ fn rewrite_beside(
             ));
         }
         let _rewriting = Rewriting(db);
-        let begun = read(db).begin_beside(which)?;
+        let (begun, need) = {
+            let g = read(db);
+            let need = g.garbage();
+            (g.begin_beside(which)?, need.file + need.live + need.kept)
+        };
         if let Some(mut b) = begun {
+            let room = crate::cache::room();
+            // The old file and the new one, both read in before the swap --
+            // or the old file alone, where the process waits for the disk.
+            if b.mapped && room.is_some_and(|r| need > r || crate::cache::faulting()) {
+                b.past = true;
+                b.side.past_cache();
+            }
             let mut watching = Watching {
                 db,
                 tokens: b.parts.iter().map(|p| p.token).collect(),
@@ -1372,11 +1402,21 @@ fn rewrite_beside(
                 }
             }
             b.hand_over()?;
+            let after = b.after.take();
             // The guard goes at the end of the statement, and the stores it
             // handed back after it.
             let r = write(db).finish_beside(b);
             watching.tokens.clear();
-            return r.map(|(done, _retired)| done);
+            let done = r.map(|(done, _retired)| done)?;
+            // Read in where it fits on its own; past the room it would push
+            // out its own pages as it went.
+            if let Some(base) =
+                after.filter(|b| room.is_some_and(|r| (**b).as_ref().len() as u64 <= r))
+            {
+                crate::fs::touch(&base);
+            }
+            crate::cache::forget_faults();
+            return Ok(done);
         }
     }
     let _ = during;

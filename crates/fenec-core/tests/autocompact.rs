@@ -6,7 +6,7 @@
 
 #![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 
-use fenec_core::engine::{compact_when_due, CompactPolicy, Compactor, Garbage};
+use fenec_core::engine::{compact_when_due, CompactPolicy, Compactor, Garbage, Memory};
 use fenec_core::prelude::*;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -124,6 +124,7 @@ fn small() -> CompactPolicy {
     CompactPolicy {
         ratio: 0.5,
         floor: 64 << 10,
+        memory: false,
     }
 }
 
@@ -187,6 +188,131 @@ fn the_policy_asks_for_both_a_share_and_a_floor() {
     assert!(CompactPolicy::at(1.0).is_err());
     assert!(CompactPolicy::at(f64::NAN).is_err());
     assert_eq!(CompactPolicy::at(0.25).unwrap().ratio, 0.25);
+}
+
+/// A file that nears what the page cache can hold of it is compacted with
+/// a third of what the compact writes dead, where half the file dead waits
+/// until it has outgrown the cache -- but not where the live records alone
+/// would not fit, nor past the floor, nor where the policy does not ask.
+#[test]
+fn the_policy_compacts_sooner_as_the_file_nears_the_room() {
+    let p = CompactPolicy::default();
+    assert!(p.memory);
+    let gb = 1u64 << 30;
+    let g = |file: u64, live: u64| Garbage {
+        file,
+        live,
+        kept: 0,
+    };
+    let room = |r: u64| Memory {
+        room: Some(r),
+        faulting: false,
+    };
+    let faulting = |r: u64| Memory {
+        room: Some(r),
+        faulting: true,
+    };
+    // A third of the file dead: not due by its dead bytes.
+    let x = g(3 * gb / 2, gb);
+    assert!(!p.due(x));
+    assert!(!p.due_in(x, Memory::default()));
+    // At three quarters of a 2 GB room, and not under it -- unless the
+    // process waits for the disk, whatever the room says.
+    assert!(p.due_in(x, room(2 * gb)));
+    assert!(!p.due_in(x, room(3 * gb)));
+    assert!(p.due_in(x, faulting(3 * gb)));
+    // A fifth of what the compact would write is dead: not yet.
+    assert!(!p.due_in(g(5 * gb / 4, gb), room(gb)));
+    assert!(!p.due_in(g(5 * gb / 4, gb), faulting(2 * gb)));
+    // What the last compact kept is written again, and counts.
+    let kept = Garbage {
+        file: 3 * gb / 2,
+        live: gb,
+        kept: gb / 4,
+    };
+    assert!(!p.due_in(kept, room(2 * gb)));
+    // The live records alone past the room: left to the dead bytes.
+    assert!(!p.due_in(g(4 * gb, 29 * gb / 10), room(2 * gb)));
+    assert!(!p.due_in(g(4 * gb, 29 * gb / 10), faulting(2 * gb)));
+    // The floor holds; a system that says nothing, and a policy that does
+    // not ask, are not asked.
+    assert!(!p.due_in(g(90 << 20, 60 << 20), faulting(100 << 20)));
+    let unknown = Memory {
+        room: None,
+        faulting: true,
+    };
+    assert!(!p.due_in(x, unknown));
+    assert!(!CompactPolicy { memory: false, ..p }.due_in(x, faulting(2 * gb)));
+}
+
+/// A compact whose new file would not fit in memory beside the old one
+/// writes it past the page cache and reads it in after the swap
+/// (`fenec_core::cache::room`, assumed here at 200 KB, past the 0.8 MB the
+/// two files hold and above the new one alone): the file it leaves is the
+/// one a compact through the cache leaves, byte for byte, writes made
+/// during it and all, and reads as its twin does before and after an open.
+#[test]
+fn a_compact_past_the_cache_leaves_the_file_one_through_it_does() {
+    const PLAIN: &str = "create collection c (tag text @hash, n int @sorted, body text @text)";
+    let mut files = Vec::new();
+    let mut twin = Database::new();
+    exec(&mut twin, PLAIN);
+    for (i, room) in [None, Some(200 << 10)].into_iter().enumerate() {
+        let path = tmp(&format!("past-{i}"));
+        let mut db = fenec_core::fs::open(&path).unwrap();
+        exec(&mut db, PLAIN);
+        let mut rng = Rng(19);
+        for k in 0..3_000u64 {
+            let id = 1 + rng.below(300);
+            let w = format!(
+                "put c {{id: {id}, tag: \"t{}\", n: {}, body: \"w{} {}\"}}",
+                k % 7,
+                k % 100,
+                k % 13,
+                "x".repeat(200)
+            );
+            exec(&mut db, &w);
+            if i == 0 {
+                exec(&mut twin, &w);
+            }
+        }
+        // Past the room together, and the new file under it alone.
+        let g = db.garbage();
+        assert!(g.file + g.live > 200 << 10 && g.live < 150 << 10, "{g:?}");
+        let db = RwLock::new(db);
+        let compact = fenec_ql::parse_one("compact").unwrap();
+        fenec_core::cache::assume(Some(room));
+        let mut round = 0;
+        Database::maintain_with(&db, &compact, &mut || {
+            round += 1;
+            let w = format!("set c {{n: {}}} where id < 50", 1_000 + round);
+            exec(&mut db.write().unwrap(), &w);
+            if i == 0 {
+                exec(&mut twin, &w);
+            }
+        })
+        .unwrap()
+        .unwrap();
+        fenec_core::cache::assume(None);
+        let mut db = db.into_inner().unwrap();
+        db.sync().unwrap();
+        assert_eq!(db.compactions(), 1);
+        let plain = |a: &Database| {
+            QUERIES
+                .iter()
+                .filter(|q| !q.contains("near"))
+                .map(|q| rows(a, q))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(plain(&db), plain(&twin));
+        drop(db);
+        assert_eq!(plain(&fenec_core::fs::open(&path).unwrap()), plain(&twin));
+        files.push(std::fs::read(&path).unwrap());
+    }
+    assert!(
+        files[0] == files[1],
+        "the two compacts wrote different files"
+    );
 }
 
 /// Writes go on from one thread while a `Compactor` compacts the file

@@ -650,6 +650,7 @@ fn a_primary_and_its_replica_compact_on_their_own_while_writes_go_on() {
     let small = CompactPolicy {
         ratio: 0.5,
         floor: 16 << 10,
+        memory: false,
     };
     let every = Duration::from_millis(3);
     let compactors = [
