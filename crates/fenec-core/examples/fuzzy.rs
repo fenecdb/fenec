@@ -261,7 +261,34 @@ fn main() {
         let cut: String = b.chars().take(b.chars().count().div_ceil(2).max(3)).collect();
         half.push(format!("{a} {cut}"));
     }
+    // A word begun, as a search box sends its first keystrokes: the first
+    // two, three and four letters of a word the documents hold.
+    let begun = |n: usize, rng: &mut Rng| -> Vec<String> {
+        (0..200)
+            .map(|_| loop {
+                let w = &vocab[rng.zipf(vocab.len())];
+                if w.chars().count() > n {
+                    break w.chars().take(n).collect();
+                }
+            })
+            .collect()
+    };
     let q = |opts: &str| format!("get d match body $1{opts} limit 10");
+    for n in [2, 3, 4] {
+        let words = begun(n, &mut rng);
+        let stmt = fenec_ql::parse_one(&q(" prefix")).unwrap();
+        let refused = (words.iter())
+            .filter(|w| db.query(&stmt, &[Value::Text((*w).clone())]).is_err())
+            .count();
+        let held: Vec<String> = (words.iter())
+            .filter(|w| db.query(&stmt, &[Value::Text((*w).clone())]).is_ok())
+            .cloned()
+            .collect();
+        show(
+            &format!("match prefix, a word's first {n} letters ({refused} of 200 refused)"),
+            time(&db, &q(" prefix"), &held),
+        );
+    }
     show("match, two words", time(&db, &q(""), &plain));
     show("match fuzzy, two words as written", time(&db, &q(" fuzzy"), &plain));
     show("match, a typo", time(&db, &q(""), &typod));

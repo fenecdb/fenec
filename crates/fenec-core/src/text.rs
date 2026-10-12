@@ -58,16 +58,24 @@ impl Loose {
 
 /// The most words of an index one word of a query may reach through
 /// `fuzzy` or `prefix`, itself among them. Past it the query is refused,
-/// never cut: a word read as the first 2 000 of its 9 000 completions is a
-/// wrong answer believed right. A word reaching 2 000 costs a `match` the
-/// merge of their lists -- 2 ms over 100 000 documents, `make fuzzy-bench`.
-pub const MAX_EXPANSIONS: usize = 2_000;
+/// never cut: a word read as the first 10 000 of its 30 000 completions is
+/// a wrong answer believed right. 10 000 as `near` and `match` answer at
+/// most 10 000 rows: FiQA's 80 426 words hold no prefix of one letter
+/// reaching more (`s` reaches 7 020, `co` 2 245, `con` 794), so a search
+/// box is refused only at a first letter over a larger vocabulary. Each
+/// word reached is a list merged into its word's, `make fuzzy-bench`.
+pub const MAX_EXPANSIONS: usize = 10_000;
 
 /// What a word found near a query's word counts for, by its distance: one
 /// it begins (`prefix`), one edit away, two. Of the weight the word's
 /// variants of that distance carry together, as one term (`Reach`).
+/// Measured on BEIR with a typo in each query (`make beir`, nDCG@10), a
+/// word one edit away is the word meant -- at the whole weight SciFact's
+/// typed queries went 0.636 -> 0.663, at half 0.657 -- and two away is as
+/// often another word: at the whole weight FiQA's went 0.2125 -> 0.2261, at
+/// a quarter 0.2292.
 #[cfg(feature = "text")]
-const NEAR_WEIGHT: [f32; 3] = [1.0, 0.5, 0.25];
+const NEAR_WEIGHT: [f32; 3] = [1.0, 1.0, 0.25];
 
 /// What a derived index of the text index's is held in: a lock natively,
 /// a second reader waiting for the first one's build, a cell in the
@@ -697,8 +705,8 @@ impl TextIndex {
     /// a one-word query ranks every document holding it above every
     /// document holding only what is near it. A word no document holds
     /// as typed -- the typo, the half-typed word -- ranks by its variants
-    /// alone, a variant one edit away at half the weight and two at a
-    /// quarter (`NEAR_WEIGHT`), a completion of a prefix at the whole.
+    /// alone: a completion of a prefix and a word one edit away at the
+    /// whole weight, two edits away at a quarter (`NEAR_WEIGHT`).
     ///
     /// The variants are cursors as any term's, their ceilings their own,
     /// so MaxScore is as safe over them as over a plain query, which

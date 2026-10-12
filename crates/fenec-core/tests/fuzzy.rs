@@ -272,8 +272,8 @@ fn the_words_follow_the_writes() {
 fn a_word_reaching_too_many_is_refused_not_cut() {
     let mut db = Database::new();
     exec(&mut db, "create collection d (body text @text)", &[]);
-    let words: Vec<String> = (0..2_001).map(|i| format!("pre{i}")).collect();
-    for chunk in words.chunks(500) {
+    let words: Vec<String> = (0..10_001).map(|i| format!("pre{i}")).collect();
+    for chunk in words.chunks(2_000) {
         exec(
             &mut db,
             "put d $1",
@@ -291,7 +291,7 @@ fn a_word_reaching_too_many_is_refused_not_cut() {
         &[Value::Text("pre".into())],
     );
     assert!(
-        e.contains("`match ... prefix` reads `pre` as more than 2000 words")
+        e.contains("`match ... prefix` reads `pre` as more than 10000 words")
             && e.contains("refused rather than cut"),
         "{e}"
     );

@@ -394,6 +394,7 @@ fn main() {
         ("match, a typo", "get d select doc match body $4 limit 10"),
         ("match fuzzy, a typo", "get d select doc match body $4 fuzzy limit 10"),
         ("match fuzzy 1, a typo", "get d select doc match body $4 fuzzy 1 limit 10"),
+        ("match prefix", "get d select doc match body $1 prefix limit 10"),
         ("match, half typed", "get d select doc match body $5 limit 10"),
         ("match prefix, half typed", "get d select doc match body $5 prefix limit 10"),
         ("match prefix fuzzy, half typed", "get d select doc match body $5 prefix fuzzy limit 10"),
