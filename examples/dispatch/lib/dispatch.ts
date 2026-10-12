@@ -18,12 +18,12 @@
 // other's batches. With nothing near and ready, the same statement is held
 // at the server (`Fenec-Wait`) and takes the nearest once one is.
 //
-// `returning *` answers the order taken. A courier reads only the orders
-// they carry, which a ready order is not until the claim is written: the
-// read rules are asked of the order as the claim leaves it, so it is
-// answered as claimed.
+// `returning *` answers the order taken. A courier reads a ready order's
+// pickup alone and the whole of the orders they carry, which a ready order
+// is not until the claim is written: the read rules are asked of the order
+// as the claim leaves it, so it is answered as claimed, door and all.
 import { CLAIM_RADIUS_M, LEASE_MS, MAX_ATTEMPTS } from './config';
-import { asUser, FenecError, retrying } from './db';
+import { asUser, FenecError, retrying, rows } from './db';
 import type { Point } from './city';
 import type { Who } from './tokens';
 import { randomUUID } from 'node:crypto';
@@ -124,6 +124,27 @@ export async function claimNearest(who: Who, at: Point, opts: ClaimOptions = {})
     return got;
   }
   return null;
+}
+
+/** A ready order as a courier sees it before claiming it: no customer, no door. */
+export type Offer = Pick<Job, 'id' | 'pickup' | 'pickup_name' | 'items' | 'fee' | 'promised'> & { metres: number };
+
+/**
+ * The ready orders near `at` -- farther than a claim reaches, for a
+ * courier to ride towards -- read under the courier's own token. A
+ * courier's read rules show a claimable order's pickup, fee and due time
+ * and not its customer or door (policy.txt), so asking for those fields
+ * here would answer them null; ordering or filtering by them is refused.
+ * Before field grants this read needed the app's token, which reads every
+ * order whole.
+ */
+export async function readyNear(who: Who, at: Point, radius = 10_000, limit = 8): Promise<Offer[]> {
+  return rows<Offer>(
+    asUser(who),
+    'get orders select id, pickup, pickup_name, items, fee, promised, distance(pickup, $1) as metres ' +
+      'where run_at <= now() and distance(pickup, $1) <= $2 order distance(pickup, $1) limit $3',
+    [at, radius, limit],
+  );
 }
 
 /** The courier has the parcel: picked up, the lease running on. */

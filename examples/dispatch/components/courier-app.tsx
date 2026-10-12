@@ -6,7 +6,7 @@
 // this is not on a bike.
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { along, route, svgOf, pathOf, type Point } from '../lib/city';
-import type { Job } from '../lib/dispatch';
+import type { Job, Offer } from '../lib/dispatch';
 import { CourierMark, LiveMap, OrderPin } from './live-map';
 
 export interface Delivery {
@@ -68,6 +68,30 @@ export function CourierApp({
   });
 
   const phase = !online ? 'off' : !job ? 'looking' : job.status === 'picked' ? 'dropoff' : 'pickup';
+
+  // While looking, the ready orders farther out than a claim reaches: where
+  // to ride to. Read under the courier's own token, which shows a ready
+  // order's pickup and fee and not its customer's door.
+  const [offers, setOffers] = useState<Offer[]>([]);
+  useEffect(() => {
+    if (phase !== 'looking') return;
+    let stop = false;
+    const look = async () => {
+      try {
+        const r = await post<{ orders: Offer[] }>('nearby', { at: live.current.at });
+        if (!stop) setOffers(r.orders);
+      } catch {
+        // The next look says it again.
+      }
+    };
+    look();
+    const t = setInterval(look, 4 * BEAT_MS);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [phase]);
+  const near = phase === 'looking' ? offers : [];
 
   // The beat: position and lease, every 2.5 s on shift.
   useEffect(() => {
@@ -187,6 +211,9 @@ export function CourierApp({
           {(k) => (
             <>
               {path.length > 0 && <path d={pathOf(path)} className="route" style={{ strokeWidth: 40 * k }} />}
+              {near.map((o) => (
+                <OrderPin key={o.id} x={svgOf(o.pickup)[0]} y={svgOf(o.pickup)[1]} k={k * 1.4} state="ready" title={`${o.pickup_name}, ${money(o.fee)}`} />
+              ))}
               {job && phase === 'pickup' && <OrderPin x={svgOf(job.pickup)[0]} y={svgOf(job.pickup)[1]} k={k * 2} state="ready" title={job.pickup_name} />}
               {job && <circle cx={svgOf(job.dropoff)[0]} cy={svgOf(job.dropoff)[1]} r={60 * k} className="dropoff-pin" />}
               <CourierMark x={x} y={y} k={k * 2.4} heading={heading} state={phase === 'off' || phase === 'looking' ? 'idle' : phase} title={name} />
@@ -206,6 +233,11 @@ export function CourierApp({
           <div className="waiting">
             <h1>Looking for orders</h1>
             <p className="muted">The nearest order within 3 km comes to you the moment it is placed.</p>
+            {near.length > 0 && (
+              <p className="muted">
+                {near.length} ready farther out, the nearest at {near[0].pickup_name}, {(near[0].metres / 1000).toFixed(1)} km away, {money(near[0].fee)}.
+              </p>
+            )}
           </div>
         )}
         {job && (

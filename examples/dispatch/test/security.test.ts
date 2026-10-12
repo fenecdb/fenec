@@ -8,7 +8,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startWorld, tandem, hopper, cast, sleep, type World } from './harness';
-import { claimNearest } from '../lib/dispatch';
+import { claimNearest, readyNear } from '../lib/dispatch';
 import { cancel, placeOrder } from '../lib/orders';
 import { appDb, asUser, FenecError, one, operatorDb, rows } from '../lib/db';
 import { mint, tokenFor, type Who } from '../lib/tokens';
@@ -83,14 +83,69 @@ test('a token reaches its own company alone', async () => {
 test('a courier reads their own orders, position and row, and nobody else\'s', async () => {
   const c0 = tn.couriers[0];
   const db = asUser(c0);
+  assert.deepEqual((await rows<Job>(db, 'get orders where courier = $1', [c0.sub])).map((o) => o.id), [mine.id]);
+  // Every other order they read is one they may claim, shown by its pickup
+  // alone (the next test); one under another courier's lease not at all.
   const seen = await rows<Job>(db, 'get orders');
-  assert.deepEqual(seen.map((o) => o.id), [mine.id]);
+  assert.ok(seen.some((o) => o.id === mine.id && o.dropoff_addr === mine.dropoff_addr));
+  for (const o of seen.filter((o) => o.id !== mine.id)) {
+    assert.equal(o.status, 'ready');
+    assert.equal(o.dropoff_addr, null, `the door of order ${o.id}`);
+  }
   assert.equal((await rows(db, 'get orders where id = $1', [theirs.id])).length, 0);
-  assert.equal((await rows(db, 'get orders where id = $1', [ready])).length, 0, 'not even a ready one');
   const crew = await rows<{ user: string }>(db, 'get couriers');
   assert.deepEqual(crew.map((r) => r.user), [c0.sub]);
   assert.equal(await refusal(db.run('get positions where courier = $1', [tn.couriers[1].sub])), 200);
   assert.equal((await rows(db, 'get positions where courier = $1', [tn.couriers[1].sub])).length, 0);
+});
+
+test("a courier reads a ready order's pickup and not its door until they claim it", async () => {
+  const c = tn.couriers[5];
+  const db = asUser(c);
+  const real = (await order(ready))!;
+  const seen = (await one<Job>(db, 'get orders where id = $1', [ready]))!;
+  assert.equal(seen.pickup_name, real.pickup_name);
+  assert.deepEqual(seen.pickup, real.pickup);
+  assert.equal(seen.fee, real.fee);
+  for (const hidden of ['customer', 'dropoff', 'dropoff_addr', 'ref', 'claim'] as const) {
+    assert.equal(seen[hidden], null, hidden);
+  }
+  // Asked for by name the door is null; asked of, it matches no ready order
+  // -- and its negation every one -- whatever it is, so no door is told
+  // from another.
+  assert.deepEqual(await rows(db, 'get orders select dropoff_addr, customer where id = $1', [ready]), [{ dropoff_addr: null, customer: null }]);
+  for (const door of [real.dropoff_addr, 'nowhere']) {
+    assert.equal((await rows(db, 'get orders where id = $1 and dropoff_addr = $2', [ready, door])).length, 0, door);
+    assert.equal((await rows(db, 'get orders where id = $1 and not (dropoff_addr = $2)', [ready, door])).length, 1, door);
+    assert.equal((await rows(db, 'get orders where id = $1 and customer = $2', [ready, real.customer])).length, 0);
+  }
+  // Ranked, grouped or counted by it, the doors would come out in order:
+  // refused, the field named.
+  for (const [q, params] of [
+    ['get orders order dropoff_addr', []],
+    ['get orders where run_at <= now() order distance(dropoff, $1) limit 1', [real.pickup]],
+    ['get orders select customer, count() as n group customer', []],
+    ['get orders facet dropoff_addr', []],
+  ] as const) {
+    const why = await db.run(q, [...params]).then(
+      () => 'answered',
+      (e: FenecError) => `${e.status} ${e.message}`,
+    );
+    assert.match(why, /^403 .*this token sees `(dropoff_addr|dropoff|customer)`/, q);
+  }
+  // The offers near a point carry what a courier chooses by.
+  const near = await readyNear(c, real.pickup, 200);
+  const offer = near.find((o) => o.id === ready);
+  assert.ok(offer && offer.pickup_name === real.pickup_name && offer.fee === real.fee);
+  // Claimed, an order is theirs and shows whole: an order placed for it at
+  // a shop no other test's order waits at.
+  const shop = tn.merchants[11];
+  const placed = await placeOrder(tn.customer(2), { ref: 'sec-door', merchant: shop, dropoff: shop.loc, dropoffAddr: 'Door 7', items: 1, fee: 300 });
+  assert.equal((await one<Job>(db, 'get orders where id = $1', [placed.id]))!.dropoff_addr, null);
+  const claimed = (await claimNearest(c, shop.loc, { radius: 1 }))!.job;
+  assert.equal(claimed.id, placed.id);
+  assert.equal(claimed.dropoff_addr, 'Door 7', 'returning * answers the claimed order whole');
+  assert.equal((await one<Job>(db, 'get orders where id = $1', [placed.id]))!.dropoff_addr, 'Door 7');
 });
 
 test("a courier's writes: their own order's fields, claims that name themselves", async () => {

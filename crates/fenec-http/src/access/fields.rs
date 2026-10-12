@@ -49,7 +49,11 @@
 //! A write's rows are found as they were (an update grant says what it may
 //! change, the read rules what it may see): the terms of its `where` are
 //! held as a read's, so a `del ... where dropoff = $1` tells nothing by the
-//! rows it counts, and its `returning` is masked as a read's rows are.
+//! rows it counts, and its `returning` is masked as a read's rows are. An
+//! update rule wider than the read rules reaches rows no read rule shows,
+//! and a field every read rule grants is held there as every field was
+//! before field grants: what field lists take away, they take away there
+//! too, and nothing more.
 //!
 //! **Against PostgreSQL.** Column privileges (`GRANT SELECT (a, b)`) are
 //! the role's and the same on every row, and a statement naming a column

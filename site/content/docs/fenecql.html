@@ -708,7 +708,9 @@ found.</p>
 
 <p>Over HTTP a scoped token's rules hold the inner <code>get</code> as they
 hold any <code>get</code>: the list holds only rows the token may read, so
-nothing of the others reaches it through what the outer query finds. A
+nothing of the others reaches it through what the outer query finds, and a
+column its rules show on some rows alone is listed from those rows
+(<a href="/docs/http#field-grants">Fields a read shows</a>). A
 token's rule itself takes no subquery. The JavaScript builder takes a query
 as an <code>in</code>'s value:
 <code>{ customer: { in: db.from('customers').select('id').where({ country: 'TR' }) } }</code>.
@@ -2446,7 +2448,10 @@ del jobs where run_at &lt;= now() order run_at limit 10 returning id, payload.to
     whole (403). Every row it writes is held to its rules after the write,
     its fields to an <code>update(…)</code> grant's and its change to a
     transition's (<a href="/docs/http#scoped-access">Scoped
-    access</a>).</li>
+    access</a>). A row answered shows the fields of the read rules
+    admitting it, and a value, a <code>where</code> or an
+    <code>order</code> reads a field a rule withholds only as a read may
+    (<a href="/docs/http#field-grants">Fields a read shows</a>).</li>
   <li><b>A sync replica refuses one</b> on a synced collection: it would
     pick and answer the replica's rows, and the server, sent the text, its
     own.</li>

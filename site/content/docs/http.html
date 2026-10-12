@@ -821,11 +821,17 @@ journal        read,insert    where owner = $jwt.sub
 journal        append-only
 accounts       update(balance, held)                              for app
 orders         update(status, run_at)  where customer = $jwt.sub and status = "ready" and new.status = "cancelled"
+orders         read(pickup, run_at)    where run_at &lt;= now()                    for courier
 *              read                                               for dashboard
 </pre>
 
 <ul>
   <li><b>Reads</b> only see the rows the rule allows.</li>
+  <li><b>Fields.</b> <code>read(pickup, run_at)</code> shows the rows it
+    admits with those fields alone, and <code>id</code>: a row shows the
+    fields of every read rule admitting it, the rest <code>null</code>. A
+    courier sees a ready order's pickup, and the customer's door once the
+    order is theirs.</li>
   <li><b>Writes</b> must stay inside the rule, or get 403. <code>write</code>
     grants <code>insert</code>, <code>update</code> and <code>delete</code>,
     and each can be granted alone; <code>update(balance, held)</code> grants
@@ -916,6 +922,55 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     granting <code>expired</code> beside the ones its operation needs, and
     neither <code>write</code> nor <code>*</code> grants it — a lapsed hold
     is the reaper's, not a user's to see again.</li>
+  <li id="field-grants"><b>Fields a read shows.</b> <code>read(pickup,
+    run_at)</code> grants the rows its filter admits with those fields and
+    <code>id</code>; <code>read</code> grants every field. A row shows the
+    fields of every read rule admitting it, and the rest answer
+    <code>null</code> — in <code>/query</code>, <code>/batch</code>, REST,
+    each <code>lookup</code> level by its own collection's rules, a write's
+    <code>returning</code>, a subscription's seed and changes, and the MCP
+    tools. Beside <code>orders read where courier = $jwt.sub for
+    courier</code>, the rule above shows a courier every ready order's
+    pickup and the whole of the orders they carry. A field no read rule
+    grants is not there: <code>select *</code> leaves it out,
+    <code>describe</code>, <code>/collections</code> and
+    <code>/_schema</code> do not list it, and naming it is refused (403)
+    as a name the collection lacks is.
+<pre data-lang="text">get orders where dropoff = $1                 -- no ready order matches, whatever its door
+get orders where not (dropoff = $1)           -- every ready order does: no door told from another
+get orders order dropoff                      -- 403: the order would tell the doors
+get orders where courier = $1 order dropoff   -- $1 their sub: every order reached shows it
+</pre>
+    A field withheld from a row must not show through what a statement does
+    with it either. A <code>where</code> term reading it holds only where
+    the row shows it — <code>dropoff = $1</code> is asked as
+    <code>(courier = $jwt.sub and dropoff = $1)</code>, the <code>or</code>
+    of the filters of the rules granting <code>dropoff</code> — in a
+    <code>get</code>, a <code>set</code> or <code>del</code>, a
+    <code>lookup</code> level, a facet's and an inner <code>get</code>'s;
+    <code>and</code> stops at the first false, so the term is never worked
+    out over a value it may not see. <code>order</code>,
+    <code>group</code>, <code>having</code>, a <code>facet</code>, an
+    aggregate, <code>match</code>, <code>near</code>, a highlight, a
+    <code>lookup</code> key and a <code>set</code>'s values read a field
+    only where every row they reach shows it, and are refused with 403
+    naming it otherwise: when every read rule of the collection grants it,
+    or when one rule granting it has no filter or one whose
+    <code>and</code> terms are each a term of the statement's own
+    <code>where</code>, parameters bound — as the last line above. A
+    computed column over such a field is <code>null</code> where the row
+    does not show it and never worked out there, and an inner
+    <code>get</code>'s column of one is listed from the rows showing it. A
+    write reaches the rows it reached before; its <code>returning</code> is
+    masked as a read's rows are. PostgreSQL's column privileges are a
+    role's and the same on every row, and refuse a statement naming a
+    column the role lacks, <code>SELECT *</code> included; a column shown
+    on some rows is a view of <code>CASE WHEN … THEN col END</code>
+    there, whose <code>WHERE</code> reads <code>NULL</code> on the rest
+    where this reads the term as false. A token whose rules name no fields
+    reads as before; one whose do loses the stored-bytes path of a plain
+    <code>get</code> where a column is masked, and pays each rule that could
+    show a row more, per row: FIELD_COST.</li>
   <li><b>Transitions.</b> A rule's filter reads the row as it stands, and
     <code>new.&lt;field&gt;</code> reads it as the write leaves it, as
     <code>new.</code> names the document in an upsert's <code>else
@@ -989,7 +1044,10 @@ orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub an
     scores over the collection, as before.</li>
   <li><b>Subscriptions</b> are told only of rows they were sent: a scoped
     subscriber hears of a row leaving its shape only if the row was in it,
-    so the ids other users write never reach it.</li>
+    so the ids other users write never reach it. Where a rule names the
+    fields it shows, a row written again that shows what it showed is not
+    sent: a write to a field the subscriber does not see would tell it
+    when.</li>
   <li><b>Tokens</b> are HS256, or RS256 with <code>--jwt-keys</code> (below).
     The algorithm is the key's, not the token's, so <code>alg: none</code> is
     refused. Every token is checked against <code>exp</code> and <code>nbf</code>,

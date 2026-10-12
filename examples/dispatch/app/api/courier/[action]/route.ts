@@ -1,11 +1,10 @@
-// A courier's phone talks to these: claim, beat, pick up, deliver, give
-// back. Each runs under the courier's own token (lib/dispatch.ts); the
-// claim's first step reads the nearest ready orders with the app's, since a
-// courier's token reads only orders already theirs.
+// A courier's phone talks to these: the ready orders near it, claim, beat,
+// pick up, deliver, give back. Each runs under the courier's own token
+// (lib/dispatch.ts), which reads a ready order's pickup and not its door.
 import type { NextRequest } from 'next/server';
 import { crossSite, json, readBody } from '../../../../lib/http';
 import { current, whoOf } from '../../../../lib/session';
-import { claimNearest, deliver, giveBack, heartbeat, pickUp } from '../../../../lib/dispatch';
+import { claimNearest, deliver, giveBack, heartbeat, pickUp, readyNear } from '../../../../lib/dispatch';
 import { CLAIM_WAIT_MS } from '../../../../lib/config';
 import { FenecError } from '../../../../lib/db';
 import type { Point } from '../../../../lib/city';
@@ -27,6 +26,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ action: st
   const { action } = await ctx.params;
   try {
     switch (action) {
+      case 'nearby': {
+        const at = point(body.at);
+        if (!at) return json({ error: 'where are you: at is [lon, lat]' }, 400);
+        return json({ orders: await readyNear(who, at) });
+      }
       case 'claim': {
         const at = point(body.at);
         if (!at) return json({ error: 'where are you: at is [lon, lat]' }, 400);
