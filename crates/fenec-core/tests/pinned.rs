@@ -180,11 +180,20 @@ fn a_pinned_read_outlives_a_handover_and_a_compact_beside() {
 fn an_index_read_is_not_pinned_and_short_reads_are_not_either() {
     let mut db = Database::new();
     seeded(&mut db);
+    exec(
+        &mut db,
+        "create collection lines (user int, n int, q int, @sorted(user, n, q))",
+    );
+    exec(
+        &mut db,
+        "put lines [{user: 3, n: 3, q: 1}, {user: 3, n: 3, q: 2}]",
+    );
     db.set_pin_at(100);
     let declined = [
         // An index answers each: a hash bucket, an ordered range, an
         // ordered walk, a facet the buckets count, `match`, an inner `get`
-        // a bucket answers, `expired()`'s range.
+        // a bucket answers, `expired()`'s range, a `lookup` over several
+        // fields' runs.
         "get ev where user = 3 count",
         "get ev where user in [1, 2] select name, count(*) group name",
         "get ev where at >= 2000 count",
@@ -192,6 +201,7 @@ fn an_index_read_is_not_pinned_and_short_reads_are_not_either() {
         "get ev where n = 1 count facet user",
         "get ev match body \"common\" limit 5",
         "get ev where user in (get acct select owner) count",
+        "get ev lookup lines on (user, n) = (user, n) order q desc limit 1",
         // Short: by id, a page with no order, a count of everything, a
         // statement that is not a `get`.
         "get ev where id = 7",

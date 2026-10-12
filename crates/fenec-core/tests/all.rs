@@ -16,6 +16,7 @@ mod changes;
 mod claims;
 mod collate;
 mod composite;
+mod composite_lookup;
 mod counts;
 mod crash;
 mod derived;

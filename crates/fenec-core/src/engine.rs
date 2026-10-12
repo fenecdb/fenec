@@ -2858,18 +2858,27 @@ struct Tuple<'a> {
 }
 
 impl<'a> Tuple<'a> {
-    /// The index on the child for `l`'s key over several fields: one whose
-    /// leading parts are its child fields in any order -- of several, one
-    /// whose next parts the level's `order` walks, then the first. Refused
-    /// where none is, naming the one to declare, as a single field with no
-    /// `@hash` is: a scan per parent would be another feature under the
-    /// same name.
-    fn resolve(child: &'a Collection, parent: &Collection, l: &Lookup) -> Result<Tuple<'a>> {
+    /// The index on the child for `l`'s key: one whose leading parts are
+    /// its child fields in any order -- of several, one whose next parts
+    /// the level's `order` walks, then the first; only one that walks it
+    /// where `walk_only`. `None` where none is, which a key over several
+    /// fields is refused for, naming the index to declare, as a single
+    /// field with no `@hash` is: a scan per parent would be another feature
+    /// under the same name.
+    fn resolve(
+        child: &'a Collection,
+        parent: &Collection,
+        l: &Lookup,
+        walk_only: bool,
+    ) -> Result<Option<Tuple<'a>>> {
         if !cfg!(feature = "composite") {
-            return Err(not_built(
-                &format!("`lookup {}` on several fields", l.collection),
-                "composite",
-            ));
+            return match l.on.len() {
+                1 => Ok(None),
+                _ => Err(not_built(
+                    &format!("`lookup {}` on several fields", l.collection),
+                    "composite",
+                )),
+            };
         }
         for (c, _) in &l.on {
             if child.schema.field(c).is_none() {
@@ -2887,21 +2896,23 @@ impl<'a> Tuple<'a> {
                 continue;
             }
             let walk = walks(comp, n, 0, &l.order, &child.schema);
-            if best.is_none_or(|b| b.1.is_none() && walk.is_some()) {
+            if (!walk_only || walk.is_some())
+                && best.is_none_or(|b| b.1.is_none() && walk.is_some())
+            {
                 best = Some((at, walk));
             }
         }
         let Some((at, walk)) = best else {
-            let fields = l.side(true);
-            return Err(Error::Query(format!(
-                "`lookup` on `{}` {fields} needs an index whose first fields are those \
-                 (declare it with @sorted{fields})",
-                l.collection
-            )));
+            return Ok(None);
         };
-        let ix = child
-            .composite(at)?
-            .ok_or_else(|| not_built("the index", "composite"))?;
+        let Some(ix) = child.composite(at)? else {
+            return Ok(None);
+        };
+        // A value its order has no place for is in no walk's order.
+        let walk = walk.filter(|_| ix.apart().is_empty());
+        if walk_only && walk.is_none() {
+            return Ok(None);
+        }
         let comp = &child.composites[at].0;
         let (mut parts, mut child_pos, mut id_at) = (Vec::with_capacity(n), Vec::new(), None);
         for (j, (k, _)) in comp.keys[..n].iter().enumerate() {
@@ -2926,15 +2937,14 @@ impl<'a> Tuple<'a> {
             parts.push((pos, ty));
             child_pos.push(child.schema.field_pos(k).unwrap_or(0));
         }
-        Ok(Tuple {
+        Ok(Some(Tuple {
             ix,
             comp,
             parts,
             child_pos,
             id_at,
-            // A value its order has no place for is in no walk's order.
-            walk: walk.filter(|_| ix.apart().is_empty()),
-        })
+            walk,
+        }))
     }
 
     /// `vals`, a value a leading part, laid end to end as the index keys
@@ -8931,10 +8941,31 @@ impl Database {
             [one] => one,
             [] => return Err(Error::Query("`lookup` needs `on`".into())),
             _ => {
-                let t = Tuple::resolve(child, parent, l)?;
+                let Some(t) = Tuple::resolve(child, parent, l, false)? else {
+                    let fields = l.side(true);
+                    return Err(Error::Query(format!(
+                        "`lookup` on `{}` {fields} needs an index whose first fields are those \
+                         (declare it with @sorted{fields})",
+                        l.collection
+                    )));
+                };
                 return Ok((child, Probe::Tuple(Box::new(t)), None));
             }
         };
+        // One field leading an index over several: its run is the
+        // children where the level's `order` walks the index past it --
+        // "the latest three reviews of each product" reads three, where a
+        // bucket is read whole and sorted -- or where the field has no
+        // `@hash` to probe.
+        if child_field != "id" && !child.composites.is_empty() {
+            let hashed = child
+                .schema
+                .field(child_field)
+                .is_some_and(|f| matches!(f.index, IndexKind::Hash { .. }));
+            if let Some(t) = Tuple::resolve(child, parent, l, hashed)? {
+                return Ok((child, Probe::Tuple(Box::new(t)), None));
+            }
+        }
         let probe = Probe::resolve(child, child_field, &l.collection)?;
         // `id` is not a schema field but is the commonest key on both sides.
         let parent_pos = if parent_field == "id" {
