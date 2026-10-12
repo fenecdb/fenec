@@ -408,7 +408,8 @@ fn through_query(ctx: &Ctx, text: &str, params: &[Value]) -> crate::http::Respon
 /// A read as `/query` runs one: held to the token's rules, pinned and run
 /// with no lock held when it is long, under the read lock otherwise.
 pub(super) fn read_served(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checked<Response2> {
-    let (stmt, mask) = crate::scoped(ctx.who, stmt, params).map_err(|e| refusal(&e))?;
+    let mut mask = None;
+    let stmt = crate::scoped(ctx.who, stmt, params, &mut mask).map_err(|e| refusal(&e))?;
     let mut pin = true;
     loop {
         let guard = crate::held::read(ctx.db);
@@ -473,7 +474,8 @@ fn query_body(text: &str, params: &[Value]) -> String {
 /// --file`): under the read lock, held to the token's rules all the same.
 /// Nothing writes beside it, so nothing is pinned.
 pub(super) fn read_local(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checked<Response2> {
-    let (stmt, mask) = crate::scoped(ctx.who, stmt, params).map_err(|e| refusal(&e))?;
+    let mut mask = None;
+    let stmt = crate::scoped(ctx.who, stmt, params, &mut mask).map_err(|e| refusal(&e))?;
     let g = crate::held::read(ctx.db);
     let r = g.query(&stmt, params).map_err(|e| refusal(&e))?;
     Ok(crate::shown(ctx.who, mask.as_ref(), &g, r))
@@ -492,7 +494,8 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
         Ok(v) => v,
         Err(e) => return crate::error_response(&e),
     };
-    let (stmt, mask) = match crate::scoped(ctx.who, Arc::unwrap_or_clone(stmt), &params) {
+    let mut mask = None;
+    let stmt = match crate::scoped(ctx.who, Arc::unwrap_or_clone(stmt), &params, &mut mask) {
         Ok(s) => s,
         Err(e) => return crate::error_response(&e),
     };

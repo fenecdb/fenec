@@ -475,18 +475,19 @@ fn full(cfg: &Config, req: &Request) -> bool {
     matches!(authenticate(cfg, req), Ok(Who::Full)) || metrics::allowed(cfg, req, true)
 }
 
-/// The statement as `who` may run it, and what its answer must not show
-/// `who` (`access::Mask`, [`shown`]): `None` but where a rule names the
-/// fields a read shows.
+/// The statement as `who` may run it, and in `mask` what its answer must
+/// not show `who` (`access::Mask`, [`shown`]): `None` but where a rule
+/// names the fields a read shows.
 fn scoped(
     who: &Who,
     stmt: Statement,
     params: &[Value],
-) -> fenec_core::error::Result<(Statement, Option<access::Mask>)> {
+    mask: &mut Option<access::Mask>,
+) -> fenec_core::error::Result<Statement> {
     match who.scope() {
-        None => Ok((stmt, None)),
+        None => Ok(stmt),
         // A parameter's documents written in, each held to the rules.
-        Some(scope) => scope.rewrite_with(stmt.with_documents(params)?, params),
+        Some(scope) => scope.rewrite_with(stmt.with_documents(params)?, params, mask),
     }
 }
 
@@ -1371,7 +1372,8 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(r) => r,
             Err(e) => return error_response(&e),
         };
-        let (stmt, mask) = match scoped(&who, routed.statement, &[]) {
+        let mut mask = None;
+        let stmt = match scoped(&who, routed.statement, &[], &mut mask) {
             Ok(s) => s,
             Err(e) => return error_response(&e),
         };
@@ -1426,7 +1428,8 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(r) => r,
             Err(e) => return error_response(&e),
         };
-        let (stmt, mask) = match scoped(&who, routed.statement, &[]) {
+        let mut mask = None;
+        let stmt = match scoped(&who, routed.statement, &[], &mut mask) {
             Ok(s) => s,
             Err(e) => return error_response(&e),
         };
@@ -1619,10 +1622,11 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     }
     // The statement parsed is shared (`api::parse_query`): a scope is ANDed
     // into a copy of it.
-    let (stmt, mask) = match who.scope() {
-        None => (stmt, None),
-        Some(_) => match scoped(who, Arc::unwrap_or_clone(stmt), &params) {
-            Ok((s, mask)) => (Arc::new(s), mask),
+    let mut mask = None;
+    let stmt = match who.scope() {
+        None => stmt,
+        Some(_) => match scoped(who, Arc::unwrap_or_clone(stmt), &params, &mut mask) {
+            Ok(s) => Arc::new(s),
             Err(e) => return error_response(&e),
         },
     };
@@ -2013,10 +2017,10 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     let stmts = match stmts
         .into_iter()
         .map(|(s, p)| {
-            scoped(who, s, &p).map(|(s, mask)| {
-                masks.push(mask);
-                (s, p)
-            })
+            let mut mask = None;
+            let s = scoped(who, s, &p, &mut mask);
+            masks.push(mask);
+            s.map(|s| (s, p))
         })
         .collect::<fenec_core::error::Result<Vec<_>>>()
     {

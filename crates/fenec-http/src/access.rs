@@ -1409,23 +1409,24 @@ impl Scope {
 
     /// The statement as this token may run it, or why it may not.
     pub fn rewrite(&self, stmt: Statement) -> Result<Statement> {
-        Ok(self.rewrite_with(stmt, &[])?.0)
+        self.rewrite_with(stmt, &[], &mut None)
     }
 
-    /// [`Self::rewrite`] with the statement's parameters, and what its
-    /// answer must not show ([`Self::shown`]): `None` where it shows all
-    /// it holds -- a token none of whose rules name fields, a statement
-    /// answering no rows, or only fields every row shows.
+    /// [`Self::rewrite`] with the statement's parameters, and in `mask`
+    /// what its answer must not show ([`Self::shown`]): `None` where it
+    /// shows all it holds -- a token none of whose rules name fields, a
+    /// statement answering no rows, or only fields every row shows. The
+    /// mask goes out beside the statement, not with it: a `Statement` is a
+    /// kilobyte, and returned in a pair it was copied twice more, a scoped
+    /// `set` in process 1 990 -> 2 060 ns with no field list anywhere.
     pub fn rewrite_with(
         &self,
         stmt: Statement,
         params: &[Value],
-    ) -> Result<(Statement, Option<fields::Mask>)> {
-        let mut mask = None;
-        let stmt = match stmt {
-            Statement::Select(sel) => {
-                Statement::Select(self.select(sel, params, Some(&mut mask))?)
-            }
+        mask: &mut Option<fields::Mask>,
+    ) -> Result<Statement> {
+        Ok(match stmt {
+            Statement::Select(sel) => Statement::Select(self.select(sel, params, Some(mask))?),
             Statement::Explain(sel) => {
                 Statement::Explain(self.select(sel, params, Some(&mut None))?)
             }
@@ -1455,7 +1456,7 @@ impl Scope {
                 }
                 if self.fielded {
                     let set = (else_set.as_deref(), true);
-                    mask = fields::write(self, &collection, &mut None, set, &mut pick, params)?;
+                    *mask = fields::write(self, &collection, &mut None, set, &mut pick, params)?;
                 }
                 let mut pins = Vec::new();
                 if let Some(f) = &f {
@@ -1500,7 +1501,7 @@ impl Scope {
                 let f = self.writable(&collection, UPDATE)?;
                 if self.fielded {
                     let s = (Some(&set[..]), false);
-                    mask = fields::write(self, &collection, &mut filter, s, &mut pick, params)?;
+                    *mask = fields::write(self, &collection, &mut filter, s, &mut pick, params)?;
                 }
                 self.inner(&mut filter, params)?;
                 let filter = self.reaping(&collection, filter)?;
@@ -1521,7 +1522,7 @@ impl Scope {
                 let f = self.writable(&collection, DELETE)?;
                 if self.fielded {
                     let s = (None, false);
-                    mask = fields::write(self, &collection, &mut filter, s, &mut pick, params)?;
+                    *mask = fields::write(self, &collection, &mut filter, s, &mut pick, params)?;
                 }
                 self.inner(&mut filter, params)?;
                 let filter = self.reaping(&collection, filter)?;
@@ -1544,8 +1545,7 @@ impl Scope {
                     "a scoped token reads and writes documents; it changes no schema".into(),
                 ))
             }
-        };
-        Ok((stmt, mask))
+        })
     }
 
     /// Whether a rule granting the token `update` in `collection` is a

@@ -356,7 +356,8 @@ fn answered(who: &Who, db: &Database, stmt: &Statement, params: &[Value], out: &
     let resp = match who.scope() {
         None => db.query(stmt, params).unwrap(),
         Some(s) => {
-            let (stmt, mask) = s.rewrite_with(stmt.clone(), params).unwrap();
+            let mut mask = None;
+            let stmt = s.rewrite_with(stmt.clone(), params, &mut mask).unwrap();
             let mut resp = db.query(&stmt, params).unwrap();
             if let Some(m) = &mask {
                 s.shown(m, db, &mut resp);

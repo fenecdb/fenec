@@ -730,9 +730,16 @@ same on every row, and refuse a statement naming the column, `SELECT *`
 included; a per-row column is a view of `CASE WHEN` columns, whose
 `WHERE` reads `NULL` where this reads false. A token none of whose rules
 name fields takes the path it took (`Scope::fielded`, one bool a
-statement, its mask `None`, its plain `get`s through `query_json`):
-FIELD_CLAUDE_COST. One whose do pays in process FIELD_INPROC, and over
-HTTP loses the stored-bytes path where a column is masked. Each attack is
+statement, its mask `None`, its plain `get`s through `query_json`): in
+eight ABBA turns against main a scoped `set` in process took 1 988 ns
+against 1 981, over HTTP 26.9-27.2 us against 26.8-27.1, and `make
+requests-bench` stayed at 0.022 ms a row by id either way. The mask goes
+out beside the statement (`rewrite_with`'s out-parameter): returned in a
+pair, the kilobyte `Statement` was copied twice more, 1 990 -> 2 060 ns.
+One whose rules do name fields pays its rules over each row answered:
+a row by id 2.12 -> 2.75 us in process and a page of twenty 12.6 -> 15.1
+(0.13 us a row), over HTTP 26.0 -> 28.0 and 34.4 -> 39.5 us, the rest of
+that the stored-bytes path a masked `get` gives up. Each attack is
 a test of `tests/fields.rs` (and `mcp.rs`), every one failing with its
 part of the holding taken out. Native only: the browser module is the
 same to the byte.
