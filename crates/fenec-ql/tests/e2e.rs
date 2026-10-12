@@ -1,7 +1,7 @@
 //! End to end: FenecQL -> engine -> result.
 
 use fenec_core::prelude::*;
-use fenec_ql::parse;
+use fenec_ql::{parse, parse_one};
 
 fn run(db: &mut Database, sql: &str) -> Response {
     run_with(db, sql, &[])
@@ -1416,6 +1416,40 @@ fn the_parent_key_can_be_named() {
         got.iter().map(|g| g.len()).collect::<Vec<_>>(),
         vec![1, 0, 1]
     );
+}
+
+/// `on (a, b) = (c, d)` reads a field of each side for each part, in
+/// order; one in parentheses is the field alone; the two sides name as
+/// many, refused where it is read.
+#[test]
+fn a_key_over_several_fields_is_read_pair_by_pair() {
+    let sel = |sql: &str| match parse_one(sql) {
+        Ok(Statement::Select(s)) => s.lookup.expect("a lookup"),
+        other => panic!("{sql}: {other:?}"),
+    };
+    let l = sel("get t lookup c on (org, order) = (org, id) order line desc limit 5");
+    assert_eq!(
+        (l.on, l.parent),
+        (
+            vec!["org".into(), "order".into()],
+            vec!["org".into(), "id".into()]
+        )
+    );
+    assert_eq!(l.limit, Some(Count::N(5)));
+    let l = sel("get t lookup c on (k) = (j)");
+    assert_eq!((l.on, l.parent), (vec!["k".into()], vec!["j".into()]));
+    let l = sel("get t lookup c on k");
+    assert_eq!((l.on, l.parent), (vec!["k".into()], vec!["id".into()]));
+    for sql in [
+        "get t lookup c on (a, b)",
+        "get t lookup c on (a, b) = (c)",
+        "get t lookup c on a = (b, c)",
+        "get t lookup c on (id, a) = (b, c)",
+        "get t lookup c on () = ()",
+        "get t lookup c on (a, b = (c, d)",
+    ] {
+        assert!(parse_one(sql).is_err(), "{sql}");
+    }
 }
 
 /// The message a refused query produces, from whichever side refuses it.

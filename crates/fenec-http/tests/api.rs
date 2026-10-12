@@ -1353,7 +1353,10 @@ fn a_lookup_over_several_fields_from_the_query_string() {
         r#"[{"code":"A","lines":[{"n":3},{"n":2}]},{"code":"B","lines":[{"n":4}]}]"#
     );
     for (target, needle) in [
-        ("/orders?lookup=lines&lines.on=org,order", "pairs 2 fields"),
+        (
+            "/orders?lookup=lines&lines.on=org,order",
+            "a field of each side for each part",
+        ),
         (
             "/orders?lookup=lines&lines.on=org,n&lines.parent=org,id",
             "@sorted(org, n)",

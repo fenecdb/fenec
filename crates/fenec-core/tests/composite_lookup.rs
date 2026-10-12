@@ -878,9 +878,9 @@ fn refusals_name_what_is_missing() {
     // A child's `id` names one row alone.
     let e = err(&ix, "get orders lookup lines on (id, org) = (id, org)");
     assert!(e.contains("`id`"), "{e}");
-    // A field twice.
+    // A field twice: no index leads with it twice.
     let e = err(&ix, "get orders lookup lines on (org, org) = (org, id)");
-    assert!(e.contains("twice"), "{e}");
+    assert!(e.contains("needs an index"), "{e}");
     // The types of a pair must match, as a single key's.
     let e = err(&ix, "get shops lookup orders on (org, shop) = (code, org)");
     assert!(e.contains("key types do not match"), "{e}");
@@ -891,7 +891,10 @@ fn refusals_name_what_is_missing() {
     let e = fenec_ql::parse_one("get orders lookup lines on (org, order) = (org)")
         .unwrap_err()
         .to_string();
-    assert!(e.contains("pairs 2 fields with 1"), "{e}");
+    assert!(
+        e.contains("pairs a field of each side for each part"),
+        "{e}"
+    );
     // One pair in parentheses is a single key.
     let one = result(
         &ix,

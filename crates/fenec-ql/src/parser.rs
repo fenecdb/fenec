@@ -18,6 +18,7 @@
 //!            -- a key: a field, or any expression over the row, `distance(loc, $1)`, `a * b`
 //!            [facet <field> [top N], ...]   -- value counts over every matched row
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
+//!            [lookup <name> on (<child>, ...) = (<parent>, ...) [required] <clauses...>]
 //! get    <name> select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
 //!            match <field> <text> ...       -- the spans the match's terms were read from
 //! where  <field> in (get <name> select <field> ...)  -- the inner get's one column, run once
@@ -1323,34 +1324,20 @@ impl Parser {
         }
         let collection = self.ident()?;
         self.expect_kw("on")?;
-        let on = if matches!(self.peek(), Tok::LParen) {
-            // `on (org, order) = (org, id)`: a key over several fields, the
-            // parent's side written out, since `id` alone pairs with one
-            // child field.
-            let child = self.names()?;
-            self.expect(Tok::Eq)?;
-            let parent = self.names()?;
-            if child.len() != parent.len() {
-                return self.err(format!(
-                    "`lookup {collection} on` pairs {} fields with {}",
-                    child.len(),
-                    parent.len()
-                ));
-            }
-            child.into_iter().zip(parent).collect()
+        // `on (org, order) = (org, id)` is a key over several fields, the
+        // parent's side written out, since `id` alone pairs with one child
+        // field; `Select::check` holds the two sides to as many.
+        let on = self.names()?;
+        let parent = if matches!(self.peek(), Tok::Eq) {
+            self.next();
+            self.names()?
         } else {
-            let child = self.ident()?;
-            let parent = if matches!(self.peek(), Tok::Eq) {
-                self.next();
-                self.ident()?
-            } else {
-                "id".to_string()
-            };
-            vec![(child, parent)]
+            vec!["id".to_string()]
         };
         let mut l = Lookup {
             collection,
             on,
+            parent,
             ..Default::default()
         };
         loop {
@@ -1396,9 +1383,12 @@ impl Parser {
         Ok(l)
     }
 
-    /// `(org, order)`: names in parentheses, one at least.
+    /// `order`, or `(org, order)`: a name, or names in parentheses.
     fn names(&mut self) -> Result<Vec<String>> {
-        self.expect(Tok::LParen)?;
+        if !matches!(self.peek(), Tok::LParen) {
+            return Ok(vec![self.ident()?]);
+        }
+        self.next();
         let mut out = vec![self.ident()?];
         while matches!(self.peek(), Tok::Comma) {
             self.next();

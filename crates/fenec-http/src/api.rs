@@ -310,17 +310,12 @@ fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> R
             "`lookup={name}` needs `{name}.on=<field>`: the child field holding the key"
         )));
     }
-    if above.is_empty() && on.len() == 1 {
+    // As FenecQL's: the parent's `id` unless named, and `Select::check`
+    // holds the two sides to as many.
+    if above.is_empty() {
         above.push("id".to_string());
     }
-    if above.len() != on.len() {
-        return Err(Error::Query(format!(
-            "`lookup={name}` pairs {} fields of `{name}.on` with {} of `{name}.parent`",
-            on.len(),
-            above.len()
-        )));
-    }
-    l.on = on.into_iter().zip(above).collect();
+    (l.on, l.parent) = (on, above);
     l.filter = parts
         .into_iter()
         .reduce(|a, b| Expr::And(Box::new(a), Box::new(b)));
