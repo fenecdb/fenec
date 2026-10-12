@@ -108,6 +108,7 @@ metres:</p>
 
 <pre data-lang="fenecql">get places select name, distance(loc, [15, 37]) as m near loc [15, 37] limit 1   -- → "Catania"
 get places select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 37] limit 10   -- → "Catania": then Palermo
+get places select name where distance(loc, [15, 37]) &lt;= 200000 order distance(loc, [15, 37]) limit 10   -- → "Catania": the same rows
 </pre>
 
 <ul>
@@ -122,6 +123,14 @@ get places select name where distance(loc, [15, 37]) &lt;= 200000 near loc [15, 
     <code>distance(loc, p)</code> for the <code>f64</code>.</li>
   <li><b><code>near loc p exact</code></b> measures every row, as the
     collection without the index does: the same answer.</li>
+  <li><b><code>order distance(loc, p)</code></b> is the same order as a
+    key of <code>order</code>, ties by id, beside other keys and in a write
+    that picks its rows (<a href="#dispatch">The nearest job</a>). With a
+    <code>limit</code> it walks the index as <code>near</code> does where no
+    row the filter passes lacks a point; a row with none has a null
+    distance, which comes first, so where some may pass -- no radius or box
+    on the field, and rows without a point -- every row the filter passes is
+    measured. <code>near</code> leaves such rows out.</li>
 </ul>
 
 <h2 id="box">In a box</h2>
@@ -197,6 +206,41 @@ get couriers count   -- → 1
   <li><b>Gone at once:</b> a row past its <code>@ttl</code> is out of every
     read the moment it is, and the server's sweeper deletes it one to two
     minutes later (<a href="/docs/fenecql#ttl">Rows that expire</a>).</li>
+</ul>
+
+<h2 id="dispatch">The nearest job</h2>
+
+<p>An order waiting for a courier, a ride for a driver: the job nearest a
+worker that is ready, taken in one statement under the write lock, so two
+workers never take the same one. <code>order</code> takes the distance as
+its key in a <code>set</code> that picks its rows, and
+<code>returning</code> answers what was taken
+(<a href="/docs/fenecql#pick">Writes that pick their rows</a>):</p>
+
+<pre data-lang="fenecql">create collection deliveries (pickup geo @geo, run_at timestamp @sorted, courier text)
+put deliveries [{pickup: [15.0912, 37.5047], run_at: now()}, {pickup: [15.0855, 37.5076], run_at: now()}, {pickup: [15.0880, 37.5031], run_at: now() + 600000}]   -- → 3
+set deliveries {courier: "ada", run_at: now() + 45000} where run_at &lt;= now() and distance(pickup, [15.0901, 37.5031]) &lt;= 3000 order distance(pickup, [15.0901, 37.5031]) limit 1 returning id   -- → 1: the nearest ready; 3 is nearer, and waits ten minutes
+set deliveries {courier: "bo", run_at: now() + 45000} where run_at &lt;= now() and distance(pickup, [15.0901, 37.5031]) &lt;= 3000 order distance(pickup, [15.0901, 37.5031]) limit 1 returning id   -- → 2: the one left
+set deliveries {courier: "cy", run_at: now() + 45000} where run_at &lt;= now() and distance(pickup, [15.0901, 37.5031]) &lt;= 3000 order distance(pickup, [15.0901, 37.5031]) limit 1 returning id   -- → no row: none ready within 3 km
+-- 50 s later
+set deliveries {courier: "cy", run_at: now() + 45000} where id in (get deliveries select id where run_at &lt;= now() near pickup [15.0901, 37.5031] limit 1)   -- → 1: ada's lease lapsed
+</pre>
+
+<ul>
+  <li><b>The lease is the ready time moved on</b>: a courier who goes quiet
+    holds the job until it lapses, and the next claim takes it, with nothing
+    written to say so. Its pickup, delivery and every beat are
+    <code>set ... where id = $1 and courier = $2 require 1</code>, refused
+    once another holds it (<a href="/docs/queues">Job queues</a>).</li>
+  <li><b>The radius bounds the walk</b>: the point index is walked
+    nearest first and stops at the page or 3 km out, whichever comes first.
+    With a radius on the field the walk is taken even where some rows hold
+    no point, since none of those passes it.</li>
+  <li><b>Or an inner <code>get</code></b> with <code>near</code>, run
+    first and its one id written, under the same lock. A
+    <code>near</code> takes no <code>order</code>, and a write takes no
+    <code>near</code> of its own: the distance is a key of
+    <code>order</code> there.</li>
 </ul>
 
 <h2 id="clients">From a client</h2>
@@ -311,6 +355,4 @@ thousand queries near a point of the data:</p>
     row's point is read first and passed as a parameter.</li>
   <li><b><code>GEOHASH</code> strings and <code>STORE</code></b>: a
     search's rows are answered, not written to another key.</li>
-  <li><b><code>order distance(...)</code></b>: an order takes fields, so
-    the nearest first is <code>near</code>.</li>
 </ul>

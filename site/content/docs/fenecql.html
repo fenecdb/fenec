@@ -33,7 +33,8 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
            [fuse [k N] [candidates N]]             -- match and near, both ranking
-           [order &lt;field&gt; [collate und|tr] [asc|desc], ...] [limit N] [offset N]   -- N or a parameter, $2
+           [order &lt;key&gt; [collate und|tr] [asc|desc], ...] [limit N] [offset N]   -- N or a parameter, $2
+                                                   -- a key: a field, or an expression, distance(loc, $1)
            [facet &lt;field&gt; [top N | ranges [..]] [disjunctive], ...]   -- value counts over every matched row
            [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]...
 get &lt;name&gt; select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
@@ -49,7 +50,8 @@ explain get &lt;name&gt; ...                         -- the path the query took
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
 set &lt;name&gt; { field: value, path: value } [where &lt;expr&gt;]  -- a value may read the row: {n: n + 1}
 del &lt;name&gt; [where &lt;expr&gt;]
-&lt;set | del ...&gt; [order &lt;field&gt; [desc], ...] [limit N] [returning * | a, b]   -- the page a get answers, written and answered
+&lt;set | del ...&gt; [order &lt;key&gt; [desc], ...] [limit N] [returning * | a, b]   -- the page a get answers, written and answered
+&lt;put | insert ...&gt; [returning * | a, b]       -- the rows written, ids and all, in the documents' order
 &lt;put | insert | set | del ...&gt; require N    -- refused, and its batch put back, unless it wrote N rows
 get &lt;name&gt; ... require N [lookup ...]       -- refused, and its batch put back, unless it answered N rows
 
@@ -74,7 +76,9 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     them.</b> <code>order</code> and <code>limit</code> write the page a
     <code>get</code> with them would answer, and <code>returning</code> hands
     it back: a job queue's claim in one statement — see
-    <a href="#pick">Writes that pick their rows</a>.</li>
+    <a href="#pick">Writes that pick their rows</a>. A <code>put</code> or
+    an <code>insert</code> answers the rows it wrote with
+    <code>returning</code>, the ids it made among them.</li>
   <li><b>A page's numbers take a parameter.</b> <code>limit $2 offset
     $3</code>, and a facet's <code>top $4</code>: every page of a list is
     one statement, which a server parses once — see <a href="#paging">Pages
@@ -118,8 +122,8 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Logic</b></td><td><code>and</code> <code>or</code> <code>not</code> — <code>and</code> binds tighter</td></tr>
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL, wherever a value goes, and as <code>limit</code>, <code>offset</code> and a facet's <code>top</code> — see <a href="#paging">Pages by parameters</a></td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>greatest</code> <code>least</code> <code>now</code> <code>expired</code> (<a href="#reaper">rows past their <code>@ttl</code></a>) <code>timestamp</code> <code>bucket(at, 15m)</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code> <code>distance(loc, p)</code> <code>within(loc, box)</code> (<a href="#geo">Points</a>), <code>case when … then … else … end</code>, plus plugins — see <a href="#functions">Functions over a row</a></td></tr>
-<tr><td><b>Ordering</b></td><td><code>order year desc, title asc</code> — a tie on the first key is decided by the second; <code>id</code> can be ordered too; <code>order name collate und</code> puts text in Unicode's order for every language and <code>collate tr</code> in Turkish order, and a field declared <code>name text collate und</code> is in it wherever it compares — see <a href="#collation">Collation</a></td></tr>
-<tr><td><b>Picking</b></td><td><code>set … order run_at limit 10 returning *</code> writes the rows a <code>get</code> with the clauses answers and hands them back, as written; <code>del … returning</code> as they were — see <a href="#pick">Writes that pick their rows</a></td></tr>
+<tr><td><b>Ordering</b></td><td><code>order year desc, title asc</code> — a tie on the first key is decided by the second; <code>id</code> can be ordered too; a key may be any expression over the row, <code>order distance(loc, $1)</code>, <code>order price * qty desc</code> (see <a href="#order-by-expression">Ordering by an expression</a>); <code>order name collate und</code> puts text in Unicode's order for every language and <code>collate tr</code> in Turkish order, and a field declared <code>name text collate und</code> is in it wherever it compares — see <a href="#collation">Collation</a></td></tr>
+<tr><td><b>Picking</b></td><td><code>set … order run_at limit 10 returning *</code> writes the rows a <code>get</code> with the clauses answers and hands them back, as written; <code>del … returning</code> as they were; <code>insert … returning id</code> the rows it made — see <a href="#pick">Writes that pick their rows</a></td></tr>
 <tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
 <tr><td><b>Highlights</b></td><td><code>highlight(body)</code> and <code>snippet(body, 20)</code> in the select list mark the words a <code>match</code> found, as UTF-16 offsets or between tags you pass — see <a href="#highlights">Highlights and snippets</a></td></tr>
 <tr><td><b>Facets</b></td><td><code>facet brand, color top 10</code> counts each value over every row the query matches, beside the page — see <a href="#facets">Facets</a></td></tr>
@@ -2302,6 +2306,85 @@ del jobs where run_at &lt;= now() order run_at limit 10 returning id, payload.to
     <code>delete</code>, and <code>{ returning: true }</code> — or the
     fields — as its option. See <a href="/docs/queues">Job queues</a> for
     the whole queue: ack, extend, backoff, dead letters, priorities.</li>
+  <li><b>An <code>order</code> key may be an expression</b>, so the
+    nearest ready job is one claim too:
+    <code>set jobs {owner: $1} where run_at &lt;= now() order
+    distance(pickup, $2) limit 1 returning *</code>
+    (<a href="#order-by-expression">Ordering by an expression</a>). A write
+    takes no <code>near</code>: the distance is a key of
+    <code>order</code> there, or an inner <code>get</code>'s
+    <code>near</code> picks the id — <code>where id in (get jobs select id
+    where run_at &lt;= now() near pickup $2 limit 1)</code>, run first under
+    the same lock.</li>
+</ul>
+
+<h3 id="insert-returning">The rows an insert made</h3>
+
+<p><code>returning</code> after a <code>put</code> or an
+<code>insert</code> answers the rows it wrote rather than their count,
+ids and all, in the order of its documents — what a client needs to know
+the id of the row it made, without reading it back by a key of its
+own:</p>
+
+<pre data-lang="fenecql">create collection orders (item text, customer text, n int)
+insert orders {item: "tea", customer: "ada"} returning id
+insert orders [{item: "pie", customer: "ada"}, {item: "jam", customer: "bo", n: 2}] returning *
+put orders {item: "tea", customer: "ada"} if absent else set {n: coalesce(n, 0) + 1} returning id, n
+</pre>
+
+<ul>
+  <li><b>Each row as the statement left it</b>: a row <code>if
+    absent</code> passed over is not answered, the row <code>else set</code>
+    set is, and a document written twice in one statement is answered
+    twice, as it ended. <code>require N</code> counts the rows
+    answered.</li>
+  <li><b>Over HTTP</b> the answer is the rows, with the change it left the
+    database at in <code>Fenec-Seq</code>; <code>POST
+    /orders?returning=id</code> answers a REST insert's rows (201) where it
+    otherwise answers <code>{"inserted": n}</code>.</li>
+  <li><b>A scoped token</b> is answered only rows its read rules let it
+    read: each row written is held to them as written, and one they leave
+    out refuses the write, put back whole (403) — an append to a stream the
+    token may write and not read is written without <code>returning</code>.
+    A token with no read rule on the collection is refused before the write
+    runs.</li>
+  <li><b>Every builder</b> takes it: <code>insert(docs, { returning: ['id']
+    })</code> and <code>upsert(docs, patch, { returning: true })</code>,
+    Python's <code>returning=</code>, Go's <code>Returning(...)</code> among
+    the documents, .NET's <code>returning:</code>, Swift's, Kotlin's and
+    Dart's <code>insertReturning</code> and <code>upsertReturning</code>. A
+    sync replica refuses it on a synced collection, as a claim: its ids are
+    the replica's until the server answers.</li>
+</ul>
+
+<h3 id="order-by-expression">Ordering by an expression</h3>
+
+<p>A key of <code>order</code> is a field, or any expression over the row:
+a distance, a product, a <code>case</code>. The rows a <code>get</code>
+answers, and those a <code>set</code> or a <code>del</code> picks, are put
+in its order as by a field's, ties in id order:</p>
+
+<pre data-lang="fenecql">get orders order n * 2 desc, item limit 10
+get orders order case when customer = "bo" then 0 else 1 end, id
+</pre>
+
+<ul>
+  <li><b>Every match's key is worked out</b> and the page put in order: the
+    cost follows the matches, as an order over a field without
+    <code>@sorted</code> does. A field beside an expression keeps its own
+    collation and fold; an expression's text orders by its bytes, or in the
+    collation <code>collate</code> names.</li>
+  <li><b><code>distance(&lt;field&gt;, &lt;point&gt;)</code> ascending</b>
+    over a field with <code>@geo</code>, with a <code>limit</code>, walks
+    the point index nearest first and stops at the page, as
+    <code>near</code> does — where no row the filter passes lacks a point,
+    whose null distance comes first: the index holds every row, or the
+    filter puts a radius or a box on the field
+    (<a href="/docs/geo#nearest">Nearest first</a>).</li>
+  <li><b>Not in every place an order goes:</b> over groups a key names a
+    column of the list (give the expression a name with <code>as</code>);
+    a <code>lookup</code> level orders its children by fields; a key holds
+    no inner <code>get</code>, aggregate or <code>expired()</code>.</li>
 </ul>
 
 <h2>Time</h2>
