@@ -1830,3 +1830,50 @@ fn returning_answers_rows_as_the_write_leaves_them() {
         r#"[{"id":2},{"id":4}]"#
     );
 }
+
+/// An upsert's `else set` is an update like any other: a transition judges
+/// the row it sets as it judges a `set`'s, the row before and after.
+#[test]
+fn a_transition_holds_an_upsert_s_set() {
+    let n = start_with(
+        "counts  read,insert  where owner = $jwt.sub\n\
+         counts  update(n)    where owner = $jwt.sub and new.n = n + 1\n",
+        &["create collection counts (owner text, key text @unique, n int)"],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let count =
+        |by: &str| format!("put counts {{key: \"k\", n: 1}} if absent else set {{n: n + {by}}}");
+    for _ in 0..3 {
+        let (status, body) = n.query(&alice, &count("1"));
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, body) = n.query(&alice, &count("5"));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        n.query(ROOT, "get counts select owner, n").1,
+        r#"[{"owner":"alice","n":3}]"#
+    );
+}
+
+/// A rule over a path into a json field reads the document written as it
+/// reads a stored one: read through `Document::get` alone, `meta.owner`
+/// was null of every row a `set` wrote, and `WITH CHECK` refused each.
+#[test]
+fn a_rule_over_a_path_checks_writes_by_the_path() {
+    let n = start_with(
+        "docs  read,update  where meta.owner = $jwt.sub\n",
+        &[
+            "create collection docs (meta json, title text)",
+            "put docs [{meta: {\"owner\": \"alice\"}, title: \"a\"}, {meta: {\"owner\": \"bob\"}, title: \"b\"}]",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let (status, body) = n.query(&alice, "set docs {title: \"z\"}");
+    assert_eq!((status, body.as_str()), (200, r#"{"affected":1}"#));
+    let (status, body) = n.query(&alice, "set docs {meta: {\"owner\": \"bob\"}} where id = 1");
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        n.query(ROOT, "get docs select title order id").1,
+        r#"[{"title":"z"},{"title":"b"}]"#
+    );
+}
