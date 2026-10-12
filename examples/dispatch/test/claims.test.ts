@@ -8,9 +8,6 @@ import { startWorld, tandem, cast, sleep, type World } from './harness';
 import { claimNearest, claimStats, deliver, type Job } from '../lib/dispatch';
 import { placeOrder } from '../lib/orders';
 import { appDb, rows, throttled } from '../lib/db';
-import { SHARD_TOKEN, tenantOf } from '../lib/config';
-import { PLANS } from '../lib/plans';
-import { setQuota } from '../lib/setup';
 import { addresses, bounds, type Point } from '../lib/city';
 import { rng } from '../lib/city';
 import type { Who } from '../lib/tokens';
@@ -20,16 +17,11 @@ const t = cast(tandem);
 
 before(async () => {
   world = await startWorld({ basePort: 18410 });
-  // These tests are about exactly-once, not the plan's rate (quotas.test.ts
-  // is): Tandem's writes go unmetered here. Metered, every courier's held
-  // claim is charged a write each time a write wakes it -- an order placed,
-  // one delivered -- whether it then writes or not, so 50 couriers waiting
-  // drained Pro's 600 writes a second within the first few orders, and an
-  // order placed then was refused (429) one run in two or three. Charging
-  // the rows a write writes, and a held claim only when it takes one, is
-  // the held-claims change's (branch held-claims-2); with it this tenant
-  // can keep its plan.
-  await setQuota({ router: world.router, shardToken: SHARD_TOKEN }, tenantOf('tandem'), { ...PLANS.pro.quota, writes: 0 });
+  // Tandem keeps its plan, 600 rows a second: a held claim that looks or
+  // runs and takes nothing writes nothing, and costs nothing. Charged a
+  // write each time a write woke it, written or not, 50 couriers waiting
+  // drained the bucket within the first few orders, and an order placed
+  // then was refused (429) one run in two or three.
 });
 after(async () => {
   await world?.stop();

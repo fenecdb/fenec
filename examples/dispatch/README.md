@@ -220,7 +220,7 @@ not the one nearest the new order (gap 3).
 
 | File | What |
 | --- | --- |
-| `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one. Tandem's writes are unmetered here (gap 7): what they hold is exactly-once, and `quotas.test.ts` holds the plan |
+| `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one, Tandem held to its plan's 600 rows a second (gap 7: a held claim that takes nothing costs nothing) |
 | `lease.test.ts` (3) | a courier as a process of its own claims, picks up and beats every 300 ms, then is killed with SIGKILL: a second courier waiting at the server is handed the order no sooner than the lease (1.5 s) after the last beat and within 2 s of it, `attempts` 2; the dead courier's late pickup, delivery and beat are refused (412, a lease kept `false`); an order given back waits out its backoff; one claimed five times is a dead letter on the sixth draw |
 | `quotas.test.ts` (4) | Tandem (Pro) and Hopper (Starter) on one node: Hopper's 20 couriers beating every 50 ms, ten times its 40 rows a second, are refused (429 `writes`) and land at most its rate, while Tandem's ten are never refused and their median beat is unchanged; a bulk import past 64 KB a second is refused (429 `write_bytes`) and lands after the wait it is told, to the millisecond; 45 claims waiting at once from a Starter fleet: 40 held, 5 refused (429 `held`); a company at its rows takes no new order (507 `rows`) and deletes still land |
 | `security.test.ts` (5) | a dispatcher's token against another company and the platform (403), no tenant (403), lapsed (401), forged (401); a courier reads only their order, row and position, cannot deliver another's order (it is not there to them), deliver a ready order nobody claimed (403), change a fee (403), claim for another courier or without counting the attempt (403), give an order back ahead of the queue (403), write another's position (403) or delete; a customer reads only their own, cannot insert as another, pre-assigned or with attempts (403), cannot move an order up the queue or cancel it claimable (403), take a cancelled one back (412), cancel another's or one carried; a customer's subscription hears their courier move on their order and nothing of another's |
@@ -460,7 +460,7 @@ instead. None was fixed in the example's own change; 1 to 5, 7 to 9 and
    with 50 couriers waiting, the first few orders placed woke 400 to 650
    runs of held claims in 200 ms, draining Pro's 600 a second, and an order
    placed then was refused (429) one run in two or three of the claims
-   test, which meters no writes now:
+   test, which holds Tandem to its plan again since:
    45 claims sent to a Starter company at once were refused for `writes`
    (6 of them) before any for `streams`. And a held claim is a stream, so a
    plan's `streams` is how many couriers may wait at once (40 held, the
