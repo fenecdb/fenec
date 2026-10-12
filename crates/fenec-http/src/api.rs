@@ -240,6 +240,10 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
 /// in FenecQL, and it is the shape PostgREST already uses for an embedded
 /// resource's filters.
 ///
+/// `lines.on=org,order&lines.parent=org,id` is a key over several fields,
+/// FenecQL's `on (org, order) = (org, id)`: the two lists pair field by
+/// field.
+///
 /// `?lookup=orders,lines&orders.on=shop_id&lines.on=order_id` chains: the
 /// list is read left to right, each name binding to the one before it, and
 /// each level keeps its own prefix. A comma-separated list is the same
