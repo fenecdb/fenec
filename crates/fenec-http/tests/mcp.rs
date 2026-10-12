@@ -335,7 +335,11 @@ fn a_2026_client_discovers_lists_and_calls_every_reading_tool() {
     assert_eq!(text(at(&s, &["rows", "0", "title"])), "dog");
     // A word misspelt, and one begun, found when asked for, the snippet
     // marking the word the index holds.
-    let (_, s) = n.call(Some(ROOT), "search", r#"{"collection":"docs","text":"wtches"}"#);
+    let (_, s) = n.call(
+        Some(ROOT),
+        "search",
+        r#"{"collection":"docs","text":"wtches"}"#,
+    );
     assert_eq!(at(&s, &["count"]), &Value::Int(0), "{s:?}");
     let (err, s) = n.call(
         Some(ROOT),
@@ -350,13 +354,19 @@ fn a_2026_client_discovers_lists_and_calls_every_reading_tool() {
         "search",
         r#"{"collection":"docs","text":"lazy slee","prefix":true}"#,
     );
-    assert_eq!(text(at(&s, &["rows", "0", "snippet"])), "a **lazy** dog **sleeps** all day");
+    assert_eq!(
+        text(at(&s, &["rows", "0", "snippet"])),
+        "a **lazy** dog **sleeps** all day"
+    );
     let (err, s) = n.call(
         Some(ROOT),
         "search",
         r#"{"collection":"docs","text":"fox","fuzzy":"yes"}"#,
     );
-    assert!(err && format!("{s:?}").contains("is true or false"), "{s:?}");
+    assert!(
+        err && format!("{s:?}").contains("is true or false"),
+        "{s:?}"
+    );
     let (_, s) = n.call(
         Some(ROOT),
         "search",

@@ -81,7 +81,10 @@ fn the_options_parse_in_either_order_and_are_refused_past_two() {
     assert_eq!(m("get d match body $1 fuzzy 0"), Some((0, false)));
     assert_eq!(m("get d match body $1 prefix"), Some((0, true)));
     assert_eq!(m("get d match body $1 fuzzy 1 prefix"), Some((1, true)));
-    assert_eq!(m("get d match body $1 prefix fuzzy limit 5"), Some((2, true)));
+    assert_eq!(
+        m("get d match body $1 prefix fuzzy limit 5"),
+        Some((2, true))
+    );
     assert_eq!(
         m(r#"get d where n > 1 match body "x" prefix fuzzy 2 limit 5"#),
         Some((2, true))
@@ -140,7 +143,11 @@ fn a_typo_and_a_word_begun_find_what_they_mean() {
     assert_eq!(ns(&db, prefix, "nothing docu")[0], 4);
     // A filter, a reranking and a fusion take a loose `match` as any.
     assert_eq!(
-        ns(&db, "get d select n where kind = \"b\" match body $1 fuzzy limit 10", "databasse"),
+        ns(
+            &db,
+            "get d select n where kind = \"b\" match body $1 fuzzy limit 10",
+            "databasse"
+        ),
         [5, 1, 3]
     );
     let r = rows(
@@ -218,11 +225,20 @@ fn a_facet_counts_what_a_loose_match_selects() {
 fn explain_says_how_the_words_were_read() {
     let db = db();
     for (sql, says) in [
-        ("get d match body $1 fuzzy limit 3", "match: the text index on body, fuzzy, "),
+        (
+            "get d match body $1 fuzzy limit 3",
+            "match: the text index on body, fuzzy, ",
+        ),
         ("get d match body $1 fuzzy 1 limit 3", "on body, fuzzy 1, "),
         ("get d match body $1 prefix limit 3", "on body, prefix, "),
-        ("get d match body $1 prefix fuzzy limit 3", "on body, fuzzy, prefix, "),
-        ("get d match body $1 limit 3", "match: the text index on body, "),
+        (
+            "get d match body $1 prefix fuzzy limit 3",
+            "on body, fuzzy, prefix, ",
+        ),
+        (
+            "get d match body $1 limit 3",
+            "match: the text index on body, ",
+        ),
     ] {
         let r = rows(
             &db,
@@ -253,10 +269,9 @@ fn the_words_follow_the_writes() {
     exec(&mut db, "del d where n = 10", &[]);
     assert!(ns(&db, fuzzy, "telescpoe").is_empty());
     // A block put back takes its words back out.
-    let block = fenec_ql::parse(
-        r#"put d {n: 11, body: "microscope"}; put d {n: 1, body: "x"} require 2"#,
-    )
-    .unwrap();
+    let block =
+        fenec_ql::parse(r#"put d {n: 11, body: "microscope"}; put d {n: 1, body: "x"} require 2"#)
+            .unwrap();
     let block: Vec<(&Statement, &[Value])> = block.iter().map(|s| (s, &[][..])).collect();
     assert!(db.execute_block(&block).is_err());
     assert!(ns(&db, fuzzy, "micrsocope").is_empty());
@@ -303,7 +318,11 @@ fn a_word_reaching_too_many_is_refused_not_cut() {
     );
     assert_eq!(r.rows.len(), 5);
     // The same words plainly are no question of the bound.
-    let r = rows(&db, "get d match body $1 limit 5", &[Value::Text("pre".into())]);
+    let r = rows(
+        &db,
+        "get d match body $1 limit 5",
+        &[Value::Text("pre".into())],
+    );
     assert!(r.rows.is_empty());
 }
 
@@ -315,7 +334,10 @@ fn an_index_of_prefixes_reads_loosely_as_any() {
         "create collection d (n int, body text @text(prefix=3))",
         &[],
     );
-    for (i, b) in ["kitapların fiyatı", "araba kiralama", "kitaplık"].iter().enumerate() {
+    for (i, b) in ["kitapların fiyatı", "araba kiralama", "kitaplık"]
+        .iter()
+        .enumerate()
+    {
         exec(
             &mut db,
             "put d {n: $1, body: $2}",
@@ -325,5 +347,12 @@ fn an_index_of_prefixes_reads_loosely_as_any() {
     let q = "get d select n match body $1 fuzzy limit 10";
     // `^`-marked prefixes are no words: a typo reaches the words.
     assert_eq!(ns(&db, q, "kiralma"), [1]);
-    assert_eq!(ns(&db, "get d select n match body $1 prefix limit 10", "kitapl"), [2, 0]);
+    assert_eq!(
+        ns(
+            &db,
+            "get d select n match body $1 prefix limit 10",
+            "kitapl"
+        ),
+        [2, 0]
+    );
 }

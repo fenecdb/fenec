@@ -308,7 +308,11 @@ fn near_with_match_is_fused() {
         r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "match_fuzzy": 3}"#,
         r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "match_prefix": "yes"}"#,
     ] {
-        assert_eq!(call(h.port, "POST", "/notes/near", Some(bad)).status, 400, "{bad}");
+        assert_eq!(
+            call(h.port, "POST", "/notes/near", Some(bad)).status,
+            400,
+            "{bad}"
+        );
     }
 }
 

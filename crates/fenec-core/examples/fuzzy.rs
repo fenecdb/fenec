@@ -202,8 +202,13 @@ fn main() {
         .unwrap();
     let mut batch: Vec<Vec<(String, Expr)>> = Vec::new();
     for i in 0..n {
-        let body: Vec<&str> = (0..30).map(|_| vocab[rng.zipf(vocab.len())].as_str()).collect();
-        batch.push(vec![("body".into(), Expr::Lit(Value::Text(body.join(" "))))]);
+        let body: Vec<&str> = (0..30)
+            .map(|_| vocab[rng.zipf(vocab.len())].as_str())
+            .collect();
+        batch.push(vec![(
+            "body".into(),
+            Expr::Lit(Value::Text(body.join(" "))),
+        )]);
         if batch.len() == 5_000 || i + 1 == n {
             db.execute(&Statement::Put {
                 collection: "d".into(),
@@ -258,7 +263,10 @@ fn main() {
             0 => format!("{} {b}", typo(&mut rng, &a)),
             _ => format!("{a} {}", typo(&mut rng, &b)),
         });
-        let cut: String = b.chars().take(b.chars().count().div_ceil(2).max(3)).collect();
+        let cut: String = b
+            .chars()
+            .take(b.chars().count().div_ceil(2).max(3))
+            .collect();
         half.push(format!("{a} {cut}"));
     }
     // A word begun, as a search box sends its first keystrokes: the first
@@ -290,11 +298,17 @@ fn main() {
         );
     }
     show("match, two words", time(&db, &q(""), &plain));
-    show("match fuzzy, two words as written", time(&db, &q(" fuzzy"), &plain));
+    show(
+        "match fuzzy, two words as written",
+        time(&db, &q(" fuzzy"), &plain),
+    );
     show("match, a typo", time(&db, &q(""), &typod));
     show("match fuzzy, a typo", time(&db, &q(" fuzzy"), &typod));
     show("match fuzzy 1, a typo", time(&db, &q(" fuzzy 1"), &typod));
-    show("match prefix, the last word half typed", time(&db, &q(" prefix"), &half));
+    show(
+        "match prefix, the last word half typed",
+        time(&db, &q(" prefix"), &half),
+    );
     show(
         "match prefix fuzzy, the last word half typed",
         time(&db, &q(" prefix fuzzy"), &half),

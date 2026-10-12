@@ -173,7 +173,9 @@ fn typo(query: &str, seed: u64) -> String {
         return query.to_string();
     }
     let w = &mut words[long[rng.upto(long.len())]];
-    let letters: Vec<usize> = (0..w.len()).filter(|&i| w[i].is_ascii_alphabetic()).collect();
+    let letters: Vec<usize> = (0..w.len())
+        .filter(|&i| w[i].is_ascii_alphabetic())
+        .collect();
     let at = match rng.upto(100) < 7 {
         true => letters[0],
         false => letters[1 + rng.upto(letters.len() - 1)],
@@ -208,7 +210,11 @@ fn half_typed(query: &str) -> String {
         .map_or(0, |(i, c)| i + c.len_utf8());
     let last: Vec<char> = trimmed[start..].chars().collect();
     let keep = last.len().div_ceil(2);
-    format!("{}{}", &trimmed[..start], last[..keep].iter().collect::<String>())
+    format!(
+        "{}{}",
+        &trimmed[..start],
+        last[..keep].iter().collect::<String>()
+    )
 }
 
 fn ndcg10(ranked: &[String], rels: &HashMap<String, u32>) -> f64 {
@@ -389,15 +395,39 @@ fn main() {
         "get d select doc match body $1 limit 10".into(),
     )];
     for (name, sql) in [
-        ("match fuzzy", "get d select doc match body $1 fuzzy limit 10"),
-        ("match fuzzy 1", "get d select doc match body $1 fuzzy 1 limit 10"),
+        (
+            "match fuzzy",
+            "get d select doc match body $1 fuzzy limit 10",
+        ),
+        (
+            "match fuzzy 1",
+            "get d select doc match body $1 fuzzy 1 limit 10",
+        ),
         ("match, a typo", "get d select doc match body $4 limit 10"),
-        ("match fuzzy, a typo", "get d select doc match body $4 fuzzy limit 10"),
-        ("match fuzzy 1, a typo", "get d select doc match body $4 fuzzy 1 limit 10"),
-        ("match prefix", "get d select doc match body $1 prefix limit 10"),
-        ("match, half typed", "get d select doc match body $5 limit 10"),
-        ("match prefix, half typed", "get d select doc match body $5 prefix limit 10"),
-        ("match prefix fuzzy, half typed", "get d select doc match body $5 prefix fuzzy limit 10"),
+        (
+            "match fuzzy, a typo",
+            "get d select doc match body $4 fuzzy limit 10",
+        ),
+        (
+            "match fuzzy 1, a typo",
+            "get d select doc match body $4 fuzzy 1 limit 10",
+        ),
+        (
+            "match prefix",
+            "get d select doc match body $1 prefix limit 10",
+        ),
+        (
+            "match, half typed",
+            "get d select doc match body $5 limit 10",
+        ),
+        (
+            "match prefix, half typed",
+            "get d select doc match body $5 prefix limit 10",
+        ),
+        (
+            "match prefix fuzzy, half typed",
+            "get d select doc match body $5 prefix fuzzy limit 10",
+        ),
     ] {
         if fenec_ql::parse_one(sql).is_ok() {
             methods.push((name.into(), sql.into()));
@@ -462,7 +492,10 @@ fn main() {
     if let Ok(only) = std::env::var("FENECBENCH_ONLY") {
         methods.retain(|(name, _)| name.starts_with(&only));
     }
-    println!("{:<36} {:>8} {:>10} {:>10}", "", "nDCG@10", "p50 ms", "p99 ms");
+    println!(
+        "{:<36} {:>8} {:>10} {:>10}",
+        "", "nDCG@10", "p50 ms", "p99 ms"
+    );
     for (name, sql) in &methods {
         let stmt = fenec_ql::parse_one(sql).unwrap();
         let mut total = 0.0;

@@ -847,14 +847,18 @@ impl TextIndex {
                 };
                 cursors.extend(self.cursor(list, r.count as f32 * scale, n, within));
             }
-            let Some(own) = r.own.and_then(|l| self.cursor(l, r.count as f32, n, within)) else {
+            let Some(own) = r
+                .own
+                .and_then(|l| self.cursor(l, r.count as f32, n, within))
+            else {
                 continue;
             };
             // The least the word's own term adds to a document holding it:
             // once, in the longest document there is. A hundredth below it
             // survives the scores' rounding to `f32`.
             let longest = self.longest.max(1) as f32;
-            let floor = 0.99 * own.weight * (k1 + 1.0) / (1.0 + k1 * (1.0 - b + b * longest / avgdl));
+            let floor =
+                0.99 * own.weight * (k1 + 1.0) / (1.0 + k1 * (1.0 - b + b * longest / avgdl));
             let most: f32 = cursors[mark..].iter().map(|c| c.ceiling).sum();
             if most > floor {
                 for c in &mut cursors[mark..] {
@@ -1013,7 +1017,11 @@ struct Reach<'a> {
 impl<'a> Reach<'a> {
     /// The lists of its variants `d` edits away.
     fn of(&self, d: u8) -> Vec<&'a Postings> {
-        self.found.iter().filter(|f| f.1 == d).map(|f| f.2).collect()
+        self.found
+            .iter()
+            .filter(|f| f.1 == d)
+            .map(|f| f.2)
+            .collect()
     }
 }
 
@@ -1237,7 +1245,13 @@ impl TextIndex {
 
     /// [`Self::search_loose`] with the pruning switched off: the same
     /// cursors, variants and all, every one driving the frontier.
-    fn search_loose_unpruned<F>(&self, query: &str, k: usize, accept: F, loose: Loose) -> Vec<(DocId, f32)>
+    fn search_loose_unpruned<F>(
+        &self,
+        query: &str,
+        k: usize,
+        accept: F,
+        loose: Loose,
+    ) -> Vec<(DocId, f32)>
     where
         F: Fn(DocId) -> bool,
     {
@@ -1249,7 +1263,13 @@ impl TextIndex {
         self.ranked_unpruned(cursors, k, accept, avgdl)
     }
 
-    fn ranked_unpruned<F>(&self, cursors: Vec<Cursor>, k: usize, accept: F, avgdl: f32) -> Vec<(DocId, f32)>
+    fn ranked_unpruned<F>(
+        &self,
+        cursors: Vec<Cursor>,
+        k: usize,
+        accept: F,
+        avgdl: f32,
+    ) -> Vec<(DocId, f32)>
     where
         F: Fn(DocId) -> bool,
     {
@@ -1776,7 +1796,11 @@ mod tests {
             prefix: false,
         };
         assert!(loose("tatabases", one).is_empty());
-        assert_eq!(loose("tatabases", fuzzy()), [2], "two edits from nine letters");
+        assert_eq!(
+            loose("tatabases", fuzzy()),
+            [2],
+            "two edits from nine letters"
+        );
         // A misspelt word begun.
         let both = Loose {
             fuzzy: 2,
@@ -1884,7 +1908,11 @@ mod tests {
                     let accept = |d: DocId| !odd || d.is_multiple_of(2);
                     let want = ix.search_loose_unpruned(&query, k, accept, loose);
                     let got = ix.search_loose(&query, k, accept, None, loose).unwrap();
-                    assert_eq!(ids(&want), ids(&got), "seed {seed} k {k} {query:?} {loose:?}");
+                    assert_eq!(
+                        ids(&want),
+                        ids(&got),
+                        "seed {seed} k {k} {query:?} {loose:?}"
+                    );
                     for (w, g) in want.iter().zip(&got) {
                         assert!((w.1 - g.1).abs() <= 1e-5 * w.1.abs().max(1.0));
                     }
@@ -1910,7 +1938,9 @@ mod tests {
         let hits = ix.search_loose("pre", 5, |_| true, None, prefix).unwrap();
         assert_eq!(hits.len(), 5);
         ix.insert(MAX_EXPANSIONS as u64, "prez");
-        let e = ix.search_loose("pre", 5, |_| true, None, prefix).unwrap_err();
+        let e = ix
+            .search_loose("pre", 5, |_| true, None, prefix)
+            .unwrap_err();
         assert!(e.to_string().contains("refused rather than cut"), "{e}");
         assert!(ix.matching_loose("pre", prefix).is_err());
         assert!(ix.search_loose("pre1", 5, |_| true, None, prefix).is_ok());
@@ -1954,7 +1984,11 @@ mod tests {
             for (id, t) in &docs {
                 fresh.insert(*id, t);
             }
-            assert_eq!(ix.dictionary().len(), fresh.dictionary().len(), "seed {seed}");
+            assert_eq!(
+                ix.dictionary().len(),
+                fresh.dictionary().len(),
+                "seed {seed}"
+            );
             let both = Loose {
                 fuzzy: 1,
                 prefix: true,
