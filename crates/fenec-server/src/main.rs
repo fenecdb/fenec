@@ -40,14 +40,20 @@ usage: fenec-server [options]
                             compact still run. A size: 64M, 2G, or bytes
       --tenant-max-rows <n> each tenant's quota of rows, its own collections'
                             together: 507 past it, deletes still run
-      --tenant-max-streams <n>  each tenant's subscriptions, /_changes waits,
-                            held writes and Fenec-After waits together: 429
+      --tenant-max-streams <n>  each tenant's subscriptions, /_changes waits
+                            and Fenec-After waits together: 429 with
+                            Retry-After past it
+      --tenant-max-held <n> each tenant's writes held until they can write
+                            (Fenec-Wait), its workers waiting for jobs: 429
                             with Retry-After past it
       --tenant-max-requests <n>  each tenant's requests in flight: 429 with
                             Retry-After past it, so one tenant cannot hold
                             every worker thread
-      --tenant-writes-per-sec <n>  each tenant's writes a second, a token
-                            bucket a second deep: 429 with Retry-After
+      --tenant-writes-per-sec <n>  each tenant's rows written a second, a
+                            token bucket a second deep, charged as each
+                            write lands: a write that writes nothing costs
+                            nothing. 429 with Retry-After while it is in
+                            debt, and retry_after_ms in the body
       --tenant-write-bytes-per-sec <size>  each tenant's bytes written a
                             second, charged as each write lands: 429 with
                             Retry-After while it is in debt
@@ -394,6 +400,7 @@ fn main() {
             flag @ ("--tenant-max-bytes"
             | "--tenant-max-rows"
             | "--tenant-max-streams"
+            | "--tenant-max-held"
             | "--tenant-max-requests"
             | "--tenant-writes-per-sec"
             | "--tenant-write-bytes-per-sec") => {
@@ -402,6 +409,7 @@ fn main() {
                     "--tenant-max-bytes" => (Kind::Bytes, true),
                     "--tenant-max-rows" => (Kind::Rows, false),
                     "--tenant-max-streams" => (Kind::Streams, false),
+                    "--tenant-max-held" => (Kind::Held, false),
                     "--tenant-max-requests" => (Kind::Requests, false),
                     "--tenant-writes-per-sec" => (Kind::Writes, false),
                     _ => (Kind::WriteBytes, true),

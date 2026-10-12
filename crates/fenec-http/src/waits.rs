@@ -187,6 +187,9 @@ struct Group {
     /// Its tests rank rows by its own order (`near`): a round waits for its
     /// bid, whenever its head was held.
     ranked: bool,
+    /// Its tenant's rate refused its run: it looks again, at once, from
+    /// this moment ([`Ticket::pause`]).
+    back: Option<Instant>,
 }
 
 impl Group {
@@ -204,6 +207,7 @@ impl Group {
         let woken = self.now || (self.stale && self.seen < horizon);
         let due = self.at.is_some_and(|at| at <= now);
         (woken || due)
+            && self.back.is_none()
             && !self.looking
             && self.bid.is_none()
             && !self.go
@@ -569,6 +573,7 @@ impl<'h> Ticket<'h> {
                     behind: None,
                     line: None,
                     ranked,
+                    back: None,
                 });
                 id
             }
@@ -604,8 +609,18 @@ impl<'h> Ticket<'h> {
                 return Next::End;
             }
             let mut wait = until - now;
+            // Held back by its tenant's rate: it looks once the rate lets a
+            // write through.
+            if let Some(back) = g.back.filter(|_| head) {
+                if now < back {
+                    wait = wait.min(back - now);
+                } else {
+                    g.back = None;
+                    g.now = true;
+                }
+            }
             // A bid waits for its round, a loser for the winner's run.
-            if head && g.bid.is_none() && g.behind.is_none() {
+            if head && g.bid.is_none() && g.behind.is_none() && g.back.is_none() {
                 // The head before wrote: more may be ready, so this one
                 // looks at once -- a look, not a run, since most often the
                 // one job is gone.
@@ -686,6 +701,21 @@ impl<'h> Ticket<'h> {
         g.at = plan.at;
         g.running = false;
         release(&mut st, self.group);
+    }
+
+    /// Its run was refused by its tenant's rate of writes before it wrote:
+    /// it keeps its place, and its group looks again once `wait` has passed
+    /// and the rate lets a write through, the groups behind it looking now.
+    /// Answered the 429, the claim came back at the end of every group, and
+    /// a claim held to wait was told to come back when the server knew when
+    /// it could run.
+    pub fn pause(&self, wait: Duration) {
+        let mut st = lock(&self.hub.waits().state);
+        let g = group(&mut st, self.group);
+        g.running = false;
+        g.back = Some(Instant::now() + wait);
+        release(&mut st, self.group);
+        settle(&mut st);
     }
 
     /// Answered: it leaves its group. One that wrote -- or whose client

@@ -933,8 +933,8 @@ fn respond(
         return (resp, Duration::ZERO, false);
     };
     // A held write holds a thread as a stream does: past its tenant's
-    // quota of streams it is answered as it ran, and told to come back.
-    let _stream = match quota.map(|q| q.stream()).transpose() {
+    // quota of held writes it is answered as it ran, and told to come back.
+    let _held = match quota.map(|q| q.held()).transpose() {
         Ok(slot) => slot,
         Err(refused) => return (refused, Duration::ZERO, false),
     };
@@ -952,8 +952,20 @@ fn respond(
                     break;
                 }
                 let t = std::time::Instant::now();
-                resp = run();
+                let answer = run();
                 ran += t.elapsed();
+                // Its tenant's rate of writes let none through: it stays
+                // held, and runs once the rate lets one through, rather
+                // than be answered the 429 and come back at every group's
+                // end. A held claim is charged when a run writes, not as it
+                // waits or looks.
+                if let Some(wait) = rated_out(&answer, quota) {
+                    if std::time::Instant::now() + wait < until {
+                        ticket.pause(wait);
+                        continue;
+                    }
+                }
+                resp = answer;
                 match waits::planned() {
                     Some(plan) => ticket.again(plan),
                     None => {
@@ -979,6 +991,27 @@ fn respond(
     }
     drop(waiting);
     (resp, held.elapsed().saturating_sub(ran), true)
+}
+
+/// How long until `resp`, a tenant's refusal for its rates of writes, lets
+/// a write through: `None` for any other answer.
+fn rated_out(resp: &Response, quota: Option<&Arc<quota::Held>>) -> Option<Duration> {
+    let rated = resp.status == 429
+        && resp.extra.iter().any(|(k, v)| {
+            k == quota::HEADER
+                && matches!(
+                    quota::Kind::parse(v),
+                    Some(quota::Kind::Writes | quota::Kind::WriteBytes)
+                )
+        });
+    if !rated {
+        return None;
+    }
+    Some(
+        quota
+            .and_then(|q| q.write_wait())
+            .unwrap_or(Duration::from_millis(1)),
+    )
 }
 
 /// How long a request sent with `Fenec-After` waits for the write it names,

@@ -239,7 +239,8 @@ impl Database {
         // stay in the file, dead and past the quota (`limit.rs`).
         if self.limit.is_some() {
             let grows = self.grows(b, b.spilled_writes);
-            self.limited(b.grew || grows, record.len() as u64)?;
+            let writes = self.app_writes(b, b.spilled_writes);
+            self.limited(b.grew || grows, record.len() as u64, writes)?;
             b.grew |= grows;
         }
         let head = (record.len() - body.len()) as u64;

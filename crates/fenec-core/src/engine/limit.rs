@@ -38,6 +38,10 @@ pub struct Landing {
     /// Whether the block writes a document into a collection of the app's
     /// or changes a schema other than by a drop: more than taking away.
     pub grows: bool,
+    /// The writes the record holds to the app's collections -- a document
+    /// put or deleted, a schema changed -- the server's own rows left out:
+    /// what a quota of rows written a second charges.
+    pub writes: u64,
 }
 
 /// What a block of writes is held to as it lands: asked with the database
@@ -67,8 +71,9 @@ impl Database {
             .sum()
     }
 
-    /// The limit's answer to `adds` more bytes, where one is set.
-    pub(super) fn limited(&self, grows: bool, adds: u64) -> Result<()> {
+    /// The limit's answer to `adds` more bytes holding `writes` writes,
+    /// where one is set.
+    pub(super) fn limited(&self, grows: bool, adds: u64, writes: u64) -> Result<()> {
         let Some(limit) = &self.limit else {
             return Ok(());
         };
@@ -76,6 +81,7 @@ impl Database {
             file: self.appended.load(Relaxed),
             adds,
             grows,
+            writes,
         };
         limit(self, &landing).map_err(Error::Quota)
     }
@@ -115,6 +121,32 @@ impl Database {
             }
         }
         false
+    }
+}
+
+impl Database {
+    /// The writes of `b` from its `from`th on to a collection of the app's,
+    /// not the server's own (`declared::own`): a keyed write's key in
+    /// `_idempotency` is not a row the tenant wrote.
+    pub(super) fn app_writes(&self, b: &Block, from: usize) -> u64 {
+        let mut last: Option<(u32, bool)> = None;
+        let mut n = 0;
+        for &(_, cid, _) in &b.heads[from.min(b.heads.len())..] {
+            let own = match last {
+                Some((c, own)) if c == cid => own,
+                _ => {
+                    let own = self
+                        .collections
+                        .values()
+                        .find(|c| c.id == cid)
+                        .is_some_and(|c| crate::declared::own(&c.schema.name));
+                    last = Some((cid, own));
+                    own
+                }
+            };
+            n += u64::from(!own);
+        }
+        n
     }
 }
 

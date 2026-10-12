@@ -5307,7 +5307,8 @@ impl Database {
         if self.limit.is_some() {
             let adds = land.as_ref().map_or_else(|| b.record_len(), Vec::len);
             let grows = b.grew || self.grows(&b, b.spilled_writes);
-            if let Err(e) = self.limited(grows, adds as u64) {
+            let writes = self.app_writes(&b, b.spilled_writes);
+            if let Err(e) = self.limited(grows, adds as u64, writes) {
                 self.undo(b);
                 return Err(e);
             }
