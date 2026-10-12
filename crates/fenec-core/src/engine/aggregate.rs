@@ -47,9 +47,11 @@ pub(super) struct Reader<'q> {
 /// A value worked out of a row's slots.
 enum Calc {
     Id,
-    /// `bucket(x, 15m)` over a constant interval, `x`'s slot.
+    /// `bucket(x, 15m)` over a constant interval, `x`'s slot -- and a
+    /// constant zone's clock, `bucket(x, 1d, 'Europe/Berlin')`, resolved
+    /// once a query; boxed, so a `Calc` stays the size it was.
     #[cfg(feature = "analytics")]
-    Bucket(usize, Interval),
+    Bucket(usize, Interval, Option<Box<crate::tz::Zone>>),
     /// Anything else: the expression, its fields made parameters.
     Expr(Expr),
 }
@@ -155,18 +157,20 @@ impl<'q> Reader<'q> {
             Expr::Field(n) if n == "id" => Calc::Id,
             Expr::Field(n) => return Ok(self.slot(n)),
             #[cfg(feature = "analytics")]
-            Expr::Call(name, args) if name == "bucket" && args.len() == 2 => {
-                let iv = match &args[1] {
-                    Expr::Lit(v) => Some(v),
-                    Expr::Param(i) => self.env.get(self.base() + i),
+            Expr::Call(name, args) if name == "bucket" && matches!(args.len(), 2 | 3) => {
+                let constant = |a: &Expr| match a {
+                    Expr::Lit(v) => Some(v.clone()),
+                    Expr::Param(i) => self.env.get(self.base() + i).cloned(),
                     _ => None,
                 };
-                match iv {
-                    Some(v) => {
-                        let iv = Interval::of(v)?;
-                        Calc::Bucket(self.bind(&args[0])?, iv)
+                let (iv, zone) = (constant(&args[1]), args.get(2).map(constant));
+                match (iv, zone) {
+                    (Some(v), None) => Calc::Bucket(self.bind(&args[0])?, Interval::of(&v)?, None),
+                    (Some(v), Some(Some(z))) => {
+                        let zone = Box::new(crate::tz::zone_of(&z)?);
+                        Calc::Bucket(self.bind(&args[0])?, Interval::of(&v)?, Some(zone))
                     }
-                    None => Calc::Expr(self.lift(e)?),
+                    _ => Calc::Expr(self.lift(e)?),
                 }
             }
             _ => Calc::Expr(self.lift(e)?),
@@ -242,7 +246,9 @@ impl<'q> Reader<'q> {
             let v = match calc {
                 Calc::Id => Value::Int(id as i64),
                 #[cfg(feature = "analytics")]
-                Calc::Bucket(x, iv) => iv.truncate(&self.env[*x])?,
+                Calc::Bucket(x, iv, None) => iv.truncate(&self.env[*x])?,
+                #[cfg(feature = "analytics")]
+                Calc::Bucket(x, iv, Some(z)) => iv.truncate_in(&self.env[*x], Some(z))?,
                 Calc::Expr(e) => {
                     let ctx = EvalCtx {
                         params: &self.env,
@@ -1029,13 +1035,20 @@ impl Database {
         fn field(e: &Expr) -> Option<&str> {
             match e {
                 Expr::Field(f) => Some(f),
-                Expr::Call(b, a) if b == "bucket" && a.len() == 2 => match &a[0] {
+                Expr::Call(b, a) if b == "bucket" && matches!(a.len(), 2 | 3) => match &a[0] {
                     Expr::Field(f) => Some(f),
                     _ => None,
                 },
                 _ => None,
             }
         }
+        // By a zone's clock a bucket may come back as the keys go up -- an
+        // hour a clock shows twice, cut by an interval not of whole hours --
+        // so its groups are looked up by their keys, as the rows' are.
+        let zoned =
+            (keys.iter()).any(|k| matches!(k, Expr::Call(b, a) if b == "bucket" && a.len() == 3));
+        let mut made: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
+        let mut cur = 0usize;
         let (Some(f), Some(filter)) = (keys.first().and_then(|k| field(k)), &sel.filter) else {
             return Ok(None);
         };
@@ -1100,14 +1113,27 @@ impl Database {
                 crate::codec::encode_value(&mut key, &rd.env[*t]);
             }
             if n == 0 || key != last {
-                for t in terms.iter() {
-                    g.key_values.push(rd.env[*t].clone());
+                let back = match zoned {
+                    true => made.get(&key).and_then(Bucket::first),
+                    false => None,
+                };
+                match back {
+                    Some(j) => cur = j as usize,
+                    None => {
+                        cur = g.folds.len() / items.len().max(1);
+                        if zoned {
+                            made.insert(key.clone(), Bucket::one(cur as DocId));
+                        }
+                        for t in terms.iter() {
+                            g.key_values.push(rd.env[*t].clone());
+                        }
+                        g.folds.extend(items.iter().map(|it| it.start.clone()));
+                    }
                 }
-                g.folds.extend(items.iter().map(|it| it.start.clone()));
                 std::mem::swap(&mut key, &mut last);
             }
-            let at = g.folds.len() - items.len();
-            for f in &mut g.folds[at..] {
+            let at = cur * items.len();
+            for f in &mut g.folds[at..at + items.len()] {
                 f.add(&Value::Bool(true))?;
             }
             n += 1;

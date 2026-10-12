@@ -68,3 +68,5 @@ mod upsert;
 mod wakes;
 mod within;
 mod writes;
+#[cfg(feature = "analytics")]
+mod zones;

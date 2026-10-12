@@ -51,6 +51,8 @@ pub mod sparse;
 pub mod store;
 pub mod text;
 pub mod time;
+#[cfg(feature = "analytics")]
+pub mod tz;
 pub mod value;
 pub mod vector;
 

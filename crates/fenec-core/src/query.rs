@@ -1520,7 +1520,39 @@ impl Interval {
                 )))
             }
         };
-        let start = match self {
+        Ok(match v {
+            Value::Int(_) => Value::Int(self.start(t)),
+            _ => Value::Timestamp(self.start(t)),
+        })
+    }
+
+    /// [`Interval::truncate`] by a zone's clock where one is given
+    /// ([`crate::tz::Zone::bucket`]): a day from local midnight.
+    #[cfg(feature = "analytics")]
+    pub fn truncate_in(self, v: &Value, zone: Option<&crate::tz::Zone>) -> Result<Value> {
+        let Some(z) = zone else {
+            return self.truncate(v);
+        };
+        let t = match v {
+            Value::Null => return Ok(Value::Null),
+            Value::Timestamp(t) | Value::Int(t) => *t,
+            other => {
+                return Err(Error::Type(format!(
+                    "`bucket` takes a timestamp; found {}",
+                    other.type_name()
+                )))
+            }
+        };
+        let start = z.bucket(self, t)?;
+        Ok(match v {
+            Value::Int(_) => Value::Int(start),
+            _ => Value::Timestamp(start),
+        })
+    }
+
+    /// The start of the interval epoch milliseconds `t` fall in, UTC's.
+    pub fn start(self, t: i64) -> i64 {
+        match self {
             // Wrapping only past the ends of time, ±292 million years; in
             // `i128` the division brought the compiler's own, 1 KB of the
             // browser module.
@@ -1536,11 +1568,7 @@ impl Interval {
                 crate::time::days_from_civil(b.div_euclid(12), b.rem_euclid(12) as u32 + 1, 1)
                     .wrapping_mul(DAY_MS)
             }
-        };
-        Ok(match v {
-            Value::Int(_) => Value::Int(start),
-            _ => Value::Timestamp(start),
-        })
+        }
     }
 }
 
