@@ -358,16 +358,17 @@ instead. None was fixed in the example's own change; 1 to 5, 7 to 9 and
    a claim too, the inner `get` run first under the same lock.
 
 3. **Fixed: a new order went to whichever waiting courier ran first, not
-   the one waiting longest; and every write woke every waiting courier.** A
+   the nearest; and every write woke every waiting courier.** A
    write now wakes only the held claims that read what it wrote -- 150
    couriers waiting on `orders` leave a position beat as it is, 22 to 25 us
    p50 at the node beside them against 50 to 95 before -- and a row several
    couriers' claims would take goes to the claim whose own order ranks it
    first, the one waiting longest on a tie, and is run for once (`make
    queue-bench`'s `held other` and `held contested`; queues.html, Who gets
-   the job). Since a `set` picks by fields, a courier's claim ranks orders
-   by `run_at`, so the order goes to the courier waiting longest, not yet
-   to the nearest: that comes with item 1. As it was: each courier's
+   the job), and a courier's held claim orders by
+   `distance(pickup, $4)` (item 1), so of the couriers waiting the one
+   nearest the order takes it: the nearest took every one at 10, 100 and
+   1 000 waiting (`held nearest`). As it was: each courier's
    held claim is a group of its own -- its point is in its filter, and its
    token's rule names `$jwt.sub`, a group being the filter with the scope
    bound in -- so "one awake in each group, the longest waiting first"

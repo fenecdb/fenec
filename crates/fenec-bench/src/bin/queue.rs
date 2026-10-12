@@ -25,7 +25,9 @@
 //!     at a time to 10, 100 and 1 000 such claims, every one of which would
 //!     take it: from the put to a worker holding it, the runs and looks a
 //!     job costs, and how often the claim held longest took it (`held
-//!     contested`).
+//!     contested`); and one order at a time to 10, 100 and 1 000 couriers
+//!     each claiming the order nearest it -- how often the nearest took it
+//!     (`held nearest`).
 //!
 //! `JOBS=200000` runs it over fewer jobs.
 

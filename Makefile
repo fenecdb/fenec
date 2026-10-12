@@ -307,7 +307,8 @@ geo-bench:
 ## pickup, a delayed one's, 100 and 1 000 held on an empty queue, a busy
 ## queue beside held claims, a put of another collection beside claims held
 ## (`held other`), one job to 10, 100 and 1 000 claims held, each its own
-## group (`held contested`). QUEUE_ARGS="held busy" runs one part.
+## group (`held contested`), one order to as many couriers each claiming the
+## order nearest it (`held nearest`). QUEUE_ARGS="held busy" runs one part.
 queue-bench:
 	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-bench --bin queue -- $(QUEUE_ARGS)

@@ -87,7 +87,7 @@ make growth-bench        # indexes growing a put at a time, the longest (a table
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 make geo-bench           # a million points: radii, the nearest, through @geo and by the scan, against PostGIS and Redis in Docker (GEO_ARGS)
-make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; `held` (or `held pickup|delayed|idle|busy|other|contested`): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims, a put of another collection beside claims held, one job to 10, 100 and 1 000 claims of their own
+make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; `held` (or `held pickup|delayed|idle|busy|other|contested|nearest`): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims, a put of another collection beside claims held, one job to 10, 100 and 1 000 claims of their own, one order to couriers each claiming the nearest
 make nearest-bench       # the nearest ready order claimed over HTTP, 1, 16 and 50 claimers: order distance(...) limit 1 returning id and an inner get's near, against examples/dispatch's read and /batch (ORDERS, CLAIMS)
 ```
 
@@ -1930,9 +1930,17 @@ workers beside 16 claims held took 143 000-148 000 jobs a second against
 groups, a burst of sixteen to the order they came at three looks a claim at
 most, and a gap to a look a millisecond beside eight writers;
 `waits::tests` a claim ranked by `near` to the job though it was held last.
-A `set` picks by fields today, so a courier's claim ranks orders by
-`run_at` and the tie goes to the courier waiting longest; the nearest
-takes it once a pick can order by distance.
+A claim ordered by a key worked out of the row -- a courier's `order
+distance(pickup, $2) limit 1` -- has the key bound with the request's
+parameters, as its filter is (copied unbound, the test ran with a `$2`
+it had no value for), and answers it beside the id (`_rank`, a computed
+column), so a row goes to the claim nearest it: one order at a time to
+couriers each claiming the order nearest it, the nearest took every one
+at 10, 100 and 1 000 waiting, run for once, 0.4-0.7, 1.4-1.6 and 19 ms
+from the put, against a raced 0.2-0.4 ms to a courier a median of 3.3-5
+km further and two runs an order (`held nearest`, in turns) -- the
+price every courier's look, 2-2.8, 14-17 and 160-168 ms of the server's
+CPU an order.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from

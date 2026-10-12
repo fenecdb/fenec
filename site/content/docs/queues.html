@@ -150,14 +150,17 @@ own order:</p>
     clients. A burst of jobs goes to the waiting claims in the order they
     came, the oldest job to the claim held longest, each claim looking for
     the next once the run before it is done.</li>
-  <li><b>A claim ranking jobs by its own point</b> -- a <code>near</code>
-    over the courier's position -- would rank a job by how far it is, and
-    the server ranks bids so where a claim's pick has one: the nearest
-    claim takes the job, the others looking again once its run is done,
-    which needs every waiting claim's look. A <code>set</code> picks its
-    rows by fields today, so a courier's claim takes the oldest order
-    within its reach (<code>distance(pickup, $1) &lt;= $2 order
-    run_at</code>), and the order goes to the courier waiting longest.</li>
+  <li><b>A claim ordering by its own point</b> -- a courier's
+    <code>order distance(pickup, $1) limit 1</code>
+    (<a href="#nearest">The nearest job</a>) -- ranks a job by how far it
+    is from the courier, so of the couriers waiting the nearest takes it,
+    the others looking again once its run is done, each for the job nearest
+    it then. That needs every waiting claim's look: one order at a time to
+    couriers waiting in a city 10 km across, the nearest took every one,
+    run for once, 0.4-0.7 ms from the put at 10 couriers, 1.4-1.6 ms at
+    100 and 19 ms at 1 000, against a raced 0.2-0.4 ms to a courier a
+    median of 3.3-5 km further, two runs an order (<code>make
+    queue-bench</code>'s <code>held nearest</code>, in turns).</li>
   <li><b>No header turns it on.</b> The claim's order says what "first"
     means, and a tie keeps the order claims came in.</li>
 </ul>
@@ -359,9 +362,11 @@ set rides {owner: "w2", run_at: now() + 30000, attempts: attempts + 1} where run
     run_at</code> — every ready job's key worked out and the page put in
     order. Only the distance from a point over <code>@geo</code> and an
     <code>@sorted</code> field are walked to the page.</li>
-  <li><b>Not the nearest worker to each job.</b> A claim takes the job
-    nearest the worker that asks; a job handed to whichever of the waiting
-    workers is nearest it is a dispatcher's choice, made by the app.</li>
+  <li><b>The nearest worker to each job, where they wait.</b> A claim
+    takes the job nearest the worker that asks; claims held at the server
+    for a job (<code>Fenec-Wait</code>) hand a job placed to the waiting
+    worker nearest it, each claim's own distance its rank
+    (<a href="#fairness">Who gets the job</a>).</li>
 </ul>
 
 <h2 id="pop">A pop</h2>
