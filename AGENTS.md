@@ -62,6 +62,7 @@ make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
+make policy-bench        # a scoped set under a plain rule, a field list, a transition and answering its row, against the server's token, in process and over HTTP
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
@@ -636,6 +637,43 @@ scoped token whatever its rules say -- a rule naming them there is refused
 at startup -- and not from the server's token, which keeps corrections,
 erasure and `@ttl`'s sweep: in the schema it would bind the operator too,
 a format change for an invariant whoever holds the file can break anyway.
+A rule's filter naming `new.<field>` is a transition (`Rule::transition`):
+`new.` reads the row as the write leaves it, as in an upsert's `else set`,
+a bare name the row as it stands, and the rule is true or not of the two
+together (`Pair`). One filter asked of each row could not say which way a
+row may go: under examples/dispatch's `status = "ready" or status =
+"cancelled"` a customer took a cancelled order back and moved one to the
+queue's head, and a courier delivered a ready order nobody claimed. It
+grants `update` alone, refused at startup beside any other grant. A write
+over a row is the token's when one rule naming every field it changes
+admits the change, a transition by the pair, any other by each row;
+rules with no field list and no transition still widen each other a half
+each, as PostgreSQL's permissive policies, and a transition lends no half.
+A `set` picks a transition's rows by `Rule::before`, the filter with each
+term naming `new.` taken as true or false by the `not`s above it
+(`relaxed`), so it admits every row the pair could -- held to that over
+every filter of three levels and every assignment of 0, 1 and null by
+a test -- and `before_write` leaves an update to `before_overwrite`, with
+the row before, where a transition grants it. `returning` answers rows
+held to the read rules as the write leaves them: a `del`'s picked through
+them as they stood, a `set`'s through their terms over fields it does not
+write, the rest taken as passing (`Scope::answerable`) and asked of each
+row as written by `Hook::answering`, which the engine's `returned` calls
+-- a row the token may not read refuses the statement (403), as
+PostgreSQL makes its `SELECT` policies `WITH CHECK` options on an
+`UPDATE ... RETURNING`'s new row, an error rather than a row dropped
+unseen.
+ANDed in whole, the read rules judged the row before: a courier, who
+reads the orders they carry, claiming a ready order with `returning *`
+took nothing and was told nothing. `Scope::admits` asks the rules one
+after another rather than making the `or` of their filters, which copied
+each, twice an update: a scoped `set` cost 1.6-1.9 us over the server
+token's in process against 2.2-2.9 on main, a field list 2.3-2.8 against
+3.0-3.7, a transition 2.2-2.6, answering its row 4.1-4.9 against 4.6-5.6;
+over HTTP 5.0 us of 45 under a plain rule, 5.7-5.9 a field list, 6.1-6.8
+a transition and 8.7-9.3 answering, main's 5.1, 5.8-6.0 and 8.5-9.0 (`make
+policy-bench`, three runs each in turns). The browser module registers no
+hook and has the `answering` loop `cfg`'d out: the size it was.
 A list claim goes after `in` (`room in $jwt.rooms` is read as `in
 [$jwt.rooms]`, which `bind` spreads), more than `MAX_CLAIM_VALUES` (1 000)
 refuses the token, and claims are read exact (`json::parse_json`): a list
@@ -1637,9 +1675,10 @@ over it, and `Database::pin` judges the folded filter; left a call, the
 walk tested every leased and delayed job after the ready ones and, short
 of a page, gave up past an eighth of the collection for the scan. A
 scoped token picks among the rows its update or delete rules reach, and
-`returning` ANDs its read rules in (`Scope::returning`), as PostgreSQL
-holds `RETURNING` to the `SELECT` policies; `WITH CHECK` and `update(..)`
-grants judge each row as any `set`'s. A sync replica refuses one on a
+`returning` holds what it answers to its read rules as the write leaves
+each row (`Scope::returning`, `Hook::answering`, above), as PostgreSQL
+holds `RETURNING` to the `SELECT` policies; `WITH CHECK`, `update(..)`
+grants and transitions judge each row as any `set`'s. A sync replica refuses one on a
 synced collection (`PICKED`, the scenario file), since it would pick and
 answer the replica's rows. Builders take `order` and `limit` before an
 update or a delete, which a `limit` lets go unfiltered, and `returning`

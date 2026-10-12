@@ -475,7 +475,7 @@ Every SDK's error carries all of them.</p>
 <tbody>
 <tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter</td><td>fix the request</td></tr>
 <tr><td class="n">401</td><td>no token, or a wrong one</td><td>send the right token</td></tr>
-<tr><td class="n">403</td><td>outside the token's rules, a write to a replica or a read-only server</td><td>write where it is taken</td></tr>
+<tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole — a write to a replica or a read-only server</td><td>write where it is taken</td></tr>
 <tr><td class="n">404</td><td>a collection, field or tenant that is not there</td><td></td></tr>
 <tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists</td><td>a lost race for a value</td></tr>
 <tr><td class="n">410</td><td>a <code>/_changes</code> cursor the server no longer reaches</td><td>start again from the <code>since</code> it names</td></tr>
@@ -783,6 +783,7 @@ messages       read,insert    where room in $jwt.rooms
 journal        read,insert    where owner = $jwt.sub
 journal        append-only
 accounts       update(balance, held)                              for app
+orders         update(status, run_at)  where customer = $jwt.sub and status = "ready" and new.status = "cancelled"
 *              read                                               for dashboard
 </pre>
 
@@ -792,6 +793,13 @@ accounts       update(balance, held)                              for app
     grants <code>insert</code>, <code>update</code> and <code>delete</code>,
     and each can be granted alone; <code>update(balance, held)</code> grants
     an update of those fields and no other.</li>
+  <li><b>Transitions.</b> <code>new.status</code> reads a row as the write
+    leaves it, and a bare name as it stands: the <code>orders</code> rule
+    above lets a customer cancel a ready order, and not take a cancelled
+    one back.</li>
+  <li><b><code>returning</code></b> answers rows the token may read as the
+    write leaves them: a courier who reads the orders they carry claims a
+    ready one and is answered it, claimed.</li>
   <li><b><code>append-only</code></b> collections take inserts from scoped
     tokens, and refuse every update and delete with 403.</li>
   <li><b>A list claim</b>, such as <code>"rooms": ["r1", "r2"]</code>,
@@ -834,6 +842,19 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     gets the claim's value, so <code>{"title":"a"}</code> is alice's. A scoped
     put names no <code>id</code>, which could overwrite a row the token cannot
     see, and a scoped token changes no schema and runs no maintenance.</li>
+  <li><b><code>returning</code></b> answers what the write wrote, so the
+    rows it answers are held to the read rules: a <code>set</code>'s as it
+    wrote them, a <code>del</code>'s as they were. A row the read rules
+    leave out by a field the write does not change is passed over, as a
+    <code>get</code> passes it over; a <code>set</code> that would leave a
+    row the token may not read is refused with 403 and writes nothing.
+    PostgreSQL asks its <code>SELECT</code> policies of the row before an
+    <code>UPDATE … RETURNING</code> as well as after, which is why a courier
+    who reads the orders they carry, claiming a ready order, would take
+    nothing there and be told nothing; here the terms over the fields the
+    <code>set</code> writes are asked of the row it leaves, and the claim
+    answers the order, claimed. Without <code>returning</code> a write's
+    rows are those its own rules reach, read rules or not.</li>
   <li><b>Grants</b> are <code>read</code>, <code>insert</code>,
     <code>update</code> and <code>delete</code>, joined by commas, and
     <code>write</code> is the three writes. An insert is a put of new
@@ -858,6 +879,44 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     granting <code>expired</code> beside the ones its operation needs, and
     neither <code>write</code> nor <code>*</code> grants it — a lapsed hold
     is the reaper's, not a user's to see again.</li>
+  <li><b>Transitions.</b> A rule's filter reads the row as it stands, and
+    <code>new.&lt;field&gt;</code> reads it as the write leaves it, as
+    <code>new.</code> names the document in an upsert's <code>else
+    set</code>. One filter asked of the row before and after cannot say
+    which way a row may go: <code>status = "ready" or status =
+    "cancelled"</code> lets a customer cancel an order and take a cancelled
+    one back, and <code>run_at</code> granted lets them move it to the head
+    of the queue. A rule naming <code>new.</code> is a transition, asked of
+    the two rows together:
+<pre data-lang="text"># a customer cancels a ready order, out of the queue for good
+orders  update(status, run_at)  where customer = $jwt.sub and courier is null and status = "ready" and new.status = "cancelled" and new.run_at is null  for customer
+# a courier claims an order whose lease is out, for themselves, counting the attempt
+orders  update(status, run_at, courier, claim, attempts)  where run_at &lt;= now() and new.status = "assigned" and new.courier = $jwt.sub and new.attempts = attempts + 1  for courier
+# and delivers only what they carry
+orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub and (status = "assigned" or status = "picked") and new.status = "delivered" and new.run_at is null  for courier
+</pre>
+    A write over a row is the token's when one rule granting
+    <code>update</code> names every field it changes (or names none) and
+    admits the change: a transition by being true of the row before and
+    after together, any other rule by admitting each. Rules naming no
+    fields and no <code>new.</code> widen each other as before, the row
+    before one rule's and the row after another's, as PostgreSQL's
+    permissive policies do; a transition lends neither half. A
+    <code>set</code> picks the rows a transition reaches by what the row
+    before can answer of it — <code>status = "ready"</code> of the first
+    rule above — and each row it writes is then asked the whole rule, a
+    refusal 403 and the statement (or the batch) put back. The row after
+    is held to what the rule says of <code>new.</code> and nothing more:
+    the field list keeps the rest where it was, so a transition with none
+    should pin what must not move (<code>new.customer = customer</code>).
+    A rule naming <code>new.</code> grants <code>update</code> alone — a
+    read, an insert or a delete has no row after, or none before — and
+    one granting more stops the server at startup. A scoped
+    <code>set</code> of one row over HTTP on loopback took 5.0 µs more
+    than the server token's 45 µs under a plain rule, 5.7–5.9 under a
+    field list and 6.1–6.8 under a transition
+    (<a href="https://github.com/fenecdb/fenec/tree/main/crates/fenec-http/examples/policy.rs"><code>make
+    policy-bench</code></a>).</li>
   <li><b><code>append-only</code></b> is a line of its own,
     <code>journal append-only</code>, with no filter and no role. No scoped
     token updates or deletes there, by any route — <code>/query</code>,

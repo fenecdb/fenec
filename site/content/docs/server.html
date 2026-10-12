@@ -113,8 +113,9 @@ deliberately with <code>--insecure</code>.</p>
 <code>kid</code> picking the key, the file read again as it changes) the
 server also takes JSON Web Tokens, each held to the rules of
 <code>--policy</code>: which collections, to read, insert, update or delete,
-and which rows (<code>where owner = $jwt.sub</code>, <code>where room in
-$jwt.rooms</code>). A token that may only read is the reporting login a
+which rows (<code>where owner = $jwt.sub</code>, <code>where room in
+$jwt.rooms</code>), and what an update may make of a row (<code>where
+status = "ready" and new.status = "cancelled"</code>). A token that may only read is the reporting login a
 dashboard needs, one that may only insert a client appending events, and an
 <code>append-only</code> collection takes no update or delete from any token
 but the server's. The rules are ANDed into every statement

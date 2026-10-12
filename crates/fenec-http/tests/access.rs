@@ -1496,3 +1496,384 @@ fn a_scoped_page_by_parameters_holds_the_token_rules() {
     assert_eq!(count(&rows, "\"mine\""), 2, "{rows}");
     assert!(rows.contains("\"b1\"") && rows.contains("\"a3\""), "{rows}");
 }
+
+/// examples/dispatch's orders under its couriers' and customers' tokens,
+/// each step of an order a transition: a rule's bare names read the row as
+/// it stands, `new.` the row the write leaves.
+const DISPATCH: &str = r#"
+orders  read                                         where courier = $jwt.sub                                                         for courier
+orders  update(status, run_at, courier, claim, attempts)  where run_at <= now() and new.status = "assigned" and new.courier = $jwt.sub and new.attempts = attempts + 1  for courier
+orders  update(status, picked_at, run_at)            where courier = $jwt.sub and status = "assigned" and new.status = "picked"      for courier
+orders  update(run_at, courier_loc)                  where courier = $jwt.sub and (status = "assigned" or status = "picked")         for courier
+orders  update(status, delivered_at, run_at, claim, driven, courier_loc)  where courier = $jwt.sub and status = "picked" and new.status = "delivered" and new.run_at is null  for courier
+orders  update(status, run_at, claim, error)         where courier = $jwt.sub and (status = "assigned" or status = "picked") and (new.status = "ready" or new.status = "dead")  for courier
+orders  read                                         where customer = $jwt.sub                                                        for customer
+orders  insert                                       where customer = $jwt.sub and status = "ready" and courier is null and attempts = 0  for customer
+orders  update(status, run_at)                       where customer = $jwt.sub and courier is null and status = "ready" and new.status = "cancelled" and new.run_at is null  for customer
+"#;
+
+fn dispatch() -> Node {
+    start_with(
+        DISPATCH,
+        &[
+            "create collection orders (customer text, status text, run_at timestamp @sorted, \
+           courier text, claim text, attempts int, picked_at timestamp, delivered_at timestamp, \
+           driven int, courier_loc text, error text, fee int)",
+        ],
+    )
+}
+
+impl Node {
+    /// An order placed by `customer` under their token: its id.
+    fn place(&self, customer: &str) -> u64 {
+        let token = self.token(&format!(r#"{{"sub":"{customer}","role":"customer"}}"#));
+        let (status, body) = self.call(
+            Some(&token),
+            "POST",
+            "/batch",
+            &[
+                line("insert orders {status: \"ready\", run_at: now(), attempts: 0, fee: 500}"),
+                line("get orders select id order id desc limit 1"),
+            ]
+            .join("\n"),
+        );
+        assert_eq!(status, 200, "{body}");
+        let at = body.rfind("\"id\":").unwrap() + 5;
+        body[at..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Fields of order `id`, as the server's token reads them.
+    fn order(&self, id: u64, fields: &str) -> String {
+        let (_, body) = self.query(ROOT, &format!("get orders select {fields} where id = {id}"));
+        body
+    }
+}
+
+/// The three writes the dispatch example's tokens could make under its one
+/// filter a rule -- a customer putting a cancelled order back in the queue
+/// and moving one to its head, a courier delivering a ready order nobody
+/// claimed -- refused by its rules written as transitions, while every step
+/// of its flows lands: an order placed, cancelled, claimed, picked up, its
+/// lease moved on, delivered, given back, a dead letter.
+#[test]
+fn a_transition_holds_a_row_to_the_change_its_rule_names() {
+    let n = dispatch();
+    let alice = n.token(r#"{"sub":"alice","role":"customer"}"#);
+    let c1 = n.token(r#"{"sub":"c1","role":"courier"}"#);
+    let c2 = n.token(r#"{"sub":"c2","role":"courier"}"#);
+
+    // A customer cancels a ready order...
+    let (a, b) = (n.place("alice"), n.place("alice"));
+    let cancel = "set orders {status: \"cancelled\", run_at: null} where id = $1 and \
+                  status = \"ready\" and courier is null require 1";
+    let (status, body) = n.query_with(&alice, cancel, &format!("[{b}]"));
+    assert_eq!(status, 200, "{body}");
+    // ...and puts it back no more: its rule reaches ready orders alone, as
+    // a `set` writes only the rows its rules reach.
+    let (status, body) = n.query_with(
+        &alice,
+        "set orders {status: \"ready\", run_at: now()} where id = $1",
+        &format!("[{b}]"),
+    );
+    assert_eq!((status, body.as_str()), (200, r#"{"affected":0}"#));
+    let (status, body) = n.query_with(
+        &alice,
+        "set orders {status: \"ready\", run_at: now()} where id = $1 require 1",
+        &format!("[{b}]"),
+    );
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(n.order(b, "status"), r#"[{"status":"cancelled"}]"#);
+    // Nor moves a ready one to the head of the queue: the rule reaches it,
+    // and the change is not the one it names.
+    let before = n.order(a, "run_at");
+    let (status, body) = n.query_with(
+        &alice,
+        "set orders {run_at: 0} where id = $1",
+        &format!("[{a}]"),
+    );
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("may not change `run_at`"), "{body}");
+    assert_eq!(n.order(a, "run_at"), before);
+    // Nor cancels it while leaving it ready to be claimed.
+    let (status, body) = n.query_with(
+        &alice,
+        "set orders {status: \"cancelled\", run_at: 0} where id = $1",
+        &format!("[{a}]"),
+    );
+    assert_eq!(status, 403, "{body}");
+
+    // A courier delivers no ready order they never claimed, with the
+    // courier written in or without.
+    for sql in [
+        "set orders {status: \"delivered\", courier: \"c2\", delivered_at: now(), run_at: null} where id = $1",
+        "set orders {status: \"delivered\", delivered_at: now(), run_at: null} where id = $1",
+    ] {
+        let (status, body) = n.query_with(&c2, sql, &format!("[{a}]"));
+        assert_eq!(status, 403, "{sql}: {body}");
+    }
+    assert_eq!(n.order(a, "status"), r#"[{"status":"ready"}]"#);
+    // Nor claims one for another courier, nor without counting the attempt.
+    let claim = "set orders {status: \"assigned\", courier: $1, claim: $2, run_at: now() + 60000, \
+                 attempts: attempts + 1} where id = $3 and run_at <= now() returning id, status, courier";
+    let (status, body) = n.query_with(&c2, claim, &format!(r#"["c1", "k0", {a}]"#));
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = n.query_with(
+        &c2,
+        "set orders {status: \"assigned\", courier: \"c2\", run_at: now() + 60000} where id = $1",
+        &format!("[{a}]"),
+    );
+    assert_eq!(status, 403, "{body}");
+
+    // The courier's claim, with `returning`: a ready order is not theirs to
+    // read until it is claimed, and is answered as claimed.
+    let (status, body) = n.query_with(&c1, claim, &format!(r#"["c1", "k1", {a}]"#));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        format!(r#"[{{"id":{a},"status":"assigned","courier":"c1"}}]"#)
+    );
+    // Taken: another courier's claim finds nothing ready.
+    let (status, body) = n.query_with(&c2, claim, &format!(r#"["c2", "k2", {a}]"#));
+    assert_eq!((status, body.as_str()), (200, "[]"));
+    // Delivered from claimed, not picked up: refused.
+    let deliver =
+        "set orders {status: \"delivered\", delivered_at: now(), run_at: null, claim: null, \
+                   driven: 1200, courier_loc: null} where id = $1 and claim = $2 require 1";
+    let (status, body) = n.query_with(&c1, deliver, &format!(r#"[{a}, "k1"]"#));
+    assert_eq!(status, 403, "{body}");
+    // Picked up, its lease moved on as they ride, delivered.
+    for sql in [
+        "set orders {status: \"picked\", picked_at: now(), run_at: now() + 60000} where id = $1 and claim = $2 require 1",
+        "set orders {run_at: now() + 60000, courier_loc: \"27.1, 38.4\"} where id = $1 and claim = $2 require 1",
+        deliver,
+    ] {
+        let (status, body) = n.query_with(&c1, sql, &format!(r#"[{a}, "k1"]"#));
+        assert_eq!(status, 200, "{sql}: {body}");
+    }
+    assert_eq!(
+        n.order(a, "status, courier"),
+        r#"[{"status":"delivered","courier":"c1"}]"#
+    );
+    // A delivered order's lease is not moved on: no rule reaches it.
+    let (status, body) = n.query_with(
+        &c1,
+        "set orders {run_at: now() + 60000} where id = $1",
+        &format!("[{a}]"),
+    );
+    assert_eq!((status, body.as_str()), (200, r#"{"affected":0}"#));
+
+    // Given back to the queue after a backoff, then a dead letter.
+    let d = n.place("alice");
+    let (status, body) = n.query_with(&c1, claim, &format!(r#"["c1", "k3", {d}]"#));
+    assert_eq!(status, 200, "{body}");
+    let back = "set orders {status: case when attempts >= 5 then \"dead\" else \"ready\" end, \
+                run_at: case when attempts >= 5 then null else now() + 1000 * attempts * attempts end, \
+                claim: null, error: $3} where id = $1 and claim = $2 require 1";
+    let (status, body) = n.query_with(&c1, back, &format!(r#"[{d}, "k3", "closed"]"#));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(n.order(d, "status"), r#"[{"status":"ready"}]"#);
+    let e = n.place("alice");
+    assert_eq!(
+        n.query_with(&c1, claim, &format!(r#"["c1", "k4", {e}]"#)).0,
+        200
+    );
+    let (status, body) = n.query_with(
+        &c1,
+        "set orders {status: \"dead\", run_at: null, claim: null, error: $3} where id = $1 and claim = $2 require 1",
+        &format!(r#"[{e}, "k4", "claimed 6 times"]"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    // Given back as delivered: not a change the give-back names.
+    let f = n.place("alice");
+    assert_eq!(
+        n.query_with(&c1, claim, &format!(r#"["c1", "k5", {f}]"#)).0,
+        200
+    );
+    let (status, body) = n.query_with(
+        &c1,
+        "set orders {status: \"delivered\", run_at: null, claim: null} where id = $1",
+        &format!("[{f}]"),
+    );
+    assert_eq!(status, 403, "{body}");
+
+    // A batch holding a refused change is put back whole: its beat does
+    // not land.
+    let lease = n.order(f, "run_at");
+    let batch = [
+        line(&format!(
+            "set orders {{run_at: now() + 120000}} where id = {f}"
+        )),
+        line(&format!(
+            "set orders {{status: \"delivered\", run_at: null}} where id = {f}"
+        )),
+    ];
+    let (status, body) = n.call(Some(&c1), "POST", "/batch", &batch.join("\n"));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(n.order(f, "run_at"), lease);
+    // A REST PATCH is the same write.
+    let (status, body) = n.call(
+        Some(&c1),
+        "PATCH",
+        &format!("/orders?id=eq.{f}"),
+        r#"{"status":"delivered","run_at":null}"#,
+    );
+    assert_eq!(status, 403, "{body}");
+    // The server's own token is held to none of it.
+    let (status, body) = n.query(
+        ROOT,
+        &format!("set orders {{status: \"ready\"}} where id = {b}"),
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
+/// A rule naming `new.` grants `update` alone: a read, an insert or a
+/// delete has no row after, or none before, for it to read.
+#[test]
+fn a_transition_is_an_update_grant_alone() {
+    assert!(Access::new(SECRET, "orders update(status) where new.status = \"x\"").is_ok());
+    assert!(Access::new(
+        SECRET,
+        "orders update where status = \"a\" and new.status = \"b\" for r"
+    )
+    .is_ok());
+    for bad in [
+        "orders read,update where new.status = \"x\"",
+        "orders write where new.status = \"x\"",
+        "orders insert where new.status = \"x\"",
+        "orders delete where status = \"a\" and new.status = \"b\"",
+        "orders update(status),read where new.status = \"x\"",
+        "orders expired where new.status = \"x\"",
+    ] {
+        let e = Access::new(SECRET, bad).err().unwrap_or_default();
+        assert!(e.contains("grants `update` alone"), "{bad}: {e}");
+    }
+}
+
+/// `returning` answers what a write wrote, held to the read rules: a row a
+/// `set` leaves unreadable refuses the statement, nothing written, where a
+/// row the read rules leave out by a field the write does not touch is
+/// passed over, as a `get` passes it over -- and a `del` answers its rows
+/// as they were, the unreadable ones passed over.
+#[test]
+fn returning_answers_rows_as_the_write_leaves_them() {
+    let n = start_with(
+        "notes  read                       where owner = $jwt.sub and archived = false\n\
+         notes  update(title, archived)    where owner = $jwt.sub\n\
+         notes  delete                     where owner = $jwt.sub\n",
+        &[
+            "create collection notes (owner text, title text, archived bool)",
+            "put notes [{owner: \"alice\", title: \"a\", archived: false}, \
+             {owner: \"alice\", title: \"b\", archived: true}, \
+             {owner: \"alice\", title: \"c\", archived: false}, \
+             {owner: \"bob\", title: \"d\", archived: false}]",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let rows = || n.query(ROOT, "get notes select title, archived order id").1;
+    let start = rows();
+    // Archived as it answers: the row as written is not alice's to read.
+    let (status, body) = n.query(
+        &alice,
+        "set notes {archived: true} where id = 1 returning *",
+    );
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        body.contains("rows this token may read") && body.contains("archived = false"),
+        "{body}"
+    );
+    assert_eq!(rows(), start);
+    // In a batch, refused whole.
+    let batch = [
+        line("set notes {title: \"z\"} where id = 3"),
+        line("set notes {archived: true} where id = 1 returning id"),
+    ];
+    assert_eq!(
+        n.call(Some(&alice), "POST", "/batch", &batch.join("\n")).0,
+        403
+    );
+    assert_eq!(rows(), start);
+    // Taken out of the archive as it answers: hers to read once written.
+    let (status, body) = n.query(
+        &alice,
+        "set notes {archived: false, title: \"b2\"} where id = 2 returning title",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"title":"b2"}]"#);
+    n.query(ROOT, "set notes {archived: true} where id = 2");
+    // A title written over every note of hers: the read rules leave the
+    // archived one out by a field the `set` does not write, and the pick
+    // passes it over.
+    let (status, body) = n.query(
+        &alice,
+        "set notes {title: \"t\"} order id returning id, title",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"id":1,"title":"t"},{"id":3,"title":"t"}]"#);
+    // Without `returning` the same set writes every row its update rule
+    // reaches, archived or not, and answers the count.
+    let (status, body) = n.query(&alice, "set notes {title: \"u\"}");
+    assert_eq!((status, body.as_str()), (200, r#"{"affected":3}"#));
+    // A `del` answers its rows as they were: the archived one passed over.
+    let (status, body) = n.query(
+        &alice,
+        "del notes where title = \"u\" order id returning id",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"id":1},{"id":3}]"#);
+    assert_eq!(
+        n.query(ROOT, "get notes select id order id").1,
+        r#"[{"id":2},{"id":4}]"#
+    );
+}
+
+/// An upsert's `else set` is an update like any other: a transition judges
+/// the row it sets as it judges a `set`'s, the row before and after.
+#[test]
+fn a_transition_holds_an_upsert_s_set() {
+    let n = start_with(
+        "counts  read,insert  where owner = $jwt.sub\n\
+         counts  update(n)    where owner = $jwt.sub and new.n = n + 1\n",
+        &["create collection counts (owner text, key text @unique, n int)"],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let count =
+        |by: &str| format!("put counts {{key: \"k\", n: 1}} if absent else set {{n: n + {by}}}");
+    for _ in 0..3 {
+        let (status, body) = n.query(&alice, &count("1"));
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, body) = n.query(&alice, &count("5"));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        n.query(ROOT, "get counts select owner, n").1,
+        r#"[{"owner":"alice","n":3}]"#
+    );
+}
+
+/// A rule over a path into a json field reads the document written as it
+/// reads a stored one: read through `Document::get` alone, `meta.owner`
+/// was null of every row a `set` wrote, and `WITH CHECK` refused each.
+#[test]
+fn a_rule_over_a_path_checks_writes_by_the_path() {
+    let n = start_with(
+        "docs  read,update  where meta.owner = $jwt.sub\n",
+        &[
+            "create collection docs (meta json, title text)",
+            "put docs [{meta: {\"owner\": \"alice\"}, title: \"a\"}, {meta: {\"owner\": \"bob\"}, title: \"b\"}]",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let (status, body) = n.query(&alice, "set docs {title: \"z\"}");
+    assert_eq!((status, body.as_str()), (200, r#"{"affected":1}"#));
+    let (status, body) = n.query(&alice, "set docs {meta: {\"owner\": \"bob\"}} where id = 1");
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        n.query(ROOT, "get docs select title order id").1,
+        r#"[{"title":"z"},{"title":"b"}]"#
+    );
+}
