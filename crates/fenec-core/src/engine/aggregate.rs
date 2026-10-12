@@ -1321,9 +1321,15 @@ impl Database {
                 None => None,
             };
             let a = f.rows(&mut g, params, reg, clock, sift)?;
+            // Ungrouped, the one row as it is: put in order and paged, a
+            // page of 20 parents' latest 50 took 24 us against 18.
             let rows = match grouped {
                 true => f.page(child, a, &l.order, limit, offset)?,
-                false => f.page(child, a, &[], None, 0)?,
+                false => vec![Row {
+                    id: 0,
+                    values: a.values,
+                    score: None,
+                }],
             };
             answered += rows.len();
             groups.push(rows);

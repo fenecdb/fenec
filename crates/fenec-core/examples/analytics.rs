@@ -112,6 +112,10 @@ fn main() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
+    if std::env::args().any(|a| a == "folds") {
+        folds(now);
+        return;
+    }
     let lit = |v: Value| Expr::Lit(v);
 
     // The fixed aggregates of before, over a million rows in 100 groups.
@@ -505,8 +509,9 @@ fn folds(now: i64) {
     let mut rng = Rng(0x0123_4567_89ab_cdef);
     let docs = (0..200_000)
         .map(|_| {
-            // Some couriers far busier than others.
-            let c = 1 + ((1.0 - rng.unit()).powf(-1.0 / 1.5) as i64 * 7) % 2000;
+            // Some couriers far busier than others, the first ids busiest:
+            // the page of 20 holds 130 to 1 300 deliveries each.
+            let c = 1 + (((1.0 - rng.unit()).powf(-1.0 / 1.5) - 1.0) * 40.0) as i64 % 2000;
             vec![
                 ("courier".into(), lit(Value::Int(c))),
                 (
