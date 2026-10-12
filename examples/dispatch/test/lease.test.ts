@@ -80,7 +80,7 @@ test('a courier killed mid-delivery: the order goes to the next courier as its l
   const took = Date.now();
   assert.ok(got, 'the order comes back');
   assert.equal(got.job.id, id);
-  assert.equal(got.how, 'waited');
+  assert.equal(got.how, 'held');
   assert.equal(got.job.attempts, 2);
   console.log(`  the order came back ${took - lastBeat} ms after the dead courier's last beat, its lease ${LEASE} ms`);
   assert.ok(took - lastBeat >= LEASE - 50, `not before the lease: ${took - lastBeat} ms after the last beat`);

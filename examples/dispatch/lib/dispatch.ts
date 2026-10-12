@@ -22,7 +22,7 @@
 // they carry, which a ready order is not until the claim is written: the
 // read rules are asked of the order as the claim leaves it, so it is
 // answered as claimed.
-import { CLAIM_RADIUS_M, CLAIM_WAIT_MS, LEASE_MS, MAX_ATTEMPTS } from './config';
+import { CLAIM_RADIUS_M, LEASE_MS, MAX_ATTEMPTS } from './config';
 import { asUser, FenecError, retrying } from './db';
 import type { Point } from './city';
 import type { Who } from './tokens';
@@ -56,7 +56,7 @@ export interface Job {
 /** The lease a claim takes and each heartbeat extends; the lease tests shorten it. */
 export const queue = { leaseMs: LEASE_MS };
 
-/** What claims cost: claims sent, claims that took an order, held claims and what they took. */
+/** What claims cost: claims sent at once, held claims, and the orders each took. */
 export const claimStats = { claims: 0, won: 0, held: 0, heldWon: 0 };
 
 // The nearest ready order within the radius, taken and answered: what a
@@ -77,8 +77,12 @@ export interface ClaimOptions {
 
 export interface Claimed {
   job: Job;
-  /** How it was found: ready at once, or by waiting. */
-  how: 'nearest' | 'waited';
+  /**
+   * How it was asked for: answered at once, or held at the server
+   * (`Fenec-Wait`) -- which takes an order ready when it comes in as at
+   * once, and waits only while none is.
+   */
+  how: 'nearest' | 'held';
 }
 
 /** A claim's own token: one claim of one order, so a lapsed one is told apart. */
@@ -94,29 +98,25 @@ export async function claimNearest(who: Who, at: Point, opts: ClaimOptions = {})
   const db = asUser(who);
   const radius = opts.radius ?? CLAIM_RADIUS_M;
   for (let round = 0; round < 3; round++) {
-    const take = (): [string, unknown[]] => [TAKE_NEAREST, [who.sub, claimToken(who.sub), queue.leaseMs, at, radius]];
-    // Refused for the company's rate (429) before it ran: sent again.
-    const r = await retrying(() => db.batch([take()]));
-    let job = taken(r.results[0]);
-    claimStats.claims++;
-    let got: Claimed | null = job ? { job, how: 'nearest' } : null;
-    if (job) claimStats.won++;
-    if (!got && opts.wait) {
-      // Nothing near is ready: the same claim held at the server while it
-      // writes nothing, and run once an order within the radius is ready
-      // -- placed, its lease lapsed, its backoff ended -- taking the nearest
-      // then. A held claim is a stream of the company's quota.
-      const r = await retrying(() =>
-        db.batch([take()], { wait: opts.wait ?? CLAIM_WAIT_MS, signal: opts.signal }),
-      );
-      job = taken(r.results[0]);
-      claimStats.held++;
-      if (job) {
-        claimStats.heldWon++;
-        got = { job, how: 'waited' };
-      }
-    }
-    if (!got) return null;
+    const take: [string, unknown[]] = [TAKE_NEAREST, [who.sub, claimToken(who.sub), queue.leaseMs, at, radius]];
+    // With `wait`, one request: a held claim runs at once first and is held
+    // only while it writes nothing, then run once an order within the radius
+    // is ready -- placed, its lease lapsed, its backoff ended -- taking the
+    // nearest then. Sent at once first and held after, each idle round was
+    // two writes of the company's rate where one does. A held claim is a
+    // stream of the company's quota. Refused for the rate (429) before it
+    // ran: sent again.
+    const held = !!opts.wait;
+    const r = await retrying(() =>
+      held ? db.batch([take], { wait: opts.wait, signal: opts.signal }) : db.batch([take]),
+    );
+    const job = taken(r.results[0]);
+    if (held) claimStats.held++;
+    else claimStats.claims++;
+    if (!job) return null;
+    if (held) claimStats.heldWon++;
+    else claimStats.won++;
+    const got: Claimed = { job, how: held ? 'held' : 'nearest' };
     if (got.job.attempts > MAX_ATTEMPTS) {
       await deadLetter(who, got.job, `claimed ${got.job.attempts} times without a delivery`);
       continue;

@@ -94,8 +94,8 @@ the city.
         orders, near loc for the 10 nearest, distance <= r by state)                             --policy policy.txt,
                                                                                                  --http-cors <site>,
  courier's phone ── /api/courier/claim ─▶ set orders ... order distance(pickup, $4) limit 1    ─▶      a quota a company (the router
-   (on shift)       {at}                  returning *, the courier's token; none ready:           sends it with the tenant)
-                                          the same, held at the node (Fenec-Wait)
+   (on shift)       {at}                  returning *, the courier's token, sent with              sends it with the tenant)
+                                          Fenec-Wait: held at the node while none is ready
                  ── /api/courier/beat ──▶ /batch: put positions ... if absent else set,
                     every 2.5 s            set orders {run_at: now() + lease, courier_loc}
                  ── pickup, deliver ────▶ set orders ... where id = $1 and claim = $2 require 1
@@ -176,7 +176,7 @@ Grafana's built-ins bound as the plugin binds them.
 | The ten nearest idle couriers | `get positions select courier, state, loc, distance(loc, $1) as m where state = "idle" near loc $1 limit 10`, live (`FenecHttp.live`, `collections: ['positions']`) |
 | Who is within reach | `get positions select state, count(*) as n where distance(loc, $1) <= $2 group state`, live |
 | A claim | `set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} where run_at <= now() and distance(pickup, $4) <= $5 order distance(pickup, $4) limit 1 returning *`: the nearest ready order within 3 km, one statement (below) |
-| Waiting for an order | the same `set`, in a `/batch` sent with `Fenec-Wait: 25000`: held while it writes nothing, and taking the nearest ready once one is |
+| Waiting for an order | the same `set`, in a `/batch` sent with `Fenec-Wait: 25000`: run at once, held only while it writes nothing, and taking the nearest ready once one is |
 | An order's id | `insert orders {...} returning id`, the customer's read rules held to the row as written |
 | The lease | every beat: `set orders {run_at: now() + $3, courier_loc: $4} where id = $1 and claim = $2` beside the position, one `/batch`; a lapsed lease is `run_at <= now()` again, and a waiting claim is woken at that moment |
 | Ack, give back, dead letter | `set ... where id = $1 and claim = $2 require 1`: a courier whose lease lapsed finds out (412); backoff `now() + 1000 * attempts * attempts`; `case when attempts >= 5 then "dead"` |
@@ -200,10 +200,11 @@ set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, atte
 The ready orders within 3 km are walked nearest first through the
 pickup's point index, the first one taken under the node's one write
 lock, and answered as claimed -- under the courier's own token, whose read
-rules are asked of the order as the claim leaves it. With none near and
-ready, the same statement goes again in a `/batch` sent with
-`Fenec-Wait`, held at the node until an order is placed, a lease lapses
-or a backoff ends, and then takes the nearest one ready.
+rules are asked of the order as the claim leaves it. The phone sends it
+in a `/batch` with `Fenec-Wait`: it runs at once, and with none near and
+ready it is held at the node until an order is placed, a lease lapses or
+a backoff ends, and then takes the nearest one ready -- one write request
+a claim either way.
 
 It holds: 50 couriers claiming 400 orders at once, and 50 waiting while
 150 were placed, took every order once (`test/claims.test.ts`). It was
@@ -219,7 +220,7 @@ not the one nearest the new order (gap 3).
 
 | File | What |
 | --- | --- |
-| `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one |
+| `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one. Tandem's writes are unmetered here (gap 7): what they hold is exactly-once, and `quotas.test.ts` holds the plan |
 | `lease.test.ts` (3) | a courier as a process of its own claims, picks up and beats every 300 ms, then is killed with SIGKILL: a second courier waiting at the server is handed the order no sooner than the lease (1.5 s) after the last beat and within 2 s of it, `attempts` 2; the dead courier's late pickup, delivery and beat are refused (412, a lease kept `false`); an order given back waits out its backoff; one claimed five times is a dead letter on the sixth draw |
 | `quotas.test.ts` (4) | Tandem (Pro) and Hopper (Starter) on one node: Hopper's 20 couriers beating every 50 ms, ten times its 40 writes a second, are refused (429 `writes`) and land at most its rate, while Tandem's ten are never refused and their median beat is unchanged; a bulk import past 64 KB a second is refused (429 `write_bytes`) and lands after its `Retry-After`; 45 claims waiting at once from a Starter fleet: 40 held, 5 refused (429 `streams`); a company at its rows takes no new order (507 `rows`) and deletes still land |
 | `security.test.ts` (5) | a dispatcher's token against another company and the platform (403), no tenant (403), lapsed (401), forged (401); a courier reads only their order, row and position, cannot deliver another's order (it is not there to them), deliver a ready order nobody claimed (403), change a fee (403), claim for another courier or without counting the attempt (403), give an order back ahead of the queue (403), write another's position (403) or delete; a customer reads only their own, cannot insert as another, pre-assigned or with attempts (403), cannot move an order up the queue or cancel it claimable (403), take a cancelled one back (412), cancel another's or one carried; a customer's subscription hears their courier move on their order and nothing of another's |
@@ -438,7 +439,12 @@ and 13 are fixed since, and say how.
    plan's bucket of 600 a second refills a token in 1.7 ms: the claims test's
    50 couriers met 50 refusals and, doing as told, waited 50 s between
    them. The bucket is taken as a write request starts, so a claim that
-   takes nothing costs one, and so does every held claim as it comes in:
+   takes nothing costs one, and so does every held claim as it comes in --
+   and again each time a write wakes it, whether it then writes or not:
+   with 50 couriers waiting, the first few orders placed woke 400 to 650
+   runs of held claims in 200 ms, draining Pro's 600 a second, and an order
+   placed then was refused (429) one run in two or three of the claims
+   test, which meters no writes now:
    45 claims sent to a Starter company at once were refused for `writes`
    (6 of them) before any for `streams`. And a held claim is a stream, so a
    plan's `streams` is how many couriers may wait at once (40 held, the
