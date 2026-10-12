@@ -578,6 +578,14 @@ impl TextIndex {
     /// already, so one alone is copied as it is; more are put together
     /// through the engine's one sort of ids.
     pub fn matching(&self, query: &str) -> Vec<DocId> {
+        self.matching_loose(query, Loose::default())
+            .unwrap_or_default()
+    }
+
+    /// [`Self::matching`] with the query's words read loosely: every
+    /// document holding a term of the query or a variant of one of its
+    /// words, what `facet` counts beside a loose `match`.
+    pub fn matching_loose(&self, query: &str, loose: Loose) -> Result<Vec<DocId>> {
         let mut lists: Vec<&Postings> = Vec::new();
         for_each_indexed_term(query, &self.spec, |t| {
             if let Some(list) = self.postings.get(t) {
@@ -586,6 +594,12 @@ impl TextIndex {
                 }
             }
         });
+        if !loose.is_plain() {
+            // A variant is no term of the query's own, so no list twice.
+            for r in self.reach(query, loose, &self.query_terms(query))? {
+                lists.extend(r.found.iter().map(|f| f.2));
+            }
+        }
         let mut out: Vec<DocId> = Vec::new();
         for l in &lists {
             out.extend_from_slice(&l.docs);
@@ -594,7 +608,7 @@ impl TextIndex {
             out.sort_unstable();
             out.dedup();
         }
-        out
+        Ok(out)
     }
 
     /// Top `k` documents for `query`, best first.
@@ -634,7 +648,7 @@ impl TextIndex {
         let (n, avgdl) = self.counted(within);
         let mut cursors: Vec<Cursor> = Vec::with_capacity(qtf.len());
         for (term, count) in &qtf {
-            if let Some(list) = self.postings.get(term) {
+            if let Some(list) = self.postings.get(term.as_str()) {
                 cursors.extend(self.cursor(list, *count as f32, n, within));
             }
         }
@@ -811,7 +825,7 @@ impl TextIndex {
     ) -> Vec<Cursor<'a>> {
         let mut cursors: Vec<Cursor> = Vec::with_capacity(qtf.len() + 3 * reach.len());
         for (term, count) in qtf {
-            if let Some(list) = self.postings.get(term) {
+            if let Some(list) = self.postings.get(term.as_str()) {
                 cursors.extend(self.cursor(list, *count as f32, n, within));
             }
         }
@@ -850,31 +864,6 @@ impl TextIndex {
         cursors
     }
 
-    /// [`Self::matching`] with the query's words read loosely: every
-    /// document holding a term of the query or a variant of one of its
-    /// words, what `facet` counts beside a loose `match`.
-    pub fn matching_loose(&self, query: &str, loose: Loose) -> Result<Vec<DocId>> {
-        if loose.is_plain() {
-            return Ok(self.matching(query));
-        }
-        let qtf = self.query_terms(query);
-        let reach = self.reach(query, loose, &qtf)?;
-        let mut out: Vec<DocId> = Vec::new();
-        for t in qtf.keys() {
-            if let Some(l) = self.postings.get(t) {
-                out.extend_from_slice(&l.docs);
-            }
-        }
-        for r in &reach {
-            for f in &r.found {
-                out.extend_from_slice(&f.2.docs);
-            }
-        }
-        out.sort_unstable();
-        out.dedup();
-        Ok(out)
-    }
-
     /// The words `query` reaches read loosely besides its own terms: what
     /// `highlight()` marks beside them.
     pub fn loose_words(&self, query: &str, loose: Loose) -> Result<Vec<&str>> {
@@ -883,7 +872,13 @@ impl TextIndex {
         }
         let qtf = self.query_terms(query);
         let reach = self.reach(query, loose, &qtf)?;
-        Ok(reach.iter().flat_map(|r| r.found.iter().map(|f| f.0)).collect())
+        let mut out = Vec::new();
+        for r in &reach {
+            for f in &r.found {
+                out.push(f.0);
+            }
+        }
+        Ok(out)
     }
 
     /// The first `k` documents `cursors` reach, best first.
@@ -1037,13 +1032,16 @@ fn unions(reach: &[Reach]) -> Vec<Postings> {
 #[cfg(feature = "text")]
 fn union(lists: &[&Postings]) -> Postings {
     let none = Postings::default();
-    let mut level: Vec<Postings> = (lists.chunks(2))
-        .map(|p| merged(p[0], p.get(1).copied().unwrap_or(&none)))
-        .collect();
+    let mut level: Vec<Postings> = Vec::with_capacity(lists.len().div_ceil(2));
+    for p in lists.chunks(2) {
+        level.push(merged(p[0], p.get(1).copied().unwrap_or(&none)));
+    }
     while level.len() > 1 {
-        level = (level.chunks(2))
-            .map(|p| merged(&p[0], p.get(1).unwrap_or(&none)))
-            .collect();
+        let mut up = Vec::with_capacity(level.len().div_ceil(2));
+        for p in level.chunks(2) {
+            up.push(merged(&p[0], p.get(1).unwrap_or(&none)));
+        }
+        level = up;
     }
     level.pop().unwrap_or_default()
 }

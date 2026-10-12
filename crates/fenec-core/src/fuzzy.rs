@@ -84,9 +84,12 @@ impl Chunk {
     }
 
     fn insert(&mut self, i: usize, w: &[u8]) {
-        let from = self.start(i);
+        let (from, end) = (self.start(i), self.bytes.len());
         self.bytes.extend_from_slice(w);
-        self.bytes[from..].rotate_right(w.len());
+        self.bytes.copy_within(from..end, from + w.len());
+        if let Some(at) = self.bytes.get_mut(from..from + w.len()) {
+            at.copy_from_slice(w);
+        }
         self.ends.insert(i, from as u32);
         for e in &mut self.ends[i..] {
             *e += w.len() as u32;
@@ -131,6 +134,35 @@ impl Chunk {
     }
 }
 
+/// `words`, each once, in byte order: merged a run at a time, the runs
+/// doubling. Not the standard library's sort, which for `&[u8]` was 3.7 KB
+/// of the browser module; 60 000 words sort in as long either way.
+fn sorted(words: Vec<&[u8]>) -> Vec<&[u8]> {
+    let n = words.len();
+    let (mut a, mut b) = (words, Vec::with_capacity(n));
+    let mut width = 1;
+    while width < n {
+        b.clear();
+        let mut i = 0;
+        while i < n {
+            let (mid, end) = ((i + width).min(n), (i + 2 * width).min(n));
+            let (mut x, mut y) = (i, mid);
+            while x < mid && y < end {
+                match a[y] < a[x] {
+                    true => (b.push(a[y]), y += 1),
+                    false => (b.push(a[x]), x += 1),
+                };
+            }
+            b.extend_from_slice(&a[x..mid]);
+            b.extend_from_slice(&a[y..end]);
+            i = end;
+        }
+        std::mem::swap(&mut a, &mut b);
+        width *= 2;
+    }
+    a
+}
+
 /// A place in a [`Dictionary`]: a chunk, and a word of it. The end of a
 /// chunk is written as the start of the next.
 type Pos = (usize, usize);
@@ -148,11 +180,13 @@ pub struct Dictionary {
 impl Dictionary {
     /// The dictionary of `words`, in any order, each once.
     pub fn of<'a>(words: impl Iterator<Item = &'a str>) -> Dictionary {
-        let mut all: Vec<&[u8]> = words
-            .filter(|w| !w.starts_with('^'))
-            .map(str::as_bytes)
-            .collect();
-        all.sort_unstable();
+        let mut all: Vec<&[u8]> = Vec::new();
+        for w in words {
+            if !w.starts_with('^') {
+                all.push(w.as_bytes());
+            }
+        }
+        let all = sorted(all);
         let mut d = Dictionary::default();
         // Half full, as an ordered index's chunks start: the first write to
         // each splits none.
@@ -343,13 +377,16 @@ impl Dictionary {
         if k == 0 && prefix {
             return self.prefixed(w, cap, out);
         }
-        let q: Vec<char> = w.chars().collect();
-        // Where each of the query's characters starts in `w`, and its end.
-        let mut at: Vec<usize> = w.char_indices().map(|(i, _)| i).collect();
+        // The query's characters, where each starts in `w` and its end,
+        // and the row of the empty prefix: each of them deleted, the first
+        // at two.
+        let (mut q, mut at, mut rows) = (Vec::new(), Vec::new(), vec![0u8]);
+        for (i, c) in w.char_indices() {
+            q.push(c);
+            at.push(i);
+            rows.push(sat(q.len() + 1));
+        }
         at.push(w.len());
-        // The row of the empty prefix: each of the query's characters
-        // deleted, the first at two.
-        let rows: Vec<u8> = (0..=q.len()).map(|j| sat(j + (j > 0) as usize)).collect();
         let (least, last) = (0, rows[q.len()]);
         let mut walk = Walk {
             dict: self,
@@ -535,29 +572,14 @@ impl<'a> Walk<'a, '_> {
         }
         let (o_least, o_last) = self.push(OTHER);
         self.pop();
-        if o_least <= k || best.min(o_last) <= k {
-            // Any character keeps the row within reach: every child.
-            let mut g0 = a;
-            while g0 != hi && !self.over {
-                let rest = self.dict.at(g0).get(off..).unwrap_or(&[]);
-                let c = std::str::from_utf8(rest)
-                    .ok()
-                    .and_then(|s| s.chars().next())
-                    .unwrap_or(OTHER);
-                let mut enc = [0u8; 4];
-                let key = c.encode_utf8(&mut enc).as_bytes();
-                let g1 = self.dict.part(g0, hi, off, key, true);
-                self.child(c, g0, g1, off, best);
-                g0 = g1;
-            }
-            return;
-        }
-        // Only a character the query holds near this depth can: each found
-        // by binary search, in order, each from where the last ended.
+        // Where any character keeps the row within reach, every child is
+        // walked; otherwise only a character the query holds near this
+        // depth can be, each found by binary search from where the last
+        // ended -- at most 2k + 2 of them, in order, each once.
+        let every = o_least <= k || best.min(o_last) <= k;
         let depth = self.path.len();
         let from = depth.saturating_sub(k as usize + 1);
         let to = (depth + k as usize + 1).min(self.q.len());
-        // At most 2k + 2 of them, in order, each once: sorted in place.
         let mut cands = [OTHER; 6];
         let mut n = 0;
         for &c in self.q.get(from..to).unwrap_or(&[]) {
@@ -568,19 +590,29 @@ impl<'a> Walk<'a, '_> {
                 n += 1;
             }
         }
-        let mut start = a;
-        for &c in &cands[..n] {
-            if self.over {
-                return;
-            }
+        let (mut g0, mut next) = (a, 0);
+        while g0 != hi && !self.over {
             let mut enc = [0u8; 4];
+            let c = match every {
+                true => (self.dict.at(g0).get(off..))
+                    .and_then(|r| std::str::from_utf8(r).ok())
+                    .and_then(|s| s.chars().next())
+                    .unwrap_or(OTHER),
+                false => match cands[..n].get(next) {
+                    Some(&c) => c,
+                    None => return,
+                },
+            };
+            next += 1;
             let key = c.encode_utf8(&mut enc).as_bytes();
-            let g0 = self.dict.part(start, hi, off, key, false);
+            if !every {
+                g0 = self.dict.part(g0, hi, off, key, false);
+            }
             let g1 = self.dict.part(g0, hi, off, key, true);
-            start = g1;
             if g0 != g1 {
                 self.child(c, g0, g1, off, best);
             }
+            g0 = g1;
         }
     }
 
@@ -768,6 +800,20 @@ mod tests {
         let mut got = Vec::new();
         assert!(dict.prefixed("", usize::MAX, &mut got));
         assert_eq!(got, [("kitap", 0), ("kitaplar", 0)]);
+    }
+
+    #[test]
+    fn the_merge_sorts_as_the_standard_sort_does() {
+        let mut rng = Rng(7);
+        for n in [0usize, 1, 2, 3, 7, 64, 1_000, 4_097] {
+            let words: Vec<String> = (0..n)
+                .map(|i| format!("{}{i}", ["b", "a", "ab", "é", "z"][rng.upto(5)]))
+                .collect();
+            let mut want: Vec<&[u8]> = words.iter().map(|w| w.as_bytes()).collect();
+            let got = sorted(want.clone());
+            want.sort_unstable();
+            assert_eq!(got, want, "{n}");
+        }
     }
 
     #[test]
