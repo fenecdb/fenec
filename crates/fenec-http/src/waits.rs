@@ -624,8 +624,8 @@ impl<'h> Ticket<'h> {
                 // The head before wrote: more may be ready, so this one
                 // looks at once -- a look, not a run, since most often the
                 // one job is gone.
-                let told = std::mem::take(&mut g.now);
-                let due = told || g.at.is_some_and(|at| at <= now_us() / 1000);
+                let due =
+                    std::mem::take(&mut g.now) || g.at.is_some_and(|at| at <= now_us() / 1000);
                 let quiet = g.quiet.filter(|q| now < *q);
                 if due || (g.stale && quiet.is_none()) {
                     let (since, tests, collections) =
@@ -662,13 +662,7 @@ impl<'h> Ticket<'h> {
                             st.horizon.get_or_insert(writes);
                         }
                         None => {
-                            // A look it was told to make -- a run before it
-                            // ended, its line came to it -- starts no gap:
-                            // one a run's end, so as many as there are runs,
-                            // and gapped, the line a job left looked once
-                            // more as it went and a job a moment after
-                            // waited out the gap.
-                            g.quiet = (!told).then(|| Instant::now() + LOOK_GAP);
+                            g.quiet = Some(Instant::now() + LOOK_GAP);
                             // Nothing is left for the line behind it, most
                             // likely: each looks for itself, at once.
                             disband(&mut st, self.group);
@@ -742,7 +736,9 @@ impl<'h> Ticket<'h> {
                 g.running = false;
             }
             if g.queue.is_empty() {
-                st.groups.swap_remove(i);
+                // Kept in the order they came, so a write wakes the heads
+                // held longest first: the one a tie goes to looks soonest.
+                st.groups.remove(i);
             } else if was_head {
                 g.now |= hand_on || held;
                 if let Some(next) = g.queue.front() {
