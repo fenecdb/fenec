@@ -141,7 +141,7 @@ alone; "Ride for me" moves them along the streets), and a customer orders
 from a shop near them and follows the courier.
 
 ```sh
-npm test            # each file a cluster of its own; the pages file wants the site (scripts/ci.sh)
+npm test            # each file a cluster of its own, on ports the system picks; the pages file wants the site (scripts/ci.sh)
 npm run lint        # tsc and eslint
 npm run bench       # the measurements below, over a cluster of its own
 npm run shots       # screenshots of the running site

@@ -86,6 +86,9 @@ SHOP_LIGHTHOUSE=1 examples/run-tests.sh shop   # the shop, its Lighthouse budget
 ```
 
 Each runs its `smoke`: create, search, filter, a live update where the
-platform has one, a reopen where the engine is local. The SwiftUI and
+platform has one, a reopen where the engine is local. Every server a run
+starts listens on a port the system picks and is found by the line it
+logs (`listening on: http://<address>`), so two runs, or a run beside
+another suite or a server on the usual ports, never meet on one. The SwiftUI and
 Compose apps and the Flutter app are built in CI (on macOS, and on Ubuntu
 with the Android SDK); their headless parts run there and here.
