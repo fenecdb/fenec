@@ -6,7 +6,8 @@
 # an audit log of refused tokens and schema changes.
 #
 #   FENEC_SERVER   the binary (default: this repository's target/release, then target/debug)
-#   FENEC_PORT     8080
+#   FENEC_PORT     8080; 0 takes a port the system picks, which the server's
+#                  `listening on: http://<address>` line names
 #   FENEC_DIR      data/tenants
 #   FENEC_SYNC     always
 #   FENEC_TOKEN, FENEC_ADMIN_TOKEN, FENEC_JWT_SECRET   as src/config.ts and src/tokens.ts read them

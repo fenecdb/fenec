@@ -3,7 +3,6 @@
 // repository's release build, or its debug build.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ADMIN_TOKEN, OPERATOR_TOKEN } from '../src/config.ts';
@@ -20,17 +19,6 @@ export function serverBinary(): string {
   return found;
 }
 
-export async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const s = createServer();
-    s.listen(0, '127.0.0.1', () => {
-      const port = (s.address() as { port: number }).port;
-      s.close(() => resolve(port));
-    });
-    s.on('error', reject);
-  });
-}
-
 export interface Node {
   url: string;
   child: ChildProcess;
@@ -41,16 +29,20 @@ export interface Node {
   stop(): Promise<void>;
 }
 
-export async function startNode(opts: { dir: string; port?: number; sync: string; extra?: string[] }): Promise<Node> {
+/**
+ * The server on a port the system picks, which it names on its `listening
+ * on:` line: a port found free and handed over was free only until someone
+ * else took it, and a server of someone else's could answer in its place.
+ */
+export async function startNode(opts: { dir: string; sync: string; extra?: string[] }): Promise<Node> {
   mkdirSync(opts.dir, { recursive: true });
   const secret = join(opts.dir, '..', `${opts.dir.split('/').pop()}.jwt`);
   writeFileSync(secret, JWT_SECRET, { mode: 0o600 });
-  const port = opts.port ?? (await freePort());
   const args = [
     '--dir',
     opts.dir,
     '--http',
-    `127.0.0.1:${port}`,
+    '127.0.0.1:0',
     '--admin-token',
     ADMIN_TOKEN,
     '--replication-token',
@@ -71,10 +63,13 @@ export async function startNode(opts: { dir: string; port?: number; sync: string
   child.stdout!.on('data', (d) => (out += d));
   child.stderr!.on('data', (d) => (out += d));
   const exited = new Promise<void>((r) => child.on('exit', () => r()));
-  await new Promise<void>((resolve, reject) => {
+  // Read to the space after the address, so a line that came in two
+  // pieces is not read short.
+  const url = await new Promise<string>((resolve, reject) => {
     const t0 = Date.now();
     const look = () => {
-      if (out.includes('listening on')) return resolve();
+      const at = /listening on: (http:\/\/\S+)\s/.exec(out);
+      if (at) return resolve(at[1]);
       if (child.exitCode !== null) return reject(new Error(`fenec-server exited: ${out}`));
       if (Date.now() - t0 > 30_000) return reject(new Error(`fenec-server did not start: ${out}`));
       setTimeout(look, 20);
@@ -82,7 +77,7 @@ export async function startNode(opts: { dir: string; port?: number; sync: string
     look();
   });
   return {
-    url: `http://127.0.0.1:${port}`,
+    url,
     child,
     log: () => out,
     kill9: async () => {

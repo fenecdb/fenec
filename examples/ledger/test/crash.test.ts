@@ -2,7 +2,10 @@
 // `--sync always`, and started again over the same files: every movement it
 // acknowledged is there, every invariant holds, an acknowledged key is
 // answered as before, and a transfer whose answer never came is made at
-// most once when sent again with its key.
+// most once when sent again with its key. Started again it listens on a
+// port the system picks, as it did the first time, and the app's stores
+// are made again for it: the port it had was free once it died, and
+// anyone's to take before it came back.
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,12 +24,13 @@ const KILL_AT = Number(process.env.LEDGER_CRASH_AFTER ?? 1500);
 test(`kill -9 after ${KILL_AT} acknowledged movements under --sync always, then restart`, async () => {
   const dir = join(mkdtempSync(join(tmpdir(), 'ledger-crash-')), 'tenants');
   let node = await startNode({ dir, sync: 'always' });
-  const port = new URL(node.url).port;
   await createTenant('crash', node.url);
   const tokens = new Tokens('crash');
-  const base = `${node.url}/t/crash`;
-  const ledger = new Ledger(new HttpStore(base, tokens.app()), { rateLimit: 1e9 });
-  const operator = new HttpStore(base, OPERATOR_TOKEN);
+  const stores = (url: string) => {
+    const base = `${url}/t/crash`;
+    return { ledger: new Ledger(new HttpStore(base, tokens.app()), { rateLimit: 1e9 }), operator: new HttpStore(base, OPERATOR_TOKEN) };
+  };
+  let { ledger, operator } = stores(node.url);
   const world = await prepare(ledger, operator, { n: 40, frozen: 4 });
 
   let acked = 0;
@@ -45,7 +49,8 @@ test(`kill -9 after ${KILL_AT} acknowledged movements under --sync always, then 
   assert.ok(acked >= KILL_AT);
   const unknown = t.pending.size;
 
-  node = await startNode({ dir, sync: 'always', port: Number(port) });
+  node = await startNode({ dir, sync: 'always' });
+  ({ ledger, operator } = stores(node.url));
   try {
     // Every acknowledged movement survived, with both its entries.
     const refs = new Set((await operator.rows<{ ref: string }>('get transfers select ref')).map((r) => r.ref));
