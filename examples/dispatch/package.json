@@ -1,0 +1,40 @@
+{
+  "name": "fenecdb-dispatch",
+  "private": true,
+  "type": "module",
+  "description": "Plover, courier dispatch for delivery companies: Next.js App Router over fenec-shard and tenant nodes -- orders claimed by the nearest courier under a lease, couriers on a live map, a tenant a company held to its plan's quota",
+  "scripts": {
+    "cluster": "tsx scripts/cluster.ts",
+    "setup": "tsx scripts/setup.ts",
+    "simulate": "tsx scripts/simulate.ts",
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3000}",
+    "lint": "tsc --noEmit && eslint . --max-warnings 0",
+    "test": "node --import tsx --test --test-reporter=spec --test-concurrency=1 test/*.test.ts",
+    "bench": "tsx scripts/bench.ts",
+    "shots": "tsx scripts/shots.ts",
+    "grafana-token": "tsx scripts/grafana-token.ts",
+    "ci": "sh scripts/ci.sh"
+  },
+  "dependencies": {
+    "@fenecdb/web": "0.1.10",
+    "next": "16.3.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "server-only": "0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.8",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "tmp": "0.2.7",
+    "uuid": "11.1.1"
+  }
+}

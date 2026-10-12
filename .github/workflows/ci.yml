@@ -408,6 +408,42 @@ jobs:
           SAAS_FENEC_SERVER="$PWD/target/release/fenec-server" SAAS_FENEC_SHARD="$PWD/target/release/fenec-shard" \
             examples/run-tests.sh saas
 
+  # examples/dispatch: Plover, courier dispatch over release fenec-server
+  # tenant nodes and fenec-shard -- 50 couriers claiming at once and waiting
+  # at the server, a courier killed under its lease, two companies' quotas
+  # side by side, its scoped-token tests, and the Next.js site built and
+  # its pages tested. A job of its own, like the saas one's: release
+  # binaries, a cluster a test file, and a Next build.
+  dispatch:
+    name: examples (dispatch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-dispatch-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-dispatch-
+
+      - name: Plover
+        run: |
+          make wasm
+          cargo build --release -p fenec-server -p fenec-shard
+          DISPATCH_FENEC_SERVER="$PWD/target/release/fenec-server" DISPATCH_FENEC_SHARD="$PWD/target/release/fenec-shard" \
+            examples/run-tests.sh dispatch
+
   # examples/analytics: Kestrel, product analytics over a release
   # fenec-server tenant node -- 40 days of history folded by the rollup
   # worker, its correctness tests against brute force (rollups, funnel,

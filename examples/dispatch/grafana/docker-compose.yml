@@ -1,0 +1,30 @@
+# Grafana with fenecdb-datasource built from this checkout, and Plover's
+# dashboard over each company's tenant, the router being the one `npm run
+# cluster` runs on this machine:
+#
+#   npm run cluster & npm run setup && npm run simulate &
+#   npm run grafana-token            # data/grafana/<company>.jwt, a day each
+#   docker compose -f grafana/docker-compose.yml up -d --build
+#   open http://127.0.0.1:3001/d/plover-dispatch
+#
+# The image is monitoring/'s: integrations/grafana/Dockerfile, built from the
+# repository's root.
+services:
+  grafana:
+    build:
+      context: ../../..
+      dockerfile: integrations/grafana/Dockerfile
+    image: fenecdb-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/plover.json
+    extra_hosts:
+      # The host's router, on Linux as on Docker Desktop.
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./plover.json:/var/lib/grafana/dashboards/plover.json:ro
+      - ../data/grafana:/run/plover:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"

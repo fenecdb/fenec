@@ -1,0 +1,479 @@
+{
+  "title": "Plover dispatch",
+  "uid": "plover-dispatch",
+  "tags": [
+    "fenecdb",
+    "plover"
+  ],
+  "description": "A delivery company's day through fenecdb-datasource: every panel is FenecQL over the company's tenant, Grafana's range and interval bound as parameters by the plugin's backend. Pick the company with the data source.",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-2d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "company",
+        "label": "Company",
+        "query": "fenecdb-datasource",
+        "regex": "/^Plover/",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "In the range",
+      "description": "One statement: count(*), the share delivered by the promised time, the mean from order to door, and the kilometres ridden.",
+      "datasource": {
+        "type": "fenecdb-datasource",
+        "uid": "${company}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "fenecdb-datasource",
+            "uid": "${company}"
+          },
+          "queryText": "get orders select count(*) as Delivered, sum(case when delivered_at <= promised then 100.0 else 0.0 end) / count(*) as On_time, avg(delivered_at - created) / 60000 as Minutes, sum(driven) / 1000 as Km where delivered_at >= $__from and delivered_at < $__to",
+          "params": [],
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Delivered"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "On_time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "On time"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Minutes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "m"
+              },
+              {
+                "id": "displayName",
+                "value": "Order to door"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Km"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix: km"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "displayName",
+                "value": "Ridden"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "orientation": "vertical"
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Deliveries, on time and late",
+      "description": "bucket(delivered_at, $__interval_ms): a series a column, stacked.",
+      "datasource": {
+        "type": "fenecdb-datasource",
+        "uid": "${company}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 16,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "fenecdb-datasource",
+            "uid": "${company}"
+          },
+          "queryText": "get orders select bucket(delivered_at, $__interval_ms) as time, sum(case when delivered_at <= promised then 1 else 0 end) as on_time, sum(case when delivered_at > promised then 1 else 0 end) as late where delivered_at >= $__from and delivered_at < $__to group time order time",
+          "params": [],
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 90,
+            "lineWidth": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "on_time"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3a66e8"
+                }
+              },
+              {
+                "id": "displayName",
+                "value": "On time"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "late"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e0652a"
+                }
+              },
+              {
+                "id": "displayName",
+                "value": "Late"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "barchart",
+      "title": "Open orders now",
+      "description": "Orders not yet delivered or cancelled, by state; a dead letter waits for a dispatcher.",
+      "datasource": {
+        "type": "fenecdb-datasource",
+        "uid": "${company}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "fenecdb-datasource",
+            "uid": "${company}"
+          },
+          "queryText": "get orders select status, count(*) as orders where status in [\"ready\", \"assigned\", \"picked\", \"dead\"] group status order status",
+          "params": [],
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2f5ef2"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xField": "status",
+        "showValue": "always",
+        "legend": {
+          "showLegend": false
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Kilometres ridden",
+      "datasource": {
+        "type": "fenecdb-datasource",
+        "uid": "${company}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "fenecdb-datasource",
+            "uid": "${company}"
+          },
+          "queryText": "get orders select bucket(delivered_at, $__interval_ms) as time, sum(driven) / 1000 as km where delivered_at >= $__from and delivered_at < $__to group time order time",
+          "params": [],
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: km",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2f5ef2"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "geomap",
+      "title": "Couriers on shift",
+      "description": "get positions: a geo field is two columns, loc.lon and loc.lat, Geomap's coordinates. A position past its @ttl (two minutes) is in no read.",
+      "datasource": {
+        "type": "fenecdb-datasource",
+        "uid": "${company}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "fenecdb-datasource",
+            "uid": "${company}"
+          },
+          "queryText": "get positions select courier, state, vehicle, loc",
+          "params": [],
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2f5ef2"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "view": {
+          "id": "coords",
+          "lat": 38.345,
+          "lon": 26.99,
+          "zoom": 13
+        },
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": true
+        },
+        "basemap": {
+          "type": "default",
+          "name": "Basemap"
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "Couriers",
+            "location": {
+              "mode": "coords",
+              "latitude": "loc.lat",
+              "longitude": "loc.lon"
+            },
+            "config": {
+              "showLegend": false,
+              "style": {
+                "size": {
+                  "fixed": 6
+                },
+                "color": {
+                  "fixed": "#2f5ef2"
+                },
+                "opacity": 0.9,
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "img/icons/marker/circle.svg"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Couriers, most deliveries first",
+      "description": "group courier over the range.",
+      "datasource": {
+        "type": "fenecdb-datasource",
+        "uid": "${company}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "fenecdb-datasource",
+            "uid": "${company}"
+          },
+          "queryText": "get orders select courier, count(*) as delivered, sum(case when delivered_at <= promised then 100.0 else 0.0 end) / count(*) as on_time, sum(driven) / 1000 as km, avg(delivered_at - picked_at) / 60000 as ride_minutes where delivered_at >= $__from and delivered_at < $__to group courier order delivered desc limit 20",
+          "params": [],
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "on_time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "delivered"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    }
+  ]
+}
