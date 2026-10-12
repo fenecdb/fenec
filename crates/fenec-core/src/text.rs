@@ -1879,7 +1879,7 @@ mod tests {
                 };
                 for k in [1usize, 3, 10, 50] {
                     let odd = rng.upto(4) == 0;
-                    let accept = |d: DocId| !odd || d % 2 == 0;
+                    let accept = |d: DocId| !odd || d.is_multiple_of(2);
                     let want = ix.search_loose_unpruned(&query, k, accept, loose);
                     let got = ix.search_loose(&query, k, accept, None, loose).unwrap();
                     assert_eq!(ids(&want), ids(&got), "seed {seed} k {k} {query:?} {loose:?}");

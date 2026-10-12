@@ -646,8 +646,8 @@ mod tests {
         let (n, m) = (a.len(), b.len());
         let w = m + 1;
         let mut d = vec![0usize; (n + 1) * w];
-        for j in 1..=m {
-            d[j] = j + 1;
+        for (j, cell) in d.iter_mut().enumerate().take(w).skip(1) {
+            *cell = j + 1;
         }
         let mut prefix = d[m];
         for i in 1..=n {
