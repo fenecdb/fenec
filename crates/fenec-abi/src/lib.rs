@@ -339,7 +339,7 @@ fn schemas(db: &Database) -> Vec<&Schema> {
     let mut out = Vec::new();
     for n in &db.collection_names() {
         if let Ok(c) = db.collection(n) {
-            out.push(&c.schema);
+            out.push(&*c.schema);
         }
     }
     out

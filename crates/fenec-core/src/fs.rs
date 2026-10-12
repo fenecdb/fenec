@@ -20,6 +20,15 @@ const WRITE_BUF: usize = 1 << 20;
 /// whether or not. A 60 ms fsync of a ledger's writes left 0.5 MB.
 const WRITE_HELD: usize = 8 << 20;
 
+/// What a write behind the database ([`Sink::write_behind`]) waits for the
+/// buffer to hold: a block or a few, a write each. On macOS a write that
+/// takes a file's dirty pages past each 8 MB waits for the disk -- 1.5 to
+/// 11 ms, the file mapped or not -- and under the write lock, a buffer
+/// written as it outgrew [`WRITE_BUF`] held four readers beside blocks of
+/// 1 000 writes up to 6 ms every 8 MB.
+#[cfg(not(target_arch = "wasm32"))]
+const BEHIND_AT: usize = 64 << 10;
+
 /// Appends collect in memory and reach the file only in `sync`, in the
 /// durability `flush` hands out, or when they outgrow `WRITE_BUF`.
 ///
@@ -50,6 +59,10 @@ pub struct FileSink {
     /// file in its place.
     #[cfg(all(unix, target_pointer_width = "64"))]
     mapping: Option<Arc<Mapping>>,
+    /// Whether a caller writes the buffer once it has let go of the
+    /// database ([`Sink::write_behind`]): an append then leaves it for that
+    /// until it holds [`WRITE_HELD`].
+    behind: bool,
 }
 
 struct Disk {
@@ -391,6 +404,7 @@ impl FileSink {
             path,
             #[cfg(all(unix, target_pointer_width = "64"))]
             mapping: None,
+            behind: false,
         }
     }
 
@@ -428,7 +442,9 @@ impl Sink for FileSink {
             pending.extend_from_slice(bytes);
             pending.len()
         };
-        if held >= WRITE_BUF {
+        // Written behind the database: by the caller once it lets the lock
+        // go, unless that has fallen behind by `WRITE_HELD`.
+        if held >= WRITE_BUF && !(self.behind && held < WRITE_HELD) {
             // Not while a durability fsyncs the file, whose writes wait for
             // it: this runs under the database's lock, and every request
             // would wait out the fsync too. The first append past the
@@ -568,6 +584,30 @@ impl Sink for FileSink {
     #[cfg(not(target_arch = "wasm32"))]
     fn write_out(&mut self) -> Result<()> {
         lock(&self.disk).write_pending(&self.pending)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_behind(&mut self, all: bool) -> Option<Durability> {
+        self.behind = true;
+        let held = lock(&self.pending).len();
+        if held == 0 || (held < BEHIND_AT && !all) {
+            return None;
+        }
+        let (disk, pending) = (Arc::clone(&self.disk), Arc::clone(&self.pending));
+        // Not while a durability fsyncs the file: it writes them itself, and
+        // the request this runs for, a buffered write, would wait out the
+        // fsync -- a ledger's transfer beside the syncer's waited 126 ms.
+        // Left, they are the next write behind's.
+        Some(Box::new(move || match disk.try_lock() {
+            Ok(mut disk) => disk.write_pending(&pending),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(()),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().write_pending(&pending),
+        }))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn written_all(&self) -> bool {
+        lock(&self.pending).is_empty()
     }
 
     fn sync_existing(&mut self) -> Result<()> {

@@ -15,9 +15,14 @@
 //!     SQLite's reach the operating system (`synchronous=NORMAL`);
 //!   * a read by id, alone and beside four writers, p50 and p99;
 //!   * a read by id beside a writer landing blocks of 1 000 writes one after
-//!     another, as `POST /batch` of 1 000 lines does: fenecdb's block holds
-//!     the write lock until it lands, SQLite's readers read the last commit
-//!     (WAL) beside its transaction. p50, p99 and the longest.
+//!     another, as `POST /batch` of 1 000 lines does: fenecdb's block has its
+//!     puts' documents built and encoded under the read lock, beside the
+//!     readers (`Database::prepare`), holds the write lock while it lands,
+//!     and writes its buffer once it has let the lock go
+//!     (`Database::write_behind`), as `fenec-server` runs a batch; SQLite's
+//!     readers read the last commit (WAL) beside its transaction. p50, p99
+//!     and the longest. `blocks` runs this alone, three times, and with
+//!     `NOPREP` set the block builds its documents under the write lock.
 //!
 //! SQLite threads each hold a connection with a 30 s busy timeout, the
 //! usual answer to `SQLITE_BUSY`; fenecdb's share one database behind a
@@ -230,6 +235,62 @@ fn sqlite_readers(path: &Path, beside: impl FnOnce(&AtomicBool) + Send) -> Vec<f
         }
     });
     all
+}
+
+/// Reads by id from four threads beside blocks of 1 000 writes landing one
+/// after another, as `POST /batch` of 1 000 lines runs them: the block's
+/// documents built and encoded under the read lock (`Database::prepare`),
+/// beside the readers, the write lock held while it lands and its buffer
+/// written once that is let go (`Database::write_behind`) -- SQLite's WAL
+/// reads the last commit meanwhile. With `NOPREP` set the block builds its
+/// documents under the write lock, as every block did before.
+fn beside_blocks(db: &Arc<RwLock<Database>>, spath: &Path) {
+    let mut f = fenec_readers(db, |stop| {
+        let put = stmt("put t {k: $1, n: $2}");
+        let end = Instant::now() + RUN;
+        let mut n = 0i64;
+        while Instant::now() < end && !stop.load(Ordering::Relaxed) {
+            let args: Vec<[Value; 2]> = (n..n + BLOCK)
+                .map(|i| [Value::Text("block".into()), Value::Int(i)])
+                .collect();
+            let stmts: Vec<(&Statement, &[Value])> = args.iter().map(|a| (&put, &a[..])).collect();
+            match std::env::var_os("NOPREP") {
+                Some(_) => drop(db.write().unwrap().execute_block(&stmts).unwrap()),
+                None => {
+                    let mut p = db.read().unwrap().prepare(&stmts);
+                    let behind = {
+                        let mut g = db.write().unwrap();
+                        g.execute_prepared(&stmts, &mut p).unwrap();
+                        g.write_behind()
+                    };
+                    drop(p);
+                    if let Some(write) = behind {
+                        write().unwrap();
+                    }
+                }
+            }
+            n += BLOCK;
+        }
+    });
+    let mut s = sqlite_readers(spath, |stop| {
+        let mut c = sqlite_conn(spath, false);
+        let end = Instant::now() + RUN;
+        let mut n = 0i64;
+        while Instant::now() < end && !stop.load(Ordering::Relaxed) {
+            let tx = c.transaction().unwrap();
+            for i in n..n + BLOCK {
+                tx.execute("insert into t (k, n) values ('block', ?1)", [i])
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+            n += BLOCK;
+        }
+    });
+    row(
+        "  beside blocks of 1 000 writes",
+        reads(&mut f),
+        reads(&mut s),
+    );
 }
 
 // --------------------------------------------------------------- main
@@ -503,6 +564,17 @@ fn main() {
         return;
     }
     let (fpath, spath) = (dir.join("bench.fenec"), dir.join("bench.sqlite"));
+    // `blocks`: the reads beside blocks alone, three times over.
+    if std::env::args().nth(1).as_deref() == Some("blocks") {
+        row("", "fenecdb".into(), "SQLite".into());
+        for _ in 0..3 {
+            let db = fenec_open(&fpath);
+            sqlite_open(&spath);
+            beside_blocks(&db, &spath);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
     println!(
         "fenecdb {} against SQLite {}, in one process, {} threads of this machine\n",
         fenec_core::VERSION,
@@ -542,42 +614,7 @@ fn main() {
     });
     row("  beside 4 writers, no fsync", reads(&mut f), reads(&mut s));
 
-    // Blocks of 1 000 writes, one after another, as `POST /batch` of 1 000
-    // lines runs them: the block holds the write lock from its first write
-    // to its record, and a reader waits for it -- SQLite's WAL reads the
-    // last commit meanwhile.
-    let mut f = fenec_readers(&db, |stop| {
-        let put = stmt("put t {k: $1, n: $2}");
-        let end = Instant::now() + RUN;
-        let mut n = 0i64;
-        while Instant::now() < end && !stop.load(Ordering::Relaxed) {
-            let args: Vec<[Value; 2]> = (n..n + BLOCK)
-                .map(|i| [Value::Text("block".into()), Value::Int(i)])
-                .collect();
-            let stmts: Vec<(&Statement, &[Value])> = args.iter().map(|a| (&put, &a[..])).collect();
-            db.write().unwrap().execute_block(&stmts).unwrap();
-            n += BLOCK;
-        }
-    });
-    let mut s = sqlite_readers(&spath, |stop| {
-        let mut c = sqlite_conn(&spath, false);
-        let end = Instant::now() + RUN;
-        let mut n = 0i64;
-        while Instant::now() < end && !stop.load(Ordering::Relaxed) {
-            let tx = c.transaction().unwrap();
-            for i in n..n + BLOCK {
-                tx.execute("insert into t (k, n) values ('block', ?1)", [i])
-                    .unwrap();
-            }
-            tx.commit().unwrap();
-            n += BLOCK;
-        }
-    });
-    row(
-        "  beside blocks of 1 000 writes",
-        reads(&mut f),
-        reads(&mut s),
-    );
+    beside_blocks(&db, &spath);
     drop(db);
     long(&dir);
     let _ = std::fs::remove_dir_all(&dir);

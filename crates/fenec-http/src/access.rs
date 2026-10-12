@@ -2292,6 +2292,10 @@ impl Hook for Check {
     fn name(&self) -> &str {
         "access"
     }
+    /// It judges a document and changes nothing of it.
+    fn rewrites(&self) -> bool {
+        false
+    }
     fn before_write(&self, schema: &Schema, op: WriteOp, doc: &mut Document) -> Result<()> {
         let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
             return Ok(());

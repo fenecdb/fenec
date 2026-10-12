@@ -707,7 +707,7 @@ impl Scope {
         let Some(v) = View::of(self, &l.collection) else {
             return;
         };
-        let schema = db.collection(&l.collection).ok().map(|c| &c.schema);
+        let schema = db.collection(&l.collection).ok().map(|c| &*c.schema);
         let kept = columns.len().saturating_sub(l.added);
         // The fields a row may not show, a place each.
         let mut maybe: Vec<String> = Vec::new();

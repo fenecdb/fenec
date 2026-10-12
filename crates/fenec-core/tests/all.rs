@@ -49,6 +49,7 @@ mod order_expr;
 mod paging;
 mod persist;
 mod pinned;
+mod prepared;
 mod quant;
 mod query_json;
 mod queues_docs;

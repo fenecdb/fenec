@@ -747,6 +747,14 @@ impl Store {
     /// Encodes a document in schema field order, a dropped place a `null`.
     pub fn encode_doc(schema: &Schema, doc: &Document) -> Vec<u8> {
         let mut payload = Vec::with_capacity(64);
+        Store::encode_doc_into(schema, doc, &mut payload);
+        payload
+    }
+
+    /// [`Self::encode_doc`] onto the end of `payload`. Each value encoded
+    /// where it is: copied first, a text's or a list's allocation and its
+    /// freeing were 4% of a put's time in a block of 1 000.
+    pub fn encode_doc_into(schema: &Schema, doc: &Document, payload: &mut Vec<u8>) {
         let mut at = 0;
         for (i, f) in schema.fields.iter().enumerate() {
             // The dropped places before this field's: none, most of the
@@ -755,12 +763,11 @@ impl Store {
                 payload.push(crate::codec::TAG_NULL);
                 at += 1;
             }
-            let v = doc.get(&f.name).cloned().unwrap_or(Value::Null);
+            let v = doc.get(&f.name).unwrap_or(&Value::Null);
             // The field type is passed along: `vector<N, f16>` halves in the record.
-            encode_value_as(&mut payload, &v, Some(&f.ty));
+            encode_value_as(payload, v, Some(&f.ty));
             at += 1;
         }
-        payload
     }
 
     /// Produces the frame (header + payload). The same byte sequence goes to
@@ -778,6 +785,28 @@ impl Store {
     /// Returns the full frame written to the segment (for the persistence layer).
     pub fn append(&mut self, op: u8, id: DocId, payload: &[u8]) -> Vec<u8> {
         let frame = Store::frame(op, id, payload);
+        self.land_frame(op, id, &frame, payload.len());
+        frame
+    }
+
+    /// [`Self::append`] for a block's write: the frame written onto the
+    /// end of `out`, the block's frames, and copied from there into the
+    /// segment -- made in a `Vec` of its own and copied twice, its
+    /// allocation and its freeing were 6% of a put's time under the write
+    /// lock in a block of 1 000.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn append_onto(&mut self, op: u8, id: DocId, payload: &[u8], out: &mut Vec<u8>) {
+        let from = out.len();
+        out.push(op);
+        put_uvarint(out, id);
+        put_uvarint(out, payload.len() as u64);
+        out.extend_from_slice(payload);
+        self.land_frame(op, id, &out[from..], payload.len());
+    }
+
+    /// The frame put in the active segment and the index pointed at it.
+    #[inline(always)]
+    fn land_frame(&mut self, op: u8, id: DocId, frame: &[u8], payload_len: usize) {
         if let Some(old) = self.index.get(id) {
             self.dead_bytes += old.len as usize;
         }
@@ -786,7 +815,7 @@ impl Store {
             self.segments.len() - 1
         };
         let seg = &mut self.segments[seg_ix];
-        let header_len = frame.len() - payload.len();
+        let header_len = frame.len() - payload_len;
         let off = seg.data.len() + header_len;
         let data = grow(&mut seg.data);
         // Doubled as a `Vec` would be, but never past the record that
@@ -800,7 +829,7 @@ impl Store {
                 .max(need);
             data.reserve_exact(to - data.len());
         }
-        data.extend_from_slice(&frame);
+        data.extend_from_slice(frame);
         self.total_bytes += frame.len();
 
         match op {
@@ -810,7 +839,7 @@ impl Store {
                     Loc {
                         seg: seg_ix as u32,
                         off: off as u32,
-                        len: payload.len() as u32,
+                        len: payload_len as u32,
                     },
                 );
                 if id >= self.next_id {
@@ -823,7 +852,6 @@ impl Store {
             }
             _ => {}
         }
-        frame
     }
 
     #[inline]

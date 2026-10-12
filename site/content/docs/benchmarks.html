@@ -966,7 +966,7 @@ that costs when many want to write, and how fast readers go meanwhile.</p>
 <tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 497 k</b> / 821 k / 611 k</td><td class="n">128 k / 128 k / 126 k</td></tr>
 <tr><td>reads/s from 4 threads, alone</td><td class="n"><b>7 061 k</b>, p99 0.8 µs</td><td class="n">1 111 k, p99 16.5 µs</td></tr>
 <tr><td>… beside 4 writers</td><td class="n"><b>701 k</b>, p99 75 µs</td><td class="n">344 k, p99 79 µs</td></tr>
-<tr><td>… beside blocks of 1 000 writes</td><td class="n">213 k, p99 0.51 ms, the longest 4.8 ms</td><td class="n"><b>632 k</b>, the longest 0.6 ms</td></tr>
+<tr><td>… beside blocks of 1 000 writes</td><td class="n"><b>2 010 k</b>, p99 2.5 µs, the longest 0.5–1.2 ms</td><td class="n">630 k, p99 59 µs, the longest 0.4–1.9 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -974,6 +974,9 @@ that costs when many want to write, and how fast readers go meanwhile.</p>
 <ul>
   <li><b>Durable writes scale with the writers.</b> Sixteen writers share
     their disk syncs; SQLite's stay flat.</li>
+  <li><b>A block of writes holds the readers only while it lands.</b> Its
+    rows are built and encoded beside them first, and its buffer is written
+    after the lock is let go.</li>
   <li><b>A long read does not hold the writers.</b> It reads what it pinned
     with no lock held, so a write waits milliseconds beside it, not the
     read's whole length.</li>
@@ -1017,14 +1020,24 @@ SQLite's, and handing the lock between sixteen costs more than half of that. A
 write, or a <code>/batch</code> of them, holds the
 lock only while it runs — microseconds for a row — and there is no
 transaction held open across requests to keep the readers or the other
-writers waiting. A block of 1 000 writes — a <code>/batch</code>'s — does
-hold it while it runs, about half a millisecond, and readers wait for it,
-where SQLite's WAL reads the last commit meanwhile. The longest wait was
-17.4 ms until a handover — the documents written since the open pointed at
-their places in the file — also ran by count: it ran once the documents
-reached 16 MB, which for rows this small was 930 000 of them, each a little
-work under the write lock. It runs every 65 536 writes as well now, the same
-work in pauses of about a millisecond.</p>
+writers waiting. A block of 1 000 writes — a <code>/batch</code>'s — held
+it while it ran, about half a millisecond, and readers waited for it, where
+SQLite's WAL reads the last commit meanwhile: 213 k reads a second, the
+longest wait 4.8 ms. Most of that half millisecond had nothing to do with the
+database as the lock holds it — each row built from the statement and its
+parameters, its values made the fields' types, encoded, and freed once
+written — and a block's rows are now built and encoded under the shared
+lock, beside the readers, the write lock held only to land them, about
+0.15 ms; whatever the database decides, the ids, a value already held, the
+indexes, is decided under the lock as before, and the file is the same byte
+for byte. The rest of the longest waits were the disk: on macOS a write that
+takes a file's dirty pages past each 8 MB waits for it, 1.5 to 11 ms, and the
+buffer was written under the lock as it filled. It is written once the lock
+is let go now, and the handover — the documents written since the open
+pointed at their places in the file — runs in pieces of 16 384 writes,
+0.3 ms each, as the next block starts, with nothing left to write. Until
+it also ran by count the longest wait was 17.4 ms: it ran once the
+documents reached 16 MB, which for rows this small was 930 000 of them.</p>
 
 <p><b>A long read is pinned.</b> A read took the shared lock for as long as
 it ran, and a write waited for every read, so an aggregate over a million

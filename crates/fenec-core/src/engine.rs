@@ -10,7 +10,7 @@ use crate::geo::GeoIndex;
 use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
-use crate::schema::{collatable, Composite, IndexKind, Metric, Schema};
+use crate::schema::{collatable, Composite, IndexKind, Metric, Schema, SchemaCell};
 use crate::sorted::{Range as SortRange, SortedIndex};
 use crate::sparse::SparseIndex;
 use crate::store::{Store, OP_DEL, OP_PUT};
@@ -38,6 +38,10 @@ mod maintenance;
 mod pinned;
 #[cfg(not(target_arch = "wasm32"))]
 pub use pinned::{Pinned, PIN_AT, PIN_BUDGET};
+#[cfg(not(target_arch = "wasm32"))]
+mod prepared;
+#[cfg(not(target_arch = "wasm32"))]
+pub use prepared::{Prepared, PREPARE_AT};
 #[cfg(not(target_arch = "wasm32"))]
 mod wake;
 #[cfg(not(target_arch = "wasm32"))]
@@ -697,7 +701,7 @@ enum Undo {
 
 /// What [`Undo::Altered`] puts back.
 struct Altered {
-    before: Schema,
+    before: SchemaCell,
     op: u8,
     field: String,
     to: String,
@@ -1070,6 +1074,26 @@ pub trait Sink: Send {
     #[cfg(not(target_arch = "wasm32"))]
     fn write_out(&mut self) -> Result<()> {
         Ok(())
+    }
+    /// What writes the appends it holds into the file, with no fsync, for
+    /// a caller to run once it has let go of the database
+    /// ([`Database::write_behind`]); `None` while it holds too few to be
+    /// worth a write. A sink asked once leaves its appends for it from then
+    /// on, rather than write them as they outgrow its buffer -- under the
+    /// write lock, where every reader waits for the disk.
+    ///
+    /// `all` asks for every append it holds, however few: a handover is
+    /// due, which takes the records in from the file, and finds them there
+    /// rather than write them under the lock ([`Self::written_all`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_behind(&mut self, _all: bool) -> Option<Durability> {
+        None
+    }
+    /// Whether every append it took is in the file, or on its way there
+    /// in a write under way: a handover then writes nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn written_all(&self) -> bool {
+        true
     }
     fn sync(&mut self) -> Result<()> {
         Ok(())
@@ -1526,7 +1550,7 @@ fn vectors_of(docs: &[Document], name: &str) -> Vec<(DocId, Vec<f32>)> {
 
 pub struct Collection {
     pub id: u32,
-    pub schema: Schema,
+    pub schema: SchemaCell,
     pub store: Store,
     /// field name -> HNSW index
     pub vectors: Fields<VectorIndex>,
@@ -1609,7 +1633,7 @@ impl Collection {
         store.set_dropped(&schema.dropped);
         let mut c = Collection {
             id,
-            schema,
+            schema: SchemaCell::new(schema),
             store,
             vectors,
             hashes,
@@ -1810,7 +1834,7 @@ impl Collection {
             FIELD_ADD | FIELD_TTL => Taken::default(),
             _ => self.take_indexes(&ch.field),
         };
-        self.schema = ch.schema.clone();
+        self.schema = SchemaCell::new(ch.schema.clone());
         self.store.set_dropped(&self.schema.dropped);
         // A json field's indexes on paths go with it, by the paths the
         // schema after names, and the indexes over several fields with the
@@ -1837,7 +1861,7 @@ impl Collection {
             fresh.append(OP_PUT, id, &self.schema.without_dropped(payload)?);
         }
         self.store = fresh;
-        self.schema.dropped.clear();
+        SchemaCell::make_mut(&mut self.schema).dropped.clear();
         Ok(())
     }
 
@@ -3532,6 +3556,23 @@ pub struct Database {
     pin_budget: usize,
     #[cfg(not(target_arch = "wasm32"))]
     pins: Arc<std::sync::atomic::AtomicUsize>,
+    /// The documents of a block's `put`s, built and encoded before the
+    /// write lock ([`Self::prepare`]), while the block runs; and which of
+    /// its statements is running, for its `put` to take its own.
+    #[cfg(not(target_arch = "wasm32"))]
+    preparation: Prepared,
+    #[cfg(not(target_arch = "wasm32"))]
+    ready_at: Option<usize>,
+    /// Whether [`Self::execute_prepared`] or [`Self::execute_ready`] has
+    /// just handed the preparation over: one found otherwise is one a panic
+    /// left half way, and let go of ([`Self::disarm`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    armed: bool,
+    /// Whether the caller writes the sink's buffer once it has let go of
+    /// the database ([`Self::write_behind`]): a handover then waits for the
+    /// next block's start, where it finds the records in the file.
+    #[cfg(not(target_arch = "wasm32"))]
+    behind: bool,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -3624,6 +3665,14 @@ impl Database {
             pin_budget: pinned::PIN_BUDGET,
             #[cfg(not(target_arch = "wasm32"))]
             pins: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            preparation: Prepared::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            ready_at: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            armed: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            behind: false,
         }
     }
 
@@ -4681,7 +4730,7 @@ impl Database {
                 }
                 *f = after;
             }
-            c.schema = ch.schema;
+            c.schema = SchemaCell::new(ch.schema);
             c.store.set_dropped(&c.schema.dropped);
             c.reset_index_structures();
             forget(restored, name, &|f| kept.iter().any(|(k, _)| k == f));
@@ -4735,7 +4784,7 @@ impl Database {
                     }
                 }
             }
-            c.schema = schema;
+            c.schema = SchemaCell::new(schema);
             c.reset_index_structures();
             forget(restored, name, &|f| kept.iter().any(|(k, _)| k == f));
             for (f, ix) in kept {
@@ -5190,6 +5239,22 @@ impl Database {
         self.storage(r)
     }
 
+    /// What writes the buffered writes into the file with no fsync, for
+    /// the caller to run once it has let go of the database, as it runs a
+    /// [`Durability`] -- a failure reported back with [`Self::fail`] --
+    /// and `None` while there are too few to be worth a write
+    /// ([`Sink::write_behind`]). A caller that asks after its writes keeps
+    /// the write, and the disk's waits, out of the lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_behind(&mut self) -> Option<Durability> {
+        if self.failed.is_some() {
+            return None;
+        }
+        self.behind = true;
+        let due = self.handover_due(1);
+        self.sink_mut().write_behind(due)
+    }
+
     /// Records a storage failure found outside the engine, a
     /// [`Durability`] that failed: every later write and sync is refused, as
     /// after one the engine saw itself.
@@ -5324,7 +5389,7 @@ impl Database {
             known: self
                 .collections
                 .values()
-                .map(|c| (c.id, c.schema.clone()))
+                .map(|c| (c.id, Schema::clone(&c.schema)))
                 .collect(),
             seq: first.saturating_sub(1),
             go: true,
@@ -5478,7 +5543,7 @@ impl Database {
         let added = changed
             .iter()
             .all(|&i| c.schema.fields[i].index == IndexKind::None);
-        c.schema = schema;
+        c.schema = SchemaCell::new(schema);
         if added {
             for i in changed {
                 build_index(c, i)?;
@@ -5670,6 +5735,10 @@ impl Database {
     }
 
     fn open_block(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.behind {
+            self.hand_over_before();
+        }
         self.block = Some(std::mem::take(&mut self.spare).cleared());
     }
 
@@ -5856,14 +5925,14 @@ impl Database {
                         let c = self.collections.get_mut(&name).unwrap();
                         let f = c.schema.fields[pos].name.clone();
                         drop(c.take_indexes(&f));
-                        c.schema.fields[pos].index = IndexKind::None;
+                        SchemaCell::make_mut(&mut c.schema).fields[pos].index = IndexKind::None;
                     }
                 }
                 Undo::PathIndexed(cid, path) => {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
                         if let Some(at) = c.schema.paths.iter().position(|p| p.name == path) {
-                            c.schema.paths.remove(at);
+                            SchemaCell::make_mut(&mut c.schema).paths.remove(at);
                         }
                         c.fit_paths();
                     }
@@ -5899,7 +5968,7 @@ impl Database {
                 Undo::Composed(cid, made) => {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
-                        let comps = &mut c.schema.composites;
+                        let comps = &mut SchemaCell::make_mut(&mut c.schema).composites;
                         if let Some(at) = comps.iter().rposition(|o| o.name() == made) {
                             comps.remove(at);
                         }
@@ -5910,7 +5979,9 @@ impl Database {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
                         let at = at.min(c.composites.len());
-                        c.schema.composites.insert(at, b.0.clone());
+                        SchemaCell::make_mut(&mut c.schema)
+                            .composites
+                            .insert(at, b.0.clone());
                         c.composites.insert(at, *b);
                     }
                 }
@@ -5933,6 +6004,8 @@ impl Database {
         &mut self,
         stmts: &[(&Statement, &[Value])],
     ) -> std::result::Result<Vec<Response>, (usize, Error)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disarm();
         if let Some(i) = stmts.iter().position(|(s, _)| !s.fits_block()) {
             return Err((
                 i,
@@ -5951,7 +6024,14 @@ impl Database {
         }
         let mut out = Vec::with_capacity(stmts.len());
         for (i, (stmt, params)) in stmts.iter().enumerate() {
-            match self.run_one(stmt, params) {
+            #[cfg(not(target_arch = "wasm32"))]
+            self.offer(i);
+            let r = self.run_one(stmt, params);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.ready_at = None;
+            }
+            match r {
                 Ok(r) => out.push(r),
                 Err(e) => {
                     if !outer {
@@ -6012,13 +6092,12 @@ impl Database {
             Statement::ListCollections => Ok(Response::Schemas(
                 self.order
                     .iter()
-                    .map(|n| self.collections[n].schema.clone())
+                    .map(|n| Schema::clone(&self.collections[n].schema))
                     .collect(),
             )),
-            Statement::Describe(name) => Ok(Response::Schemas(vec![self
-                .collection(name)?
-                .schema
-                .clone()])),
+            Statement::Describe(name) => Ok(Response::Schemas(vec![Schema::clone(
+                &self.collection(name)?.schema,
+            )])),
             _ => Err(Error::Query("this statement requires write access".into())),
         }
     }
@@ -6173,6 +6252,8 @@ impl Database {
     /// statement finishes -- not per document: a `put` of 10 000 documents is
     /// a single wake-up, and the subscriber will read one batch anyway.
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disarm();
         // A write is a block of one: a `put` of many documents stopped half
         // way -- a hook's refusal, a crash -- left the ones before applied.
         // Its writes land as one record, which for a lone document is the
@@ -6291,13 +6372,12 @@ impl Database {
             Statement::ListCollections => Ok(Response::Schemas(
                 self.order
                     .iter()
-                    .map(|n| self.collections[n].schema.clone())
+                    .map(|n| Schema::clone(&self.collections[n].schema))
                     .collect(),
             )),
-            Statement::Describe(name) => Ok(Response::Schemas(vec![self
-                .collection(name)?
-                .schema
-                .clone()])),
+            Statement::Describe(name) => Ok(Response::Schemas(vec![Schema::clone(
+                &self.collection(name)?.schema,
+            )])),
             Statement::Compact(which) => self.compact(which.as_deref(), true),
         }
     }
@@ -6827,7 +6907,7 @@ impl Database {
             self.link_waiting(1);
         }
         let c = self.collection(collection)?;
-        let mut schema = c.schema.clone();
+        let mut schema = Schema::clone(&c.schema);
         let no_field = |f: &str| Error::NotFound(format!("field `{f}` in `{collection}`"));
         let (op, field, to) = match change {
             Alter::AddField(f) => {
@@ -6979,7 +7059,7 @@ impl Database {
         // copy beside the database, as an HNSW build's seconds are.
         if crate::schema::split_path(field).is_some() {
             let f = crate::schema::Field::new(field, DataType::Json).indexed(kind.resolved());
-            c.schema.add_path(f);
+            SchemaCell::make_mut(&mut c.schema).add_path(f);
             if let Some(b) = &mut self.block {
                 b.was.push(Undo::PathIndexed(cid, field.to_string()));
             }
@@ -6987,7 +7067,7 @@ impl Database {
             build_path_index(c, field)?;
         } else {
             let pos = c.schema.field_pos(field).unwrap();
-            c.schema.fields[pos].index = kind.resolved();
+            SchemaCell::make_mut(&mut c.schema).fields[pos].index = kind.resolved();
             // Before the build, which a block that does not land -- or a
             // build that fails -- puts back with it.
             if let Some(b) = &mut self.block {
@@ -7026,7 +7106,9 @@ impl Database {
         }
         let c = self.collections.get_mut(collection).unwrap();
         let cid = c.id;
-        c.schema.composites.push(comp.clone());
+        SchemaCell::make_mut(&mut c.schema)
+            .composites
+            .push(comp.clone());
         c.fit_composites();
         // Before the build, which a block that does not land -- or a build
         // that fails -- puts back with it.
@@ -7101,7 +7183,7 @@ impl Database {
         };
         let c = self.collections.get_mut(collection).unwrap();
         let cid = c.id;
-        c.schema.composites.remove(at);
+        SchemaCell::make_mut(&mut c.schema).composites.remove(at);
         let taken = c.composites.remove(at);
         let encoded = c.schema.encode();
         let text = taken.0.keys_text();
@@ -7183,30 +7265,44 @@ impl Database {
         params: &[Value],
         mut answered: Option<&mut (Vec<DocId>, Vec<WriteOp>)>,
     ) -> Result<usize> {
-        let schema = self.collection(collection)?.schema.clone();
-        let cid = self.collection(collection)?.id;
-        let hooks: Vec<_> = registry.hooks().to_vec();
+        // The collection looked up once, and its hooks borrowed rather than
+        // copied: a lookup by name is a hash of the name, and the copy an
+        // allocation, every statement.
+        let (schema, cid) = {
+            let c = self.collection(collection)?;
+            (c.schema.clone(), c.id)
+        };
+        let hooks = registry.hooks();
         let ctx = EvalCtx {
             params,
             registry,
             clock: self.clock,
         };
 
-        let mut built = Vec::with_capacity(docs.len());
-        for pairs in docs {
-            let mut doc = Document::default();
-            for (k, e) in pairs {
-                doc_field(&schema, &mut doc, k, eval(e, &mut NoRow, &ctx)?)?;
+        // Built and encoded beside the readers, where the block was
+        // prepared against the schema the collection holds
+        // ([`Self::prepare`]); here otherwise, as they always were.
+        #[cfg(not(target_arch = "wasm32"))]
+        let ready = self.take_ready(cid, &schema);
+        #[cfg(not(target_arch = "wasm32"))]
+        let built = match ready {
+            Some((first, count)) => self.take_built(first, count),
+            None => {
+                let mut built = Vec::with_capacity(docs.len());
+                build_docs(&schema, collection, docs, docs_param, &ctx, &mut built)?;
+                built
             }
-            built.push(doc_done(&schema, doc)?);
-        }
-        if let Some(i) = docs_param {
-            let given = documents_in(collection, i, params)?;
-            built.reserve(given.len());
-            for members in given {
-                built.push(Self::document_of(&schema, members)?);
-            }
-        }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let built = {
+            let mut built = Vec::with_capacity(docs.len());
+            build_docs(&schema, collection, docs, docs_param, &ctx, &mut built)?;
+            built
+        };
+        // The payloads encoded with them are the documents' as written
+        // only where no hook may change one.
+        #[cfg(not(target_arch = "wasm32"))]
+        let encoded = !hooks.iter().any(|h| h.rewrites());
         // An upsert's pairs, bound once a statement as a `set`'s are, `new.f`
         // reading the document put.
         let assigns: Option<Vec<Assign>> = else_set.map(|set| {
@@ -7233,7 +7329,10 @@ impl Database {
         let unique = schema.has_unique();
         // Without a clock -- the browser module handed none -- no row is
         // past its time for a write, as before.
-        let expiry = match self.ttl_of(collection).filter(|_| insert || unique) {
+        let expiry = match (insert || unique)
+            .then(|| self.ttl_of(collection))
+            .flatten()
+        {
             Some((f, ttl)) => self.now().ok().map(|now| {
                 let cut = now.saturating_sub(ttl.min(i64::MAX as u64) as i64);
                 (schema.field_pos(f).unwrap_or(0), cut)
@@ -7243,7 +7342,9 @@ impl Database {
 
         let mut n = 0usize;
         let mut written: Vec<Document> = Vec::with_capacity(built.len());
-        for mut doc in built {
+        for (i, mut doc) in built.into_iter().enumerate() {
+            #[cfg(target_arch = "wasm32")]
+            let _ = i;
             if let (Some(cut), true) = (expiry, unique) {
                 let c = &self.collections[collection];
                 let mut gone = Vec::new();
@@ -7253,7 +7354,7 @@ impl Database {
                     }
                 }
                 for other in gone {
-                    self.erase(collection, &schema, other, &hooks)?;
+                    self.erase(collection, &schema, other, hooks)?;
                 }
             }
             let c = self.collections.get_mut(collection).unwrap();
@@ -7343,14 +7444,44 @@ impl Database {
                     if let Some(old) = &old {
                         c.unindex_doc(old, Some(&doc));
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let made;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let payload = match ready
+                        .filter(|_| encoded)
+                        .and_then(|(at, _)| self.preparation.payload(at + i))
+                    {
+                        Some(p) => p,
+                        None => {
+                            made = Store::encode_doc(&schema, &doc);
+                            &made[..]
+                        }
+                    };
+                    #[cfg(target_arch = "wasm32")]
                     let payload = Store::encode_doc(&schema, &doc);
                     let was = c.store.loc(doc.id);
+                    // In a block, the frame made where the block keeps it.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let frame = match self.block.as_mut() {
+                        Some(b) => {
+                            c.store.append_onto(OP_PUT, doc.id, payload, &mut b.frames);
+                            b.heads.push((REC_DATA, cid, b.frames.len()));
+                            None
+                        }
+                        None => Some(c.store.append(OP_PUT, doc.id, payload)),
+                    };
+                    #[cfg(target_arch = "wasm32")]
                     let frame = c.store.append(OP_PUT, doc.id, &payload);
                     c.index_scalar(&doc, old.as_ref());
                     self.remember(cid, doc.id, was, mark);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(frame) = frame {
+                        self.wal(REC_DATA, cid, &frame)?;
+                    }
+                    #[cfg(target_arch = "wasm32")]
                     self.wal(REC_DATA, cid, &frame)?;
                     self.note(cid, doc.id);
-                    for h in &hooks {
+                    for h in hooks {
                         h.after_write(collection, op, &doc)?;
                     }
                     if let Some((ids, ops)) = answered.as_deref_mut() {
@@ -7371,6 +7502,11 @@ impl Database {
             };
             if !written.is_empty() {
                 self.index_written(collection, &mut written);
+                #[cfg(not(target_arch = "wasm32"))]
+                match ready {
+                    Some(_) => self.preparation.spend(&mut written),
+                    None => written.clear(),
+                }
             }
             if self.set_row(
                 collection,
@@ -7379,7 +7515,7 @@ impl Database {
                 id,
                 assigns,
                 &ctx,
-                &hooks,
+                hooks,
                 Some(&doc),
             )? {
                 if let Some((ids, ops)) = answered.as_deref_mut() {
@@ -7390,12 +7526,19 @@ impl Database {
             }
         }
         self.index_written(collection, &mut written);
+        // What it wrote, for the caller to let go of after the lock.
+        #[cfg(not(target_arch = "wasm32"))]
+        if ready.is_some() {
+            self.preparation.spend(&mut written);
+        }
         Ok(n)
     }
 
     /// The vectors of the documents a `put` wrote, indexed in a batch:
     /// construction can parallelise. In a block that defers, the block's
-    /// statements are one batch.
+    /// statements are one batch. The browser lets the documents go here;
+    /// natively the caller does, or keeps them for after the lock.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(clippy::ptr_arg))]
     fn index_written(&mut self, collection: &str, written: &mut Vec<Document>) {
         let c = self.collections.get_mut(collection).unwrap();
         match self.block.as_mut().filter(|b| DEFERS && b.defers) {
@@ -7405,6 +7548,9 @@ impl Database {
             }
             None => c.index_vectors_batch(written),
         }
+        // Natively the caller lets them go, or a preparation keeps them to
+        // be let go of after the lock.
+        #[cfg(target_arch = "wasm32")]
         written.clear();
     }
 
@@ -11501,6 +11647,35 @@ fn doc_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<(
         return Ok(());
     }
     set_field(schema, doc, k, v)
+}
+
+/// A `put`'s documents, onto the end of `built`: each of its pairs' values
+/// worked out and made its field's type, then each object its parameter
+/// holds (`put <c> $n`). The same under the write lock and beside it
+/// ([`Database::prepare`]).
+fn build_docs(
+    schema: &Schema,
+    collection: &str,
+    docs: &[Vec<(String, Expr)>],
+    docs_param: Option<usize>,
+    ctx: &EvalCtx,
+    built: &mut Vec<Document>,
+) -> Result<()> {
+    for pairs in docs {
+        let mut doc = Document::default();
+        for (k, e) in pairs {
+            doc_field(schema, &mut doc, k, eval(e, &mut NoRow, ctx)?)?;
+        }
+        built.push(doc_done(schema, doc)?);
+    }
+    if let Some(i) = docs_param {
+        let given = documents_in(collection, i, ctx.params)?;
+        built.reserve(given.len());
+        for members in given {
+            built.push(Database::document_of(schema, members)?);
+        }
+    }
+    Ok(())
 }
 
 /// A document being put with every field it was not given `null`, or

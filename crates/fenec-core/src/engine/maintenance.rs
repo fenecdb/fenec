@@ -511,7 +511,7 @@ impl Database {
                 c.geo.push((copy.field.clone(), Derived::new(ix)));
             }
         }
-        c.schema.fields[pos].index = copy.kind;
+        crate::schema::SchemaCell::make_mut(&mut c.schema).fields[pos].index = copy.kind;
         let (cid, encoded) = (c.id, c.schema.encode());
         self.wal(REC_ALTER, cid, &encoded)?;
         self.note(cid, SCHEMA_MARK);
@@ -601,7 +601,9 @@ impl Database {
             return Err(super::composite_shared(c, &index, a, b));
         }
         let text = index.keys_text();
-        c.schema.composites.push(index.clone());
+        crate::schema::SchemaCell::make_mut(&mut c.schema)
+            .composites
+            .push(index.clone());
         c.composites.push((index, Derived::new(built)));
         let encoded = c.schema.encode();
         self.wal(REC_ALTER, cid, &encoded)?;
@@ -639,7 +641,7 @@ impl Database {
         let mut parts = Vec::with_capacity(targets.len());
         for name in targets {
             let c = &self.collections[&name];
-            let mut fresh = Collection::new(c.id, c.schema.clone());
+            let mut fresh = Collection::new(c.id, Schema::clone(&c.schema));
             fresh.store = c.store.compacted()?;
             parts.push(Part {
                 token: 0,

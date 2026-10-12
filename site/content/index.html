@@ -202,8 +202,8 @@ description: One database from the screen to the server: state your screens foll
     </dl>
 
     <p class="after rise">Durable writes, an fsync each, and four reading
-      threads, in one process on an M1. A block of 1 000 writes does hold
-      readers for the half millisecond it runs. <a href="docs/benchmarks.html#concurrency">Method
+      threads, in one process on an M1. A block of 1 000 writes builds its
+      rows beside the readers and holds them for the 0.15 ms it lands. <a href="docs/benchmarks.html#concurrency">Method
       and the rest of the table</a></p>
   </div>
 </section>
