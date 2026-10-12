@@ -1134,9 +1134,32 @@ pub struct Lookup {
     /// unless `on a = b` names one, the foreign-key-to-primary-key case
     /// spelled out. Two lists rather than a list of pairs: a `Vec<String>`
     /// is code the browser module has already.
+    ///
+    /// Where the level above folds -- a `get` or a level whose list
+    /// aggregates -- its rows are its groups, and each name is a column of
+    /// its list: `get orders select courier, count() as n group courier
+    /// lookup couriers on user = courier`.
     pub parent: Vec<String>,
     /// None = all fields of the child.
     pub project: Option<Vec<String>>,
+    /// A list that aggregates -- `select count() as n, sum(total) as
+    /// revenue` -- in the order written: each parent's children folded, one
+    /// row a parent, or one a group of them with `group`, rather than the
+    /// children themselves. Empty: the children.
+    ///
+    /// A level is the `get` its children would be with the parent's key in
+    /// its `where`, so its list folds as a `get`'s does, by the same
+    /// `Fold`s: ungrouped, `order`, `limit` and `offset` pick the children
+    /// it folds -- the latest 50 of a courier's deliveries -- and grouped
+    /// they page each parent's groups, its three best-selling products. A
+    /// parent's own fields beside its children's folds would be two
+    /// collections in one list, which the positional scoping keeps out: the
+    /// parent's level selects those.
+    pub aggregate: Vec<Column>,
+    /// `group product`: one row a parent and a set of the keys' values.
+    pub group: Vec<Expr>,
+    /// `having <expr>` after `group`, a parent's groups it holds for.
+    pub having: Option<Expr>,
     pub filter: Option<Expr>,
     pub order: Vec<Sort>,
     pub limit: Option<Count>,
@@ -1150,7 +1173,11 @@ pub struct Lookup {
     /// rather than inferred from the presence of a child `where`.
     ///
     /// It is tested before `offset` and `limit`: a parent whose matches the
-    /// page happened to skip has matches all the same.
+    /// page happened to skip has matches all the same. A level that folds
+    /// asks it of its children too, not of its groups: an ungrouped list
+    /// answers one row for every parent, so asked of the rows it would
+    /// keep every one, and "couriers who delivered, with their counts" is
+    /// the question.
     pub required: bool,
     /// A further `lookup`, hanging off the children of this one:
     /// `products -> reviews -> authors`.
@@ -1233,6 +1260,50 @@ impl Lookup {
             return Ok(());
         };
         Err(Error::Query(format!("`lookup {}` {why}", self.collection)))
+    }
+
+    /// Whether its list aggregates: its rows are its children folded.
+    pub fn folds(&self) -> bool {
+        !self.aggregate.is_empty() || !self.group.is_empty()
+    }
+
+    /// The expressions of its aggregating list, its keys and `having`.
+    pub fn list_exprs(&self) -> impl Iterator<Item = &Expr> {
+        (self.aggregate.iter().map(|c| &c.expr))
+            .chain(&self.group)
+            .chain(&self.having)
+    }
+
+    /// What a level must be beside its list: one that folds as a `get`'s
+    /// does ([`check_folds`]) and orders its groups by columns; and where
+    /// the level above folds (`above`, its list), a key read from the
+    /// columns of that level's rows, which have no `id`.
+    fn check_level(&self, above: Option<&[Column]>) -> Result<()> {
+        if self.folds() {
+            check_folds(&self.aggregate, &self.group, self.having.as_ref())?;
+            if self.group.is_empty() {
+                picks_by_rows(&self.aggregate, &self.order)?;
+            }
+        } else if self.having.is_some() {
+            return Err(Error::Query(
+                "`having` keeps the groups it holds for: it follows `group`".into(),
+            ));
+        }
+        let Some(list) = above else {
+            return Ok(());
+        };
+        for p in &self.parent {
+            if !list.iter().any(|c| c.name == *p) {
+                return Err(Error::Query(format!(
+                    "`lookup {}` on {} = {}: the level above answers groups, and `{p}` is \
+                     not a column of its list -- name a key or a value it selects",
+                    self.collection,
+                    self.side(true),
+                    self.side(false)
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// This clause and every one hanging off it, outermost first.
@@ -1822,6 +1893,9 @@ impl Select {
             // child = parent` reaches the level above and could mean either.
             // Every collection in the chain must therefore be distinct.
             let mut seen = vec![self.collection.as_str()];
+            // The list of the level above where it folds: its rows are its
+            // groups, and a key is read from their columns.
+            let mut above = (!self.aggregate.is_empty()).then_some(self.aggregate.as_slice());
             for (depth, step) in l.chain().enumerate() {
                 if depth + 1 > MAX_LOOKUP_DEPTH {
                     return Err(Error::Query(format!(
@@ -1844,6 +1918,8 @@ impl Select {
                     ));
                 }
                 step.check_key()?;
+                step.check_level(above)?;
+                above = step.folds().then_some(step.aggregate.as_slice());
             }
         }
         check_order(&self.order, !self.group.is_empty())?;
@@ -2033,7 +2109,10 @@ impl Select {
             .as_ref()
             .map(|l| {
                 (l.chain())
-                    .map(|s| opt(&s.filter).max(counts(&s.limit, &s.offset)))
+                    .map(|s| {
+                        let list = s.list_exprs().map(Expr::max_param).max().unwrap_or(0);
+                        opt(&s.filter).max(counts(&s.limit, &s.offset)).max(list)
+                    })
                     .max()
                     .unwrap_or(0)
             })
@@ -2079,7 +2158,7 @@ impl Select {
             || self.computed.iter().any(item)
             || sorts_read_vectors(&self.order);
         while let (false, Some(l)) = (any, level) {
-            any = opt(&l.filter);
+            any = opt(&l.filter) || l.list_exprs().any(Expr::reads_vectors);
             level = l.next.as_deref();
         }
         any
@@ -2255,83 +2334,20 @@ impl Select {
     }
 
     /// Aggregates follow `count`'s rules: they collapse rows, so nothing that
-    /// ranks the rows or hangs children from them combines with them, and a
-    /// single row has nothing to order or page. Grouped, the rows are the
-    /// groups, and those do.
+    /// ranks the rows combines with them. Ungrouped, `order`, `limit` and
+    /// `offset` pick the rows the one row folds -- what the `get` would
+    /// answer without the aggregates, `limit 50` its 50 latest; grouped,
+    /// the rows are the groups, and those they order and page. A `lookup`
+    /// hangs off the rows either way, keyed by their columns.
     fn check_aggregate(&self) -> Result<()> {
+        check_folds(&self.aggregate, &self.group, self.having.as_ref())?;
         if self.group.is_empty() {
-            let clash = if !self.order.is_empty() {
-                "order"
-            } else if self.limit.is_some() {
-                "limit"
-            } else if !self.offset.is_zero() {
-                "offset"
-            } else {
-                ""
-            };
-            if !clash.is_empty() {
-                return Err(Error::Query(format!(
-                    "aggregates answer one row, which `{clash}` has nothing to do with; \
-                     `group` makes a row per value"
-                )));
-            }
-        } else if self.aggregate.is_empty() {
-            return Err(Error::Query(
-                "`group` needs an aggregate to answer with: `select <key>, count(*)`".into(),
-            ));
+            picks_by_rows(&self.aggregate, &self.order)?;
         }
-        let keys = self.group_keys();
-        for k in &keys {
-            if k.has_aggregate() {
-                return Err(Error::Query(
-                    "`group` takes the rows' values; an aggregate is the group's own".into(),
-                ));
-            }
-        }
-        for (i, c) in self.aggregate.iter().enumerate() {
-            grouped(&c.expr, &keys, false)?;
-            if self.aggregate[..i].iter().any(|d| d.name == c.name) {
-                return Err(Error::Query(format!(
-                    "`{}` names two columns of the list: name one with `as`",
-                    c.name
-                )));
-            }
-        }
-        // `having` reads what a column may, and the columns by their names.
-        if let Some(h) = &self.having {
-            let names: Vec<Expr> = (self.aggregate.iter())
-                .map(|c| Expr::Field(c.name.clone()))
-                .collect();
-            let mut known = keys.clone();
-            known.extend(&names);
-            grouped(h, &known, false)?;
-        }
-        self.check_aggregate_company()
-    }
-
-    /// The group's keys as the rows are grouped by them: a name the list
-    /// gives an item with `as` -- `select bucket(at, 1h) as hour, count(*)
-    /// group hour` -- stands for that item's expression, before a field of
-    /// the same name; anything else is the key as written.
-    pub fn group_keys(&self) -> Vec<&Expr> {
-        let mut out = Vec::with_capacity(self.group.len());
-        for g in &self.group {
-            let named = match g {
-                Expr::Field(n) => self.aggregate.iter().find(|c| c.name == *n),
-                _ => None,
-            };
-            out.push(named.map_or(g, |c| &c.expr));
-        }
-        out
-    }
-
-    fn check_aggregate_company(&self) -> Result<()> {
         let clash = if self.near.is_some() {
             "near"
         } else if self.matcher.is_some() {
             "match"
-        } else if self.lookup.is_some() {
-            "lookup"
         } else if self.count && self.group.is_empty() {
             "count"
         } else if self.project.is_some() {
@@ -2343,6 +2359,88 @@ impl Select {
             "aggregates cannot be used together with `{clash}`"
         )))
     }
+
+    /// The group's keys as the rows are grouped by them ([`group_keys`]).
+    pub fn group_keys(&self) -> Vec<&Expr> {
+        group_keys(&self.aggregate, &self.group)
+    }
+}
+
+/// The group's keys as the rows are grouped by them: a name the list gives
+/// an item with `as` -- `select bucket(at, 1h) as hour, count(*) group
+/// hour` -- stands for that item's expression, before a field of the same
+/// name; anything else is the key as written. A `get`'s and a `lookup`
+/// level's alike.
+pub fn group_keys<'a>(list: &'a [Column], group: &'a [Expr]) -> Vec<&'a Expr> {
+    let mut out = Vec::with_capacity(group.len());
+    for g in group {
+        let named = match g {
+            Expr::Field(n) => list.iter().find(|c| c.name == *n),
+            _ => None,
+        };
+        out.push(named.map_or(g, |c| &c.expr));
+    }
+    out
+}
+
+/// An ungrouped list's `order` picks the rows it folds, by what a row
+/// holds: a key naming one of its columns -- `order sum(n)`, an alias --
+/// would order the one row it answers, and is refused rather than read as
+/// a field that may share the name.
+fn picks_by_rows(list: &[Column], order: &[Sort]) -> Result<()> {
+    match order
+        .iter()
+        .find(|s| list.iter().any(|c| c.name == s.field))
+    {
+        Some(s) => Err(Error::Query(format!(
+            "`order {}`: ungrouped, `order` picks the rows the list folds, by what a row \
+             holds; `group` makes rows to order by their columns",
+            s.field
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// What an aggregating list must be, a `get`'s or a `lookup` level's: an
+/// aggregate to answer with where it groups, keys that are the rows'
+/// values, items each a group key or folded ([`grouped`]) and named once,
+/// and a `having` that reads what an item may and the items by name.
+fn check_folds(list: &[Column], group: &[Expr], having: Option<&Expr>) -> Result<()> {
+    if !group.is_empty() && list.is_empty() {
+        return Err(Error::Query(
+            "`group` needs an aggregate to answer with: `select <key>, count(*)`".into(),
+        ));
+    }
+    if having.is_some() && group.is_empty() {
+        return Err(Error::Query(
+            "`having` keeps the groups it holds for: it follows `group`".into(),
+        ));
+    }
+    let keys = group_keys(list, group);
+    for k in &keys {
+        if k.has_aggregate() {
+            return Err(Error::Query(
+                "`group` takes the rows' values; an aggregate is the group's own".into(),
+            ));
+        }
+    }
+    for (i, c) in list.iter().enumerate() {
+        grouped(&c.expr, &keys, false)?;
+        if list[..i].iter().any(|d| d.name == c.name) {
+            return Err(Error::Query(format!(
+                "`{}` names two columns of the list: name one with `as`",
+                c.name
+            )));
+        }
+    }
+    // `having` reads what a column may, and the columns by their names.
+    if let Some(h) = having {
+        let names: Vec<Expr> = list.iter().map(|c| Expr::Field(c.name.clone())).collect();
+        let mut known = keys.clone();
+        known.extend(&names);
+        grouped(h, &known, false)?;
+    }
+    Ok(())
 }
 
 /// Refuses what an item of an aggregating list cannot answer: a field read

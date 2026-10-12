@@ -423,11 +423,15 @@ mod tests {
         assert_eq!(pick.unwrap().limit, Some(Count::Param(1)));
         // A float with no fraction is the number it is, as a parameter's.
         assert_eq!(sel("get t limit 20.0").limit, Some(Count::N(20)));
-        // `offset $1` is an offset whatever it is handed, so `count` and an
-        // aggregate without `group` refuse it, as they refuse `offset 5`.
-        for q in ["get t offset $1 count", "get t select count(*) limit $1"] {
-            assert!(parse_one(q).is_err(), "{q}");
-        }
+        // `offset $1` is an offset whatever it is handed, so `count` refuses
+        // it, as it refuses `offset 5`; an aggregate without `group` picks
+        // the rows it folds with it, as with `limit 5`.
+        assert!(parse_one("get t offset $1 count").is_err());
+        let s = sel("get t select count(*) limit $1 offset $2");
+        assert_eq!(
+            (s.limit, s.offset),
+            (Some(Count::Param(0)), Count::Param(1))
+        );
         let refused = |q: &str| parse_one(q).unwrap_err().to_string();
         for (q, says) in [
             (

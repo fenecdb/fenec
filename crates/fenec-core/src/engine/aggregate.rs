@@ -574,6 +574,438 @@ fn collect<'q>(e: &'q Expr, keys: &[&Expr], out: &mut Vec<&'q Expr>) {
     e.each_child(&mut |c| collect(c, keys, out));
 }
 
+/// An aggregating list bound to its collection, once a query: a `get`'s,
+/// or a `lookup` level's, whose every parent's children are folded by the
+/// one binding -- what a row is read into, the fold each item starts at,
+/// and how a group's row is worked out of its keys and folds. Bound a
+/// parent, a page of 20 shops' orders folded took 0.2 ms more than the
+/// folds themselves.
+pub(super) struct Folding<'q> {
+    pub(super) rd: Reader<'q>,
+    keys: Vec<&'q Expr>,
+    terms: Vec<usize>,
+    /// A `nocase` field's groups are its folds: `Alice` and `alice` one,
+    /// shown as the first row to hold it wrote it.
+    key_folds: Vec<Option<CaseFold>>,
+    folded: bool,
+    items: Vec<Item>,
+    /// Each item's slot, `count(*)`'s one holding a value that is no null:
+    /// one slot read a value whatever the item.
+    args: Vec<usize>,
+    outs: Vec<Out>,
+    having: Option<Expr>,
+    list: &'q [Column],
+}
+
+/// The groups rows were folded into: emptied for each parent of a
+/// `lookup` level, the room of its maps and lists kept.
+#[derive(Default)]
+pub(super) struct Groups {
+    /// A group's number under its keys' encoding. The hash index's own map
+    /// type, holding one number: a map of another type was 1 KB of the
+    /// browser module. `count(distinct ...)`'s values go in one more of
+    /// them, each under its item's and its group's numbers.
+    index: crate::maps::Map<Vec<u8>, Bucket>,
+    seen: crate::maps::Map<Vec<u8>, Bucket>,
+    key_values: Vec<Value>,
+    folds: Vec<Fold>,
+    n: usize,
+    key: Vec<u8>,
+    last_key: Vec<u8>,
+    dkey: (Vec<u8>, usize),
+    /// The group the row before went to, and whether it was the one
+    /// before that's too: only then is a row's key asked of it first.
+    last: usize,
+    streak: bool,
+}
+
+/// What keeps a group's row -- a `lookup ... required` hanging off the
+/// groups, asked of it -- or keeps every one.
+pub(super) type Keep<'k> = Option<&'k mut dyn FnMut(&[Value]) -> Result<bool>>;
+
+/// The groups a list answers, worked out: each one's columns, `width` a
+/// group, and its keys' values, `nk` a group.
+pub(super) struct Answered {
+    values: Vec<Value>,
+    key_values: Vec<Value>,
+    n: usize,
+}
+
+impl<'q> Folding<'q> {
+    /// `list` folded over rows of `c`, grouped by `group`, its groups held
+    /// to `having`.
+    pub(super) fn new(
+        c: &'q Collection,
+        list: &'q [Column],
+        group: &'q [Expr],
+        having: Option<&'q Expr>,
+        params: &[Value],
+    ) -> Result<Folding<'q>> {
+        let keys = group_keys(list, group);
+        let mut calls: Vec<&Expr> = Vec::new();
+        for col in list {
+            collect(&col.expr, &keys, &mut calls);
+        }
+        // `having`'s own aggregates are folded after the list's, numbered on.
+        if let Some(h) = having {
+            collect(h, &keys, &mut calls);
+        }
+        let mut read: Vec<&Expr> = keys.clone();
+        read.extend(calls.iter().copied());
+        let mut rd = Reader::new(c, &read, params)?;
+        let mut terms = Vec::with_capacity(keys.len());
+        for k in &keys {
+            terms.push(rd.bind(k)?);
+        }
+        let key_folds: Vec<Option<CaseFold>> = terms
+            .iter()
+            .map(|&t| rd.typed(t).and_then(|f| f.case_fold()))
+            .collect();
+        let folded = key_folds.iter().any(Option::is_some);
+        let mut items = Vec::with_capacity(calls.len());
+        for call in &calls {
+            let Expr::Call(name, args) = call else {
+                unreachable!("an aggregate is a call")
+            };
+            let (arg, distinct) = match args.first() {
+                Some(Expr::Call(d, x)) if d == "distinct" => (x.first(), true),
+                a => (a, false),
+            };
+            let arg = arg.map(|a| rd.bind(a)).transpose()?;
+            let ty = arg.and_then(|t| rd.typed(t));
+            let by = args.get(1).map(|b| rd.bind(b)).transpose()?;
+            let mut start = Fold::new(name, distinct, ty)?;
+            // `first(e by k)` orders by `k` as its field compares.
+            if let (Fold::Pick(_, _, text), Some(b)) = (&mut start, by) {
+                *text = rd.typed(b).map_or(TextOrder::BYTES, |f| f.text_order());
+            }
+            items.push(Item { start, arg, by });
+        }
+        let (nk, ni) = (keys.len(), items.len());
+        let mut outs = Vec::with_capacity(list.len());
+        // The aggregates are numbered as `collect` met them, column by
+        // column, so a copy's are told apart by their turn.
+        let mut turn = 0;
+        for col in list {
+            let e = &col.expr;
+            outs.push(if let Some(j) = keys.iter().position(|k| is_key(k, e)) {
+                Out::Key(j)
+            } else if e.aggregate_name().is_some() {
+                turn += 1;
+                Out::Fold(turn - 1)
+            } else {
+                let given = params.len();
+                let mut e = e.clone();
+                e.rewrite(&mut |x| {
+                    *x = if let Some(j) = keys.iter().position(|k| is_key(k, x)) {
+                        Expr::Param(j)
+                    } else if x.aggregate_name().is_some() {
+                        turn += 1;
+                        Expr::Param(nk + turn - 1)
+                    } else {
+                        match x {
+                            Expr::Param(i) if *i >= given => return Err(unbound(*i)),
+                            Expr::Param(i) => Expr::Param(nk + ni + *i),
+                            _ => return Ok(false),
+                        }
+                    };
+                    Ok(true)
+                })?;
+                Out::Expr(e)
+            });
+        }
+        // `having` as a column is worked out, over the keys, the folds and
+        // the parameters -- and the list's columns after them, by name.
+        let given = params.len();
+        let having = match having {
+            None => None,
+            Some(h) => {
+                let mut h = h.clone();
+                h.rewrite(&mut |x| {
+                    *x = if let Some(j) = keys.iter().position(|k| is_key(k, x)) {
+                        Expr::Param(j)
+                    } else if x.aggregate_name().is_some() {
+                        turn += 1;
+                        Expr::Param(nk + turn - 1)
+                    } else {
+                        match x {
+                            Expr::Field(n) => match list.iter().position(|c| c.name == *n) {
+                                Some(i) => Expr::Param(nk + ni + given + i),
+                                None => return Ok(false),
+                            },
+                            Expr::Param(i) if *i >= given => return Err(unbound(*i)),
+                            Expr::Param(i) => Expr::Param(nk + ni + *i),
+                            _ => return Ok(false),
+                        }
+                    };
+                    Ok(true)
+                })?;
+                Some(h)
+            }
+        };
+        rd.env.push(Value::Bool(true));
+        let counted = rd.env.len() - 1;
+        let args: Vec<usize> = items.iter().map(|it| it.arg.unwrap_or(counted)).collect();
+        Ok(Folding {
+            rd,
+            keys,
+            terms,
+            key_folds,
+            folded,
+            items,
+            args,
+            outs,
+            having,
+            list,
+        })
+    }
+
+    /// The list's column names.
+    pub(super) fn columns(&self) -> Vec<String> {
+        self.list.iter().map(|c| c.name.clone()).collect()
+    }
+
+    /// `g` emptied for rows of a new set: none, or ungrouped the one row
+    /// every list answers, its folds at their start.
+    pub(super) fn start(&self, g: &mut Groups) {
+        g.index.clear();
+        g.seen.clear();
+        g.key_values.clear();
+        g.folds.clear();
+        (g.n, g.last, g.streak, g.dkey.1) = (0, usize::MAX, false, 0);
+        if self.keys.is_empty() {
+            g.n = 1;
+            g.folds.extend(self.items.iter().map(|it| it.start.clone()));
+        }
+    }
+
+    /// Folds the rows `ids` into `g`, the group of each by its keys.
+    pub(super) fn fold(
+        &mut self,
+        g: &mut Groups,
+        ids: &[DocId],
+        reg: &Registry,
+        clock: Option<i64>,
+    ) -> Result<()> {
+        let (nk, ni) = (self.keys.len(), self.items.len());
+        for &id in ids {
+            if !self.rd.read(id, reg, clock)? {
+                continue;
+            }
+            let env = &self.rd.env;
+            let at = match nk {
+                0 => 0,
+                _ => {
+                    g.key.clear();
+                    match self.folded {
+                        false => {
+                            for t in &self.terms {
+                                crate::codec::encode_value(&mut g.key, &env[*t]);
+                            }
+                        }
+                        true => {
+                            for (t, f) in self.terms.iter().zip(&self.key_folds) {
+                                encode_folded(&mut g.key, &env[*t], *f);
+                            }
+                        }
+                    }
+                    // Rows in a time series come in the order they were
+                    // written, a bucket's together: while they do, the
+                    // group the row before went to is asked first. Asked
+                    // every row, keys in no order took 8% longer.
+                    if g.streak && g.key == g.last_key {
+                        g.last
+                    } else {
+                        let n = match g.index.get(&g.key) {
+                            Some(n) => n.first().unwrap_or(0) as usize,
+                            None => {
+                                g.index.insert(g.key.clone(), Bucket::one(g.n as DocId));
+                                for t in &self.terms {
+                                    g.key_values.push(env[*t].clone());
+                                }
+                                g.folds.extend(self.items.iter().map(|it| it.start.clone()));
+                                g.n += 1;
+                                g.n - 1
+                            }
+                        };
+                        // Swapped, not copied: `key` is written over
+                        // next row.
+                        std::mem::swap(&mut g.key, &mut g.last_key);
+                        g.streak = n == g.last;
+                        g.last = n;
+                        n
+                    }
+                }
+            };
+            let base = at * ni;
+            for (i, (fold, &arg)) in g.folds[base..base + ni]
+                .iter_mut()
+                .zip(&self.args)
+                .enumerate()
+            {
+                let v = &env[arg];
+                if !fold.add(v)? {
+                    let by = self.items[i].by.map(|b| &env[b]);
+                    fold.row_held(v, by, id, (i, at), &mut g.seen, &mut g.dkey)?
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The groups of `g` answered, each a row of the list's columns: the
+    /// ones `having` holds for and `keep` keeps -- a `lookup ... required`
+    /// hanging off them, asked of each group's row -- before any order or
+    /// page sees them. Takes the folds out of `g`.
+    pub(super) fn rows(
+        &self,
+        g: &mut Groups,
+        params: &[Value],
+        reg: &Registry,
+        clock: Option<i64>,
+        mut keep: Keep,
+    ) -> Result<Answered> {
+        let (nk, ni, n) = (self.keys.len(), self.items.len(), g.n);
+        let width = self.list.len();
+        let mut values: Vec<Value> = Vec::with_capacity(n * width);
+        let mut env: Vec<Value> = Vec::with_capacity(nk + ni + params.len());
+        let mut folds = g.folds.drain(..);
+        let mut passed: Vec<Value> = Vec::new();
+        let sifted = self.having.is_some() || keep.is_some();
+        for at in 0..n {
+            env.clear();
+            env.extend_from_slice(&g.key_values[at * nk..at * nk + nk]);
+            // A loop: `extend` over the folds' `take` was 0.3 KB more of
+            // the browser module.
+            for f in folds.by_ref().take(ni) {
+                env.push(f.value());
+            }
+            env.extend_from_slice(params);
+            for out in &self.outs {
+                values.push(match out {
+                    Out::Key(j) => env[*j].clone(),
+                    Out::Fold(i) => env[nk + i].clone(),
+                    Out::Expr(e) => {
+                        let ctx = EvalCtx {
+                            params: &env,
+                            registry: reg,
+                            clock,
+                        };
+                        eval(e, &mut IdRow(0), &ctx)?
+                    }
+                });
+            }
+            if !sifted {
+                continue;
+            }
+            // A group `having` does not hold for is taken back out, its
+            // keys with it, before the order and the page see it: the
+            // groups answered are the groups that pass.
+            let row = values.len() - width;
+            let mut holds = true;
+            if let Some(h) = &self.having {
+                env.extend_from_slice(&values[row..]);
+                let ctx = EvalCtx {
+                    params: &env,
+                    registry: reg,
+                    clock,
+                };
+                holds = truthy(&eval(h, &mut IdRow(0), &ctx)?);
+            }
+            if let (true, Some(k)) = (holds, keep.as_mut()) {
+                holds = k(&values[row..])?;
+            }
+            match holds {
+                true => passed.extend_from_slice(&g.key_values[at * nk..at * nk + nk]),
+                false => values.truncate(row),
+            }
+        }
+        drop(folds);
+        let (key_values, n) = match sifted {
+            true => (passed, values.len() / width.max(1)),
+            false => (std::mem::take(&mut g.key_values), n),
+        };
+        Ok(Answered {
+            values,
+            key_values,
+            n,
+        })
+    }
+
+    /// The rows of `a` in the order `order` names -- the list's columns --
+    /// the keys breaking what it leaves tied, `offset` skipped and `limit`
+    /// kept: groups come out by their keys unless it says otherwise.
+    pub(super) fn page(
+        &self,
+        c: &Collection,
+        a: Answered,
+        order: &[Sort],
+        limit: Option<usize>,
+        offset: usize,
+    ) -> Result<Vec<Row>> {
+        let (nk, n, width) = (self.keys.len(), a.n, self.list.len());
+        let mut keys: Vec<OrderKey> = Vec::with_capacity(order.len() + nk);
+        let mut picked: Vec<usize> = Vec::with_capacity(order.len());
+        for s in order {
+            let name = &s.field;
+            let Some(at) = self.list.iter().position(|c| c.name == *name) else {
+                return Err(Error::Query(format!(
+                    "`order {name}`: not a column of this select"
+                )));
+            };
+            // A key, `min`, `max`, `first` and `last` carry a field's
+            // values, and order in its collation when the query names
+            // none; `collate` orders only text.
+            let field = carried_field(&self.list[at].expr).and_then(|f| c.schema.field(f));
+            if let Some(coll) = s.collate {
+                if !field.is_some_and(|f| collatable(&f.ty)) {
+                    return Err(Error::Query(format!(
+                        "`collate {}` orders text; `{name}` is not",
+                        coll.name()
+                    )));
+                }
+            }
+            picked.push(at);
+            let text = field.map_or(TextOrder::BYTES, |f| f.text_order());
+            keys.push((
+                None,
+                s.asc,
+                TextOrder {
+                    coll: s.collate.or(text.coll),
+                    fold: text.fold,
+                },
+                None,
+            ));
+        }
+        // A `nocase` key by its fold, as its groups were told apart.
+        for k in &self.keys {
+            let fold = match k {
+                Expr::Field(f) => c.schema.field(f).and_then(|f| f.case_fold()),
+                _ => None,
+            };
+            keys.push((None, true, TextOrder { coll: None, fold }, None));
+        }
+        let w = keys.len();
+        let mut flat: Vec<Value> = Vec::with_capacity(n * w);
+        for at in 0..n {
+            for &p in &picked {
+                flat.push(a.values[at * width + p].clone());
+            }
+            flat.extend_from_slice(&a.key_values[at * nk..at * nk + nk]);
+        }
+        let k = limit.map_or(n, |l| l.saturating_add(offset)).min(n);
+        let mut rows = Vec::with_capacity(k.saturating_sub(offset));
+        for at in order_rows(&flat, w, n, &keys, k).into_iter().skip(offset) {
+            rows.push(Row {
+                id: 0,
+                values: a.values[at * width..at * width + width].to_vec(),
+                score: None,
+            });
+        }
+        Ok(rows)
+    }
+}
+
 impl Database {
     /// The groups of a count by a timestamp or int field's `bucket` -- or
     /// the field itself -- over a range of it, read off its ordered index:
@@ -585,18 +1017,14 @@ impl Database {
     /// of a million events took 23.5 ms reading the rows, the browser
     /// module would carry it for nothing it is asked.
     #[cfg(not(target_arch = "wasm32"))]
-    #[allow(clippy::too_many_arguments)]
     fn counted_by_index(
         &self,
         c: &Collection,
         sel: &Select,
-        keys: &[&Expr],
-        terms: &[usize],
-        items: &[Item],
-        rd: &mut Reader,
-        key_values: &mut Vec<Value>,
-        folds: &mut Vec<Fold>,
+        f: &mut Folding,
+        g: &mut Groups,
     ) -> Result<Option<usize>> {
+        let (keys, terms, items, rd) = (&f.keys, &f.terms, &f.items, &mut f.rd);
         let params = &rd.env[rd.base()..];
         fn field(e: &Expr) -> Option<&str> {
             match e {
@@ -668,18 +1096,18 @@ impl Database {
             };
             rd.work_out(0, reg, clock)?;
             key.clear();
-            for t in terms {
+            for t in terms.iter() {
                 crate::codec::encode_value(&mut key, &rd.env[*t]);
             }
             if n == 0 || key != last {
-                for t in terms {
-                    key_values.push(rd.env[*t].clone());
+                for t in terms.iter() {
+                    g.key_values.push(rd.env[*t].clone());
                 }
-                folds.extend(items.iter().map(|it| it.start.clone()));
+                g.folds.extend(items.iter().map(|it| it.start.clone()));
                 std::mem::swap(&mut key, &mut last);
             }
-            let at = folds.len() - items.len();
-            for f in &mut folds[at..] {
+            let at = g.folds.len() - items.len();
+            for f in &mut g.folds[at..] {
                 f.add(&Value::Bool(true))?;
             }
             n += 1;
@@ -688,13 +1116,17 @@ impl Database {
         if !walked {
             return Ok(None);
         }
+        if !keys.is_empty() {
+            g.n = g.key_values.len() / keys.len();
+        }
         plan(|| format!("aggregate: the ordered index on {f} counted, no row read"));
         Ok(Some(n))
     }
 
     /// An aggregating select: the rows the filter finds -- through the same
     /// indexes any select uses -- folded into one row, or one per distinct
-    /// set of the group's keys, each row in the select list's order.
+    /// set of the group's keys, each row in the select list's order; and
+    /// the level a `lookup` hangs off them, keyed by their columns.
     ///
     /// Written as plain loops over types the engine already has -- the hash
     /// index's map, `order`'s sort: the first version, in iterator chains
@@ -705,351 +1137,197 @@ impl Database {
         sel: &Select,
         params: &[Value],
     ) -> Result<ResultSet> {
-        let keys = sel.group_keys();
-        let mut calls: Vec<&Expr> = Vec::new();
-        for col in &sel.aggregate {
-            collect(&col.expr, &keys, &mut calls);
-        }
-        // `having`'s own aggregates are folded after the list's, numbered on.
-        let having = sel.having.as_ref();
-        if let Some(h) = having {
-            collect(h, &keys, &mut calls);
-        }
-        let mut read: Vec<&Expr> = keys.clone();
-        read.extend(calls.iter().copied());
-        let mut rd = Reader::new(c, &read, params)?;
-        let mut terms = Vec::with_capacity(keys.len());
-        for k in &keys {
-            terms.push(rd.bind(k)?);
-        }
-        // A `nocase` field's groups are its folds: `Alice` and `alice` one,
-        // shown as the first row to hold it wrote it. None at all, the keys
-        // are encoded as they were.
-        let key_folds: Vec<Option<CaseFold>> = terms
-            .iter()
-            .map(|&t| rd.typed(t).and_then(|f| f.case_fold()))
-            .collect();
-        let folded = key_folds.iter().any(Option::is_some);
-        let mut items = Vec::with_capacity(calls.len());
-        for call in &calls {
-            let Expr::Call(name, args) = call else {
-                unreachable!("an aggregate is a call")
-            };
-            let (arg, distinct) = match args.first() {
-                Some(Expr::Call(d, x)) if d == "distinct" => (x.first(), true),
-                a => (a, false),
-            };
-            let arg = arg.map(|a| rd.bind(a)).transpose()?;
-            let ty = arg.and_then(|t| rd.typed(t));
-            let by = args.get(1).map(|b| rd.bind(b)).transpose()?;
-            let mut start = Fold::new(name, distinct, ty)?;
-            // `first(e by k)` orders by `k` as its field compares.
-            if let (Fold::Pick(_, _, text), Some(b)) = (&mut start, by) {
-                *text = rd.typed(b).map_or(TextOrder::BYTES, |f| f.text_order());
-            }
-            items.push(Item { start, arg, by });
-        }
-        let (nk, ni) = (keys.len(), items.len());
-        let mut outs = Vec::with_capacity(sel.aggregate.len());
-        // The aggregates are numbered as `collect` met them, column by
-        // column, so a copy's are told apart by their turn.
-        let mut turn = 0;
-        for col in &sel.aggregate {
-            let e = &col.expr;
-            outs.push(if let Some(j) = keys.iter().position(|k| is_key(k, e)) {
-                Out::Key(j)
-            } else if e.aggregate_name().is_some() {
-                turn += 1;
-                Out::Fold(turn - 1)
-            } else {
-                let given = params.len();
-                let mut e = e.clone();
-                e.rewrite(&mut |x| {
-                    *x = if let Some(j) = keys.iter().position(|k| is_key(k, x)) {
-                        Expr::Param(j)
-                    } else if x.aggregate_name().is_some() {
-                        turn += 1;
-                        Expr::Param(nk + turn - 1)
-                    } else {
-                        match x {
-                            Expr::Param(i) if *i >= given => return Err(unbound(*i)),
-                            Expr::Param(i) => Expr::Param(nk + ni + *i),
-                            _ => return Ok(false),
-                        }
-                    };
-                    Ok(true)
-                })?;
-                Out::Expr(e)
-            });
-        }
-        // `having` as a column is worked out, over the keys, the folds and
-        // the parameters -- and the list's columns after them, by name.
-        let given = params.len();
-        let having = match having {
-            None => None,
-            Some(h) => {
-                let mut h = h.clone();
-                h.rewrite(&mut |x| {
-                    *x = if let Some(j) = keys.iter().position(|k| is_key(k, x)) {
-                        Expr::Param(j)
-                    } else if x.aggregate_name().is_some() {
-                        turn += 1;
-                        Expr::Param(nk + turn - 1)
-                    } else {
-                        match x {
-                            Expr::Field(n) => match sel.aggregate.iter().position(|c| c.name == *n)
-                            {
-                                Some(i) => Expr::Param(nk + ni + given + i),
-                                None => return Ok(false),
-                            },
-                            Expr::Param(i) if *i >= given => return Err(unbound(*i)),
-                            Expr::Param(i) => Expr::Param(nk + ni + *i),
-                            _ => return Ok(false),
-                        }
-                    };
-                    Ok(true)
-                })?;
-                Some(h)
-            }
-        };
-
+        let mut f = Folding::new(c, &sel.aggregate, &sel.group, sel.having.as_ref(), params)?;
+        let mut g = Groups::default();
+        f.start(&mut g);
         let (reg, clock) = (&self.registry, self.clock);
-        // A group's number under its keys' encoding. The hash index's own
-        // map type, holding one number: a map of another type was 1 KB of
-        // the browser module. `count(distinct ...)`'s values go in one more
-        // of them, each under its item's and its group's numbers.
-        let mut index: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
-        let mut seen: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
-        let mut key_values: Vec<Value> = Vec::new();
-        let mut folds: Vec<Fold> = Vec::new();
-        let mut groups = 0usize;
-        if nk == 0 {
-            groups = 1;
-            folds.extend(items.iter().map(|it| it.start.clone()));
-        }
+        let ctx = EvalCtx {
+            params,
+            registry: reg,
+            clock,
+        };
+        // Ungrouped, `order`, `limit` and `offset` pick the rows the one
+        // row folds, as they pick a `get`'s page.
+        let picks = sel.group.is_empty()
+            && (!sel.order.is_empty() || sel.limit.is_some() || !sel.offset.is_zero());
         #[cfg(not(target_arch = "wasm32"))]
-        let walked = self.counted_by_index(
-            c,
-            sel,
-            &keys,
-            &terms,
-            &items,
-            &mut rd,
-            &mut key_values,
-            &mut folds,
-        )?;
+        let walked = match picks {
+            true => None,
+            false => self.counted_by_index(c, sel, &mut f, &mut g)?,
+        };
         #[cfg(target_arch = "wasm32")]
         let walked: Option<usize> = None;
         let ids = match walked {
             Some(_) => Vec::new(),
+            None if picks => {
+                // Picked as the `get`'s page is, without the `lookup`, which
+                // hangs off the groups rather than sifting the rows.
+                let bare;
+                let page = match sel.lookup {
+                    Some(_) => {
+                        bare = Select {
+                            lookup: None,
+                            ..sel.clone()
+                        };
+                        &bare
+                    }
+                    None => sel,
+                };
+                let all = sel.filter.is_none();
+                let (mut ids, _) = self.page_ids(c, page, params, &ctx, false, all, false)?;
+                ids.drain(..sel.offset.at(params).min(ids.len()));
+                ids
+            }
             None => self.matching_ids(&sel.collection, &sel.filter, params)?,
         };
-        if let (Some(_), true) = (walked, nk > 0) {
-            groups = key_values.len() / nk;
-        }
+        f.fold(&mut g, &ids, reg, clock)?;
         // In the browser module `walked` is always `None`.
         #[allow(clippy::unnecessary_literal_unwrap)]
         let read = walked.unwrap_or(ids.len());
-        // Each item's slot, `count(*)`'s one holding a value that is no
-        // null: one slot read a value whatever the item.
-        rd.env.push(Value::Bool(true));
-        let counted = rd.env.len() - 1;
-        let args: Vec<usize> = items.iter().map(|it| it.arg.unwrap_or(counted)).collect();
-        let (mut key, mut last_key, mut dkey) = (Vec::new(), Vec::new(), (Vec::<u8>::new(), 0));
-        // The group the row before went to, and whether it was the one
-        // before that's too: only then is a row's key asked of it first.
-        let (mut last, mut streak) = (usize::MAX, false);
-        for &id in &ids {
-            if !rd.read(id, reg, clock)? {
-                continue;
-            }
-            let g = match nk {
-                0 => 0,
-                _ => {
-                    key.clear();
-                    match folded {
-                        false => {
-                            for t in &terms {
-                                crate::codec::encode_value(&mut key, &rd.env[*t]);
-                            }
-                        }
-                        true => {
-                            for (t, f) in terms.iter().zip(&key_folds) {
-                                encode_folded(&mut key, &rd.env[*t], *f);
-                            }
-                        }
-                    }
-                    // Rows in a time series come in the order they were
-                    // written, a bucket's together: while they do, the
-                    // group the row before went to is asked first. Asked
-                    // every row, keys in no order took 8% longer.
-                    if streak && key == last_key {
-                        last
-                    } else {
-                        let g = match index.get(&key) {
-                            Some(n) => n.first().unwrap_or(0) as usize,
-                            None => {
-                                index.insert(key.clone(), Bucket::one(groups as DocId));
-                                for t in &terms {
-                                    key_values.push(rd.env[*t].clone());
-                                }
-                                folds.extend(items.iter().map(|it| it.start.clone()));
-                                groups += 1;
-                                groups - 1
-                            }
-                        };
-                        // Swapped, not copied: `key` is written over
-                        // next row.
-                        std::mem::swap(&mut key, &mut last_key);
-                        streak = g == last;
-                        last = g;
-                        g
-                    }
-                }
-            };
-            let at = g * ni;
-            for (i, (fold, &arg)) in folds[at..at + ni].iter_mut().zip(&args).enumerate() {
-                let v = &rd.env[arg];
-                if !fold.add(v)? {
-                    let by = items[i].by.map(|b| &rd.env[b]);
-                    fold.row_held(v, by, id, (i, g), &mut seen, &mut dkey)?
-                }
-            }
-        }
-        let n = groups;
+        let n = g.n;
         plan(|| {
             format!(
                 "aggregate: {read} rows into {n} {}",
                 if n == 1 { "group" } else { "groups" }
             )
         });
-
-        let columns: Vec<String> = sel.aggregate.iter().map(|c| c.name.clone()).collect();
-        let width = columns.len();
-        let mut values: Vec<Value> = Vec::with_capacity(n * width);
-        let mut env: Vec<Value> = Vec::with_capacity(nk + ni + params.len());
-        let mut folds = folds.into_iter();
-        let mut passed: Vec<Value> = Vec::new();
-        for g in 0..n {
-            env.clear();
-            env.extend_from_slice(&key_values[g * nk..g * nk + nk]);
-            // A loop: `extend` over the folds' `take` was 0.3 KB more of
-            // the browser module.
-            for f in folds.by_ref().take(ni) {
-                env.push(f.value());
-            }
-            env.extend_from_slice(params);
-            for out in &outs {
-                values.push(match out {
-                    Out::Key(j) => env[*j].clone(),
-                    Out::Fold(i) => env[nk + i].clone(),
-                    Out::Expr(e) => {
-                        let ctx = EvalCtx {
-                            params: &env,
-                            registry: reg,
-                            clock,
-                        };
-                        eval(e, &mut IdRow(0), &ctx)?
-                    }
-                });
-            }
-            // A group `having` does not hold for is taken back out, its
-            // keys with it, before the order and the page see it: the
-            // groups answered are the groups that pass.
-            if let Some(h) = &having {
-                let at = values.len() - width;
-                env.extend_from_slice(&values[at..]);
-                let ctx = EvalCtx {
-                    params: &env,
-                    registry: reg,
-                    clock,
-                };
-                if truthy(&eval(h, &mut IdRow(0), &ctx)?) {
-                    passed.extend_from_slice(&key_values[g * nk..g * nk + nk]);
-                } else {
-                    values.truncate(at);
-                }
-            }
-        }
-        let n = match having {
-            Some(_) => {
-                key_values = passed;
-                values.len() / width.max(1)
-            }
-            None => n,
+        // A `lookup` hangs off the groups: resolved against the list's
+        // columns, and where `required`, asked of each group's row before
+        // the order and the page.
+        let steps = match &sel.lookup {
+            Some(l) => Some(self.lookup_chain(c, l, Some(&sel.aggregate))?),
+            None => None,
         };
+        let mut keep = |row: &[Value]| -> Result<bool> {
+            let steps = steps.as_deref().unwrap_or_default();
+            steps[0].any_of(row, |cid| survives(steps, 0, cid, &ctx))
+        };
+        let required = steps.as_ref().is_some_and(|s| s[0].l.required);
+        let keep: Keep = match required {
+            true => Some(&mut keep),
+            false => None,
+        };
+        let answered = f.rows(&mut g, params, reg, clock, keep)?;
         if sel.count {
-            return Ok(ResultSet::counted(n, Vec::new()));
+            return Ok(ResultSet::counted(answered.n, Vec::new()));
         }
-        // Groups come out by their keys unless `order` says otherwise, naming
-        // the list's columns; the keys break what the order leaves tied.
-        let mut order: Vec<OrderKey> = Vec::with_capacity(sel.order.len() + nk);
-        let mut picked: Vec<usize> = Vec::with_capacity(sel.order.len());
-        for s in &sel.order {
-            let name = &s.field;
-            let Some(at) = columns.iter().position(|c| c == name) else {
-                return Err(Error::Query(format!(
-                    "`order {name}`: not a column of this select"
-                )));
-            };
-            // A key, `min`, `max`, `first` and `last` carry a field's
-            // values, and order in its collation when the query names
-            // none; `collate` orders only text.
-            let field = carried_field(&sel.aggregate[at].expr).and_then(|f| c.schema.field(f));
-            if let Some(coll) = s.collate {
-                if !field.is_some_and(|f| collatable(&f.ty)) {
-                    return Err(Error::Query(format!(
-                        "`collate {}` orders text; `{name}` is not",
-                        coll.name()
-                    )));
-                }
-            }
-            picked.push(at);
-            let text = field.map_or(TextOrder::BYTES, |f| f.text_order());
-            order.push((
-                None,
-                s.asc,
-                TextOrder {
-                    coll: s.collate.or(text.coll),
-                    fold: text.fold,
-                },
-                None,
-            ));
-        }
-        // A `nocase` key by its fold, as its groups were told apart.
-        for k in &keys {
-            let fold = match k {
-                Expr::Field(f) => c.schema.field(f).and_then(|f| f.case_fold()),
-                _ => None,
-            };
-            order.push((None, true, TextOrder { coll: None, fold }, None));
-        }
-        let w = order.len();
-        let mut flat: Vec<Value> = Vec::with_capacity(n * w);
-        for g in 0..n {
-            for &at in &picked {
-                flat.push(values[g * width + at].clone());
-            }
-            flat.extend_from_slice(&key_values[g * nk..g * nk + nk]);
-        }
-        let offset = sel.offset.at(params);
-        let k = sel
-            .limit
-            .map_or(n, |l| l.at(params).saturating_add(offset))
-            .min(n);
-        let mut rows = Vec::with_capacity(k.saturating_sub(offset));
-        for g in order_rows(&flat, w, n, &order, k).into_iter().skip(offset) {
-            rows.push(Row {
-                id: 0,
-                values: values[g * width..g * width + width].to_vec(),
-                score: None,
-            });
-        }
+        let rows = match picks {
+            true => f.page(c, answered, &[], None, 0)?,
+            false => f.page(
+                c,
+                answered,
+                &sel.order,
+                sel.limit.map(|l| l.at(params)),
+                sel.offset.at(params),
+            )?,
+        };
+        let nested = match &steps {
+            Some(steps) => Some(self.run_level(steps, 0, Parents::Rows(&rows), &ctx)?),
+            None => None,
+        };
         Ok(ResultSet {
-            columns,
+            columns: f.columns(),
             rows,
-            nested: None,
+            nested,
             facets: Vec::new(),
+        })
+    }
+
+    /// A `lookup` level whose list aggregates: each parent's children --
+    /// probed once, its `where` and any `required` level below held, and
+    /// ungrouped those its `order`, `limit` and `offset` pick -- folded by
+    /// the list bound once for the level, into one row a parent, or one a
+    /// group of them in the order and page the level names. A parent with
+    /// no child answers the one row every ungrouped list does -- `count`
+    /// 0, a sum null -- and no group.
+    pub(super) fn fold_level(
+        &self,
+        steps: &[Step],
+        depth: usize,
+        parents: Parents,
+        ctx: &EvalCtx,
+    ) -> Result<Nested> {
+        let l = steps[depth].l;
+        let child = steps[depth].child;
+        let params = ctx.params;
+        let (reg, clock) = (ctx.registry, ctx.clock);
+        let mut f = Folding::new(child, &l.aggregate, &l.group, l.having.as_ref(), params)?;
+        let mut g = Groups::default();
+        let grouped = !l.group.is_empty();
+        let (limit, offset) = (l.limit.map(|n| n.at(params)), l.offset.at(params));
+        // Ungrouped, the children are picked as the level's rows would be;
+        // grouped, every child is folded and the groups paged.
+        let mut keys = Vec::new();
+        if !grouped {
+            let owner = format!("{}.", l.collection);
+            for s in &l.order {
+                keys.push(order_key(&child.schema, s, &owner)?);
+            }
+        }
+        let want = match grouped {
+            true => usize::MAX,
+            false => offset.saturating_add(limit.unwrap_or(usize::MAX)),
+        };
+        // A `required` level below drops a group no child of which survives,
+        // before the order and the page.
+        let below = steps.get(depth + 1).filter(|s| s.l.required);
+        let mut keep = |row: &[Value]| -> Result<bool> {
+            match below {
+                Some(s) => s.any_of(row, |cid| survives(steps, depth + 1, cid, ctx)),
+                None => Ok(true),
+            }
+        };
+        let mut groups = Vec::with_capacity(parents.len());
+        let mut bucket: Vec<DocId> = Vec::new();
+        let (mut children, mut answered) = (0usize, 0usize);
+        for i in 0..parents.len() {
+            let mut kept =
+                self.kept_children(steps, depth, parents.at(i), &keys, want, &mut bucket, ctx)?;
+            if !grouped {
+                kept.truncate(want);
+                kept.drain(..offset.min(kept.len()));
+            }
+            children += kept.len();
+            f.start(&mut g);
+            f.fold(&mut g, &kept, reg, clock)?;
+            let sift: Keep = match below {
+                Some(_) => Some(&mut keep),
+                None => None,
+            };
+            let a = f.rows(&mut g, params, reg, clock, sift)?;
+            let rows = match grouped {
+                true => f.page(child, a, &l.order, limit, offset)?,
+                false => f.page(child, a, &[], None, 0)?,
+            };
+            answered += rows.len();
+            groups.push(rows);
+        }
+        plan(|| {
+            format!(
+                "lookup: {} on {}, {} for {} parents, {children} children folded into {answered} rows",
+                l.collection,
+                l.side(true),
+                steps[depth].probed(),
+                parents.len()
+            )
+        });
+        let nested = match steps.get(depth + 1) {
+            None => None,
+            Some(_) => {
+                let rows: Vec<Row> = groups.iter().flatten().cloned().collect();
+                Some(Box::new(self.run_level(
+                    steps,
+                    depth + 1,
+                    Parents::Rows(&rows),
+                    ctx,
+                )?))
+            }
+        };
+        Ok(Nested {
+            name: l.collection.clone(),
+            columns: f.columns(),
+            groups,
+            nested,
         })
     }
 }

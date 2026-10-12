@@ -1341,8 +1341,26 @@ impl Parser {
             ..Default::default()
         };
         loop {
+            // Fields, or a list that aggregates: each parent's children
+            // folded, `select count() as n, sum(total) as revenue`.
             if self.eat_kw("select") {
-                l.project = self.projection_list()?;
+                let at = self.i;
+                let list = self.select_list()?;
+                if !list.marks.is_empty() || !list.computed.is_empty() {
+                    self.i = at;
+                    return self.err(
+                        "a `lookup` level selects its children's fields, or aggregates of them",
+                    );
+                }
+                (l.project, l.aggregate) = (list.project, list.aggregate);
+                continue;
+            }
+            if self.eat_kw("group") {
+                l.group = self.group_list()?;
+                continue;
+            }
+            if self.eat_kw("having") {
+                l.having = Some(self.expr()?);
                 continue;
             }
             if self.eat_kw("where") {
