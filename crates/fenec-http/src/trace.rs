@@ -204,13 +204,16 @@ fn fresh() -> u64 {
 /// monotonic clock from an anchor its start took of both, two reads apart,
 /// and whatever passed between them moved all of them: two requests of one
 /// process -- a router's forward and the node's span under it, in one test
-/// or one binary -- were each off by their own anchor, and beside load two
-/// such reads landed up to 62 ms apart (180 pairs of 8 million past 100 us
-/// on an M1 beside eight busy loops). One clock orders every span of the
-/// process as it happened, as OpenTelemetry's Go, Rust and Python SDKs time
-/// theirs. A step of the clock inside a span shows in it -- an end before
-/// its start is written as the start (`encode`) -- and on macOS the clock
-/// reads in microseconds; each read costs what the monotonic one did.
+/// or one binary -- were each off by their own anchor, and two such reads
+/// land far apart: 188 pairs of 8 million past 100 us and the widest 83
+/// ms in a container of three cores beside six busy loops, 41 of 2 million
+/// with nothing beside them, 180 of 8 million on an M1 beside eight. One
+/// clock orders every span of the process as it happened, as
+/// OpenTelemetry's Go, Rust and Python SDKs time theirs. A step of the
+/// clock inside a span shows in it -- an end before its start is written
+/// as the start (`encode`) -- and on macOS the clock reads in microseconds;
+/// a read costs what the monotonic one did (59.6 ns against 52.2 in that
+/// container, 56.6 against 63.2 on the M1), and `begin` makes one fewer.
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
