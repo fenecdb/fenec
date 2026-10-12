@@ -765,7 +765,9 @@ type Opt func(*opts)
 type opts struct {
 	ef, k, candidates, limit, offset *int
 	exact, required, all, ifAbsent   bool
-	on, parentKey, collate           *string
+	collate                          *string
+	on, parentKey                    []string
+	parentSet                        bool
 	sel                              []string
 	selSet                           bool
 	where                            *Cond
@@ -802,19 +804,27 @@ func intp(n int) *int { return &n }
 
 // The options, each named for the clause word it writes or the JS
 // builder's option of that name.
-func strp(s string) *string      { return &s }
-func Ef(n int) Opt               { return func(o *opts) { o.ef = intp(n) } }
-func Exact() Opt                 { return func(o *opts) { o.exact = true } }
-func K(n int) Opt                { return func(o *opts) { o.k = intp(n) } }
-func Candidates(n int) Opt       { return func(o *opts) { o.candidates = intp(n) } }
-func Collate(name string) Opt    { return func(o *opts) { o.collate = strp(name) } }
-func All() Opt                   { return func(o *opts) { o.all = true } }
-func On(field string) Opt        { return func(o *opts) { o.on = strp(field) } }
-func ParentKey(field string) Opt { return func(o *opts) { o.parentKey = strp(field) } }
-func Required() Opt              { return func(o *opts) { o.required = true } }
-func Limit(n int) Opt            { return func(o *opts) { o.limit = intp(n) } }
-func Offset(n int) Opt           { return func(o *opts) { o.offset = intp(n) } }
-func Top(n int) Opt              { return func(o *opts) { o.top = intp(n) } }
+func strp(s string) *string   { return &s }
+func Ef(n int) Opt            { return func(o *opts) { o.ef = intp(n) } }
+func Exact() Opt              { return func(o *opts) { o.exact = true } }
+func K(n int) Opt             { return func(o *opts) { o.k = intp(n) } }
+func Candidates(n int) Opt    { return func(o *opts) { o.candidates = intp(n) } }
+func Collate(name string) Opt { return func(o *opts) { o.collate = strp(name) } }
+func All() Opt                { return func(o *opts) { o.all = true } }
+func Required() Opt           { return func(o *opts) { o.required = true } }
+func Limit(n int) Opt         { return func(o *opts) { o.limit = intp(n) } }
+func Offset(n int) Opt        { return func(o *opts) { o.offset = intp(n) } }
+func Top(n int) Opt           { return func(o *opts) { o.top = intp(n) } }
+
+// On names a Lookup's child field, or one for each part of a key over
+// several fields: On("org", "order").
+func On(fields ...string) Opt { return func(o *opts) { o.on = fields } }
+
+// ParentKey names the parent's field a Lookup's child field equals, id
+// unless given, or one for each of On's: ParentKey("org", "id").
+func ParentKey(fields ...string) Opt {
+	return func(o *opts) { o.parentKey, o.parentSet = fields, true }
+}
 
 // Ranges makes a Facet count the rows in each range of numbers from one
 // bound up to the next, every range in order, its value [from, to].
@@ -875,14 +885,15 @@ func (k sortKey) String() string {
 }
 
 type lookupLevel struct {
-	collection, on, parent string
-	project                []string
-	cond                   []*node
-	required               bool
-	order                  []sortKey
-	limit                  int
-	hasLimit               bool
-	offset                 int
+	collection string
+	on, parent []string
+	project    []string
+	cond       []*node
+	required   bool
+	order      []sortKey
+	limit      int
+	hasLimit   bool
+	offset     int
 }
 
 // mark is a highlight (words < 0) or a snippet of words words.
@@ -1269,27 +1280,37 @@ func (b *Builder) Rerank(field string, vector any, options ...Opt) *Builder {
 
 // Lookup is `lookup name on child [= parent] ...`: each row's children,
 // attached to it. On names the child's field (needed), ParentKey the
-// parent's (id unless given); Select, Where, Sort, Limit and Offset bind
-// to the looked-up collection, and Limit counts children per parent.
-// Required drops a parent no child matches. Called again, it chains onto
-// the collection the call before named.
+// parent's (id unless given), or each a field for each part of a key over
+// several fields, `on (org, order) = (org, id)`; Select, Where, Sort, Limit
+// and Offset bind to the looked-up collection, and Limit counts children
+// per parent. Required drops a parent no child matches. Called again, it
+// chains onto the collection the call before named.
 func (b *Builder) Lookup(name string, options ...Opt) *Builder {
 	return b.step(func(d *Builder) (err error) {
 		o := gather(options)
-		if o.on == nil || *o.on == "" {
+		if len(o.on) == 0 || o.on[0] == "" {
 			return refuse("lookup needs `on`: the child field holding the key")
 		}
 		l := lookupLevel{required: o.required}
 		if l.collection, err = ident(name, "collection"); err != nil {
 			return err
 		}
-		if l.on, err = ident(*o.on, "field"); err != nil {
-			return err
-		}
-		if o.parentKey != nil {
-			if l.parent, err = ident(*o.parentKey, "field"); err != nil {
+		for _, f := range o.on {
+			if f, err = ident(f, "field"); err != nil {
 				return err
 			}
+			l.on = append(l.on, f)
+		}
+		for _, f := range o.parentKey {
+			if f, err = ident(f, "field"); err != nil {
+				return err
+			}
+			l.parent = append(l.parent, f)
+		}
+		// One child field alone pairs with id unless named; several, each
+		// with its own.
+		if (len(l.on) > 1 || o.parentSet) && len(l.parent) != len(l.on) {
+			return refuse("lookup pairs %d child fields with %d parent fields", len(l.on), len(l.parent))
 		}
 		if o.selSet && !slices.Contains(o.sel, "*") {
 			for _, c := range o.sel {
@@ -1600,10 +1621,16 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 	}
 	// Terminal, so every clause after it is the child's -- and last, so its
 	// parameters come after the parent's.
+	side := func(names []string) string {
+		if len(names) > 1 {
+			return "(" + strings.Join(names, ", ") + ")"
+		}
+		return names[0]
+	}
 	for _, l := range b.lookups {
-		sql.WriteString(" lookup " + l.collection + " on " + l.on)
-		if l.parent != "" {
-			sql.WriteString(" = " + l.parent)
+		sql.WriteString(" lookup " + l.collection + " on " + side(l.on))
+		if len(l.parent) > 0 {
+			sql.WriteString(" = " + side(l.parent))
 		}
 		if l.required {
 			sql.WriteString(" required")

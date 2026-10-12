@@ -364,6 +364,14 @@ c('lookup needs on', ['from', 'products'], ['lookup', 'reviews', { limit: 3 }], 
 c('lookup names are names', ['from', 'products'], ['lookup', 'reviews; del products', { on: 'product_id' }], Q);
 c('lookup on is a name', ['from', 'products'], ['lookup', 'reviews', { on: 'meta.pid' }], Q);
 c('a collection cannot look itself up', ['from', 'products'], ['lookup', 'products', { on: 'parent_id' }], Q);
+// A key over several fields: a field of each side for each part, in order.
+c('lookup on several fields pairs them in order', ['from', 'orders'], ['where', 'org', 7], ['lookup', 'lines', { on: ['org', 'order'], parentKey: ['org', 'id'], where: { qty: { gte: 2 } }, order: [['line', 'desc']], limit: 5 }], Q);
+c('lookup on one field in a list is that field', ['from', 'orders'], ['lookup', 'lines', { on: ['order'], parentKey: ['id'] }], Q);
+c('lookup on several fields chains and is required', ['from', 'shops'], ['lookup', 'orders', { on: ['org', 'shop'], parentKey: ['org', 'code'], required: true }], ['lookup', 'lines', { on: ['org', 'order'], parentKey: ['org', 'id'], limit: 2 }], Q);
+c('lookup on several fields names as many parent fields', ['from', 'orders'], ['lookup', 'lines', { on: ['org', 'order'] }], Q);
+c('lookup pairs as many fields of each side', ['from', 'orders'], ['lookup', 'lines', { on: ['org', 'order'], parentKey: ['org', 'id', 'n'] }], Q);
+c('lookup on a list of no field', ['from', 'orders'], ['lookup', 'lines', { on: [] }], Q);
+c('lookup fields in a list are names', ['from', 'orders'], ['lookup', 'lines', { on: ['org', 'order) = (id'], parentKey: ['org', 'id'] }], Q);
 c('a chain names a collection once', ['from', 'a'], ['lookup', 'b', { on: 'a_id' }], ['lookup', 'a', { on: 'b_id' }], Q);
 c(
   'a chain at most eight deep',

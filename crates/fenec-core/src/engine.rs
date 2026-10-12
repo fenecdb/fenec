@@ -2734,6 +2734,37 @@ impl Step<'_> {
         })
     }
 
+    /// Fills `out` with the children of the row `id` of the level above:
+    /// ascending, alive and free of duplicates. A key over several fields
+    /// asks its index apart, so a single key's probe -- `key` and
+    /// [`Probe::ids`] over a value -- is the code it was: through one key
+    /// that was a value or an index's bytes, a page of 20 x 3 x 5 by one
+    /// `@hash` field ran 1 to 2% longer in quiet runs (`make
+    /// lookup-bench`).
+    fn ids(&self, id: DocId, out: &mut Vec<DocId>) -> Result<()> {
+        if let Probe::Tuple(t) = &self.probe {
+            out.clear();
+            if let Some(k) = t.prefix(self.parent, id)? {
+                t.ids(self.child, &k, out);
+            }
+            return Ok(());
+        }
+        self.probe.ids(self.child, &self.key(id)?, out);
+        Ok(())
+    }
+
+    /// Whether any live child of the row `id` of the level above satisfies
+    /// `pred`, as `ids` asks.
+    fn any(&self, id: DocId, mut pred: impl FnMut(DocId) -> Result<bool>) -> Result<bool> {
+        if let Probe::Tuple(t) = &self.probe {
+            return match t.prefix(self.parent, id)? {
+                Some(k) => t.any(self.child, &k, &mut pred),
+                None => Ok(false),
+            };
+        }
+        self.probe.any(self.child, &self.key(id)?, pred)
+    }
+
     /// Whether `id` passes this level's own `where`.
     fn passes(&self, id: DocId, ctx: &EvalCtx) -> Result<bool> {
         let Some(f) = &self.l.filter else {
@@ -2764,14 +2795,12 @@ fn survives(steps: &[Step], depth: usize, id: DocId, ctx: &EvalCtx) -> Result<bo
     let Some(next) = steps.get(depth + 1).filter(|n| n.l.required) else {
         return Ok(true);
     };
-    let key = next.key(id)?;
-    next.probe
-        .any(next.child, &key, |g| survives(steps, depth + 1, g, ctx))
+    next.any(id, |g| survives(steps, depth + 1, g, ctx))
 }
 
 /// How `lookup` addresses the child collection.
 ///
-/// Both arms are one lookup per parent. There is deliberately no "scan the
+/// Every arm is one lookup per parent. There is deliberately no "scan the
 /// child collection" arm: `near` refuses an unindexed field and names
 /// `@hnsw`, `match` refuses one and names `@text`, and the same rule keeps
 /// `lookup` from being an index probe in one query and a full scan in the
@@ -2787,6 +2816,234 @@ enum Probe<'a> {
     Id,
     /// A `@hash` bucket, borrowed for the whole query.
     Hash(&'a HashIndex, &'a DataType),
+    /// A key over several fields, or one field leading such an index: a
+    /// run of the index whose leading parts are the child's fields.
+    Tuple(Tuple<'a>),
+}
+
+/// A [`Tuple`]'s mark of a build with the index: nothing, and without the
+/// `composite` feature a type of no value, so that no `Tuple` is made there
+/// and every path through one -- the probe, the walk, the child side of
+/// `required` -- is dead code the compiler drops, not code skipped.
+#[cfg(feature = "composite")]
+type Built = ();
+#[cfg(not(feature = "composite"))]
+type Built = crate::off::Never;
+
+#[cfg(feature = "composite")]
+const BUILT: Option<Built> = Some(());
+#[cfg(not(feature = "composite"))]
+const BUILT: Option<Built> = None;
+
+/// How a key over several fields reaches its children: the child's index
+/// whose leading parts are the fields `on` names, and for each of those
+/// parts, in the index's order, the field of the level above it pairs with.
+/// A parent's values, each made its child field's type as a single key's
+/// is, laid end to end as the index lays a row's, are a prefix of its
+/// children's keys: their entries are one run, found by two searches.
+struct Tuple<'a> {
+    ix: &'a CompositeIndex,
+    comp: &'a Composite,
+    /// Each leading part's parent field (`None` for `id`), and the type its
+    /// value is made first.
+    parts: Vec<(Option<usize>, DataType)>,
+    /// Each leading part's child field, by position: what the child side
+    /// of `required` reads a child's own parts with.
+    child_pos: Vec<usize>,
+    /// Whether the level's `order` is the order of the run's entries --
+    /// backwards or not, and up to which part it reads -- so a parent's
+    /// children are walked in it and only as far as its page, rather than
+    /// gathered and sorted.
+    walk: Option<(bool, usize)>,
+    _built: Built,
+}
+
+impl<'a> Tuple<'a> {
+    /// The index on the child for `l`'s key: one whose leading parts are
+    /// its child fields in any order -- of several, one whose next parts
+    /// the level's `order` walks, then the first; only one that walks it
+    /// where `walk_only`. `None` where none is for one field, which has its
+    /// `@hash` to be probed by; a key over several fields is refused,
+    /// naming the index to declare, as a single field with neither is: a
+    /// scan per parent would be another feature under the same name.
+    fn resolve(
+        child: &'a Collection,
+        parent: &Collection,
+        l: &Lookup,
+        walk_only: bool,
+    ) -> Result<Option<Tuple<'a>>> {
+        let n = l.on.len();
+        let leads = |comp: &Composite| {
+            comp.keys.len() >= n && comp.keys[..n].iter().all(|(k, _)| l.on.contains(k))
+        };
+        let Some(built) = BUILT else {
+            // What a full build answers through the index is refused
+            // naming the feature; one field with a `@hash` is probed.
+            let led = !walk_only && child.composites.iter().any(|(c, _)| leads(c));
+            return match (n, led) {
+                (1, false) => Ok(None),
+                _ => Err(not_built(
+                    &format!("`lookup {}` on {}", l.collection, l.side(true)),
+                    "composite",
+                )),
+            };
+        };
+        for c in &l.on {
+            if child.schema.field(c).is_none() {
+                return Err(Error::NotFound(format!("field `{}.{c}`", l.collection)));
+            }
+        }
+        let mut best: Option<(usize, Option<(bool, usize)>)> = None;
+        for (at, (comp, _)) in child.composites.iter().enumerate() {
+            if !leads(comp) {
+                continue;
+            }
+            let walk = walks(comp, n, 0, &l.order, &child.schema);
+            if (!walk_only || walk.is_some())
+                && best.is_none_or(|b| b.1.is_none() && walk.is_some())
+            {
+                best = Some((at, walk));
+            }
+        }
+        let Some((at, walk)) = best else {
+            if n == 1 {
+                return Ok(None);
+            }
+            // Here, where a build without the index never reaches, so it
+            // holds none of the text.
+            let fields = l.side(true);
+            return Err(Error::Query(format!(
+                "`lookup` on `{}` {fields} needs an index whose first fields are those \
+                 (declare it with @sorted{fields})",
+                l.collection
+            )));
+        };
+        let Some(ix) = child.composite(at)? else {
+            return Ok(None);
+        };
+        // A value its order has no place for is in no walk's order.
+        let walk = walk.filter(|_| ix.apart().is_empty());
+        if walk_only && walk.is_none() {
+            return Ok(None);
+        }
+        let comp = &child.composites[at].0;
+        let (mut parts, mut child_pos) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for (k, _) in &comp.keys[..n] {
+            let Some(p) = l.on.iter().position(|c| c == k).map(|i| &l.parent[i]) else {
+                continue;
+            };
+            let pos = match p.as_str() {
+                "id" => None,
+                _ => Some(
+                    parent
+                        .schema
+                        .field_pos(p)
+                        .ok_or_else(|| Error::NotFound(format!("field `{p}`")))?,
+                ),
+            };
+            let ty = child.schema.part_type(k)?;
+            let pty = pos.map_or(DataType::Int, |q| parent.schema.fields[q].ty.clone());
+            check_key_types(&pty, &ty, p, &l.collection, k)?;
+            parts.push((pos, ty));
+            child_pos.push(child.schema.field_pos(k).unwrap_or(0));
+        }
+        Ok(Some(Tuple {
+            ix,
+            comp,
+            parts,
+            child_pos,
+            walk,
+            _built: built,
+        }))
+    }
+
+    /// The prefix the row `id` of the level above probes with: its fields'
+    /// values, each made its child field's type, or `None` where one is
+    /// null -- a NULL key matches nothing, as a single key's -- or cannot
+    /// be. Out of line: its callers are four.
+    #[inline(never)]
+    fn prefix(&self, parent: &Collection, id: DocId) -> Result<Option<crate::composite::KeyBytes>> {
+        let mut vals = Vec::with_capacity(self.parts.len());
+        for (pos, ty) in &self.parts {
+            let v = match pos {
+                None => Value::Int(id as i64),
+                Some(p) => parent.store.read_field(id, *p)?.unwrap_or(Value::Null),
+            };
+            vals.push(v.coerce(ty).unwrap_or(Value::Null));
+        }
+        Ok(self.laid(&vals))
+    }
+
+    /// `vals`, a value a leading part, laid end to end as the index keys
+    /// them; `None` where one is null.
+    fn laid(&self, vals: &[Value]) -> Option<crate::composite::KeyBytes> {
+        const NULL: Value = Value::Null;
+        let mut refs = [&NULL; crate::schema::MAX_COMPOSITE_KEYS];
+        for (r, v) in refs.iter_mut().zip(vals) {
+            if v.is_null() {
+                return None;
+            }
+            *r = v;
+        }
+        Some(self.ix.key(&refs[..vals.len()]).bytes)
+    }
+
+    /// Whether the child `cid`'s own leading parts are what the row `pid`
+    /// of the level above probes with: the child side of `required`, whose
+    /// child names its parent by the part paired with `id` and is held to
+    /// the rest here, as the parent's probe would hold it -- the same
+    /// bytes, since an entry's are the child's parts as `laid` lays them.
+    fn holds(
+        &self,
+        child: &Collection,
+        cid: DocId,
+        parent: &Collection,
+        pid: DocId,
+    ) -> Result<bool> {
+        let mut vals = Vec::with_capacity(self.child_pos.len());
+        for &p in &self.child_pos {
+            vals.push(child.store.read_field(cid, p)?.unwrap_or(Value::Null));
+        }
+        Ok(match (self.laid(&vals), self.prefix(parent, pid)?) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        })
+    }
+
+    /// The run of entries `key` is the prefix of.
+    fn span(&self, key: &[u8]) -> crate::composite::Span {
+        self.ix.span(key, self.parts.len(), None)
+    }
+
+    /// [`Probe::ids`] over the run `key` names: in the index's order, put in
+    /// id order, the order a bucket holds them in and a tie goes by.
+    fn ids(&self, child: &Collection, key: &[u8], out: &mut Vec<DocId>) {
+        let _ = self.ix.run(key, &mut |id| {
+            if child.store.contains(id) {
+                out.push(id);
+            }
+            Ok(true)
+        });
+        out.sort_unstable();
+    }
+
+    /// [`Probe::any`] over the run `key` names, as it lies, as a bucket is
+    /// walked: one witness is the answer, whatever order the rest are in.
+    /// The test by reference, so the walk's callback is one function rather
+    /// than one for each caller's test.
+    fn any(
+        &self,
+        child: &Collection,
+        key: &[u8],
+        pred: &mut dyn FnMut(DocId) -> Result<bool>,
+    ) -> Result<bool> {
+        let mut found = false;
+        self.ix.run(key, &mut |id| {
+            found = child.store.contains(id) && pred(id)?;
+            Ok(!found)
+        })?;
+        Ok(found)
+    }
 }
 
 impl<'a> Probe<'a> {
@@ -2808,8 +3065,8 @@ impl<'a> Probe<'a> {
     /// The type the parent's key is compared against.
     fn key_type(&self) -> DataType {
         match self {
-            Probe::Id => DataType::Int,
             Probe::Hash(_, ty) => (*ty).clone(),
+            _ => DataType::Int,
         }
     }
 
@@ -2859,6 +3116,8 @@ impl<'a> Probe<'a> {
                 }
                 Ok(false)
             }
+            // Asked apart ([`Step::any`]).
+            Probe::Tuple(_) => Ok(false),
         }
     }
 
@@ -2901,6 +3160,8 @@ impl<'a> Probe<'a> {
                 // order whatever order they were written in.
                 out.extend(ids.iter().filter(|id| child.store.contains(*id)));
             }
+            // Asked apart ([`Step::ids`]).
+            Probe::Tuple(_) => {}
         }
     }
 }
@@ -2915,7 +3176,13 @@ impl<'a> Probe<'a> {
 /// parses the text and calls them equal. Refusing the mismatch closes that
 /// by construction instead of special-casing the one pair known to differ
 /// today. The cost is refusing two pairs that would have agreed.
-fn check_key_types(parent: &DataType, child: &DataType, l: &Lookup) -> Result<()> {
+fn check_key_types(
+    parent: &DataType,
+    child: &DataType,
+    parent_field: &str,
+    collection: &str,
+    child_field: &str,
+) -> Result<()> {
     let numeric = |t: &DataType| matches!(t, DataType::Int | DataType::Float | DataType::Timestamp);
     if matches!(parent, DataType::Vector(..)) || matches!(child, DataType::Vector(..)) {
         return Err(Error::Type(
@@ -2927,11 +3194,8 @@ fn check_key_types(parent: &DataType, child: &DataType, l: &Lookup) -> Result<()
         return Ok(());
     }
     Err(Error::Type(format!(
-        "`lookup` key types do not match: `{}` is {}, `{}.{}` is {}",
-        l.parent_field,
+        "`lookup` key types do not match: `{parent_field}` is {}, `{collection}.{child_field}` is {}",
         parent.name(),
-        l.collection,
-        l.child_field,
         child.name()
     )))
 }
@@ -7906,39 +8170,7 @@ impl Database {
                 continue;
             }
             let p = composed(comp, ix, sel.filter.as_ref(), params);
-            let fixed = &comp.keys[..p.fixed];
-            let (mut next, mut back, mut fits) = (p.fixed, None, true);
-            for s in &sel.order {
-                // A part an equality fixes orders nothing; one an `in`
-                // fixes holds several values, which the walk of each span
-                // does not put in order.
-                match fixed.iter().position(|(k, _)| *k == s.field) {
-                    Some(i) if p.inlisted & (1 << i) == 0 => continue,
-                    Some(_) => {
-                        fits = false;
-                        break;
-                    }
-                    None => {}
-                }
-                let Some((k, desc)) = comp.keys.get(next) else {
-                    fits = false;
-                    break;
-                };
-                // The index holds its field's order, a collation's or the
-                // bytes': a key in another one sorts.
-                let own = c.schema.field(k).and_then(|f| f.collate);
-                if *k != s.field || s.collate.is_some_and(|x| Some(x) != own) {
-                    fits = false;
-                    break;
-                }
-                let rev = s.asc == *desc;
-                if *back.get_or_insert(rev) != rev {
-                    fits = false;
-                    break;
-                }
-                next += 1;
-            }
-            let Some(back) = back.filter(|_| fits) else {
+            let Some((back, next)) = walks(comp, p.fixed, p.inlisted, &sel.order, &c.schema) else {
                 continue;
             };
             let run: usize = p.spans.iter().map(|s| ix.count(s)).sum();
@@ -8719,23 +8951,53 @@ impl Database {
         l: &Lookup,
     ) -> Result<(&'a Collection, Probe<'a>, Option<usize>)> {
         let child = self.collection(&l.collection)?;
-        let probe = Probe::resolve(child, &l.child_field, &l.collection)?;
+        let (child_field, parent_field) = match (&l.on[..], &l.parent[..]) {
+            ([one], [above]) => (one, above),
+            ([], _) => return Err(Error::Query("`lookup` needs `on`".into())),
+            _ => {
+                let Some(t) = Tuple::resolve(child, parent, l, false)? else {
+                    return Err(Error::Query("`lookup` needs an index".into()));
+                };
+                return Ok((child, Probe::Tuple(t), None));
+            }
+        };
+        // One field leading an index over several: its run is the
+        // children where the level's `order` walks the index past it --
+        // "the latest three reviews of each product" reads three, where a
+        // bucket is read whole and sorted -- or where the field has no
+        // `@hash` to probe.
+        if child_field != "id" && !child.composites.is_empty() {
+            let hashed = child
+                .schema
+                .field(child_field)
+                .is_some_and(|f| matches!(f.index, IndexKind::Hash { .. }));
+            if let Some(t) = Tuple::resolve(child, parent, l, hashed)? {
+                return Ok((child, Probe::Tuple(t), None));
+            }
+        }
+        let probe = Probe::resolve(child, child_field, &l.collection)?;
         // `id` is not a schema field but is the commonest key on both sides.
-        let parent_pos = if l.parent_field == "id" {
+        let parent_pos = if parent_field == "id" {
             None
         } else {
             Some(
                 parent
                     .schema
-                    .field_pos(&l.parent_field)
-                    .ok_or_else(|| Error::NotFound(format!("field `{}`", l.parent_field)))?,
+                    .field_pos(parent_field)
+                    .ok_or_else(|| Error::NotFound(format!("field `{parent_field}`")))?,
             )
         };
         let parent_ty = match parent_pos {
             None => DataType::Int,
             Some(p) => parent.schema.fields[p].ty.clone(),
         };
-        check_key_types(&parent_ty, &probe.key_type(), l)?;
+        check_key_types(
+            &parent_ty,
+            &probe.key_type(),
+            parent_field,
+            &l.collection,
+            child_field,
+        )?;
         Ok((child, probe, parent_pos))
     }
 
@@ -8834,14 +9096,18 @@ impl Database {
     ) -> Result<Vec<DocId>> {
         let l = steps[0].l;
         let child = steps[0].child;
-        let child_pos = if l.child_field == "id" {
+        // The child's field its parent's `id` pairs with: the key, or that
+        // part of a key over several fields.
+        let at = l.parent.iter().position(|p| p == "id").unwrap_or(0);
+        let child_field = &l.on[at];
+        let child_pos = if child_field == "id" {
             None
         } else {
             Some(
                 child
                     .schema
-                    .field_pos(&l.child_field)
-                    .ok_or_else(|| Error::NotFound(format!("field `{}`", l.child_field)))?,
+                    .field_pos(child_field)
+                    .ok_or_else(|| Error::NotFound(format!("field `{child_field}`")))?,
             )
         };
 
@@ -8869,9 +9135,24 @@ impl Database {
             let Ok(Value::Int(i)) = k.coerce(&DataType::Int) else {
                 continue;
             };
-            if let Ok(id) = DocId::try_from(i) {
-                keys.push(id);
+            let Ok(id) = DocId::try_from(i) else {
+                continue;
+            };
+            // A key over several fields: the child names its parent by the
+            // part paired with `id`, and holds the rest of the key or not.
+            // Probing each parent so named for the whole key instead read
+            // every child of every one again, where a tenth of the children
+            // named most of the parents: over 20 000 orders and 200 000
+            // lines, 11.7 ms against 5.7, and 9.5 for the parents' side
+            // alone (`make lookup-bench`); and mapping each child's key back
+            // whole, sorted beside the parent named, was a sort of its own,
+            // 4.5 KB of the browser module.
+            if let Probe::Tuple(t) = &steps[0].probe {
+                if t.parts.len() > 1 && !t.holds(child, cid, steps[0].parent, id)? {
+                    continue;
+                }
             }
+            keys.push(id);
         }
         keys.sort_unstable();
         keys.dedup();
@@ -8902,10 +9183,7 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
         let steps = self.lookup_chain(parent, l)?;
-        let (child, probe, parent_pos) = {
-            let s = &steps[0];
-            (s.child, &s.probe, s.parent_pos)
-        };
+        let child = steps[0].child;
 
         // Two plans answer this question, and every number that decides
         // between them is exact and already in hand: the candidate parents
@@ -8932,7 +9210,8 @@ impl Database {
         // 21 parents 1.10/5.01 ms, 736 1.76/5.87, 4 172 7.67/10.13,
         // 10 932 19.40/17.07, 20 000 36.84/30.68. The rule picks the winner
         // at every one of them.
-        if l.parent_field == "id" {
+        // The child names its parent by the field its `id` pairs with.
+        if l.parent.iter().any(|p| p == "id") {
             if let Some(f) = &l.filter {
                 if let Some(cands) = Self::child_candidates(child, f, ctx.params) {
                     let n = child.store.len() as u64;
@@ -8957,14 +9236,10 @@ impl Database {
         let mut out = Vec::new();
         let parents = ids.len();
         for id in ids {
-            let key = match parent_pos {
-                None => Value::Int(id as i64),
-                Some(p) => parent.store.read_field(id, p)?.unwrap_or(Value::Null),
-            };
             // A child only counts if it survives what is below it too: with
             // a `required` level further down, a child that passes its own
             // `where` may still have nothing hanging off it.
-            if probe.any(child, &key, |cid| survives(&steps, 0, cid, ctx))? {
+            if steps[0].any(id, |cid| survives(&steps, 0, cid, ctx))? {
                 out.push(id);
             }
         }
@@ -9034,45 +9309,73 @@ impl Database {
         let mut groups = Vec::with_capacity(ids.len());
         let mut bucket: Vec<DocId> = Vec::new();
 
+        // A key over several fields whose index holds the level's `order`
+        // past its leading parts walks each parent's run in it, as far as
+        // its page: "the latest five lines of each order" reads five.
+        let walk = match probe {
+            Probe::Tuple(t) => t.walk.map(|w| (t, w)),
+            _ => None,
+        };
+        let want = offset.saturating_add(limit);
         for &pid in ids {
-            let key = steps[depth].key(pid)?;
-            probe.ids(child, &key, &mut bucket);
-
-            // The child filter is evaluated over the bucket rather than sent
-            // through `matching_ids`. The bucket is already one parent's
-            // children, so a second index lookup would have to be
-            // intersected with it and would almost always cost more than
-            // reading the handful of rows it is narrowing.
-            //
-            // `survives` also drops a child a `required` level below has
-            // nothing for, and it does so here -- before the ordering and
-            // before `offset` and `limit` -- for the reason `required`
-            // already runs there: it decides who is on the page, so cutting
-            // afterwards would answer a request for three with one.
             let mut kept: Vec<DocId> = Vec::new();
-            for &cid in &bucket {
-                if survives(steps, depth, cid, ctx)? {
-                    kept.push(cid);
+            if let Some((t, (back, ties))) = walk {
+                if let (true, Some(k)) = (want > 0, t.prefix(steps[depth].parent, pid)?) {
+                    let mut take = |cid| {
+                        if child.store.contains(cid) && survives(steps, depth, cid, ctx)? {
+                            kept.push(cid);
+                        }
+                        Ok(kept.len() < want)
+                    };
+                    // Forwards over every part, the run is in the order as
+                    // it lies, ties and all; the rest a walk puts in order.
+                    match !back && ties >= t.ix.parts().len() {
+                        true => t.ix.run(&k, &mut take)?,
+                        false => {
+                            t.ix.walk(&[t.span(&k)], t.parts.len(), back, ties, &mut take)?
+                        }
+                    }
                 }
-            }
+            } else {
+                steps[depth].ids(pid, &mut bucket)?;
 
-            if !keys.is_empty() {
-                // Put in order as the parent path is, through `order_ids`,
-                // which reads the keys up front -- comparing through the
-                // store would read every row log(n) times. Its ties go by
-                // position, so the children go in ascending id first: a
-                // hash bucket holds them that way almost always, not always,
-                // and a tie has gone to the lower id. A sort of its own, of
-                // `(Vec<Value>, DocId)` rows, was 8.1 KB of the browser
-                // module.
+                // The child filter is evaluated over the bucket rather than
+                // sent through `matching_ids`. The bucket is already one
+                // parent's children, so a second index lookup would have to
+                // be intersected with it and would almost always cost more
+                // than reading the handful of rows it is narrowing.
                 //
-                // `lookup` is the one place a bounded `order` is known up
-                // front: the clause carries its own `limit`, so only
-                // `offset + limit` children can ever be emitted and the rest
-                // never need an order at all. Elsewhere `order` has no such
-                // guarantee, which is why the engine sorts in full there.
-                kept.sort_unstable();
-                kept = order_ids(&child.store, &kept, &keys, offset.saturating_add(limit))?;
+                // `survives` also drops a child a `required` level below has
+                // nothing for, and it does so here -- before the ordering
+                // and before `offset` and `limit` -- for the reason
+                // `required` already runs there: it decides who is on the
+                // page, so cutting afterwards would answer a request for
+                // three with one.
+                for &cid in &bucket {
+                    if survives(steps, depth, cid, ctx)? {
+                        kept.push(cid);
+                    }
+                }
+
+                if !keys.is_empty() {
+                    // Put in order as the parent path is, through
+                    // `order_ids`, which reads the keys up front --
+                    // comparing through the store would read every row
+                    // log(n) times. Its ties go by position, so the children
+                    // go in ascending id first: a hash bucket holds them
+                    // that way almost always, not always, and a tie has gone
+                    // to the lower id. A sort of its own, of `(Vec<Value>,
+                    // DocId)` rows, was 8.1 KB of the browser module.
+                    //
+                    // `lookup` is the one place a bounded `order` is known
+                    // up front: the clause carries its own `limit`, so only
+                    // `offset + limit` children can ever be emitted and the
+                    // rest never need an order at all. Elsewhere `order` has
+                    // no such guarantee, which is why the engine sorts in
+                    // full there.
+                    kept.sort_unstable();
+                    kept = order_ids(&child.store, &kept, &keys, want)?;
+                }
             }
 
             let mut group = Vec::new();
@@ -9098,13 +9401,22 @@ impl Database {
 
         plan(|| {
             let by = match probe {
-                Probe::Id => "the id",
-                Probe::Hash(..) => "the hash index",
+                Probe::Id => "the id probed".to_string(),
+                Probe::Hash(..) => "the hash index probed".to_string(),
+                Probe::Tuple(t) => format!(
+                    "the index on ({}) {}",
+                    t.comp.keys_text(),
+                    match t.walk {
+                        Some((false, _)) => "walked",
+                        Some((true, _)) => "walked backwards",
+                        None => "probed",
+                    }
+                ),
             };
             format!(
-                "lookup: {} on {}, {by} probed for {} parents, {} children",
+                "lookup: {} on {}, {by} for {} parents, {} children",
                 l.collection,
-                l.child_field,
+                l.side(true),
                 ids.len(),
                 groups.iter().map(Vec::len).sum::<usize>()
             )
@@ -12448,6 +12760,42 @@ fn composed(
         ranged,
         exact: used.iter().all(|u| *u) && ix.apart().is_empty(),
     }
+}
+
+/// Whether `order`, over a run of `comp`'s entries whose first `fixed`
+/// parts the run fixes, is the run's order -- forwards, or every part
+/// reversed -- and the part after the last it reads: what a walk of the
+/// run takes. `None` where it sorts. A part an equality fixes orders
+/// nothing; one an `in` fixes (`inlisted`, a bit a part) holds several
+/// values, which the walk of each span does not put in order.
+fn walks(
+    comp: &Composite,
+    fixed: usize,
+    inlisted: u8,
+    order: &[Sort],
+    schema: &Schema,
+) -> Option<(bool, usize)> {
+    let (mut next, mut back) = (fixed, None);
+    for s in order {
+        match comp.keys[..fixed].iter().position(|(k, _)| *k == s.field) {
+            Some(i) if inlisted & (1 << i) == 0 => continue,
+            Some(_) => return None,
+            None => {}
+        }
+        let (k, desc) = comp.keys.get(next)?;
+        // The index holds its field's order, a collation's or the bytes':
+        // a key in another one sorts.
+        let own = schema.field(k).and_then(|f| f.collate);
+        if *k != s.field || s.collate.is_some_and(|x| Some(x) != own) {
+            return None;
+        }
+        let rev = s.asc == *desc;
+        if *back.get_or_insert(rev) != rev {
+            return None;
+        }
+        next += 1;
+    }
+    back.map(|b| (b, next))
 }
 
 /// Whether the `and` chain of `filter` names `field` -- an equality, an

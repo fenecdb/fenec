@@ -16,7 +16,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench ttl-bench growth-bench search-bench nocase-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
@@ -644,6 +644,17 @@ composite-bench:
 	$(CARGO) build --release -p fenec-core --example composite
 	./target/release/examples/composite all 1000000 10000
 	./target/release/examples/composite sorted 1000000
+
+## A `lookup` over a key of several fields: a tenant's 20 shops x 3 orders x
+## 5 lines, `on (org, shop) = (org, id)` through `@sorted(org, shop, at
+## desc)` against the key joined into one `@hash` text field, the tenant left
+## out of a `@hash` key, and that key walked through an index it leads; and
+## `required` counted from the children's side (crates/fenec-core/examples/
+## lookups.rs). ARGS="all 500 2": 500 orders a shop. ARGS=single: the
+## `@hash` key alone, for a build from before the feature.
+lookup-bench:
+	$(CARGO) build --release -p fenec-core --example lookups
+	./target/release/examples/lookups $(if $(ARGS),$(ARGS),all)
 
 ## `in (get ...)` against the same `in [..]` written out, and against the
 ## `lookup ... required` that asks the same question from the other side:

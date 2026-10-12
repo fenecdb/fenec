@@ -297,21 +297,29 @@ export interface Relation<T extends TableRef = TableRef, K extends 'many' | 'one
   readonly $kind: K;
 }
 
+/** A relation's two sides: a column each, or a column of each side for each part of a key over several fields. */
+type RelationSpec<T extends TableRef> =
+  | { from: ColumnRef; to: ColumnRef<T> }
+  | { from: ColumnRef[]; to: ColumnRef<T>[] };
+
 type RelationHelpers<T extends Tables> = {
   [K in keyof T]: { readonly [C in keyof T[K]['$fields'] | 'id']: ColumnRef<T[K]> };
 } & {
-  many: { [K in keyof T]: (spec: { from: ColumnRef; to: ColumnRef<T[K]> }) => Relation<T[K], 'many'> };
-  one: { [K in keyof T]: (spec: { from: ColumnRef; to: ColumnRef<T[K]> }) => Relation<T[K], 'one'> };
+  many: { [K in keyof T]: (spec: RelationSpec<T[K]>) => Relation<T[K], 'many'> };
+  one: { [K in keyof T]: (spec: RelationSpec<T[K]>) => Relation<T[K], 'one'> };
 };
 
 /**
  * Drizzle 1.0's `defineRelations`, answered by `lookup`: a relation is
- * `on <to> = <from>`, so `to` is the child's key -- `id`, or a column with a
- * hash or unique index -- and a relation `lookup` cannot answer is refused.
- * The rows it attaches are under the table's name, a list either way.
+ * `on <to> = <from>`, so `to` is the child's key -- `id`, a column with a
+ * hash or unique index, or the first columns of an index over several, a
+ * column of each side for each part -- and a relation `lookup` cannot
+ * answer is refused. The rows it attaches are under the table's name, a
+ * list either way.
  *
  *   const relations = defineRelations({ products, reviews }, (r) => ({
  *     products: { reviews: r.many.reviews({ from: r.products.id, to: r.reviews.productId }) },
+ *     orders: { lines: r.many.lines({ from: [r.orders.org, r.orders.id], to: [r.lines.org, r.lines.order] }) },
  *   }));
  *   const db = await Fenec.open(wasm, { schema: { products, reviews }, relations });
  *   await db.from(products).lookup('reviews').rows();

@@ -172,6 +172,15 @@ String _quote(String s) {
 String _identOf(String name, [String what = 'field']) =>
     _ident.hasMatch(name) ? name : throw _refuse('invalid $what name: ${_quote(name)}');
 
+/// A lookup's side: a field's name, or a list of them for a key over
+/// several fields; anything else is no name.
+List<String>? _namesOf(Object? v) => switch (v) {
+      null => null,
+      final String s => [s],
+      final List l when l.every((x) => x is String) => l.cast<String>(),
+      _ => throw _refuse('invalid field name: ${_quote('$v')}'),
+    };
+
 /// A field's name, or a path into a json field: `meta.lang`.
 String _pathOf(String name) => _path.hasMatch(name) ? name : throw _refuse('invalid field name: ${_quote(name)}');
 
@@ -450,8 +459,8 @@ class _Key {
 }
 
 class _Level {
-  final String collection, on;
-  final String? parent;
+  final String collection;
+  final List<String> on, parent;
   final List<String>? project;
   final List<Node> cond;
   final bool required;
@@ -737,23 +746,33 @@ class Query {
 
   /// `lookup name on child [= parent] ...`: each row's children, attached to
   /// it. [on] names the child's field, [parentKey] the parent's (`id` unless
-  /// given); the rest binds to the looked-up collection, and [limit] counts
-  /// children per parent. [required] drops a parent no child matches.
-  /// Called again, it chains onto the collection the call before named.
+  /// given) -- each a [String], or a [List] of them for a key over several
+  /// fields, a field of each side for each part: `on: ['org', 'order'],
+  /// parentKey: ['org', 'id']`. The rest binds to the looked-up collection,
+  /// and [limit] counts children per parent. [required] drops a parent no
+  /// child matches. Called again, it chains onto the collection the call
+  /// before named.
   Query lookup(String name,
-      {required String? on,
-      String? parentKey,
+      {required Object? on,
+      Object? parentKey,
       List<String>? select,
       Object? where,
       bool required = false,
       List<SortKey> order = const [],
       int? limit,
       int? offset}) {
-    if (on == null || on.isEmpty) throw _refuse('lookup needs `on`: the child field holding the key');
+    final names = _namesOf(on) ?? const [];
+    if (names.isEmpty || names[0].isEmpty) throw _refuse('lookup needs `on`: the child field holding the key');
+    final child = [for (final f in names) _identOf(f)];
+    final parent = [for (final f in _namesOf(parentKey) ?? const <String>[]) _identOf(f)];
+    // One child field alone pairs with `id` unless named; several, each with its own.
+    if ((child.length > 1 || parentKey != null) && parent.length != child.length) {
+      throw _refuse('lookup pairs ${child.length} child fields with ${parent.length} parent fields');
+    }
     final level = _Level(
       _identOf(name, 'collection'),
-      _identOf(on),
-      parentKey == null ? null : _identOf(parentKey),
+      child,
+      parent,
       select == null || select.contains('*') ? null : select.map(_pathOf).toList(),
       where == null ? const [] : [_toNode(where)],
       required,
@@ -915,8 +934,9 @@ class Query {
     // Terminal, so every clause after it is the child's -- and last, so its
     // parameters come after the parent's.
     for (final l in _lookups) {
-      sql.write(' lookup ${l.collection} on ${l.on}');
-      if (l.parent != null) sql.write(' = ${l.parent}');
+      String side(List<String> names) => names.length > 1 ? '(${names.join(', ')})' : names[0];
+      sql.write(' lookup ${l.collection} on ${side(l.on)}');
+      if (l.parent.isNotEmpty) sql.write(' = ${side(l.parent)}');
       if (l.required) sql.write(' required');
       if (l.project != null) sql.write(' select ${l.project!.join(', ')}');
       final lw = _whereOf(l.cond, bind);

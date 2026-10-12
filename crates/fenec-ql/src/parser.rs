@@ -18,6 +18,7 @@
 //!            -- a key: a field, or any expression over the row, `distance(loc, $1)`, `a * b`
 //!            [facet <field> [top N], ...]   -- value counts over every matched row
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
+//!            [lookup <name> on (<child>, ...) = (<parent>, ...) [required] <clauses...>]
 //! get    <name> select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
 //!            match <field> <text> ...       -- the spans the match's terms were read from
 //! where  <field> in (get <name> select <field> ...)  -- the inner get's one column, run once
@@ -1296,8 +1297,9 @@ impl Parser {
         }
     }
 
-    /// `lookup <name> on <child> [= <parent>]` and the clauses that follow,
-    /// all of which belong to the child collection.
+    /// `lookup <name> on <child> [= <parent>]`, or `on (<child>, ...) =
+    /// (<parent>, ...)` for a key over several fields, and the clauses that
+    /// follow, all of which belong to the child collection.
     ///
     /// Written without the second half of `on`, the parent key is `id`: that
     /// is the foreign-key-to-primary-key shape, which is most of them, and
@@ -1322,17 +1324,20 @@ impl Parser {
         }
         let collection = self.ident()?;
         self.expect_kw("on")?;
-        let child_field = self.ident()?;
-        let parent_field = if matches!(self.peek(), Tok::Eq) {
+        // `on (org, order) = (org, id)` is a key over several fields, the
+        // parent's side written out, since `id` alone pairs with one child
+        // field; `Select::check` holds the two sides to as many.
+        let on = self.names()?;
+        let parent = if matches!(self.peek(), Tok::Eq) {
             self.next();
-            self.ident()?
+            self.names()?
         } else {
-            "id".to_string()
+            vec!["id".to_string()]
         };
         let mut l = Lookup {
             collection,
-            child_field,
-            parent_field,
+            on,
+            parent,
             ..Default::default()
         };
         loop {
@@ -1376,6 +1381,27 @@ impl Parser {
             break;
         }
         Ok(l)
+    }
+
+    /// `order`, or `(org, order)`: a name, or names in parentheses. One
+    /// call of `ident` for both, which is inlined where it is called.
+    fn names(&mut self) -> Result<Vec<String>> {
+        let listed = matches!(self.peek(), Tok::LParen);
+        if listed {
+            self.next();
+        }
+        let mut out = Vec::new();
+        loop {
+            out.push(self.ident()?);
+            if !listed || !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        if listed {
+            self.expect(Tok::RParen)?;
+        }
+        Ok(out)
     }
 
     /// `[0, 2500, 5000]`: a facet's range bounds, numbers as written --

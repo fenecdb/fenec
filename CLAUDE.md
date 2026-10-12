@@ -2501,10 +2501,10 @@ which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (414.5 KB, 142.4 brotli, against 662.3 and 224.2 with
+module with none (421.3 KB, 144.9 brotli, against 675.1 and 228.8 with
 every one) and left out of the full one, brotli added and saved:
-`vector` 20.7 and 18.7, `sorted` 8.9 and 21.2 with `composite`,
-`composite` beside it 9.2 and 8.4, `collate` 9.0 and 8.3, `text` 5.7 and
+`vector` 20.7 and 18.7, `sorted` 8.8 and 23.4 with `composite`,
+`composite` beside it 11.5 and 10.5, `collate` 9.0 and 8.3, `text` 5.7 and
 7.3, `facets` 3.5 and 4.1, `highlight` beside `text` 3.5 and 3.1,
 `nocase` 3.1 and 2.6, `geo` 2.8 and 5.9 (its index with it), `analytics`
 2.7 and 2.1, `sparse` 2.7 and 0.9, the schema check 9.5 and 9.5. The module with every feature is the code
@@ -2558,9 +2558,9 @@ schema check, search -- `match`, `highlight` and `snippet`, facets,
 `near` with its graph, `fuse` -- and the standard query features. A
 plugin is an extra one kind of app needs: geo, sparse vectors, a
 language's collation, `bucket` and the HLL sketches. Held to that rule
-the core is about 207 KB brotli and the extras about 17 together (`geo`
-5.9, `collate` 8.3, `sparse` 0.9, `bucket` and the sketches 2.1), 8% of
-the full module's 224: too little to pay for modules built ahead
+the core is about 212 KB brotli and the extras about 17 together (`geo`
+5.9, `collate` 8.3, `sparse` 0.9, `bucket` and the sketches 2.1), 7% of
+the full module's 229: too little to pay for modules built ahead
 for sets of features and a choice of one per page, let alone a module a
 plugin loaded beside the engine, which would carry its own copy of the
 standard library's allocator and panic machinery and reach into the write
@@ -2572,7 +2572,7 @@ and `first`/`last` are standard, and are in the core.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 224.2 KB brotli) and `@fenecdb/web/client`, so a user has two
+check, 228.8 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
@@ -2586,9 +2586,9 @@ wasm-min`, no feature at all) is the same kind of test build. The client entry i
 glue, persistence and sync. The entry's worth is that it cannot pull in
 the engine, sync or storage, not the bytes: a `connect`-only app never
 fetched the `.wasm` through `fenec.js` either (only `Fenec.open` does),
-and bundling `connect` and a builder query's rows is 5.7 KB brotli
-through the entry against 8.2 through `fenec.js` (7.5 on main before
-`FenecHttp.live`), whose `Fenec` class a bundler cannot drop -- its static
+and bundling `connect` and a builder query's rows is 8.8 KB brotli
+through the entry against 11.7 through `fenec.js` (5.7 against 8.2 when
+the entry was made, 7.5 through `fenec.js` before `FenecHttp.live`), whose `Fenec` class a bundler cannot drop -- its static
 block is a side effect. `web/fenec.client.test.js` walks the client's imports and fails
 if they reach anything but those three files or hold the module's glue,
 `FenecSync`, IndexedDB or files. `FenecHttp.live` is `Fenec.live`'s
@@ -3134,9 +3134,10 @@ it counts children *per parent* -- the shape a join cannot express. It is
 terminal in the grammar: everything before it binds to the driving collection,
 everything after to the looked-up one, which is exactly why there are no
 qualified names (`reviews.stars`) in the language and no filter splitting in
-the planner. The child key must be `id` or carry `@hash`; refusing an
-unindexed one follows `near` and `match`, because a silent full scan of the
-child collection would be a different feature under the same name. Nesting
+the planner. The child key must be `id`, carry `@hash` or lead an index over
+several fields (below); refusing an unindexed one follows `near` and `match`,
+because a silent full scan of the child collection would be a different
+feature under the same name. Nesting
 lives in `ResultSet.nested`, never in `Value` -- JSON transports nest all the
 way down, and a flat one flattens (`ResultSet::flatten`: one row per
 root-to-leaf path, nulls below the first level that ran out); a
@@ -3158,6 +3159,58 @@ child-driven when `|ids| * n > |bucket|^2`. Over 20 000 parents and 200 000
 children that is 12.07 ms against 15.63 ms for the parent side, 2.19 ms with no
 child filter, and 0.02 ms for a `bool @hash` field on the parent maintained on
 write. Ad hoc, use `required`; on every page load, use the field.
+
+**A `lookup` over a key of several fields is a run of an index over several
+fields.** `on (org, order) = (org, id)` pairs a child field with a field of
+the level immediately above for each part, the positional rule unchanged;
+`Lookup::on` and `parent` are two lists of names, since a `Vec<String>` is
+code the browser module had and pairs were a clone and a collect of their
+own. The child side is a `Tuple` (`engine.rs`): the child's index over
+several fields whose first parts are its fields in any order
+(`Tuple::resolve`, one the level's order walks before the first), refused
+otherwise naming the `@sorted(...)` to declare. A parent's values, each made
+its child field's type as a single key's is and laid end to end by the
+index's own encoding (`Tuple::prefix`, `CompositeIndex::key`), are the start
+of its children's keys, so they are one span, two searches -- and equality
+is the index's: a `nocase` part finds every spelling of its fold, a collated
+one its bytes, as a `@hash` key does. Where the level's `order` is the
+index's next parts, in its directions or every one reversed (`walks`, which
+`walk_composite` shares), each parent's run is walked in it and stops at
+`offset + limit`, ties in id order; otherwise read, put in id order and
+sorted as a bucket is. One field leading such an index goes the same way
+where it has no `@hash` or the order walks it -- "the latest three reviews
+of each product" over `@sorted(product_id, created desc)`. `required`'s
+child side, where a part pairs with the parent's `id`: each candidate child
+names its parent by that part and is held to the rest of the key by its own
+parts' bytes against the parent's (`Tuple::holds`); probing each parent so
+named for the whole key read every child again -- 11.7 ms against 5.7 for 20
+000 orders whose 200 000 lines a tenth named, the parents' side alone 9.5 --
+and mapping the keys back whole sorted `(u64, KeyBytes)`, a sort of its own,
+4.5 KB of the module. Without `composite` a `Tuple` holds `off::Never`
+(`Built`), so every path through one is dead code, and a key the index would
+answer is refused naming the feature. `tests/composite_lookup.rs` holds
+every lookup over several fields -- order, ties, page, `required` at each
+level and counted, three levels, `flatten` -- to a reference worked out from
+plain `get`s over a twin without the indexes, through writes, key parts
+moved on both sides, a block read inside and put back, a reopen and rows
+past their `@ttl`. A parent's run read forwards over every part -- the
+probe, `required`'s witness, a walk whose order is the index's whole -- is
+one search and read until a key leaves the prefix (`CompositeIndex::run`): a
+span searched for its end too, a score of comparisons of keys on the heap,
+and the page below took 125 us against 96. A tenant's 20 shops x 3 latest
+orders x 5 lines, over 2 000 shops in 100 tenants, 20 000 orders and 200 000
+lines (`make lookup-bench`): 89 us by `(org, shop)` and `(org, order)`,
+against 123 through the key joined into one `@hash` text field of each side
+-- kept up by hand on every write -- 99 through `@hash` keys that leave the
+tenant out, and 64 through those keys leading an index walked; at 500 orders
+a shop, 146 us against 1 987, 1 962 and 56, the buckets read whole and
+sorted for three. A single key's page as it was: 89.2 us on main and 90.2
+here at the quiet runs' median, their instructions retired within 0.2% (the
+key a value or an index's bytes through one enum, it was 1 to 2% slower:
+`Step::ids`, `Step::any` ask a `Tuple` apart). The browser module grew 8.5
+KB, 3.1 KB brotli (`Tuple::resolve` the most of it, 1.7 KB), the one without
+the indexes 2.5 KB, 0.8 KB brotli, and the one with no feature 2.5 KB, 0.9
+KB brotli: the parse, the check and the refusal by name.
 
 **`match` prunes with MaxScore.** The exhaustive merge is not selective --
 on BEIR FiQA the average query reaches 86% of the corpus -- so terms whose

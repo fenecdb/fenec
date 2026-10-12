@@ -1327,6 +1327,47 @@ fn a_chained_lookup_from_the_query_string() {
     assert!(r.body.contains("itself"), "{}", r.body);
 }
 
+/// A key over several fields over the query string: `on` and `parent` list
+/// as many fields each, as FenecQL's `on (org, order) = (org, id)`.
+#[test]
+fn a_lookup_over_several_fields_from_the_query_string() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection orders (org int, code text)",
+        "create collection lines (org int, order int, n int, @sorted(org, order, n desc))",
+        r#"put orders [{org: 1, code: "A"}, {org: 2, code: "B"}]"#,
+        "put lines [{org: 1, order: 1, n: 1}, {org: 1, order: 1, n: 3}, {org: 2, order: 1, n: 2}, \
+         {org: 2, order: 2, n: 4}, {org: 1, order: 1, n: 2}]",
+    ] {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let h = start_with(Config::default(), db);
+    let r = get(
+        h.port,
+        "/orders?select=code&lookup=lines&lines.on=org,order&lines.parent=org,id\
+         &lines.select=n&lines.order=n.desc&lines.limit=2",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body,
+        r#"[{"code":"A","lines":[{"n":3},{"n":2}]},{"code":"B","lines":[{"n":4}]}]"#
+    );
+    for (target, needle) in [
+        (
+            "/orders?lookup=lines&lines.on=org,order",
+            "a field of each side for each part",
+        ),
+        (
+            "/orders?lookup=lines&lines.on=org,n&lines.parent=org,id",
+            "@sorted(org, n)",
+        ),
+    ] {
+        let r = get(h.port, target);
+        assert_eq!(r.status, 400, "{target} -> {}", r.body);
+        assert!(r.body.contains(needle), "{target} -> {}", r.body);
+    }
+}
+
 /// Every way of getting it wrong, with the status the shape implies.
 #[test]
 fn lookup_from_the_query_string_is_checked() {

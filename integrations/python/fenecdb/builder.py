@@ -813,8 +813,8 @@ class _Builder:
         self: Q,
         name: str,
         *,
-        on: str | None = None,
-        parent_key: str | None = None,
+        on: str | Sequence[str] | None = None,
+        parent_key: str | Sequence[str] | None = None,
         select: str | Sequence[str] | None = None,
         where: Any = None,
         required: bool = False,
@@ -825,15 +825,27 @@ class _Builder:
         """`lookup name on child [= parent] ...`: each row's children,
         attached to it. Everything here binds to the looked-up collection;
         `limit` counts children per parent. `required` drops a parent no
-        child matches. Called again, it chains onto the collection the call
-        before named."""
-        if not on:
+        child matches. A key over several fields names a field of each side
+        for each part, `on=["org", "order"], parent_key=["org", "id"]`.
+        Called again, it chains onto the collection the call before named."""
+        names = [on] if isinstance(on, str) else list(on or [])
+        if not names or not names[0]:
             raise _err("lookup needs `on`: the child field holding the key")
+        child = [_ident(f) for f in names]
+        above = (
+            []
+            if parent_key is None
+            else [_ident(f) for f in ([parent_key] if isinstance(parent_key, str) else parent_key)]
+        )
+        # One child field alone pairs with `id` unless named; several, each
+        # with its own.
+        if (len(child) > 1 or parent_key is not None) and len(above) != len(child):
+            raise _err(f"lookup pairs {len(child)} child fields with {len(above)} parent fields")
         cols = None if select is None else ([select] if isinstance(select, str) else list(select))
         level = {
             "collection": _ident(name, "collection"),
-            "on": _ident(on),
-            "parent": None if parent_key is None else _ident(parent_key),
+            "on": child,
+            "parent": above,
             "project": None if cols is None or "*" in cols else [_path(c) for c in cols],
             "cond": [] if where is None else [_cond_of((where,))],
             "required": bool(required),
@@ -993,10 +1005,13 @@ class _Builder:
             )
         # Terminal, so every clause after it is the child's -- and last, so
         # its parameters come after the parent's.
+        def side(names: list[str]) -> str:
+            return f"({', '.join(names)})" if len(names) > 1 else names[0]
+
         for level in lookups:
-            sql += f" lookup {level['collection']} on {level['on']}"
+            sql += f" lookup {level['collection']} on {side(level['on'])}"
             if level["parent"]:
-                sql += f" = {level['parent']}"
+                sql += f" = {side(level['parent'])}"
             if level["required"]:
                 sql += " required"
             if level["project"]:

@@ -67,8 +67,8 @@ fn fixture() -> Database {
 fn lookup(child_field: &str, parent_field: &str) -> Lookup {
     Lookup {
         collection: "reviews".into(),
-        child_field: child_field.into(),
-        parent_field: parent_field.into(),
+        on: vec![child_field.into()],
+        parent: vec![parent_field.into()],
         ..Default::default()
     }
 }
@@ -368,8 +368,8 @@ fn a_bounded_child_order_agrees_with_a_full_sort() {
 fn lookup_c() -> Lookup {
     Lookup {
         collection: "c".into(),
-        child_field: "pid".into(),
-        parent_field: "id".into(),
+        on: vec!["pid".into()],
+        parent: vec!["id".into()],
         ..Default::default()
     }
 }
@@ -581,8 +581,8 @@ fn both_required_plans_give_the_same_answer() {
 fn lookup_p() -> Lookup {
     Lookup {
         collection: "c".into(),
-        child_field: "pid".into(),
-        parent_field: "id".into(),
+        on: vec!["pid".into()],
+        parent: vec!["id".into()],
         ..Default::default()
     }
 }
@@ -630,8 +630,8 @@ fn required_on_a_named_parent_key_matches_the_reference() {
     let named = |coll: &str, required: bool, filter: Option<Expr>| -> Vec<u64> {
         let l = Lookup {
             collection: "rv".into(),
-            child_field: "sku".into(),
-            parent_field: "sku".into(),
+            on: vec!["sku".into()],
+            parent: vec!["sku".into()],
             filter,
             required,
             ..Default::default()

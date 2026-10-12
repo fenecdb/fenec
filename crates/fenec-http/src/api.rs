@@ -240,6 +240,10 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
 /// in FenecQL, and it is the shape PostgREST already uses for an embedded
 /// resource's filters.
 ///
+/// `lines.on=org,order&lines.parent=org,id` is a key over several fields,
+/// FenecQL's `on (org, order) = (org, id)`: the two lists pair field by
+/// field.
+///
 /// `?lookup=orders,lines&orders.on=shop_id&lines.on=order_id` chains: the
 /// list is read left to right, each name binding to the one before it, and
 /// each level keeps its own prefix. A comma-separated list is the same
@@ -279,17 +283,19 @@ fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> R
     let prefix = format!("{name}.");
     let mut l = Lookup {
         collection: name.to_string(),
-        parent_field: "id".to_string(),
         ..Default::default()
     };
+    let (mut on, mut above) = (Vec::new(), Vec::new());
     let mut parts: Vec<Expr> = Vec::new();
     for (key, raw) in &req.query {
         let Some(k) = key.strip_prefix(&prefix) else {
             continue;
         };
         match k {
-            "on" => l.child_field = field_of(child, raw)?,
-            "parent" => l.parent_field = field_of(parent, raw)?,
+            // `on=org,order&parent=org,id`: a key over several fields, as
+            // FenecQL's `on (org, order) = (org, id)`.
+            "on" => on = fields_of(child, raw)?,
+            "parent" => above = fields_of(parent, raw)?,
             "select" => l.project = Some(projection(child, raw)?),
             "order" => l.order = order(child, raw)?,
             "limit" => l.limit = Some(Count::N(number(raw, "limit")?)),
@@ -299,15 +305,26 @@ fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> R
             other => parts.push(condition(child, other, raw)?),
         }
     }
-    if l.child_field.is_empty() {
+    if on.is_empty() {
         return Err(Error::Query(format!(
             "`lookup={name}` needs `{name}.on=<field>`: the child field holding the key"
         )));
     }
+    // As FenecQL's: the parent's `id` unless named, and `Select::check`
+    // holds the two sides to as many.
+    if above.is_empty() {
+        above.push("id".to_string());
+    }
+    (l.on, l.parent) = (on, above);
     l.filter = parts
         .into_iter()
         .reduce(|a, b| Expr::And(Box::new(a), Box::new(b)));
     Ok(l)
+}
+
+/// A comma-separated list of [`field_of`]s.
+fn fields_of(schema: &Schema, raw: &str) -> Result<Vec<String>> {
+    raw.split(',').map(|f| field_of(schema, f)).collect()
 }
 
 /// A field name from the query string, checked against the schema so an

@@ -123,9 +123,11 @@ import Testing
         case ("offset", _): return try q.offset(a[0].int!)
         case ("require", _): return try q.require(a[0].int!)
         case ("lookup", _):
-            let select: [String]? = opt(a, 1, "select").map { $0.string.map { [$0] } ?? $0.array!.map { $0.string! } }
+            // A name, or a list of them: a key over several fields too.
+            let names = { (v: Value?) in v.map { $0.string.map { [$0] } ?? $0.array!.map { $0.string! } } }
+            let select: [String]? = names(opt(a, 1, "select"))
             return try q.lookup(
-                a[0].string!, on: opt(a, 1, "on")?.string, parentKey: opt(a, 1, "parentKey")?.string, select: select,
+                a[0].string!, on: names(opt(a, 1, "on")) ?? [], parentKey: names(opt(a, 1, "parentKey")), select: select,
                 where: opt(a, 1, "where").map(cond), required: opt(a, 1, "required")?.bool ?? false,
                 order: sortKeys(opt(a, 1, "order")), limit: opt(a, 1, "limit")?.int, offset: opt(a, 1, "offset")?.int)
         default:

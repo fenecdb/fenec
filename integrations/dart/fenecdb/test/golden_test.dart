@@ -109,8 +109,9 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
       ('offset', _) => q.offset(a[0] as int),
       ('require', _) => q.require(a[0] as int),
       ('lookup', _) => q.lookup(a[0] as String,
-          on: opt(a, 1, 'on') as String?,
-          parentKey: opt(a, 1, 'parentKey') as String?,
+          // A name, or a list of them: a key over several fields too.
+          on: switch (opt(a, 1, 'on')) { final List l => l.cast<String>(), final v => v },
+          parentKey: switch (opt(a, 1, 'parentKey')) { final List l => l.cast<String>(), final v => v },
           select: switch (opt(a, 1, 'select')) {
             null => null,
             String s => [s],

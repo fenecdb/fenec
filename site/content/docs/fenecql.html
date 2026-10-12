@@ -37,6 +37,7 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
                                                    -- a key: a field, or an expression, distance(loc, $1)
            [facet &lt;field&gt; [top N | ranges [..]] [disjunctive], ...]   -- value counts over every matched row
            [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]...
+           [lookup &lt;name&gt; on (&lt;child&gt;, ...) = (&lt;parent&gt;, ...) ...]   -- a key over several fields
 get &lt;name&gt; select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
            match &lt;field&gt; &lt;text&gt; ...           -- where the words matched
 get &lt;name&gt; where &lt;field&gt; in (get &lt;name&gt; select &lt;field&gt; ...)  -- a subquery's list
@@ -399,8 +400,9 @@ children per parent.</p>
 <ul>
   <li><b>Clauses after <code>lookup</code> apply to the child
     collection</b>; clauses before it apply to the parent.</li>
-  <li><b>The child's key needs <code>id</code> or a <code>@hash</code>
-    index.</b></li>
+  <li><b>The child's key needs <code>id</code>, a <code>@hash</code>
+    index, or an index over several fields it leads.</b> A key of several
+    fields is written <code>on (org, order) = (org, id)</code>.</li>
   <li><b><code>required</code> keeps only parents that have a match.</b></li>
 </ul>
 
@@ -450,6 +452,53 @@ an unindexed one is the same rule <code>near</code> and <code>match</code>
 follow: the clause is one bucket probe per parent, and quietly becoming a
 full scan of the child collection instead — 12.98 ms against 0.092 ms on the
 same 200 000 rows — is not a thing a query should do without saying so.</p>
+
+<h3>A key over several fields</h3>
+
+<pre data-lang="fenecql">create collection lines (org int, order int, line int, qty int, @sorted(org, order, line))
+get orders where org = $1 limit 20
+  lookup lines on (org, order) = (org, id) order line limit 5
+</pre>
+
+<p>Where one field does not say which children are a row's — a tenant's
+rows by <code>(org, user)</code>, an order's lines in a file every tenant's
+orders share, a child keyed by two fields of its parent — <code>on</code>
+pairs a field of each side for each part, in order: <code>(org, order) =
+(org, id)</code> is <code>lines.org = orders.org and lines.order =
+orders.id</code>. The positional rule is the one above: the names on the
+left are the looked-up collection's, those on the right the level
+immediately above's, <code>id</code> among them. A null on either side
+matches nothing, as for a single key.</p>
+
+<p>The child side is answered by an <a href="#composite">index over several
+fields</a> whose first parts are the child's fields, in any order:
+<code>@sorted(org, order, line)</code> or <code>@unique(order, org)</code>
+answer <code>on (org, order) = …</code>. A parent's values, each made its
+child field's type as a single key's is, laid end to end as the index lays
+a row's, are the start of its children's keys, so its children are one run
+of the index, found by two searches. No such index is refused, naming the
+one to declare — <code>needs an index whose first fields are those
+(declare it with @sorted(org, order))</code> — for the reason an unindexed
+single key is. A child's <code>id</code> cannot be one of several parts (it
+names one row alone), and the two sides name as many fields.</p>
+
+<p>Where the level's <code>order</code> is the index's next parts — in its
+directions or every one reversed, a part the key fixes ordering nothing —
+each parent's run is <b>walked</b> in that order and stops at the page:
+"the five latest lines of each order" reads five lines an order, where a
+bucket is read whole and sorted. Any other order is read and sorted per
+parent, as for a single key, its ties in ascending id either way. A single
+field leading an index over several is answered the same way: with no
+<code>@hash</code> of its own, or where the level's order walks the index
+past it — <code>lookup reviews on product_id order created desc limit
+3</code> over <code>@sorted(product_id, created desc)</code>.</p>
+
+<p><code>required</code> takes either side here too: where a part is paired
+with the parent's <code>id</code> and the child filter holds a
+<code>@hash</code> equality, the children it names map back to their
+parents by that part, each held to the rest of the key by its own parts
+against its parent's — the same bytes the probe from the parent would
+find.</p>
 
 <pre data-lang="fenecql">get products limit 20 lookup reviews on product_id required where stars = 5
 get products count lookup reviews on product_id required where stars = 5
@@ -1166,6 +1215,11 @@ create index on pages (org, slug) @unique                   -- or @unique(org, s
     owner.</li>
   <li><b>It gives the scan's answer, row for row</b>, ties in ascending
     <code>id</code> either way, as <code>@sorted</code> does.</li>
+  <li><b>A <code>lookup</code> keyed by its first fields</b> reads each
+    parent's children as a run of it, walked in the level's order where
+    that is the index's next parts:
+    <a href="#a-key-over-several-fields"><code>lookup lines on (org, order)
+    = (org, id) order line limit 5</code></a>.</li>
   <li><b>Up to 8 fields</b> of <code>bool</code>, <code>int</code>,
     <code>float</code>, <code>timestamp</code>, <code>text</code> (in its
     collation) or <code>json</code>, a path into one among them
@@ -1998,7 +2052,7 @@ came up short and fell back. The steps name each of them.</p>
 <tr><td><code>near:</code></td><td>the ANN and its <code>ef</code>, the filter's set searched exactly, the probe that stopped past the budget, the fallback when the ANN came up short, and the wider beam or exact search when tombstones cut it short</td></tr>
 <tr><td><code>match:</code>, <code>rerank:</code></td><td>the text index and how many rows it ranked, the vectors read for the rerank</td></tr>
 <tr><td><code>fuse:</code></td><td>the rank offset, and how many candidates each side brought — after its own <code>match:</code> and <code>near:</code> steps</td></tr>
-<tr><td><code>lookup:</code>, <code>required:</code></td><td>the probe per parent and how many children it attached; which side <code>required</code> was answered from</td></tr>
+<tr><td><code>lookup:</code>, <code>required:</code></td><td>the probe per parent and how many children it attached — over several fields the index and whether its runs were walked in the level's order or probed and sorted; which side <code>required</code> was answered from</td></tr>
 </tbody>
 </table>
 </div>

@@ -123,6 +123,36 @@ fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
 }
 
+/// A `lookup` over a key of several fields holds each level to its own
+/// rules: the token's tenant's parents, and of their children only its
+/// user's -- in a page, under `required`, and counted.
+#[test]
+fn a_lookup_over_several_fields_holds_each_level_to_its_rules() {
+    let n = start_with(
+        "docs   read  where org = $jwt.org\nlines  read  where owner = $jwt.sub\n",
+        &[
+            "create collection docs (org int, ref text)",
+            "create collection lines (org int, doc int, owner text, n int, \
+             @sorted(org, doc, n desc))",
+            r#"put docs [{org: 1, ref: "a"}, {org: 2, ref: "b"}]"#,
+            r#"put lines [{org: 1, doc: 1, owner: "alice", n: 1}, {org: 1, doc: 1, owner: "bob", n: 2},
+               {org: 1, doc: 1, owner: "alice", n: 3}, {org: 2, doc: 2, owner: "alice", n: 4},
+               {org: 2, doc: 1, owner: "alice", n: 5}]"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice","org":1}"#);
+    let bob = n.token(r#"{"sub":"bob","org":1}"#);
+    let page = "get docs select ref lookup lines on (org, doc) = (org, id) select n order n desc";
+    let (status, body) = n.query(&alice, page);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"ref":"a","lines":[{"n":3},{"n":1}]}]"#);
+    let (_, body) = n.query(&bob, page);
+    assert_eq!(body, r#"[{"ref":"a","lines":[{"n":2}]}]"#);
+    let count = "get docs count lookup lines on (org, doc) = (org, id) required where n > 2";
+    assert_eq!(n.query(&alice, count).1, r#"[{"count":1}]"#);
+    assert_eq!(n.query(&bob, count).1, r#"[{"count":0}]"#);
+}
+
 #[test]
 fn two_users_see_and_change_only_their_own_rows() {
     let n = start();

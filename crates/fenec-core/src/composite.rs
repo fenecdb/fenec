@@ -699,6 +699,27 @@ impl CompositeIndex {
         }
         true
     }
+
+    /// The ids of the entries whose key starts with `prefix` -- whole
+    /// parts, each part's bytes ending where it does -- in the keys' order,
+    /// handed to `emit` until it returns `false`: a `lookup`'s parent's
+    /// children. One search, the run read until a key leaves it, where a
+    /// span searches for its end as well: over a key of three ints, each
+    /// search a score of comparisons of keys on the heap, the second was a
+    /// fifth of a page of 20 x 3 x 5.
+    pub fn run(
+        &self,
+        prefix: &[u8],
+        emit: &mut dyn FnMut(DocId) -> crate::error::Result<bool>,
+    ) -> crate::error::Result<()> {
+        let lo = Bound::Included((KeyBytes::new(prefix), 0));
+        for e in self.keys.range(&lo, &Bound::Unbounded) {
+            if !e.0.starts_with(prefix) || !emit(e.1)? {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "composite")]

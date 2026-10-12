@@ -76,6 +76,14 @@ public sealed class BuilderTests(Servers servers)
 
     static long? Long(JsonElement? e) => e?.GetInt64();
 
+    // A lookup's key: a field, or a list of them.
+    static Fields? Key(JsonElement? e) => e switch
+    {
+        null => null,
+        { ValueKind: JsonValueKind.String } s => s.GetString()!,
+        { } list => list.EnumerateArray().Select(x => x.GetString()!).ToArray(),
+    };
+
     // JavaScript's returning: true is every field, "*" here.
     static IReadOnlyList<string>? Returning(JsonElement? e) => e switch
     {
@@ -118,8 +126,8 @@ public sealed class BuilderTests(Servers servers)
         "offset" => q.Offset(a[0].GetInt64()),
         "require" => q.Require(a[0].GetInt64()),
         "lookup" => q.Lookup(a[0].GetString()!,
-            on: Opt(a, 1, "on")?.GetString(),
-            parentKey: Opt(a, 1, "parentKey")?.GetString(),
+            on: Key(Opt(a, 1, "on")),
+            parentKey: Key(Opt(a, 1, "parentKey")),
             select: Opt(a, 1, "select") switch
             {
                 null => null,

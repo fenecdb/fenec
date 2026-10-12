@@ -197,6 +197,14 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
     .from('articles')
     .lookup('reviews', { on: 'product_id', where: { stars: { gte: 4 } }, order: [['created', 'desc']], limit: 3 })
     .rows();
+  // A key over several fields: a field of each side for each part.
+  const lined = await db
+    .from('articles')
+    .lookup<'reviews', Review>('reviews', { on: ['product_id', 'stars'], parentKey: ['id', 'year'], limit: 3 })
+    .rows();
+  expect<number>(lined[0].reviews[0].stars);
+  // @ts-expect-error -- the child's fields are its own
+  db.from('articles').lookup<'reviews', Review>('reviews', { on: ['product_id', 'nope'], parentKey: ['id', 'year'] });
 
   await db.from('articles').insert([{ title: 'a', published: new Date(), embed: new Float32Array(3) }]);
   await db.from('articles').where('id', 1).update({ year: 2025 });

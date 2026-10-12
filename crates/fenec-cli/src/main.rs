@@ -30,6 +30,7 @@ FenecQL summary
   get <name> [select a,b] [where <expr>] [near <field> <vector> [ef N] [exact]]
            [order <field> [collate tr] [asc|desc], ...] [limit N] [offset N] [count]
            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
+           [lookup <name> on (<child>, ...) = (<parent>, ...) ...]   -- a key over several fields
   explain get <name> ...                  -- the path the query took, one row a step
   select a, b from <name> ...             -- the classic SQL order works too
   set <name> { field: value } [where <expr>]

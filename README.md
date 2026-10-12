@@ -4,7 +4,7 @@
 
 An embedded document database with full-text and vector search built in.
 Documents, indexes, aggregates, atomic batches, BM25 and HNSW in one engine,
-written in Rust with no dependencies. It runs inside a web page as 272 KB of
+written in Rust with no dependencies. It runs inside a web page as 275 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FenecQL**).
@@ -138,9 +138,9 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-272 KB of gzipped WebAssembly and a 55 KB gzipped client — no wasm-bindgen, no
+275 KB of gzipped WebAssembly and a 56 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
-`@fenecdb/web/client`, 8 KB brotli in its bundle, which cannot pull in the
+`@fenecdb/web/client`, 9 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fenecdb.com/docs/javascript#packages)). With live
 queries (`db.live`, React's `useLiveQuery`) it can be an app's whole state,
 no server: [state in the page](https://fenecdb.com/docs/javascript#state). [JavaScript client](https://fenecdb.com/docs/javascript).
@@ -234,7 +234,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Aggregates** | `count(*)` `sum` `avg` `min` `max`, whole or per `group`, ordered and paged by any of them |
 | **Collation** | `order name collate und` — Unicode's order for every script, as ICU's root orders it (PostgreSQL's `und-x-icu`); `collate tr` Turkish (`ç` after `c`, `ı` before `i`, `tr-x-icu`); a field declared in one pages by its last row; bytes otherwise |
 | **Case-insensitive text** | `email text nocase @unique` — compared by its Unicode case fold wherever it is compared (`=`, its indexes, `order`, `group`, `facet`), kept as written, PostgreSQL's `citext`; Turkish's `I`/`ı` and `İ`/`i` under `collate tr` |
-| **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
+| **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, keyed by one field or several (`on (org, order) = (org, id)`), chainable to 8 levels |
 | **Places** | `distance(loc, p) <= 500` and `within(loc, [w, s, e, n])` over a `geo` field, through `@geo`, nearest first with `near` — Redis's `GEOSEARCH`, the metres its `GEODIST`'s ([Points and distances](https://fenecdb.com/docs/geo)) |
 | **Instead of Redis** | counters (`set c {n: n + 1}`), rate limits (fixed and sliding windows, token buckets), locks with fencing tokens, sessions and caches under `@ttl`, leaderboards, sets, HyperLogLog, job queues with leases and a claim held until a job comes, delayed jobs, streams, pub/sub, idempotency keys — each a statement or two a test runs; no LRU eviction, no Lua ([Instead of Redis](https://fenecdb.com/docs/redis)) |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize distance within` + plugins |
@@ -245,7 +245,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fenec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own |
-| **Runtime size** | 272 KB gzip wasm + 55 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
+| **Runtime size** | 275 KB gzip wasm + 56 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

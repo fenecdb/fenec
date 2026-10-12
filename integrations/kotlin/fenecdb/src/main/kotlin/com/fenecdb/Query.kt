@@ -508,7 +508,7 @@ class Query private constructor(private val s: State) {
     private class Facet(val field: String, val top: Long?, val ranges: List<String>?, val disjunctive: Boolean)
 
     private class Level(
-        val collection: String, val on: String, val parent: String?, val project: List<String>?, val cond: List<Node>,
+        val collection: String, val on: List<String>, val parent: List<String>, val project: List<String>?, val cond: List<Node>,
         val required: Boolean, val order: List<Key>, val limit: Long?, val offset: Long,
     )
 
@@ -642,12 +642,30 @@ class Query private constructor(private val s: State) {
     fun lookup(
         name: String, on: String?, parentKey: String? = null, select: List<String>? = null, where: Any? = null,
         required: Boolean = false, order: List<SortKey> = emptyList(), limit: Long? = null, offset: Long? = null,
+    ): Query = lookup(name, listOfNotNull(on), parentKey?.let { listOf(it) }, select, where, required, order, limit, offset)
+
+    /**
+     * `lookup name on (child, ...) = (parent, ...) ...`: a key over several
+     * fields, a field of each side for each part, in order --
+     * `on = listOf("org", "order"), parentKey = listOf("org", "id")`.
+     */
+    @JvmOverloads
+    fun lookup(
+        name: String, on: List<String>, parentKey: List<String>? = null, select: List<String>? = null,
+        where: Any? = null, required: Boolean = false, order: List<SortKey> = emptyList(), limit: Long? = null,
+        offset: Long? = null,
     ): Query {
-        if (on.isNullOrEmpty()) throw refuse("lookup needs `on`: the child field holding the key")
+        if (on.isEmpty() || on[0].isEmpty()) throw refuse("lookup needs `on`: the child field holding the key")
+        val child = on.map { Builder.ident(it) }
+        val parent = parentKey.orEmpty().map { Builder.ident(it) }
+        // One child field alone pairs with `id` unless named; several, each with its own.
+        if ((child.size > 1 || parentKey != null) && parent.size != child.size) {
+            throw refuse("lookup pairs ${child.size} child fields with ${parent.size} parent fields")
+        }
         val level = Level(
             collection = Builder.ident(name, "collection"),
-            on = Builder.ident(on),
-            parent = parentKey?.let { Builder.ident(it) },
+            on = child,
+            parent = parent,
             project = if (select == null || "*" in select) null else select.map(Builder::path),
             cond = if (where == null) emptyList() else listOf(Builder.toNode(where)),
             required = required,
@@ -881,8 +899,9 @@ class Query private constructor(private val s: State) {
         // Terminal, so every clause after it is the child's -- and last, so
         // its parameters come after the parent's.
         for (l in s.lookups) {
-            sql.append(" lookup ${l.collection} on ${l.on}")
-            l.parent?.let { sql.append(" = $it") }
+            val side = { names: List<String> -> if (names.size > 1) "(${names.joinToString(", ")})" else names[0] }
+            sql.append(" lookup ${l.collection} on ${side(l.on)}")
+            if (l.parent.isNotEmpty()) sql.append(" = ${side(l.parent)}")
             if (l.required) sql.append(" required")
             l.project?.let { sql.append(" select ").append(it.joinToString(", ")) }
             whereOf(l.cond, bind)?.let { sql.append(" where ").append(it) }
