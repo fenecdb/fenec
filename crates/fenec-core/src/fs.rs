@@ -26,6 +26,7 @@ const WRITE_HELD: usize = 8 << 20;
 /// 11 ms, the file mapped or not -- and under the write lock, a buffer
 /// written as it outgrew [`WRITE_BUF`] held four readers beside blocks of
 /// 1 000 writes up to 6 ms every 8 MB.
+#[cfg(not(target_arch = "wasm32"))]
 const BEHIND_AT: usize = 64 << 10;
 
 /// Appends collect in memory and reach the file only in `sync`, in the

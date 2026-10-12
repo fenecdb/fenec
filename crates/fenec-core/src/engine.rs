@@ -7536,7 +7536,9 @@ impl Database {
 
     /// The vectors of the documents a `put` wrote, indexed in a batch:
     /// construction can parallelise. In a block that defers, the block's
-    /// statements are one batch.
+    /// statements are one batch. The browser lets the documents go here;
+    /// natively the caller does, or keeps them for after the lock.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(clippy::ptr_arg))]
     fn index_written(&mut self, collection: &str, written: &mut Vec<Document>) {
         let c = self.collections.get_mut(collection).unwrap();
         match self.block.as_mut().filter(|b| DEFERS && b.defers) {

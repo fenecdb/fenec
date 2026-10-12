@@ -320,7 +320,7 @@ fn a_preparation_the_schema_moved_from_is_built_again() {
         schema(&mut a);
         schema(&mut b);
         let put = stmt("put ev $1");
-        let params = vec![objects(0, 50)];
+        let params = [objects(0, 50)];
         let stmts: Vec<(&Statement, &[Value])> = vec![(&put, &params[..]); 3];
         let mut p = b.prepare(&stmts);
         assert_eq!(p.built(), 3);
@@ -376,7 +376,7 @@ fn a_hook_that_rewrites_has_its_document_encoded_after_it() {
         db.install_plugin(&Shout).unwrap();
     }
     let put = stmt("put ev $1");
-    let params = vec![objects(0, 40)];
+    let params = [objects(0, 40)];
     let stmts: Vec<(&Statement, &[Value])> = vec![(&put, &params[..])];
     let mut p = b.prepare(&stmts);
     a.execute_block(&stmts).unwrap();
@@ -570,11 +570,11 @@ fn a_preparation_a_panic_left_is_let_go_of() {
     run(&mut db, "create collection ev (k text, n int)");
     db.install_plugin(&Boom).unwrap();
     let put = stmt("put ev $1");
-    let first = vec![Value::List(vec![Value::Object(vec![(
+    let first = [Value::List(vec![Value::Object(vec![(
         "k".into(),
         Value::Text("boom".into()),
     )])])];
-    let second = vec![objects(0, 20)];
+    let second = [objects(0, 20)];
     let stmts: Vec<(&Statement, &[Value])> = vec![(&put, &first[..]), (&put, &second[..])];
     let mut p = db.prepare(&stmts);
     assert_eq!(p.built(), 2);
@@ -583,7 +583,7 @@ fn a_preparation_a_panic_left_is_let_go_of() {
     }));
     assert!(unwound.is_err());
     db.rollback();
-    let mine = vec![objects(500, 20)];
+    let mine = [objects(500, 20)];
     let again: Vec<(&Statement, &[Value])> = vec![(&put, &mine[..]), (&put, &mine[..])];
     db.execute_block(&again).unwrap();
     let rows = answer(&db, "get ev select n order id");
