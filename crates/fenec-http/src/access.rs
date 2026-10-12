@@ -1137,9 +1137,9 @@ impl Scope {
     /// tenants its claim names, and each rule that applies to it -- the
     /// collection, the grants, the fields an update may change, the fields
     /// a read shows and the rows, the filter as the policy writes it. A
-    /// token is shown its own
-    /// rules and no other's: a rule for a role it does not hold, or naming
-    /// a claim it lacks, never became one of its own.
+    /// token is shown its own rules and no other's: a rule for a role it
+    /// does not hold, or naming a claim it lacks, never became one of its
+    /// own.
     pub fn summary_into(&self, out: &mut String) {
         use fenec_core::json::escape_into;
         out.push_str("\"sub\":");
