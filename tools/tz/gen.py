@@ -280,41 +280,52 @@ def write_table(names, version):
     for o in offsets:
         if o % 60:
             raise SystemExit(f'an offset of {o} s is no whole minute')
-    out = bytearray()
-    out += struct.pack('<I', MAGIC)
+    # Laid out to be read where it lies, with no pass over it first: the
+    # header says where the names start, offsets and rules are records of a
+    # fixed size, and each zone's entry is found by its place in an index.
+    # Parsed into lists and the names front-coded, the reader was 1.6 KB
+    # more of the browser module, 0.7 KB brotli of every page, for a table
+    # 5.4 KB smaller, 0.8 KB brotli, fetched by the pages that name a zone.
+    head = bytearray()
+    head += struct.pack('<I', MAGIC)
     v = version.encode()
-    out += bytes([len(v)]) + v
-    out += struct.pack('<q', FROM * 1000)
-    out += struct.pack('<q', KEPT * 1000)
-    out += bytes([len(offsets)])
+    head += bytes([len(v)]) + v
+    head += struct.pack('<q', FROM * 1000)
+    head += struct.pack('<q', KEPT * 1000)
+    names_at_pos = len(head)
+    head += struct.pack('<I', 0)
+    head += bytes([len(offsets)])
     for o in offsets:
-        out += struct.pack('<h', o // 60)
-    out += bytes([len(rules)])
+        head += struct.pack('<h', o // 60)
+    head += bytes([len(rules)])
     for std, (dst, start, end) in rules:
-        out += bytes([offsets.index(std), offsets.index(dst)])
+        head += bytes([offsets.index(std), offsets.index(dst)])
         for (month, week, wday, at) in (start, end):
-            out += bytes([month, week, wday]) + struct.pack('<i', at)
-    out += varint(len(datas))
+            head += bytes([month, week, wday]) + struct.pack('<i', at)
+    head += struct.pack('<H', len(datas))
+    index_at = len(head)
+    head += bytes(4 * len(datas))
+    entries = bytearray()
+    places = []
     for init, trans, rule, rule_from in datas:
-        out += bytes([offsets.index(init), 255 if rule is None else rules.index(rule)])
+        places.append(len(head) + len(entries))
+        entries += bytes([offsets.index(init), 255 if rule is None else rules.index(rule)])
         if rule is not None:
-            out += varint(rule_from - KEPT)
-        out += varint(len(trans))
+            entries += varint(rule_from - KEPT)
+        entries += varint(len(trans))
         prev = KEPT
         for t, o in trans:
-            out += varint(t - prev) + bytes([offsets.index(o)])
+            entries += varint(t - prev) + bytes([offsets.index(o)])
             prev = t
-    # Names in order, each its prefix shared with the one before, the rest,
-    # and its entry.
-    out += varint(len(names))
-    prev = ''
+    for k, at in enumerate(places):
+        head[index_at + 4 * k:index_at + 4 * k + 4] = struct.pack('<I', at)
+    out = head + entries
+    out[names_at_pos:names_at_pos + 4] = struct.pack('<I', len(out))
+    # Names in order, each its length, its bytes and its entry.
+    out += struct.pack('<H', len(names))
     for n in sorted(names):
-        shared = 0
-        while shared < min(len(prev), len(n), 255) and prev[shared] == n[shared]:
-            shared += 1
-        rest = n[shared:].encode()
-        out += bytes([shared, len(rest)]) + rest + varint(data_of[datas_key(models[n])])
-        prev = n
+        b = n.encode()
+        out += bytes([len(b)]) + b + struct.pack('<H', data_of[datas_key(models[n])])
     os.makedirs(os.path.dirname(BIN), exist_ok=True)
     open(BIN, 'wb').write(out)
     return models, len(datas), len(rules), len(offsets), len(out)

@@ -331,7 +331,10 @@ fn aggregates_over_the_query_string() {
     );
     assert_eq!(get(h.port, "/remarks?select=sum(body)").status, 400);
     // Ungrouped, `limit` picks the rows folded: the first one's stars.
-    let r = get(h.port, "/remarks?select=count(*),max(stars)&order=id&limit=1");
+    let r = get(
+        h.port,
+        "/remarks?select=count(*),max(stars)&order=id&limit=1",
+    );
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body.trim(), "[{\"count\":1,\"max(stars)\":5}]");
     // Expressions: a column worked out, keys of several, a distinct count

@@ -6,10 +6,10 @@
 //! A zone is the offset it had at the start of 1999, the transitions since
 //! that its current rule does not make, and that rule -- the POSIX TZ
 //! string a TZif file ends with -- from the year it took over: 2026c's
-//! 597 names are 196 tables, 25.2 KB, 8.9 KB gzip, 7.7 KB brotli. Native
+//! 597 names are 196 tables, 30.6 KB, 10.1 KB gzip, 8.5 KB brotli. Native
 //! builds carry it; the browser module is handed it as it is handed the
 //! collation data (`add_chunk`), since a page that buckets by a zone is
-//! rare and the table would have been 7.7 KB brotli of every page: a
+//! rare and the table would have been 8.5 KB brotli of every page: a
 //! statement naming a zone it has not got is refused with a note
 //! (`take_missing`), and runs again once fetched.
 //!
@@ -445,153 +445,124 @@ fn table() -> Option<&'static Table<'static>> {
     TABLE.get_or_init(|| Table::parse(b)).as_ref()
 }
 
-/// The table read once: its offsets and rules, where each zone's entry
-/// starts, and where the names do.
+/// The table's header: where each part of it starts. Offsets and rules are
+/// records of a fixed size, each zone's entry found through an index, so a
+/// lookup reads where the bytes lie and nothing is parsed into lists first.
 struct Table<'a> {
     bytes: &'a [u8],
     from: i64,
     kept: i64,
-    offsets: Vec<i64>,
-    rules: Vec<Rule>,
-    entries: Vec<usize>,
     names: usize,
+    offsets: usize,
+    rules: usize,
+    index: usize,
 }
 
-/// A cursor over the table's bytes, `None` past their end.
-struct Reader<'a> {
-    b: &'a [u8],
-    at: usize,
+/// The `len` bytes at `at`, `None` past the end.
+fn at(b: &[u8], at: usize, len: usize) -> Option<&[u8]> {
+    b.get(at..at.checked_add(len)?)
 }
 
-impl Reader<'_> {
-    fn take(&mut self, n: usize) -> Option<&[u8]> {
-        let s = self.b.get(self.at..self.at + n)?;
-        self.at += n;
-        Some(s)
+fn le(b: &[u8]) -> i64 {
+    let mut v = 0i64;
+    for (i, x) in b.iter().enumerate() {
+        v |= (*x as i64) << (8 * i);
     }
-    fn u8(&mut self) -> Option<u8> {
-        self.take(1).map(|s| s[0])
-    }
-    fn i64(&mut self) -> Option<i64> {
-        Some(i64::from_le_bytes(self.take(8)?.try_into().ok()?))
-    }
-    fn i32(&mut self) -> Option<i32> {
-        Some(i32::from_le_bytes(self.take(4)?.try_into().ok()?))
-    }
-    fn varint(&mut self) -> Option<u64> {
-        let mut v = 0u64;
-        for shift in (0..64).step_by(7) {
-            let b = self.u8()?;
-            v |= ((b & 0x7F) as u64) << shift;
-            if b & 0x80 == 0 {
-                return Some(v);
-            }
+    v
+}
+
+/// A LEB128 number at `*p`, moving it past.
+fn varint(b: &[u8], p: &mut usize) -> Option<i64> {
+    let mut v = 0i64;
+    for shift in (0..63).step_by(7) {
+        let x = *b.get(*p)?;
+        *p += 1;
+        v |= ((x & 0x7F) as i64) << shift;
+        if x & 0x80 == 0 {
+            return Some(v);
         }
-        None
     }
+    None
 }
 
 impl<'a> Table<'a> {
     fn parse(b: &'a [u8]) -> Option<Table<'a>> {
-        let mut r = Reader { b, at: 0 };
-        if u32::from_le_bytes(r.take(4)?.try_into().ok()?) != MAGIC {
+        if le(at(b, 0, 4)?) != MAGIC as i64 {
             return None;
         }
-        let n = r.u8()? as usize;
-        r.take(n)?;
-        let (from, kept) = (r.i64()?, r.i64()?);
-        let mut offsets = Vec::new();
-        for _ in 0..r.u8()? {
-            let m = i16::from_le_bytes(r.take(2)?.try_into().ok()?);
-            offsets.push(m as i64 * 60_000);
-        }
-        let mut rules = Vec::new();
-        for _ in 0..r.u8()? {
-            let std = *offsets.get(r.u8()? as usize)?;
-            let dst = *offsets.get(r.u8()? as usize)?;
-            let mut when = [When {
-                month: 1,
-                week: 1,
-                wday: 0,
-                at: 0,
-            }; 2];
-            for w in &mut when {
-                let (month, week, wday) = (r.u8()? as u32, r.u8()? as u32, r.u8()? as i64);
-                *w = When {
-                    month,
-                    week,
-                    wday,
-                    at: r.i32()? as i64 * 1000,
-                };
-            }
-            rules.push(Rule {
-                std,
-                dst,
-                start: when[0],
-                end: when[1],
-            });
-        }
-        let mut entries = Vec::new();
-        for _ in 0..r.varint()? {
-            entries.push(r.at);
-            r.u8()?;
-            if r.u8()? != 255 {
-                r.varint()?;
-            }
-            for _ in 0..r.varint()? {
-                r.varint()?;
-                r.u8()?;
-            }
-        }
+        let h = 5 + *b.get(4)? as usize;
+        let offsets = h + 21;
+        let rules = offsets + 2 * *b.get(h + 20)? as usize + 1;
+        let index = rules + 16 * *b.get(rules - 1)? as usize + 2;
         Some(Table {
             bytes: b,
-            from,
-            kept,
+            from: le(at(b, h, 8)?),
+            kept: le(at(b, h + 8, 8)?),
+            names: le(at(b, h + 16, 4)?) as usize,
             offsets,
             rules,
-            entries,
-            names: r.at,
+            index,
+        })
+    }
+
+    /// Offset `k`, in milliseconds.
+    fn offset(&self, k: u8) -> Option<i64> {
+        let m = le(at(self.bytes, self.offsets + 2 * k as usize, 2)?) as i16;
+        Some(m as i64 * 60_000)
+    }
+
+    /// Rule `k`: its offsets, and when daylight time starts and ends.
+    fn rule(&self, k: u8) -> Option<Rule> {
+        let r = at(self.bytes, self.rules + 16 * k as usize, 16)?;
+        let when = |w: &[u8]| When {
+            month: w[0] as u32,
+            week: w[1] as u32,
+            wday: w[2] as i64,
+            at: le(&w[3..7]) as i32 as i64 * 1000,
+        };
+        Some(Rule {
+            std: self.offset(r[0])?,
+            dst: self.offset(r[1])?,
+            start: when(&r[2..9]),
+            end: when(&r[9..16]),
         })
     }
 
     /// The zone named `name`, in any case.
     fn find(&self, name: &str) -> Option<Zone> {
-        let mut r = Reader {
-            b: self.bytes,
-            at: self.names,
-        };
-        let mut prev: Vec<u8> = Vec::new();
-        for _ in 0..r.varint()? {
-            let shared = r.u8()? as usize;
-            let len = r.u8()? as usize;
-            prev.truncate(shared);
-            prev.extend_from_slice(r.take(len)?);
-            let entry = r.varint()? as usize;
-            if prev.eq_ignore_ascii_case(name.as_bytes()) {
-                return self.zone(entry);
+        let b = self.bytes;
+        let mut p = self.names + 2;
+        for _ in 0..le(at(b, self.names, 2)?) {
+            let len = *b.get(p)? as usize;
+            if at(b, p + 1, len)?.eq_ignore_ascii_case(name.as_bytes()) {
+                return self.zone(le(at(b, p + 1 + len, 2)?) as usize);
             }
+            p += len + 3;
         }
         None
     }
 
     fn zone(&self, entry: usize) -> Option<Zone> {
-        let mut r = Reader {
-            b: self.bytes,
-            at: *self.entries.get(entry)?,
-        };
-        let init = *self.offsets.get(r.u8()? as usize)?;
-        let (rule, rule_from) = match r.u8()? {
+        let b = self.bytes;
+        let mut p = le(at(b, self.index + 4 * entry, 4)?) as usize;
+        let init = self.offset(*b.get(p)?)?;
+        let (rule, rule_from) = match *b.get(p + 1)? {
             255 => (None, i64::MAX),
-            k => {
-                let secs = r.varint()? as i64;
-                (Some(*self.rules.get(k as usize)?), self.kept + secs * 1000)
-            }
+            k => (
+                Some(self.rule(k)?),
+                self.kept + varint(b, &mut { p + 2 })? * 1000,
+            ),
         };
+        p += 2;
+        if rule.is_some() {
+            varint(b, &mut p)?;
+        }
         let mut trans = Vec::new();
-        let mut at = self.kept;
-        for _ in 0..r.varint()? {
-            at += r.varint()? as i64 * 1000;
-            trans.push((at, *self.offsets.get(r.u8()? as usize)?));
+        let mut t = self.kept;
+        for _ in 0..varint(b, &mut p)? {
+            t += varint(b, &mut p)? * 1000;
+            trans.push((t, self.offset(*b.get(p)?)?));
+            p += 1;
         }
         Some(Zone::Rules(Rules {
             from: self.from,
