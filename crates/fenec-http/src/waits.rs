@@ -17,8 +17,8 @@
 //!
 //! **When it runs again.** Two things change what a held write would
 //! write: a write to a collection it reads, which the database's watcher
-//! announces ([`Waits::wrote`], under the write lock, a counter and a
-//! wake-up), and the time reaching a row's moment -- a delayed job's ready
+//! announces with the collections it wrote ([`Waits::wrote`], under the
+//! write lock: a flag and a wake-up for the groups reading one), and the time reaching a row's moment -- a delayed job's ready
 //! time, a lease's end, a `@ttl` -- which nothing announces, and which
 //! [`Database::wakes_at`] works out from the filter: one step of an
 //! `@sorted` index past `now()`. A held request sleeps on a `Condvar` until
@@ -80,9 +80,6 @@ pub struct Stats {
 
 #[derive(Default)]
 struct State {
-    /// Writes announced so far: a head that last looked at an older count
-    /// looks again.
-    writes: u64,
     /// The tenant was closed on this node -- moved, deleted -- and every
     /// held request is answered 503, to come back through the router.
     closed: bool,
@@ -99,8 +96,9 @@ struct Group {
     collections: Arc<Vec<String>>,
     /// Who waits, the longest first: the first is the head.
     queue: VecDeque<Arc<Turn>>,
-    /// `State::writes` when the head last looked or ran.
-    writes: u64,
+    /// A write to a collection it reads landed since the head last looked
+    /// or ran: the head looks again.
+    stale: bool,
     /// The database's change when the head last looked or ran.
     since: u64,
     /// The next moment its answer may change with no write, ms.
@@ -337,17 +335,33 @@ fn now_us() -> i64 {
 }
 
 impl Waits {
-    /// A write landed: the head of each group looks. Called by the
-    /// database's watcher under its write lock, so it is a load when
-    /// nothing is held.
-    pub fn wrote(&self) {
-        if self.held.load(Ordering::Acquire) == 0 {
+    /// Whether any request is held here: what a write asks before it works
+    /// out which collections it wrote.
+    pub fn holds(&self) -> bool {
+        self.held.load(Ordering::Acquire) > 0
+    }
+
+    /// A write landed to `written`, or to whatever a held request may read
+    /// (`None`: a load, a drop, a compact): the head of each group reading
+    /// one of them looks. Called by the database's watcher under its write
+    /// lock, so it is a load when nothing is held. Woken by every write
+    /// whatever it wrote, 150 claims held on `orders`, each a group of its
+    /// own, took a put of `positions` beside them from 0.16 to 0.29 ms p50
+    /// and 0.67 to 4.3 ms p99 at the node, every head a wake-up and a look
+    /// under the read lock that found nothing written.
+    pub fn wrote(&self, written: Option<&[String]>) {
+        if !self.holds() {
             return;
         }
         let mut st = lock(&self.state);
-        st.writes += 1;
         let mut now = None;
-        for g in &st.groups {
+        for g in &mut st.groups {
+            if let Some(cs) = written {
+                if !g.collections.iter().any(|c| cs.contains(c)) {
+                    continue;
+                }
+            }
+            g.stale = true;
             // A head in its gap looks at its end, and wakes for that.
             if let Some(q) = g.quiet {
                 if *now.get_or_insert_with(Instant::now) < q {
@@ -426,16 +440,15 @@ impl<'h> Ticket<'h> {
             None => {
                 st.next += 1;
                 let id = st.next;
-                // Writes between the run and this moment were announced to
-                // no one here: the first look is due at once, and finds
-                // them by the change the run was at.
-                let writes = st.writes.wrapping_sub(1);
                 st.groups.push(Group {
                     id,
                     tests: Arc::new(plan.tests),
                     collections: Arc::new(plan.collections),
                     queue: VecDeque::from([Arc::clone(&turn)]),
-                    writes,
+                    // Writes between the run and this moment were announced
+                    // to no one here: the first look is due at once, and
+                    // finds them by the change the run was at.
+                    stale: true,
                     since: plan.seq,
                     at: plan.at,
                     now: false,
@@ -462,7 +475,6 @@ impl<'h> Ticket<'h> {
             if now >= until || ENDING.load(Ordering::Acquire) {
                 return Next::End;
             }
-            let writes = st.writes;
             let g = group(&mut st, self.group);
             let head = g.queue.front().is_some_and(|t| Arc::ptr_eq(t, &self.turn));
             let mut wait = until - now;
@@ -473,10 +485,10 @@ impl<'h> Ticket<'h> {
                 let due =
                     std::mem::take(&mut g.now) || g.at.is_some_and(|at| at <= now_us() / 1000);
                 let quiet = g.quiet.filter(|q| now < *q);
-                if due || (g.writes != writes && quiet.is_none()) {
+                if due || (g.stale && quiet.is_none()) {
                     let (since, tests, collections) =
                         (g.since, Arc::clone(&g.tests), Arc::clone(&g.collections));
-                    g.writes = writes;
+                    g.stale = false;
                     drop(st);
                     waits.looks.fetch_add(1, Ordering::Relaxed);
                     LOOKS.fetch_add(1, Ordering::Relaxed);

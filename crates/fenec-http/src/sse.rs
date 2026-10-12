@@ -72,17 +72,32 @@ impl Watcher for Hub {
     /// stream at once, forever. Notifications come under the database's
     /// write lock, so they arrive in the order the counter moved.
     fn notify(&self, seq: u64) {
-        let mut g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
-        *g = seq;
-        self.cv.notify_all();
-        drop(g);
-        self.waits.wrote();
+        self.mark(seq);
+        // A load, a compact, a maintenance: whatever a held write reads.
+        self.waits.wrote(None);
+    }
+
+    /// A block landed: held writes are woken by the collections it wrote
+    /// alone, asked of the change ring only when some are held.
+    fn landed(&self, db: &Database, before: u64) {
+        self.mark(db.change_seq());
+        if self.waits.holds() {
+            self.waits
+                .wrote(db.changed_collections_since(before).as_deref());
+        }
     }
 }
 
 impl Hub {
     pub fn new() -> Arc<Hub> {
         Arc::new(Hub::default())
+    }
+
+    /// The counter moved to `seq`: every stream looks.
+    fn mark(&self, seq: u64) {
+        let mut g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
+        *g = seq;
+        self.cv.notify_all();
     }
 
     /// Waits until it sees a counter greater than `after`. On timeout it

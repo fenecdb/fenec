@@ -751,3 +751,65 @@ fn a_held_claim_holds_no_tenant_against_a_freeze() {
     assert_eq!(rows(&a.body).len(), 1, "{}", a.body);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A write wakes the held claims that read what it wrote, and no others:
+/// claims held on `jobs`, each a group of its own as a courier's is, are
+/// not looked at by a hundred writes of another collection -- woken by
+/// every write, 150 of them took a put beside them from 0.16 to 0.29 ms
+/// p50 -- and a write of `jobs` has each look and the one it is for take
+/// it.
+#[test]
+fn a_write_wakes_only_the_claims_reading_what_it_wrote() {
+    const N: usize = 8;
+    let node = start();
+    let port = node.port;
+    let a = Conn::open(port).query("create collection positions (x int)", "[]");
+    assert_eq!(a.status, 200, "{}", a.body);
+    let claim = "set jobs {owner: $1, run_at: now() + 60000} where run_at <= now() and \
+                 kind = $2 order run_at limit 1 returning id, kind";
+    let held: Vec<_> = (0..N)
+        .map(|w| {
+            std::thread::spawn(move || {
+                Conn::open(port).post(
+                    "/query",
+                    &line(claim, &format!("[\"w{w}\", \"k{w}\"]")),
+                    &[("Fenec-Wait", "20000")],
+                )
+            })
+        })
+        .collect();
+    until_held(&node, N);
+    // Each group's first look, made at once as it is held.
+    let t = Instant::now();
+    while node.server.waits().looks < N as u64 {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            node.server.waits()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = node.server.waits();
+    let mut c = Conn::open(port);
+    for i in 0..100 {
+        let a = c.query("put positions {x: $1}", &format!("[{i}]"));
+        assert_eq!(a.status, 200, "{}", a.body);
+    }
+    let after = node.server.waits();
+    assert_eq!(
+        (after.looks, after.runs),
+        (before.looks, before.runs),
+        "a write of another collection woke a held claim"
+    );
+    for w in 0..N {
+        put(port, &format!("k{w}"), now_ms() - 1);
+    }
+    for (w, h) in held.into_iter().enumerate() {
+        let a = h.join().unwrap();
+        assert_eq!(a.status, 200, "{}", a.body);
+        let got = rows(&a.body);
+        assert_eq!(got.len(), 1, "{}", a.body);
+        assert_eq!(got[0]["kind"], Value::Text(format!("k{w}")));
+    }
+    assert!(node.server.waits().looks > after.looks);
+}
