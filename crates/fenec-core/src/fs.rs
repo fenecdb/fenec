@@ -593,7 +593,15 @@ impl Sink for FileSink {
             return None;
         }
         let (disk, pending) = (Arc::clone(&self.disk), Arc::clone(&self.pending));
-        Some(Box::new(move || lock(&disk).write_pending(&pending)))
+        // Not while a durability fsyncs the file: it writes them itself, and
+        // the request this runs for, a buffered write, would wait out the
+        // fsync -- a ledger's transfer beside the syncer's waited 126 ms.
+        // Left, they are the next write behind's.
+        Some(Box::new(move || match disk.try_lock() {
+            Ok(mut disk) => disk.write_pending(&pending),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(()),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().write_pending(&pending),
+        }))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
