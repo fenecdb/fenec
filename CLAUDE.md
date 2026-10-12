@@ -813,7 +813,7 @@ rules that apply to it, the filter as the policy writes it
 (`Scope::summary_into`). The grid reads 100 rows a block, the block after
 one in id order by `id > $last`, a jump or an order by offset, and draws
 only the rows in view: a scroll down 100 000 rows and back took no long task,
-the longest frame 18.7 ms in headless Chrome. Its first load is 60 KB of JS
+the longest frame 18.7 ms in headless Chrome. Its first load is 63 KB of JS
 and CSS gzipped (`site/build.py` holds the docs to it), served uncompressed.
 The query editor, the schema, the live rows and the admin view are modules
 fetched the first time each opens (`app.js`'s `LOAD`, their stylesheet
