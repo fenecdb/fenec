@@ -9856,6 +9856,9 @@ impl Database {
             let Some(doc) = c.store.read(&c.schema, id)? else {
                 continue;
             };
+            for h in self.registry.hooks() {
+                h.answering(&c.schema, &doc)?;
+            }
             // A loop rather than a `map` and `collect`: a copy of the
             // adapter of its own, 249 bytes of the browser module.
             let mut values = Vec::with_capacity(columns.len());

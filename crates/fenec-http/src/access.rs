@@ -40,6 +40,42 @@
 //! statement asking it is held to those rules' filters as well, and
 //! neither `write` nor `*` grants it.
 //!
+//! **Transitions.** A rule's filter reads the row as it stands, and
+//! `new.<field>` reads it as the write leaves it -- as `new.` names the
+//! document in an upsert's `else set`. A rule that names `new.` is a
+//! transition: it grants `update` and nothing else, and it is true or not
+//! of the two rows together, where any other rule holds the row before and
+//! the row after to its filter each:
+//!
+//! ```text
+//! orders  update(status, run_at)  where customer = $jwt.sub and status = "ready" and new.status = "cancelled" and new.run_at is null
+//! ```
+//!
+//! lets a customer cancel a ready order and nothing else -- not put a
+//! cancelled one back, not move one up the queue -- where the one filter
+//! `status = "ready" or status = "cancelled"` let the row go either way.
+//! A write over a row is the token's when one rule granting `update` there
+//! names every field it changes (or names none) and admits it: a
+//! transition by being true of the pair, another rule by admitting the row
+//! before and the row after. Where no rule of the collection names fields
+//! or `new.`, rules widen each other as PostgreSQL's permissive policies
+//! do, the row before one's and the row after another's ([`Scope::overwrites`]).
+//! A transition picks the rows a `set` may write by what it asks of the
+//! row before alone, its `new.` terms taken as passing ([`relaxed`]), and
+//! judges each pair as it is written. The row after is held to what the
+//! rule says of `new.` and nothing more: what must not move, its field
+//! list leaves out.
+//!
+//! **`returning`** answers what a write wrote, so the rows it answers are
+//! held to the read rules: a `set`'s as it wrote them, a `del`'s as they
+//! were. A `del` and a `set` pass over the rows the read rules leave out by
+//! a field the write does not change -- as a `get` passes them over -- and
+//! a `set` that would leave a row its token may not read is refused whole
+//! (403), nothing written: written and left out of the answer, a claim
+//! would hold a job its worker was never told of; picked by the read rules
+//! as the row stood, a courier's claim of a ready order -- theirs to read
+//! once claimed -- took nothing and said nothing ([`Scope::answerable`]).
+//!
 //! **`append-only`** is a line of its own, `<collection> append-only`,
 //! with no filter and no role: no scoped token updates or deletes there,
 //! whatever its rules grant -- `write` and `*` mean `insert` there, and a
@@ -299,6 +335,11 @@ struct Rule {
     fields: Option<Vec<String>>,
     /// With `$jwt.<claim>` as parameter `k`, the claim `claims[k]`.
     filter: Option<Expr>,
+    /// A transition's (a filter naming `new.`): what it asks of the row
+    /// before alone ([`relaxed`]), which picks the rows; `None` for every
+    /// row, and for a rule that is no transition.
+    before: Option<Expr>,
+    transition: bool,
     /// The filter as the policy writes it, `$jwt.<claim>` and all: what
     /// `/_whoami` shows a token it applies to.
     text: Option<Arc<str>>,
@@ -327,7 +368,21 @@ struct Bound {
     ops: u8,
     fields: Option<Vec<String>>,
     filter: Option<Expr>,
+    /// [`Rule::before`], its claims bound.
+    before: Option<Expr>,
+    transition: bool,
     text: Option<Arc<str>>,
+}
+
+impl Bound {
+    /// What the rule asks of a row as it stands: its filter, or a
+    /// transition's half of it the row before can answer.
+    fn using(&self) -> &Option<Expr> {
+        match self.transition {
+            true => &self.before,
+            false => &self.filter,
+        }
+    }
 }
 
 fn denied(msg: String) -> Error {
@@ -515,6 +570,8 @@ impl Access {
                 ops: r.ops,
                 fields: r.fields.clone(),
                 filter: r.filter.as_ref().map(|f| bind(f, &values)),
+                before: r.before.as_ref().map(|f| bind(f, &values)),
+                transition: r.transition,
                 text: r.text.clone(),
             });
         }
@@ -786,16 +843,101 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         }
         sel.filter
     };
+    // A transition says what an update may make of a row; a read, an
+    // insert or a delete has no row after, or none before, for its `new.`
+    // to read. Granting one beside it would hold that grant to a filter
+    // it cannot answer.
+    let transition = filter.as_ref().is_some_and(names_new);
+    if transition && ops != UPDATE {
+        return Err("a rule naming `new.` judges an update -- the row before it and the row it \
+                    leaves -- and grants `update` alone"
+            .into());
+    }
+    let before = match (transition, &filter) {
+        (true, Some(f)) => relaxed(f, &|name| name.starts_with(NEW)),
+        _ => None,
+    };
     Ok(Rule {
         collection: (collection != "*").then(|| collection.to_string()),
         ops,
         named,
         fields,
         filter,
+        before,
+        transition,
         text,
         claims,
         role,
     })
+}
+
+/// What a rule's filter names the row as a write leaves it by: `new.`, as
+/// an upsert's `else set` names the document put.
+const NEW: &str = "new.";
+
+/// Whether `e` reads the row after (`new.<field>`).
+fn names_new(e: &Expr) -> bool {
+    let mut fields = Vec::new();
+    e.referenced_fields(&mut fields);
+    fields.iter().any(|f| f.starts_with(NEW))
+}
+
+/// `e` as a row that cannot answer every term of it answers it: each term
+/// reading a field `unseen` names -- a transition's `new.status`, a field a
+/// `set` is about to write -- taken as whatever lets the row through where
+/// the term stands, true under an even number of `not`s and false under an
+/// odd one, and the `and`s and `or`s it decides worked out. What is left
+/// admits every row `e` admits, whatever those terms come to, so it picks
+/// rows without leaving one out; the terms are asked once they can be, of
+/// each row as it is written. `None` where nothing is left to ask.
+fn relaxed(e: &Expr, unseen: &dyn Fn(&str) -> bool) -> Option<Expr> {
+    match loosened(e, true, unseen) {
+        Expr::Lit(Value::Bool(true)) => None,
+        e => Some(e),
+    }
+}
+
+fn loosened(e: &Expr, pass: bool, unseen: &dyn Fn(&str) -> bool) -> Expr {
+    let known = |e: &Expr| match e {
+        Expr::Lit(Value::Bool(b)) => Some(*b),
+        _ => None,
+    };
+    let is = |b: bool| Expr::Lit(Value::Bool(b));
+    match e {
+        Expr::And(a, b) => {
+            let (a, b) = (loosened(a, pass, unseen), loosened(b, pass, unseen));
+            match (known(&a), known(&b)) {
+                (Some(false), _) | (_, Some(false)) => is(false),
+                (Some(true), _) => b,
+                (_, Some(true)) => a,
+                _ => Expr::And(Box::new(a), Box::new(b)),
+            }
+        }
+        Expr::Or(a, b) => {
+            let (a, b) = (loosened(a, pass, unseen), loosened(b, pass, unseen));
+            match (known(&a), known(&b)) {
+                (Some(true), _) | (_, Some(true)) => is(true),
+                (Some(false), _) => b,
+                (_, Some(false)) => a,
+                _ => Expr::Or(Box::new(a), Box::new(b)),
+            }
+        }
+        Expr::Not(a) => {
+            let a = loosened(a, !pass, unseen);
+            match known(&a) {
+                Some(b) => is(!b),
+                None => Expr::Not(Box::new(a)),
+            }
+        }
+        e => {
+            let mut fields = Vec::new();
+            e.referenced_fields(&mut fields);
+            match fields.iter().any(|f| unseen(f)) {
+                true => is(pass),
+                false => e.clone(),
+            }
+        }
+    }
 }
 
 /// The grants of a rule, split at the commas outside a field list.
@@ -991,7 +1133,8 @@ impl Scope {
     }
 
     /// `None`: no access. `Some(None)`: every row. `Some(Some(f))`: the rows
-    /// `f` matches -- the filters of the rules granting `op`, any of them.
+    /// `f` matches -- the filters of the rules granting `op`, any of them,
+    /// a transition's by what the row before can answer of it.
     fn filter(&self, collection: &str, op: u8) -> Option<Option<Expr>> {
         if op & (UPDATE | DELETE) != 0 && self.append_only(collection) {
             return None;
@@ -1005,7 +1148,7 @@ impl Scope {
                 continue;
             }
             any = true;
-            match &r.filter {
+            match r.using() {
                 None => every = true,
                 Some(f) => {
                     either = Some(match either {
@@ -1134,21 +1277,48 @@ impl Scope {
             .ok_or_else(|| self.refused(collection, verb))
     }
 
-    /// A write's filter, with the read rules' ANDed in when it answers its
+    /// A write's filter, with the read rules ANDed in when it answers its
     /// rows (`returning`): what a write hands back is a read, as
-    /// PostgreSQL's `RETURNING` is held to the `SELECT` policies. `writable`
-    /// asked that a read rule exists; an update rule wider than the read
-    /// one would otherwise answer rows the token cannot `get`.
+    /// PostgreSQL's `RETURNING` is held to the `SELECT` policies.
+    /// `writable` asked that a read rule exists; an update rule wider than
+    /// the read one would otherwise answer rows the token cannot `get`.
+    ///
+    /// A `del` answers its rows as they were, so the read rules are asked
+    /// of them as they stand. A `set` answers them as it wrote them, and a
+    /// term of the read rules over a field it writes is asked of the row
+    /// after, not before ([`Self::answerable`]): asked before, a courier --
+    /// who reads the orders they carry -- claiming a ready order with
+    /// `returning *` picked nothing and wrote nothing, where the same
+    /// claim without it took the order.
     fn returning(
         &self,
         collection: &str,
         pick: &Option<Box<Pick>>,
+        set: Option<&[(String, Expr)]>,
         f: Option<Expr>,
     ) -> Option<Expr> {
-        match pick.as_ref().filter(|p| p.returning.is_some()) {
-            Some(_) => and(f, self.filter(collection, READ).flatten()),
-            None => f,
+        if !pick.as_ref().is_some_and(|p| p.returning.is_some()) {
+            return f;
         }
+        let read = self.filter(collection, READ).flatten();
+        match (set, read) {
+            (Some(set), Some(read)) => and(f, Self::answerable(&read, set)),
+            (_, read) => and(f, read),
+        }
+    }
+
+    /// The read rules `read` as a `set` writing `set` can be held to before
+    /// it writes: each term over a field it assigns taken as passing
+    /// ([`relaxed`]) -- the row as written answers those, through
+    /// [`Check`]'s `answering`, and one it does not admit refuses the
+    /// statement (403) rather than being written and left out of the
+    /// answer. The terms over the fields it leaves alone are what they will
+    /// be after, and pass over a row the token will not be able to read
+    /// whatever the `set` writes, as a `get` passes it over.
+    fn answerable(read: &Expr, set: &[(String, Expr)]) -> Option<Expr> {
+        let field = |name: &str| name.split('.').next().unwrap_or(name).to_string();
+        let written: Vec<String> = set.iter().map(|(k, _)| field(k)).collect();
+        relaxed(read, &|name| written.contains(&field(name)))
     }
 
     /// The statement as this token may run it, or why it may not.
@@ -1222,7 +1392,7 @@ impl Scope {
                 self.inner(&mut filter)?;
                 let filter = self.reaping(&collection, filter)?;
                 Statement::Update {
-                    filter: self.returning(&collection, &pick, and(filter, f)),
+                    filter: self.returning(&collection, &pick, Some(&set), and(filter, f)),
                     collection,
                     set,
                     require,
@@ -1239,7 +1409,7 @@ impl Scope {
                 self.inner(&mut filter)?;
                 let filter = self.reaping(&collection, filter)?;
                 Statement::Delete {
-                    filter: self.returning(&collection, &pick, and(filter, f)),
+                    filter: self.returning(&collection, &pick, None, and(filter, f)),
                     collection,
                     require,
                     pick,
@@ -1260,13 +1430,30 @@ impl Scope {
         })
     }
 
+    /// Whether a rule granting the token `update` in `collection` is a
+    /// transition: there an update's row after is judged with its row
+    /// before, by [`Self::overwrites`], and not on its own.
+    fn transitions(&self, collection: &str) -> bool {
+        self.rules.iter().any(|r| {
+            r.transition
+                && r.ops & UPDATE != 0
+                && r.collection.as_deref().is_none_or(|c| c == collection)
+        })
+    }
+
     /// Whether the token may write `doc` over `old` in the collection
     /// `schema` describes, when a rule granting it `update` there names the
-    /// fields it may change: the fields that differ -- a `set`'s, a `put`'s
-    /// over an id, whatever route -- must all be one such rule's, a rule
-    /// that also admits the row before (`USING`) and after (`WITH CHECK`).
+    /// fields it may change or is a transition: the fields that differ --
+    /// a `set`'s, a `put`'s over an id, whatever route -- must all be one
+    /// such rule's, a rule that also admits the change: a transition by
+    /// being true of the row before and the row after together, any other
+    /// by admitting the row before (`USING`) and after (`WITH CHECK`).
     /// Rules that name no fields reach every field, as before, so a policy
-    /// with no field list judges nothing here.
+    /// with no field list and no transition judges nothing here: its rules
+    /// widen each other, the row before one's and the row after another's,
+    /// as PostgreSQL's permissive policies do. A transition never lends a
+    /// half: true of the pair or not, it is not the before of one change
+    /// and the after of another.
     fn overwrites(
         &self,
         schema: &Schema,
@@ -1277,7 +1464,12 @@ impl Scope {
         let name = schema.name.as_str();
         let here =
             |r: &&Bound| r.ops & UPDATE != 0 && r.collection.as_deref().is_none_or(|c| c == name);
-        if !self.rules.iter().filter(here).any(|r| r.fields.is_some()) {
+        if !self
+            .rules
+            .iter()
+            .filter(here)
+            .any(|r| r.fields.is_some() || r.transition)
+        {
             return Ok(());
         }
         // Compared as their encodings: `==` takes -0.0 for 0.0.
@@ -1313,6 +1505,14 @@ impl Scope {
         };
         let (mut before, mut after) = (false, false);
         for r in self.rules.iter().filter(here).filter(|r| covers(r)) {
+            if r.transition {
+                // `new.` reads the row after, a bare name the row before.
+                let pair = |f: &Expr| eval(f, &mut Pair(old, doc, schema), &ctx);
+                if r.filter.as_ref().map_or(Ok(true), |f| pair(f).map(|v| truthy(&v)))? {
+                    return Ok(());
+                }
+                continue;
+            }
             before = before || admits(&r.filter, old)?;
             after = after || admits(&r.filter, doc)?;
             if before && after {
@@ -1370,15 +1570,47 @@ impl RowAccess for Written<'_> {
         self.0.id
     }
     fn field(&mut self, name: &str) -> Result<Value> {
-        if name == "id" {
-            return Ok(Value::Int(self.0.id as i64));
-        }
-        Ok(self.0.get(name).cloned().unwrap_or(Value::Null))
+        Ok(read(self.0, name))
     }
     fn text_order(&self, name: &str) -> fenec_core::collate::TextOrder {
-        self.1
-            .field(name)
-            .map_or(fenec_core::collate::TextOrder::BYTES, |f| f.text_order())
+        order_of(self.1, name)
+    }
+}
+
+/// A field of `doc`, or a path into a json one, as a filter reads it off a
+/// stored row: through [`Document::get`] alone, a rule's `meta.owner`
+/// read `null` of every document written, and refused each.
+fn read(doc: &Document, name: &str) -> Value {
+    if name == "id" {
+        return Value::Int(doc.id as i64);
+    }
+    doc.at(name).cloned().unwrap_or(Value::Null)
+}
+
+fn order_of(schema: &Schema, name: &str) -> fenec_core::collate::TextOrder {
+    let field = name.split('.').next().unwrap_or(name);
+    schema
+        .field(field)
+        .map_or(fenec_core::collate::TextOrder::BYTES, |f| f.text_order())
+}
+
+/// The row before a write and the row it leaves, as a transition reads
+/// them: `new.<field>` the row after, a bare name the row before, each in
+/// its field's collation as [`Written`] reads one.
+struct Pair<'a>(&'a Document, &'a Document, &'a Schema);
+
+impl RowAccess for Pair<'_> {
+    fn id(&self) -> DocId {
+        self.0.id
+    }
+    fn field(&mut self, name: &str) -> Result<Value> {
+        Ok(match name.strip_prefix(NEW) {
+            Some(after) => read(self.1, after),
+            None => read(self.0, name),
+        })
+    }
+    fn text_order(&self, name: &str) -> fenec_core::collate::TextOrder {
+        order_of(self.2, name.strip_prefix(NEW).unwrap_or(name))
     }
 }
 
@@ -1446,6 +1678,10 @@ impl Hook for Check {
         };
         let op = match op {
             WriteOp::Insert => INSERT,
+            // Where a transition grants it, the row after is judged with
+            // the row before, which `before_overwrite` is handed next:
+            // every update is a write over a row the collection holds.
+            WriteOp::Update if scope.transitions(&schema.name) => return Ok(()),
             WriteOp::Update => UPDATE,
             // A delete's rows were found through its filter, the token's
             // ANDed in; nothing is written to check.
@@ -1474,6 +1710,30 @@ impl Hook for Check {
             )));
         }
         scope.overwrites(schema, old, doc, &self.registry)
+    }
+    fn answering(&self, schema: &Schema, doc: &Document) -> Result<()> {
+        let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
+            return Ok(());
+        };
+        if scope.admits(schema, READ, doc, &self.registry)? {
+            return Ok(());
+        }
+        // The token knows the row: it may update it, and wrote it so. What
+        // it may read is its own rules, which `/_whoami` shows it.
+        let rules: Vec<&str> = scope
+            .rules
+            .iter()
+            .filter(|r| r.ops & READ != 0)
+            .filter(|r| r.collection.as_deref().is_none_or(|c| c == schema.name))
+            .filter_map(|r| r.text.as_deref())
+            .collect();
+        Err(denied(format!(
+            "`returning` would answer a row of `{}` this token may not read as written \
+             (read where {}): nothing is written; without `returning` the write is \
+             answered by its count",
+            schema.name,
+            rules.join(" or ")
+        )))
     }
 }
 

@@ -64,6 +64,15 @@ pub trait Hook: Send + Sync {
     fn after_write(&self, _collection: &str, _op: WriteOp, _doc: &Document) -> Result<()> {
         Ok(())
     }
+    /// Called for each row a write answers (`returning`): a `set`'s as it
+    /// wrote it, a `del`'s as it was. Returning `Err` refuses the
+    /// statement, which is put back whole: a scoped token is answered the
+    /// rows it may read alone, and one it wrote and may not read is no
+    /// write of its, rather than one it is not told of (`fenec-http`'s
+    /// `access`).
+    fn answering(&self, _schema: &Schema, _doc: &Document) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A function as the registry holds it: its name, lowered, the function,
