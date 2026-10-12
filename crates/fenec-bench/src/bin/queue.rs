@@ -19,7 +19,13 @@
 //!     CPU, resident memory and threads, beside as many clients polling and
 //!     as many subscriptions -- and the million jobs over HTTP again with
 //!     the header on every claim, and beside 16 claims held on a queue that
-//!     stays empty (`held`).
+//!     stays empty (`held`);
+//!   * a put of another collection beside 0, 50 and 150 claims held, each a
+//!     group of its own, as couriers' claims are (`held other`); and one job
+//!     at a time to 10, 100 and 1 000 such claims, every one of which would
+//!     take it: from the put to a worker holding it, the runs and looks a
+//!     job costs, and how often the claim held longest took it (`held
+//!     contested`).
 //!
 //! `JOBS=200000` runs it over fewer jobs.
 
@@ -759,6 +765,168 @@ fn busy(n: usize, header: bool, aside: usize) {
     );
 }
 
+/// A metric's value in a scrape of `/_metrics`, 0 where it is not.
+fn metric(c: &mut http::Http, name: &str) -> u64 {
+    let text = String::from_utf8_lossy(c.get("/_metrics")).into_owned();
+    let prefix = format!("{name} ");
+    text.lines()
+        .find_map(|l| l.strip_prefix(prefix.as_str()))
+        .and_then(|n| n.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Waits until `n` requests are held on the server `c` reaches.
+fn until_held(c: &mut http::Http, n: u64) {
+    let until = Instant::now() + std::time::Duration::from_secs(120);
+    while metric(c, "fenec_held_requests") != n {
+        assert!(Instant::now() < until, "{n} never held");
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+}
+
+/// `held` claims held that no job is for, each a group of its own -- a
+/// courier's claim, whose point is in its filter -- for 30 s, beside one
+/// writer putting rows of another collection one at a time: a position
+/// beat's time, which the claims held on `jobs` have no business in.
+fn other(held: usize) {
+    const WRITES: usize = 20_000;
+    let (server, addr, dir) =
+        empty_queue(&["--max-connections", "5000", "--http-max-streams", "5000"]);
+    let mut c = http::Http::connect(&addr);
+    c.query("create collection positions (x int, y int)", "");
+    let hs: Vec<_> = (0..held)
+        .map(|w| {
+            let addr = addr.clone();
+            std::thread::spawn(move || {
+                let mut c = http::Http::connect(&addr);
+                // Answered at the server's SIGTERM, with nothing.
+                c.query_with(
+                    ASIDE,
+                    &format!("\"w{w}\",\"aside{w}\""),
+                    "Fenec-Wait: 30000\r\n",
+                );
+            })
+        })
+        .collect();
+    until_held(&mut c, held as u64);
+    let looks = metric(&mut c, "fenec_held_looks_total");
+    let mut us = Vec::with_capacity(WRITES);
+    let began = Instant::now();
+    for i in 0..WRITES {
+        let t = Instant::now();
+        c.query(
+            "put positions {id: $1, x: $2, y: $2}",
+            &format!("{},{i}", 1 + i % 150),
+        );
+        us.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    let s = began.elapsed().as_secs_f64();
+    let looks = metric(&mut c, "fenec_held_looks_total") - looks;
+    server.terminate();
+    for h in hs {
+        let _ = h.join();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    println!(
+        "  a put of another collection beside {held} claims held, each its own group: {}; \
+         {:.0} looks/s by the held claims",
+        percentiles(us),
+        looks as f64 / s
+    );
+}
+
+/// A claim every job matches, a group of each worker's own: its third
+/// parameter, a bound no job's `sent` is under, differs worker by worker,
+/// as a courier's point does.
+const OWN_CLAIM: &str = "set jobs {owner: $1, run_at: now() + 600000, attempts: attempts + 1} \
+                         where run_at <= now() and kind = $2 and sent > $3 order run_at \
+                         limit 1 returning id, kind, sent";
+
+/// One job at a time to `n` claims held, each a group of its own that the
+/// job matches: from its put sent to a worker holding it, the runs and the
+/// heads' looks a job costs, and how often the claim held longest took it.
+/// Each job waits for the last one's taker to be held again, so which
+/// claim was held longest is the order they came back in.
+fn contested(n: usize) {
+    let jobs = if n >= 1000 { 100 } else { 300 };
+    let (server, addr, dir) =
+        empty_queue(&["--max-connections", "5000", "--http-max-streams", "5000"]);
+    let mut c = http::Http::connect(&addr);
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, i64, i64)>();
+    let mut hs = Vec::with_capacity(n);
+    // The workers in the order they were held, the longest first.
+    let mut order = std::collections::VecDeque::with_capacity(n);
+    for w in 0..n {
+        let addr = addr.clone();
+        let tx = tx.clone();
+        hs.push(std::thread::spawn(move || {
+            let mut c = http::Http::connect(&addr);
+            for k in 0.. {
+                let owner = format!("\"c{w}:{k}\"");
+                let params = format!("{owner},\"mail\",{}", -1_000_000 - w as i64);
+                let body = c
+                    .query_with(OWN_CLAIM, &params, "Fenec-Wait: 30000\r\n")
+                    .to_vec();
+                let at = micros();
+                let sent = http::ints(&body, "sent");
+                if sent.contains(&-1) {
+                    break;
+                }
+                for (s, id) in sent.iter().zip(http::ids(&body)) {
+                    c.query(ACK, &format!("{id},{owner}"));
+                    tx.send((w, *s, at)).unwrap();
+                }
+            }
+        }));
+        until_held(&mut c, w as u64 + 1);
+        order.push_back(w);
+    }
+    let (runs0, looks0) = (
+        metric(&mut c, "fenec_held_runs_total"),
+        metric(&mut c, "fenec_held_looks_total"),
+    );
+    let (cpu0, _, _) = usage(server.pid());
+    let (mut lat, mut longest) = (Vec::with_capacity(jobs), 0);
+    for _ in 0..jobs {
+        c.query(
+            "put jobs {kind: \"mail\", sent: $1, run_at: now(), attempts: 0}",
+            &micros().to_string(),
+        );
+        let (w, sent, at) = rx.recv().unwrap();
+        lat.push((at - sent) as f64);
+        if order.front() == Some(&w) {
+            longest += 1;
+        }
+        order.retain(|&o| o != w);
+        order.push_back(w);
+        until_held(&mut c, n as u64);
+    }
+    let (cpu1, _, _) = usage(server.pid());
+    let runs = metric(&mut c, "fenec_held_runs_total") - runs0;
+    let looks = metric(&mut c, "fenec_held_looks_total") - looks0;
+    for _ in 0..n {
+        c.query(
+            "put jobs {kind: \"mail\", sent: -1, run_at: 0, attempts: 0}",
+            "",
+        );
+    }
+    for h in hs {
+        h.join().unwrap();
+    }
+    server.terminate();
+    let _ = std::fs::remove_dir_all(&dir);
+    println!(
+        "  {n} claims held, each its own group, {jobs} jobs one at a time: put to held {}; \
+         {:.2} runs and {:.1} looks a job, the server's CPU {:.1} ms a job; the claim held \
+         longest took it {:.0}%",
+        ms_percentiles(lat),
+        runs as f64 / jobs as f64,
+        looks as f64 / jobs as f64,
+        (cpu1 - cpu0) * 1e3 / jobs as f64,
+        longest as f64 * 100.0 / jobs as f64
+    );
+}
+
 fn main() {
     let n = jobs();
     let only = std::env::args().nth(1);
@@ -801,6 +969,16 @@ fn main() {
             busy(n, false, 0);
             busy(n, true, 0);
             busy(n, false, 16);
+        }
+        if part("other") {
+            for held in [0, 50, 150] {
+                other(held);
+            }
+        }
+        if part("contested") {
+            for held in [10, 100, 1000] {
+                contested(held);
+            }
         }
     }
 }
