@@ -821,7 +821,7 @@ impl<'h> Ticket<'h> {
                     continue;
                 }
                 if let Some(next) = deadline(&st, now) {
-                    wait = wait.min(next);
+                    wait = wait.min(asked_for(next));
                 }
             }
             st = self
@@ -1215,6 +1215,20 @@ fn deadline(st: &State, now: Instant) -> Option<Duration> {
         }
     }
     least
+}
+
+/// What to ask a timed wait for, to wake by `d`. macOS lets one run late
+/// by half again -- 3 ms took 4.5 every time, 6 ms 9, a thread's sleep
+/// as a condition's wait -- and a delayed job went from 0.2 ms after its
+/// time at the median to 1.3, p99 1.5 to 29, once the looks' one request
+/// slept to its moment, where each head had slept a gap at a time: so
+/// two thirds of it are asked for, and the rest again from there. Where a
+/// wait keeps its time, that is a few wakes more on the way to a moment.
+fn asked_for(d: Duration) -> Duration {
+    match d > Duration::from_micros(200) {
+        true => d * 2 / 3,
+        false => d,
+    }
 }
 
 /// What a look found, kept for its group under the mutex.
