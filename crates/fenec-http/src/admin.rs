@@ -10,6 +10,9 @@
 //!                                      applies it: what a router's create with
 //!                                      a schema sends, once the tenant is placed
 //! DELETE /_admin/tenants/<t>           close and remove             204
+//! POST   /_admin/tenants/<t>/query     {query, params}: a read, answered as
+//!                                      /query answers it, any write refused
+//!                                      (403): a router's query across tenants
 //! POST   /_admin/tenants/<t>/freeze    refuse writes, wait for the ones in flight
 //! POST   /_admin/tenants/<t>/thaw
 //! GET    /_admin/tenants/<t>/file      the whole image (octet-stream)
@@ -85,6 +88,15 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 Ok(()) => crate::apply_schema(&tenant.db, cfg, &String::from_utf8_lossy(&req.body)),
             }
         }),
+        // A read of one tenant for a router's query across tenants
+        // (`fenec-shard`'s `POST /_shard/query`), with the admin token it
+        // holds: the data token reaches every tenant and writes, and the
+        // router holds it nowhere. A token that takes a tenant's whole
+        // image (`GET .../file`) learns nothing more by reading it, and the
+        // read refuses every statement that writes.
+        (Method::Post, ["tenants", t, "query"]) => tenants
+            .get(t)
+            .map(|tenant| crate::admin_query(&tenant, cfg, req)),
         (Method::Post, ["tenants", t, "freeze"]) => tenants
             .freeze(t)
             .map(|_| Response::json(200, "{\"frozen\":true}")),

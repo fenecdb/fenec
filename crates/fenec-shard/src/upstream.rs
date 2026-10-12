@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Response header ceiling, same as the server side's.
 const MAX_HEAD: usize = fenec_http::http::MAX_HEADER_BYTES;
@@ -106,11 +106,11 @@ impl Pool {
         }
     }
 
-    fn connect(&self, addr: &str) -> io::Result<TcpStream> {
+    fn connect(&self, addr: &str, within: Duration) -> io::Result<TcpStream> {
         use std::net::ToSocketAddrs;
         let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
         for a in addr.to_socket_addrs()? {
-            match TcpStream::connect_timeout(&a, self.timeout) {
+            match TcpStream::connect_timeout(&a, within) {
                 Ok(s) => {
                     let _ = s.set_nodelay(true);
                     // Once a connection: it is the same for every request.
@@ -149,6 +149,44 @@ impl Pool {
         body: &[u8],
         held: Duration,
     ) -> io::Result<Answer> {
+        let replay = replayable(method, headers);
+        let times = (self.timeout + held, self.timeout);
+        self.send_timed(addr, method, target, headers, body, times, replay)
+    }
+
+    /// [`Pool::send`] of a read that must be answered by `deadline`: the
+    /// connect and the head's reads are bounded by what is left of it
+    /// (and by the pool's timeout), and [`Answer::read_body_by`] reads the
+    /// body by it too. A read is harmless to run twice, so one whose
+    /// connection ended before its answer goes again on a fresh one,
+    /// whatever its method: a query across tenants is a `POST`.
+    pub fn send_by(
+        &self,
+        addr: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        deadline: Instant,
+    ) -> io::Result<Answer> {
+        let left = left_until(deadline)?.min(self.timeout);
+        self.send_timed(addr, "POST", target, headers, body, (left, left), true)
+    }
+
+    /// One request, its answer's head read within `times.0` a read and its
+    /// connection made within `times.1`; `replay` is whether it may go
+    /// again once sent whole (the module's comment).
+    #[allow(clippy::too_many_arguments)]
+    fn send_timed(
+        &self,
+        addr: &str,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        times: (Duration, Duration),
+        replay: bool,
+    ) -> io::Result<Answer> {
+        let (read_timeout, connect_within) = times;
         let mut req = String::with_capacity(256);
         for part in [method, " ", target, " HTTP/1.1\r\nHost: ", addr, "\r\n"] {
             req.push_str(part);
@@ -196,20 +234,22 @@ impl Pool {
             if !open(&idle.stream) {
                 continue;
             }
-            match self.exchange(addr, idle.stream, Some(idle.read_timeout), head, body, held) {
+            let set = Some(idle.read_timeout);
+            match self.exchange(addr, idle.stream, set, head, body, read_timeout) {
                 Ok(a) => return Ok(a),
                 Err(Failure(Stage::Unsent, _)) => break,
-                Err(Failure(Stage::Unanswered, _)) if replayable(method, headers) => break,
+                Err(Failure(Stage::Unanswered, _)) if replay => break,
                 Err(Failure(_, e)) => return Err(e),
             }
         }
-        let s = self.connect(addr)?;
-        self.exchange(addr, s, None, head, body, held)
+        let s = self.connect(addr, connect_within)?;
+        self.exchange(addr, s, None, head, body, read_timeout)
             .map_err(|Failure(_, e)| e)
     }
 
     /// One request and the head of its answer over `s`, whose read timeout
-    /// is `set` where it is known.
+    /// is `set` where it is known, each read of the answer bounded by
+    /// `read_timeout`.
     fn exchange(
         &self,
         addr: &str,
@@ -217,9 +257,8 @@ impl Pool {
         set: Option<Duration>,
         head: &[u8],
         body: &[u8],
-        held: Duration,
+        read_timeout: Duration,
     ) -> Result<Answer, Failure> {
-        let read_timeout = self.timeout + held;
         if set != Some(read_timeout) {
             s.set_read_timeout(Some(read_timeout))
                 .map_err(|e| Failure(Stage::Unsent, e))?;
@@ -416,12 +455,55 @@ impl Answer {
         Ok(body)
     }
 
+    /// [`Answer::read_body`] of an answer that must be in by `deadline`:
+    /// each read waits for what is left of it, so a node that sends its
+    /// body a byte at a time cannot stretch the wait past it. The read
+    /// timeout is set only where the buffer is empty -- a small answer
+    /// comes in with its head, in the one read that took that.
+    pub fn read_body_by(mut self, pool: &Pool, deadline: Instant) -> io::Result<Vec<u8>> {
+        let Some(len) = self.content_length() else {
+            return Err(bad("an answer with no length: a stream"));
+        };
+        let mut body = vec![0u8; len];
+        let mut got = 0;
+        while got < len {
+            if self.reader.buffer().is_empty() {
+                let left = left_until(deadline)?.min(self.read_timeout);
+                self.reader.get_ref().set_read_timeout(Some(left))?;
+                self.read_timeout = left;
+            }
+            match self.reader.read(&mut body[got..])? {
+                0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+                n => got += n,
+            }
+        }
+        if self.reusable && self.reader.buffer().is_empty() {
+            let idle = Idle {
+                stream: self.reader.into_inner(),
+                read_timeout: self.read_timeout,
+            };
+            pool.put(&self.addr, idle);
+        }
+        Ok(body)
+    }
+
     /// The rest of the answer as a byte stream, with no read timeout: an SSE
     /// stream is silent until something changes (the node's keep-alive
     /// line bounds the silence).
     pub fn into_stream(self) -> io::Result<BufReader<TcpStream>> {
         self.reader.get_ref().set_read_timeout(None)?;
         Ok(self.reader)
+    }
+}
+
+/// What is left until `deadline`, or the timeout it has come to.
+fn left_until(deadline: Instant) -> io::Result<Duration> {
+    match deadline.checked_duration_since(Instant::now()) {
+        Some(left) if !left.is_zero() => Ok(left),
+        _ => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the query's time ran out",
+        )),
     }
 }
 
@@ -495,7 +577,7 @@ mod tests {
     /// the request not wholly sent rightly makes unsent.
     fn stage(pool: &Pool, s: TcpStream, set: Option<Duration>) -> &'static str {
         let head = b"DELETE /t/acme/notes/1 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
-        match pool.exchange("node", s, set, head, b"", Duration::ZERO) {
+        match pool.exchange("node", s, set, head, b"", pool.timeout) {
             Ok(_) => "answered",
             Err(Failure(Stage::Unsent, _)) => "unsent",
             Err(Failure(Stage::Unanswered, _)) => "unanswered",

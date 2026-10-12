@@ -92,6 +92,37 @@ static MOVES: [AtomicU64; 2] = [ZERO; 2];
 /// Automatic failovers `[every tenant promoted, some not]`.
 static FAILOVERS: [AtomicU64; 2] = [ZERO; 2];
 static MOVE_TIMES: Timings = Timings::new(&MOVE_BUCKETS);
+/// Queries across tenants (`POST /_shard/query`), by [`Fanned`].
+static FANOUTS: [AtomicU64; 4] = [ZERO; 4];
+static FANOUT_TIMES: Timings = Timings::new(&BUCKETS);
+/// The tenants those queries asked: `[answered, failed]`.
+static FANOUT_TENANTS: [AtomicU64; 2] = [ZERO; 2];
+
+/// How a query across tenants ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fanned {
+    /// Every tenant answered, and the rows were merged.
+    Done = 0,
+    /// Some did not, and the caller asked for the others' rows, which it
+    /// was given with the failures named.
+    Partial = 1,
+    /// Some did not, and the query failed naming them.
+    Failed = 2,
+    /// Refused as a whole: the request did not read, a bound was passed,
+    /// or a merge could not be made.
+    Refused = 3,
+}
+
+const FANNED: [&str; 4] = ["done", "partial", "failed", "refused"];
+
+/// Counts a query across tenants: how it ended, how long it took, and how
+/// many tenants answered and failed.
+pub fn fanned(how: Fanned, took: Duration, answered: u64, failed: u64) {
+    FANOUTS[how as usize].fetch_add(1, Ordering::Relaxed);
+    FANOUT_TIMES.add(took);
+    FANOUT_TENANTS[0].fetch_add(answered, Ordering::Relaxed);
+    FANOUT_TENANTS[1].fetch_add(failed, Ordering::Relaxed);
+}
 
 /// Counts a request answered `status` after `took`.
 pub fn request(route: Route, status: u16, took: Duration) {
@@ -252,6 +283,41 @@ pub fn counters(out: &mut Text) {
         &[],
         &[&MOVE_TIMES],
     );
+    out.family(
+        "fenec_router_fanouts_total",
+        "counter",
+        "Queries across tenants (POST /_shard/query), by how they ended: done, partial (some tenants failed and the caller asked for the rest), failed (naming the tenants), refused (as a whole).",
+    );
+    for (i, outcome) in FANNED.iter().enumerate() {
+        out.sample(
+            "fenec_router_fanouts_total",
+            &[("outcome", outcome)],
+            FANOUTS[i].load(Ordering::Relaxed),
+        );
+    }
+    out.family(
+        "fenec_router_fanout_duration_seconds",
+        "histogram",
+        "How long a query across tenants took, from its arrival to the merged answer.",
+    );
+    histogram(
+        out,
+        "fenec_router_fanout_duration_seconds",
+        &[],
+        &[&FANOUT_TIMES],
+    );
+    out.family(
+        "fenec_router_fanout_tenants_total",
+        "counter",
+        "Tenants the queries across tenants asked, by whether each answered or failed.",
+    );
+    for (i, outcome) in ["answered", "failed"].iter().enumerate() {
+        out.sample(
+            "fenec_router_fanout_tenants_total",
+            &[("outcome", outcome)],
+            FANOUT_TENANTS[i].load(Ordering::Relaxed),
+        );
+    }
     out.family(
         "fenec_router_connections",
         "gauge",
