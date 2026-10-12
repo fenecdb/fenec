@@ -20,11 +20,12 @@
 //   3. none near and ready: a claim of the oldest ready order within the
 //      radius, held at the server until one is placed (`Fenec-Wait`).
 //
-// None of them says `returning`: under a scoped token it ANDs the token's
-// read rules into the claim's filter, against the row before the write, and
-// a courier reads only orders already theirs -- a claim with `returning *`
-// picks nothing, silently. Each batch ends with a read of the order by its
-// claim token instead, which by then is the courier's.
+// Each `set` answers the order it took (`returning *`). A courier reads
+// only the orders they carry, which a ready order is not until the claim
+// is written: the read rules are asked of the order as the claim leaves it,
+// so it is answered as claimed. (Asked of it as it stood, the claim picked
+// nothing and said nothing, and each batch read the order back by its
+// claim token.)
 import { CLAIM_RADIUS_M, CLAIM_WAIT_MS, LEASE_MS, MAX_ATTEMPTS } from './config';
 import { appDb, asUser, FenecError, retrying, rows, type Db } from './db';
 import type { Point } from './city';
@@ -69,18 +70,18 @@ const NEAREST =
   'get orders select id where run_at <= now() and distance(pickup, $1) <= $2 near pickup $1 limit $3';
 
 // Each statement of the claim's /batch: this candidate, if it is still
-// ready and no statement before it in the batch took one.
+// ready and no statement before it in the batch took one, answered as taken.
 const TAKE_IF_FIRST =
   'set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} ' +
-  'where id = $4 and run_at <= now() and not ($2 in (get orders select claim where claim = $2))';
+  'where id = $4 and run_at <= now() and not ($2 in (get orders select claim where claim = $2)) returning *';
 
 // The oldest ready order within the radius: what a courier waits on.
 const TAKE_OLDEST_NEAR =
   'set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} ' +
-  'where run_at <= now() and distance(pickup, $4) <= $5 order run_at limit 1';
+  'where run_at <= now() and distance(pickup, $4) <= $5 order run_at limit 1 returning *';
 
-// What the claim took, read back in the same /batch.
-const TAKEN = 'get orders where claim = $1';
+/** The order a statement of a claim's batch answered, if it took one. */
+const taken = (result: unknown): Job | undefined => (result as { rows?: Job[] }).rows?.[0];
 
 export interface ClaimOptions {
   radius?: number;
@@ -119,17 +120,13 @@ export async function claimNearest(who: Who, at: Point, opts: ClaimOptions = {})
       const claim = claimToken(who.sub);
       // Refused for the company's rate (429) before it ran: sent again.
       const r = await retrying(() =>
-        db.batch([
-          ...ids.map((id): [string, unknown[]] => [TAKE_IF_FIRST, [who.sub, claim, queue.leaseMs, id]]),
-          [TAKEN, [claim]],
-        ]),
+        db.batch(ids.map((id): [string, unknown[]] => [TAKE_IF_FIRST, [who.sub, claim, queue.leaseMs, id]])),
       );
-      const i = r.results.findIndex((x) => (x as { affected?: number }).affected === 1);
-      const job = (r.results[ids.length] as unknown as { rows: Job[] }).rows[0];
+      const i = r.results.findIndex((x) => taken(x) !== undefined);
       claimStats.batches++;
-      if (job) {
+      if (i >= 0) {
         claimStats.won++;
-        got = { job, how: 'nearest', tried: i + 1 };
+        got = { job: taken(r.results[i])!, how: 'nearest', tried: i + 1 };
       }
     }
     if (!got && opts.wait) {
@@ -138,15 +135,12 @@ export async function claimNearest(who: Who, at: Point, opts: ClaimOptions = {})
       // claim is a stream of the company's quota.
       const claim = claimToken(who.sub);
       const r = await retrying(() =>
-        db.batch(
-          [
-            [TAKE_OLDEST_NEAR, [who.sub, claim, queue.leaseMs, at, radius]],
-            [TAKEN, [claim]],
-          ],
-          { wait: opts.wait ?? CLAIM_WAIT_MS, signal: opts.signal },
-        ),
+        db.batch([[TAKE_OLDEST_NEAR, [who.sub, claim, queue.leaseMs, at, radius]]], {
+          wait: opts.wait ?? CLAIM_WAIT_MS,
+          signal: opts.signal,
+        }),
       );
-      const job = (r.results[1] as unknown as { rows: Job[] }).rows[0];
+      const job = taken(r.results[0]);
       claimStats.held++;
       if (job) {
         claimStats.heldWon++;

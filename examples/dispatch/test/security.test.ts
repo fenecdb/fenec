@@ -2,8 +2,9 @@
 // company's people never another company's tenant nor the platform's; a
 // courier their own orders and position; a customer their own orders;
 // writes held to the rows and fields their role is granted, before and
-// after (WITH CHECK). Each refused write is checked with the operator's
-// token to have written nothing.
+// after (WITH CHECK), and an order's to the steps its transitions name.
+// Each refused write is checked with the operator's token to have written
+// nothing.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startWorld, tandem, hopper, cast, sleep, type World } from './harness';
@@ -103,8 +104,23 @@ test("a courier's writes: their own order's fields, claims that name themselves"
   assert.equal(await refusal(db.run('set orders {fee: 1} where id = $1', [mine.id])), 403);
   assert.equal((await order(mine.id))!.fee, 500);
   // A claim that names another courier: the row after the write fails the rule.
-  assert.equal(await refusal(db.run('set orders {courier: $1, status: "assigned", run_at: now() + 60000} where id = $2', [tn.couriers[2].sub, ready])), 403);
-  assert.equal((await order(ready))!.courier, null);
+  assert.equal(await refusal(db.run('set orders {courier: $1, status: "assigned", run_at: now() + 60000, attempts: attempts + 1} where id = $2', [tn.couriers[2].sub, ready])), 403);
+  // Nor one that leaves the attempts uncounted, which a dead letter counts.
+  assert.equal(await refusal(db.run('set orders {courier: $1, status: "assigned", run_at: now() + 60000} where id = $2', [c0.sub, ready])), 403);
+  // A ready order delivered without a claim, the courier written in or not:
+  // no step of an order starts from ready but the claim.
+  for (const [q, params] of [
+    ['set orders {status: "delivered", courier: $1, delivered_at: now(), run_at: null} where id = $2', [c0.sub, ready]],
+    ['set orders {status: "delivered", delivered_at: now(), run_at: null} where id = $1', [ready]],
+  ] as const) {
+    assert.equal(await refusal(db.run(q, [...params])), 403, q);
+  }
+  // Their own order given back ahead of the queue: a give-back waits out a backoff.
+  assert.equal(await refusal(db.run('set orders {status: "ready", run_at: 0, claim: null} where id = $1', [mine.id])), 403);
+  const left = (await order(ready))!;
+  assert.equal(left.courier, null);
+  assert.equal(left.status, 'ready');
+  assert.equal((await order(mine.id))!.status, 'assigned');
   // Somebody else's position.
   assert.equal(
     await refusal(db.run('put positions {courier: $1, loc: [27.0, 38.36], seen: now(), state: "idle"}', [tn.couriers[3].sub])),
@@ -137,7 +153,14 @@ test("a customer reads and places their own orders, and cancels one nobody carri
   assert.equal((await order(k1s.id))!.status === 'cancelled', false);
   const own = await one<Job>(db, 'get orders where status = "ready" limit 1');
   assert.ok(own);
+  // Moved to the head of the queue, or cancelled and left claimable: not
+  // the change their rule names.
+  assert.equal(await refusal(db.run('set orders {run_at: 0} where id = $1', [own.id])), 403);
+  assert.equal(await refusal(db.run('set orders {status: "cancelled", run_at: 0} where id = $1', [own.id])), 403);
   assert.equal(await cancel(k0, own.id), true);
+  // Taken back once cancelled: their rule reaches ready orders alone.
+  assert.equal(await refusal(db.run('set orders {status: "ready", run_at: now()} where id = $1 require 1', [own.id])), 412);
+  assert.equal((await order(own.id))!.status, 'cancelled');
   assert.equal(mine.customer === k0.sub || mine.customer === k1.sub, true);
   const carried = mine.customer === k0.sub ? k0 : k1;
   assert.equal(await cancel(carried, mine.id), false);
@@ -162,7 +185,7 @@ test("a customer follows their own order live, and hears nothing of another's", 
   await asUser(c0).run('set orders {courier_loc: $1} where id = $2 and claim = $3', [[26.99, 38.35], mine.id, mine.claim]);
   // Another customer's order is assigned meanwhile: no word of it.
   const theirsReady = await one<Job>(asUser(other), 'get orders where status = "ready" limit 1');
-  if (theirsReady) await asUser(tn.couriers[4]).run('set orders {courier: $1, status: "assigned", claim: "x", run_at: now() + 60000} where id = $2', [tn.couriers[4].sub, theirsReady.id]);
+  if (theirsReady) await asUser(tn.couriers[4]).run('set orders {courier: $1, status: "assigned", claim: "x", run_at: now() + 60000, attempts: attempts + 1} where id = $2', [tn.couriers[4].sub, theirsReady.id]);
   for (let i = 0; i < 100 && !heard.some((r) => r.id === mine.id); i++) await sleep(20);
   stop();
   assert.ok(heard.some((r) => r.id === mine.id && JSON.stringify(r.courier_loc) === '[26.99,38.35]'), 'heard their courier move');

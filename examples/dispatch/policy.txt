@@ -32,15 +32,33 @@ merchants      read                                                             
 orders         read            where courier = $jwt.sub                             for courier
 # Their own position, written over as they move.
 positions      read,insert,update(loc, seen, state, heading, job, vehicle)  where courier = $jwt.sub  for courier
-# A claim picks among the orders whose lease is out -- ready, or lapsed under
-# another courier -- and every other write is to their own: the row before
-# and after the write must pass, so a claim that names another courier is
-# refused (403), and a courier never touches what a customer wrote.
-orders         update(status, run_at, courier, claim, attempts, picked_at, delivered_at, driven, courier_loc, error)  where run_at <= now() or courier = $jwt.sub  for courier
+
+# An order's steps, each a transition: a bare name reads the order as it
+# stands, `new.` as the write leaves it, and a write is a courier's when one
+# of these names every field it changes and is true of the order before and
+# after. A courier never touches what a customer wrote (`fee`, the
+# addresses), and a step is taken from the state it starts from alone: no
+# order is delivered that its courier did not claim.
+#
+# A claim takes an order whose lease is out -- ready, or lapsed under
+# another courier -- for themselves, counting the attempt, so a claim
+# naming another courier is refused (403) and no claim wipes the count
+# that makes a dead letter.
+orders         update(status, run_at, courier, claim, attempts)  where run_at <= now() and new.status = "assigned" and new.courier = $jwt.sub and new.attempts = attempts + 1  for courier
+# They pick up what they claimed,
+orders         update(status, picked_at, run_at)  where courier = $jwt.sub and status = "assigned" and new.status = "picked"  for courier
+# move its lease on as they ride, their point on it,
+orders         update(run_at, courier_loc)  where courier = $jwt.sub and (status = "assigned" or status = "picked")  for courier
+# deliver what they carry, out of the queue for good,
+orders         update(status, delivered_at, run_at, claim, driven, courier_loc)  where courier = $jwt.sub and (status = "assigned" or status = "picked") and new.status = "delivered" and new.run_at is null  for courier
+# or give it back: to the queue after a backoff, never ahead of it, or to a
+# dispatcher as a dead letter.
+orders         update(status, run_at, claim, error)  where courier = $jwt.sub and (status = "assigned" or status = "picked") and ((new.status = "ready" and new.run_at > now()) or (new.status = "dead" and new.run_at is null))  for courier
 
 # A customer reads their own orders and the merchants, places orders as
-# themselves, and cancels one no courier has taken.
+# themselves, and cancels one no courier has taken -- and takes back no
+# cancelled one, nor moves one up the queue.
 merchants      read                                                                 for customer
 orders         read            where customer = $jwt.sub                            for customer
 orders         insert          where customer = $jwt.sub and status = "ready" and courier is null and attempts = 0   for customer
-orders         update(status, run_at)  where customer = $jwt.sub and courier is null and (status = "ready" or status = "cancelled")  for customer
+orders         update(status, run_at)  where customer = $jwt.sub and courier is null and status = "ready" and new.status = "cancelled" and new.run_at is null  for customer
