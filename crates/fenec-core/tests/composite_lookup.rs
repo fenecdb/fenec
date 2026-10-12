@@ -904,3 +904,39 @@ fn refusals_name_what_is_missing() {
     let two = result(&ix, "get orders lookup lines on order order line", &[]);
     assert_eq!(one, two);
 }
+
+/// A part keys its child field's values as the index does, so a parent's
+/// value finds what the field's own equality finds: a `nocase` text every
+/// spelling of its fold, a collated one its bytes alone, a timestamp the
+/// int of its milliseconds, an int the float it equals -- as a single key
+/// through `@hash` does.
+#[test]
+fn a_part_matches_as_its_field_keys() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection p (who text, place text, at timestamp, n int)",
+        "create collection c (who text nocase, place text collate tr, at int, n float, k int, \
+         @sorted(who, place, k), @sorted(at, n, k))",
+        r#"put p [{who: "Ab", place: "ağaç", at: 5, n: 2}, {who: "x", place: "Ağaç", at: 7, n: 3}]"#,
+        r#"put c [{who: "ab", place: "ağaç", at: 5, n: 2.0, k: 1}, {who: "AB", place: "ağaç", at: 5, n: 2.5, k: 2},
+                  {who: "aB", place: "Ağaç", at: 7, n: 3.0, k: 3}, {who: "X", place: "Ağaç", at: 7, n: 3.0, k: 4}]"#,
+    ] {
+        exec(&mut db, sql);
+    }
+    let kids = |q: &str| -> Vec<Vec<Value>> {
+        let rs = result(&db, q, &[]);
+        let n = rs.nested.expect("nested");
+        n.groups
+            .iter()
+            .map(|g| g.iter().map(|r| r.values[0].clone()).collect())
+            .collect()
+    };
+    assert_eq!(
+        kids("get p lookup c on (who, place) = (who, place) select k order k"),
+        vec![vec![Value::Int(1), Value::Int(2)], vec![Value::Int(4)]]
+    );
+    assert_eq!(
+        kids("get p lookup c on (at, n) = (at, n) select k order k"),
+        vec![vec![Value::Int(1)], vec![Value::Int(3), Value::Int(4)]]
+    );
+}
