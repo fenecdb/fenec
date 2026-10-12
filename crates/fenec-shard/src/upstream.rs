@@ -8,7 +8,7 @@
 //!
 //! Connections are kept per node address and reused, and a node closes one
 //! silent past its `--idle-timeout`. So a pooled connection is looked at
-//! before it is used ([`open`]: a read that does not wait) and let go of
+//! before it is used (`open`: a read that does not wait) and let go of
 //! when the node has closed or reset it. Before the look, macOS answered a
 //! request after a minute of quiet 502: some 60 s after the node closed the
 //! connection (`net.inet.tcp.fin_timeout`) it is reset, and `setsockopt`
@@ -18,8 +18,9 @@
 //!
 //! The look cannot see a close on its way: the node's idle timeout firing
 //! as the request goes out. What may be sent again on a fresh connection
-//! then turns on how far the exchange got ([`Stage`]), never on the error's
-//! kind, which differs by system. Failing before the request's last byte
+//! then turns on how far the exchange got (`Stage`), not on the error,
+//! which each system names its own way (EINVAL, EPIPE and ECONNRESET for
+//! one reset connection). Failing before the request's last byte
 //! was handed to the system, the node never read a whole request and ran
 //! nothing: it is sent again, whatever it is. Failing after it, the
 //! connection ending before the first byte of an answer, the node may have
@@ -50,7 +51,7 @@ pub struct Pool {
 
 /// A pooled connection and the read timeout it was left with, so that a
 /// request waiting as long sets none: the two `setsockopt`s every exchange
-/// made took 0.67 us, more than the look ([`open`]) made in their place.
+/// made took 0.67 us, more than the look (`open`) made in their place.
 struct Idle {
     stream: TcpStream,
     read_timeout: Duration,
