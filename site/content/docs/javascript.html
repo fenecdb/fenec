@@ -42,7 +42,12 @@ load test measured. Another is a payments ledger on Node
 transfers, refunds and holds as guarded <code>/batch</code> blocks, an
 append-only journal, reconciliation and a change-stream sink, held to its
 invariants by 16 clients, a crash under <code>kill -9</code> and its
-security tests.</p>
+security tests. A third is courier dispatch in Next.js
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/dispatch">dispatch</a>):
+a company a tenant behind <code>fenec-shard</code> with its plan's quota,
+orders claimed by the nearest courier under a lease or held at the server
+until one comes, couriers on a live map, and couriers' and customers'
+tokens held to their own rows, with the gaps it found listed.</p>
 
 <p>Beside a module the page loads <code>fenec.js</code> and the two modules it
 imports, 47 KB brotli as they are served with no build step; a bundler keeps

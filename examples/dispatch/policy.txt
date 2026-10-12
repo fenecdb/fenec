@@ -1,0 +1,46 @@
+# Who may read and write what, with a JSON Web Token Plover signs (HS256,
+# lib/tokens.ts). Every token names its tenant, so on these nodes it reaches
+# that tenant's file alone -- a dispatcher of one company never another's --
+# and the rules below are then about rows and fields inside it. The
+# operator's token (--http-token) is not a JWT and is held to none of this;
+# scripts/setup.ts alone uses it.
+#
+# collection   access          rows                                                 role
+
+# ---- The platform tenant, `plover`: the app's token alone. No person's
+# token names it, so none reaches these collections whatever they grant.
+companies      read,insert                                                          for app
+users          read,insert,update(password, name)                                   for app
+
+# ---- A company's tenant.
+
+# The app's own reads: a courier's nearest ready orders, the dashboards.
+orders         read                                                                 for app
+positions      read                                                                 for app
+couriers       read                                                                 for app
+merchants      read                                                                 for app
+
+# A dispatcher sees and runs the whole company.
+orders         read,write                                                           for dispatcher
+couriers       read,write                                                           for dispatcher
+positions      read                                                                 for dispatcher
+merchants      read,write                                                           for dispatcher
+
+# A courier reads their own row, the merchants, and the orders they carry.
+couriers       read            where user = $jwt.sub                                for courier
+merchants      read                                                                 for courier
+orders         read            where courier = $jwt.sub                             for courier
+# Their own position, written over as they move.
+positions      read,insert,update(loc, seen, state, heading, job, vehicle)  where courier = $jwt.sub  for courier
+# A claim picks among the orders whose lease is out -- ready, or lapsed under
+# another courier -- and every other write is to their own: the row before
+# and after the write must pass, so a claim that names another courier is
+# refused (403), and a courier never touches what a customer wrote.
+orders         update(status, run_at, courier, claim, attempts, picked_at, delivered_at, driven, courier_loc, error)  where run_at <= now() or courier = $jwt.sub  for courier
+
+# A customer reads their own orders and the merchants, places orders as
+# themselves, and cancels one no courier has taken.
+merchants      read                                                                 for customer
+orders         read            where customer = $jwt.sub                            for customer
+orders         insert          where customer = $jwt.sub and status = "ready" and courier is null and attempts = 0   for customer
+orders         update(status, run_at)  where customer = $jwt.sub and courier is null and (status = "ready" or status = "cancelled")  for customer

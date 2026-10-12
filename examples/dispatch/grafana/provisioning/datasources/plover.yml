@@ -1,0 +1,29 @@
+# A data source a company: the router's prefix for its tenant, and a token
+# `npm run grafana-token` minted for it -- role `app`, which policy.txt lets
+# read orders, positions, couriers and merchants and write nothing. Grafana
+# keeps the token in its secure settings and hands it to the plugin's
+# backend, never to a browser. The router is the host's, as `npm run
+# cluster` runs it.
+apiVersion: 1
+datasources:
+  - name: Plover Tandem Couriers
+    type: fenecdb-datasource
+    uid: plover-tandem
+    url: http://host.docker.internal:8090/t/co-tandem
+    access: proxy
+    editable: false
+    isDefault: true
+    jsonData:
+      timeoutSeconds: 30
+    secureJsonData:
+      token: $__file{/run/plover/tandem.jwt}
+  - name: Plover Hopper & Daughters
+    type: fenecdb-datasource
+    uid: plover-hopper
+    url: http://host.docker.internal:8090/t/co-hopper
+    access: proxy
+    editable: false
+    jsonData:
+      timeoutSeconds: 30
+    secureJsonData:
+      token: $__file{/run/plover/hopper.jwt}

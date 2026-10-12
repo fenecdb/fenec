@@ -155,6 +155,19 @@ run_analytics() {
         FENEC_PORT=$((port + 4)) KESTREL_PORT=$((port + 5)) sh scripts/ci.sh)
 }
 
+# Plover (examples/dispatch/scripts/ci.sh): lint; its claims, lease, quota
+# and security tests, each file over a cluster of its own -- two tenant
+# nodes and fenec-shard; the site built and started over another, and its
+# pages tested; DISPATCH_BENCH=1 adds the measurements.
+run_dispatch() {
+    has node || { missing node "dispatch"; return; }
+    w=$(npm_example dispatch)
+    [ -x "${DISPATCH_FENEC_SHARD:-$root/target/debug/fenec-shard}" ] || "$cargo" build -q -p fenec-shard --manifest-path "$root/Cargo.toml"
+    (cd "$w" && FENEC_SERVER="${DISPATCH_FENEC_SERVER:-$root/target/debug/fenec-server}" \
+        FENEC_SHARD="${DISPATCH_FENEC_SHARD:-$root/target/debug/fenec-shard}" \
+        DISPATCH_PORT=$((port + 6)) sh scripts/ci.sh)
+}
+
 run_python() {
     has python3 || { missing python3 "python"; return; }
     serve python
@@ -206,7 +219,7 @@ run_flutter() {
     (cd "$here/flutter" && ./run-tests.sh)
 }
 
-all="node-server web-local react shop ledger saas analytics python go dotnet rust swift kotlin-android flutter"
+all="node-server web-local react shop ledger saas analytics dispatch python go dotnet rust swift kotlin-android flutter"
 "$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 for e in ${*:-$all}; do
     echo "== $e"
@@ -218,6 +231,7 @@ for e in ${*:-$all}; do
         ledger) run_ledger ;;
         saas) run_saas ;;
         analytics) run_analytics ;;
+        dispatch) run_dispatch ;;
         python) run_python ;;
         go) run_go ;;
         dotnet) run_dotnet ;;
