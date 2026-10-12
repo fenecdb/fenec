@@ -624,8 +624,8 @@ impl<'h> Ticket<'h> {
                 // The head before wrote: more may be ready, so this one
                 // looks at once -- a look, not a run, since most often the
                 // one job is gone.
-                let due =
-                    std::mem::take(&mut g.now) || g.at.is_some_and(|at| at <= now_us() / 1000);
+                let told = std::mem::take(&mut g.now);
+                let due = told || g.at.is_some_and(|at| at <= now_us() / 1000);
                 let quiet = g.quiet.filter(|q| now < *q);
                 if due || (g.stale && quiet.is_none()) {
                     let (since, tests, collections) =
@@ -662,7 +662,13 @@ impl<'h> Ticket<'h> {
                             st.horizon.get_or_insert(writes);
                         }
                         None => {
-                            g.quiet = Some(Instant::now() + LOOK_GAP);
+                            // A look it was told to make -- a run before it
+                            // ended, its line came to it -- starts no gap:
+                            // one a run's end, so as many as there are runs,
+                            // and gapped, the line a job left looked once
+                            // more as it went and a job a moment after
+                            // waited out the gap.
+                            g.quiet = (!told).then(|| Instant::now() + LOOK_GAP);
                             // Nothing is left for the line behind it, most
                             // likely: each looks for itself, at once.
                             disband(&mut st, self.group);
@@ -828,17 +834,32 @@ fn settle(st: &mut State) {
         return;
     }
     let horizon = st.horizon.unwrap_or(st.writes);
-    let now = now_us() / 1000;
+    let (now, instant) = (now_us() / 1000, Instant::now());
     // Who is yet to bid: the head held longest of them, and whether any
     // ranks rows by its own order. A group behind a run bids once it ends:
     // passed over, the claim second in a burst's line lost the second job
     // to a claim that came after it and looked while it waited.
-    let (mut first, mut ranked) = (None::<Instant>, false);
+    let (mut first, mut ranked, mut gapped) = (None::<Instant>, false, false);
     for g in &st.groups {
-        if g.looking || g.owes(horizon, now) || g.behind.is_some() {
+        let owes = g.owes(horizon, now);
+        if g.looking || owes || g.behind.is_some() {
             ranked |= g.ranked;
             if let Some(t) = g.queue.front() {
                 first = Some(first.map_or(t.joined, |f| f.min(t.joined)));
+            }
+        }
+        gapped |= owes && g.quiet.is_some_and(|q| instant < q);
+    }
+    // A bid waiting for a head in its gap ends the gap: kept, a job to
+    // claims that had looked a moment before waited out the gap, the
+    // round with it.
+    if gapped {
+        for g in &mut st.groups {
+            if g.owes(horizon, now) && g.quiet.is_some_and(|q| instant < q) {
+                g.quiet = None;
+                if let Some(head) = g.queue.front() {
+                    head.cv.notify_one();
+                }
             }
         }
     }
@@ -852,34 +873,46 @@ fn settle(st: &mut State) {
         None => true,
         Some(first) => !ranked && b.rank.is_none() && b.joined < first,
     };
+    // Asked of every look's settle, so most often the answer is no: each
+    // bid a scan of the given rows, before any bid is sorted -- sorted at
+    // every look, a job to a thousand claims held the mutex every look
+    // waits for through a thousand sorts.
+    let taken = |b: &Bid| b.row.is_some() && st.taken.iter().any(|(r, _)| *r == b.row);
+    let due = st
+        .groups
+        .iter()
+        .filter_map(|g| g.bid.as_ref())
+        .any(|b| settles(b) || taken(b));
+    if !due {
+        return;
+    }
     let mut bidders: Vec<usize> = (0..st.groups.len())
         .filter(|&i| st.groups[i].bid.is_some())
         .collect();
-    let bid = |st: &State, i: usize| {
-        st.groups[i]
-            .bid
-            .as_ref()
-            .map(|b| (b.row.clone(), b.rank, b.joined))
-    };
+    fn bid(st: &State, i: usize) -> &Bid {
+        st.groups[i].bid.as_ref().expect("a bidder bids")
+    }
     // A row of its own -- a look that met an error -- is no other's.
     bidders.sort_by(|&a, &b| {
-        let (a, b) = (bid(st, a).unwrap(), bid(st, b).unwrap());
-        a.0.cmp(&b.0)
+        let (a, b) = (bid(st, a), bid(st, b));
+        a.row
+            .cmp(&b.row)
             .then(
-                a.1.unwrap_or(f64::INFINITY)
-                    .total_cmp(&b.1.unwrap_or(f64::INFINITY)),
+                a.rank
+                    .unwrap_or(f64::INFINITY)
+                    .total_cmp(&b.rank.unwrap_or(f64::INFINITY)),
             )
-            .then(a.2.cmp(&b.2))
+            .then(a.joined.cmp(&b.joined))
     });
     let mut at = 0;
     while at < bidders.len() {
-        let row = bid(st, bidders[at]).unwrap().0;
+        let row = bid(st, bidders[at]).row.clone();
         let end = match row {
             None => at + 1,
             Some(_) => {
                 at + bidders[at..]
                     .iter()
-                    .take_while(|&&i| bid(st, i).unwrap().0 == row)
+                    .take_while(|&&i| bid(st, i).row == row)
                     .count()
             }
         };
