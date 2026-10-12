@@ -2830,6 +2830,9 @@ struct Tuple<'a> {
     /// Each leading part's parent field (`None` for `id`), and the type its
     /// value is made first.
     parts: Vec<(Option<usize>, DataType)>,
+    /// Each leading part's child field, by position: what the child side
+    /// of `required` reads a child's own parts with.
+    child_pos: Vec<usize>,
     /// Whether the level's `order` is the order of the run's entries --
     /// backwards or not, and up to which part it reads -- so a parent's
     /// children are walked in it and only as far as its page, rather than
@@ -2907,7 +2910,7 @@ impl<'a> Tuple<'a> {
             return Ok(None);
         }
         let comp = &child.composites[at].0;
-        let mut parts = Vec::with_capacity(n);
+        let (mut parts, mut child_pos) = (Vec::with_capacity(n), Vec::with_capacity(n));
         for (k, _) in &comp.keys[..n] {
             let Some(p) = l.on.iter().position(|c| c == k).map(|i| &l.parent[i]) else {
                 continue;
@@ -2925,11 +2928,13 @@ impl<'a> Tuple<'a> {
             let pty = pos.map_or(DataType::Int, |q| parent.schema.fields[q].ty.clone());
             check_key_types(&pty, &ty, p, &l.collection, k)?;
             parts.push((pos, ty));
+            child_pos.push(child.schema.field_pos(k).unwrap_or(0));
         }
         Ok(Some(Tuple {
             ix,
             comp,
             parts,
+            child_pos,
             walk,
             _built: built,
         }))
@@ -2946,17 +2951,45 @@ impl<'a> Tuple<'a> {
                 None => Value::Int(id as i64),
                 Some(p) => parent.store.read_field(id, *p)?.unwrap_or(Value::Null),
             };
-            match v.coerce(ty) {
-                Ok(v) if !v.is_null() => vals.push(v),
-                _ => return Ok(None),
-            }
+            vals.push(v.coerce(ty).unwrap_or(Value::Null));
         }
+        Ok(self.laid(&vals))
+    }
+
+    /// `vals`, a value a leading part, laid end to end as the index keys
+    /// them; `None` where one is null.
+    fn laid(&self, vals: &[Value]) -> Option<crate::composite::KeyBytes> {
         const NULL: Value = Value::Null;
         let mut refs = [&NULL; crate::schema::MAX_COMPOSITE_KEYS];
-        for (r, v) in refs.iter_mut().zip(&vals) {
+        for (r, v) in refs.iter_mut().zip(vals) {
+            if v.is_null() {
+                return None;
+            }
             *r = v;
         }
-        Ok(Some(self.ix.key(&refs[..vals.len()]).bytes))
+        Some(self.ix.key(&refs[..vals.len()]).bytes)
+    }
+
+    /// Whether the child `cid`'s own leading parts are what the row `pid`
+    /// of the level above probes with: the child side of `required`, whose
+    /// child names its parent by the part paired with `id` and is held to
+    /// the rest here, as the parent's probe would hold it -- the same
+    /// bytes, since an entry's are the child's parts as `laid` lays them.
+    fn holds(
+        &self,
+        child: &Collection,
+        cid: DocId,
+        parent: &Collection,
+        pid: DocId,
+    ) -> Result<bool> {
+        let mut vals = Vec::with_capacity(self.child_pos.len());
+        for &p in &self.child_pos {
+            vals.push(child.store.read_field(cid, p)?.unwrap_or(Value::Null));
+        }
+        Ok(match (self.laid(&vals), self.prefix(parent, pid)?) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        })
     }
 
     /// The run of entries `key` is the prefix of.
@@ -9090,9 +9123,23 @@ impl Database {
             let Ok(Value::Int(i)) = k.coerce(&DataType::Int) else {
                 continue;
             };
-            if let Ok(id) = DocId::try_from(i) {
-                keys.push(id);
+            let Ok(id) = DocId::try_from(i) else {
+                continue;
+            };
+            // A key over several fields: the child names its parent by the
+            // part paired with `id`, and holds the rest of the key or not.
+            // Probing each parent so named for the whole key instead read
+            // every child of every one again, where a tenth of the children
+            // named most of the parents: 57 against 36 ms for the parents'
+            // side alone; and mapping each child's key back whole, sorted
+            // beside the parent named, was a sort of its own, 4.5 KB of the
+            // browser module.
+            if let Probe::Tuple(t) = &steps[0].probe {
+                if t.parts.len() > 1 && !t.holds(child, cid, steps[0].parent, id)? {
+                    continue;
+                }
             }
+            keys.push(id);
         }
         keys.sort_unstable();
         keys.dedup();
@@ -9119,7 +9166,7 @@ impl Database {
         &self,
         parent: &Collection,
         l: &Lookup,
-        mut ids: Vec<DocId>,
+        ids: Vec<DocId>,
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
         let steps = self.lookup_chain(parent, l)?;
@@ -9167,17 +9214,7 @@ impl Database {
                                 kept.len()
                             )
                         });
-                        // A child names its parent by the `id` part of a
-                        // key over several fields alone: the parents named
-                        // are probed for the whole key below, the rest of
-                        // them spared. Mapping each child's key back whole
-                        // -- its parts laid end to end, sorted beside the
-                        // parent named -- was a sort of its own, 4.5 KB of
-                        // the browser module.
-                        let Probe::Tuple(_) = probe else {
-                            return Ok(kept);
-                        };
-                        ids = kept;
+                        return Ok(kept);
                     }
                 }
             }
