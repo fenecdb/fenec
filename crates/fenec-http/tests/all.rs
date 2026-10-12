@@ -16,4 +16,5 @@ mod replication;
 mod require;
 mod schema;
 mod server;
+mod token_first;
 mod waits;
