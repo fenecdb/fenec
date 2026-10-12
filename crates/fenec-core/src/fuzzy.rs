@@ -330,12 +330,17 @@ impl Dictionary {
             return self.prefixed(w, cap, out);
         }
         let q: Vec<char> = w.chars().collect();
+        // Where each of the query's characters starts in `w`, and its end.
+        let mut at: Vec<usize> = w.char_indices().map(|(i, _)| i).collect();
+        at.push(w.len());
         // The row of the empty prefix: each of the query's characters
         // deleted, the first at two.
         let rows: Vec<u8> = (0..=q.len()).map(|j| sat(j + (j > 0) as usize)).collect();
-        let best = rows[q.len()];
+        let (least, last) = (0, rows[q.len()]);
         let mut walk = Walk {
             dict: self,
+            w: w.as_bytes(),
+            at: &at,
             q: &q,
             k,
             prefix,
@@ -346,7 +351,7 @@ impl Dictionary {
             over: false,
         };
         if !self.is_empty() {
-            walk.node((0, 0), self.end(), 0, best);
+            walk.node((0, 0), self.end(), 0, least, last, u8::MAX);
         }
         !walk.over
     }
@@ -364,10 +369,16 @@ const OTHER: char = '\u{10FFFF}';
 /// One walk of a dictionary for one word.
 struct Walk<'a, 'o> {
     dict: &'a Dictionary,
+    /// The query word, its bytes, and where each of its characters starts.
+    w: &'o [u8],
+    at: &'o [usize],
     q: &'o [char],
     k: u8,
     prefix: bool,
     /// The table's rows down the path walked, `q.len() + 1` cells each.
+    /// Only the cells within `k` of the diagonal are worked out: a cell
+    /// further holds more than `k`, and is left at `k + 1`, which every
+    /// question asked of it answers the same.
     rows: Vec<u8>,
     path: Vec<char>,
     out: &'o mut Vec<(&'a str, u8)>,
@@ -384,16 +395,27 @@ impl<'a> Walk<'a, '_> {
         self.out.push((self.dict.word(p), d));
     }
 
+    /// Every word of `lo..hi`, at distance `d`.
+    fn all(&mut self, lo: Pos, hi: Pos, d: u8) {
+        let mut p = lo;
+        while p != hi && !self.over {
+            self.found(p, d);
+            p = self.dict.next(p);
+        }
+    }
+
     /// The row of `c` after the path pushed, with its least cell and its
     /// last: optimal string alignment, an edit touching either word's
     /// first character at two.
     fn push(&mut self, c: char) -> (u8, u8) {
         let w = self.q.len() + 1;
         let d = self.path.len() + 1;
+        let k = self.k as usize;
         let base = self.rows.len();
-        self.rows.push(sat(d + 1));
+        self.rows.resize(base + w, sat(k + 1));
+        self.rows[base] = sat(d + 1);
         let mut least = self.rows[base];
-        for j in 1..w {
+        for j in d.saturating_sub(k).max(1)..(d + k + 1).min(w) {
             let first = (d == 1 || j == 1) as u8;
             let up = self.rows[base - w + j];
             let diag = self.rows[base - w + j - 1];
@@ -410,10 +432,10 @@ impl<'a> Walk<'a, '_> {
                 .min(left.saturating_add(1 + (j == 1) as u8))
                 .min(diag.saturating_add(if same { 0 } else { 1 + first }))
                 .min(swap);
-            self.rows.push(v);
+            self.rows[base + j] = v;
             least = least.min(v);
         }
-        (least, self.rows[self.rows.len() - 1])
+        (least, self.rows[base + w - 1])
     }
 
     fn pop(&mut self) {
@@ -421,22 +443,61 @@ impl<'a> Walk<'a, '_> {
     }
 
     /// The words of `lo..hi`, which share the path's `off` bytes and whose
-    /// row is the last pushed; `best`, the least last cell of the rows above
-    /// it, is the distance of a prefix of the path from the query.
-    fn node(&mut self, lo: Pos, hi: Pos, off: usize, best: u8) {
-        let w = self.q.len() + 1;
-        let row = &self.rows[self.rows.len() - w..];
-        let least = row.iter().copied().min().unwrap_or(u8::MAX);
-        let last = row[w - 1];
-        let best = if self.prefix { best.min(last) } else { u8::MAX };
+    /// row is the last pushed, its least cell `least` and its last `last`;
+    /// `best` is the least last cell of the rows above it: the distance of
+    /// the nearest prefix of the path from the query, where that counts.
+    #[allow(clippy::too_many_arguments)]
+    fn node(&mut self, lo: Pos, hi: Pos, off: usize, least: u8, last: u8, best: u8) {
         let k = self.k;
-        if best <= k && least > k {
+        let best = if self.prefix { best.min(last) } else { u8::MAX };
+        // No row below holds a cell under this one's least.
+        if best <= k && least >= k {
             // A prefix of the path is near enough, and nothing below it is
             // nearer: every word of the range, at that distance.
-            let mut p = lo;
-            while p != hi && !self.over {
-                self.found(p, best);
-                p = self.dict.next(p);
+            return self.all(lo, hi, best);
+        }
+        let w = self.q.len() + 1;
+        let base = self.rows.len() - w;
+        // A swap of the path's last character with the next is counted from
+        // the row above this one: while that row could pay for it, the next
+        // character is no exact continuation.
+        let d = self.path.len() + 1;
+        let swapped = base >= w
+            && (2..w).any(|j| {
+                self.path.last() == self.q.get(j - 1)
+                    && self.rows[base - w + j - 2].saturating_add(1 + (d == 2 || j == 2) as u8)
+                        <= k
+            });
+        if least == k && !swapped {
+            // No edit is left: a word below is the path, then the rest of
+            // the query from a cell at `k`, exactly -- looked up, rather
+            // than walked a character at a time. Shortest rest first: a
+            // range found with `prefix` holds those of the longer rests
+            // that begin with it.
+            let mut seen: [(Pos, Pos); 5] = [((0, 0), (0, 0)); 5];
+            let mut n = 0;
+            for j in (0..w).rev() {
+                if self.rows[base + j] != k || self.over {
+                    continue;
+                }
+                let rest = self.w.get(self.at[j]..).unwrap_or(&[]);
+                let a = self.dict.part(lo, hi, off, rest, false);
+                let b = match self.prefix {
+                    true => self.dict.part(a, hi, off, rest, true),
+                    false if a != hi && self.dict.at(a).get(off..) == Some(rest) => {
+                        self.dict.next(a)
+                    }
+                    false => a,
+                };
+                if a == b || seen[..n].iter().any(|s| s.0 <= a && b <= s.1) {
+                    continue;
+                }
+                self.all(a, b, k);
+                // A row within `k` of the diagonal has 2k + 1 cells at most.
+                if n < seen.len() {
+                    seen[n] = (a, b);
+                    n += 1;
+                }
             }
             return;
         }
@@ -475,11 +536,19 @@ impl<'a> Walk<'a, '_> {
         let depth = self.path.len();
         let from = depth.saturating_sub(k as usize + 1);
         let to = (depth + k as usize + 1).min(self.q.len());
-        let mut cands: Vec<char> = self.q.get(from..to).unwrap_or(&[]).to_vec();
-        cands.sort_unstable();
-        cands.dedup();
+        // At most 2k + 2 of them, in order, each once: sorted in place.
+        let mut cands = [OTHER; 6];
+        let mut n = 0;
+        for &c in self.q.get(from..to).unwrap_or(&[]) {
+            let at = cands[..n].partition_point(|&x| x < c);
+            if cands.get(at) != Some(&c) && n < cands.len() {
+                cands.copy_within(at..n, at + 1);
+                cands[at] = c;
+                n += 1;
+            }
+        }
         let mut start = a;
-        for c in cands {
+        for &c in &cands[..n] {
             if self.over {
                 return;
             }
@@ -498,7 +567,7 @@ impl<'a> Walk<'a, '_> {
         let (least, last) = self.push(c);
         if least <= self.k || best.min(last) <= self.k {
             self.path.push(c);
-            self.node(lo, hi, off + c.len_utf8(), best);
+            self.node(lo, hi, off + c.len_utf8(), least, last, best);
             self.path.pop();
         }
         self.pop();
