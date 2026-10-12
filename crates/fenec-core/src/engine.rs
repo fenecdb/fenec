@@ -2871,11 +2871,21 @@ impl<'a> Tuple<'a> {
         l: &Lookup,
         walk_only: bool,
     ) -> Result<Option<Tuple<'a>>> {
+        let n = l.on.len();
+        let leads = |comp: &Composite| {
+            comp.keys.len() >= n
+                && comp.keys[..n]
+                    .iter()
+                    .all(|(k, _)| l.on.iter().any(|(c, _)| c == k))
+        };
         if !cfg!(feature = "composite") {
-            return match l.on.len() {
-                1 => Ok(None),
+            // What a full build answers through the index is refused
+            // naming the feature; one field with a `@hash` is probed.
+            let led = !walk_only && child.composites.iter().any(|(c, _)| leads(c));
+            return match (n, led) {
+                (1, false) => Ok(None),
                 _ => Err(not_built(
-                    &format!("`lookup {}` on several fields", l.collection),
+                    &format!("`lookup {}` on {}", l.collection, l.side(true)),
                     "composite",
                 )),
             };
@@ -2885,14 +2895,9 @@ impl<'a> Tuple<'a> {
                 return Err(Error::NotFound(format!("field `{}.{c}`", l.collection)));
             }
         }
-        let n = l.on.len();
         let mut best: Option<(usize, Option<(bool, usize)>)> = None;
         for (at, (comp, _)) in child.composites.iter().enumerate() {
-            let leads = comp.keys.len() >= n
-                && comp.keys[..n]
-                    .iter()
-                    .all(|(k, _)| l.on.iter().any(|(c, _)| c == k));
-            if !leads {
+            if !leads(comp) {
                 continue;
             }
             let walk = walks(comp, n, 0, &l.order, &child.schema);

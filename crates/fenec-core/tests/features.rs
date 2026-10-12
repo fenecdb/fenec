@@ -395,6 +395,17 @@ fn an_index_over_several_fields_declared_is_answered_by_the_scan() {
     run(&mut db, r#"put p {owner: 2, at: 1, slug: "c"}"#).unwrap();
     let e = run(&mut db, "create index on p (slug, at) @sorted").unwrap_err();
     assert!(e.to_string().contains("`composite`"), "{e}");
+    // A `lookup` the index answers -- a key over several fields, or one
+    // field it leads with no `@hash` -- is refused naming it.
+    run(&mut db, "create collection o (owner int)").unwrap();
+    run(&mut db, "put o {owner: 1}").unwrap();
+    for sql in [
+        "get o lookup p on (owner, at) = (owner, id)",
+        "get o lookup p on owner = owner order at desc limit 1",
+    ] {
+        let e = run(&mut db, sql).unwrap_err();
+        assert!(e.to_string().contains("`composite`"), "{sql}: {e}");
+    }
     let mut back = Database::new();
     back.load(&db.snapshot()).expect("the image opens");
     let r = run(&mut back, "get p select at where owner = 1 order at desc").unwrap();

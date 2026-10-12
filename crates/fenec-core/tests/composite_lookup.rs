@@ -372,8 +372,8 @@ fn reference(plain: &Database, top: &Top, levels: &[Level], count: bool) -> Resu
     let mut rows: Vec<Row> = top_rs
         .rows
         .iter()
-        .cloned()
         .filter(|r| !levels[0].required || !children(&known, levels, 0, r.id).is_empty())
+        .cloned()
         .collect();
     if count {
         return ResultSet {
@@ -489,7 +489,7 @@ fn check(ix: &Database, plain: &Database, stage: &str) {
                             required,
                             ..Level::new("orders", ORDERS_ON)
                         };
-                        holds(ix, plain, &top, &[l.clone()], false, stage);
+                        holds(ix, plain, &top, std::slice::from_ref(&l), false, stage);
                         if required {
                             holds(ix, plain, &top, &[l], true, stage);
                         }
@@ -539,7 +539,7 @@ fn check(ix: &Database, plain: &Database, stage: &str) {
                             required,
                             ..Level::new("lines", LINES_ON)
                         };
-                        holds(ix, plain, &top, &[l.clone()], false, stage);
+                        holds(ix, plain, &top, std::slice::from_ref(&l), false, stage);
                         if required {
                             holds(ix, plain, &top, &[l], true, stage);
                         }
