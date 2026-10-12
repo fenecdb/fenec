@@ -169,6 +169,14 @@ def _column(name: Any) -> tuple[Any, bool]:
     return f"{m[3].lower()}({m[4]})", True
 
 
+def _group_keys(flat: list) -> list:
+    """`group`'s keys: a field or a path, a name the list gives, or an
+    expression."""
+    if not flat:
+        raise _err("group takes at least one key")
+    return [k if isinstance(k, Computed) and k.kind == "expr" else _path(k) for k in flat]
+
+
 def _key(name: Any) -> str:
     """An `order` key: a field, a path, or an aggregate by its name."""
     return _column(name)[0] if isinstance(name, str) else _path(name)
@@ -362,19 +370,30 @@ def expr(sql: str, *params: Any) -> Computed:
 _INTERVAL = re.compile(r"[1-9][0-9]*(ms|s|m|h|d|w|mo|y)", re.ASCII)
 
 
-def bucket(field: str, interval: str) -> Computed:
-    """`bucket(field, interval)`: the start of the interval a timestamp
-    falls in -- `"15m"`, `"1h"`, `"1d"`, `"1w"` (from a Monday), `"1mo"`,
-    `"1y"`, in UTC -- for a select list or a group:
+def bucket(field: str, interval: str, zone: str | None = None) -> Computed:
+    """`bucket(field, interval [, zone])`: the start of the interval a
+    timestamp falls in -- `"15m"`, `"1h"`, `"1d"`, `"1w"` (from a Monday),
+    `"1mo"`, `"1y"`, in UTC -- for a select list or a group:
 
         .select(bucket("at", "1m").as_("minute"), "count(*)").group("minute")
+
+    Given a zone -- an IANA name, `"Europe/Istanbul"`, or an offset,
+    `"+03:00"` -- by its clock: a day from local midnight, 23 or 25 hours
+    where it changes to or from daylight time. It goes as a parameter.
     """
     if not isinstance(interval, str) or not _INTERVAL.fullmatch(interval):
         raise _err(
             "bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': "
             + json.dumps(interval, ensure_ascii=False, default=str)
         )
-    return Computed("expr", sql=f"bucket({_path(field)}, {interval})")
+    if zone is None:
+        return Computed("expr", sql=f"bucket({_path(field)}, {interval})")
+    if not isinstance(zone, str) or zone == "":
+        raise _err(
+            "bucket() takes a zone's name, such as 'Europe/Istanbul', or an offset, such as "
+            "'+03:00': " + json.dumps(zone, ensure_ascii=False, default=str)
+        )
+    return Computed("expr", sql=f"bucket({_path(field)}, {interval}, ?)", params=(zone,))
 
 
 def count_distinct(field: str) -> Computed:
@@ -597,7 +616,8 @@ def _order_keys(spec: Any) -> list[tuple[str, bool, str | None]]:
         field = parts[0] if parts else None
         d = parts[1] if len(parts) > 1 else "asc"
         opts = parts[2] if len(parts) > 2 else {}
-        keys.append((_path(field), _direction(d), _collation((opts or {}).get("collate"))))
+        # Over groups a key may name an aggregate of the list.
+        keys.append((_key(field), _direction(d), _collation((opts or {}).get("collate"))))
     return keys
 
 
@@ -759,9 +779,7 @@ class _Builder:
         flat = _flat(keys)
         if not flat:
             raise _err("group takes at least one key")
-        return self._with(
-            group=[k if isinstance(k, Computed) and k.kind == "expr" else _path(k) for k in flat]
-        )
+        return self._with(group=_group_keys(flat))
 
     def where(self: Q, *args: Any) -> Q:
         """`where(field, op, value)`, `where(field, value)` -- a value is
@@ -815,7 +833,8 @@ class _Builder:
         *,
         on: str | Sequence[str] | None = None,
         parent_key: str | Sequence[str] | None = None,
-        select: str | Sequence[str] | None = None,
+        select: Any = None,
+        group: Any = None,
         where: Any = None,
         required: bool = False,
         order: Any = None,
@@ -827,7 +846,13 @@ class _Builder:
         `limit` counts children per parent. `required` drops a parent no
         child matches. A key over several fields names a field of each side
         for each part, `on=["org", "order"], parent_key=["org", "id"]`.
-        Called again, it chains onto the collection the call before named."""
+        Called again, it chains onto the collection the call before named.
+
+        `select` may aggregate, as a query's own list does: each parent's
+        children folded, one row a parent, or with `group` one a group,
+        ordered and paged a parent at a time; ungrouped, `order`, `limit`
+        and `offset` pick the children folded. A query whose list
+        aggregates hangs a lookup off its groups, `parent_key` a column."""
         names = [on] if isinstance(on, str) else list(on or [])
         if not names or not names[0]:
             raise _err("lookup needs `on`: the child field holding the key")
@@ -841,12 +866,23 @@ class _Builder:
         # with its own.
         if (len(child) > 1 or parent_key is not None) and len(above) != len(child):
             raise _err(f"lookup pairs {len(child)} child fields with {len(above)} parent fields")
-        cols = None if select is None else ([select] if isinstance(select, str) else list(select))
+        cols = None if select is None else _flat((select,))
+        listed = None if cols is None or "*" in cols else [_column(c) for c in cols]
+        aggregate = any(a for _, a in listed or [])
+        keys = None if group is None else _group_keys(_flat((group,)))
+        # The engine refuses it too; failing here never sends a query.
+        if keys and not aggregate:
+            text = ", ".join(k if isinstance(k, str) else k.sql for k in keys)
+            raise _err(f"group {text} needs an aggregate in select: 'count(*)'")
+        # A level selects its children's fields, or aggregates of them.
+        if listed and not aggregate and any(not isinstance(c, str) for c, _ in listed):
+            raise _err("a lookup selects its children's fields, or aggregates of them")
         level = {
             "collection": _ident(name, "collection"),
             "on": child,
             "parent": above,
-            "project": None if cols is None or "*" in cols else [_path(c) for c in cols],
+            "project": None if listed is None else [c for c, _ in listed],
+            "group": keys,
             "cond": [] if where is None else [_cond_of((where,))],
             "required": bool(required),
             "order": _order_keys(order),
@@ -889,13 +925,13 @@ class _Builder:
             keys = ", ".join(k if isinstance(k, str) else k.sql for k in s["group"])
             raise _err(f"group {keys} needs an aggregate in select: 'count(*)'")
         if s["aggregate"]:
+            # Ungrouped, `order`, `limit` and `offset` pick the rows folded;
+            # a lookup hangs off the groups, keyed by a column.
             clash = (
-                "near" if near else "match" if match else "lookup" if lookups else "count" if count else None
+                "near" if near else "match" if match else "count" if count and not s["group"] else None
             )
             if clash:
                 raise _err(f"aggregates cannot be combined with {clash}")
-            if not s["group"] and (order or s["limit"] is not None or s["offset"]):
-                raise _err("aggregates answer one row; group makes a row per value")
             if not s["group"] and s["require"]:
                 raise _err("require counts the rows a query answers, and an aggregate answers one")
         if marks:
@@ -1015,10 +1051,12 @@ class _Builder:
             if level["required"]:
                 sql += " required"
             if level["project"]:
-                sql += f" select {', '.join(level['project'])}"
+                sql += f" select {', '.join(_column_text(c, bind) for c in level['project'])}"
             root = _prune(Cond("and", items=level["cond"]))
             if root is not None:
                 sql += f" where {_render(root, bind)}"
+            if level["group"]:
+                sql += f" group {', '.join(_column_text(k, bind) for k in level['group'])}"
             for i, k in enumerate(level["order"]):
                 sql += f"{' order ' if i == 0 else ', '}{_sort_key(k)}"
             if level["limit"] is not None:
