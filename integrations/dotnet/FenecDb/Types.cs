@@ -147,12 +147,12 @@ public class FenecException : Exception
     public int? At { get; }
 
     /// <summary>The tenant's quota that refused the request: <c>bytes</c> and <c>rows</c> answer 507, and room
-    /// is made by deleting; <c>streams</c>, <c>requests</c>, <c>writes</c> and <c>write_bytes</c> answer 429
-    /// with <see cref="RetryAfter"/>. <c>null</c> for any other refusal.</summary>
+    /// is made by deleting; <c>streams</c>, <c>held</c>, <c>requests</c>, <c>writes</c> and <c>write_bytes</c>
+    /// answer 429 with <see cref="RetryAfter"/>. <c>null</c> for any other refusal.</summary>
     public string? Quota { get; }
 
-    /// <summary>How long to wait before sending again, where the server said: a quota's 429, the 503 of a tenant
-    /// being moved or failed over or of a server at its ceiling.</summary>
+    /// <summary>How long to wait before sending again, where the server said: a quota's 429 to the millisecond,
+    /// the 503 of a tenant being moved or failed over or of a server at its ceiling in whole seconds.</summary>
     public TimeSpan? RetryAfter { get; }
 
     /// <summary>A refusal with its status, message and, for a batch, how many statements were applied and
@@ -192,12 +192,18 @@ public class FenecException : Exception
             using var doc = JsonDocument.Parse(body);
             var r = doc.RootElement;
             if (r.ValueKind == JsonValueKind.Object && r.TryGetProperty("error", out var e))
-                // The wait Retry-After says, in the body as well: what reads it here has no headers.
+            {
+                // The wait Retry-After says, in the body as well: what reads it here has no headers. To the
+                // millisecond where the body says it: a bucket of 600 rows a second refills a row in 1.7 ms.
+                TimeSpan? wait = r.TryGetProperty("retry_after", out var w) ? TimeSpan.FromSeconds(w.GetInt64()) : null;
+                if (r.TryGetProperty("retry_after_ms", out var ms) && ms.GetInt64() > 0)
+                    wait = TimeSpan.FromMilliseconds(ms.GetInt64());
                 return new FenecException(status, e.GetString() ?? body,
                     r.TryGetProperty("completed", out var c) ? c.GetInt32() : 0,
                     r.TryGetProperty("at", out var at) ? at.GetInt32() : null,
                     r.TryGetProperty("quota", out var q) ? q.GetString() : null,
-                    r.TryGetProperty("retry_after", out var w) ? TimeSpan.FromSeconds(w.GetInt64()) : null);
+                    wait);
+            }
         }
         catch (JsonException) { }
         return new FenecException(status, body.Trim());

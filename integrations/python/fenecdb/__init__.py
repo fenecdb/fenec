@@ -111,10 +111,11 @@ class FenecError(Exception):
     lands whole, but for one holding a `compact`); both None otherwise.
 
     A tenant's quota names itself (`quota`): "bytes" and "rows" answer 507,
-    and room is made by deleting; "streams", "requests", "writes" and
-    "write_bytes" answer 429, with the seconds to wait before sending again
-    (`retry_after`), as a tenant being moved or failed over answers its
-    writes 503. None otherwise."""
+    and room is made by deleting; "streams", "held", "requests", "writes"
+    and "write_bytes" answer 429, with the seconds to wait before sending
+    again (`retry_after`) -- to the millisecond, as the server says it in
+    `retry_after_ms` -- as a tenant being moved or failed over answers its
+    writes 503, in whole seconds. None otherwise."""
 
     def __init__(
         self,
@@ -502,8 +503,12 @@ def _answer(status: int, raw: bytes) -> Any:
         at, completed = body.get("at"), body.get("completed")
         # A quota's refusal says which, and the wait its `Retry-After`
         # says -- a quota's 429, a move's 503 -- in the body too: what is
-        # read here has no headers.
+        # read here has no headers. To the millisecond where it says it: a
+        # bucket of 600 rows a second refills a row in 1.7 ms.
         quota, retry_after = body.get("quota"), body.get("retry_after")
+        ms = body.get("retry_after_ms")
+        if isinstance(ms, (int, float)) and ms > 0:
+            retry_after = ms / 1000
     except (ValueError, AttributeError):
         message = raw.decode(errors="replace")
     raise FenecError(

@@ -694,10 +694,12 @@ test('through a router whose token is the nodes\': the admin view lists the tena
       ['globex', 'n1', 'active'],
     ]);
     for (const r of rows) assert.match(r[3], /^\d+(\.\d)? (B|KB|MB)$/);
-    // Each tenant's rows against its quota, and the quotas it is held to.
+    // Each tenant's rows against its quota, and the quotas it is held to:
+    // its streams and held writes a quarter of the node's 100 connections
+    // each, as a node that sets neither holds every tenant.
     assert.deepEqual(rows.map((r) => r.slice(4, 6)), [
-      ['3 of 10', '50 writes/s'],
-      ['1', 'none'],
+      ['3 of 10', '0/25 streams · 0/25 held · 50 rows/s'],
+      ['1', '0/25 streams · 0/25 held'],
     ]);
     // The router's own counts, and the tenant's statements through it.
     await p.waitForFunction(() => /Requests/.test(document.querySelector('.ad-numbers')?.textContent ?? ''), { timeout: 10_000 });

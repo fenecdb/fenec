@@ -785,19 +785,23 @@ impl Tenants {
                 };
                 // Counted where the quota is set; without one, the
                 // subscriptions its hub counts in any case.
-                let (streams, requests) = t.quota.holding();
+                let (streams, requests, _) = t.quota.holding();
                 let streams = match t.quota.get(Kind::Streams) {
                     0 => t.hub.live() as u64,
                     _ => streams,
                 };
+                let held = t.hub.waits().stats().held as u64;
                 (
                     t.quota.quota(),
-                    usage_json(bytes, rows, Some(streams), requests),
+                    usage_json(bytes, rows, Some(streams), requests, Some(held)),
                 )
             }
             None => {
                 let bytes = std::fs::metadata(self.path(name)).map_or(0, |m| m.len());
-                (set.over(&self.quota), usage_json(bytes, None, None, 0))
+                (
+                    set.over(&self.quota),
+                    usage_json(bytes, None, None, 0, None),
+                )
             }
         };
         let mut out = String::from("{\"tenant\":");
@@ -1183,12 +1187,19 @@ pub struct Stats {
 }
 
 /// What a tenant uses of its quota, as `quota_report` writes it.
-fn usage_json(bytes: u64, rows: Option<u64>, streams: Option<u64>, requests: u64) -> String {
+fn usage_json(
+    bytes: u64,
+    rows: Option<u64>,
+    streams: Option<u64>,
+    requests: u64,
+    held: Option<u64>,
+) -> String {
     let opt = |v: Option<u64>| v.map_or("null".to_string(), |n| n.to_string());
     format!(
-        "{{\"bytes\":{bytes},\"rows\":{},\"streams\":{},\"requests\":{requests}}}",
+        "{{\"bytes\":{bytes},\"rows\":{},\"streams\":{},\"requests\":{requests},\"held\":{}}}",
         opt(rows),
-        opt(streams)
+        opt(streams),
+        opt(held)
     )
 }
 

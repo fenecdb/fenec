@@ -398,9 +398,10 @@ fn try_subscribe(port: u16, tenant: &str) -> Result<TcpStream, String> {
     Ok(s)
 }
 
-/// A tenant at its quota of streams: its next subscription, `Fenec-After`
-/// wait and held write are refused with 429, while another tenant on the
-/// node opens as many as it likes and is answered. Told apart by what each
+/// A tenant at its quota of streams: its next subscription and
+/// `Fenec-After` wait are refused with 429, while another tenant on the
+/// node opens as many as it likes and is answered, and a write held until
+/// it can write is no stream of its own (`held`). Told apart by what each
 /// is answered, not by how long anything took.
 #[test]
 fn a_tenant_at_its_streams_quota_leaves_the_others_answered() {
@@ -419,14 +420,16 @@ fn a_tenant_at_its_streams_quota_leaves_the_others_answered() {
         &[("Fenec-After", "1000000"), ("Fenec-Wait", "5000")],
     );
     assert_eq!((r.status, r.quota()), (429, Some("streams")), "{}", r.body);
+    // Held for its wait and answered what it wrote, nothing: a held write
+    // is counted by `held`, not by the streams a dashboard opens.
     let r = call(
         n.port,
         "POST",
         "/t/acme/query",
         &line("del notes where title = \"nothing\""),
-        &[("Fenec-Wait", "5000")],
+        &[("Fenec-Wait", "50")],
     );
-    assert_eq!((r.status, r.quota()), (429, Some("streams")), "{}", r.body);
+    assert_eq!((r.status, r.quota()), (200, None), "{}", r.body);
     // A request that holds no stream is answered.
     ok(query(n.port, "acme", "get notes"));
     // The other tenant, its own quota none, beside it.
@@ -536,6 +539,112 @@ fn a_write_bytes_rate_charges_what_landed() {
     if t0.elapsed() < Duration::from_secs(1) {
         assert_eq!((r.status, r.quota()), (429, Some("writes")), "{}", r.body);
     }
+}
+
+/// Waits for `n` writes held on `tenant`, as a test waits for an event.
+fn until_held(n: &Node, tenant: &str, held: usize) {
+    let t = Instant::now();
+    while n.tenants.get(tenant).unwrap().hub.waits().stats().held != held {
+        assert!(t.elapsed() < Duration::from_secs(20), "{held} never held");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A claim held until a note titled `title` comes.
+fn held_claim(port: u16, title: &str) -> std::thread::JoinHandle<Res> {
+    let body = line(&format!("del notes where title = \"{title}\""));
+    std::thread::spawn(move || {
+        call(
+            port,
+            "POST",
+            "/t/acme/query",
+            &body,
+            &[("Fenec-Wait", "20000")],
+        )
+    })
+}
+
+/// A tenant at its quota of held writes: the next is refused with 429
+/// naming `held`, its wait in the body to the millisecond as well as in
+/// whole seconds, while its subscriptions open as before -- counted
+/// together, forty couriers waiting for orders left a dispatcher's map no
+/// stream to open.
+#[test]
+fn a_tenant_at_its_held_quota_still_opens_its_streams() {
+    let n = start("held", Quota::default().with(Kind::Held, 2));
+    create(n.port, "acme", Some("{\"streams\": 1}"));
+    let held = [held_claim(n.port, "x1"), held_claim(n.port, "x2")];
+    until_held(&n, "acme", 2);
+    let r = call(
+        n.port,
+        "POST",
+        "/t/acme/query",
+        &line("del notes where title = \"x3\""),
+        &[("Fenec-Wait", "20000")],
+    );
+    assert_eq!((r.status, r.quota()), (429, Some("held")), "{}", r.body);
+    assert_eq!(r.header("retry-after"), Some("1"));
+    assert!(r.body.contains("\"retry_after_ms\":1000"), "{}", r.body);
+    let stream = subscribe(n.port, "acme");
+    ok(query(
+        n.port,
+        "acme",
+        "put notes [{title: \"x1\"}, {title: \"x2\"}]",
+    ));
+    for h in held {
+        let r = h.join().unwrap();
+        assert_eq!((r.status, r.body.as_str()), (200, "{\"affected\":1}"));
+    }
+    drop(stream);
+}
+
+/// A rate of rows written: a write that writes nothing costs nothing --
+/// a claim that took no job, a `require` unmet -- and one of ten rows is
+/// let through on what the bucket holds and charged ten, so the next is
+/// refused, told the wait to the millisecond in the body and in whole
+/// seconds, rounded up, in `Retry-After`. A claim held while the tenant
+/// is in debt is not answered the 429 when its row comes: it waits the
+/// debt out and runs.
+#[test]
+fn a_rate_of_rows_charges_what_was_written() {
+    let n = start("rows-rate", Quota::default());
+    create(n.port, "acme", Some("{\"writes\": 5}"));
+    for _ in 0..20 {
+        let r = ok(query(
+            n.port,
+            "acme",
+            "set notes {n: 1} where title = \"no such note\"",
+        ));
+        assert_eq!(r.body, "{\"affected\":0}");
+    }
+    let held = held_claim(n.port, "target");
+    until_held(&n, "acme", 1);
+    let filler: Vec<String> = (0..10).map(|i| format!("{{n: {i}}}")).collect();
+    let charged = Instant::now();
+    ok(query(
+        n.port,
+        "acme",
+        &format!("put notes [{}]", filler.join(", ")),
+    ));
+    let r = query(n.port, "acme", "put notes {n: 99}");
+    assert_eq!((r.status, r.quota()), (429, Some("writes")), "{}", r.body);
+    let ms = number(&r.body, &["retry_after_ms"]).expect("retry_after_ms");
+    let secs: u64 = r.header("retry-after").unwrap().parse().unwrap();
+    assert_eq!(secs, ms.div_ceil(1000), "{}", r.body);
+    // At most six rows in debt -- the bucket's five and the collection
+    // made, less ten -- at five a second: a row's worth in 1.4 s at most.
+    assert!((1..=1400).contains(&ms), "{}", r.body);
+    // The note the claim waits for, written by the node's own hand: the
+    // claim's run is refused by the rate, and waits rather than answer.
+    {
+        let acme = n.tenants.get("acme").unwrap();
+        let mut db = acme.db.write().unwrap();
+        db.execute(&fenec_ql::parse_one("put notes {title: \"target\"}").unwrap())
+            .unwrap();
+    }
+    let r = held.join().unwrap();
+    assert_eq!((r.status, r.body.as_str()), (200, "{\"affected\":1}"));
+    assert!(charged.elapsed() >= Duration::from_secs(1), "ran in debt");
 }
 
 /// A tenant's quota is kept beside its file: a tenant closed and opened

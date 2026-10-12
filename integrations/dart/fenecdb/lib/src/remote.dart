@@ -179,17 +179,20 @@ class FenecRemote {
 
   /// A refusal as the error it is: its status and message, where a batch
   /// stopped, and where a tenant's quota refused it the quota and how long
-  /// to wait -- `Retry-After`, or the same in the body.
+  /// to wait -- to the millisecond where the body says it
+  /// (`retry_after_ms`), else `Retry-After`, or the same in the body.
   static FenecException refused(int status, Map? m, String? retryAfter) {
     final quota = m?['quota'] as String?;
+    final ms = (m?['retry_after_ms'] as num?)?.toInt();
     final secs = int.tryParse(retryAfter ?? '') ?? (m?['retry_after'] as num?)?.toInt();
+    final wait = ms != null && ms > 0
+        ? Duration(milliseconds: ms)
+        : secs == null
+            ? null
+            : Duration(seconds: secs);
     return FenecException.http(
         quota == null ? _code(status) : FenecCode.quota, m?['error'] as String? ?? 'HTTP $status',
-        status: status,
-        at: m?['at'] as int?,
-        completed: m?['completed'] as int?,
-        quota: quota,
-        retryAfter: secs == null ? null : Duration(seconds: secs));
+        status: status, at: m?['at'] as int?, completed: m?['completed'] as int?, quota: quota, retryAfter: wait);
   }
 
   /// An HTTP status as the error kind the engine would have said; the

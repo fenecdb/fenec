@@ -174,6 +174,10 @@ void main() {
     // Its header over its body.
     final rate = FenecRemote.refused(429, {'error': 'past', 'quota': 'writes', 'retry_after': 1}, '3');
     expect((rate.quota, rate.retryAfter), ('writes', const Duration(seconds: 3)));
+    // To the millisecond where the body says it, over the whole second.
+    final soon =
+        FenecRemote.refused(429, {'error': 'past', 'quota': 'writes', 'retry_after': 1, 'retry_after_ms': 2}, '1');
+    expect((soon.quota, soon.retryAfter), ('writes', const Duration(milliseconds: 2)));
     final memory = FenecRemote.refused(507, {'error': 'data ceiling'}, null);
     expect((memory.code, memory.quota), (FenecCode.io, null));
     // A tenant being moved says the wait in its body as a quota does.

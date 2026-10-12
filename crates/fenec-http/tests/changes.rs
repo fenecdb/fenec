@@ -33,11 +33,15 @@ struct Harness {
     db: Arc<RwLock<Database>>,
 }
 
-fn start(mut cfg: Config) -> Harness {
+fn start(cfg: Config) -> Harness {
+    start_over(seeded(), cfg)
+}
+
+fn start_over(db: Database, mut cfg: Config) -> Harness {
     cfg.addr = "127.0.0.1:0".into();
     // We do not want to wait for a keep-alive line in the tests.
     cfg.stream_keepalive = Duration::from_millis(80);
-    let db = Arc::new(RwLock::new(seeded()));
+    let db = Arc::new(RwLock::new(db));
     let server = Server::new(Arc::clone(&db), cfg);
     let listener = server.bind().expect("bind");
     let port = listener.local_addr().unwrap().port();
@@ -436,6 +440,98 @@ fn stream_cap_is_separate_from_connection_cap() {
     assert_eq!(st, 200);
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// The ids a change event names as deleted.
+fn dels(data: &str) -> Vec<i64> {
+    let at = data.find("\"dels\":[").expect("dels") + "\"dels\":[".len();
+    let end = data[at..].find(']').unwrap() + at;
+    data[at..end]
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim().parse().unwrap())
+        .collect()
+}
+
+/// A row reaching its `@ttl` is told to a subscriber as a deletion at its
+/// time, with no write to tell of it: left to the sweep, a minute and its
+/// grace later, a courier whose phone went quiet stayed on a dispatcher's
+/// map 73 s after it had gone from every read. Its time is asserted from
+/// below; that the sweep had not deleted it, by the row still read as
+/// expired once the deletion was heard. A shape that holds nothing --
+/// what `FenecHttp.live` opens -- is told a change happened, for each row.
+#[test]
+fn a_row_reaching_its_ttl_is_told_as_a_deletion_at_its_time() {
+    let mut db = Database::new();
+    for stmt in
+        fenec_ql::parse("create collection positions (courier text, seen timestamp @ttl(1000ms))")
+            .unwrap()
+    {
+        db.execute(&stmt).unwrap();
+    }
+    let h = start_over(db, Config::default());
+    let now = now_ms();
+    // Gone in 300 ms, and in a second.
+    let quiet_at = now - 700 + 1000;
+    let busy_at = now + 1000;
+    let (st, body) = post(
+        h.port,
+        "/query",
+        &format!(
+            r#"{{"query":"put positions [{{courier: \"quiet\", seen: $1}}, {{courier: \"busy\", seen: $2}}]","params":[{},{}]}}"#,
+            now - 700,
+            now
+        ),
+    );
+    assert_eq!(st, 200, "{body}");
+    let id_of = |courier: &str| {
+        let guard = h.db.read().unwrap();
+        let stmt = fenec_ql::parse_one(&format!(
+            "get positions select id where courier = \"{courier}\""
+        ))
+        .unwrap();
+        match guard.query(&stmt, &[]).unwrap() {
+            Response::Rows(rs) => rs.rows[0].id as i64,
+            other => panic!("{other:?}"),
+        }
+    };
+    let (quiet, busy) = (id_of("quiet"), id_of("busy"));
+    let mut s = Sub::open(h.port, "/positions/changes");
+    let mut probe = Sub::open(h.port, "/positions/changes?select=id&where=false");
+    let (name, data) = s.next().expect("seed");
+    assert_eq!((name.as_str(), count(&data, "rows")), ("seed", 2), "{data}");
+    assert_eq!(probe.next().expect("seed").0, "seed");
+
+    for (id, at) in [(quiet, quiet_at), (busy, busy_at)] {
+        let (name, data) = s.next_within(Duration::from_secs(10)).expect("a change");
+        let heard = now_ms();
+        assert_eq!(name, "change", "{data}");
+        assert_eq!(dels(&data), vec![id], "{data}");
+        assert_eq!(count(&data, "puts"), 0, "{data}");
+        assert!(heard >= at, "told {} ms before its time", at - heard);
+        eprintln!("expiry told {} ms after its time", heard - at);
+        // Out of every read, and still in the file: the sweep did not
+        // delete it.
+        let guard = h.db.read().unwrap();
+        let read = |q: &str| match guard.query(&fenec_ql::parse_one(q).unwrap(), &[]).unwrap() {
+            Response::Rows(rs) => rs.rows.iter().map(|r| r.id as i64).collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert!(!read("get positions select id").contains(&id));
+        assert!(read("get positions select id where expired()").contains(&id));
+        drop(guard);
+        let (name, data) = probe
+            .next_within(Duration::from_secs(10))
+            .expect("a change");
+        assert_eq!(name, "change", "{data}");
+    }
+}
+
 // ------------------------------------------------------------------- batch
 
 #[test]
@@ -640,11 +736,14 @@ fn an_expired_row_leaves_the_subscription() {
     assert_eq!(name, "change");
     assert!(data.contains("\"dels\":[2]"), "{data}");
 
-    // The row it was sent expires, and is deleted once its time is past.
-    std::thread::sleep(Duration::from_millis(2100));
+    // The row it was sent is told deleted at its time, with no write, and
+    // again as the sweep deletes it: a deletion of what is gone already.
+    let (name, data) = s.next_within(Duration::from_secs(10)).expect("change");
+    assert_eq!(name, "change");
+    assert!(data.contains("\"dels\":[1]"), "{data}");
+    assert!(data.contains("\"puts\":[]"), "{data}");
     assert_eq!(fenec_http::sweep::pass("test", &h.db), 1);
     let (name, data) = s.next().expect("change");
     assert_eq!(name, "change");
     assert!(data.contains("\"dels\":[1]"), "{data}");
-    assert!(data.contains("\"puts\":[]"), "{data}");
 }

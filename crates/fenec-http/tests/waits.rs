@@ -751,3 +751,254 @@ fn a_held_claim_holds_no_tenant_against_a_freeze() {
     assert_eq!(rows(&a.body).len(), 1, "{}", a.body);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A write wakes the held claims that read what it wrote, and no others:
+/// claims held on `jobs`, each a group of its own as a courier's is, are
+/// not looked at by a hundred writes of another collection -- woken by
+/// every write, 150 of them took a put beside them from 0.16 to 0.29 ms
+/// p50 -- and a write of `jobs` has each look and the one it is for take
+/// it.
+#[test]
+fn a_write_wakes_only_the_claims_reading_what_it_wrote() {
+    const N: usize = 8;
+    let node = start();
+    let port = node.port;
+    let a = Conn::open(port).query("create collection positions (x int)", "[]");
+    assert_eq!(a.status, 200, "{}", a.body);
+    let claim = "set jobs {owner: $1, run_at: now() + 60000} where run_at <= now() and \
+                 kind = $2 order run_at limit 1 returning id, kind";
+    let held: Vec<_> = (0..N)
+        .map(|w| {
+            std::thread::spawn(move || {
+                Conn::open(port).post(
+                    "/query",
+                    &line(claim, &format!("[\"w{w}\", \"k{w}\"]")),
+                    &[("Fenec-Wait", "20000")],
+                )
+            })
+        })
+        .collect();
+    until_held(&node, N);
+    // Each group's first look, made at once as it is held.
+    let t = Instant::now();
+    while node.server.waits().looks < N as u64 {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            node.server.waits()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = node.server.waits();
+    let mut c = Conn::open(port);
+    for i in 0..100 {
+        let a = c.query("put positions {x: $1}", &format!("[{i}]"));
+        assert_eq!(a.status, 200, "{}", a.body);
+    }
+    let after = node.server.waits();
+    assert_eq!(
+        (after.looks, after.runs),
+        (before.looks, before.runs),
+        "a write of another collection woke a held claim"
+    );
+    for w in 0..N {
+        put(port, &format!("k{w}"), now_ms() - 1);
+    }
+    for (w, h) in held.into_iter().enumerate() {
+        let a = h.join().unwrap();
+        assert_eq!(a.status, 200, "{}", a.body);
+        let got = rows(&a.body);
+        assert_eq!(got.len(), 1, "{}", a.body);
+        assert_eq!(got[0]["kind"], Value::Text(format!("k{w}")));
+    }
+    assert!(node.server.waits().looks > after.looks);
+}
+
+/// A claim every job matches, a group of each worker's own: its third
+/// parameter, a bound every job's `attempts` is under, differs worker by
+/// worker as a courier's point does.
+const OWN: &str = "set jobs {owner: $1, run_at: now() + 60000, attempts: attempts + 1} \
+                   where run_at <= now() and attempts < $2 order run_at limit 1 \
+                   returning id, owner";
+
+fn own_claim(port: u16, w: usize) -> std::thread::JoinHandle<Answer> {
+    std::thread::spawn(move || {
+        Conn::open(port).post(
+            "/query",
+            &line(OWN, &format!("[\"w{w}\", {}]", 1000 + w)),
+            &[("Fenec-Wait", "20000")],
+        )
+    })
+}
+
+/// A job every held claim would take goes to the claim held longest, each
+/// a group of its own -- as couriers' claims are -- and is run for once:
+/// raced, whichever head ran first took it, and every head that found it
+/// ran the request under the write lock for nothing.
+#[test]
+fn a_job_many_groups_would_take_goes_to_the_one_held_longest() {
+    const N: usize = 12;
+    let node = start();
+    let port = node.port;
+    let mut held = Vec::new();
+    for w in 0..N {
+        held.push(own_claim(port, w));
+        // In order, so the longest held is known.
+        until_held(&node, w + 1);
+    }
+    let before = node.server.waits();
+    for (w, h) in held.into_iter().enumerate() {
+        let id = put(port, "mail", now_ms() - 1);
+        let a = h.join().unwrap();
+        assert_eq!(a.status, 200, "{}", a.body);
+        let got = rows(&a.body);
+        assert_eq!(got.len(), 1, "{}", a.body);
+        assert_eq!(int(&got[0]["id"]), id, "the claim held longest takes it");
+        until_held(&node, N - w - 1);
+    }
+    let s = node.server.waits();
+    assert_eq!(
+        s.runs - before.runs,
+        N as u64,
+        "one run a job: {before:?} -> {s:?}"
+    );
+    assert_eq!(s.held, 0);
+}
+
+/// A burst of jobs to as many claims, each a group of its own, all of
+/// which would take the oldest: each is served in the order it came, the
+/// oldest job to the claim held longest, and the burst costs a look and a
+/// run a claim or so, not a round of every claim's looks a job.
+#[test]
+fn a_burst_goes_to_held_claims_in_the_order_they_came() {
+    const N: usize = 16;
+    let node = start();
+    let port = node.port;
+    let mut held = Vec::new();
+    for w in 0..N {
+        held.push(own_claim(port, w));
+        until_held(&node, w + 1);
+    }
+    let before = node.server.waits();
+    let at = now_ms() - 1000;
+    let docs: Vec<String> = (0..N)
+        .map(|i| format!("{{kind: \"mail\", run_at: {}, attempts: 0}}", at + i as i64))
+        .collect();
+    let a = Conn::open(port).query(&format!("put jobs [{}]", docs.join(", ")), "[]");
+    assert_eq!(a.status, 200, "{}", a.body);
+    let mut ids = Vec::new();
+    for h in held {
+        let a = h.join().unwrap();
+        let got = rows(&a.body);
+        assert_eq!(got.len(), 1, "{}", a.body);
+        ids.push(int(&got[0]["id"]));
+    }
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        ids, sorted,
+        "the oldest job to the claim held longest, and on"
+    );
+    let s = node.server.waits();
+    assert_eq!(s.runs - before.runs, N as u64, "{before:?} -> {s:?}");
+    // Each claim looks for its first bid, and then once as its turn in the
+    // line comes; a round of every claim's looks a job would be N * N.
+    assert!(
+        s.looks - before.looks <= 3 * N as u64,
+        "{before:?} -> {s:?}"
+    );
+}
+
+/// A claim that looked and found nothing does not look again for
+/// `LOOK_GAP` however many writes of its queue land, a round of bids
+/// waiting for it apart: 300 jobs it cannot take cost it a look a
+/// millisecond at most, where ending its gap at every look had it look
+/// at every write.
+#[test]
+fn a_held_claim_looks_once_a_gap_beside_writes_it_cannot_take() {
+    let node = start();
+    let port = node.port;
+    let held = own_claim(port, 0);
+    until_held(&node, 1);
+    let t = Instant::now();
+    while node.server.waits().looks < 1 {
+        assert!(t.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = node.server.waits().looks;
+    let began = Instant::now();
+    // Eight writers at once, so writes land while it looks.
+    let writers: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut c = Conn::open(port);
+                for _ in 0..100 {
+                    let a = c.query(
+                        "put jobs {kind: \"other\", run_at: 0, attempts: 99999}",
+                        "[]",
+                    );
+                    assert_eq!(a.status, 200, "{}", a.body);
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().unwrap();
+    }
+    let ms = began.elapsed().as_millis() as u64;
+    let looks = node.server.waits().looks - before;
+    assert!(looks <= ms + 2, "{looks} looks in {ms} ms");
+    put(port, "mail", now_ms() - 1);
+    let a = held.join().unwrap();
+    assert_eq!(rows(&a.body).len(), 1, "{}", a.body);
+}
+
+/// Couriers' claims ordered by distance from their own points, held 3, 1
+/// and 2 km from where an order is placed, in that order: the order goes to
+/// the nearest, though it was not held longest, and is run for once; the
+/// next two orders go to the other two. Raced, whichever ran first took it,
+/// the nearest of ten one time in ten.
+#[test]
+fn an_order_goes_to_the_nearest_claim_held_for_it() {
+    let node = start();
+    let port = node.port;
+    let a = Conn::open(port).query(
+        "create collection orders (pickup geo @geo, run_at timestamp @sorted, courier text)",
+        "[]",
+    );
+    assert_eq!(a.status, 200, "{}", a.body);
+    let claim = "set orders {courier: $1, run_at: now() + 60000} where run_at <= now() \
+                 order distance(pickup, $2) limit 1 returning id, courier";
+    let mut held = Vec::new();
+    for (w, km) in [3.0, 1.0, 2.0].into_iter().enumerate() {
+        let point = format!("[{}, 41.0]", 29.0 + km / 84.0);
+        held.push(std::thread::spawn(move || {
+            Conn::open(port).post(
+                "/query",
+                &line(claim, &format!("[\"c{w}\", {point}]")),
+                &[("Fenec-Wait", "20000")],
+            )
+        }));
+        until_held(&node, w + 1);
+    }
+    let before = node.server.waits();
+    let place = || {
+        let a = Conn::open(port).query(
+            "put orders {pickup: [29.0, 41.0], run_at: $1}",
+            &format!("[{}]", now_ms() - 1),
+        );
+        assert_eq!(a.status, 200, "{}", a.body);
+    };
+    place();
+    let nearest = held.remove(1).join().unwrap();
+    let got = rows(&nearest.body);
+    assert_eq!(got.len(), 1, "{}", nearest.body);
+    assert_eq!(got[0]["courier"], Value::Text("c1".into()));
+    assert_eq!(node.server.waits().runs - before.runs, 1, "run for once");
+    place();
+    place();
+    for h in held {
+        let a = h.join().unwrap();
+        assert_eq!(rows(&a.body).len(), 1, "{}", a.body);
+    }
+}

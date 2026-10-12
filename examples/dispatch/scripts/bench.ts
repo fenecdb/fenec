@@ -34,7 +34,7 @@ await setup({ router: cluster.routerUrl, shardToken: SHARD_TOKEN, companies: [sp
 await fetch(`${cluster.routerUrl}/_shard/tenants/co-bench/quota`, {
   method: 'PUT',
   headers: { authorization: `Bearer ${SHARD_TOKEN}` },
-  body: JSON.stringify({ bytes: 0, rows: 0, streams: 0, requests: 0, writes: 0, write_bytes: 0 }),
+  body: JSON.stringify({ bytes: 0, rows: 0, streams: 0, held: 0, requests: 0, writes: 0, write_bytes: 0 }),
 });
 const folk = people(spec);
 const couriers: Who[] = folk.filter((p) => p.role === 'courier').map((p) => ({ sub: p.uid, role: 'courier', company: 'bench' }));

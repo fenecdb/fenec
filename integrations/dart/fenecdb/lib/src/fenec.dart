@@ -40,12 +40,13 @@ class FenecException implements Exception {
 
   /// The tenant's quota a server refused with ([FenecRemote] to a tenant
   /// node): "bytes" and "rows" answer 507, and room is made by deleting;
-  /// "streams", "requests", "writes" and "write_bytes" answer 429 with
-  /// [retryAfter]. Null for any other refusal.
+  /// "streams", "held", "requests", "writes" and "write_bytes" answer 429
+  /// with [retryAfter]. Null for any other refusal.
   final String? quota;
 
-  /// How long to wait before sending again, where the server said
-  /// (`Retry-After`: a quota's 429, a move's or a failover's 503).
+  /// How long to wait before sending again, where the server said: a
+  /// quota's 429 to the millisecond (`retry_after_ms`), a move's or a
+  /// failover's 503 in whole seconds (`Retry-After`).
   final Duration? retryAfter;
 
   FenecException(this.code, this.message, [this.exact])

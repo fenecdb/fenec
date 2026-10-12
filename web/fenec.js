@@ -1396,8 +1396,9 @@ const NO_SEQ = Number.MAX_SAFE_INTEGER;
 const RETRY_AFTER_MAX_MS = 3_600_000;
 
 /**
- * What an answer says beyond its words -- the tenant's quota and the
- * seconds `Retry-After` gives -- read from the body fenec-server writes
+ * What an answer says beyond its words -- the tenant's quota and its wait,
+ * to the millisecond (`retry_after_ms`) or in the seconds `Retry-After`
+ * gives -- read from the body fenec-server writes
  * beside its headers, as the native core reads it: a page on another
  * origin reads a header only where the server lists it for CORS.
  */
@@ -1408,10 +1409,12 @@ function said(body) {
   } catch {
     /* not JSON: nothing said */
   }
-  const { quota, retry_after: s } = b ?? {};
+  const { quota, retry_after: s, retry_after_ms: ms } = b ?? {};
+  // The wait itself where the server says it, whole seconds otherwise.
+  const wait = typeof ms === 'number' && ms > 0 ? ms : typeof s === 'number' && s > 0 ? s * 1000 : 0;
   return {
     quota: typeof quota === 'string' && quota ? quota : null,
-    retryMs: typeof s === 'number' && s > 0 ? Math.min(Math.floor(s * 1000), RETRY_AFTER_MAX_MS) : 0,
+    retryMs: Math.min(Math.floor(wait), RETRY_AFTER_MAX_MS),
   };
 }
 

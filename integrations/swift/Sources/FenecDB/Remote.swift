@@ -201,10 +201,12 @@ public final class FenecRemote: @unchecked Sendable {
 
     /// A refusal as the error it is: its status and message, where a batch
     /// stopped, and where a tenant's quota refused it the quota and how
-    /// many seconds to wait -- `Retry-After`, or the same in the body.
+    /// many seconds to wait -- to the millisecond where the body says it
+    /// (`retry_after_ms`), else `Retry-After`, or the same in the body.
     static func refused(_ status: Int, _ v: Value?, retryAfter: String?) -> FenecError {
         let quota = v?["quota"]?.string
-        let wait = retryAfter.flatMap { Double($0) } ?? v?["retry_after"]?.int.map(Double.init)
+        let ms = v?["retry_after_ms"]?.int.flatMap { $0 > 0 ? Double($0) / 1000 : nil }
+        let wait = ms ?? retryAfter.flatMap { Double($0) } ?? v?["retry_after"]?.int.map(Double.init)
         return FenecError(
             code: quota == nil ? FenecRemote.code(status) : .quota,
             message: v?["error"]?.string ?? "HTTP \(status)",

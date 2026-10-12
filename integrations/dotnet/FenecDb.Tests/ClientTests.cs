@@ -487,6 +487,18 @@ public sealed class ClientTests(Servers servers)
         await acme.ExecAsync("put notes {t: $1}", ["a"]);
     }
 
+    // A quota's wait is read to the millisecond where the body says it, over the whole seconds Retry-After
+    // rounds it up to: a bucket of 600 rows a second refills a row in 1.7 ms.
+    [Fact]
+    public void ARefusalsWaitIsReadToTheMillisecond()
+    {
+        var soon = FenecException.From(429,
+            "{\"error\":\"past\",\"quota\":\"writes\",\"retry_after\":1,\"retry_after_ms\":2}");
+        Assert.Equal(("writes", (TimeSpan?)TimeSpan.FromMilliseconds(2)), (soon.Quota, soon.RetryAfter));
+        var moved = FenecException.From(503, "{\"error\":\"the tenant is being moved\",\"retry_after\":1}");
+        Assert.Equal(TimeSpan.FromSeconds(1), moved.RetryAfter);
+    }
+
     [Fact]
     public async Task AScopedToken()
     {

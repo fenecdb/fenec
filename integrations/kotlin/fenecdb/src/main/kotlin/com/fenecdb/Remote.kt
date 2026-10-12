@@ -185,16 +185,18 @@ class FenecRemote private constructor(
     internal companion object {
         /**
          * A refusal as the error it is: its status and message, where a batch stopped, and where a
-         * tenant's quota refused it the quota and how many seconds to wait -- `Retry-After`, or the same
-         * in the body.
+         * tenant's quota refused it the quota and how many seconds to wait -- to the millisecond where
+         * the body says it (`retry_after_ms`), else `Retry-After`, or the same in the body.
          */
         fun refused(status: Int, r: Row?, retryAfter: String?): FenecException {
             val quota = r?.string("quota")
+            val ms = r?.double("retry_after_ms")?.takeIf { it > 0 }?.let { it / 1000 }
             return FenecException(
                 if (quota == null) code(status) else FenecException.Code.QUOTA,
                 r?.string("error") ?: "HTTP $status", null,
                 status = status, at = r?.int("at"), completed = r?.int("completed"),
-                quota = quota, retryAfter = retryAfter?.toDoubleOrNull() ?: r?.double("retry_after"),
+                quota = quota,
+                retryAfter = ms ?: retryAfter?.toDoubleOrNull() ?: r?.double("retry_after"),
             )
         }
 

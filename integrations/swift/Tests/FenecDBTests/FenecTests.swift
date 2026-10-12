@@ -119,6 +119,11 @@ struct Note: Codable, Equatable, FenecValue {
         let rate = FenecRemote.refused(
             429, try Value.parse(#"{"error":"past","quota":"writes","retry_after":1}"#), retryAfter: "3")
         #expect(rate.code == .quota && rate.quota == "writes" && rate.retryAfter == 3)
+        // To the millisecond where the body says it, over the whole second.
+        let soon = FenecRemote.refused(
+            429, try Value.parse(#"{"error":"past","quota":"writes","retry_after":1,"retry_after_ms":2}"#),
+            retryAfter: "1")
+        #expect(soon.quota == "writes" && soon.retryAfter == 0.002)
         let memory = FenecRemote.refused(507, try Value.parse(#"{"error":"data ceiling"}"#), retryAfter: nil)
         #expect(memory.quota == nil && memory.code == .io)
         // A tenant being moved says the wait in its body as a quota does.

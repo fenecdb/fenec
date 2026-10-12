@@ -1107,6 +1107,20 @@ pub type Fence = Arc<dyn Fn() -> std::result::Result<(), String> + Send + Sync>;
 /// through `Hub`; in a database with no subscribers the cost is zero.
 pub trait Watcher: Send + Sync {
     fn notify(&self, seq: u64);
+
+    /// A block of writes landed: [`Watcher::notify`] with the database as
+    /// the block left it, and `before`, the change it was at, so a watcher
+    /// that wakes waiters by what they read asks
+    /// [`Database::changed_collections_since`]`(before)` -- under the write
+    /// lock, before any reader sees the writes. A server's held claims on
+    /// `orders` were woken by every write of `positions` beside them: 150
+    /// of them took a position's put from 0.16 to 0.29 ms p50 and 0.67 to
+    /// 4.3 ms p99 (`fenec_http::waits`). Native only: a page holds no write.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn landed(&self, db: &Database, before: u64) {
+        let _ = before;
+        self.notify(db.change_seq());
+    }
 }
 
 /// `[kind][collection][length]`, the head every record but the counter has.
@@ -5138,6 +5152,9 @@ impl Database {
         let after = self.changes.seq();
         if after != before {
             if let Some(w) = &self.watcher {
+                #[cfg(not(target_arch = "wasm32"))]
+                w.landed(self, before);
+                #[cfg(target_arch = "wasm32")]
                 w.notify(after);
             }
         }
@@ -5554,7 +5571,8 @@ impl Database {
         if self.limit.is_some() {
             let adds = land.as_ref().map_or_else(|| b.record_len(), Vec::len);
             let grows = b.grew || self.grows(&b, b.spilled_writes);
-            if let Err(e) = self.limited(grows, adds as u64) {
+            let writes = self.app_writes(&b, b.spilled_writes);
+            if let Err(e) = self.limited(grows, adds as u64, writes) {
                 self.undo(b);
                 return Err(e);
             }
@@ -5588,6 +5606,8 @@ impl Database {
         }
         *self.appended.get_mut() += len as u64;
         self.dirty = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        let before = self.changes.seq();
         for &(cid, id) in &b.notes {
             self.note(cid, id);
         }
@@ -5596,6 +5616,9 @@ impl Database {
         b.was.clear();
         self.spare(b);
         if let Some(w) = &self.watcher {
+            #[cfg(not(target_arch = "wasm32"))]
+            w.landed(self, before);
+            #[cfg(target_arch = "wasm32")]
             w.notify(self.changes.seq());
         }
         #[cfg(not(target_arch = "wasm32"))]

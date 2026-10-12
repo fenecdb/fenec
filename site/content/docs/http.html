@@ -473,8 +473,9 @@ what to do about it; a <code>/batch</code> that stopped adds where
 tenant's quota names itself (<code>quota</code>, and the
 <code>Fenec-Quota</code> header), and one to come back from says when
 (<code>retry_after</code>, the seconds of its <code>Retry-After</code>
-header: a page on another origin, or an app's replica, reads the body).
-Every SDK's error carries all of them.</p>
+header: a page on another origin, or an app's replica, reads the body; a
+quota's 429 says it to the millisecond as well, <code>retry_after_ms</code>,
+which is the one to wait). Every SDK's error carries all of them.</p>
 
 <div class="tbl">
 <table>
@@ -489,7 +490,7 @@ Every SDK's error carries all of them.</p>
 <tr><td class="n">412</td><td>a <code>require</code> not met, its batch put back</td><td>read again, decide again</td></tr>
 <tr><td class="n">413</td><td>a body past the ceiling, 64 MB</td><td>send less at once</td></tr>
 <tr><td class="n">422</td><td>an <code>Idempotency-Key</code> sent with another request</td><td>a new key for a new request</td></tr>
-<tr><td class="n">429</td><td>a tenant's quota of <code>streams</code>, <code>requests</code>, <code>writes</code> or <code>write_bytes</code></td><td>come back after <code>Retry-After</code> seconds</td></tr>
+<tr><td class="n">429</td><td>a tenant's quota of <code>streams</code>, <code>held</code>, <code>requests</code>, <code>writes</code> or <code>write_bytes</code></td><td>come back after <code>retry_after_ms</code></td></tr>
 <tr><td class="n">503</td><td>too many connections or subscriptions; a tenant being moved or failed over; a node going down</td><td>come back after <code>Retry-After</code> seconds</td></tr>
 <tr><td class="n">504</td><td>a <code>Fenec-After</code> change that did not reach a replica in the wait</td><td>ask again, or ask the primary</td></tr>
 <tr><td class="n">507</td><td>past <code>--max-memory</code>, or a tenant's quota of <code>bytes</code> or <code>rows</code>; the write put back whole</td><td>delete, then write again: waiting does not help</td></tr>
@@ -501,7 +502,7 @@ Every SDK's error carries all of them.</p>
 Fenec-Quota: writes
 Retry-After: 1
 
-{"error":"the tenant writes past its quota of 100 writes a second","quota":"writes","retry_after":1}
+{"error":"the tenant writes past its quota of 100 rows a second","quota":"writes","retry_after":1,"retry_after_ms":10}
 
 HTTP/1.1 503 Service Unavailable
 Retry-After: 1
@@ -527,7 +528,13 @@ the rows matching your filter, then each change to them as it happens.</p>
 
 <ul>
   <li><b>Limited separately</b> from ordinary requests:
-    <code>--http-max-streams</code>, 64 by default.</li>
+    <code>--http-max-streams</code>, 64 by default, a database's -- on a
+    tenant node each tenant's own -- and each one of
+    <code>--max-connections</code> too, which a node's tenants share
+    (<a href="sharding.html#quotas">a tenant's share</a>).</li>
+  <li><b>A row reaching its <code>@ttl</code></b> is told as a deletion at
+    its time, as a write would be, not when the sweep deletes it a minute
+    and its grace later.</li>
   <li><b>In the browser,</b> <a href="sync.html">Sync</a> builds on this
     stream.</li>
 </ul>
@@ -543,10 +550,26 @@ change counter has reached a point, and <code>fenec-http</code> ties that to a
 per subscriber and still add 50 ms of latency.</p>
 
 <p>Every subscription is a connection and a thread, so they are counted
-separately from ordinary requests (<code>--http-max-streams</code>, default
-64). Sharing one ceiling would let 100 subscribers shut the server to plain
-requests. The client-side layer built on this stream is
-<a href="sync.html">Sync</a>.</p>
+separately from ordinary requests as well (<code>--http-max-streams</code>,
+default 64, a database's: on a tenant node each tenant's). Sharing one
+ceiling would let 100 subscribers shut the server to plain requests. A
+stream is also one of the node's <code>--max-connections</code>, the bound
+every tenant of a node shares, of which each tenant's streams take a quarter
+at most unless its quota says otherwise. The client-side layer built on this
+stream is <a href="sync.html">Sync</a>.</p>
+
+<p>A row past its <code>@ttl</code> leaves every read at once and the file at
+the sweep, a minute and its grace later; a stream of its collection is told
+of it at its time. It works out when the next row of the collection reaches
+its time -- a step of the field's ordered index, again after each write to
+the collection -- sleeps until then if no write comes first, and reads the
+rows that reached it since it last looked, the shape ANDed in, telling each
+as a deletion as the sweep's delete would be told: a scoped stream of the
+rows it was sent alone, a shape that holds nothing (what
+<code>FenecHttp.live</code> opens) that something changed. Heard at the
+sweep, a courier whose phone went quiet stayed on a dispatcher's map 73 s
+after it had gone from every read; at its time, it is told about 10 ms after
+it. The sweep's delete comes after, a deletion of what is gone already.</p>
 
 <p>What a stream costs, measured on an M1 with streams of a shape that holds
 nothing (what <code>FenecHttp.live</code> opens): 45 to 57 KB of resident

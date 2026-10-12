@@ -361,8 +361,9 @@ block in the file. Writes go one at a time, in order, each under its key, so
 a write whose answer was lost is sent again and answered as the first time,
 not made again. A server's answer of <code>0</code> (no answer),
 <code>408</code>, <code>429</code> or <code>5xx</code> is tried again with
-backoff, 250 ms doubling to 15 s, or after the <code>retry_after</code> a
-tenant's quota, a move or a failover names where that is longer; a
+backoff, 250 ms doubling to 15 s, or after the wait a tenant's quota (to
+the millisecond, <code>retry_after_ms</code>), a move or a failover
+(<code>retry_after</code>) names where that is longer; a
 <code>401</code> asks for a token; a <code>507</code> naming a tenant's
 quota, and any other <code>4xx</code>, is a refusal, and the writes behind
 it go on
@@ -387,7 +388,7 @@ rows 72 ms (<code>make sync-bench</code>).</p>
 <p>The browser's <code>sync</code> (<a href="sync.html">Sync</a>) is
 written apart -- this core in the browser module was 21 KB brotli more --
 and the two are held to one script: <code>integrations/sync-scenarios.json</code>,
-68 scenarios of shapes, writes, answers and server events, each step's
+71 scenarios of shapes, writes, answers and server events, each step's
 replica, queue and requests stated once and run against both. What is left
 between them is the platforms':</p>
 <ul>

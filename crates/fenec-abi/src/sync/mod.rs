@@ -158,8 +158,9 @@ struct Fault {
 
 /// What an answer says beyond its words, read from the body fenec-server
 /// writes beside its headers: the tenant's quota (`"quota"`, the
-/// `Fenec-Quota` header's) and how long to stay away (`"retry_after"`,
-/// `Retry-After`'s seconds). The body, since that is what a binding hands
+/// `Fenec-Quota` header's) and how long to stay away (`"retry_after_ms"`,
+/// the wait itself, or `"retry_after"`, `Retry-After`'s seconds rounded
+/// up, where it is not said). The body, since that is what a binding hands
 /// the core: headers would take a parameter more through the C ABI and
 /// every binding, and a browser on another origin reads a header only
 /// where the server lists it for CORS.
@@ -180,14 +181,21 @@ fn said(body: &str) -> Said {
             Value::Text(q) if !q.is_empty() => Some(q),
             _ => None,
         });
-    let secs = match field(&m, "retry_after").and_then(|s| json::parse(s).ok()) {
+    let positive = |name: &str| match field(&m, name).and_then(|s| json::parse(s).ok()) {
         Some(Value::Int(n)) if n > 0 => n as f64,
         Some(Value::Float(f)) if f > 0.0 => f,
         _ => 0.0,
     };
+    // The wait itself where the server says it (`retry_after_ms`), whole
+    // seconds rounded up otherwise: a bucket of 600 rows a second refills
+    // a row in 1.7 ms, and its `retry_after` says a second.
+    let ms = match positive("retry_after_ms") {
+        0.0 => positive("retry_after") * 1000.0,
+        ms => ms,
+    };
     Said {
         quota,
-        retry_ms: ((secs * 1000.0) as u64).min(RETRY_AFTER_MAX_MS),
+        retry_ms: (ms as u64).min(RETRY_AFTER_MAX_MS),
     }
 }
 
@@ -2390,6 +2398,12 @@ mod tests {
         assert_eq!((s.quota.as_deref(), s.retry_ms), (Some("bytes"), 0));
         // A wait in part of a second, as a proxy may write one.
         assert_eq!(said(r#"{"retry_after":1.5}"#).retry_ms, 1500);
+        // The milliseconds where they are said, over the seconds.
+        assert_eq!(said(r#"{"retry_after":1,"retry_after_ms":2}"#).retry_ms, 2);
+        assert_eq!(
+            said(r#"{"retry_after":2,"retry_after_ms":0}"#).retry_ms,
+            2000
+        );
         // Bounded: a browser's timer fires at once past 2^31 ms.
         assert_eq!(
             said(r#"{"retry_after":99999999}"#).retry_ms,

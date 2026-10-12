@@ -333,14 +333,15 @@ export function mount(host, ctx) {
     );
   }
 
-  /** The tenant's other quotas, those set: streams and requests held now of their bound, and its rates. */
+  /** The tenant's other quotas, those set: streams, held writes and requests held now of their bound, and its rates. */
   function limits(t) {
     const q = t.quota ?? {};
     const u = t.usage ?? {};
     const parts = [];
     if (q.streams) parts.push(`${number(u.streams ?? 0)}/${number(q.streams)} streams`);
+    if (q.held) parts.push(`${number(u.held ?? 0)}/${number(q.held)} held`);
     if (q.requests) parts.push(`${number(u.requests ?? 0)}/${number(q.requests)} in flight`);
-    if (q.writes) parts.push(`${number(q.writes)} writes/s`);
+    if (q.writes) parts.push(`${number(q.writes)} rows/s`);
     if (q.write_bytes) parts.push(`${bytes(q.write_bytes)}/s`);
     return parts.length ? parts.join(' · ') : h('span', { class: 'muted' }, t.quota ? 'none' : '–');
   }

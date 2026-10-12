@@ -1279,6 +1279,57 @@ fn a_scoped_stream_of_no_rows_hears_the_writes_to_rows_it_may_read() {
     }
 }
 
+/// A scoped stream is told of its own rows reaching their `@ttl`, as they
+/// do, and of no other: bob's row lapsing first leaves alice's stream
+/// silent, where told of every row reaching its time it would hand her the
+/// moment bob's courier went quiet, and his row's id.
+#[test]
+fn a_scoped_stream_hears_its_own_rows_reach_their_time_and_no_others() {
+    let n = start_with(
+        "pos  read  where owner = $jwt.sub\n",
+        &["create collection pos (owner text @hash, seen timestamp @ttl(1000ms))"],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    // Bob's lapses in 200 ms, alice's in 700.
+    let (bobs_at, alices_at) = (now + 200, now + 700);
+    let r = n.query(
+        ROOT,
+        &format!(
+            r#"put pos [{{id: 1, owner: "bob", seen: {}}}, {{id: 2, owner: "alice", seen: {}}}]"#,
+            bobs_at - 1000,
+            alices_at - 1000
+        ),
+    );
+    assert_eq!(r.0, 200, "{}", r.1);
+    let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    write!(
+        s,
+        "GET /pos/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+    )
+    .unwrap();
+    let mut heard = String::new();
+    listen(
+        &mut s,
+        &mut heard,
+        &|h| h.contains("event: change"),
+        Duration::from_secs(10),
+    );
+    let told = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(heard.contains("event: seed"), "{heard}");
+    assert!(told >= alices_at, "told before her row's time: {heard}");
+    assert_eq!(count(&heard, "event: change"), 1, "{heard}");
+    assert!(heard.contains(r#""dels":[2]"#), "{heard}");
+    assert!(!heard.contains(r#""id":1"#), "{heard}");
+}
+
 /// A polled live query sends the tag of its last answer, and is answered
 /// 304 while nothing it reads was written. A scoped token's tag was the
 /// database's change counter: 304 against 200 told it when anyone wrote to

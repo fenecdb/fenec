@@ -348,7 +348,7 @@ file before and after and how long it held the lock.</p>
 <tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it.</td></tr>
 <tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td>Refuses writes that would grow the data past it; reads go on.</td></tr>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">60</td><td>Closes a quiet keep-alive connection (0 = never).</td></tr>
-<tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on subscriptions, counted apart.</td></tr>
+<tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on a database's subscriptions, counted apart; on a tenant node, each tenant's.</td></tr>
 </tbody>
 </table>
 </div>
@@ -360,7 +360,11 @@ file before and after and how long it held the lock.</p>
 memory ceiling to the client. Past <code>--max-connections</code> a client
 gets 503; <code>--idle-timeout</code> closes a quiet connection. A
 subscription holds a thread for as long as it lasts, so subscriptions are
-counted apart, under <code>--http-max-streams</code>.</p>
+counted apart as well, under <code>--http-max-streams</code>, a database's
+own: on a tenant node each tenant's, where <code>--max-connections</code> is
+what all of them share, and each tenant's streams and held writes take a
+quarter of it at most unless its quota says otherwise
+(<a href="sharding.html#quotas">quotas</a>).</p>
 
 <p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
 requests that <b>grow</b> the data are refused with 507, while reads,

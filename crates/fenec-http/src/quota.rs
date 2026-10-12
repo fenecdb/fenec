@@ -4,12 +4,35 @@
 //! ```text
 //! bytes        its file, as written                     507  at the landing
 //! rows         the documents of its own collections     507  at the landing
-//! streams      subscriptions, /_changes waits, held      429  Retry-After
-//!              writes (Fenec-Wait) and Fenec-After waits
+//! streams      subscriptions, /_changes waits and       429  Retry-After
+//!              Fenec-After waits
+//! held         writes held until they can write         429  Retry-After
+//!              (Fenec-Wait): a queue's waiting workers
 //! requests     requests in flight                       429  Retry-After
-//! writes       writes a second, a token bucket          429  Retry-After
+//! writes       rows written a second, a token bucket    429  Retry-After
 //! write_bytes  bytes written a second, a token bucket   429  Retry-After
 //! ```
+//!
+//! **A 429 says its wait to the millisecond.** `Retry-After` is whole
+//! seconds, as HTTP has it, rounded up; the body's `retry_after_ms` is the
+//! wait itself, which a client prefers: a bucket of 600 writes a second
+//! refills a write in 1.7 ms, and fifty couriers told `Retry-After: 1`
+//! waited fifty seconds between them.
+//!
+//! **`writes` counts rows written, as they land.** A write is let through
+//! while the bucket holds a row's worth, and charged the rows of its
+//! collections it wrote as it lands -- in debt past the bucket, as the
+//! bytes are -- so a claim that took nothing, a `require` unmet, a held
+//! claim's every look and run that wrote nothing costs none: taken as a
+//! write started, 45 claims held at once by a fleet of the Starter plan
+//! were refused for `writes` before any for being held. Only a request's
+//! own landings are charged: the sweep of rows past their `@ttl`, a
+//! compact or a replica's apply is the node's, not the tenant's rate.
+//!
+//! **`held` is apart from `streams`.** A plan sizes how many workers may
+//! wait at once apart from how many dashboards may stream: counted
+//! together, forty couriers waiting for orders left a dispatcher's map no
+//! subscription to open.
 //!
 //! **What is bounded is what is known exactly and cheaply.** A file's bytes
 //! are the engine's count of what it appended, read with no system call;
@@ -67,15 +90,17 @@ pub enum Kind {
     Requests,
     Writes,
     WriteBytes,
+    Held,
 }
 
-pub const KINDS: [Kind; 6] = [
+pub const KINDS: [Kind; 7] = [
     Kind::Bytes,
     Kind::Rows,
     Kind::Streams,
     Kind::Requests,
     Kind::Writes,
     Kind::WriteBytes,
+    Kind::Held,
 ];
 
 impl Kind {
@@ -88,6 +113,7 @@ impl Kind {
             Kind::Requests => "requests",
             Kind::Writes => "writes",
             Kind::WriteBytes => "write_bytes",
+            Kind::Held => "held",
         }
     }
 
@@ -102,7 +128,7 @@ impl Kind {
 
 /// A tenant's quota, kind by kind; 0 is none.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Quota([u64; 6]);
+pub struct Quota([u64; 7]);
 
 impl Quota {
     pub fn get(&self, k: Kind) -> u64 {
@@ -140,7 +166,7 @@ impl Quota {
 /// its own -- 0 for none -- and one it leaves out, or names `null`, is the
 /// node's. Kept beside the tenant's file as `<tenant>.quota`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Set([Option<u64>; 6]);
+pub struct Set([Option<u64>; 7]);
 
 impl Set {
     pub fn get(&self, k: Kind) -> Option<u64> {
@@ -224,6 +250,33 @@ impl Set {
     }
 }
 
+/// The part of a node's connections each tenant's streams, and each
+/// tenant's held writes, may take where the node sets no quota of either
+/// ([`shared`]): a quarter each, so that no one tenant's dashboards and
+/// workers together hold more than half of what every tenant shares.
+pub const SHARE: usize = 4;
+
+/// A node's quota with each tenant's streams and held writes bounded by a
+/// share of its `max_connections` where the node's flags set neither
+/// (`given` the kinds they set; 0 among them is none, as given). Every
+/// stream and every held write is a connection -- a thread -- and the
+/// node's `--max-connections` is the one bound every tenant shares:
+/// `--http-max-streams` counts a database's subscriptions, so a tenant's
+/// own on a `--dir` node, and nothing bounded a tenant's held writes, so
+/// 100 workers of one tenant waiting for jobs took every connection of a
+/// default node and its other tenants were answered 503. A node with no
+/// ceiling of connections (0) has nothing to share.
+pub fn shared(q: Quota, given: &[Kind], max_connections: usize) -> Quota {
+    if max_connections == 0 {
+        return q;
+    }
+    let share = (max_connections / SHARE).max(1) as u64;
+    [Kind::Streams, Kind::Held]
+        .into_iter()
+        .filter(|k| !given.contains(k))
+        .fold(q, |q, k| q.with(k, share))
+}
+
 /// A size as a flag gives one: bytes, or a number and `K`, `M`, `G` or `T`
 /// (powers of 1024), `B` and `iB` allowed after.
 pub fn size(text: &str) -> Option<u64> {
@@ -270,9 +323,10 @@ impl Bucket {
 /// One tenant's quota as it is held to it: the quota, and what of it its
 /// requests hold now. Shared by the tenant and the engine's limit.
 pub struct Held {
-    limits: [AtomicU64; 6],
+    limits: [AtomicU64; 7],
     requests: AtomicU64,
     streams: AtomicU64,
+    held: AtomicU64,
     writes: Mutex<Bucket>,
     write_bytes: Mutex<Bucket>,
 }
@@ -283,6 +337,7 @@ impl Held {
             limits: q.0.map(AtomicU64::new),
             requests: AtomicU64::new(0),
             streams: AtomicU64::new(0),
+            held: AtomicU64::new(0),
             writes: Mutex::new(Bucket::default()),
             write_bytes: Mutex::new(Bucket::default()),
         })
@@ -306,11 +361,12 @@ impl Held {
         }
     }
 
-    /// The streams and requests it holds now.
-    pub fn holding(&self) -> (u64, u64) {
+    /// The streams, requests and held writes it holds now.
+    pub fn holding(&self) -> (u64, u64, u64) {
         (
             self.streams.load(Ordering::Relaxed),
             self.requests.load(Ordering::Relaxed),
+            self.held.load(Ordering::Relaxed),
         )
     }
 
@@ -322,13 +378,24 @@ impl Held {
         })
     }
 
-    /// A stream -- a subscription, a `/_changes` wait, a held write, a
-    /// `Fenec-After` wait -- each a thread for as long as it lasts.
+    /// A stream -- a subscription, a `/_changes` wait, a `Fenec-After`
+    /// wait -- each a thread for as long as it lasts.
     pub fn stream(self: &Arc<Self>) -> Result<Slot, Response> {
         self.take(Kind::Streams, &self.streams, |max| {
             format!(
-                "the tenant holds {max} streams -- subscriptions, waits for changes, held \
-                 writes -- its quota: close one, or retry shortly"
+                "the tenant holds {max} streams -- subscriptions, waits for changes -- its \
+                 quota: close one, or retry shortly"
+            )
+        })
+    }
+
+    /// A write held until it can write (`Fenec-Wait`): a worker waiting
+    /// for a job, a thread for as long as it waits.
+    pub fn held(self: &Arc<Self>) -> Result<Slot, Response> {
+        self.take(Kind::Held, &self.held, |max| {
+            format!(
+                "the tenant holds {max} writes waiting to write, its quota: retry shortly, \
+                 or wait for fewer"
             )
         })
     }
@@ -350,10 +417,11 @@ impl Held {
         Ok(Slot(Some((Arc::clone(self), kind))))
     }
 
-    /// Whether a write may start now, by the tenant's rates: a write a
-    /// token, and the bytes written a second paid for -- a write lands
-    /// while the bucket holds any, and its bytes are charged as it lands
-    /// ([`Self::charge`]), so one larger than a second's worth goes through
+    /// Whether a write may start now, by the tenant's rates: a row's worth
+    /// of the rows written a second, and the bytes written a second paid
+    /// for. Both are charged as the write lands ([`Self::charge_rows`],
+    /// [`Self::charge`]) by what it wrote -- a write that wrote nothing
+    /// costs nothing -- so one larger than a second's worth goes through
     /// and the next waits out its debt.
     pub fn write(&self) -> Result<(), Response> {
         self.write_at(Instant::now())
@@ -370,11 +438,10 @@ impl Held {
                 return Err(refusal(
                     Kind::Writes,
                     429,
-                    &format!("the tenant writes past its quota of {rate} writes a second"),
+                    &format!("the tenant writes past its quota of {rate} rows a second"),
                     Some(wait),
                 ));
             }
-            b.tokens -= 1.0;
         }
         let rate = self.get(Kind::WriteBytes);
         if rate > 0 {
@@ -391,6 +458,46 @@ impl Held {
             }
         }
         Ok(())
+    }
+
+    /// How long until a write may start, by the rates: `None` now.
+    pub fn write_wait(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let mut wait = None;
+        let rate = self.get(Kind::Writes);
+        if rate > 0 {
+            let mut b = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+            b.refill(rate as f64, now);
+            if b.tokens < 1.0 {
+                wait = Some(Duration::from_secs_f64((1.0 - b.tokens) / rate as f64));
+            }
+        }
+        let rate = self.get(Kind::WriteBytes);
+        if rate > 0 {
+            let mut b = self.write_bytes.lock().unwrap_or_else(|e| e.into_inner());
+            b.refill(rate as f64, now);
+            if b.tokens <= 0.0 {
+                let w = Duration::from_secs_f64(-b.tokens / rate as f64 + 1e-6);
+                wait = Some(wait.map_or(w, |o: Duration| o.max(w)));
+            }
+        }
+        wait
+    }
+
+    /// The rows a write landed, against the rows a second.
+    pub fn charge_rows(&self, rows: u64) {
+        self.charge_rows_at(rows, Instant::now());
+    }
+
+    /// [`Self::charge_rows`] at `now`.
+    pub fn charge_rows_at(&self, rows: u64, now: Instant) {
+        let rate = self.get(Kind::Writes);
+        if rate == 0 || rows == 0 {
+            return;
+        }
+        let mut b = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        b.refill(rate as f64, now);
+        b.tokens -= rows as f64;
     }
 
     /// The bytes a write landed, against the bytes a second.
@@ -416,10 +523,14 @@ impl Held {
 }
 
 /// What the engine holds `held`'s database to as each block lands, where
-/// its bytes, rows or bytes a second are bounded; `None` asks nothing.
+/// its bytes, rows, rows a second or bytes a second are bounded; `None`
+/// asks nothing.
 pub fn limit(held: &Arc<Held>) -> Option<Limit> {
     let q = held.quota();
-    if q.get(Kind::Bytes) == 0 && q.get(Kind::Rows) == 0 && q.get(Kind::WriteBytes) == 0 {
+    if [Kind::Bytes, Kind::Rows, Kind::Writes, Kind::WriteBytes]
+        .iter()
+        .all(|&k| q.get(k) == 0)
+    {
         return None;
     }
     let held = Arc::clone(held);
@@ -444,6 +555,11 @@ pub fn limit(held: &Arc<Held>) -> Option<Limit> {
             }
         }
         held.charge(l.adds);
+        // A request's own rows, not the sweep's, a compact's or a
+        // replica's: those land on threads no request is held to a rate on.
+        if writing_here() {
+            held.charge_rows(l.writes);
+        }
         Ok(())
     }))
 }
@@ -457,6 +573,7 @@ impl Drop for Slot {
         if let Some((held, kind)) = &self.0 {
             let count = match kind {
                 Kind::Streams => &held.streams,
+                Kind::Held => &held.held,
                 _ => &held.requests,
             };
             count.fetch_sub(1, Ordering::SeqCst);
@@ -498,8 +615,16 @@ pub fn writing() -> Result<(), Response> {
     })
 }
 
-/// A quota's refusal: `{"error", "quota", "retry_after"}`, the quota named
-/// in [`HEADER`] too, and `Retry-After` where coming back helps.
+/// Whether this thread is a request held to its tenant's rates: what a
+/// landing charges its rows to.
+fn writing_here() -> bool {
+    RATED.with(|r| r.borrow().is_some())
+}
+
+/// A quota's refusal: `{"error", "quota", "retry_after", "retry_after_ms"}`,
+/// the quota named in [`HEADER`] too, and `Retry-After` where coming back
+/// helps: whole seconds there and in `retry_after`, as HTTP has them, the
+/// wait itself in `retry_after_ms`.
 pub fn refusal(kind: Kind, status: u16, why: &str, retry: Option<Duration>) -> Response {
     let mut body = String::from("{\"error\":");
     fenec_core::json::escape_into(&mut body, why);
@@ -507,8 +632,11 @@ pub fn refusal(kind: Kind, status: u16, why: &str, retry: Option<Duration>) -> R
     body.push_str(kind.name());
     body.push('"');
     let secs = retry.map(seconds);
-    if let Some(s) = secs {
-        body.push_str(&format!(",\"retry_after\":{s}"));
+    if let (Some(s), Some(d)) = (secs, retry) {
+        body.push_str(&format!(
+            ",\"retry_after\":{s},\"retry_after_ms\":{}",
+            millis(d)
+        ));
     }
     body.push('}');
     let resp = Response::json(status, body).header(HEADER, kind.name());
@@ -522,6 +650,13 @@ pub fn refusal(kind: Kind, status: u16, why: &str, retry: Option<Duration>) -> R
 fn seconds(d: Duration) -> u64 {
     let s = d.as_secs() + u64::from(d.subsec_nanos() > 0);
     s.max(1)
+}
+
+/// The wait in whole milliseconds, rounded up, one at least: come back
+/// sooner and the bucket still refuses.
+pub fn millis(d: Duration) -> u64 {
+    let ms = d.as_millis() as u64 + u64::from(!d.subsec_nanos().is_multiple_of(1_000_000));
+    ms.max(1)
 }
 
 /// The engine's refusal of a block past a quota (`Error::Quota`), whose
@@ -541,7 +676,7 @@ pub fn split(msg: &str) -> Option<(Kind, &str)> {
 
 /// Refusals by quota, for `/_metrics`: never by tenant, which is the
 /// admin API's to tell (`GET /_admin/quotas`).
-static REFUSED: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+static REFUSED: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 
 pub fn refused(k: Kind) -> u64 {
     REFUSED[k.at()].load(Ordering::Relaxed)
@@ -645,32 +780,80 @@ mod tests {
             .unwrap()
     }
 
-    /// A rate of five a second lets five through at once and refuses the
-    /// sixth with a wait of a fifth of a second, rounded up to one; a fifth
-    /// of a second on, one more goes. On a clock of the test's own: the
-    /// machine's would have the refill depend on how fast it ran.
+    /// A write of a row's worth at the given moment: let through, and
+    /// charged the rows it wrote as it lands.
+    fn wrote(held: &Held, rows: u64, at: Instant) -> Result<(), Response> {
+        held.write_at(at)?;
+        held.charge_rows_at(rows, at);
+        Ok(())
+    }
+
+    /// A rate of five rows a second lets five through at once and refuses
+    /// the sixth with a wait of a fifth of a second: 200 ms in the body,
+    /// rounded up to a second in `Retry-After`; a fifth of a second on, one
+    /// more goes. A write that wrote nothing costs nothing. On a clock of
+    /// the test's own: the machine's would have the refill depend on how
+    /// fast it ran.
     #[test]
     fn a_rate_lets_its_second_through_and_then_refuses() {
         let held = Held::new(Quota::default().with(Kind::Writes, 5));
         let t0 = Instant::now();
+        for _ in 0..100 {
+            assert!(wrote(&held, 0, t0).is_ok(), "a write of no row is free");
+        }
         for _ in 0..5 {
-            assert!(held.write_at(t0).is_ok());
+            assert!(wrote(&held, 1, t0).is_ok());
         }
         let r = held.write_at(t0).expect_err("the sixth is past the rate");
         assert_eq!(r.status, 429);
         let body = String::from_utf8_lossy(&r.body);
         assert!(body.contains(r#""quota":"writes""#), "{body}");
-        assert!(body.contains(r#""retry_after":1"#), "{body}");
+        assert!(
+            body.contains(r#""retry_after":1,"retry_after_ms":200"#),
+            "{body}"
+        );
         assert_eq!(retry_after(&r), 1);
         let later = t0 + Duration::from_millis(200);
-        assert!(held.write_at(later).is_ok());
+        assert!(wrote(&held, 1, later).is_ok());
         assert!(held.write_at(later).is_err());
         // A second's worth at most: idle for a minute, five again.
         let idle = t0 + Duration::from_secs(60);
         for _ in 0..5 {
-            assert!(held.write_at(idle).is_ok());
+            assert!(wrote(&held, 1, idle).is_ok());
         }
         assert!(held.write_at(idle).is_err());
+        // A write of many rows goes through on a row's worth, and the
+        // next waits out the debt: ten rows past five, 2.2 s.
+        let again = idle + Duration::from_secs(60);
+        assert!(wrote(&held, 15, again).is_ok());
+        let r = held.write_at(again).expect_err("in debt");
+        let body = String::from_utf8_lossy(&r.body);
+        assert!(
+            body.contains(r#""retry_after":3,"retry_after_ms":2200"#),
+            "{body}"
+        );
+    }
+
+    /// A node that sets no quota of streams or of held writes gives each
+    /// tenant a quarter of its connections of each; one it sets, 0 among
+    /// them, stands; a node with no ceiling shares nothing.
+    #[test]
+    fn a_tenants_waits_default_to_a_share_of_the_nodes_connections() {
+        let q = shared(Quota::default(), &[], 100);
+        assert_eq!((q.get(Kind::Streams), q.get(Kind::Held)), (25, 25));
+        let set = Quota::default().with(Kind::Streams, 0);
+        let q = shared(set, &[Kind::Streams], 100);
+        assert_eq!((q.get(Kind::Streams), q.get(Kind::Held)), (0, 25));
+        assert_eq!(shared(Quota::default(), &[], 0), Quota::default());
+        assert_eq!(shared(Quota::default(), &[], 2).get(Kind::Held), 1);
+    }
+
+    #[test]
+    fn a_wait_is_whole_milliseconds_rounded_up() {
+        assert_eq!(millis(Duration::from_micros(1_666)), 2);
+        assert_eq!(millis(Duration::from_millis(1_700)), 1_700);
+        assert_eq!(millis(Duration::ZERO), 1);
+        assert_eq!(seconds(Duration::from_millis(1_700)), 2);
     }
 
     /// Bytes are charged as they land: a write larger than a second's

@@ -477,7 +477,12 @@ function refused(res, body, message) {
   if (typeof body?.completed === 'number') e.completed = body.completed;
   const quota = body?.quota ?? res.headers?.get?.('fenec-quota');
   if (quota) e.quota = quota;
-  const wait = Number(res.headers?.get?.('retry-after') ?? body?.retry_after);
+  // The wait to the millisecond where the body says it: `Retry-After` is
+  // whole seconds, and a bucket of 600 rows a second refills a row in 1.7 ms.
+  const ms = Number(body?.retry_after_ms);
+  const wait = Number.isFinite(ms) && ms > 0
+    ? ms / 1000
+    : Number(res.headers?.get?.('retry-after') ?? body?.retry_after);
   if (Number.isFinite(wait) && wait > 0) e.retryAfter = wait;
   return e;
 }

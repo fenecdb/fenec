@@ -289,7 +289,7 @@ through the router, which sends it wherever the tenant goes.</p>
 <pre data-lang="bash"># every tenant on this node, unless its own quota says otherwise
 fenec-server --dir /data/n1 --admin-token a1 \
     --tenant-max-bytes 1G --tenant-max-rows 1000000 \
-    --tenant-max-streams 50 --tenant-max-requests 16 \
+    --tenant-max-streams 50 --tenant-max-held 200 --tenant-max-requests 16 \
     --tenant-writes-per-sec 500 --tenant-write-bytes-per-sec 8M
 
 # a tenant on a plan of its own: set as it is created ...
@@ -304,7 +304,7 @@ curl -X PUT localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer r
 curl localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root'
 # {"tenant":"acme","open":true,"set":{"bytes":1073741824,"rows":0,"writes":100},
 #  "quota":{"bytes":1073741824,"rows":0,"streams":50,...},
-#  "usage":{"bytes":48211,"rows":312,"streams":1,"requests":0}}</pre>
+#  "usage":{"bytes":48211,"rows":312,"streams":1,"requests":0,"held":0}}</pre>
 
 <div class="tbl">
 <table>
@@ -312,16 +312,29 @@ curl localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root'
 <tbody>
 <tr><td><code>bytes</code></td><td>the tenant's file, as written</td><td><b>507</b>, the write put back whole</td></tr>
 <tr><td><code>rows</code></td><td>the documents of its collections, together</td><td><b>507</b>, the write put back whole</td></tr>
-<tr><td><code>streams</code></td><td>subscriptions, <code>/_changes</code> waits, held writes and <code>Fenec-After</code> waits</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
+<tr><td><code>streams</code></td><td>subscriptions, <code>/_changes</code> waits and <code>Fenec-After</code> waits</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
+<tr><td><code>held</code></td><td>writes held until they can write (<a href="queues.html#wait"><code>Fenec-Wait</code></a>): workers waiting for jobs</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
 <tr><td><code>requests</code></td><td>requests in flight</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
-<tr><td><code>writes</code></td><td>writes a second, a second's worth at once</td><td><b>429</b>, <code>Retry-After</code> until the next</td></tr>
+<tr><td><code>writes</code></td><td>rows written a second, charged as each write lands</td><td><b>429</b>, <code>retry_after_ms</code> until a row's worth is back</td></tr>
 <tr><td><code>write_bytes</code></td><td>bytes written a second, charged as each lands</td><td><b>429</b>, <code>Retry-After</code> until the debt is paid</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>A refusal names its quota in the body and in a header, and every SDK's
-error carries it typed (<code>quota</code>, <code>retryAfter</code>):</p>
+error carries it typed (<code>quota</code>, <code>retryAfter</code>). A
+<code>429</code> says its wait twice: in whole seconds, rounded up, in
+<code>Retry-After</code> and <code>retry_after</code>, as HTTP has it, and to
+the millisecond in <code>retry_after_ms</code>, which every SDK and a
+replica's sync read first -- a bucket of 600 rows a second refills a row in
+1.7 ms, and fifty couriers told to come back in a second waited fifty
+seconds between them:</p>
+
+<pre data-lang="bash">HTTP/1.1 429 Too Many Requests
+Fenec-Quota: writes
+Retry-After: 1
+
+{"error":"the tenant writes past its quota of 600 rows a second","quota":"writes","retry_after":1,"retry_after_ms":2}</pre>
 
 <pre data-lang="bash">HTTP/1.1 507 Insufficient Storage
 Fenec-Quota: rows
@@ -329,6 +342,29 @@ Fenec-Quota: rows
 {"error":"the write would take the tenant past its quota of 50000 rows: delete rows, or raise the quota","quota":"rows"}</pre>
 
 <ul>
+  <li><b>A write that writes nothing costs nothing.</b> <code>writes</code>
+    counts the rows of the tenant's collections a write landed -- a put of
+    ten rows ten, a claim that took no job, a <code>require</code> unmet or
+    a held claim looking none -- and lets a write through while the bucket
+    holds a row's worth, so one of many rows goes through and the next
+    waits out the debt. Charged as a write started, 45 claims held at once
+    by a fleet on a small plan were refused for <code>writes</code> before
+    any for being held. A held claim the rate refuses as it is to run stays
+    held, and runs once a row's worth is back. The node's own landings --
+    the sweep of rows past their <code>@ttl</code>, a compact -- are not
+    the tenant's rate.</li>
+  <li><b>A tenant waits in a share of the node.</b> Every stream and every
+    held write is a connection and its thread, and a node's
+    <code>--max-connections</code> is what all its tenants share:
+    <code>--http-max-streams</code> counts each tenant's own subscriptions,
+    and nothing counted a tenant's held writes, so a hundred workers of one
+    tenant waiting for jobs took every connection of a default node and its
+    neighbours were answered 503. Where the node sets neither
+    <code>--tenant-max-streams</code> nor <code>--tenant-max-held</code>,
+    each is a quarter of <code>--max-connections</code> -- 25 of a default
+    node's 100 -- so no one tenant's dashboards and workers hold more than
+    half; a node serving a fleet raises <code>--max-connections</code>
+    (each is about 50 KB of memory) and sets its plans' quotas.</li>
   <li><b>Deletes always land.</b> A write that only takes away — a
     <code>del</code>, a <code>drop</code> — is never refused, and neither is
     a <code>compact</code>, which gives bytes back. A tenant at its quota
@@ -384,9 +420,11 @@ after, its bytes would stay in the file, dead and past the quota. The file
 passes its quota only by what a write that takes away adds — a delete's
 tombstones, a drop's record — and by what no client writes: the graphs a
 server keeps in its file's tail. The next compact gives both back. A rate is
-not asked at the landing: a write lands while its
-bucket holds any, and its bytes are charged as it lands, so a write larger
-than a second's worth goes through and the next waits out the debt.</p>
+not asked at the landing: a write lands while its bucket holds a row's worth
+or any bytes, and its rows and bytes are charged as it lands -- the rows of
+the tenant's collections it wrote, not the server's own, such as an
+<code>Idempotency-Key</code>'s -- so a write larger than a second's worth
+goes through and the next waits out the debt.</p>
 
 <p><b>A refusal tells the quota, not what the tenant holds:</b> a scoped
 token's user is told the tenant is full, not how many rows the other users

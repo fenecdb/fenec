@@ -220,9 +220,9 @@ not the one nearest the new order (gap 3).
 
 | File | What |
 | --- | --- |
-| `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one. Tandem's writes are unmetered here (gap 7): what they hold is exactly-once, and `quotas.test.ts` holds the plan |
+| `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one, Tandem held to its plan's 600 rows a second (gap 7: a held claim that takes nothing costs nothing) |
 | `lease.test.ts` (3) | a courier as a process of its own claims, picks up and beats every 300 ms, then is killed with SIGKILL: a second courier waiting at the server is handed the order no sooner than the lease (1.5 s) after the last beat and within 2 s of it, `attempts` 2; the dead courier's late pickup, delivery and beat are refused (412, a lease kept `false`); an order given back waits out its backoff; one claimed five times is a dead letter on the sixth draw |
-| `quotas.test.ts` (4) | Tandem (Pro) and Hopper (Starter) on one node: Hopper's 20 couriers beating every 50 ms, ten times its 40 writes a second, are refused (429 `writes`) and land at most its rate, while Tandem's ten are never refused and their median beat is unchanged; a bulk import past 64 KB a second is refused (429 `write_bytes`) and lands after its `Retry-After`; 45 claims waiting at once from a Starter fleet: 40 held, 5 refused (429 `streams`); a company at its rows takes no new order (507 `rows`) and deletes still land |
+| `quotas.test.ts` (4) | Tandem (Pro) and Hopper (Starter) on one node: Hopper's 20 couriers beating every 50 ms, ten times its 40 rows a second, are refused (429 `writes`) and land at most its rate, while Tandem's ten are never refused and their median beat is unchanged; a bulk import past 64 KB a second is refused (429 `write_bytes`) and lands after the wait it is told, to the millisecond; 45 claims waiting at once from a Starter fleet: 40 held, 5 refused (429 `held`); a company at its rows takes no new order (507 `rows`) and deletes still land |
 | `security.test.ts` (5) | a dispatcher's token against another company and the platform (403), no tenant (403), lapsed (401), forged (401); a courier reads only their order, row and position, cannot deliver another's order (it is not there to them), deliver a ready order nobody claimed (403), change a fee (403), claim for another courier or without counting the attempt (403), give an order back ahead of the queue (403), write another's position (403) or delete; a customer reads only their own, cannot insert as another, pre-assigned or with attempts (403), cannot move an order up the queue or cancel it claimable (403), take a cancelled one back (412), cancel another's or one carried; a customer's subscription hears their courier move on their order and nothing of another's |
 | `grafana.test.ts` (7) | every panel of `grafana/plover.json` runs under Grafana's token with the built-ins bound; that token writes nothing and reaches no other company |
 | `pages.test.ts` (5) | over the site `scripts/ci.sh` starts: sign-in with the email in another case, a wrong password, each role's pages, an order placed and followed, another customer's order a 404, a courier's claim, pickup, delivery and a second ack refused through the phone's routes, a write from another site refused |
@@ -306,8 +306,8 @@ From the tests, on the same machine:
 
 What fenecdb made awkward, slow or impossible here, the most important
 first, each with the statement that showed it and what Plover does
-instead. None was fixed in the example's own change; 1, 2, 4, 5, 8, 9
-and 13 are fixed since, and say how.
+instead. None was fixed in the example's own change; 1 to 5, 7 to 9 and
+12 to 14 are fixed since, and say how.
 
 1. **Fixed: a claim could not pick the nearest row.** A job queue's claim
    picked its rows with `order` over fields; a courier's is "the nearest
@@ -357,8 +357,18 @@ and 13 are fixed since, and say how.
    where id in (get orders select id where ... near pickup $p limit 1)` is
    a claim too, the inner `get` run first under the same lock.
 
-3. **A new order goes to whichever waiting courier runs first, not the
-   nearest; and every write wakes every waiting courier.** Each courier's
+3. **Fixed: a new order went to whichever waiting courier ran first, not
+   the nearest; and every write woke every waiting courier.** A
+   write now wakes only the held claims that read what it wrote -- 150
+   couriers waiting on `orders` leave a position beat as it is, 22 to 25 us
+   p50 at the node beside them against 50 to 95 before -- and a row several
+   couriers' claims would take goes to the claim whose own order ranks it
+   first, the one waiting longest on a tie, and is run for once (`make
+   queue-bench`'s `held other` and `held contested`; queues.html, Who gets
+   the job), and a courier's held claim orders by
+   `distance(pickup, $4)` (item 1), so of the couriers waiting the one
+   nearest the order takes it: the nearest took every one at 10, 100 and
+   1 000 waiting (`held nearest`). As it was: each courier's
    held claim is a group of its own -- its point is in its filter, and its
    token's rule names `$jwt.sub`, a group being the filter with the scope
    bound in -- so "one awake in each group, the longest waiting first"
@@ -433,8 +443,14 @@ and 13 are fixed since, and say how.
    door before they take it; a read rule gives whole rows, so the
    candidates are read with the app's token on the server.
 
-7. **Quotas: a second's wait for a 2 ms token, and a write is a write
-   whether it writes or not.** A 429 for `writes` answers `Retry-After: 1`
+7. **Fixed: a quota's 429 says its wait to the millisecond
+   (`retry_after_ms`, which every SDK and a replica's sync read first),
+   `writes` counts rows written as they land -- a claim that took nothing
+   costs nothing, a held claim is charged when its run writes and stays
+   held while the rate refuses it -- and held claims are a quota of their
+   own (`held`), apart from `streams` (`plans.ts`, `quotas.test.ts`). As it
+   was: a second's wait for a 2 ms token, and a write was a write whether
+   it wrote or not.** A 429 for `writes` answered `Retry-After: 1`
    and `"retry_after":1` -- whole seconds, at least one -- where the Pro
    plan's bucket of 600 a second refills a token in 1.7 ms: the claims test's
    50 couriers met 50 refusals and, doing as told, waited 50 s between
@@ -444,7 +460,7 @@ and 13 are fixed since, and say how.
    with 50 couriers waiting, the first few orders placed woke 400 to 650
    runs of held claims in 200 ms, draining Pro's 600 a second, and an order
    placed then was refused (429) one run in two or three of the claims
-   test, which meters no writes now:
+   test, which holds Tandem to its plan again since:
    45 claims sent to a Starter company at once were refused for `writes`
    (6 of them) before any for `streams`. And a held claim is a stream, so a
    plan's `streams` is how many couriers may wait at once (40 held, the
@@ -501,10 +517,14 @@ and 13 are fixed since, and say how.
     `bucket(t + 10800000, 86400000)`, an offset written into every
     statement, which cannot follow a zone with daylight saving.
 
-12. **A row past its `@ttl` leaves every read at once, but a subscriber
-    hears of it only when the sweeper deletes it**: a position written two minutes stale -- past its time a second later, and out of every read from then -- was heard deleted 73 s after it was written. The map
-    keeps showing a courier whose phone went quiet; Plover's map drops a
-    position whose `seen` is two minutes old itself.
+12. **Fixed: a row past its `@ttl` left every read at once, but a
+    subscriber heard of it only when the sweeper deleted it**: a position
+    written two minutes stale -- past its time a second later, and out of
+    every read from then -- was heard deleted 73 s after it was written.
+    A stream now works out when its collection's next row expires and tells
+    the deletion then, about 10 ms after the row's time, with nothing
+    written; Plover's map still drops a position whose `seen` is two
+    minutes old itself, for a page whose stream was away.
 
 13. **Fixed: a `nocase` clash named the spelling written, not the one
     stored:**
@@ -513,11 +533,17 @@ and 13 are fixed since, and say how.
     reads the value from the row holding it; a scoped token is still told
     the field alone.
 
-14. **A node's streams default to 64 for all its tenants together**
-    (`--http-max-streams`): a dispatcher's map is two subscriptions and two
-    more for its live queries, a customer following an order one. Plover's
-    nodes take 2000; each is a thread, so a node's thousands of customers
-    following orders want `live` with `{ poll }` rather than a stream each.
+14. **Answered: `--http-max-streams`'s 64 is each tenant's, not a node's
+    for all of them together; what a node's tenants share is
+    `--max-connections`, of which every stream and every held claim is one**
+    -- a dispatcher's map is two subscriptions and two more for its live
+    queries, a customer following an order one. A node that sets no quota
+    of streams or held claims now holds each tenant to a quarter of its
+    connections of each, so no one company's maps and couriers take more
+    than half of a node; Plover's plans set their own, and its nodes take
+    2000 connections. Each is a thread, so a node's thousands of customers
+    following orders still want `live` with `{ poll }` rather than a stream
+    each.
 
 ## Files
 

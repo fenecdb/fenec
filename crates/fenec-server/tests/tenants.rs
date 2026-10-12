@@ -202,3 +202,72 @@ fn a_tenant_sees_its_own_statements() {
         a.body
     );
 }
+
+/// A subscription opened on `prefix`, or the status it was refused with.
+fn subscribe(port: u16, prefix: &str) -> Result<TcpStream, String> {
+    use std::io::Read;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(s, "GET {prefix}/notes/changes HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    let mut seen = String::new();
+    let mut buf = [0u8; 4096];
+    while !seen.contains("event: seed") {
+        let k = s.read(&mut buf).unwrap();
+        seen.push_str(&String::from_utf8_lossy(&buf[..k]));
+        if k == 0 || (seen.len() >= 12 && !seen.starts_with("HTTP/1.1 200")) {
+            return Err(seen);
+        }
+    }
+    Ok(s)
+}
+
+/// A node that sets no quota of streams or held writes holds each tenant
+/// to a quarter of its connections of each: a tenant's dashboards and
+/// workers cannot take every connection its neighbours share, where
+/// `--http-max-streams` counts each tenant's own and nothing counted a
+/// tenant's held writes. Two of eight here; the other tenant opens its
+/// own beside.
+#[test]
+fn a_tenants_waits_are_a_share_of_the_nodes_connections() {
+    let dir = tmp("tenants", "share");
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = start(&[
+        "--admin-token",
+        ADMIN,
+        "--dir",
+        dir.to_str().unwrap(),
+        "--max-connections",
+        "8",
+    ]);
+    let n = Node { server, dir };
+    assert!(n.server.logged(
+        "each tenant may hold 2 streams and 2 held writes of the node's 8 connections",
+        Duration::from_secs(5)
+    ));
+    let mut c = n.http();
+    for t in ["acme", "beta"] {
+        assert_eq!(n.admin("PUT", &format!("/_admin/tenants/{t}")), 201);
+        run(
+            &mut c,
+            &format!("/t/{t}"),
+            "create collection notes (title text)",
+        );
+    }
+    drop(c);
+    let acme = [
+        subscribe(n.server.port, "/t/acme").unwrap(),
+        subscribe(n.server.port, "/t/acme").unwrap(),
+    ];
+    let refused = subscribe(n.server.port, "/t/acme").unwrap_err();
+    assert!(refused.starts_with("HTTP/1.1 429"), "{refused}");
+    let beta = subscribe(n.server.port, "/t/beta").unwrap();
+    // A held write is counted apart, and to the same share.
+    let held = n.http().ask_with(
+        "POST",
+        "/t/acme/query",
+        "{\"query\": \"del notes where title = \\\"none\\\"\"}",
+        &[("Fenec-Wait", "20")],
+    );
+    assert_eq!(held.status, 200, "{}", held.body);
+    drop((acme, beta));
+}
