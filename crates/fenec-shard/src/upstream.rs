@@ -250,9 +250,10 @@ impl Pool {
                 ))
             }
             Ok(_) => {}
-            Err(e) if line.is_empty() && !timed_out(&e) => {
-                return Err(Failure(Stage::Unanswered, e))
-            }
+            // The connection's end, as each system reports it. Not any
+            // error with nothing read: a line that is not UTF-8 is left
+            // out of `line`, and that is an answer.
+            Err(e) if line.is_empty() && ended(&e) => return Err(Failure(Stage::Unanswered, e)),
             Err(e) => return Err(Failure(Stage::Other, e)),
         }
         let other = |e| Failure(Stage::Other, e);
@@ -328,6 +329,14 @@ fn timed_out(e: &io::Error) -> bool {
     matches!(
         e.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+fn ended(e: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        UnexpectedEof | ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected
     )
 }
 
