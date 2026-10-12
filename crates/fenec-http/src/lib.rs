@@ -813,14 +813,17 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             return;
         }
         // Reading one's own write on a replica: the request waits until the
-        // write its client made on the primary (`Fenec-Seq`) is here.
-        let waiting = match req.header("fenec-after").is_some() {
-            true => admit(&tenant, true),
-            false => Ok(None),
-        };
-        let refused = match waiting {
-            Ok(_slot) => after(&req, db, hub),
-            Err(refused) => Some(refused),
+        // write its client made on the primary (`Fenec-Seq`) is here -- once
+        // `handle` would take it past its token. Waited for first, a guessed
+        // token held a connection thread for up to 30 s, enough of them
+        // every one `--max-connections` allows, and the 504 after told it
+        // where the database stood. A request refused goes on to `handle`
+        // at once, which refuses it as any other.
+        let waits = req.header("fenec-after").is_some() && admitted(cfg, &req);
+        let refused = match waits.then(|| admit(&tenant, true)) {
+            None => None,
+            Some(Ok(_slot)) => after(&req, db, hub),
+            Some(Err(refused)) => Some(refused),
         };
         if let Some(refusal) = refused {
             if let Some(t) = &tenant {
@@ -1223,14 +1226,31 @@ fn is_stream(req: &Request) -> bool {
     req.method == Method::Get && matches!(req.segments().as_slice(), [_, "changes"])
 }
 
+/// Whether `req` is the MCP endpoint's: its own path, a tenant's below its
+/// prefix. Its underscore keeps it out of a collection's way, as
+/// `/_metrics`'s does. The path is looked at before its segments are made:
+/// every other request pays a scan, not a `Vec`.
+fn is_mcp(req: &Request) -> bool {
+    req.path.contains("_mcp") && req.segments() == ["_mcp"]
+}
+
+/// Whether [`handle`] takes `req` past its token -- the MCP endpoint's own
+/// checks where it sends it there -- asked before a request waits for
+/// anything, so that a refused one waits for nothing. Only a request
+/// carrying `Fenec-After` asks it, and `handle` then asks again: a token
+/// is 0.27 us a check from the verified cache, a wait up to 30 s.
+fn admitted(cfg: &Config, req: &Request) -> bool {
+    match is_mcp(req) {
+        true => mcp::admit(cfg, req).is_ok(),
+        false => authenticate(cfg, req).is_ok(),
+    }
+}
+
 /// Turns a request into a response: auth, preflight, routing, execution.
 pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Response {
     // The MCP endpoint asks where a request comes from before its token,
-    // and answers in JSON-RPC: its own path, a tenant's below its prefix,
-    // and 404 on a server without `--mcp`. Its underscore keeps it out of a
-    // collection's way, as `/_metrics`'s does. The path is looked at before
-    // its segments are made: every other request pays a scan, not a `Vec`.
-    if req.path.contains("_mcp") && req.segments() == ["_mcp"] {
+    // and answers in JSON-RPC, 404 on a server without `--mcp`.
+    if is_mcp(req) {
         return mcp::http(db, cfg, req);
     }
     let who = match authenticate(cfg, req) {

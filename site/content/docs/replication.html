@@ -138,6 +138,9 @@ curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
 <ul>
   <li><b>It waits 5 seconds</b> unless <code>Fenec-Wait</code> says otherwise
     (in milliseconds, 30 s at most), then answers 504.</li>
+  <li><b>Its token comes first:</b> a request the server refuses (401, or
+    403 for another tenant's token) is answered at once, not after the
+    wait, and learns nothing of where the replica stands.</li>
   <li><b>The Python client</b> keeps the number for you:
     <code>client.seq</code>, sent with <code>query(..., after=...)</code>.</li>
 </ul>

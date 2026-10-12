@@ -914,8 +914,10 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     the sync layer, Go's <code>*Error</code> and .NET's
     <code>Event.Status</code>). Without it a stream outlived its token, and
     a member taken off a team heard the team until the client went away.
-    No other request is held open past its token: a read sent with
-    <code>Fenec-After</code> is checked again once its wait ends, a write
+    No other request is held open past its token, nor before it: a read
+    sent with <code>Fenec-After</code> waits only once its token is taken
+    — one the server refuses is answered 401 at once, never after the
+    wait — and is checked again once its wait ends, a write
     held by <code>Fenec-Wait</code> asks its token again each time it runs,
     and <code>/_changes</code> takes no scoped token.</li>
   <li><b>Refusals</b> tell a scoped token only what it may read: a

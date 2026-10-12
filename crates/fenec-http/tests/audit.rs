@@ -232,19 +232,18 @@ fn an_answer_that_verified_no_token_starts_no_count_again() {
             ("GET", "/_studio/", "", "", 404),
             // Its method is refused before its token is looked at.
             ("POST", "/_whoami", "", "", 405),
-            // A read waiting for a write is held before its token is asked.
-            (
-                "GET",
-                "/notes",
-                "Fenec-After: 99\r\nFenec-Wait: 0\r\n",
-                "",
-                504,
-            ),
         ],
         held,
     );
     // A listener of `/_metrics` alone answers the rest 404, unasked.
     verify_nothing(scrape, &[("GET", "/query", "", "", 404)], held);
+    // A read waiting for a write is refused for its token before it
+    // waits, and counted as any refusal: held first, it was answered 504
+    // by the wait's end and counted nothing.
+    let after = format!("{GUESSED}Fenec-After: 99\r\nFenec-Wait: 30000\r\n");
+    let (got, out) = ask(port, "GET", "/notes", &after, "");
+    assert_eq!(got, 401, "{out}");
+    assert_eq!(would_wait(LOCAL), held * 2);
     let root = format!("Authorization: Bearer {ROOT}\r\n");
     verify(scrape, &[("GET", "/_metrics", &root, "", 200)]);
 

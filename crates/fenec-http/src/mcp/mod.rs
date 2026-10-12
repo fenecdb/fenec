@@ -195,29 +195,9 @@ impl Reply {
 /// request, answered with one JSON object -- never a stream, since no tool
 /// here has anything to say before its answer.
 pub(crate) fn http(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Response {
-    let Some(opts) = cfg.mcp.as_deref() else {
-        return Response::error(404, "MCP is off: start the server with --mcp");
-    };
-    // Before the token, as the binding asks of every connection: a page
-    // on another origin, or one a DNS name was rebound under, is refused
-    // whatever it sends.
-    if let Some(why) = foreign(cfg, req) {
-        let body = Reply::error(403, None, INVALID_REQUEST, &why).body;
-        return Response::json(403, body.unwrap_or_default());
-    }
-    match req.method {
-        Method::Post => {}
-        // No stream to open with a GET and no session to end with a
-        // DELETE: 2026-07-28 has neither, and a 2025 client takes 405 for
-        // "this server keeps none".
-        _ => {
-            return Response::error(405, "the MCP endpoint takes one JSON-RPC message a POST")
-                .header("Allow", "POST")
-        }
-    }
-    let who = match crate::authenticate(cfg, req) {
-        Ok(who) => who,
-        Err(deny) => return deny,
+    let (opts, who) = match admit(cfg, req) {
+        Ok(admitted) => admitted,
+        Err(refused) => return refused,
     };
     let Ok(text) = std::str::from_utf8(&req.body) else {
         let r = Reply::error(400, None, PARSE_ERROR, "the body is not UTF-8");
@@ -237,6 +217,43 @@ pub(crate) fn http(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> R
         None => Response::empty(reply.status),
         Some(body) => Response::json(reply.status, body),
     }
+}
+
+/// What the endpoint refuses a request for before it reads its body, in
+/// the order the binding asks: MCP off, where the request comes from, its
+/// method, its token. Apart from [`http`] so that the connection asks it
+/// before a request waits for anything (`Fenec-After`): a request refused
+/// here is refused at once, not after the wait.
+pub(crate) fn admit<'a>(
+    cfg: &'a Config,
+    req: &Request,
+) -> std::result::Result<(&'a Options, Who), Response> {
+    let Some(opts) = cfg.mcp.as_deref() else {
+        return Err(Response::error(
+            404,
+            "MCP is off: start the server with --mcp",
+        ));
+    };
+    // Before the token, as the binding asks of every connection: a page
+    // on another origin, or one a DNS name was rebound under, is refused
+    // whatever it sends.
+    if let Some(why) = foreign(cfg, req) {
+        let body = Reply::error(403, None, INVALID_REQUEST, &why).body;
+        return Err(Response::json(403, body.unwrap_or_default()));
+    }
+    match req.method {
+        Method::Post => {}
+        // No stream to open with a GET and no session to end with a
+        // DELETE: 2026-07-28 has neither, and a 2025 client takes 405 for
+        // "this server keeps none".
+        _ => {
+            return Err(
+                Response::error(405, "the MCP endpoint takes one JSON-RPC message a POST")
+                    .header("Allow", "POST"),
+            )
+        }
+    }
+    Ok((opts, crate::authenticate(cfg, req)?))
 }
 
 /// Why a request is refused for where it comes from, if it is: an

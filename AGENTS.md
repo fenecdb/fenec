@@ -1345,7 +1345,23 @@ wait is the subscriptions' `Condvar`. Held back, a replica answered a read
 without the header from before the write and with it after 300 ms, as the
 test holds it. It costs the server nothing measurable -- 37 500 puts a
 second against 37 700 from a client that does not parse headers -- while
-Python's `http.client`, parsing one more, went 18 200 -> 17 900.
+Python's `http.client`, parsing one more, went 18 200 -> 17 900. Only a
+request `handle` would take past its token waits (`admitted`: the MCP
+endpoint's own checks where it goes there, `authenticate` elsewhere, and
+before either `route_tenant`'s token and tenant); a refused one goes on to
+`handle` at once, refused and counted by `audit` as any. On a single
+database the wait ran first: a guessed token held a thread for up to 30 s,
+enough of them every one `--max-connections` allows, and its 504 said
+where the database stood. Every other wait already came after its token
+-- a held claim is planned only past `authenticate`, `/_changes` and a
+subscription ask first, a replication stream its own token, `/_admin/` the
+admin token -- and the router forwards what the node refuses at once
+(`tests/token_first.rs`, fenec-shard's
+`a_refused_token_waits_for_nothing_through_the_router`: each refusal asks
+30 s for a write made only once it is in, so one that waited would be the
+wait's 504, never 401). A request without the header asks nothing more:
+`make requests-bench` in ABBA turns against main kept every p50 and its
+rates within 0.5%.
 
 **`insert` never writes over; `put` does.** `Statement::Put` carries
 `insert` (the parser sets it for the keyword, `POST /<name>` over REST):
