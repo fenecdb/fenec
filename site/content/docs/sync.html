@@ -272,10 +272,13 @@ write would hold every write behind it for good, the delete that would make
 its room among them. A <code>507</code> naming no quota is the server's own
 ceiling (<code>--max-memory</code>) or a proxy's, and is waited out as a
 <code>5xx</code> is. A <code>429</code> of <code>streams</code>,
-<code>requests</code>, <code>writes</code> or <code>write_bytes</code> is
-waited out for its <code>retry_after</code> -- the seconds
-<code>Retry-After</code> says -- where that is longer than the backoff, an
-hour at most, with the jitter on top, since every client the quota refused
+<code>held</code>, <code>requests</code>, <code>writes</code> or
+<code>write_bytes</code> is waited out for its <code>retry_after_ms</code> --
+the wait to the millisecond, a bucket refilling a row in 2 ms where
+<code>Retry-After</code> rounds it up to a second -- or its
+<code>retry_after</code>, the seconds <code>Retry-After</code> says, where
+no milliseconds are given, where that is longer than the backoff, an hour at
+most, with the jitter on top, since every client the quota refused
 in one moment is told the same wait; a stream refused so waits the same
 way, its shape not <code>connected</code> meanwhile, and
 <code>status()</code> names the quota (<code>quota</code>) beside the

@@ -119,6 +119,13 @@ wait with no row: Redis's <code>BLPOP</code>, SQS's long poll.</p>
     taken a job it hands the turn to the next, since more may be ready.
     A write to the queue costs one look under the read lock, not a claim
     a worker.</li>
+  <li><b>Claims of their own, one job:</b> it goes to the claim whose own
+    order puts it first, and on a tie to the one that has waited longest.
+    A courier's claim is a line of its own -- its point is in its filter,
+    its token's subject in its rules -- so every courier is woken by an
+    order placed; each that finds a row bids for it, and once every claim
+    that could beat the best bid has looked, the row is the best's and the
+    rest wait behind its run (<a href="#fairness">Who gets the job</a>).</li>
   <li><b>At most 30 seconds</b>, and the answer is then what the claim
     answers on an empty queue: <code>[]</code>, or a
     <code>require</code>'s 412. A worker sends the next.</li>
@@ -130,6 +137,61 @@ wait with no row: Redis's <code>BLPOP</code>, SQS's long poll.</p>
     when its answer changes.</li>
 </ul>
 
+<h3 id="fairness">Who gets the job</h3>
+
+<p>A job every waiting claim would take goes to one claim, by the claim's
+own order:</p>
+
+<ul>
+  <li><b>A claim ordering by a field</b> -- <code>order run_at</code>, a
+    queue's -- ranks a job as every other claim does, so the tie goes to
+    the claim that has waited longest: first come, first served across
+    claims as within one line, as Redis serves <code>BLPOP</code>'s
+    clients. A burst of jobs goes to the waiting claims in the order they
+    came, the oldest job to the claim held longest, each claim looking for
+    the next once the run before it is done.</li>
+  <li><b>A claim ranking jobs by its own point</b> -- a <code>near</code>
+    over the courier's position -- would rank a job by how far it is, and
+    the server ranks bids so where a claim's pick has one: the nearest
+    claim takes the job, the others looking again once its run is done,
+    which needs every waiting claim's look. A <code>set</code> picks its
+    rows by fields today, so a courier's claim takes the oldest order
+    within its reach (<code>distance(pickup, $1) &lt;= $2 order
+    run_at</code>), and the order goes to the courier waiting longest.</li>
+  <li><b>No header turns it on.</b> The claim's order says what "first"
+    means, and a tie keeps the order claims came in.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Raced, which it was before, an order placed woke every courier's claim
+and whichever ran first took it: of ten couriers waiting within reach the
+nearest was handed it one time in ten, of a hundred one in a hundred, and
+every claim that found the order ran under the write lock for nothing. One
+job every 2 ms at least to claims of their own that would all take it,
+raced in brackets (<code>make queue-bench</code>'s <code>held
+contested</code>, in turns):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Claims waiting</th><th>Held longest took it</th><th>Runs a job</th><th>Put to taken, p50</th><th>Server CPU a job</th></tr></thead>
+<tbody>
+<tr><td class="n">10</td><td class="n">100% (4-6%)</td><td class="n">1 (5.2-5.3)</td><td class="n">0.43-0.47 ms (0.37-0.43)</td><td class="n">2.0-2.1 ms (1.8-2.1)</td></tr>
+<tr><td class="n">100</td><td class="n">100% (2%)</td><td class="n">1 (5.2-5.5)</td><td class="n">0.83-0.99 ms (0.57-0.68)</td><td class="n">12.6-13.9 ms (11-14)</td></tr>
+<tr><td class="n">1 000</td><td class="n">100% (3%)</td><td class="n">1 (4.7-5.2)</td><td class="n">11-13 ms (2.6-5.2)</td><td class="n">110-131 ms (138-144)</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A tie settles as soon as the claim held longest has looked: no claim
+held after it could take the job before it. That look is what the job
+waits for, among a hundred or a thousand woken at once, where raced it
+went to the fastest of them; the one run a job, against five under the
+write lock, is every other writer's. A row a claim ranking by its own
+point may bid for waits for every claim woken, each looking once. A single
+line of workers -- the same claim -- is served as before: a job enqueued
+reached one of eight in 0.35 ms either way.</p>
+</details>
+
 <details class="deep"><summary>Details</summary>
 <p>A held claim is the same request run at a later moment: the first
 moment it would write something, or the end of the wait.</p>
@@ -138,7 +200,12 @@ moment it would write something, or the end of the wait.</p>
   <li><b>When it runs again.</b> A write to a collection it reads wakes the
     first claim of its line, which looks under the read lock whether a job
     is there to take — the claim's own filter as a <code>get</code> of one
-    row — and runs the claim only if one is. A look that found nothing is
+    row — and runs the claim only if one is. A write of another collection
+    wakes none: woken by every write, 150 claims held on
+    <code>orders</code>, each a line of its own, took a put of
+    <code>positions</code> beside them from 22 µs at the median to 50-95,
+    and at p99 from 30-90 to 200-480 µs; now it takes 22-25 and 30-97,
+    as beside none. A look that found nothing is
     not repeated for a millisecond, however many writes land meanwhile:
     beside sixteen claims held on a queue that stayed empty, sixteen busy
     workers took 148 000 jobs a second against 150 600 with none held, the
@@ -160,7 +227,13 @@ moment it would write something, or the end of the wait.</p>
     subscription is: 46 KB of the server's memory each at a thousand,
     against a subscription's 45. They count against
     <code>--max-connections</code>, which a server with many waiting
-    workers raises.</li>
+    workers raises. On a tenant node a tenant's held claims are its
+    <code>held</code> quota, apart from its <code>streams</code> -- a
+    quarter of the node's connections unless set
+    (<a href="sharding.html#quotas">quotas</a>) -- and a claim costs its
+    tenant's rate of rows written only when a run writes: one held while
+    the tenant is past its rate stays held, and runs once a row's worth is
+    back.</li>
   <li><b>Under an <code>Idempotency-Key</code></b> a claim that waited and
     then took jobs keeps them under the key: sent again, it is answered
     those rows and takes none. While it takes nothing it keeps no key, so
