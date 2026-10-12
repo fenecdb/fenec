@@ -9863,9 +9863,14 @@ impl Database {
             let Some(doc) = c.store.read(&c.schema, id)? else {
                 continue;
             };
+            // The browser module registers no hook -- a scoped token's rules
+            // are a server's -- and the loop was 147 bytes of it.
+            #[cfg(not(target_arch = "wasm32"))]
             for h in self.registry.hooks() {
                 h.answering(&c.schema, op, &doc)?;
             }
+            #[cfg(target_arch = "wasm32")]
+            let _ = op;
             // A loop rather than a `map` and `collect`: a copy of the
             // adapter of its own, 249 bytes of the browser module.
             let mut values = Vec::with_capacity(columns.len());
