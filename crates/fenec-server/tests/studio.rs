@@ -181,7 +181,7 @@ fn whoami_says_whom_the_server_takes_a_token_for() {
     assert_eq!(a.status, 200, "{}", a.body);
     assert_eq!(
         a.body,
-        r#"{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","tenants":null,"unbound":false,"append_only":["log"],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"rows":"owner = $jwt.sub"},{"collection":"board","grants":["read"],"fields":null,"rows":null},{"collection":"log","grants":["insert"],"fields":null,"rows":null}]}"#
+        r#"{"node":"single","tenant":null,"read_only":false,"kind":"scoped","sub":"alice","tenants":null,"unbound":false,"append_only":["log"],"rules":[{"collection":"notes","grants":["read","insert","update","delete"],"fields":null,"read_fields":null,"rows":"owner = $jwt.sub"},{"collection":"board","grants":["read"],"fields":null,"read_fields":null,"rows":null},{"collection":"log","grants":["insert"],"fields":null,"read_fields":null,"rows":null}]}"#
     );
     // A rule for a role the token does not hold is not shown to it.
     assert!(!a.body.contains("title"));
@@ -194,7 +194,7 @@ fn whoami_says_whom_the_server_takes_a_token_for() {
     );
     assert!(
         b.body.contains(
-            r#"{"collection":"board","grants":["update"],"fields":["title"],"rows":null}"#
+            r#"{"collection":"board","grants":["update"],"fields":["title"],"read_fields":null,"rows":null}"#
         ),
         "{}",
         b.body

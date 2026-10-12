@@ -663,14 +663,21 @@ docs  read(title)                                 for viewer
     let (_, s) = n.call(Some(&viewer), "get", r#"{"collection":"docs","ids":[1]}"#);
     assert_eq!(text(at(&s, &["rows", "0", "title"])), "fox");
     assert_eq!(at(&s, &["rows", "0", "body"]), &Value::Null, "{s:?}");
-    let (err, s) = n.call(Some(&viewer), "query", r#"{"query":"get docs select body"}"#);
+    let (err, s) = n.call(
+        Some(&viewer),
+        "query",
+        r#"{"query":"get docs select body"}"#,
+    );
     assert!(err && int(at(&s, &["status"])) == 403, "{s:?}");
 
     // Bob reads his dog whole, alice's cat by its title and year alone.
     let bob = n.token(r#"{"sub":"bob","role":"reader"}"#);
     let (_, s) = n.call(Some(&bob), "query", r#"{"query":"get docs order id"}"#);
     assert_eq!(at(&s, &["count"]), &Value::Int(2), "{s:?}");
-    assert_eq!(text(at(&s, &["rows", "0", "body"])), "a lazy dog sleeps all day");
+    assert_eq!(
+        text(at(&s, &["rows", "0", "body"])),
+        "a lazy dog sleeps all day"
+    );
     assert_eq!(text(at(&s, &["rows", "1", "title"])), "cat");
     assert_eq!(at(&s, &["rows", "1", "body"]), &Value::Null, "{s:?}");
     assert_eq!(at(&s, &["rows", "1", "owner"]), &Value::Null, "{s:?}");

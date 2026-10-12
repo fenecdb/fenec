@@ -389,7 +389,9 @@ fn read_engine(rounds: usize) {
                 times[side].push(t.elapsed().as_nanos() as f64 / TURN as f64);
             }
         }
-        println!("\n{what} read in process and written as JSON, the median of {rounds} turns of {TURN}:");
+        println!(
+            "\n{what} read in process and written as JSON, the median of {rounds} turns of {TURN}:"
+        );
         let base = pct(&mut times[0], 0.5);
         for (k, s) in sides.iter().enumerate() {
             let f = pct(&mut times[k], 0.5);
