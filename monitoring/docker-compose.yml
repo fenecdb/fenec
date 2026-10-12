@@ -19,8 +19,9 @@
 # database the first time, and mints the token Grafana reads them with.
 # `docker compose ... down -v` takes the data and the token away with the
 # containers. FENEC_PORT, GRAFANA_PORT and PROMETHEUS_PORT move the ports
-# published on loopback (`make grafana-check` runs beside a stack on the
-# usual ones).
+# published on loopback, 0 to one Docker picks (`make grafana-check` asks
+# for those, and reads them back with `docker compose port`, so it runs
+# beside a stack on the usual ones and beside another check).
 
 services:
   fenecdb:
