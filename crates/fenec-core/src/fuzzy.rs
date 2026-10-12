@@ -21,9 +21,10 @@
 //! was 2.4 MB, and 25% slower for the pointer each comparison followed.
 //!
 //! **The distance is Damerau's, restricted** -- optimal string alignment:
-//! two letters swapped are one edit, as a third or more of typing errors
-//! are (Damerau 1964), where plain Levenshtein counts them two and a
-//! five-letter word with a swap would be out of reach. It is what Lucene's
+//! two letters swapped are one edit, as a letter added, dropped or changed
+//! is -- the four Damerau (1964) found four misspellings in five to be --
+//! where plain Levenshtein counts a swap two, and a five-letter word with
+//! one would be out of reach. It is what Lucene's
 //! `FuzzyQuery`, Elasticsearch's `fuzzy_transpositions` and Meilisearch
 //! default to. **An edit that touches a word's first character counts two**,
 //! as Meilisearch counts it: a first letter is mistyped least often (7% of

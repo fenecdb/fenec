@@ -724,7 +724,7 @@ impl TextIndex {
     ///
     /// The variants are cursors as any term's, their ceilings their own,
     /// so MaxScore is as safe over them as over a plain query, which
-    /// `pruning_never_changes_the_answer` holds it to with them.
+    /// `pruning_never_changes_a_loose_answer` holds it to.
     pub fn search_loose<F>(
         &self,
         query: &str,
@@ -881,7 +881,12 @@ impl TextIndex {
         Ok(out)
     }
 
-    /// The first `k` documents `cursors` reach, best first.
+    /// The first `k` documents `cursors` reach, best first. Natively in
+    /// line with each caller, as the walk was before a loose `match` shared
+    /// it: called, FiQA's `match` took 0.261 -> 0.269 ms p50; in line, 0.257.
+    /// The browser module's `match` moved by noise alone either way, so it
+    /// keeps one copy.
+    #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
     fn ranked<F>(&self, cursors: Vec<Cursor>, k: usize, accept: F, avgdl: f32) -> Vec<(DocId, f32)>
     where
         F: Fn(DocId) -> bool,

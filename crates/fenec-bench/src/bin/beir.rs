@@ -457,6 +457,11 @@ fn main() {
         .count();
     eprintln!("a typo in {changed} of {} queries", qrels.len());
 
+    // `FENECBENCH_ONLY=match`: the methods whose names begin so, to time
+    // one against another build.
+    if let Ok(only) = std::env::var("FENECBENCH_ONLY") {
+        methods.retain(|(name, _)| name.starts_with(&only));
+    }
     println!("{:<36} {:>8} {:>10} {:>10}", "", "nDCG@10", "p50 ms", "p99 ms");
     for (name, sql) in &methods {
         let stmt = fenec_ql::parse_one(sql).unwrap();
