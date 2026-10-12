@@ -2501,10 +2501,10 @@ which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (414.5 KB, 142.4 brotli, against 662.3 and 224.2 with
+module with none (417.0 KB, 143.4 brotli, against 670.8 and 227.4 with
 every one) and left out of the full one, brotli added and saved:
-`vector` 20.7 and 18.7, `sorted` 8.9 and 21.2 with `composite`,
-`composite` beside it 9.2 and 8.4, `collate` 9.0 and 8.3, `text` 5.7 and
+`vector` 20.7 and 18.7, `sorted` 8.9 and 23.5 with `composite`,
+`composite` beside it 11.5 and 10.7, `collate` 9.0 and 8.3, `text` 5.7 and
 7.3, `facets` 3.5 and 4.1, `highlight` beside `text` 3.5 and 3.1,
 `nocase` 3.1 and 2.6, `geo` 2.8 and 5.9 (its index with it), `analytics`
 2.7 and 2.1, `sparse` 2.7 and 0.9, the schema check 9.5 and 9.5. The module with every feature is the code
@@ -2558,9 +2558,9 @@ schema check, search -- `match`, `highlight` and `snippet`, facets,
 `near` with its graph, `fuse` -- and the standard query features. A
 plugin is an extra one kind of app needs: geo, sparse vectors, a
 language's collation, `bucket` and the HLL sketches. Held to that rule
-the core is about 207 KB brotli and the extras about 17 together (`geo`
+the core is about 210 KB brotli and the extras about 17 together (`geo`
 5.9, `collate` 8.3, `sparse` 0.9, `bucket` and the sketches 2.1), 8% of
-the full module's 224: too little to pay for modules built ahead
+the full module's 227: too little to pay for modules built ahead
 for sets of features and a choice of one per page, let alone a module a
 plugin loaded beside the engine, which would carry its own copy of the
 standard library's allocator and panic machinery and reach into the write
@@ -2572,7 +2572,7 @@ and `first`/`last` are standard, and are in the core.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 224.2 KB brotli) and `@fenecdb/web/client`, so a user has two
+check, 227.4 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
