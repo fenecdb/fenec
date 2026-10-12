@@ -26,6 +26,11 @@
 //! Each is a walk over the zone's pieces -- stretches of one offset --
 //! near the time, a handful at most.
 
+// Built whatever the features, so that a binding asks one name whether
+// the module was handed the table; without `analytics` no `bucket` reads
+// a zone, and the rest is code the compiler drops.
+#![cfg_attr(not(feature = "analytics"), allow(dead_code))]
+
 use crate::error::{Error, Result};
 use crate::query::Interval;
 use crate::time::{civil_from_days, days_from_civil};
@@ -383,8 +388,9 @@ fn bytes() -> Option<&'static [u8]> {
 
 static MISSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether the build may lack the table: the browser module, handed it.
-pub const PARTIAL: bool = cfg!(target_arch = "wasm32");
+/// Whether the build may lack the table: the browser module, handed it,
+/// where a `bucket` reads a zone at all.
+pub const PARTIAL: bool = cfg!(all(target_arch = "wasm32", feature = "analytics"));
 
 /// Whether a statement since the last call named a zone the build had no
 /// table for; clears the note.
@@ -400,13 +406,12 @@ pub fn loaded() -> bool {
 /// Hands the browser module the table, the bytes of `zones.bin`: false
 /// for bytes that are not one, another version's among them.
 pub fn add_chunk(b: &[u8]) -> bool {
-    if Table::parse(b).is_none() {
+    if !PARTIAL || Table::parse(b).is_none() {
         return false;
     }
     #[cfg(target_arch = "wasm32")]
     {
         let _ = HANDED.set(b.to_vec());
-        TABLE.get_or_init(|| bytes().and_then(Table::parse));
         true
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -416,9 +421,10 @@ pub fn add_chunk(b: &[u8]) -> bool {
 static TABLE: std::sync::OnceLock<Option<Table<'static>>> = std::sync::OnceLock::new();
 
 fn table() -> Option<&'static Table<'static>> {
-    TABLE
-        .get_or_init(|| bytes().and_then(Table::parse))
-        .as_ref()
+    // Read once there are bytes: a statement asked before the module was
+    // handed them keeps nothing that would outlast their coming.
+    let b = bytes()?;
+    TABLE.get_or_init(|| Table::parse(b)).as_ref()
 }
 
 /// The table read once: its offsets and rules, where each zone's entry

@@ -156,6 +156,7 @@ wasm:
 		(echo "the wasm32 target may be missing: rustup target add wasm32-unknown-unknown"; exit 1)
 	@cp $(WASM_OUT) web/fenec.wasm
 	@mkdir -p web/collate && rm -f web/collate/*.bin && cp crates/fenec-core/src/collate/*.bin web/collate/
+	@cp crates/fenec-core/src/tz/zones.bin web/collate/
 	@echo "web/fenec.wasm  $$(wc -c < web/fenec.wasm) bytes"
 
 ## The module made without the indexes or the schema check (as `make wasm
