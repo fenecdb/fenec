@@ -51,10 +51,11 @@ export const operatorDb = (tenant: string) => conn(tenant, OPERATOR_TOKEN);
 export const throttled = { count: 0, waitedMs: 0, by: {} as Record<string, number> };
 
 /**
- * A write that a quota refused with 429 is sent again after the server's
- * `Retry-After`; anything else is thrown. The header is whole seconds, a
- * second at least, even where the writes bucket refills a token in under
- * two milliseconds: a client that does as it is told waits that second.
+ * A write that a quota refused with 429 is sent again after the wait the
+ * server names -- `retryAfter`, to the millisecond from the body's
+ * `retry_after_ms`, where `Retry-After` is whole seconds and the writes
+ * bucket refills a row in under two milliseconds -- and 50 ms at least;
+ * anything else is thrown.
  */
 export async function retrying<T>(f: () => Promise<T>, tries = 50): Promise<T> {
   for (let i = 0; ; i++) {

@@ -1,16 +1,17 @@
 // A company is held to its plan, and its neighbour is not slowed by it.
 // Tandem (Pro) and Hopper (Starter) side by side on one node: Hopper's fleet
-// sending positions ten times faster than its plan's writes a second is
+// sending positions ten times faster than its plan's rows a second is
 // refused (429, `writes`) while Tandem's couriers are answered as before; a
 // bulk import past its bytes a second waits out its debt; an idle fleet
-// larger than the plan's streams cannot all wait at the server for orders;
-// and a company at its rows takes no new order (507) but still deletes.
+// larger than the plan's held claims cannot all wait at the server for
+// orders, while its maps still stream; and a company at its rows takes no
+// new order (507) but still deletes.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startWorld, tandem, hopper, cast, quantile, sleep, type World } from './harness';
 import { heartbeat } from '../lib/dispatch';
 import { placeOrder } from '../lib/orders';
-import { asUser, FenecError, operatorDb, one } from '../lib/db';
+import { asUser, FenecError, operatorDb, one, retrying } from '../lib/db';
 import { setQuota } from '../lib/setup';
 import { PLANS } from '../lib/plans';
 import { addresses, bounds, rng, type Point } from '../lib/city';
@@ -42,7 +43,7 @@ interface Tally {
   ms: number[];
 }
 
-/** A fleet beating every `every` ms until `stop`; a refused beat waits its Retry-After. */
+/** A fleet beating every `every` ms until `stop`; a refused beat waits what the 429 says, to the millisecond. */
 function fleet(couriers: Who[], every: number, stop: { done: boolean }, tally: Tally) {
   return Promise.all(
     couriers.map(async (who, k) => {
@@ -103,6 +104,10 @@ test('a starter fleet writing ten times its plan is refused; the pro company bes
 test('a bulk import past the bytes a second waits out its debt', async () => {
   const dispatcher = asUser(hp.dispatcher);
   const doors = addresses();
+  // An import is let off the plan's rows a second -- 120 rows a page would
+  // be three seconds of a Starter company's 40 -- and held to its bytes.
+  const shard = { router: world.router, shardToken: SHARD_TOKEN };
+  await setQuota(shard, 'co-hopper', { ...PLANS.starter.quota, writes: 0 });
   // A day's orders from a merchant's system, 120 a statement: about 50 KB.
   const page = (k: number) =>
     Array.from({ length: 120 }, (_, i) => {
@@ -138,26 +143,27 @@ test('a bulk import past the bytes a second waits out its debt', async () => {
   assert.ok(refusal, `refused after ${landed} pages`);
   assert.equal(refusal.status, 429);
   assert.equal(refusal.quota, 'write_bytes');
-  assert.ok((refusal.retryAfter ?? 0) >= 1);
+  // The debt's own wait, to the millisecond, not Retry-After's whole second.
+  assert.ok((refusal.retryAfter ?? 0) > 0);
   // Waited out, the next page lands.
   await sleep(refusal.retryAfter! * 1000);
   await dispatcher.run('put orders $1', [page(9)]);
+  await setQuota(shard, 'co-hopper', PLANS.starter.quota);
 });
 
-test("an idle fleet larger than the plan's streams cannot all wait at the server", async () => {
-  const streams = PLANS.starter.quota.streams;
+test("an idle fleet larger than the plan's held claims cannot all wait at the server", async () => {
+  const held = PLANS.starter.quota.held;
   const couriers = hp.couriers.slice(0, 20);
   // 45 claims from 20 couriers' phones -- two or three each, as a phone
   // that lost its answer and asked again would -- where no order is: each
-  // waits at the server. Sent 40 ms apart, under the plan's 40 writes a
-  // second, since a held claim takes a write of the rate as it comes in
-  // before it holds a stream: sent at once, the 41st to 45th were refused
-  // for `writes` rather than for `streams`.
+  // waits at the server. A claim that takes nothing writes nothing, so the
+  // plan's rate charges none of them; sent 10 ms apart, so the five past
+  // the plan's held claims are the last five.
   await sleep(1_100);
   const nowhere: Point = [26.951, 38.331];
   const answers = await Promise.all(
-    Array.from({ length: streams + 5 }, async (_, i) => {
-      await sleep(i * 40);
+    Array.from({ length: held + 5 }, async (_, i) => {
+      await sleep(i * 10);
       const who = couriers[i % couriers.length];
       return asUser(who)
         .batch([['set orders {courier: $1} where run_at <= now() and distance(pickup, $2) <= 1 order run_at limit 1', [who.sub, nowhere]]], { wait: 4_000 })
@@ -165,8 +171,8 @@ test("an idle fleet larger than the plan's streams cannot all wait at the server
         .catch((e: FenecError) => `${e.status} ${e.quota}`);
     }),
   );
-  assert.equal(answers.filter((a) => a === 'held').length, streams);
-  assert.deepEqual(answers.slice(streams), Array(5).fill('429 streams'));
+  assert.equal(answers.filter((a) => a === 'held').length, held);
+  assert.deepEqual(answers.slice(held), Array(5).fill('429 held'));
 });
 
 test('a company at its rows takes no new order, and deletes still land', async () => {
@@ -182,7 +188,9 @@ test('a company at its rows takes no new order, and deletes still land', async (
   // The dispatcher clears cancelled orders, and the company has room again.
   const cleared = await asUser(hp.dispatcher).run('del orders where status = "cancelled" and ref ~ "import-0-"');
   assert.ok((cleared as { count: number }).count > 0);
-  await place(4);
+  // A delete's rows are rows written: the next order waits out the rate's
+  // debt, as the server tells it to the millisecond.
+  await retrying(() => place(4));
   const kept = await one<{ count: number }>(operatorDb('co-hopper'), 'get orders where ref ~ "full-" count');
   assert.equal(kept!.count, 4);
   await setQuota({ router: world.router, shardToken: SHARD_TOKEN }, 'co-hopper', PLANS.starter.quota);

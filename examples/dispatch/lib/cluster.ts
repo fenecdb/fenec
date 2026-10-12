@@ -115,7 +115,10 @@ export class Cluster {
       '2000',
       // Every dispatcher's map holds a stream for positions and one for
       // orders, each live query one more, each customer following an order
-      // one: 64, the default, is a node's for all its tenants together.
+      // one: 64, the default, is each tenant's, and every one of them is
+      // also one of the node's --max-connections, which its tenants share --
+      // each tenant's streams and held claims a quarter of it unless its
+      // plan's quota says otherwise.
       '--http-max-streams',
       '2000',
       ...(this.opts.cors ? ['--http-cors', this.opts.cors] : []),
