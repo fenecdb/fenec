@@ -408,6 +408,7 @@ fn put_docs(collection: &str, docs: Vec<Vec<(String, Value)>>) -> Statement {
         docs_param: None,
         else_set: None,
         require: None,
+        pick: None,
     }
 }
 

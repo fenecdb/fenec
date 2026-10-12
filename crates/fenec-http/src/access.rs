@@ -1350,6 +1350,7 @@ impl Scope {
                 if_absent,
                 else_set,
                 require,
+                mut pick,
             } => {
                 // `scoped()` writes a parameter's documents in first, so
                 // that each is held to the rules below.
@@ -1383,6 +1384,20 @@ impl Scope {
                         }
                     }
                 }
+                // `returning` answers the rows written, which is a read:
+                // each held to the read rules as written (`Pick::visible`),
+                // the write refused where one does not pass them.
+                if let Some(p) = pick.as_mut().filter(|p| p.returning.is_some()) {
+                    match self.filter(&collection, READ) {
+                        Some(f) => p.visible = f,
+                        None => {
+                            return Err(denied(format!(
+                                "`returning` answers the rows written, and this token reads \
+                                 none of `{collection}`: write without it"
+                            )))
+                        }
+                    }
+                }
                 // An insert stays one: made a put here, it would write over.
                 Statement::Put {
                     collection,
@@ -1392,6 +1407,7 @@ impl Scope {
                     if_absent,
                     else_set,
                     require,
+                    pick,
                 }
             }
             // `require` counts the rows the token's filter let it write, and

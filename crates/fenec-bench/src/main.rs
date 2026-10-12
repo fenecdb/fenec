@@ -172,6 +172,7 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
             docs_param: None,
             else_set: None,
             require: None,
+            pick: None,
         })
         .unwrap();
     }

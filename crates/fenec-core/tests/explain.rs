@@ -104,6 +104,7 @@ fn db() -> Database {
         docs_param: None,
         else_set: None,
         require: None,
+        pick: None,
     })
     .unwrap();
     let children: Vec<Vec<(String, Expr)>> = (0..4000usize)
@@ -125,6 +126,7 @@ fn db() -> Database {
         docs_param: None,
         else_set: None,
         require: None,
+        pick: None,
     })
     .unwrap();
     db

@@ -5818,6 +5818,7 @@ impl Database {
                 if_absent,
                 else_set,
                 require,
+                pick,
             } => required(
                 if *insert { "insert" } else { "put" },
                 collection,
@@ -5829,6 +5830,7 @@ impl Database {
                     *insert,
                     *if_absent,
                     else_set.as_deref(),
+                    pick.as_deref(),
                     params,
                 ),
             ),
@@ -6706,30 +6708,81 @@ impl Database {
         insert: bool,
         if_absent: bool,
         else_set: Option<&[(String, Expr)]>,
+        pick: Option<&Pick>,
         params: &[Value],
     ) -> Result<Response> {
         // Taken out for the statement, as `set` takes it: an upsert's
         // values call its functions while the row is written.
         let registry = std::mem::take(&mut self.registry);
+        let list = pick.and_then(|p| p.returning.as_ref());
+        let mut ids = list.map(|_| Vec::new());
         let out = self.put_with(
-            collection, docs, docs_param, insert, if_absent, else_set, &registry, params,
+            collection,
+            docs,
+            docs_param,
+            (insert, if_absent),
+            else_set,
+            &registry,
+            params,
+            ids.as_mut(),
         );
         self.registry = registry;
-        out
+        match (out, list, ids) {
+            (Ok(_), Some(list), Some(ids)) => self.answer_put(collection, list, pick, &ids, params),
+            (out, ..) => out.map(Response::Affected),
+        }
     }
 
+    /// A `put`'s `returning`: the rows it wrote, ids and all, each as the
+    /// statement left it -- held first, under a scoped token, to its read
+    /// rules (`Pick::visible`), which refuse the write rather than answer a
+    /// row the token could not `get`. Out of line, as [`Self::returned`]
+    /// is: a put that answers its count keeps the code it had.
+    #[inline(never)]
+    fn answer_put(
+        &self,
+        collection: &str,
+        list: &Option<Vec<String>>,
+        pick: Option<&Pick>,
+        ids: &[DocId],
+        params: &[Value],
+    ) -> Result<Response> {
+        if let Some(f) = pick.and_then(|p| p.visible.as_ref()) {
+            let c = self.collection(collection)?;
+            let ctx = EvalCtx {
+                params,
+                registry: &self.registry,
+                clock: self.clock,
+            };
+            let test = Filter::new(c, f, &ctx);
+            for &id in ids {
+                if !test.matches(id, &ctx)? {
+                    return Err(Error::Denied(format!(
+                        "`returning` answers rows this token reads, and document {id} of \
+                         `{collection}` it wrote is not one: the write is put back -- \
+                         write it without `returning`"
+                    )));
+                }
+            }
+        }
+        Ok(Response::Rows(self.returned(collection, list, ids)?))
+    }
+
+    /// The documents of a `put` written, how many rows it wrote, and --
+    /// into `answered`, when `returning` asks -- each row's id in the
+    /// order of the documents.
     #[allow(clippy::too_many_arguments)]
     fn put_with(
         &mut self,
         collection: &str,
         docs: &[Vec<(String, Expr)>],
         docs_param: Option<usize>,
-        insert: bool,
-        if_absent: bool,
+        (insert, if_absent): (bool, bool),
         else_set: Option<&[(String, Expr)]>,
         registry: &Registry,
         params: &[Value],
-    ) -> Result<Response> {
+        mut answered: Option<&mut Vec<DocId>>,
+    ) -> Result<usize> {
         let schema = self.collection(collection)?.schema.clone();
         let cid = self.collection(collection)?.id;
         let hooks: Vec<_> = registry.hooks().to_vec();
@@ -6900,6 +6953,9 @@ impl Database {
                     for h in &hooks {
                         h.after_write(collection, op, &doc)?;
                     }
+                    if let Some(ids) = answered.as_deref_mut() {
+                        ids.push(doc.id);
+                    }
                     written.push(doc);
                     n += 1;
                     continue;
@@ -6925,11 +6981,14 @@ impl Database {
                 &hooks,
                 Some(&doc),
             )? {
+                if let Some(ids) = answered.as_deref_mut() {
+                    ids.push(id);
+                }
                 n += 1;
             }
         }
         self.index_written(collection, &mut written);
-        Ok(Response::Affected(n))
+        Ok(n)
     }
 
     /// The vectors of the documents a `put` wrote, indexed in a batch:

@@ -126,6 +126,7 @@ fn in_process(rows: &[Row], indexed: bool) -> String {
             docs_param: None,
             else_set: None,
             require: None,
+            pick: None,
         })
         .unwrap();
     }

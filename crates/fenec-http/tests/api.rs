@@ -462,6 +462,40 @@ fn count_and_free_where() {
     assert_eq!(get(h.port, "/articles?count&limit=2").status, 400);
 }
 
+/// `POST /<name>?returning=...` answers the documents it made, ids and
+/// all, where it otherwise answers their count -- `insert ... returning`.
+#[test]
+fn a_post_answers_its_rows_when_asked() {
+    let h = start(Config::default());
+    let doc = r#"[{"article_id": 2, "body": "fine", "stars": 4}, {"article_id": 3, "stars": 1}]"#;
+    let r = call(h.port, "POST", "/remarks?returning=id,stars", Some(doc));
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(r.body, r#"[{"id":4,"stars":4},{"id":5,"stars":1}]"#);
+    assert!(r.header("fenec-seq").is_some(), "a write names its change");
+    let r = call(
+        h.port,
+        "POST",
+        "/remarks?returning=*",
+        Some(r#"{"body": "x"}"#),
+    );
+    assert_eq!(r.status, 201, "{}", r.body);
+    assert_eq!(
+        r.body,
+        r#"[{"id":6,"article_id":null,"body":"x","stars":null}]"#
+    );
+    let r = call(h.port, "POST", "/remarks", Some(r#"{"body": "y"}"#));
+    assert_eq!((r.status, r.body.as_str()), (201, r#"{"inserted":1}"#));
+    let r = call(
+        h.port,
+        "POST",
+        "/remarks?returning=nope",
+        Some(r#"{"body": "z"}"#),
+    );
+    // As `?select=nope` is: a field it has not got, and nothing written.
+    assert_eq!(r.status, 404, "{}", r.body);
+    assert_eq!(rows(&get(h.port, "/remarks").body), 7);
+}
+
 #[test]
 fn near_is_a_post_endpoint() {
     let h = start(Config::default());

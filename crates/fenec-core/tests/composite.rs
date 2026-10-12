@@ -160,6 +160,7 @@ fn twins(docs: usize) -> (Database, Database) {
             docs_param: None,
             else_set: None,
             require: None,
+            pick: None,
         })
         .unwrap();
     }

@@ -71,6 +71,7 @@ fn main() {
             docs_param: None,
             else_set: None,
             require: None,
+            pick: None,
         })
         .unwrap();
     }
@@ -147,6 +148,7 @@ fn main() {
                 docs_param: None,
                 else_set: None,
                 require: None,
+                pick: None,
             })
             .unwrap();
         }
@@ -187,6 +189,7 @@ fn main() {
                 docs_param: None,
                 else_set: None,
                 require: None,
+                pick: None,
             })
             .unwrap();
         }

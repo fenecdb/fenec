@@ -493,6 +493,13 @@ c('returning takes the fields to answer', jobs, ['where', 'id', 3], ['toDelete',
 c('returning star takes no other field', jobs, ['where', 'id', 3], ['toDelete', { returning: ['*', 'id'] }]);
 c('returning takes field names', jobs, ['where', 'id', 3], ['toDelete', { returning: ['a b'] }]);
 c('insert takes no order', jobs, ['order', 'run_at'], ['toInsert', { a: 1 }]);
+// An insert's and an upsert's `{ returning }`: the rows written, ids and all.
+const orders = ['from', 'orders'];
+c('an insert answers the ids it made', orders, ['toInsert', { item: 'tea' }, { returning: ['id'] }]);
+c('an insert through the endpoint answers its rows', orders, ['insert', [{ item: 'tea' }, { item: 'pie', n: 2 }], { returning: true }]);
+c('an insert if absent answers what it made, before its require', ['from', 'locks'], ['toInsert', { name: 'job', owner: 'a' }, { ifAbsent: true, returning: ['id', 'owner'], require: 1 }]);
+c('an upsert answers the rows it made and set', hits, ['upsert', { key: 'ip1', n: 1 }, { n: { $inc: 1 } }, { returning: ['id', 'n'] }]);
+c('an insert returning takes field names', orders, ['toInsert', { a: 1 }, { returning: ['a b'] }]);
 c('upsert takes no limit', jobs, ['limit', 1], ['toUpsert', { id: 1 }, { a: 1 }]);
 c('a write still takes no offset', jobs, ['where', 'a', 1], ['order', 'id'], ['limit', 2], ['offset', 1], ['toUpdate', { a: 1 }]);
 

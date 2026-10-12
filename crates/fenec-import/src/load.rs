@@ -301,6 +301,7 @@ fn flush(
         docs_param: None,
         else_set: None,
         require: None,
+        pick: None,
     })
     .map_err(|e| locate(e, rows_done - n + 1, rows_done))
     .map(|_| ())

@@ -1619,6 +1619,13 @@ pub struct Pick {
     /// picked, under the columns a `get`'s `select` names: `None` every
     /// field after the id (`returning *`), or those listed.
     pub returning: Option<Option<Vec<String>>>,
+    /// A scoped token's read rules (`fenec_http::access`), which every row
+    /// a `put`'s `returning` answers is held to as written: a row they do
+    /// not pass refuses the write, put back whole, rather than hand the
+    /// token a row it could not `get` -- or leave the row out, and answer
+    /// fewer rows than were written with nothing to say why. None: every
+    /// row.
+    pub visible: Option<Expr>,
 }
 
 impl Pick {
@@ -2452,6 +2459,12 @@ pub enum Statement {
         /// `... require <n>`: the statement is refused (`Error::Unmet`), and
         /// so its block put back whole, unless it wrote exactly `n` rows.
         require: Option<u64>,
+        /// `returning * | a, b`: the rows it wrote answered rather than
+        /// counted, ids and all, in the order of its documents -- a row
+        /// `if absent` passed over is neither, the row `else set` set is.
+        /// A `Pick` as a `set`'s is, its `order` and `limit` empty: a put
+        /// picks no rows.
+        pick: Option<Box<Pick>>,
     },
     Select(Select),
     /// `explain get ...`: the query runs, and what comes back is the path it
@@ -2619,6 +2632,7 @@ impl Statement {
             if_absent,
             else_set,
             require,
+            pick,
         } = self
         else {
             return Ok(self);
@@ -2639,6 +2653,7 @@ impl Statement {
             if_absent,
             else_set,
             require,
+            pick,
         })
     }
 
@@ -2681,11 +2696,13 @@ impl Statement {
         self.is_read_only() || self.pick().is_some_and(|p| p.returning.is_some())
     }
 
-    /// A `set`'s or a `del`'s `order`, `limit` and `returning`, if it has
-    /// any.
+    /// A `set`'s or a `del`'s `order`, `limit` and `returning`, or a
+    /// `put`'s `returning`, if it has any.
     pub fn pick(&self) -> Option<&Pick> {
         match self {
-            Statement::Update { pick, .. } | Statement::Delete { pick, .. } => pick.as_deref(),
+            Statement::Update { pick, .. }
+            | Statement::Delete { pick, .. }
+            | Statement::Put { pick, .. } => pick.as_deref(),
             _ => None,
         }
     }

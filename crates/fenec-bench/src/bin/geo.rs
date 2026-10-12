@@ -265,6 +265,7 @@ fn load(db: &mut Database, data: &[(f64, f64)]) -> Duration {
             if_absent: false,
             else_set: None,
             require: None,
+            pick: None,
         })
         .unwrap();
     }
@@ -380,6 +381,7 @@ fn fenec(out: &mut Out, dist: &str, data: &[(f64, f64)], qs: &[(f64, f64)]) {
                 if_absent: false,
                 else_set: None,
                 require: None,
+                pick: None,
             })
             .unwrap();
     }

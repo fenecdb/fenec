@@ -59,6 +59,8 @@ struct Conn {
 struct Answer {
     status: u16,
     replayed: bool,
+    /// `Fenec-Seq`: the change a write left the database at.
+    seq: Option<u64>,
     body: String,
 }
 
@@ -83,7 +85,7 @@ impl Conn {
         let mut line = String::new();
         self.r.read_line(&mut line).unwrap();
         let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
-        let (mut len, mut replayed) = (0, false);
+        let (mut len, mut replayed, mut seq) = (0, false, None);
         loop {
             let mut h = String::new();
             self.r.read_line(&mut h).unwrap();
@@ -98,6 +100,9 @@ impl Conn {
                 if k.eq_ignore_ascii_case("idempotent-replayed") {
                     replayed = v.trim() == "true";
                 }
+                if k.eq_ignore_ascii_case("fenec-seq") {
+                    seq = v.trim().parse().ok();
+                }
             }
         }
         let mut body = vec![0; len];
@@ -105,6 +110,7 @@ impl Conn {
         Answer {
             status,
             replayed,
+            seq,
             body: String::from_utf8(body).unwrap(),
         }
     }
@@ -227,4 +233,42 @@ fn an_ack_by_another_worker_is_412() {
                limit 1 returning id require 1";
     let a = c.post("/query", &line(one, "[\"w3\"]"), None);
     assert_eq!(a.status, 412, "{}", a.body);
+}
+
+/// An insert answers the ids it made (`returning`) with the change it left
+/// the database at, over `/query` and in a `/batch` under a key, whose
+/// replay answers the same rows and writes nothing.
+#[test]
+fn an_insert_answers_its_ids_and_its_change() {
+    let port = start();
+    let mut c = Conn::open(port);
+    let put =
+        "insert jobs [{run_at: 1, attempts: 0}, {run_at: 2, attempts: 0}] returning id, run_at";
+    let a = c.post("/query", &line(put, "[]"), None);
+    assert_eq!(a.status, 200, "{}", a.body);
+    let first = JOBS + 1;
+    assert_eq!(
+        a.body,
+        format!(
+            r#"[{{"id":{first},"run_at":"1970-01-01T00:00:00.001Z"}},{{"id":{},"run_at":"1970-01-01T00:00:00.002Z"}}]"#,
+            first + 1
+        )
+    );
+    let seq = a.seq.expect("a write's answer names its change");
+    let one = "insert jobs {run_at: $1, attempts: 0} returning id";
+    let batch = format!("{}\n{}", line(one, "[7]"), line("get jobs count", "[]"));
+    let a = c.post("/batch", &batch, Some("insert-once"));
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert!(
+        a.body.contains(&format!(r#"[{{"id":{}}}]"#, first + 2)),
+        "{}",
+        a.body
+    );
+    // The row, the key kept beside it, and the collection keys are kept in.
+    assert!(a.seq.is_some_and(|s| s > seq), "{:?}", a.seq);
+    let again = c.post("/batch", &batch, Some("insert-once"));
+    assert!(again.replayed);
+    assert_eq!(again.body, a.body);
+    let a = c.post("/query", r#"{"query":"get jobs count"}"#, None);
+    assert_eq!(a.body, format!(r#"[{{"count":{}}}]"#, JOBS + 3));
 }

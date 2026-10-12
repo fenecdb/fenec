@@ -52,6 +52,7 @@ mod queues_docs;
 mod redis_docs;
 mod replica;
 mod require;
+mod returning;
 mod rewrite;
 mod sorted;
 mod sparse;

@@ -862,7 +862,7 @@ export declare class Query<
    * them as written.
    */
   toUpdate(patch: Insert<F>, opts?: WriteOptions): [sql: string, params: unknown[]];
-  toUpsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: RequireOptions): [sql: string, params: unknown[]];
+  toUpsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: UpsertOptions): [sql: string, params: unknown[]];
   toDelete(opts?: WriteOptions): [sql: string, params: unknown[]];
 
   /** The query's collection. */
@@ -901,8 +901,15 @@ export declare class Query<
    * `id` written over. FenecQL's `insert` refuses a taken id instead.
    * `{ ifAbsent: true }` passes over a document whose id or `@unique` value
    * is held (`put ... if absent`), and the count says what was written: a
-   * lock taken (1) or not (0).
+   * lock taken (1) or not (0). `{ returning }` answers the rows written
+   * instead, ids and all, in the documents' order: `insert(order, {
+   * returning: ['id'] })`.
    */
+  insert(docs: InsertRow<F> | InsertRow<F>[], opts: InsertOptions & { returning: true | readonly ['*'] }): Promise<Row<F>[]>;
+  insert<K extends keyof Row<F> & string>(
+    docs: InsertRow<F> | InsertRow<F>[],
+    opts: InsertOptions & { returning: readonly K[] },
+  ): Promise<Pick<Row<F>, K>[]>;
   insert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): Promise<number>;
   /**
    * `set`: the rows it changed, or with `{ returning }` the rows as
@@ -923,9 +930,16 @@ export declare class Query<
    * the patch -- an update's, `inc(n)` and `expr(...)` with it, and in an
    * expression `new.f` the document's own `f`:
    * `upsert({ key, n: 1 }, { n: expr('n + new.n') })`. The count is the
-   * rows set and made together.
+   * rows set and made together, or with `{ returning }` those rows as
+   * written, in the documents' order.
    */
-  upsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: RequireOptions): Promise<number>;
+  upsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts: UpsertOptions & { returning: true | readonly ['*'] }): Promise<Row<F>[]>;
+  upsert<K extends keyof Row<F> & string>(
+    docs: InsertRow<F> | InsertRow<F>[],
+    patch: Insert<F>,
+    opts: UpsertOptions & { returning: readonly K[] },
+  ): Promise<Pick<Row<F>, K>[]>;
+  upsert(docs: InsertRow<F> | InsertRow<F>[], patch: Insert<F>, opts?: UpsertOptions): Promise<number>;
   /** `del`: the rows it deleted, or with `{ returning }` the rows as they were -- a pop. */
   delete(opts: WriteOptions & { returning: true | readonly ['*'] }): Promise<Row<F>[]>;
   delete<K extends keyof Row<F> & string>(opts: WriteOptions & { returning: readonly K[] }): Promise<Pick<Row<F>, K>[]>;
@@ -951,9 +965,19 @@ export interface WriteOptions extends RequireOptions {
   returning?: true | readonly string[];
 }
 
-/** An insert's options: `ifAbsent` passes over a document whose id or `@unique` value is held. */
-export interface InsertOptions extends RequireOptions {
+/**
+ * An insert's options: `ifAbsent` passes over a document whose id or
+ * `@unique` value is held, and `returning` answers the rows written rather
+ * than their count, ids and all: `true` or `['*']` every field, or those
+ * named.
+ */
+export interface InsertOptions extends UpsertOptions {
   ifAbsent?: boolean;
+}
+
+/** An upsert's options: `require`, and `returning` as an insert's. */
+export interface UpsertOptions extends RequireOptions {
+  returning?: true | readonly string[];
 }
 
 /** A patch (`update`): every field optional, a value written or worked out (`inc`, `expr`). */

@@ -14,7 +14,8 @@
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
-//!            [order <field> [collate und|tr] [asc|desc], ...] [limit N] [offset N] [count]
+//!            [order <key> [collate und|tr] [asc|desc], ...] [limit N] [offset N] [count]
+//!            -- a key: a field, or any expression over the row, `distance(loc, $1)`, `a * b`
 //!            [facet <field> [top N], ...]   -- value counts over every matched row
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
 //! get    <name> select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
@@ -31,10 +32,11 @@
 //! put    <name> { ... } if absent         -- a document whose id or @unique value is held is passed over
 //! put    <name> { ... } if absent else set { n: n + new.n }   -- or sets the row holding it
 //! put    <name> $1                       -- the documents a parameter holds: an object or a list
+//! put | insert ... [returning * | a, b]  -- the rows written, ids and all, in the documents' order
 //! set    <name> { k: v, ... } [where <expr>] -- v may read the row: {n: n + 1, at: now()}
 //! <expr> + - * / <expr>                  -- numbers, or a timestamp and milliseconds
 //! del    <name> [where <expr>]
-//! set | del ... [order <field> [desc], ...] [limit N] [returning * | a, b]
+//! set | del ... [order <key> [desc], ...] [limit N] [returning * | a, b]
 //!                                        -- the rows a get would page to, answered as written
 //! collections | describe <name> | compact [<name>]
 //! ```
@@ -983,7 +985,20 @@ impl Parser {
                 else_set = Some(self.object()?);
             }
         }
-        let require = self.require()?;
+        // `require` and `returning`, either first.
+        let (mut require, mut pick) = (None, None);
+        loop {
+            if self.peek_kw("require") {
+                require = self.require()?;
+            } else if self.eat_kw("returning") {
+                pick = Some(Box::new(Pick {
+                    returning: Some(self.projection_list()?),
+                    ..Pick::default()
+                }));
+            } else {
+                break;
+            }
+        }
         Ok(Statement::Put {
             collection,
             docs,
@@ -992,6 +1007,7 @@ impl Parser {
             if_absent,
             else_set,
             require,
+            pick,
         })
     }
 
