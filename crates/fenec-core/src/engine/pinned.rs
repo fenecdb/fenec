@@ -218,6 +218,15 @@ impl Database {
             if ordered(&s.field) {
                 return None;
             }
+            // `order distance(<field>, <point>)`, a walk of the point index
+            // (`walk_distance`).
+            if let Some((f, _)) =
+                (s.expr.as_ref()).and_then(|e| crate::geo::distance_call(e, params))
+            {
+                if c.geo.iter().any(|(n, _)| n == f) {
+                    return None;
+                }
+            }
         }
         if sel.order.first().is_some_and(|s| composed(&s.field)) {
             return None;

@@ -7665,6 +7665,14 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Option<Vec<DocId>>> {
+        // A key worked out of the row walks no index of a field's, but the
+        // distance from a point one of a point's.
+        if let Some(i) = sel.order.iter().position(|s| s.expr.is_some()) {
+            return match (&sel.order[..], &sel.order[i].expr) {
+                ([s], Some(e)) => self.walk_distance(c, sel, s, e, params, ctx),
+                _ => Ok(None),
+            };
+        }
         if cfg!(feature = "composite") && !c.composites.is_empty() {
             if let Some(ids) = self.walk_composite(c, sel, params, ctx)? {
                 return Ok(Some(ids));
@@ -7674,6 +7682,7 @@ impl Database {
             field,
             asc,
             collate,
+            ..
         }] = sel.order.as_slice()
         else {
             return Ok(None);
@@ -8326,6 +8335,62 @@ impl Database {
         _: &EvalCtx,
     ) -> Result<Option<Vec<(DocId, f32)>>> {
         Ok(None)
+    }
+
+    /// `order distance(<field>, <point>) limit N` over a field with `@geo`
+    /// answered by walking the point index nearest first, as `near` walks
+    /// it ([`Self::walk_geo_near`]), and stopping at the page -- `None`
+    /// where the scan answers. The walk's order is the scan's sort of every
+    /// distance, ties in id order, but it meets no row without a point,
+    /// whose null distance the scan puts first: so only where none can
+    /// pass -- the index holds every row, or the filter's `and` chain puts
+    /// a radius or a box on the field. Descending, it is the scan's.
+    fn walk_distance(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        s: &Sort,
+        e: &Expr,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Option<Vec<DocId>>> {
+        let (true, None, Some(limit)) = (s.asc, s.collate, sel.limit.map(|l| l.at(params))) else {
+            return Ok(None);
+        };
+        let Some((field, from)) = crate::geo::distance_call(e, params) else {
+            return Ok(None);
+        };
+        if sel.lookup.as_ref().is_some_and(|l| l.required) {
+            return Ok(None);
+        }
+        let Some(ix) = c.geo_index(field)? else {
+            return Ok(None);
+        };
+        let shaped = sel.filter.as_ref().is_some_and(|f| {
+            let mut shapes = Vec::new();
+            crate::geo::conjunct_shapes(f, params, &mut shapes);
+            shapes.iter().any(|(n, _)| *n == field)
+        });
+        if ix.len() != c.store.len() && !shaped {
+            plan(|| {
+                format!(
+                    "order: the point index on {field} not walked, {} rows hold no point",
+                    c.store.len() - ix.len()
+                )
+            });
+            return Ok(None);
+        }
+        let near = Near {
+            field: field.to_string(),
+            vector: Expr::Lit(Value::Null),
+            ef: None,
+            exact: false,
+        };
+        let want = limit.saturating_add(sel.offset.at(params));
+        plan(|| format!("order: distance from a point on {field}, by its point index"));
+        Ok(self
+            .walk_geo_near(c, sel, &near, from, want, params, ctx)?
+            .map(|hits| hits.into_iter().map(|(id, _)| id).collect()))
     }
 
     /// `near` over a `sparse<N>` field: the documents with the largest dot
@@ -9298,7 +9363,13 @@ impl Database {
                     ids.truncate(k);
                 }
             }
-            if !sel.order.is_empty() {
+            if sel.order.iter().any(|s| s.expr.is_some()) {
+                let k = sel
+                    .limit
+                    .map(|l| l.at(params).saturating_add(sel.offset.at(params)))
+                    .unwrap_or(usize::MAX);
+                ids = self.order_ids_by(c, &sel.order, &ids, k, params)?;
+            } else if !sel.order.is_empty() {
                 // `id` is not a schema field but must still be sortable -- the
                 // field lookup used to happen first, so `order id` raised an
                 // error.
@@ -9339,6 +9410,84 @@ impl Database {
             }
             Ok((ids, facet_ids))
         }
+    }
+
+    /// `ids` in the order of `sorts`, an expression among them -- `order
+    /// distance(loc, $1)`, `order price * qty desc` -- the first `k`: what
+    /// [`order_ids`] does with keys read, each key worked out of each row,
+    /// every field and path the keys read decoded in one pass a row
+    /// ([`aggregate::Reader`], as a computed column's are). A field among
+    /// them orders as it does alone, in its collation and by its fold; an
+    /// expression's text in the one `collate` names, its bytes' otherwise.
+    /// Out of line, so an order of fields alone keeps the code it had.
+    #[inline(never)]
+    fn order_ids_by(
+        &self,
+        c: &Collection,
+        sorts: &[Sort],
+        ids: &[DocId],
+        k: usize,
+        params: &[Value],
+    ) -> Result<Vec<DocId>> {
+        let fields: Vec<Expr> = sorts.iter().map(|s| Expr::Field(s.field.clone())).collect();
+        let (mut exprs, mut keys) = (Vec::with_capacity(sorts.len()), Vec::new());
+        for (s, f) in sorts.iter().zip(&fields) {
+            match &s.expr {
+                Some(e) => {
+                    exprs.push(e);
+                    let text = TextOrder {
+                        coll: s.collate,
+                        fold: None,
+                    };
+                    keys.push((None, s.asc, text, None));
+                }
+                None => {
+                    exprs.push(f);
+                    keys.push(order_key(&c.schema, s, "")?);
+                }
+            }
+        }
+        let mut rd = aggregate::Reader::new(c, &exprs, params)?;
+        let mut slots = Vec::with_capacity(exprs.len());
+        for e in &exprs {
+            slots.push(rd.bind(e)?);
+        }
+        let n = keys.len();
+        let mut flat: Vec<Value> = Vec::with_capacity(ids.len() * n);
+        for &id in ids {
+            let found = rd.read(id, &self.registry, self.clock)?;
+            for &at in &slots {
+                flat.push(match found {
+                    true => rd.env[at].clone(),
+                    false => Value::Null,
+                });
+            }
+        }
+        let unfolded: Vec<OrderKey>;
+        let keys = match keys.iter().any(|k| k.2.fold.is_some()) {
+            false => &keys,
+            true => {
+                unfolded = folded_keys(&mut flat, &keys);
+                &unfolded
+            }
+        };
+        plan(|| {
+            let kept = if k < ids.len() {
+                format!("the first {k} put in order")
+            } else {
+                "all put in order".to_string()
+            };
+            let keys = match n {
+                1 => "a key".to_string(),
+                n => format!("{n} keys"),
+            };
+            format!(
+                "order: {keys} worked out of each row, {} matches, {kept}",
+                ids.len()
+            )
+        });
+        let idx = order_rows(&flat, n, ids.len(), keys, k);
+        Ok(idx.into_iter().map(|i| ids[i]).collect())
     }
 
     /// What each `highlight()` and `snippet()` of the list needs once a
@@ -10670,21 +10819,39 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
             docs.iter().flatten().for_each(&mut pair);
             else_set.iter().flatten().for_each(&mut pair);
         }
-        Statement::Update { set, filter, .. } => {
+        Statement::Update {
+            set, filter, pick, ..
+        } => {
             set.iter().for_each(&mut pair);
             filter.iter().for_each(|f| expr_needs(of, k, f, out));
+            sorts_need(of, k, pick.iter().flat_map(|p| &p.order), out);
         }
-        Statement::Delete { filter, .. } => {
+        Statement::Delete { filter, pick, .. } => {
             filter.iter().for_each(|f| expr_needs(of, k, f, out));
+            sorts_need(of, k, pick.iter().flat_map(|p| &p.order), out);
         }
         Statement::Select(s) | Statement::Explain(s) => select_needs(of, s, out),
         _ => {}
     }
 }
 
+/// What `order`'s expressions need: `order distance(loc, [29.09, 41.09])`.
+fn sorts_need<'a, 's>(
+    of: &dyn Fn(&str) -> Known<'a>,
+    k: Known<'a>,
+    sorts: impl Iterator<Item = &'s Sort>,
+    out: &mut Exactly,
+) {
+    for s in sorts {
+        if let Some(e) = &s.expr {
+            expr_needs(of, k, e, out);
+        }
+    }
+}
+
 /// What a `get` needs, by its collection's schema: every expression it
 /// holds -- its filter, a disjunctive facet's, `having`, `group`, each item
-/// of its list -- the point of a `near` over a point,
+/// of its list, each `order` key -- the point of a `near` over a point,
 /// and each `lookup` level's filter by the level's own collection. An
 /// inner `get` is walked where it is met, by its own.
 fn select_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, s: &Select, out: &mut Exactly) {
@@ -10700,6 +10867,9 @@ fn select_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, s: &Select, out: &mut Exactl
     s.group.iter().for_each(&mut each);
     for c in s.aggregate.iter().chain(&s.computed) {
         each(&c.expr);
+    }
+    for o in &s.order {
+        o.expr.iter().for_each(&mut each);
     }
     for f in &s.facets {
         if let Some(Some(rest)) = &f.rest {

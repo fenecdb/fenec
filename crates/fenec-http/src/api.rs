@@ -370,6 +370,7 @@ fn order(schema: &Schema, raw: &str) -> Result<Vec<Sort>> {
             field: name,
             asc,
             collate,
+            expr: None,
         });
     }
     Ok(out)

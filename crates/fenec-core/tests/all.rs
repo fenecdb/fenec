@@ -42,6 +42,7 @@ mod memory;
 // without the feature has no fold to call.
 #[cfg(feature = "nocase")]
 mod nocase;
+mod order_expr;
 mod paging;
 mod persist;
 mod pinned;

@@ -1210,6 +1210,7 @@ fn collate_in_an_order_key() {
             field: "b".into(),
             asc: false,
             collate: Some(Collation::Turkish),
+            expr: None,
         },
         Sort::new("a", true),
     ];

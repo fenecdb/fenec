@@ -278,6 +278,9 @@ impl GeoIndex {
     pub fn memory_bytes(&self) -> usize {
         match *self {}
     }
+    pub fn len(&self) -> usize {
+        match *self {}
+    }
     pub fn candidates(&self, shape: &crate::geo::Shape, cap: usize) -> Option<Vec<DocId>> {
         match *self {}
     }

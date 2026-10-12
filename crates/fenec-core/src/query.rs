@@ -1271,6 +1271,46 @@ pub fn label_of(e: &Expr) -> Option<String> {
     }
 }
 
+/// The keys of an `order` -- a `get`'s, a `set`'s or a `del`'s -- that are
+/// expressions, held to what a row can work out: no inner `get`, which a
+/// filter holds and a token's rules reach, no aggregate and no
+/// `expired()`, each asked of a set of rows. Over groups a key names a
+/// column of the list, so an expression there is named with `as` first.
+pub fn check_order(order: &[Sort], grouped: bool) -> Result<()> {
+    for e in order.iter().filter_map(|s| s.expr.as_ref()) {
+        let why = if grouped {
+            "over groups `order` names a column of the list: give the expression a name \
+             with `as` there, and order by the name"
+        } else if e.has_subquery() {
+            "an `order` key is worked out of each row: an inner `get` goes in `where`"
+        } else if e.has_aggregate() {
+            "an aggregate in `order` needs `group`: it folds a group's rows, not one row"
+        } else if e.asks_expired() {
+            "`expired()` is a filter's: it goes in `where`"
+        } else {
+            continue;
+        };
+        return Err(Error::Query(why.into()));
+    }
+    Ok(())
+}
+
+/// Whether an expression among `order`'s keys holds a list of numbers.
+fn sorts_read_vectors(order: &[Sort]) -> bool {
+    order
+        .iter()
+        .any(|s| s.expr.as_ref().is_some_and(Expr::reads_vectors))
+}
+
+/// The highest `$n` among `order`'s expressions.
+fn sorts_max_param(order: &[Sort]) -> usize {
+    let mut n = 0;
+    for e in order.iter().filter_map(|s| s.expr.as_ref()) {
+        n = n.max(e.max_param());
+    }
+    n
+}
+
 /// The field whose values a column carries, if it carries one's: the field
 /// itself, or its `min`, `max`, `first` or `last`. Its collation is the
 /// column's, and `collate` orders the column only when it is text.
@@ -1508,14 +1548,25 @@ pub struct FacetValues {
     pub values: Vec<(Value, u64)>,
 }
 
-/// One key of `order`: `order year desc`, `order name collate tr`.
+/// One key of `order`: `order year desc`, `order name collate tr`, `order
+/// distance(loc, $1)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sort {
+    /// The field, or the path into a json field, it orders by -- over
+    /// groups, the column of the list (`order sum(total) desc`). Empty for
+    /// an expression.
     pub field: String,
     pub asc: bool,
     /// `collate tr`: the field's text in a language's order rather than
     /// its bytes'. None: byte order, which is what `@sorted` holds.
     pub collate: Option<Collation>,
+    /// `order distance(loc, $1)`, `order price * qty desc`: a key worked
+    /// out of each row rather than read -- the rows a `get` answers, and a
+    /// `set` or a `del` picks, put in its order as by a field's, ties in id
+    /// order. `distance(<field>, <point>)` ascending over a field with
+    /// `@geo` walks the point index to the page, as `near` does; the rest
+    /// is every match's key worked out and put in order. None: `field`.
+    pub expr: Option<Expr>,
 }
 
 impl Sort {
@@ -1525,6 +1576,17 @@ impl Sort {
             field: field.into(),
             asc,
             collate: None,
+            expr: None,
+        }
+    }
+
+    /// `e` ascending, or descending: a key worked out of each row.
+    pub fn by(e: Expr, asc: bool) -> Sort {
+        Sort {
+            field: String::new(),
+            asc,
+            collate: None,
+            expr: Some(e),
         }
     }
 }
@@ -1727,8 +1789,19 @@ impl Select {
                     )));
                 }
                 seen.push(step.collection.as_str());
+                // Its children are put in order a group at a time, by keys
+                // read: an expression would be every group's rows worked
+                // out apart, for a shape nobody has asked for.
+                if step.order.iter().any(|s| s.expr.is_some()) {
+                    return Err(Error::Query(format!(
+                        "a `lookup` level orders its children by their fields: `{}` \
+                         takes `order <field>`",
+                        step.collection
+                    )));
+                }
             }
         }
+        check_order(&self.order, !self.group.is_empty())?;
         self.check_marks_and_facets()?;
         // `count` and an aggregate answer one row whatever matched: a
         // `require 1` over them would always hold, and say nothing.
@@ -1937,6 +2010,7 @@ impl Select {
         {
             marks = marks.max(e.max_param());
         }
+        marks = marks.max(sorts_max_param(&self.order));
         opt(&self.filter)
             .max(near)
             .max(m)
@@ -1957,7 +2031,8 @@ impl Select {
             || self.near.as_ref().is_some_and(|n| n.vector.reads_vectors())
             || self.group.iter().any(Expr::reads_vectors)
             || self.aggregate.iter().any(item)
-            || self.computed.iter().any(item);
+            || self.computed.iter().any(item)
+            || sorts_read_vectors(&self.order);
         while let (false, Some(l)) = (any, level) {
             any = opt(&l.filter);
             level = l.next.as_deref();
@@ -2494,16 +2569,18 @@ impl Statement {
     /// field can be handed one, and nothing has to be asked of the schema.
     pub fn reads_vectors(&self) -> bool {
         let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::reads_vectors);
+        let picked =
+            |p: &Option<Box<Pick>>| p.as_ref().is_some_and(|p| sorts_read_vectors(&p.order));
         match self {
             Statement::Put { docs, else_set, .. } => docs
                 .iter()
                 .flatten()
                 .chain(else_set.iter().flatten())
                 .any(|(_, e)| e.reads_vectors()),
-            Statement::Update { set, filter, .. } => {
-                set.iter().any(|(_, e)| e.reads_vectors()) || opt(filter)
-            }
-            Statement::Delete { filter, .. } => opt(filter),
+            Statement::Update {
+                set, filter, pick, ..
+            } => set.iter().any(|(_, e)| e.reads_vectors()) || opt(filter) || picked(pick),
+            Statement::Delete { filter, pick, .. } => opt(filter) || picked(pick),
             Statement::Select(s) | Statement::Explain(s) => s.reads_vectors(),
             _ => false,
         }
@@ -2570,8 +2647,13 @@ impl Statement {
         let opt = |e: &Option<Expr>| e.as_ref().map(|e| e.max_param()).unwrap_or(0);
         let pairs =
             |v: &Vec<(String, Expr)>| v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0);
-        let picked =
-            |p: &Option<Box<Pick>>| p.as_ref().and_then(|p| p.limit).map_or(0, Count::param);
+        let picked = |p: &Option<Box<Pick>>| {
+            p.as_ref().map_or(0, |p| {
+                p.limit
+                    .map_or(0, Count::param)
+                    .max(sorts_max_param(&p.order))
+            })
+        };
         match self {
             Statement::Put {
                 docs,

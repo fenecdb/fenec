@@ -1225,23 +1225,21 @@ impl Parser {
 
     /// `order year desc, title asc` -- keys in priority order. Over groups a
     /// key may be an aggregate, `order sum(total) desc`, named by its column.
+    /// Any other expression is a key worked out of each row: `order
+    /// distance(loc, $1)`, `order price * qty desc`.
     fn order_list(&mut self, out: &mut Vec<Sort>) -> Result<()> {
         self.eat_kw("by");
         loop {
-            let mut field = self.path()?;
-            if matches!(self.peek(), Tok::LParen) {
-                self.next();
-                let name = field.to_ascii_lowercase();
-                if matches!(self.peek(), Tok::Star) {
-                    self.next();
-                    field = COUNT_COLUMN.to_string();
-                } else if name == "count" && self.eat_kw("distinct") {
-                    field = format!("count(distinct {})", self.path()?);
-                } else {
-                    field = format!("{name}({})", self.path()?);
-                }
-                self.expect(Tok::RParen)?;
-            }
+            // A field, or an aggregate of one, by the name it answers
+            // under -- what a key was before it could be an expression.
+            let (field, expr) = match self.expr()? {
+                Expr::Field(f) => (f, None),
+                e @ Expr::Call(..) if e.aggregate_name().is_some() => match label_of(&e) {
+                    Some(label) => (label, None),
+                    None => (String::new(), Some(e)),
+                },
+                e => (String::new(), Some(e)),
+            };
             // `collate` comes before the direction, as in SQL; written
             // after it, it reads just as well and is taken there too.
             let mut collate = self.collate()?;
@@ -1258,6 +1256,7 @@ impl Parser {
                 field,
                 asc,
                 collate,
+                expr,
             });
             if !matches!(self.peek(), Tok::Comma) {
                 break;
@@ -1588,6 +1587,15 @@ impl Parser {
             if self.peek_kw("require") {
                 require = self.require()?;
                 continue;
+            }
+            // `near` ranks a `get`'s rows, scores and all; a write picks
+            // its rows by `order`, which takes the distance as a key.
+            if self.peek_kw("near") {
+                return self.err(
+                    "a write picks its rows with `order`: `order distance(<field>, <point>) \
+                     limit 1` for the nearest, or `where id in (get ... near <field> <vector> \
+                     limit 1)`",
+                );
             }
             break;
         }
