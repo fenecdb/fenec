@@ -33,6 +33,9 @@ const LONGEST: &str = "30000";
 const CLAIM: &str = r#"{"query":"set jobs {owner: \"w\", run_at: now() + 60000} where run_at <= now() order run_at limit 1 returning id"}"#;
 const MCP_CALL: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
 
+/// A request's method, target, headers and body.
+type Case<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)], String);
+
 struct Answer {
     status: u16,
     head: String,
@@ -354,7 +357,7 @@ fn a_tenant_s_waits_come_after_its_token_and_its_tenant() {
     for (token, status) in cases {
         let mcp_only = token == Some(ROOT);
         let origin = [("Origin", "https://elsewhere.example"), after[0], after[1]];
-        let requests: Vec<(&str, &str, &[(&str, &str)], String)> = match mcp_only {
+        let requests: Vec<Case> = match mcp_only {
             true => vec![("POST", "/t/acme/_mcp", &origin, MCP_CALL.to_string())],
             false => vec![
                 ("POST", "/t/acme/query", &after, query("get notes")),

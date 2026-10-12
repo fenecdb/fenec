@@ -766,3 +766,110 @@ fn a_held_claim_is_waited_for_through_the_router() {
     assert!(answer.ends_with(r#""retry_after":1}"#), "{answer}");
     assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
 }
+
+/// A request its node refuses for its token is refused at once through
+/// the router, whatever it asks to wait for: a write to come
+/// (`Fenec-After`), a claim held (`Fenec-Wait`), `/_changes`'s `wait`, a
+/// subscription. Each asks 30 s for a write made only once every refusal is
+/// in: a refusal that waited would be answered by the wait, as the wait
+/// answers (504, the tenant's change), never 401 or 403. The router waits
+/// for a held request as long as it asks, and a token for the tenant still
+/// waits through it, answered by its wait.
+#[test]
+fn a_refused_token_waits_for_nothing_through_the_router() {
+    let access = Arc::new(
+        fenec_http::access::Access::new(
+            b"thirty-two bytes and a few more, for HS256",
+            "notes  read,write  where owner = $jwt.sub\njobs  read,write\n",
+        )
+        .unwrap(),
+    );
+    let c = cluster_with("first", 1, None, Some(Arc::clone(&access)));
+    c.create("acme", Some("n1"));
+    c.create("globex", Some("n1"));
+    for q in [
+        r#"{"query":"create collection notes (owner text, title text)"}"#,
+        r#"{"query":"create collection jobs (run_at timestamp @sorted, owner text)"}"#,
+    ] {
+        let r = c.call("POST", "/t/acme/query", q, Some("data"));
+        assert_eq!(r.0, 200, "{}", r.1);
+    }
+    let seq = || {
+        let t = c.nodes[0].tenants.get("acme").unwrap();
+        let n = t.db.read().unwrap().change_seq();
+        n
+    };
+    let before = seq();
+    let after = format!("Fenec-After: {}\r\nFenec-Wait: 30000\r\n", before + 1);
+    let wait = "Fenec-Wait: 30000\r\n";
+    let claim = r#"{"query":"set jobs {owner: \"w\", run_at: now() + 60000} where run_at <= now() order run_at limit 1 returning id"}"#;
+    let changes = format!("/t/acme/_changes?since={before}&wait=30000");
+    let get = r#"{"query":"get notes"}"#;
+    let globex = access.mint(r#"{"sub":"alice","tenant":"globex"}"#).unwrap();
+    for (token, status) in [
+        (None, 401),
+        (Some("guessed"), 401),
+        (Some("a.b.c"), 401),
+        (Some(globex.as_str()), 403),
+    ] {
+        for (method, target, headers, body) in [
+            ("POST", "/t/acme/query", after.as_str(), get),
+            ("GET", "/t/acme/notes", after.as_str(), ""),
+            ("POST", "/t/acme/query", wait, claim),
+            ("POST", "/t/acme/batch", wait, claim),
+            ("GET", changes.as_str(), "", ""),
+            ("GET", "/t/acme/notes/changes", "", ""),
+        ] {
+            let out = ask(c.port, method, target, headers, body, token);
+            assert!(
+                out.starts_with(&format!("HTTP/1.1 {status}")),
+                "{method} {target} with {token:?}: {out}"
+            );
+            assert!(
+                !out.contains("\"seq\"") && !out.contains("Fenec-Seq"),
+                "{out}"
+            );
+        }
+    }
+    let held = c.nodes[0].tenants.get("acme").unwrap().hub.waits().stats();
+    assert_eq!((held.held, held.looks, held.runs), (0, 0, 0), "{held:?}");
+
+    // Only now is the write made that would have ended their waits.
+    assert_eq!(seq(), before);
+    let put = r#"{"query":"put notes {owner: \"alice\", title: \"first\"}"}"#;
+    assert_eq!(c.call("POST", "/t/acme/query", put, Some("data")).0, 200);
+    let alice = access.mint(r#"{"sub":"alice","tenant":"acme"}"#).unwrap();
+    let out = ask(c.port, "POST", "/t/acme/query", &after, get, Some(&alice));
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    assert!(out.contains("first"), "{out}");
+    let soon = format!("Fenec-After: {}\r\nFenec-Wait: 100\r\n", before + 1000);
+    let out = ask(c.port, "POST", "/t/acme/query", &soon, get, Some(&alice));
+    assert!(out.starts_with("HTTP/1.1 504"), "{out}");
+    assert!(out.contains(&format!("\"seq\":{}", before + 1)), "{out}");
+}
+
+/// A request with `headers` (each line ended) through the router, its
+/// whole answer. The read timeout is past the longest wait, so a request
+/// that waited is answered by its wait, not cut.
+fn ask(
+    port: u16,
+    method: &str,
+    target: &str,
+    headers: &str,
+    body: &str,
+    auth: Option<&str>,
+) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    write!(
+        s,
+        "{method} {target} HTTP/1.1\r\nHost: t\r\n{auth}{headers}Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    out
+}
