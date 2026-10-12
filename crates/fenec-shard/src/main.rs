@@ -18,7 +18,9 @@ use std::time::Duration;
 const USAGE: &str = "\
 usage: fenec-shard [options]
 
-  -l, --listen <address>    default 127.0.0.1:8090
+  -l, --listen <address>    default 127.0.0.1:8090. Port 0 takes one the system
+                            picks: the `listening on: http://<address>` line
+                            on stderr names it
   -d, --directory <path>    the directory file: which node holds which tenant
                             default: shard.fenec
       --token <value>       require `Authorization: Bearer <value>` on /_shard/.
