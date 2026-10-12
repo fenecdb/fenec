@@ -4,8 +4,9 @@
 //! parameter -- with `require` counting them, and a statement refused
 //! writing nothing.
 
+use fenec_core::plugin::{Hook, WriteOp};
 use fenec_core::prelude::*;
-use fenec_core::query::Pick;
+use std::sync::{Arc, Mutex};
 
 fn run(db: &mut Database, sql: &str, params: &[Value]) -> Result<Response> {
     let stmt = fenec_ql::parse_one_for(db, sql)?;
@@ -180,39 +181,55 @@ fn a_put_refused_answers_nothing_and_writes_nothing() {
     assert_eq!(table(&rs), [(2, vec![Value::Int(2)])]);
     db.rollback();
     assert_eq!(count(&mut db), Value::Int(1));
-    // A row the statement's visibility does not pass -- a scoped token's
-    // read rules (`fenec_http::access`) -- refuses the write.
-    let mut stmt = fenec_ql::parse_one("insert users {email: \"e@x\", n: 2} returning id").unwrap();
-    if let Statement::Put { pick, .. } = &mut stmt {
-        let p: &mut Pick = pick.as_mut().unwrap();
-        p.visible = Some(
-            fenec_ql::parse_one("get users where n = 1")
-                .map(|s| match s {
-                    Statement::Select(sel) => sel.filter.unwrap(),
-                    _ => unreachable!(),
-                })
-                .unwrap(),
-        );
-    }
-    let e = db.execute(&stmt).unwrap_err();
+    // Each row is handed to the hooks as the write it was -- a scoped
+    // token's read rules (`fenec_http::access`) -- and one refused refuses
+    // the write.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    db.registry_mut()
+        .register_hook(Arc::new(Answering(seen.clone())));
+    let e = run(
+        &mut db,
+        "insert users [{email: \"e@x\", n: 1}, {email: \"f@x\", n: 2}] returning id",
+        &[],
+    )
+    .unwrap_err();
     assert!(matches!(e, Error::Denied(_)), "{e}");
     assert_eq!(count(&mut db), Value::Int(1), "nothing written");
-    // And passes the rows it holds.
-    let mut stmt = fenec_ql::parse_one("insert users {email: \"e@x\", n: 1} returning n").unwrap();
-    if let Statement::Put { pick, .. } = &mut stmt {
-        pick.as_mut().unwrap().visible = Some(
-            fenec_ql::parse_one("get users where n = 1")
-                .map(|s| match s {
-                    Statement::Select(sel) => sel.filter.unwrap(),
-                    _ => unreachable!(),
-                })
-                .unwrap(),
-        );
+    seen.lock().unwrap().clear();
+    run(&mut db, "insert users {email: \"g@x\", n: 1}", &[]).unwrap();
+    let rs = rows(
+        &mut db,
+        "put users [{email: \"G@x\", n: 1}, {email: \"h@x\", n: 1}] \
+         if absent else set {n: n} returning email",
+        &[],
+    );
+    assert_eq!(
+        table(&rs)
+            .iter()
+            .map(|r| r.1[0].clone())
+            .collect::<Vec<_>>(),
+        [text("g@x"), text("h@x")]
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [WriteOp::Update, WriteOp::Insert],
+        "the row set an update, the row made an insert"
+    );
+}
+
+/// Refuses a row answered whose `n` is not 1, as a scoped token's read
+/// rules refuse one outside them, and keeps the write each was.
+struct Answering(Arc<Mutex<Vec<WriteOp>>>);
+impl Hook for Answering {
+    fn name(&self) -> &str {
+        "answering"
     }
-    match db.execute(&stmt).unwrap() {
-        // The ids the writes put back handed out again.
-        Response::Rows(rs) => assert_eq!(table(&rs), [(2, vec![Value::Int(1)])]),
-        other => panic!("{other:?}"),
+    fn answering(&self, _: &Schema, op: WriteOp, doc: &Document) -> Result<()> {
+        self.0.lock().unwrap().push(op);
+        match doc.get("n") {
+            Some(Value::Int(1)) => Ok(()),
+            _ => Err(Error::Denied("not readable".into())),
+        }
     }
 }
 

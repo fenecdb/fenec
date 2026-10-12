@@ -1350,7 +1350,7 @@ impl Scope {
                 if_absent,
                 else_set,
                 require,
-                mut pick,
+                pick,
             } => {
                 // `scoped()` writes a parameter's documents in first, so
                 // that each is held to the rules below.
@@ -1381,20 +1381,6 @@ impl Scope {
                     for (field, v) in &pins {
                         if !doc.iter().any(|(k, _)| k == field) {
                             doc.push((field.clone(), Expr::Lit(v.clone())));
-                        }
-                    }
-                }
-                // `returning` answers the rows written, which is a read:
-                // each held to the read rules as written (`Pick::visible`),
-                // the write refused where one does not pass them.
-                if let Some(p) = pick.as_mut().filter(|p| p.returning.is_some()) {
-                    match self.filter(&collection, READ) {
-                        Some(f) => p.visible = f,
-                        None => {
-                            return Err(denied(format!(
-                                "`returning` answers the rows written, and this token reads \
-                                 none of `{collection}`: write without it"
-                            )))
                         }
                     }
                 }

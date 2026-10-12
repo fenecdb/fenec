@@ -1618,13 +1618,6 @@ pub struct Pick {
     /// picked, under the columns a `get`'s `select` names: `None` every
     /// field after the id (`returning *`), or those listed.
     pub returning: Option<Option<Vec<String>>>,
-    /// A scoped token's read rules (`fenec_http::access`), which every row
-    /// a `put`'s `returning` answers is held to as written: a row they do
-    /// not pass refuses the write, put back whole, rather than hand the
-    /// token a row it could not `get` -- or leave the row out, and answer
-    /// fewer rows than were written with nothing to say why. None: every
-    /// row.
-    pub visible: Option<Expr>,
 }
 
 impl Pick {

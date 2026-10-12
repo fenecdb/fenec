@@ -2343,11 +2343,11 @@ put orders {item: "tea", customer: "ada"} if absent else set {n: coalesce(n, 0) 
     /orders?returning=id</code> answers a REST insert's rows (201) where it
     otherwise answers <code>{"inserted": n}</code>.</li>
   <li><b>A scoped token</b> is answered only rows its read rules let it
-    read: each row written is held to them as written, and one they leave
-    out refuses the write, put back whole (403) — an append to a stream the
-    token may write and not read is written without <code>returning</code>.
-    A token with no read rule on the collection is refused before the write
-    runs.</li>
+    read, as a <code>set</code>'s are: each row written is held to them as
+    written — a row made as an insert, a row set as an update — and one they
+    leave out refuses the write, put back whole (403). An append to a stream
+    the token may write and not read is written without
+    <code>returning</code>.</li>
   <li><b>Every builder</b> takes it: <code>insert(docs, { returning: ['id']
     })</code> and <code>upsert(docs, patch, { returning: true })</code>,
     Python's <code>returning=</code>, Go's <code>Returning(...)</code> among

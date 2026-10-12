@@ -6715,7 +6715,7 @@ impl Database {
         // values call its functions while the row is written.
         let registry = std::mem::take(&mut self.registry);
         let list = pick.and_then(|p| p.returning.as_ref());
-        let mut ids = list.map(|_| Vec::new());
+        let mut answered = list.map(|_| (Vec::new(), Vec::new()));
         let out = self.put_with(
             collection,
             docs,
@@ -6724,53 +6724,24 @@ impl Database {
             else_set,
             &registry,
             params,
-            ids.as_mut(),
+            answered.as_mut(),
         );
         self.registry = registry;
-        match (out, list, ids) {
-            (Ok(_), Some(list), Some(ids)) => self.answer_put(collection, list, pick, &ids, params),
+        // `returning`: the rows it wrote, ids and all, each as the
+        // statement left it, and each handed to the hooks as the write it
+        // was -- a scoped token's read rules hold it (`Hook::answering`).
+        match (out, list, answered) {
+            (Ok(_), Some(list), Some((ids, ops))) => {
+                Ok(Response::Rows(self.returned(collection, list, &ids, &ops)?))
+            }
             (out, ..) => out.map(Response::Affected),
         }
     }
 
-    /// A `put`'s `returning`: the rows it wrote, ids and all, each as the
-    /// statement left it -- held first, under a scoped token, to its read
-    /// rules (`Pick::visible`), which refuse the write rather than answer a
-    /// row the token could not `get`. Out of line, as [`Self::returned`]
-    /// is: a put that answers its count keeps the code it had.
-    #[inline(never)]
-    fn answer_put(
-        &self,
-        collection: &str,
-        list: &Option<Vec<String>>,
-        pick: Option<&Pick>,
-        ids: &[DocId],
-        params: &[Value],
-    ) -> Result<Response> {
-        if let Some(f) = pick.and_then(|p| p.visible.as_ref()) {
-            let c = self.collection(collection)?;
-            let ctx = EvalCtx {
-                params,
-                registry: &self.registry,
-                clock: self.clock,
-            };
-            let test = Filter::new(c, f, &ctx);
-            for &id in ids {
-                if !test.matches(id, &ctx)? {
-                    return Err(Error::Denied(format!(
-                        "`returning` answers rows this token reads, and document {id} of \
-                         `{collection}` it wrote is not one: the write is put back -- \
-                         write it without `returning`"
-                    )));
-                }
-            }
-        }
-        Ok(Response::Rows(self.returned(collection, list, ids)?))
-    }
-
     /// The documents of a `put` written, how many rows it wrote, and --
     /// into `answered`, when `returning` asks -- each row's id in the
-    /// order of the documents.
+    /// order of the documents, and the write it was: an insert, or an
+    /// update of a row a `put` wrote over or an upsert set.
     #[allow(clippy::too_many_arguments)]
     fn put_with(
         &mut self,
@@ -6781,7 +6752,7 @@ impl Database {
         else_set: Option<&[(String, Expr)]>,
         registry: &Registry,
         params: &[Value],
-        mut answered: Option<&mut Vec<DocId>>,
+        mut answered: Option<&mut (Vec<DocId>, Vec<WriteOp>)>,
     ) -> Result<usize> {
         let schema = self.collection(collection)?.schema.clone();
         let cid = self.collection(collection)?.id;
@@ -6953,8 +6924,9 @@ impl Database {
                     for h in &hooks {
                         h.after_write(collection, op, &doc)?;
                     }
-                    if let Some(ids) = answered.as_deref_mut() {
+                    if let Some((ids, ops)) = answered.as_deref_mut() {
                         ids.push(doc.id);
+                        ops.push(op);
                     }
                     written.push(doc);
                     n += 1;
@@ -6981,8 +6953,9 @@ impl Database {
                 &hooks,
                 Some(&doc),
             )? {
-                if let Some(ids) = answered.as_deref_mut() {
+                if let Some((ids, ops)) = answered.as_deref_mut() {
                     ids.push(id);
+                    ops.push(WriteOp::Update);
                 }
                 n += 1;
             }
@@ -9991,7 +9964,7 @@ impl Database {
                 collection,
                 list,
                 &ids,
-                WriteOp::Update,
+                &[WriteOp::Update],
             )?)),
             (out, _) => out.map(Response::Affected),
         }
@@ -10039,8 +10012,10 @@ impl Database {
             ..Default::default()
         };
         // `limit $1` checked here, where the write's parameters are, as a
-        // `get`'s is where it is answered.
+        // `get`'s is where it is answered, and an expression's key as a
+        // `get`'s `check` holds it.
         sel.check_counts(params)?;
+        crate::query::check_order(&sel.order, false)?;
         Ok(self.page_ids(c, &sel, params, &ctx, false, false, false)?.0)
     }
 
@@ -10048,14 +10023,16 @@ impl Database {
     /// store as it stands -- a `set`'s rows as written, a `del`'s before
     /// they go -- under the columns `select` names in a `get`, `list`
     /// every field after the id when `None`. Each is handed to the hooks
-    /// first (`Hook::answering`), as the write `op` answers it.
+    /// first (`Hook::answering`), as the write it was answers it: `ops`
+    /// one for every row, or one a row -- a `put`'s rows are inserts and
+    /// updates.
     #[inline(never)]
     fn returned(
         &self,
         collection: &str,
         list: &Option<Vec<String>>,
         ids: &[DocId],
-        op: WriteOp,
+        ops: &[WriteOp],
     ) -> Result<ResultSet> {
         let c = self.collection(collection)?;
         let columns = projection_columns(&c.schema, list);
@@ -10067,7 +10044,7 @@ impl Database {
         // reading by places (`one_pass`) was 1.4 KB more of the browser
         // module, and took `one_pass` out of line from `select`.
         let mut rows = Vec::with_capacity(ids.len());
-        for &id in ids {
+        for (i, &id) in ids.iter().enumerate() {
             // A row the write did not find is not answered: the count and
             // the rows agree.
             let Some(doc) = c.store.read(&c.schema, id)? else {
@@ -10077,10 +10054,10 @@ impl Database {
             // are a server's -- and the loop was 147 bytes of it.
             #[cfg(not(target_arch = "wasm32"))]
             for h in self.registry.hooks() {
-                h.answering(&c.schema, op, &doc)?;
+                h.answering(&c.schema, ops[i.min(ops.len() - 1)], &doc)?;
             }
             #[cfg(target_arch = "wasm32")]
-            let _ = op;
+            let _ = (i, ops);
             // A loop rather than a `map` and `collect`: a copy of the
             // adapter of its own, 249 bytes of the browser module.
             let mut values = Vec::with_capacity(columns.len());
@@ -10213,7 +10190,7 @@ impl Database {
         }
         // Read before they go: what a pop hands back.
         let rows = match pick.and_then(|p| p.returning.as_ref()) {
-            Some(list) => Some(self.returned(collection, list, &ids, WriteOp::Delete)?),
+            Some(list) => Some(self.returned(collection, list, &ids, &[WriteOp::Delete])?),
             None => None,
         };
         let schema = self.collection(collection)?.schema.clone();

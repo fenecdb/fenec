@@ -333,6 +333,11 @@ fn what_an_order_key_cannot_be() {
         ("get tw order nope * 2", "nope"),
         ("set tw {a: 1} order unknown + 1 limit 1", "unknown"),
         (
+            "set tw {a: 1} order a in (get ix select id) limit 1",
+            "inner `get`",
+        ),
+        ("del tw order sum(a) + 1 limit 1", "needs `group`"),
+        (
             "set tw {a: 1} where ready near loc [29.09, 41.09] limit 1",
             "a write picks its rows with `order`",
         ),

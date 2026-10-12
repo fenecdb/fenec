@@ -1494,7 +1494,7 @@ fn a_scoped_insert_answers_the_rows_it_reads() {
     // No read rule at all: refused before it runs.
     let (status, body) = n.query(&alice, "insert events {kind: \"click\"} returning id");
     assert_eq!(status, 403, "{body}");
-    assert!(body.contains("reads none of `events`"), "{body}");
+    assert!(body.contains("nothing was written"), "{body}");
     assert_eq!(n.query(&alice, "insert events {kind: \"click\"}").0, 200);
     // A row the read rules leave out: refused, and put back.
     let (status, body) = n.query(
