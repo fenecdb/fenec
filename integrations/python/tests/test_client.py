@@ -49,6 +49,13 @@ def test_a_quota_names_itself_and_the_wait():
             429, b'{"error":"past its quota of 2 writes a second","quota":"writes","retry_after":3}'
         )
     assert (e.value.status, e.value.quota, e.value.retry_after) == (429, "writes", 3)
+    # To the millisecond where the body says it, over the whole second.
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(
+            429,
+            b'{"error":"past","quota":"writes","retry_after":1,"retry_after_ms":2}',
+        )
+    assert (e.value.quota, e.value.retry_after) == ("writes", 0.002)
     with pytest.raises(FenecError) as e:
         fenecdb._answer(507, b'{"error":"past","quota":"bytes","completed":0,"at":1}')
     assert (e.value.quota, e.value.at, e.value.completed) == ("bytes", 1, 0)

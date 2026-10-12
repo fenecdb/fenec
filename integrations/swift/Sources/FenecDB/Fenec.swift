@@ -29,11 +29,12 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
     public let completed: Int?
     /// The tenant's quota a server refused with (`FenecRemote` to a tenant
     /// node): "bytes" and "rows" answer 507, and room is made by deleting;
-    /// "streams", "requests", "writes" and "write_bytes" answer 429 with
-    /// `retryAfter`. nil for any other refusal.
+    /// "streams", "held", "requests", "writes" and "write_bytes" answer 429
+    /// with `retryAfter`. nil for any other refusal.
     public let quota: String?
-    /// Seconds to wait before sending again, where the server said
-    /// (`Retry-After`: a quota's 429, a move's or a failover's 503).
+    /// Seconds to wait before sending again, where the server said: a
+    /// quota's 429 to the millisecond (`retry_after_ms`), a move's or a
+    /// failover's 503 in whole seconds (`Retry-After`).
     public let retryAfter: Double?
     /// The parameters the library asked for again as JSON (`exact`).
     let exact: [Int]?

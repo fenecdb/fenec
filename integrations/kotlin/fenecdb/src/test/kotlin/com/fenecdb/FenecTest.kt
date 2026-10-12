@@ -113,6 +113,11 @@ class FenecTest {
         val rate = FenecRemote.refused(429, Json.parse("""{"error":"past","quota":"writes","retry_after":1}""") as Row, "3")
         assertEquals("writes", rate.quota)
         assertEquals(3.0, rate.retryAfter)
+        // To the millisecond where the body says it, over the whole second.
+        val soon = FenecRemote.refused(
+            429, Json.parse("""{"error":"past","quota":"writes","retry_after":1,"retry_after_ms":2}""") as Row, "1",
+        )
+        assertEquals(0.002, soon.retryAfter)
         val memory = FenecRemote.refused(507, Json.parse("""{"error":"data ceiling"}""") as Row, null)
         assertEquals(null, memory.quota)
         assertEquals(FenecException.Code.IO, memory.code)

@@ -31,11 +31,14 @@ class FenecException internal constructor(
     val completed: Int? = null,
     /**
      * The tenant's quota a server refused with ([FenecRemote] to a tenant node): "bytes" and "rows"
-     * answer 507, and room is made by deleting; "streams", "requests", "writes" and "write_bytes" answer
-     * 429 with [retryAfter]. Null for any other refusal.
+     * answer 507, and room is made by deleting; "streams", "held", "requests", "writes" and
+     * "write_bytes" answer 429 with [retryAfter]. Null for any other refusal.
      */
     val quota: String? = null,
-    /** Seconds to wait before sending again, where the server said (`Retry-After`: a quota's 429, a move's or a failover's 503). */
+    /**
+     * Seconds to wait before sending again, where the server said: a quota's 429 to the millisecond
+     * (`retry_after_ms`), a move's or a failover's 503 in whole seconds (`Retry-After`).
+     */
     val retryAfter: Double? = null,
 ) : RuntimeException(message) {
     constructor(code: Code, message: String) : this(code, message, null)

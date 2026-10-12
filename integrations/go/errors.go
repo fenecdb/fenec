@@ -32,6 +32,7 @@ const (
 	QuotaBytes      = "bytes"
 	QuotaRows       = "rows"
 	QuotaStreams    = "streams"
+	QuotaHeld       = "held"
 	QuotaRequests   = "requests"
 	QuotaWrites     = "writes"
 	QuotaWriteBytes = "write_bytes"
@@ -57,8 +58,9 @@ type Error struct {
 	// Quota constants; "" for any other refusal.
 	Quota string
 	// RetryAfter is how long to wait before sending again, where the
-	// server said -- a quota's 429, the 503 of a tenant being moved or
-	// failed over or of a server at its ceiling: 0 otherwise.
+	// server said -- a quota's 429 to the millisecond, the 503 of a tenant
+	// being moved or failed over or of a server at its ceiling in whole
+	// seconds: 0 otherwise.
 	RetryAfter time.Duration
 }
 
@@ -97,17 +99,22 @@ func codeOf(status int) string {
 func errorOf(status int, raw []byte) *Error {
 	e := &Error{Status: status, Code: codeOf(status), At: -1}
 	var body struct {
-		Error      string `json:"error"`
-		Completed  int    `json:"completed"`
-		At         *int   `json:"at"`
-		Quota      string `json:"quota"`
-		RetryAfter int64  `json:"retry_after"`
+		Error        string `json:"error"`
+		Completed    int    `json:"completed"`
+		At           *int   `json:"at"`
+		Quota        string `json:"quota"`
+		RetryAfter   int64  `json:"retry_after"`
+		RetryAfterMs int64  `json:"retry_after_ms"`
 	}
 	if json.Unmarshal(raw, &body) == nil && body.Error != "" {
 		e.Message, e.Completed, e.Quota = body.Error, body.Completed, body.Quota
-		// The wait Retry-After says, in the body as well: what reads it
-		// here has no headers.
+		// The wait in the body, what reads it here having no headers: to
+		// the millisecond where the server says it -- a bucket of 600 rows
+		// a second refills a row in 1.7 ms -- else Retry-After's seconds.
 		e.RetryAfter = time.Duration(body.RetryAfter) * time.Second
+		if body.RetryAfterMs > 0 {
+			e.RetryAfter = time.Duration(body.RetryAfterMs) * time.Millisecond
+		}
 		if body.At != nil {
 			e.At = *body.At
 		}

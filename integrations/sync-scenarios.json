@@ -625,16 +625,32 @@
       ]
     },
     {
+      "name": "a 429 that says its wait to the millisecond is waited that long, not the whole second Retry-After rounds it up to",
+      "covers": "sync.html#refusals-retries-and-offline: retry_after_ms, where the body says it, is the server's wait itself -- a bucket of 600 rows a second refills a row in 1.7 ms, which retry_after and Retry-After round up to a second -- and is waited where it is longer than the backoff, as retry_after is; retry_after only where it is not given",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 429, "body": {"error": "the tenant writes past its quota of 600 rows a second", "quota": "writes", "retry_after": 1, "retry_after_ms": 2}, "expect": {
+          "refused": [], "pending": 1, "waits": [[250, 325]], "quota": "writes"}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 429, "body": {"error": "the tenant writes past its quota of 10 rows a second", "quota": "writes", "retry_after": 1, "retry_after_ms": 900}, "expect": {
+          "refused": [], "pending": 1, "waits": [[900, 1170]]}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "refused": [], "quota": null}}
+      ]
+    },
+    {
       "name": "a stream the tenant's streams quota refuses waits the server's Retry-After, and the status names the quota",
       "covers": "sync.html#refusals-retries-and-offline: a 429 on a subscription is backed off by its retry_after, never under it; the replica reads as offline, its error naming the quota, until a stream opens",
       "steps": [
-        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes, held writes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
+        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
         {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[1000, 1300]], "token_asked": false, "quota": "streams", "ready": false}},
-        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes, held writes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
+        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
         {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[1000, 1300]]}},
-        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes, held writes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
+        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
         {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[1000, 1300]]}},
-        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes, held writes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
+        {"do": "stream_status", "status": 429, "body": {"error": "the tenant holds 4 streams -- subscriptions, waits for changes -- its quota: close one, or retry shortly", "quota": "streams", "retry_after": 1}},
         {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[2000, 2600]], "quota": "streams"}},
         {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [], "quota": null}},
         {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}

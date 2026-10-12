@@ -4,7 +4,21 @@ import (
 	"math"
 	"strconv"
 	"testing"
+	"time"
 )
+
+// A quota's wait is read to the millisecond where the body says it, over
+// the whole seconds Retry-After rounds it up to, and in seconds where not.
+func TestARefusalsWaitIsReadToTheMillisecond(t *testing.T) {
+	e := errorOf(429, []byte(`{"error":"past","quota":"writes","retry_after":1,"retry_after_ms":2}`))
+	if e.Quota != QuotaWrites || e.RetryAfter != 2*time.Millisecond {
+		t.Fatalf("%+v", e)
+	}
+	e = errorOf(503, []byte(`{"error":"the tenant is being moved; retry shortly","retry_after":1}`))
+	if e.RetryAfter != time.Second {
+		t.Fatalf("%+v", e)
+	}
+}
 
 // Every f32 written reads back through an f64, as the server reads it --
 // one in 4 099 of them, a spread over every exponent, and the tie.

@@ -513,14 +513,16 @@ export declare class FenecError extends Error {
   /**
    * The tenant's quota that refused the request (`connect` to a tenant
    * node): `bytes` and `rows` answer 507 -- delete rows to make room --
-   * `streams`, `requests`, `writes` and `write_bytes` answer 429 with
-   * `retryAfter`.
+   * `streams`, `held`, `requests`, `writes` and `write_bytes` answer 429
+   * with `retryAfter`.
    */
-  quota?: 'bytes' | 'rows' | 'streams' | 'requests' | 'writes' | 'write_bytes';
+  quota?: 'bytes' | 'rows' | 'streams' | 'held' | 'requests' | 'writes' | 'write_bytes';
   /**
-   * Seconds to wait before sending again, where the server said
-   * (`Retry-After`): a quota's 429, and the 503 of a tenant being moved or
-   * failed over, or of a server at its ceiling of connections.
+   * Seconds to wait before sending again, where the server said: a quota's
+   * 429 to the millisecond (`retry_after_ms`, so 0.002 where a bucket
+   * refills in 2 ms), and the 503 of a tenant being moved or failed over,
+   * or of a server at its ceiling of connections, in whole seconds
+   * (`Retry-After`).
    */
   retryAfter?: number;
 }
