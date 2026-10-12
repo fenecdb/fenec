@@ -60,7 +60,7 @@ make small         # smallest `fenec` binary: --profile cli --no-default-feature
 make server TOKEN=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
-make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease
+make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part)
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
 make policy-bench        # a scoped set under a plain rule, a field list, a transition and answering its row, against the server's token, in process and over HTTP
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
@@ -4421,6 +4421,51 @@ connection: the write timeout is set at the connect, the read timeout
 only when it changes (a `Fenec-Wait`), kept with the pooled connection.
 `make shard-bench`'s added p50 stayed 23.3 us against main's 23.3, six
 runs each in ABBA turns (23.1-24.8 and 20.0-24.4).
+
+**A query across tenants is the router's admin's, merged by what the
+request says** (`fenec-shard/src/fanout.rs`, `POST /_shard/query`). An
+operator asked every tenant themselves for a count each or the newest
+sign-ups of all. Tenants are the boundary, so it sits behind the
+router's `--token` like the rest of `/_shard/`: a JWT bound to a tenant
+and the nodes' data token are 401 there. Each tenant is asked through its
+node's `POST /_admin/tenants/<t>/query` (`fenec_http::admin_query`) with
+the admin token the router holds -- one that exports a tenant's whole
+image learns nothing more by reading it; the data token reaches every
+tenant and writes -- which refuses a statement that writes before it runs
+and runs the rest in read-only mode besides. The router parses no FenecQL:
+`query` and `params` go to every node as their JSON came (validated with
+`parse_json`, never re-encoded), and the merge is the request's own JSON,
+three kinds exact from the answers alone -- none (rows one after another,
+a `tenant` column spliced in), `order` with `limit` (a k-way merge of rows
+each tenant gives in that order, checked, a tenant out of it failed rather
+than merged wrong) and a fold (`sum`, `min`, `max` by `group`; every
+column grouped or folded or the tenant fails, since a column dropped is an
+answer cut; no `avg`). Rows are passed on as the nodes wrote them
+(`scan`: extents found, only the merge's values decoded, no key allocated
+a member), and a timestamp, which travels as ISO text with its
+milliseconds left out where they are 0 so its bytes do not order as its
+time, is read from its digits (`iso_ms`, held to `format_iso` over 200 000
+instants): read through `time::parse` and on the request's thread after
+the last answer, 2 000 rows held it 0.69 ms, now read by the worker that
+fetched each answer. A tenant failing, timing out (one timeout a query,
+every connect and read bounded by it: `Pool::send_by`,
+`Answer::read_body_by`) or not fitting the merge is named with node,
+status and why; the query fails with them (the first stops the asking)
+unless `"partial": true`. A tenant moved under the query is asked again
+where the directory places it now, one deleted is a failure. Rows and
+bytes gathered are bounded (`--fanout-max-rows`, `--fanout-max-bytes`,
+the bytes before a body is read) and refused past, 413, never cut.
+Consistency is a tenant's: no one moment across them. Calls go out
+`--fanout-concurrency` at once, node by node in turn; one span a node
+under a `fanout` span (`trace::Remote`, recorded by the request's thread
+for the workers' calls), the request id on every call, three metric
+families with no tenant label, one audit line at the router (the nodes'
+reads are not admin changes, `audit::http`). Over 100 tenants on three
+nodes a summed count took 1.15-1.23 ms and a merged top 20 1.35-1.39,
+against 4.3-5.5 asking each in turn through the router and 1.9-2.2
+sixteen at once with no merge (`make shard-bench ARGS=fanout`); a
+forwarded request's added p50 23.0 us against main's 23.8 in ABBA turns.
+The SDKs have no `/_shard/` call, so none for this; the studio does not ask it.
 
 **A schema declared in code is checked at every open, in the engine.**
 Two front ends compile to one description (`fenec_core::declared`,

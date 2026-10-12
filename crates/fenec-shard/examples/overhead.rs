@@ -224,7 +224,20 @@ fn latencies(c: &mut Client, target: &str) -> Vec<f64> {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // A word first runs one part: `latency` the forwarded request alone,
+    // `fanout` the query across tenants alone.
+    let only = match args.first().map(String::as_str) {
+        Some(w @ ("latency" | "fanout")) => Some(w.to_string()),
+        _ => None,
+    };
+    if only.is_some() {
+        args.remove(0);
+    }
+    if only.as_deref() == Some("fanout") {
+        fanout();
+        return;
+    }
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(20_000);
     let dim: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(128);
 
@@ -301,6 +314,11 @@ fn main() {
         pct(&routed, 0.95) - pct(&direct, 0.95),
         pct(&routed, 0.99) - pct(&direct, 0.99)
     );
+    if only.is_some() {
+        let _ = std::fs::remove_dir_all(d1);
+        let _ = std::fs::remove_dir_all(d2);
+        return;
+    }
 
     // ----------------------------------------------------------- counting
     // What `/_metrics` adds to a request: a count and two histograms in the
@@ -384,6 +402,149 @@ fn main() {
     replicas();
     spread();
     automatic();
+    fanout();
+}
+
+/// A query across tenants (`POST /_shard/query`) over 100 tenants on three
+/// nodes, against a client asking each tenant itself through the router:
+/// one after another on a kept-alive connection, and sixteen at once on
+/// sixteen, as many as the router has out. A count added up, and the
+/// twenty newest rows of all of them, each tenant's twenty merged.
+fn fanout() {
+    const TENANTS: usize = 100;
+    const ROWS: usize = 200;
+    const ROUNDS: usize = 300;
+    const AT_ONCE: usize = 16;
+    let nodes: Vec<(String, std::path::PathBuf)> =
+        (1..=3).map(|i| node(&format!("f{i}"))).collect();
+    let router = Router::new(
+        Directory::in_memory(),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(600),
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let raddr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let mut r = Client::new(&raddr);
+    for (i, (addr, _)) in nodes.iter().enumerate() {
+        let body = format!(r#"{{"addr":"{addr}","token":"adm"}}"#);
+        let target = format!("/_shard/nodes/n{}", i + 1);
+        assert_eq!(r.send("PUT", &target, None, body.as_bytes()).0, 201);
+    }
+    let schema = "create collection users (email text, created timestamp @sorted)";
+    for t in 0..TENANTS {
+        let mut body = format!(r#"{{"node":"n{}","schema":"#, t % 3 + 1);
+        fenec_core::json::escape_into(&mut body, schema);
+        body.push('}');
+        let target = format!("/_shard/tenants/t{t:03}");
+        let (status, b) = r.send("PUT", &target, None, body.as_bytes());
+        assert_eq!(status, 201, "{}", String::from_utf8_lossy(&b));
+        let docs: Vec<String> = (0..ROWS)
+            .map(|k| {
+                let ms = 1_790_000_000_000u64 + ((k * TENANTS + t) as u64) * 1_000;
+                format!("{{email: \"u{k}@t{t}\", created: {ms}}}")
+            })
+            .collect();
+        let mut q = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut q, &format!("put users [{}]", docs.join(",")));
+        q.push('}');
+        let (status, b) = r.send("POST", &format!("/t/t{t:03}/query"), None, q.as_bytes());
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&b));
+    }
+    let count = "get users select count() as n";
+    let top = "get users select email, created order created desc limit 20";
+    let body = |q: &str, merge: &str| {
+        let mut b = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut b, q);
+        b.push_str(&format!(",\"merge\":{merge}}}"));
+        b
+    };
+    let cases = [
+        ("a count, summed", count, r#"{"sum":["n"]}"#),
+        (
+            "the 20 newest, merged",
+            top,
+            r#"{"order":["created desc"],"limit":20}"#,
+        ),
+    ];
+    let tenants: Vec<String> = (0..TENANTS).map(|t| format!("t{t:03}")).collect();
+    println!(
+        "\nquery across tenants: {TENANTS} tenants of {ROWS} rows on 3 nodes, {ROUNDS} rounds"
+    );
+    println!("                                    p50        p95        p99");
+    for (label, q, merge) in cases {
+        let fan = body(q, merge);
+        // The answer is what a client asking each tenant would merge.
+        let (status, b) = r.send("POST", "/_shard/query", None, fan.as_bytes());
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&b));
+        assert!(String::from_utf8_lossy(&b).contains(&format!("\"answered\":{TENANTS}")));
+        let one = |c: &mut Client| {
+            let (status, _) = c.send("POST", "/_shard/query", None, fan.as_bytes());
+            assert_eq!(status, 200);
+        };
+        let mut each = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut each, q);
+        each.push('}');
+        let in_turn = |c: &mut Client| {
+            for t in &tenants {
+                let (status, _) = c.send("POST", &format!("/t/{t}/query"), None, each.as_bytes());
+                assert_eq!(status, 200);
+            }
+        };
+        let mut pool: Vec<Client> = (0..AT_ONCE).map(|_| Client::new(&raddr)).collect();
+        let mut at_once = || {
+            std::thread::scope(|s| {
+                for (k, c) in pool.iter_mut().enumerate() {
+                    let (tenants, each) = (&tenants, &each);
+                    s.spawn(move || {
+                        for t in tenants.iter().skip(k).step_by(AT_ONCE) {
+                            let target = format!("/t/{t}/query");
+                            let (status, _) = c.send("POST", &target, None, each.as_bytes());
+                            assert_eq!(status, 200);
+                        }
+                    });
+                }
+            });
+        };
+        let timed = |f: &mut dyn FnMut()| -> Vec<f64> {
+            for _ in 0..20 {
+                f();
+            }
+            let mut out: Vec<f64> = (0..ROUNDS)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            out
+        };
+        let fanned = timed(&mut || one(&mut r));
+        let turned = timed(&mut || in_turn(&mut r));
+        let parallel = timed(&mut at_once);
+        println!("  {label}");
+        for (how, v) in [
+            ("POST /_shard/query", &fanned),
+            ("each tenant in turn", &turned),
+            ("each tenant, 16 at once", &parallel),
+        ] {
+            println!(
+                "    {how:<28} {:>7.2} ms {:>7.2} ms {:>7.2} ms",
+                pct(v, 0.5),
+                pct(v, 0.95),
+                pct(v, 0.99)
+            );
+        }
+    }
+    for (_, dir) in &nodes {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// A node and its standby: what a write costs to reach the replica, and

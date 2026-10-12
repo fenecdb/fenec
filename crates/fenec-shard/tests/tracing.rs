@@ -90,10 +90,29 @@ fn a_request_through_the_router_is_one_trace_with_the_node() {
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
+    // A second node, for a query across tenants on both.
+    let other = Arc::new(Tenants::new(dir.join("other")).unwrap());
+    other.create("beta").unwrap();
+    let server = fenec_http::Server::with_tenants(
+        other,
+        fenec_http::Config {
+            addr: "127.0.0.1:0".into(),
+            admin_token: Some("adm2".into()),
+            ..fenec_http::Config::default()
+        },
+    );
+    let listener = server.bind().unwrap();
+    let node2 = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
     let mut d = Directory::in_memory();
     let (addr, token) = (node.clone(), "adm".into());
     d.set_node("n1", Node { addr, token }).unwrap();
     d.place("acme", "n1", State::Active).unwrap();
+    let (addr, token) = (node2.clone(), "adm2".into());
+    d.set_node("n2", Node { addr, token }).unwrap();
+    d.place("beta", "n2", State::Active).unwrap();
     let router = Router::new(
         d,
         Config {
@@ -242,5 +261,50 @@ fn a_request_through_the_router_is_one_trace_with_the_node() {
         out
     };
     assert!(scrape.contains("fenec_trace_spans_dropped_total{reason=\"queue_full\"} 0"));
+
+    // A query across tenants: a span for the fan-out, one under it for
+    // each node it asked, and each tenant's read on its node under that
+    // node's span, every one with the request's id.
+    assert_eq!(call(&front, "/t/beta/query", create, ""), 200);
+    let fan = r#"{"query":"get notes"}"#;
+    assert_eq!(
+        call(&front, "/_shard/query", fan, "X-Request-Id: fan-1\r\n"),
+        200
+    );
+    let spans = recv.until("the fan-out's spans on both nodes", |s| {
+        s.iter()
+            .filter(|g| g.kind == 2 && g.attr("fenec.request_id") == Some("fan-1"))
+            .count()
+            == 3
+    });
+    let root = spans
+        .iter()
+        .find(|g| g.attr("fenec.request_id") == Some("fan-1") && g.parent.is_none())
+        .expect("the router's root span");
+    assert_eq!(root.name, "POST /_shard/query");
+    assert_eq!(root.attr("fenec.tenants"), Some("2"));
+    assert_eq!(root.attr("http.response.status_code"), Some("200"));
+    let fanning = children(&spans, root, "fanout");
+    assert_eq!(fanning.len(), 1, "{spans:#?}");
+    assert_eq!(fanning[0].attr("fenec.answered"), Some("2"));
+    let per_node = children(&spans, fanning[0], "node");
+    assert_eq!(per_node.len(), 2, "{spans:#?}");
+    for (n, tenant) in [("n1", "acme"), ("n2", "beta")] {
+        let span = per_node
+            .iter()
+            .find(|g| g.attr("fenec.node") == Some(n))
+            .unwrap_or_else(|| panic!("no span for {n} in {per_node:#?}"));
+        assert_eq!(span.kind, 3, "a client span");
+        assert_eq!(span.attr("fenec.tenants"), Some("1"));
+        assert!(span.start >= fanning[0].start && span.end <= fanning[0].end);
+        let read: Vec<&Got> = spans
+            .iter()
+            .filter(|g| g.kind == 2 && g.parent.as_deref() == Some(span.id.as_str()))
+            .collect();
+        assert_eq!(read.len(), 1, "{tenant}: {spans:#?}");
+        assert_eq!(read[0].name, "POST /_admin/tenants/{name}/query");
+        assert_eq!(read[0].attr("fenec.request_id"), Some("fan-1"));
+        assert_eq!(read[0].trace, root.trace);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

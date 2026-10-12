@@ -30,6 +30,7 @@
 //! over once its lease has certainly lapsed ([`lease`]).
 
 pub mod directory;
+pub mod fanout;
 pub mod lease;
 pub mod metrics;
 pub mod upstream;
@@ -78,6 +79,10 @@ pub struct Config {
     /// CORS headers it replaces; `None` leaves those as the node wrote them
     /// and sends none of its own.
     pub cors: Option<String>,
+    /// What a query across tenants (`POST /_shard/query`) may gather, how
+    /// long it may take and how many calls it has out at once
+    /// (`--fanout-*`).
+    pub fanout: fanout::Limits,
 }
 
 impl Default for Config {
@@ -94,6 +99,7 @@ impl Default for Config {
             auto_failover: None,
             studio: None,
             cors: None,
+            fanout: fanout::Limits::default(),
         }
     }
 }
@@ -492,6 +498,17 @@ impl Router {
                         Some(resp) => answer(&mut out, Route::Replication, self.cors(resp)),
                     }
                 }
+                // A query across tenants is traced as a forward is: its
+                // calls to the nodes are its spans, and the nodes' hang
+                // under them. The rest of `/_shard/` is not.
+                Some(&"_shard") if fanout::asked(&req) => {
+                    fenec_http::trace::begin(&req);
+                    let resp = self.cors(self.admin(&req));
+                    let status = resp.status;
+                    let keep = answer(&mut out, Route::Shard, resp);
+                    fenec_http::trace::end(status);
+                    keep
+                }
                 Some(&"_shard") => answer(&mut out, Route::Shard, self.cors(self.admin(&req))),
                 // The studio's files go without, as a node's do: pages
                 // opened, never fetched from another origin.
@@ -778,10 +795,25 @@ impl Router {
     ///                                       replica -- and route them there
     /// POST   /_shard/replicas                  give every tenant in no pair
     ///                                       that has no replica one
+    /// POST   /_shard/query {query, params, tenants | prefix, merge, column,
+    ///                       partial, timeout_ms}  one read on every tenant,
+    ///                                       the answers merged ([`fanout`])
     /// ```
     pub fn admin(&self, req: &Request) -> Response {
         if let Some(refused) = self.refused(req) {
             return refused;
+        }
+        // Its body is not the object of fields the others' is: what goes
+        // to the nodes stays the text it came as. A read, so a standby
+        // router answers it from the placements it follows.
+        if req.segments().get(1) == Some(&"query") {
+            return match fanout::asked(req) {
+                true => self.fanout(req),
+                false => Response::error(
+                    405,
+                    "a query across tenants is sent with POST to /_shard/query",
+                ),
+            };
         }
         let body = match body_fields(req) {
             Ok(b) => b,

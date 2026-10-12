@@ -1583,6 +1583,73 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
     }
 }
 
+/// `POST /_admin/tenants/<t>/query`: one read of a tenant, answered as
+/// `/query` answers it with the server's own authority, for a router's
+/// query across tenants. A statement that writes is refused before it
+/// runs, in words of its own, and the read runs in read-only mode as well,
+/// which refuses one again: two locks on the one door that lets a token
+/// meant for moving tenants near their rows. Counted among the tenant's
+/// statements and in the slow log, as a read under its prefix is: it is the
+/// tenant's load.
+pub(crate) fn admin_query(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
+    if req.body.len() > cfg.max_body {
+        return Response::error(
+            413,
+            &format!(
+                "the body is {} bytes, the ceiling is {}",
+                req.body.len(),
+                cfg.max_body
+            ),
+        );
+    }
+    let started = std::time::Instant::now();
+    let resp = {
+        // Held against a freeze as any request of the tenant's is: a move
+        // waits for the read rather than delete the file under it.
+        let _held = t.enter();
+        match writes(&req.body) {
+            Some(word) => Response::error(
+                403,
+                &format!("a query across tenants reads, and `{word}` writes"),
+            ),
+            None => {
+                let read_only = Config {
+                    read_only: true,
+                    ..cfg.clone()
+                };
+                handle_query(&t.db, &read_only, req, &Who::Full)
+            }
+        }
+    };
+    let took = started.elapsed();
+    let failed = resp.status >= 400;
+    let what = || {
+        let mut s = format!("{} {} ", req.method.name(), req.target);
+        s.push_str(&String::from_utf8_lossy(&req.body));
+        s
+    };
+    metrics::record(took, failed, Some(t.name()), what);
+    statements::record(Some(t.name()), &what(), took, failed);
+    resp
+}
+
+/// The first word of a `/query` body's statement where it writes; `None`
+/// for a read, and for a body that does not parse, which the read's own
+/// parse then refuses with its error.
+fn writes(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let obj = fenec_core::json::parse_object_listing(text, "params").ok()?;
+    let sql = obj.iter().find_map(|(k, v)| match v {
+        Value::Text(s) if k == "query" || k == "sql" => Some(s.as_str()),
+        _ => None,
+    })?;
+    let stmt = api::parsed(sql).ok()?;
+    match stmt.is_read_only() {
+        true => None,
+        false => Some(sql.split_whitespace().next().unwrap_or("").to_string()),
+    }
+}
+
 /// `POST /_schema/apply`, and a tenant's schema as a router creates it
 /// (`POST /_admin/tenants/<t>/schema`): the description's migrations, then
 /// what only adds, one block under the write lock, synced as a write is.

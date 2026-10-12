@@ -310,7 +310,13 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
         return;
     }
     let admin = path.starts_with("/_admin/") || path.starts_with("/_shard/");
-    if admin && on() && !matches!(req.method, Method::Get | Method::Head | Method::Options) {
+    // A tenant's read for a router's query across tenants changes nothing,
+    // though it is a `POST`: one fan-out over a thousand tenants would be
+    // a thousand lines on the nodes. The router's own `POST /_shard/query`
+    // is the line, its request id the one every node's read carries.
+    let read = path.starts_with("/_admin/tenants/") && path.ends_with("/query");
+    if admin && !read && on() && !matches!(req.method, Method::Get | Method::Head | Method::Options)
+    {
         event(
             "admin",
             &[

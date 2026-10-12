@@ -651,6 +651,113 @@ impl Drop for Span {
     }
 }
 
+/// A child span of this thread's request whose work other threads do: a
+/// router's calls to one node during a query across tenants, made by
+/// workers at once. The spans of a trace are the request thread's, and a
+/// worker has none, so the span's id is made here, each call names it as
+/// its parent ([`Remote::traceparent`]) -- the node's spans hang under it
+/// -- and this thread records it once the work is done
+/// ([`Remote::end_at`]). With the request not sampled it records nothing,
+/// and its calls carry the request's own context, as [`outgoing`] sends.
+pub struct Remote {
+    trace: [u8; 16],
+    id: [u8; 8],
+    parent: [u8; 8],
+    sampled: bool,
+    state: Option<String>,
+    start: u64,
+    generation: u64,
+}
+
+/// A [`Remote`] span under the span open now, begun now: `None` when no
+/// request is being served under a context -- tracing off among them.
+pub fn remote() -> Option<Remote> {
+    if !on() {
+        return None;
+    }
+    CTX.with(|c| {
+        let c = c.borrow();
+        if !c.active {
+            return None;
+        }
+        let parent = match c.open.last() {
+            Some(&i) if c.sampled => c.spans[i].id,
+            _ => c.root,
+        };
+        let id = match c.sampled {
+            true => fresh().to_be_bytes(),
+            false => c.root,
+        };
+        Some(Remote {
+            trace: c.id,
+            id,
+            parent,
+            sampled: c.sampled,
+            state: c.state.clone(),
+            start: now_unix(),
+            generation: c.generation,
+        })
+    })
+}
+
+impl Remote {
+    /// The `traceparent` a call made for this span carries: the span as
+    /// its parent.
+    pub fn traceparent(&self) -> String {
+        let mut v = String::with_capacity(55);
+        v.push_str("00-");
+        hex_into(&mut v, &self.trace);
+        v.push('-');
+        hex_into(&mut v, &self.id);
+        v.push_str(if self.sampled { "-01" } else { "-00" });
+        v
+    }
+
+    /// The `tracestate` such a call passes on, as it came.
+    pub fn tracestate(&self) -> Option<&str> {
+        self.state.as_deref()
+    }
+
+    /// Records the span, named `name`, from when it was begun to `at`, on
+    /// the thread it was begun on while its request lasts. A trace holding
+    /// its [`MAX_SPANS`] already leaves it out, as it leaves out any span
+    /// past them.
+    pub fn end_at(
+        self,
+        name: &'static str,
+        kind: Kind,
+        at: Instant,
+        attrs: Vec<(&'static str, Val)>,
+        error: Option<String>,
+    ) {
+        if !(self.sampled && on()) {
+            return;
+        }
+        let ago = Instant::now().saturating_duration_since(at).as_nanos() as u64;
+        let end = now_unix().saturating_sub(ago).max(self.start);
+        CTX.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.generation != self.generation
+                || !c.active
+                || c.spans.is_empty()
+                || c.spans.len() >= MAX_SPANS
+            {
+                return;
+            }
+            c.spans.push(Rec {
+                name: Cow::Borrowed(name),
+                id: self.id,
+                parent: Some(self.parent),
+                kind,
+                start: self.start,
+                end,
+                attrs,
+                error,
+            });
+        });
+    }
+}
+
 /// The `traceparent` (and `tracestate`) to send a request out of this
 /// thread's with: the innermost open span as the parent, the trace's
 /// flag. `None` when no context is active -- tracing off, or no request.

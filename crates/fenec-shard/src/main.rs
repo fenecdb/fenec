@@ -47,6 +47,16 @@ usage: fenec-shard [options]
       --max-connections <n> ceiling on concurrent connections  default: 1000
       --max-body <MiB>      request body ceiling  default: 64
       --upstream-timeout <s> connect/read bound towards a node  default: 60
+      --fanout-timeout <s>  the longest a query across tenants (POST /_shard/query)
+                            runs, every call to a node within it; a request
+                            may ask for less (timeout_ms)  default: 30
+      --fanout-max-rows <n> rows such a query gathers from its tenants at
+                            most: past it the query is refused (413), never
+                            answered with what fitted  default: 100000
+      --fanout-max-bytes <MiB>  bytes of the tenants' answers it gathers at
+                            most, refused past it likewise  default: 64
+      --fanout-concurrency <n>  calls to the nodes it has out at once, the
+                            tenants taken node by node in turn  default: 16
       --replicas            give each tenant created on a node in no pair a
                             replica on another node -- the one holding the
                             fewest -- so a node's tenants fail over across
@@ -168,6 +178,28 @@ fn main() {
                     fail("--upstream-timeout cannot be zero");
                 }
                 cfg.upstream_timeout = Duration::from_secs(secs);
+            }
+            "--fanout-timeout" => {
+                let secs = number(next(&mut i, "--fanout-timeout"), "--fanout-timeout");
+                if secs == 0 {
+                    fail("--fanout-timeout cannot be zero");
+                }
+                cfg.fanout.timeout = Duration::from_secs(secs);
+            }
+            "--fanout-max-rows" => {
+                cfg.fanout.max_rows =
+                    number(next(&mut i, "--fanout-max-rows"), "--fanout-max-rows") as usize
+            }
+            "--fanout-max-bytes" => {
+                let mib = number(next(&mut i, "--fanout-max-bytes"), "--fanout-max-bytes");
+                cfg.fanout.max_bytes = (mib as usize) << 20;
+            }
+            "--fanout-concurrency" => {
+                let n = number(next(&mut i, "--fanout-concurrency"), "--fanout-concurrency");
+                if n == 0 {
+                    fail("--fanout-concurrency is how many calls go out at once: 1 at least");
+                }
+                cfg.fanout.concurrency = n as usize;
             }
             "--replication-token" => replication_token = Some(next(&mut i, "--replication-token")),
             "--replica-of" => {
