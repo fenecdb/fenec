@@ -117,12 +117,18 @@ public sealed class Computed
 
     /// <summary>The start of the interval a timestamp falls in -- <c>"15m"</c>, <c>"1h"</c>, <c>"1d"</c>,
     /// <c>"1w"</c> (from a Monday), <c>"1mo"</c>, <c>"1y"</c>, in UTC -- for a select list or a group:
-    /// <c>db.From("ticks").Select(Computed.Bucket("at", "1m").As("minute"), "count(*)").Group("minute")</c>.</summary>
-    public static Computed Bucket(string field, string interval)
+    /// <c>db.From("ticks").Select(Computed.Bucket("at", "1m").As("minute"), "count(*)").Group("minute")</c>.
+    /// Given a <paramref name="zone"/> -- an IANA name, <c>"Europe/Istanbul"</c>, or an offset, <c>"+03:00"</c> --
+    /// by its clock: a day from local midnight, 23 or 25 hours where it changes to or from daylight time. The
+    /// zone goes as a parameter.</summary>
+    public static Computed Bucket(string field, string interval, string? zone = null)
     {
         if (interval is null || !Interval.IsMatch(interval))
             throw Builder.Refuse($"bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': {Builder.Quote(interval)}");
-        return new("expr", null, $"bucket({Builder.FieldPath(field)}, {interval})", []);
+        if (zone is null) return new("expr", null, $"bucket({Builder.FieldPath(field)}, {interval})", []);
+        if (zone.Length == 0)
+            throw Builder.Refuse($"bucket() takes a zone's name, such as 'Europe/Istanbul', or an offset, such as '+03:00': {Builder.Quote(zone)}");
+        return new("expr", null, $"bucket({Builder.FieldPath(field)}, {interval}, ?)", [zone]);
     }
 
     /// <summary><c>count(distinct field)</c>: how many distinct values the rows hold.</summary>
@@ -646,7 +652,7 @@ public sealed class Query
     sealed record VectorClause(string Field, object? Vector, long? N, bool Exact);
 
     sealed record Level(string Collection, IReadOnlyList<string> On, IReadOnlyList<string> Parent,
-        IReadOnlyList<string>? Project,
+        IReadOnlyList<SelectItem>? Project, IReadOnlyList<SelectItem>? Group,
         IReadOnlyList<Node> Cond, bool Required, IReadOnlyList<(string Field, bool Asc, string? Collate)> Order,
         long? Limit, long Offset);
 
@@ -874,10 +880,15 @@ public sealed class Query
     /// the looked-up collection, and <paramref name="limit"/> counts children per parent.
     /// <paramref name="required"/> drops a parent no child matches. Called again, it chains onto the collection
     /// the call before named.
+    /// <paramref name="select"/> may aggregate, as the query's own list does -- <c>"count(*)"</c>,
+    /// <c>"sum(total)"</c>, a <see cref="Computed"/> -- each parent's children folded, one row a parent, or with
+    /// <paramref name="group"/> one a group, ordered and paged a parent at a time; ungrouped,
+    /// <paramref name="order"/>, <paramref name="limit"/> and <paramref name="offset"/> pick the children folded. A
+    /// query whose list aggregates hangs a lookup off its groups, <paramref name="parentKey"/> a column.
     /// </summary>
-    public Query Lookup(string name, Fields? on = null, Fields? parentKey = null, IEnumerable<string>? select = null,
+    public Query Lookup(string name, Fields? on = null, Fields? parentKey = null, IEnumerable<object?>? select = null,
         Cond? where = null, bool required = false, IEnumerable<SortKey>? order = null, long? limit = null,
-        long? offset = null)
+        long? offset = null, IEnumerable<object?>? group = null)
     {
         if (on is null || on.Names.Count == 0 || string.IsNullOrEmpty(on.Names[0]))
             throw Builder.Refuse("lookup needs `on`: the child field holding the key");
@@ -887,12 +898,29 @@ public sealed class Query
         // One child field alone pairs with `id` unless named; several, each with its own.
         if ((child.Count > 1 || parentKey is not null) && parent.Count != child.Count)
             throw Builder.Refuse($"lookup pairs {child.Count} child fields with {parent.Count} parent fields");
-        var cols = select?.ToList();
-        var project = cols is null || cols.Contains("*") ? null : cols.Select(Builder.FieldPath).ToList();
+        var cols = select is null ? null : Builder.Flat(select.ToArray());
+        List<SelectItem>? project = null;
+        var aggregate = false;
+        if (cols is not null && !cols.Contains("*")) (project, aggregate) = Builder.Columns(cols, false);
+        IReadOnlyList<SelectItem>? groupKeys = null;
+        if (group is not null)
+        {
+            (groupKeys, _) = Builder.Columns(Builder.Flat(group.ToArray()), true);
+            if (groupKeys.Count == 0) throw Builder.Refuse("group takes at least one key");
+            // The engine refuses it too; failing here never sends a query.
+            if (!aggregate)
+                throw Builder.Refuse(
+                    $"group {string.Join(", ", groupKeys.Select(k => k.Text ?? k.Expr!.Sql))} needs an aggregate in select: 'count(*)'");
+        }
+        // A level selects its children's fields, or aggregates of them.
+        if (!aggregate && project is not null && project.Any(c => c.Expr is not null))
+            throw Builder.Refuse("a lookup selects its children's fields, or aggregates of them");
+        // Over groups a key may name an aggregate of the list.
         var keys = (order ?? []).Select(k =>
-            (Builder.FieldPath(k.Field), Builder.Direction(k.Direction), Builder.Collation(k.Collate))).ToList();
-        var level = new Level(collection, child, parent, project, where is null ? [] : [where.Node], required, keys,
-            limit is { } l ? Builder.Whole(l, "limit") : null, offset is { } o ? Builder.Whole(o, "offset") : 0);
+            (Builder.Column(k.Field).Text, Builder.Direction(k.Direction), Builder.Collation(k.Collate))).ToList();
+        var level = new Level(collection, child, parent, project, groupKeys, where is null ? [] : [where.Node],
+            required, keys, limit is { } l ? Builder.Whole(l, "limit") : null,
+            offset is { } o ? Builder.Whole(o, "offset") : 0);
         return new(_s with { Lookups = [.. _s.Lookups, level] });
     }
 
@@ -926,11 +954,11 @@ public sealed class Query
                 $"group {string.Join(", ", s.Group.Select(k => k.Text ?? k.Expr!.Sql))} needs an aggregate in select: 'count(*)'");
         if (s.Aggregate)
         {
+            // Ungrouped, Order, Limit and Offset pick the rows folded; a lookup hangs off the groups, keyed by
+            // a column.
             var clash = s.Near is not null ? "near" : s.Match is not null ? "match"
-                : s.Lookups.Count > 0 ? "lookup" : s.Count ? "count" : null;
+                : s.Count && s.Group is null ? "count" : null;
             if (clash is not null) throw Builder.Refuse($"aggregates cannot be combined with {clash}");
-            if (s.Group is null && (s.Order.Count > 0 || s.Limit is not null || s.Offset > 0))
-                throw Builder.Refuse("aggregates answer one row; group makes a row per value");
             if (s.Group is null && s.Require.Length > 0)
                 throw Builder.Refuse("require counts the rows a query answers, and an aggregate answers one");
         }
@@ -1030,8 +1058,10 @@ public sealed class Query
             sql.Append($" lookup {l.Collection} on {Side(l.On)}");
             if (l.Parent.Count > 0) sql.Append($" = {Side(l.Parent)}");
             if (l.Required) sql.Append(" required");
-            if (l.Project is not null) sql.Append(" select ").Append(string.Join(", ", l.Project));
+            if (l.Project is not null)
+                sql.Append(" select ").Append(string.Join(", ", l.Project.Select(c => c.Render(bind))));
             if (WhereOf(l.Cond, bind) is { } w) sql.Append(" where ").Append(w);
+            if (l.Group is not null) sql.Append(" group ").Append(string.Join(", ", l.Group.Select(k => k.Render(bind))));
             AppendOrder(sql, l.Order);
             if (l.Limit is { } n) sql.Append(" limit ").Append(bind.Bind(n));
             if (l.Offset > 0) sql.Append(" offset ").Append(bind.Bind(l.Offset));
