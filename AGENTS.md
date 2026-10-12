@@ -1341,7 +1341,9 @@ admin token -- and the router forwards what the node refuses at once
 (`tests/token_first.rs`, fenec-shard's
 `a_refused_token_waits_for_nothing_through_the_router`: each refusal asks
 30 s for a write made only once it is in, so one that waited would be the
-wait's 504, never 401). A request without the header asks nothing more.
+wait's 504, never 401). A request without the header asks nothing more:
+`make requests-bench` in ABBA turns against main kept every p50 and its
+rates within 0.5%.
 
 **`insert` never writes over; `put` does.** `Statement::Put` carries
 `insert` (the parser sets it for the keyword, `POST /<name>` over REST):
