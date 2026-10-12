@@ -159,6 +159,7 @@ image:</p>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;</code></td><td>create an empty tenant (409 if it exists)</td></tr>
 <tr><td><code>DELETE /_admin/tenants/&lt;t&gt;</code></td><td>end its streams, close it, remove the file</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/schema</code></td><td>a schema description, applied as <code>/_schema/apply</code> applies it: what the router sends for a tenant created with a schema</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/query</code></td><td>a read, <code>{query, params}</code> as <code>/query</code> takes it, answered as <code>/query</code> answers it; a statement that writes is refused (403). What the router sends each tenant for a <a href="#across-tenants">query across tenants</a></td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/freeze</code></td><td>refuse writes and wait for the ones in flight</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/thaw</code></td><td>accept writes again</td></tr>
 <tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
@@ -226,6 +227,7 @@ does not return them.</p>
 <tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{node}</code> to choose, otherwise the node with the fewest bytes on disk; <code>{schema}</code>, FenecQL <code>create collection</code> text, applied there before the tenant is answered (below)</td></tr>
 <tr><td><code>DELETE /_shard/tenants/&lt;t&gt;</code></td><td>delete on the node, then forget</td></tr>
 <tr><td><code>POST /_shard/tenants/&lt;t&gt;/move</code></td><td><code>{to}</code>; see below</td></tr>
+<tr><td><code>POST /_shard/query</code></td><td>one read on every tenant, or those named, the answers merged as the request says (<a href="#across-tenants">A query across tenants</a>)</td></tr>
 <tr><td><code>GET /_metrics</code></td><td>what the router answered and forwarded, the nodes' time and the ones it could not reach, and its moves, in Prometheus's text format (<a href="monitoring.html#router">Monitoring</a>)</td></tr>
 </tbody>
 </table>
@@ -516,8 +518,9 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
 
 <h2>What it does not do</h2>
 
-<p>No queries across tenants, no tenant bigger than a node, and only one
-router makes changes at a time. Failover is never guessed.</p>
+<p>No join across tenants -- a query across them is an operator's read,
+merged as it says -- no tenant bigger than a node, and only one router
+makes changes at a time. Failover is never guessed.</p>
 
 <details class="deep"><summary>Details</summary>
 <ul>
@@ -528,7 +531,12 @@ router makes changes at a time. Failover is never guessed.</p>
     router promotes a node's tenants only once the node's own lease has
     certainly lapsed, and the node stops its writes as it does (<a
     href="#automatic-failover">Automatic failover</a>).</li>
-  <li><b>No query across tenants.</b> Each request names one.</li>
+  <li><b>No join across tenants.</b> A data request names one tenant. The
+    router's <a href="#across-tenants">query across tenants</a> runs one
+    read on each and merges the answers by a rule the request states --
+    one after another, the first rows of an order, sums and extremes by
+    group -- and never parses the query: nothing joins one tenant's rows to
+    another's, and the answers are each tenant's own, of no one moment.</li>
   <li><b>No tenant larger than a node.</b> A tenant has to fit one node's
     memory, with the same 2× open and 3× checkpoint peaks as any file.</li>
   <li><b>One router takes changes at a time.</b> A standby follows its

@@ -188,20 +188,11 @@ struct Cluster {
     gate: Gate,
 }
 
+#[derive(Default)]
 struct Setup {
     token: Option<&'static str>,
     access: Option<Arc<fenec_http::access::Access>>,
     limits: Limits,
-}
-
-impl Default for Setup {
-    fn default() -> Setup {
-        Setup {
-            token: None,
-            access: None,
-            limits: Limits::default(),
-        }
-    }
 }
 
 /// A router over `n1`, reached straight, and `n2`, reached through the

@@ -966,24 +966,31 @@ fn failed(tenant: &str, why: &str) -> Failure {
     }
 }
 
-/// Each row's members, checked to leave room for the tenant's column.
+/// Whether each row holds no member at all, each checked to be an object
+/// that leaves room for the tenant's column.
 fn members_of(
     column: &str,
     text: &str,
     rows: &[Range<usize>],
-) -> std::result::Result<Vec<scan::Members>, String> {
+) -> std::result::Result<Vec<bool>, String> {
     rows.iter()
         .map(|r| {
-            let m = scan::members(text, r.clone())?;
-            if m.iter().any(|(k, _)| k == column) {
-                return Err(format!(
-                    "its rows hold a `{column}` column of their own: name the tenant's with \
-                     \"column\""
-                ));
+            let (mut empty, mut clash) = (true, false);
+            scan::each(text, r.clone(), &mut |k, _| {
+                empty = false;
+                clash |= scan::key_is(text, &k, column);
+                Ok(())
+            })?;
+            match clash {
+                true => Err(clashing(column)),
+                false => Ok(empty),
             }
-            Ok(m)
         })
         .collect()
+}
+
+fn clashing(column: &str) -> String {
+    format!("its rows hold a `{column}` column of their own: name the tenant's with \"column\"")
 }
 
 /// A row with the tenant's column first: the node's text after it.
@@ -1026,51 +1033,69 @@ fn concat(
                 continue;
             }
         };
-        for (row, m) in rows.iter().zip(&members) {
+        for (row, empty) in rows.iter().zip(members) {
             if !std::mem::take(&mut first) {
                 out.push(',');
             }
-            row_into(&mut out, column, tenant, text, row, m.is_empty());
+            row_into(&mut out, column, tenant, text, row, empty);
         }
     }
     out.push(']');
     out
 }
 
-/// Two values of an answer in the order the engine puts the values they
-/// stand for. A timestamp travels as ISO text, which omits its
-/// milliseconds where they are 0, so its bytes do not order as its time
-/// does (`...:00Z` after `...:00.500Z`): two texts that are timestamps as
-/// fenecdb writes one compare as the times they name. Anything else
-/// compares as the engine compares its values, text by its bytes -- a
+/// A value of an answer, read to be compared or added. A timestamp travels
+/// as ISO text, which omits its milliseconds where they are 0, so its
+/// bytes do not order as its time does (`...:00Z` after `...:00.500Z`): a
+/// text that is a timestamp as fenecdb writes one is read as the time it
+/// names, once, here. Anything else compares as the engine compares its
+/// values ([`cmp`]).
+fn value_of(raw: &str) -> std::result::Result<Value, String> {
+    // A string with no escape is the text between its quotes: no parse.
+    let b = raw.as_bytes();
+    if b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' && !raw.contains('\\') {
+        let inner = &raw[1..raw.len() - 1];
+        return Ok(match iso_ms(inner) {
+            Some(ms) => Value::Timestamp(ms),
+            None => Value::Text(inner.to_string()),
+        });
+    }
+    match fenec_core::json::parse_json(raw).map_err(|e| crate::message(&e))? {
+        Value::Text(s) => Ok(match iso_ms(&s) {
+            Some(ms) => Value::Timestamp(ms),
+            None => Value::Text(s),
+        }),
+        v => Ok(v),
+    }
+}
+
+/// Two values in the order the engine puts them, text by its bytes: a
 /// collated or `nocase` order is the engine's alone, and a tenant whose
 /// rows come in one is found out of order and named, never merged wrong.
 fn cmp(a: &Value, b: &Value) -> Order {
-    if let (Value::Text(x), Value::Text(y)) = (a, b) {
-        if let (Some(p), Some(q)) = (iso_ms(x), iso_ms(y)) {
-            return p.cmp(&q);
-        }
-    }
     a.cmp_value(b)
 }
 
 /// The milliseconds a text names when it is a timestamp as
 /// `fenec_core::time::format_iso` writes one: `2026-10-12T09:30:12Z`, or
-/// `.041` before the `Z`.
+/// `.041` before the `Z`, a year of four digits or more (`-001` before
+/// year 1). Worked out from the digits where they lie: through
+/// `time::parse`, which takes every form a client may write, it was most
+/// of a merge of 2 000 rows.
 fn iso_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     let n = b.len();
     let digits = |r: Range<usize>| b.get(r).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
-    let time_end = match n >= 5 && b[n - 5] == b'.' {
-        true if digits(n - 4..n - 1) => n - 5,
+    let num = |r: Range<usize>| b[r].iter().fold(0i64, |v, d| v * 10 + (d - b'0') as i64);
+    let (time_end, milli) = match n >= 5 && b[n - 5] == b'.' {
+        true if digits(n - 4..n - 1) => (n - 5, num(n - 4..n - 1)),
         true => return None,
-        false => n - 1,
+        false => (n.checked_sub(1)?, 0),
     };
-    // `-MM-DDTHH:MM:SS` before the seconds' end, and a year of four digits
-    // or more before that, a sign allowed.
     if b.last() != Some(&b'Z') || time_end < 19 {
         return None;
     }
+    // `-MM-DDTHH:MM:SS` before the seconds' end, the year before that.
     let t = time_end - 15;
     let shaped = b[t] == b'-'
         && digits(t + 1..t + 3)
@@ -1082,12 +1107,28 @@ fn iso_ms(s: &str) -> Option<i64> {
         && digits(t + 10..t + 12)
         && b[t + 12] == b':'
         && digits(t + 13..t + 15);
-    let year = b.get(..t)?;
-    let year = year.strip_prefix(b"-").unwrap_or(year);
-    if !shaped || year.len() < 4 || !year.iter().all(u8::is_ascii_digit) {
+    let (negative, year) = match b[..t].strip_prefix(b"-") {
+        Some(y) => (true, y),
+        None => (false, &b[..t]),
+    };
+    // As `{:04}` writes a year: four places, the sign one of them.
+    let places = if negative { 3 } else { 4 };
+    if !shaped || year.len() < places || year.len() > 9 || !year.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    fenec_core::time::parse(s).ok()
+    let y = year.iter().fold(0i64, |v, d| v * 10 + (d - b'0') as i64);
+    let y = if negative { -y } else { y };
+    let (m, d) = (num(t + 1..t + 3) as u32, num(t + 4..t + 6) as u32);
+    let (h, mi, sec) = (num(t + 7..t + 9), num(t + 10..t + 12), num(t + 13..t + 15));
+    let days = fenec_core::time::days_from_civil(y, m, d);
+    // A date that is no date -- the 31st of a month of 30 -- is a text.
+    if !(1..=12).contains(&m) || fenec_core::time::civil_from_days(days) != (y, m, d) {
+        return None;
+    }
+    if h > 23 || mi > 59 || sec > 59 {
+        return None;
+    }
+    Some((((days * 24 + h) * 60 + mi) * 60 + sec) * 1000 + milli)
 }
 
 /// A tenant's rows for an order: each one's values of the keys, and
@@ -1113,17 +1154,30 @@ fn keyed(
     text: &str,
     rows: &[Range<usize>],
 ) -> std::result::Result<Keyed, String> {
-    let members = members_of(column, text, rows)?;
     let mut out: Keyed = Vec::with_capacity(rows.len());
-    for m in &members {
+    let mut found: Vec<Option<Range<usize>>> = vec![None; keys.len()];
+    for r in rows {
+        found.fill(None);
+        let (mut empty, mut clash) = (true, false);
+        scan::each(text, r.clone(), &mut |k, v| {
+            empty = false;
+            clash |= scan::key_is(text, &k, column);
+            for (slot, (name, _)) in found.iter_mut().zip(keys) {
+                if slot.is_none() && scan::key_is(text, &k, name) {
+                    *slot = Some(v.clone());
+                }
+            }
+            Ok(())
+        })?;
+        if clash {
+            return Err(clashing(column));
+        }
         let mut values = Vec::with_capacity(keys.len());
-        for (k, _) in keys {
-            let Some((_, r)) = m.iter().find(|(name, _)| name == k) else {
+        for (slot, (k, _)) in found.iter().zip(keys) {
+            let Some(at) = slot else {
                 return Err(format!("its rows have no `{k}` column to order by"));
             };
-            values.push(
-                fenec_core::json::parse_json(&text[r.clone()]).map_err(|e| crate::message(&e))?,
-            );
+            values.push(value_of(&text[at.clone()])?);
         }
         if let Some((before, _)) = out.last() {
             if cmp_keys(before, &values, keys) == Order::Greater {
@@ -1137,7 +1191,7 @@ fn keyed(
                 ));
             }
         }
-        out.push((values, m.is_empty()));
+        out.push((values, empty));
     }
     Ok(out)
 }
@@ -1422,30 +1476,35 @@ fn fold_row(
     row: Range<usize>,
     columns: &mut Vec<(String, Role)>,
 ) -> std::result::Result<Folding, String> {
-    let members = scan::members(text, row)?;
-    let mut out = Vec::with_capacity(members.len());
-    for (name, r) in members {
-        let Some(role) = fold.role(&name) else {
-            return Err(format!(
-                "its rows hold `{name}`, which the merge neither groups by nor folds: a \
-                 column it would drop is an answer cut"
-            ));
-        };
-        let v = fenec_core::json::parse_json(&text[r.clone()]).map_err(|e| crate::message(&e))?;
-        if role == Role::Sum && !matches!(v, Value::Int(_) | Value::Float(_) | Value::Null) {
-            return Err(format!(
-                "`{name}` is summed, and its rows hold no number there"
-            ));
-        }
-        let c = match columns.iter().position(|(c, _)| *c == name) {
+    let mut out = Vec::with_capacity(columns.len());
+    scan::each(text, row, &mut |k, r| {
+        // A column met before is known by its key where it lies; only a
+        // new one's name is decoded, and held to the merge.
+        let c = match columns.iter().position(|(c, _)| scan::key_is(text, &k, c)) {
             Some(c) => c,
             None => {
+                let name = scan::key_text(text, &k)?;
+                let Some(role) = fold.role(&name) else {
+                    return Err(format!(
+                        "its rows hold `{name}`, which the merge neither groups by nor \
+                         folds: a column it would drop is an answer cut"
+                    ));
+                };
                 columns.push((name, role));
                 columns.len() - 1
             }
         };
+        let v = value_of(&text[r.clone()])?;
+        if columns[c].1 == Role::Sum && !matches!(v, Value::Int(_) | Value::Float(_) | Value::Null)
+        {
+            return Err(format!(
+                "`{}` is summed, and its rows hold no number there",
+                columns[c].0
+            ));
+        }
         out.push((c, v, r));
-    }
+        Ok(())
+    })?;
     if let Some(missing) = fold
         .named()
         .find(|n| !out.iter().any(|(c, _, _)| columns[*c].0 == **n))
@@ -1536,9 +1595,10 @@ mod scan {
         }
     }
 
-    /// A key's text: its bytes between the quotes, or decoded where it
-    /// holds an escape.
-    fn key(raw: &str) -> Result<String, String> {
+    /// The text of the key at `raw` (its quotes included): its bytes
+    /// between the quotes, or decoded where it holds an escape.
+    pub fn key_text(text: &str, raw: &Range<usize>) -> Result<String, String> {
+        let raw = &text[raw.clone()];
         if !raw.contains('\\') {
             return Ok(raw[1..raw.len() - 1].to_string());
         }
@@ -1548,8 +1608,26 @@ mod scan {
         }
     }
 
-    /// The members of the object at `range.start`, and where it ends.
-    fn members_at(text: &str, start: usize) -> Result<(Members, usize), String> {
+    /// Whether the key at `raw` is `name`: compared where it lies, and
+    /// decoded only where it holds an escape.
+    pub fn key_is(text: &str, raw: &Range<usize>, name: &str) -> bool {
+        let quoted = &text[raw.clone()];
+        let inner = &quoted[1..quoted.len() - 1];
+        match inner.contains('\\') {
+            false => inner == name,
+            true => key_text(text, raw).is_ok_and(|k| k == name),
+        }
+    }
+
+    /// Each member of the object at `start` to `f` -- where its key lies,
+    /// quotes included, and where its value does -- and where it ends.
+    /// Nothing is allocated a member: a merge walks every row of every
+    /// tenant, and a key decoded into a `String` each was most of it.
+    fn walk(
+        text: &str,
+        start: usize,
+        f: &mut dyn FnMut(Range<usize>, Range<usize>) -> Result<(), String>,
+    ) -> Result<usize, String> {
         let b = text.as_bytes();
         let mut i = start;
         ws(b, &mut i);
@@ -1557,10 +1635,9 @@ mod scan {
             return Err("not an object".into());
         }
         i += 1;
-        let mut out = Vec::new();
         ws(b, &mut i);
         if b.get(i) == Some(&b'}') {
-            return Ok((out, i + 1));
+            return Ok(i + 1);
         }
         loop {
             ws(b, &mut i);
@@ -1569,7 +1646,7 @@ mod scan {
             }
             let k = i;
             string(b, &mut i)?;
-            let name = key(&text[k..i])?;
+            let key = k..i;
             ws(b, &mut i);
             if b.get(i) != Some(&b':') {
                 return Err(format!("`:` is missing at byte {i}"));
@@ -1578,31 +1655,49 @@ mod scan {
             ws(b, &mut i);
             let v = i;
             value(b, &mut i)?;
-            out.push((name, v..i));
+            f(key, v..i)?;
             ws(b, &mut i);
             match b.get(i) {
                 Some(b',') => i += 1,
-                Some(b'}') => return Ok((out, i + 1)),
+                Some(b'}') => return Ok(i + 1),
                 _ => return Err(format!("`,` or `}}` is missing at byte {i}")),
             }
         }
     }
 
-    /// The members of the object `range` holds.
-    pub fn members(text: &str, range: Range<usize>) -> Result<Members, String> {
-        let (m, end) = members_at(text, range.start)?;
-        match end == range.end {
-            true => Ok(m),
+    /// Each member of the object `range` holds to `f`, as [`walk`] has it.
+    pub fn each(
+        text: &str,
+        range: Range<usize>,
+        f: &mut dyn FnMut(Range<usize>, Range<usize>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        match walk(text, range.start, f)? == range.end {
+            true => Ok(()),
             false => Err("not an object".into()),
         }
     }
 
-    /// The members of the object the whole of `text` is.
+    /// The members of the object `range` holds, their keys decoded.
+    pub fn members(text: &str, range: Range<usize>) -> Result<Members, String> {
+        let mut out = Vec::new();
+        each(text, range, &mut |k, v| {
+            out.push((key_text(text, &k)?, v));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// The members of the object the whole of `text` is, keys decoded.
     pub fn object(text: &str) -> Result<Members, String> {
-        let (m, mut end) = members_at(text, 0).map_err(|e| format!("the body: {e}"))?;
+        let mut out = Vec::new();
+        let mut end = walk(text, 0, &mut |k, v| {
+            out.push((key_text(text, &k)?, v));
+            Ok(())
+        })
+        .map_err(|e| format!("the body: {e}"))?;
         ws(text.as_bytes(), &mut end);
         match end == text.len() {
-            true => Ok(m),
+            true => Ok(out),
             false => Err("the body: text after its object".into()),
         }
     }
@@ -1676,7 +1771,7 @@ mod tests {
 
     #[test]
     fn a_timestamp_compares_as_its_time_and_text_as_its_bytes() {
-        let at = |s: &str| Value::Text(s.into());
+        let at = |s: &str| value_of(&format!("{s:?}")).unwrap();
         assert_eq!(
             cmp(&at("2026-10-12T09:30:00Z"), &at("2026-10-12T09:30:00.500Z")),
             Order::Less
@@ -1693,6 +1788,36 @@ mod tests {
         ] {
             assert_eq!(iso_ms(not), None, "{not}");
         }
+        // Read from its digits, a timestamp is the one `format_iso` wrote
+        // and `time::parse` reads, over every year from before year 1 to
+        // 9999, leap days and the milliseconds' two forms among them.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for i in 0..200_000i64 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let span = 253_402_300_799_999i64 + 62_198_755_200_000;
+            let mut ms = (x % span as u64) as i64 - 62_198_755_200_000;
+            if i % 3 == 0 {
+                ms -= ms.rem_euclid(1000);
+            }
+            let text = fenec_core::time::format_iso(ms);
+            assert_eq!(iso_ms(&text), Some(ms), "{text}");
+            if ms >= 0 {
+                assert_eq!(fenec_core::time::parse(&text).ok(), Some(ms), "{text}");
+            }
+        }
+        for not_a_day in [
+            "2026-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+        ] {
+            assert_eq!(iso_ms(not_a_day), None, "{not_a_day}");
+        }
+        assert_eq!(
+            iso_ms("2024-02-29T23:59:59.999Z"),
+            fenec_core::time::parse("2024-02-29T23:59:59.999Z").ok()
+        );
         assert_eq!(cmp(&at("b"), &at("a")), Order::Greater);
         assert_eq!(cmp(&Value::Int(2), &Value::Float(1.5)), Order::Greater);
         assert_eq!(cmp(&Value::Null, &Value::Int(0)), Order::Less);
