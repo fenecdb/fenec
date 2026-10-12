@@ -2726,15 +2726,42 @@ struct Step<'a> {
 }
 
 impl Step<'_> {
-    /// What a row of the level above probes with.
-    fn key(&self, id: DocId) -> Result<Key> {
-        if let Probe::Tuple(t) = &self.probe {
-            return Ok(Key::Parts(t.prefix(self.parent, id)?));
-        }
-        Ok(Key::One(match self.parent_pos {
+    /// The value a row of the level above probes with.
+    fn key(&self, id: DocId) -> Result<Value> {
+        Ok(match self.parent_pos {
             None => Value::Int(id as i64),
             Some(p) => self.parent.store.read_field(id, p)?.unwrap_or(Value::Null),
-        }))
+        })
+    }
+
+    /// Fills `out` with the children of the row `id` of the level above:
+    /// ascending, alive and free of duplicates. A key over several fields
+    /// asks its index apart, so a single key's probe -- `key` and
+    /// [`Probe::ids`] over a value -- is the code it was: through a key
+    /// that was a value or an index's bytes, a page of 20 x 3 x 5 by one
+    /// `@hash` field took 1% longer.
+    fn ids(&self, id: DocId, out: &mut Vec<DocId>) -> Result<()> {
+        if let Probe::Tuple(t) = &self.probe {
+            out.clear();
+            if let Some(k) = t.prefix(self.parent, id)? {
+                t.ids(self.child, &k, out);
+            }
+            return Ok(());
+        }
+        self.probe.ids(self.child, &self.key(id)?, out);
+        Ok(())
+    }
+
+    /// Whether any live child of the row `id` of the level above satisfies
+    /// `pred`, as `ids` asks.
+    fn any(&self, id: DocId, mut pred: impl FnMut(DocId) -> Result<bool>) -> Result<bool> {
+        if let Probe::Tuple(t) = &self.probe {
+            return match t.prefix(self.parent, id)? {
+                Some(k) => t.any(self.child, &k, &mut pred),
+                None => Ok(false),
+            };
+        }
+        self.probe.any(self.child, &self.key(id)?, pred)
     }
 
     /// Whether `id` passes this level's own `where`.
@@ -2767,18 +2794,7 @@ fn survives(steps: &[Step], depth: usize, id: DocId, ctx: &EvalCtx) -> Result<bo
     let Some(next) = steps.get(depth + 1).filter(|n| n.l.required) else {
         return Ok(true);
     };
-    let key = next.key(id)?;
-    next.probe
-        .any(next.child, &key, |g| survives(steps, depth + 1, g, ctx))
-}
-
-/// What a row of the level above probes with: one field's value, or for a
-/// key over several fields the leading parts of the child's index as its
-/// keys hold them -- `None` where a part is null or a value its child field
-/// cannot hold, which no child matches.
-enum Key {
-    One(Value),
-    Parts(Option<crate::composite::KeyBytes>),
+    next.any(id, |g| survives(steps, depth + 1, g, ctx))
 }
 
 /// How `lookup` addresses the child collection.
@@ -3069,14 +3085,12 @@ impl<'a> Probe<'a> {
     fn any(
         &self,
         child: &Collection,
-        key: &Key,
+        key: &Value,
         mut pred: impl FnMut(DocId) -> Result<bool>,
     ) -> Result<bool> {
-        let key = match (self, key) {
-            (Probe::Tuple(t), Key::Parts(Some(k))) => return t.any(child, k, &mut pred),
-            (_, Key::One(v)) if !v.is_null() => v,
-            _ => return Ok(false),
-        };
+        if key.is_null() {
+            return Ok(false);
+        }
         match self {
             Probe::Id => {
                 if let Ok(Value::Int(i)) = key.clone().coerce(&DataType::Int) {
@@ -3104,19 +3118,15 @@ impl<'a> Probe<'a> {
                 }
                 Ok(false)
             }
+            // Asked apart ([`Step::any`]).
             Probe::Tuple(_) => Ok(false),
         }
     }
 
     /// Fills `out` with the child ids matching `key`: ascending, alive and
     /// free of duplicates.
-    fn ids(&self, child: &Collection, key: &Key, out: &mut Vec<DocId>) {
+    fn ids(&self, child: &Collection, key: &Value, out: &mut Vec<DocId>) {
         out.clear();
-        let key = match (self, key) {
-            (Probe::Tuple(t), Key::Parts(Some(k))) => return t.ids(child, k, out),
-            (_, Key::One(v)) => v,
-            _ => return,
-        };
         // A NULL key matches nothing, not even a stored NULL. A field left
         // out of a document is written as NULL and does get a bucket, so
         // without this guard every document missing the key would attach to
@@ -3152,6 +3162,7 @@ impl<'a> Probe<'a> {
                 // order whatever order they were written in.
                 out.extend(ids.iter().filter(|id| child.store.contains(*id)));
             }
+            // Asked apart ([`Step::ids`]).
             Probe::Tuple(_) => {}
         }
     }
@@ -9173,7 +9184,7 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
         let steps = self.lookup_chain(parent, l)?;
-        let (child, probe) = (steps[0].child, &steps[0].probe);
+        let child = steps[0].child;
 
         // Two plans answer this question, and every number that decides
         // between them is exact and already in hand: the candidate parents
@@ -9226,11 +9237,10 @@ impl Database {
         let mut out = Vec::new();
         let parents = ids.len();
         for id in ids {
-            let key = steps[0].key(id)?;
             // A child only counts if it survives what is below it too: with
             // a `required` level further down, a child that passes its own
             // `where` may still have nothing hanging off it.
-            if probe.any(child, &key, |cid| survives(&steps, 0, cid, ctx))? {
+            if steps[0].any(id, |cid| survives(&steps, 0, cid, ctx))? {
                 out.push(id);
             }
         }
@@ -9309,10 +9319,9 @@ impl Database {
         };
         let want = offset.saturating_add(limit);
         for &pid in ids {
-            let key = steps[depth].key(pid)?;
             let mut kept: Vec<DocId> = Vec::new();
             if let Some((t, (back, ties))) = walk {
-                if let (Key::Parts(Some(k)), true) = (&key, want > 0) {
+                if let (true, Some(k)) = (want > 0, t.prefix(steps[depth].parent, pid)?) {
                     let mut take = |cid| {
                         if child.store.contains(cid) && survives(steps, depth, cid, ctx)? {
                             kept.push(cid);
@@ -9322,14 +9331,14 @@ impl Database {
                     // Forwards over every part, the run is in the order as
                     // it lies, ties and all; the rest a walk puts in order.
                     match !back && ties >= t.ix.parts().len() {
-                        true => t.ix.run(k, &mut take)?,
+                        true => t.ix.run(&k, &mut take)?,
                         false => {
-                            t.ix.walk(&[t.span(k)], t.parts.len(), back, ties, &mut take)?
+                            t.ix.walk(&[t.span(&k)], t.parts.len(), back, ties, &mut take)?
                         }
                     }
                 }
             } else {
-                probe.ids(child, &key, &mut bucket);
+                steps[depth].ids(pid, &mut bucket)?;
 
                 // The child filter is evaluated over the bucket rather than
                 // sent through `matching_ids`. The bucket is already one
