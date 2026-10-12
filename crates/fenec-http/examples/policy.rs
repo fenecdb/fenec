@@ -120,7 +120,12 @@ fn sides() -> Vec<(&'static str, Option<Arc<Access>>, Who, bool)> {
             Ok(a) => {
                 let token = a.mint(r#"{"sub":"c1"}"#).unwrap();
                 let scope = a.scope(&token, 1).unwrap();
-                out.push((name, Some(Arc::new(a)), Who::Scoped(Arc::new(scope)), returning));
+                out.push((
+                    name,
+                    Some(Arc::new(a)),
+                    Who::Scoped(Arc::new(scope)),
+                    returning,
+                ));
             }
             Err(e) => println!("  ({name} left out: {e})"),
         }
