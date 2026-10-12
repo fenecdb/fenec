@@ -68,3 +68,8 @@ merchants      read                                                             
 orders         read            where customer = $jwt.sub                            for customer
 orders         insert          where customer = $jwt.sub and status = "ready" and courier is null and attempts = 0   for customer
 orders         update(status, run_at)  where customer = $jwt.sub and courier is null and status = "ready" and new.status = "cancelled" and new.run_at is null  for customer
+# And who is bringing it: the row of the courier carrying an order of
+# theirs, which the rule finds in `orders` -- an inner `get`, held to the
+# customer's own orders and answered before each statement -- their name and
+# vehicle, not the code the company knows them by.
+couriers       read(user, name, vehicle)  where user in (get orders select courier where customer = $jwt.sub and (status = "assigned" or status = "picked"))  for customer

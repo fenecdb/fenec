@@ -183,7 +183,7 @@ Grafana's built-ins bound as the plugin binds them.
 | Ack, give back, dead letter | `set ... where id = $1 and claim = $2 require 1`: a courier whose lease lapsed finds out (412); backoff `now() + 1000 * attempts * attempts`; `case when attempts >= 5 then "dead"` |
 | Couriers see their own jobs | `orders read where courier = $jwt.sub`, and a claim's `returning *` answers the order as claimed: the read rules are asked of the row the `set` leaves |
 | An order's steps | each a transition, `new.` the order as the write leaves it: a claim `where run_at <= now() and new.status = "assigned" and new.courier = $jwt.sub and new.attempts = attempts + 1`, a delivery `where courier = $jwt.sub and (status = "assigned" or status = "picked") and new.status = "delivered" and new.run_at is null`, a customer's cancel `where ... status = "ready" and new.status = "cancelled" and new.run_at is null`: a claim for another courier, an order delivered unclaimed, a cancelled one taken back or one moved up the queue are 403 |
-| Customers follow their courier | a subscription to their own order row (`{ id: 'eq.<n>' }`), the courier's point written onto it with each beat |
+| Customers follow their courier | a subscription to their own order row (`{ id: 'eq.<n>' }`), the courier's point written onto it with each beat; who the courier is, a rule reading `orders`: `couriers read(user, name, vehicle) where user in (get orders select courier where customer = $jwt.sub and ...)` |
 | Deliveries an hour, on time | `bucket(delivered_at, 3600000)`, `sum(case when delivered_at <= promised then 1 else 0 end)`, `avg(delivered_at - created)` over `@sorted(delivered_at)` |
 | Grafana | fenecdb-datasource over `/t/co-<slug>`, `$__from`, `$__to`, `$__interval_ms` bound as parameters |
 
@@ -307,8 +307,8 @@ From the tests, on the same machine:
 
 What fenecdb made awkward, slow or impossible here, the most important
 first, each with the statement that showed it and what Plover does
-instead. None was fixed in the example's own change; 1 to 5 and 7 to 14
-are fixed since, and say how.
+instead. None was fixed in the example's own change; 1 to 14 are fixed
+since, and say how.
 
 1. **Fixed: a claim could not pick the nearest row.** A job queue's claim
    picked its rows with `order` over fields; a courier's is "the nearest
@@ -438,15 +438,39 @@ are fixed since, and say how.
    "picked") and new.status = "delivered" and new.run_at is null`, so the
    third is 403. `test/security.test.ts` sends all three.
 
-6. **A rule cannot reach another collection, and reads have no field
-   grants.** A customer may follow "the courier carrying my order" -- a
-   row of `positions` -- which a rule's filter cannot say (it takes no
-   inner `get`); Plover writes the courier's point onto the order with each
-   beat (`courier_loc`), the customer's subscription to their own order
-   carrying it, at the price of writing the order every 2.5 s. A courier
-   should see a ready order's pickup to claim it but not the customer's
-   door before they take it; a read rule gave whole rows, so the
-   candidates were read with the app's token on the server.
+6. **Fixed: a rule could not reach another collection, and reads had no
+   field grants.** A customer may follow "the courier carrying my order"
+   -- a row of `positions` -- which a rule's filter could not say (it took
+   no inner `get`); Plover writes the courier's point onto the order with
+   each beat (`courier_loc`), the customer's subscription to their own
+   order carrying it. A courier should see a ready order's pickup to claim
+   it but not the customer's door before they take it; a read rule gave
+   whole rows, so the candidates were read with the app's token on the
+   server.
+
+   **Fixed for the other collection: a rule's filter takes `in (get
+   ...)`,** `$jwt` bound inside, held to the token's own rules on the
+   collection it reads and answered before each statement under the lock
+   that runs it -- a `/batch` again for each line, a write's `WITH CHECK`
+   and a row's fields by its list, a scoped stream again whenever that
+   collection is written, its rows entering and leaving as the answer
+   moves (http.html, Rules that read another collection). `positions read
+   where courier in (get orders select courier where customer = $jwt.sub
+   and (status = "assigned" or status = "picked"))` is the rule, and
+   Plover keeps `courier_loc` all the same: the beat writes the order
+   anyway, its lease, and following `positions` is a second stream for
+   each customer, which hears the courier's row at every beat beside the
+   order's and answers the rule again at every beat of any courier, since
+   each writes `orders`. A beat carrying an order beside 10, 50 and 200
+   customers following theirs took 66, 149 and 574 us p50 and 0.13, 0.64
+   and 3.65 ms of the process's CPU, the customers' streams sent 202 to
+   208 bytes a beat, where following `positions` took 104, 323 and 1 476
+   us, 0.33, 1.89 and 9.55 ms, 399 to 409 bytes (`make policy-bench
+   ARGS=beats`, in process and in turns). What the rule is for here is
+   who the courier is: the tracking page reads the customer's courier by
+   name under their own token, `couriers read(user, name, vehicle) where
+   user in (get orders select courier where customer = $jwt.sub and ...)`
+   (`policy.txt`, `security.test.ts`) -- the courier's code withheld.
 
    **Fixed for the fields: a read rule names the fields it shows.**
    `orders read(id, merchant, pickup, pickup_name, items, fee, status,

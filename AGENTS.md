@@ -744,6 +744,63 @@ a test of `tests/fields.rs` (and `mcp.rs`), every one failing with its
 part of the holding taken out. Native only: the browser module is the
 same to the byte.
 
+**A rule may read another collection, answered before each statement**
+(`access.rs`: `inner_gets`, `ring`, `Scope::held`, `Scope::bound`).
+`positions read where courier in (get orders select courier where
+customer = $jwt.sub and ...)` lets a customer read the courier carrying
+their order; a rule took no `in (get ...)`, since `admits` tests a lone
+document inside the `Check` hook, where no query runs (`eval` refuses an
+`InSelect`). `$jwt` binds inside the inner `get`'s `where`, and nowhere
+else in it (`max_param` of the rest, at startup); the inner `get` is held
+to the token's read rules on its collection once a token (`held`, from the
+rules as bound: none granting `read` is `false`, no rows, as PostgreSQL's
+RLS gives a policy's subquery none of a table no policy grants -- refused
+as missing, it would fail every read of `positions`). Rules reading each
+other's collections at any depth and whatever their roles, a `*` rule
+reading one, `new.` or `expired()` inside one, are refused at startup
+(`ring`). Under the lock that runs a statement, the rules of the
+collections it reads or writes (`statement_reads`) are answered as the
+`in` lists they are (`bound`, through lib.rs's `scoped_under` and
+`run_bound`): the statement then holds lists the engine reads as any, and
+`within` installs the bound scope, so `Check` -- an insert's document, an
+update's pair, a transition's, an upsert's row written over, `answering`
+-- tests by them. The rewrite before the lock stays, with the rules
+unanswered: it refuses a scoped schema change before `Database::maintain`
+could build it beside the database, and it is what a held write is planned
+from (`waits::plan`), so its look reads what the rule reads and a write
+there wakes it. A `/batch` answers them for each line (a claim, then the
+read the claim opened, one round trip), a read loop and a read batch again
+for each lock they take, the MCP tools as `/query`. The list is held to
+`MAX_CLAIM_VALUES` and refused past it, never cut (`listed`: the inner
+`get` read up to 1 002 rows, and grouped by its field for its distinct
+values only when it fills them -- grouped every time, a `set` under such
+a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach out
+(`sse::Reach`) binds them again under each look's lock where a collection
+they read was written since its change (every look where an inner `get`
+reads the time), runs the shape where the list moved and diffs by id
+against what it sent (`enter_and_leave`), a row leaving a deletion only of
+a row it was sent: a customer's stream gains the courier as the order is
+claimed and loses them at the delivery, no write to `positions` between.
+It costs one inner `get` a statement -- `make policy-bench`, a crew's
+bucket: a `set` 1.9 us over a plain rule in process, 3.9 against 2.0, a
+read by id 1.9 (3.2 against 1.4), 4.4-4.7 us over HTTP, 31.4 against
+27.0 -- and a stream one at each write to what its rules read: beside 10
+and 100 scoped streams a write, half of them to `orders`, took 221 us
+and 1.94 ms of the process's CPU against 181 us and 1.62 ms under a rule
+naming the courier as a claim (`ARGS=streams`), every scoped stream
+looking at every write either way; examples/dispatch's beat, which writes
+`orders`, beside 50 customers following `positions` so took 1.89 ms
+against 0.64 with the courier's point on the order, so Plover keeps
+`courier_loc` and reads the courier's name through such a rule
+(`ARGS=beats`). A token with no such rule runs as it did:
+`Who::reaches_out` is a field read and the rest is untouched -- the
+policy bench's common sides in four ABBA quartets against main, the
+server token in process 1 320-1 394 ns against 1 329-1 370 and a plain
+rule 1 985-2 086 against 1 998-2 041, over HTTP 23.1-25.3 us p50 against
+24.7-25.3, and `make requests-bench`'s one client the same to the
+microsecond, eight inside the spread -- and nothing below fenec-http
+changed: the browser module is the same to the byte.
+
 **A token is bound to the tenant it names** (`Scope::reaches`,
 `route_tenant`). The policy is the node's, not a tenant's, so `owner =
 $jwt.sub` matched alice's rows in every tenant's file: a token minted for

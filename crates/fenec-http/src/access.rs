@@ -100,6 +100,28 @@
 //! 'lobby']` those and one more -- and a text claim there is a list of one.
 //! A token whose claim lists more than [`MAX_CLAIM_VALUES`] is refused.
 //!
+//! **A rule may read another collection** through `in (get ...)`, its
+//! claims bound inside the inner `get` as anywhere in the filter:
+//!
+//! ```text
+//! positions  read  where courier in (get orders select courier where customer = $jwt.sub and (status = "assigned" or status = "picked"))  for customer
+//! ```
+//!
+//! lets a customer read the position of the courier carrying their order.
+//! The inner `get` reads `orders` as the token's own `get` would, held to
+//! its rules there ([`Scope::held`]: none granting `read` is no row, as
+//! PostgreSQL's row security lets a policy's subquery see no row of a table
+//! no policy grants), and it is answered under the lock that runs each
+//! statement, before it runs ([`Scope::bound`]) -- a write's `WITH CHECK`
+//! tests a document on its own, where no query runs, and a `/batch`
+//! answers it again for each statement, since the one before may have
+//! changed what it reads. Its list is held to [`MAX_CLAIM_VALUES`], as a
+//! list claim is, and refused past it rather than cut. Rules that read each
+//! other's collections, at any depth and whatever their roles, are refused
+//! at startup: none of them could be answered first. A scoped subscription
+//! whose rules read another collection is bound again when that collection
+//! is written, its rows entering and leaving as the answer moves (`sse`).
+//!
 //! **Reads** get the rule's filter ANDed into every level of the query:
 //! the collection's `where`, each `lookup` below it, a subscription's shape.
 //! **Writes** get it twice, as PostgreSQL's `USING` and `WITH CHECK`: a
@@ -153,6 +175,14 @@ impl Who {
             Who::Full => None,
             Who::Scoped(s) => Some(s),
         }
+    }
+
+    /// Whether a rule of the token reads another collection: its
+    /// statements are then held to its rules as they answer under the lock
+    /// that runs them ([`Scope::bound`]), and every other token's path is
+    /// the one it was.
+    pub fn reaches_out(&self) -> bool {
+        matches!(self, Who::Scoped(s) if s.reaching)
     }
 }
 
@@ -362,6 +392,9 @@ struct Rule {
     text: Option<Arc<str>>,
     claims: Vec<String>,
     role: Option<String>,
+    /// The collections its inner `get`s read, at any depth: what a ring of
+    /// rules reading each other is found by at startup ([`ring`]).
+    reads: Vec<String>,
 }
 
 /// A token's rules, its claims bound in.
@@ -371,6 +404,8 @@ pub struct Scope {
     /// request held open past it -- a subscription -- is ended at.
     expires: Option<u64>,
     rules: Vec<Bound>,
+    /// Whether a rule reads another collection ([`Who::reaches_out`]).
+    reaching: bool,
     /// The tenants the token names in its tenant claim; `None` where it
     /// names none.
     tenants: Option<Vec<String>>,
@@ -383,6 +418,7 @@ pub struct Scope {
     fielded: bool,
 }
 
+#[derive(Clone)]
 struct Bound {
     collection: Option<String>,
     ops: u8,
@@ -393,6 +429,8 @@ struct Bound {
     before: Option<Expr>,
     transition: bool,
     text: Option<Arc<str>>,
+    /// Its filter holds an inner `get` not answered yet ([`Scope::bound`]).
+    reaches: bool,
 }
 
 impl Bound {
@@ -467,7 +505,7 @@ impl Access {
         // things, and which was meant is not for the server to guess.
         // `write` and `*` stand for more than the one collection, and mean
         // `insert` there.
-        for (r, n) in rules.iter().zip(lines) {
+        for (r, n) in rules.iter().zip(&lines) {
             let Some(c) = &r.collection else { continue };
             let named = r.named & (UPDATE | DELETE) != 0;
             if named && append_only.iter().any(|a| a == "*" || a == c) {
@@ -476,6 +514,9 @@ impl Access {
                      `delete` there"
                 ));
             }
+        }
+        if let Some(why) = ring(&rules, &lines) {
+            return Err(why);
         }
         Ok(Access {
             keys: RwLock::new(Arc::new(keys)),
@@ -595,7 +636,12 @@ impl Access {
                 before: r.before.as_ref().map(|f| bind(f, &values)),
                 transition: r.transition,
                 text: r.text.clone(),
+                reaches: !r.reads.is_empty(),
             });
+        }
+        let reaching = rules.iter().any(|r| r.reaches);
+        if reaching {
+            Scope::held(&mut rules);
         }
         // Anything but a text or a list of texts names no tenant: a number
         // or an object compared as text could be made to match.
@@ -626,6 +672,7 @@ impl Access {
             },
             expires,
             rules,
+            reaching,
             tenants,
             unbound: self.demands.unbound_tenants,
             append_only: Arc::clone(&self.append_only),
@@ -814,6 +861,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
     }
     let rest = rest.trim();
     let mut claims = Vec::new();
+    let mut reads = Vec::new();
     let text = rest.strip_prefix("where").map(|t| Arc::from(t.trim()));
     let filter = if rest.is_empty() {
         None
@@ -862,11 +910,12 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let Statement::Select(sel) = stmt else {
             unreachable!("a get parses as a select")
         };
-        // A rule is tested against a document being written on its own
-        // (`admits`), where no query runs to answer an inner `get`, and the
-        // inner `get` would itself be scoped by the rules it is part of.
-        if sel.filter.as_ref().is_some_and(Expr::has_subquery) {
-            return Err("a rule's filter takes no `in (get ...)`".into());
+        // An inner `get` reads another collection, as the token's own `get`
+        // would, and is answered before each statement under its lock
+        // ([`Scope::bound`]): a document being written is tested on its
+        // own (`admits`), where no query runs.
+        if let Some(f) = &sel.filter {
+            inner_gets(f, &mut reads)?;
         }
         // Tested against a document on its own as well, where nothing
         // answers it; what a token may reap is the `expired` grant's.
@@ -901,7 +950,120 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         text,
         claims,
         role,
+        reads,
     })
+}
+
+/// The collections the inner `get`s of a rule's filter read, at any depth,
+/// each held to what an inner `get` is held to (`check_subquery`). A claim
+/// goes in an inner `get`'s `where` alone, which [`bind`] binds: in a
+/// `limit` or a `near` it would make every token's list another statement.
+/// `new.` there would read the inner collection's own field of that name,
+/// not the row a write leaves, and `expired()` its rows past their time,
+/// which are the `expired` grant's: both refused.
+fn inner_gets(e: &Expr, out: &mut Vec<String>) -> std::result::Result<(), String> {
+    if let Expr::InSelect(_, sel) = e {
+        sel.check_subquery()
+            .map_err(|e| format!("the filter: {e}"))?;
+        let mut rest = (**sel).clone();
+        let filter = rest.filter.take();
+        if rest.max_param() > 0 {
+            return Err("a rule's inner `get` takes `$jwt.<claim>` in its `where` alone".into());
+        }
+        if let Some(f) = &filter {
+            if f.asks_expired() {
+                return Err("a rule's filter takes no `expired()`: grant `expired`".into());
+            }
+            if names_new(f) {
+                return Err(format!(
+                    "a rule's inner `get` reads `{}` as it stands: `new.` is the row a write \
+                     leaves, outside it",
+                    sel.collection
+                ));
+            }
+            inner_gets(f, out)?;
+        }
+        if !out.contains(&sel.collection) {
+            out.push(sel.collection.clone());
+        }
+    }
+    let mut r = Ok(());
+    e.each_child(&mut |c| {
+        if r.is_ok() {
+            r = inner_gets(c, out);
+        }
+    });
+    r
+}
+
+/// The first ring of rules reading each other's collections through their
+/// inner `get`s -- `positions` reading `orders`, whose rules read
+/// `positions` -- at any depth and whatever their roles: a rule's inner
+/// `get` is held to the token's rules on the collection it reads, which are
+/// answered first, and around a ring none of them can be. A rule on `*`
+/// that reads a collection is one by itself, being a rule of that
+/// collection too.
+fn ring(rules: &[Rule], lines: &[usize]) -> Option<String> {
+    // The collections the rules of `c` read, each with its rule's line:
+    // `c`'s own rules' and `*`'s.
+    let reads = |c: &str| -> Vec<(&str, usize)> {
+        rules
+            .iter()
+            .zip(lines)
+            .filter(|(r, _)| r.collection.as_deref().is_none_or(|x| x == c))
+            .flat_map(|(r, n)| r.reads.iter().map(move |d| (d.as_str(), *n)))
+            .collect()
+    };
+    // Depth first from each collection, the path kept: one met again on it
+    // closes a ring.
+    fn walk<'a>(
+        reads: &dyn Fn(&str) -> Vec<(&'a str, usize)>,
+        path: &mut Vec<(&'a str, usize)>,
+        done: &mut Vec<&'a str>,
+    ) -> Option<Vec<(&'a str, usize)>> {
+        let at = path.last()?.0;
+        for (next, n) in reads(at) {
+            if let Some(k) = path.iter().position(|(c, _)| *c == next) {
+                let mut ring = path[k..].to_vec();
+                ring.push((next, n));
+                return Some(ring);
+            }
+            if done.contains(&next) {
+                continue;
+            }
+            path.push((next, n));
+            if let Some(ring) = walk(reads, path, done) {
+                return Some(ring);
+            }
+            path.pop();
+            done.push(next);
+        }
+        None
+    }
+    let mut done = Vec::new();
+    let starts = rules
+        .iter()
+        .flat_map(|r| r.collection.iter().chain(&r.reads))
+        .map(String::as_str);
+    for start in starts {
+        let Some(ring) = walk(&reads, &mut vec![(start, 0)], &mut done) else {
+            continue;
+        };
+        let mut used: Vec<usize> = ring[1..].iter().map(|(_, n)| *n).collect();
+        used.sort_unstable();
+        used.dedup();
+        let used: Vec<String> = used.iter().map(usize::to_string).collect();
+        let names: Vec<String> = ring.iter().map(|(c, _)| format!("`{c}`")).collect();
+        return Some(format!(
+            "policy line{} {}: these rules read each other's collections, {}: a rule's inner \
+             `get` is held to the token's rules on what it reads, answered first, and around a \
+             ring none can be",
+            if used.len() > 1 { "s" } else { "" },
+            used.join(", "),
+            names.join(" -> ")
+        ));
+    }
+    None
 }
 
 /// What a rule's filter names the row as a write leaves it by: `new.`, as
@@ -1054,8 +1216,12 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
             }
             Expr::In(b(x), out)
         }
-        // A rule holds none ([`rule`]).
-        Expr::InSelect(..) => e.clone(),
+        // An inner `get` holds its claims in its `where` alone ([`rule`]).
+        Expr::InSelect(x, sel) => {
+            let mut sel = (**sel).clone();
+            sel.filter = sel.filter.as_ref().map(|f| bind(f, values));
+            Expr::InSelect(b(x), Box::new(sel))
+        }
         Expr::Call(f, args) => {
             Expr::Call(f.clone(), args.iter().map(|a| bind(a, values)).collect())
         }
@@ -1083,6 +1249,222 @@ fn and(filter: Option<Expr>, more: Option<Expr>) -> Option<Expr> {
         (Some(a), Some(b)) => Some(Expr::And(Box::new(a), Box::new(b))),
         (a, b) => a.or(b),
     }
+}
+
+/// `None`: no access. `Some(None)`: every row. `Some(Some(f))`: the rows
+/// `f` matches -- the filters of the `rules` granting `op` on `collection`,
+/// any of them, a transition's by what the row before can answer of it.
+fn granted(rules: &[Bound], collection: &str, op: u8) -> Option<Option<Expr>> {
+    let mut any = false;
+    let mut every = false;
+    let mut either: Option<Expr> = None;
+    for r in rules {
+        let here = r.collection.as_deref().is_none_or(|c| c == collection);
+        if !here || r.ops & op == 0 {
+            continue;
+        }
+        any = true;
+        match r.using() {
+            None => every = true,
+            Some(f) => {
+                either = Some(match either {
+                    None => f.clone(),
+                    Some(o) => Expr::Or(Box::new(o), Box::new(f.clone())),
+                })
+            }
+        }
+    }
+    match (any, every) {
+        (false, _) => None,
+        (true, true) => Some(None),
+        (true, false) => Some(either),
+    }
+}
+
+/// Each inner `get` in `e` held to the read rules of `rules` on the
+/// collection it reads, and the inner `get`s those bring held in turn
+/// ([`Scope::held`]).
+fn hold(rules: &[Bound], e: &mut Expr) {
+    let _ = e.each_subquery_mut(&mut |x| {
+        if let Expr::InSelect(_, sel) = x {
+            sel.filter = match granted(rules, &sel.collection, READ) {
+                None => Some(Expr::Lit(Value::Bool(false))),
+                Some(read) => and(sel.filter.take(), read),
+            };
+            if let Some(f) = &mut sel.filter {
+                hold(rules, f);
+            }
+        }
+        Ok(())
+    });
+}
+
+/// Each inner `get` in `e` answered against `db` as the `in` list it is,
+/// the innermost first: one column's distinct values, nulls left out, as
+/// the engine answers a statement's own -- but held to
+/// [`MAX_CLAIM_VALUES`], a list claim's bound, since a rule's list is made
+/// before every statement its token sends, and refused past it rather than
+/// cut, which would hide rows the rule grants.
+fn answer(db: &Database, e: &mut Expr) -> Result<()> {
+    e.each_subquery_mut(&mut |x| {
+        let Expr::InSelect(lhs, sel) = std::mem::replace(x, Expr::Lit(Value::Null)) else {
+            unreachable!("each_subquery_mut hands an `in (get ...)`")
+        };
+        let mut sel = *sel;
+        if let Some(f) = &mut sel.filter {
+            answer(db, f)?;
+        }
+        *x = Expr::In(lhs, listed(db, sel)?);
+        Ok(())
+    })
+}
+
+/// The values an inner `get` with no inner `get` left lists, at most
+/// [`MAX_CLAIM_VALUES`] of them. A plain one -- one field, no page, no
+/// ranking -- is read up to the rows that could still be under the bound,
+/// and only one that fills them read again grouped by its field, its rows
+/// then its distinct values: a customer's few orders are a bucket's read,
+/// where grouping every list took a `set` under such a rule 4.5 -> 5.1 us
+/// (`make policy-bench`).
+fn listed(db: &Database, sel: Select) -> Result<Vec<Expr>> {
+    // Two past the bound tell that the list is past it: one may be a null.
+    let past = MAX_CLAIM_VALUES + 2;
+    let mut stmt = Statement::Select(sel);
+    let Statement::Select(sel) = &mut stmt else {
+        unreachable!("made a select")
+    };
+    let ranked = sel.near.is_some() || sel.matcher.is_some();
+    let plain = !ranked
+        && sel.aggregate.is_empty()
+        && sel.group.is_empty()
+        && sel.computed.is_empty()
+        && sel.limit.is_none()
+        && sel.offset.at(&[]) == 0;
+    let column = match &sel.project {
+        Some(p) if plain && p.len() == 1 => Some(p[0].clone()),
+        _ => None,
+    };
+    if !ranked && (sel.aggregate.is_empty() || !sel.group.is_empty()) {
+        sel.limit = Some(Count::N(sel.limit.map_or(past, |l| l.at(&[]).min(past))));
+    }
+    let mut rows = rows_of(db, &stmt)?;
+    if let (Some(column), true) = (column, rows.len() >= past) {
+        let Statement::Select(sel) = &mut stmt else {
+            unreachable!("made a select")
+        };
+        sel.aggregate = vec![
+            Column {
+                expr: Expr::Field(column.clone()),
+                name: column.clone(),
+            },
+            Column {
+                expr: Expr::Call("count".into(), Vec::new()),
+                name: "n".into(),
+            },
+        ];
+        sel.project = None;
+        sel.group = vec![Expr::Field(column)];
+        // An `in` list has no order.
+        sel.order.clear();
+        rows = rows_of(db, &stmt)?;
+    }
+    distinct(rows).ok_or_else(|| {
+        let Statement::Select(sel) = &stmt else {
+            unreachable!("made a select")
+        };
+        Error::Query(format!(
+            "a rule's `in (get {} ...)` lists more than {MAX_CLAIM_VALUES} values: a policy's \
+             list is held to that many, as a list claim is, and refused past it rather than cut \
+             -- narrow the inner `get`, or keep the membership in the rows themselves",
+            sel.collection
+        ))
+    })
+}
+
+fn rows_of(db: &Database, stmt: &Statement) -> Result<Vec<Row>> {
+    Ok(match db.query(stmt, &[])? {
+        Response::Rows(rs) => rs.rows,
+        _ => Vec::new(),
+    })
+}
+
+/// The first column's distinct values of `rows`, nulls left out; `None`
+/// past [`MAX_CLAIM_VALUES`].
+fn distinct(rows: Vec<Row>) -> Option<Vec<Expr>> {
+    let mut items: Vec<Expr> = Vec::with_capacity(rows.len());
+    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(rows.len());
+    let mut key = Vec::new();
+    for row in rows {
+        let Some(v) = row.values.into_iter().next().filter(|v| !v.is_null()) else {
+            continue;
+        };
+        key.clear();
+        fenec_core::codec::encode_value(&mut key, &v);
+        // Told apart by their encodings, as the engine's `in` lists are,
+        // kept in order: a handful a list, a thousand at the most.
+        match keys.binary_search(&key) {
+            Ok(_) => continue,
+            Err(at) => keys.insert(at, key.clone()),
+        }
+        items.push(Expr::Lit(v));
+    }
+    (items.len() <= MAX_CLAIM_VALUES).then_some(items)
+}
+
+/// The collections `stmt` reads or writes, each `lookup` level's and each
+/// inner `get`'s among them: whose rules [`Scope::bound`] answers.
+fn statement_reads<'a>(stmt: &'a Statement, out: &mut Vec<&'a str>) {
+    match stmt {
+        Statement::Select(s) | Statement::Explain(s) => select_reads(s, out),
+        Statement::Put { collection, .. } => out.push(collection),
+        Statement::Update {
+            collection, filter, ..
+        }
+        | Statement::Delete {
+            collection, filter, ..
+        } => {
+            out.push(collection);
+            if let Some(f) = filter {
+                expr_reads(f, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn select_reads<'a>(s: &'a Select, out: &mut Vec<&'a str>) {
+    out.push(&s.collection);
+    if let Some(f) = &s.filter {
+        expr_reads(f, out);
+    }
+    for l in s.lookup.iter().flat_map(|l| l.chain()) {
+        out.push(&l.collection);
+        if let Some(f) = &l.filter {
+            expr_reads(f, out);
+        }
+    }
+}
+
+fn expr_reads<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
+    if let Expr::InSelect(_, sel) = e {
+        select_reads(sel, out);
+    }
+    e.each_child(&mut |c| expr_reads(c, out));
+}
+
+/// The collections the inner `get`s of `e` read, at any depth, and
+/// whether one of them reads the time ([`Scope::reached_from`]).
+fn reached(e: &Expr, reads: &mut Vec<String>, clock: &mut bool) {
+    if let Expr::InSelect(_, sel) = e {
+        if !reads.contains(&sel.collection) {
+            reads.push(sel.collection.clone());
+        }
+        if let Some(f) = &sel.filter {
+            *clock = *clock || f.calls_now();
+            reached(f, reads, clock);
+        }
+    }
+    e.each_child(&mut |c| reached(c, reads, clock));
 }
 
 /// The fields a filter pins to one value: the `field = value` terms of its
@@ -1201,30 +1583,123 @@ impl Scope {
         if op & (UPDATE | DELETE) != 0 && self.append_only(collection) {
             return None;
         }
-        let mut any = false;
-        let mut every = false;
-        let mut either: Option<Expr> = None;
+        granted(&self.rules, collection, op)
+    }
+
+    /// Each reaching rule's inner `get`s held to the token's read rules on
+    /// the collection each reads, at any depth -- the rules there may read
+    /// further, which the ring check at startup bounds -- so that each is
+    /// the `get` the token itself would send, answered under the lock that
+    /// runs a statement ([`Self::bound`]). A collection no rule lets the
+    /// token read gives none of its rows, as PostgreSQL's row security
+    /// gives a policy's subquery none of a table no policy grants: refused
+    /// as missing, as the token's own `get` of it is, it would fail every
+    /// read of `positions` over a collection the token is not to know of.
+    /// Done once a token, from the rules as bound to its claims.
+    fn held(rules: &mut [Bound]) {
+        let read: Vec<Bound> = rules.to_vec();
+        for r in rules.iter_mut().filter(|r| r.reaches) {
+            if let Some(f) = &mut r.filter {
+                hold(&read, f);
+            }
+            // A transition picks by what its row before can answer, its
+            // inner `get`s held as the filter's are.
+            if r.transition {
+                r.before = r
+                    .filter
+                    .clone()
+                    .and_then(|f| relaxed(f, &|name| name.starts_with(NEW)));
+            }
+        }
+    }
+
+    /// The token as `stmts` run over `db`, under the lock the caller holds
+    /// on it: each rule of a collection the statements read or write that
+    /// reads another collection, its inner `get`s answered there as the
+    /// `in` lists they are ([`answer`]) -- so that a statement's filters
+    /// hold lists the engine reads as any other, and a written document is
+    /// tested by them where no query can run ([`Check`]), and a row is
+    /// shown the fields the rules admitting it name ([`Self::shown`]),
+    /// where unanswered a rule admits no row it is asked of alone. A read
+    /// `/batch` is bound once for all its statements, under its one lock.
+    /// Rules of other
+    /// collections are left as they are: answered for every statement, a
+    /// customer's rule over `positions` would read `orders` for each of
+    /// their reads of `orders` itself. A `/batch` answers them for each
+    /// statement, under the lock it holds through all of them: the one
+    /// before may have changed what an inner `get` reads -- a claim, then
+    /// the courier followed.
+    pub fn bound(&self, db: &Database, stmts: &[&Statement]) -> Result<Scope> {
+        let mut touched = Vec::new();
+        for stmt in stmts {
+            statement_reads(stmt, &mut touched);
+        }
+        self.bound_over(db, &touched)
+    }
+
+    /// [`Self::bound`] for the rules of `collections`.
+    pub fn bound_over(&self, db: &Database, collections: &[&str]) -> Result<Scope> {
+        let mut rules = Vec::with_capacity(self.rules.len());
         for r in &self.rules {
-            let here = r.collection.as_deref().is_none_or(|c| c == collection);
-            if !here || r.ops & op == 0 {
+            let here = r.reaches
+                && r.collection
+                    .as_deref()
+                    .is_some_and(|c| collections.contains(&c));
+            if !here {
+                rules.push(r.clone());
                 continue;
             }
-            any = true;
-            match r.using() {
-                None => every = true,
-                Some(f) => {
-                    either = Some(match either {
-                        None => f.clone(),
-                        Some(o) => Expr::Or(Box::new(o), Box::new(f.clone())),
-                    })
-                }
+            let mut filter = r.filter.clone();
+            if let Some(f) = &mut filter {
+                answer(db, f)?;
+            }
+            // What a transition asks of the row before is its filter's,
+            // read off the answer rather than answered again.
+            let before = match r.transition {
+                true => filter
+                    .clone()
+                    .and_then(|f| relaxed(f, &|name| name.starts_with(NEW))),
+                false => None,
+            };
+            // Field by field: `..r.clone()` copied the filter once more.
+            rules.push(Bound {
+                collection: r.collection.clone(),
+                ops: r.ops,
+                fields: r.fields.clone(),
+                read_fields: r.read_fields.clone(),
+                filter,
+                before,
+                transition: r.transition,
+                text: r.text.clone(),
+                reaches: false,
+            });
+        }
+        Ok(Scope {
+            subject: self.subject.clone(),
+            expires: self.expires,
+            reaching: rules.iter().any(|r| r.reaches),
+            rules,
+            tenants: self.tenants.clone(),
+            unbound: self.unbound,
+            append_only: Arc::clone(&self.append_only),
+            fielded: self.fielded,
+        })
+    }
+
+    /// What the token's rules of `collection` read beside it, at any depth,
+    /// and whether one reads the time there -- what a stream of it binds
+    /// them again on: a write to one of those collections, or every look.
+    /// `None` where no rule of it reads another collection.
+    pub fn reached_from(&self, collection: &str) -> Option<(Vec<String>, bool)> {
+        let mut reads = Vec::new();
+        let mut clock = false;
+        for r in &self.rules {
+            let here = r.reaches && r.collection.as_deref() == Some(collection);
+            if let (true, Some(f)) = (here, &r.filter) {
+                reached(f, &mut reads, &mut clock);
             }
         }
-        match (any, every) {
-            (false, _) => None,
-            (true, true) => Some(None),
-            (true, false) => Some(either),
-        }
+        (!reads.is_empty()).then_some((reads, clock))
     }
 
     /// Whether the token may read `collection` at all: a rule granting

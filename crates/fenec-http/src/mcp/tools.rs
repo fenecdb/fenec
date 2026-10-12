@@ -408,26 +408,44 @@ fn through_query(ctx: &Ctx, text: &str, params: &[Value]) -> crate::http::Respon
 /// A read as `/query` runs one: held to the token's rules, pinned and run
 /// with no lock held when it is long, under the read lock otherwise.
 pub(super) fn read_served(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checked<Response2> {
+    // A token whose rules read other collections is held to them as they
+    // answer under each lock taken (`crate::scoped_under`).
+    let unscoped = ctx.who.reaches_out().then(|| stmt.clone());
     let mut mask = None;
     let stmt = crate::scoped(ctx.who, stmt, params, &mut mask).map_err(|e| refusal(&e))?;
     let mut pin = true;
     loop {
         let guard = crate::held::read(ctx.db);
+        let (rebound, rebound_mask, bound);
+        let (stmt, mask, who) = match &unscoped {
+            None => (&stmt, mask.as_ref(), ctx.who),
+            Some(sent) => {
+                let mut m = None;
+                let (s, b) = crate::scoped_under(ctx.who, &guard, sent.clone(), params, &mut m)
+                    .map_err(|e| refusal(&e))?;
+                (rebound, rebound_mask, bound) = (s, m, b);
+                (
+                    &rebound,
+                    rebound_mask.as_ref(),
+                    bound.as_ref().unwrap_or(ctx.who),
+                )
+            }
+        };
         let running = crate::trace::span("execute");
         let pinned = match pin {
-            true => guard.pin(&[(&stmt, params)]),
+            true => guard.pin(&[(stmt, params)]),
             false => None,
         };
         // Shown as the token is shown it, out of what answered.
-        let shown = |r: Response2, db: &Database| crate::shown(ctx.who, mask.as_ref(), db, r);
+        let shown = |r: Response2, db: &Database| crate::shown(who, mask, db, r);
         let answered = match &pinned {
             Some(p) => {
                 drop(guard);
                 running.attr("fenec.pinned", true);
-                p.query(&stmt, params)
+                p.query(stmt, params)
                     .map(|r| r.map(|r| shown(r, p.database())))
             }
-            None => Some(guard.query(&stmt, params).map(|r| shown(r, &guard))),
+            None => Some(guard.query(stmt, params).map(|r| shown(r, &guard))),
         };
         match answered {
             Some(r) => {
@@ -475,10 +493,12 @@ fn query_body(text: &str, params: &[Value]) -> String {
 /// Nothing writes beside it, so nothing is pinned.
 pub(super) fn read_local(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checked<Response2> {
     let mut mask = None;
-    let stmt = crate::scoped(ctx.who, stmt, params, &mut mask).map_err(|e| refusal(&e))?;
     let g = crate::held::read(ctx.db);
+    let (stmt, bound) =
+        crate::scoped_under(ctx.who, &g, stmt, params, &mut mask).map_err(|e| refusal(&e))?;
     let r = g.query(&stmt, params).map_err(|e| refusal(&e))?;
-    Ok(crate::shown(ctx.who, mask.as_ref(), &g, r))
+    let who = bound.as_ref().unwrap_or(ctx.who);
+    Ok(crate::shown(who, mask.as_ref(), &g, r))
 }
 
 /// A write over a database this process holds for one caller: run under
@@ -494,6 +514,7 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
         Ok(v) => v,
         Err(e) => return crate::error_response(&e),
     };
+    let unscoped = ctx.who.reaches_out().then(|| Arc::clone(&stmt));
     let mut mask = None;
     let stmt = match crate::scoped(ctx.who, Arc::unwrap_or_clone(stmt), &params, &mut mask) {
         Ok(s) => s,
@@ -503,8 +524,13 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
         return crate::http::Response::error(403, "this session is read-only (--read-only)");
     }
     let mut g = crate::held::write(ctx.db);
-    let r = crate::access::within(ctx.who, || g.execute_with(&stmt, &params))
-        .map(|r| crate::shown(ctx.who, mask.as_ref(), &g, r));
+    let r = match &unscoped {
+        None => crate::access::within(ctx.who, || g.execute_with(&stmt, &params))
+            .map(|r| crate::shown(ctx.who, mask.as_ref(), &g, r)),
+        Some(sent) => {
+            crate::run_bound(ctx.who, &mut g, sent, &params).map(|r| crate::visible(ctx.who, r))
+        }
+    };
     let durability = match (&r, ctx.cfg.sync_on_write) {
         (Ok(_), true) => match g.flush() {
             Ok(d) => d,

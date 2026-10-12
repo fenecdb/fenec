@@ -1,9 +1,12 @@
 'use client';
 // A customer following their order: a subscription to that one row under
 // their own token, straight to the router. The courier's point arrives on
-// the order itself (`courier_loc`), written with each beat of its lease:
-// the customer's rules read their own orders and nothing of `positions`,
-// since a rule cannot say "the courier carrying my order".
+// the order itself (`courier_loc`), written with each beat of its lease,
+// which writes the order anyway: a rule reading `orders` could let the
+// customer follow the courier's row of `positions` instead, but that is a
+// second stream for each customer and an inner `get` for each of them at
+// every beat (README, gap 6). Who the courier is, read once as the order
+// is claimed, is that rule's: their row of `couriers` (policy.txt).
 import { useEffect, useState, type ReactNode } from 'react';
 import { metresBetween, pathOf, svgOf, type Point } from '../lib/city';
 import type { Job } from '../lib/dispatch';
@@ -25,6 +28,26 @@ export function Track({ access, base, initial, tooLate }: { access: Access; base
       }),
     [conn, initial.id],
   );
+  // The courier carrying it, by name: read under the customer's token,
+  // which reaches that one row of `couriers` while the order is theirs to
+  // carry, and no other.
+  const carrier = o.status === 'assigned' || o.status === 'picked' ? o.courier : null;
+  const [read, setRead] = useState<{ user: string; name: string; vehicle: string } | null>(null);
+  useEffect(() => {
+    if (!carrier) return;
+    let gone = false;
+    conn
+      .run('get couriers select user, name, vehicle where user = $1', [carrier])
+      .then((r) => {
+        const row = (r as { rows: { user: string; name: string; vehicle: string }[] }).rows?.[0];
+        if (!gone && row) setRead(row);
+      })
+      .catch(() => {});
+    return () => {
+      gone = true;
+    };
+  }, [conn, carrier]);
+  const rider = read && read.user === carrier ? read : null;
   const s = shownState(o, now);
   const courier = o.courier_loc;
   const next: Point = o.status === 'picked' ? o.dropoff : o.pickup;
@@ -68,7 +91,9 @@ export function Track({ access, base, initial, tooLate }: { access: Access; base
         ) : s === 'cancelled' ? (
           <p className="notice bad">Cancelled.</p>
         ) : eta !== null ? (
-          <p className="notice">About {Math.max(1, Math.round(eta / 60))} min away.</p>
+          <p className="notice">
+            {rider ? `${rider.name}, by ${rider.vehicle}: about` : 'About'} {Math.max(1, Math.round(eta / 60))} min away.
+          </p>
         ) : (
           <p className="notice">Waiting {since(now - Date.parse(o.created))} for a courier.</p>
         )}

@@ -538,13 +538,7 @@ fn an_inner_get_reads_only_what_the_token_may() {
     assert!(body.contains("\"affected\":0"), "{body}");
     let (_, body) = n.query(ROOT, "get board count");
     assert!(body.contains("\"count\":4"), "{body}");
-
-    // A rule takes none: tested against a document on its own, no query
-    // would answer it.
-    let Err(e) = Access::new(SECRET, "notes read where owner in (get board select msg)") else {
-        panic!("a rule holding `in (get ...)` was taken");
-    };
-    assert!(e.contains("in (get ...)"), "{e}");
+    // A rule's own inner `get`s: tests/reach.rs.
 }
 
 /// A disjunctive facet leaves the query's own conditions on its field out,

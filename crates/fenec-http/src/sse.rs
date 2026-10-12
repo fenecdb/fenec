@@ -220,25 +220,33 @@ pub fn serve(
     // (`Scope::shaped`): the shape's terms over a field a row may not show
     // asked only where it does, and each row sent with the fields of the
     // rules admitting it (`mask`).
+    //
+    // A token whose rules read other collections has them bound under each
+    // look's lock ([`Reach`]), from the shape as the subscriber sent it.
     let sub = {
         let guard = crate::held::read(db);
         api::subscription(&guard, req).and_then(|mut sub| {
             let mut quiet = false;
-            let mut mask = None;
-            if let Some(scope) = who.scope() {
+            let mut view = None;
+            let mut reach = None;
+            if let Who::Scoped(scope) = who {
                 quiet = matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
                 let shape = if quiet { None } else { sub.filter.take() };
                 if quiet {
                     sub.project = Some(vec!["id".to_string()]);
                 }
-                let (shape, m) = scope.shaped(&sub.collection, shape, &mut sub.project)?;
-                mask = m;
+                reach = Reach::of(scope, &sub.collection, &shape, &sub.project);
+                let (shape, mask) = scope.shaped(&sub.collection, shape, &mut sub.project)?;
+                view = Some(View {
+                    scope: Arc::clone(scope),
+                    mask,
+                });
                 sub.filter = scope.restrict(&sub.collection, shape)?;
             }
-            Ok((sub, quiet, mask))
+            Ok((sub, quiet, view, reach))
         })
     };
-    let (sub, quiet, mask) = match sub {
+    let (mut sub, quiet, mut view, reach) = match sub {
         Ok(s) => s,
         Err(e) => {
             let _ = write_head(
@@ -274,10 +282,9 @@ pub fn serve(
     // the token does not see would otherwise tell it when that field
     // changed, which a scoped poll's content tag (`same_answer`) keeps
     // from it as well.
-    let show = who.scope().zip(mask.as_ref());
     let mut seen: Option<Seen> = who.scope().map(|_| Seen {
         ids: Default::default(),
-        digests: show.is_some(),
+        digests: shows(&view).is_some(),
     });
     // A stream of a shape that holds nothing, unscoped, is told of every
     // write to the collection, and so of every row reaching its time.
@@ -289,7 +296,7 @@ pub fn serve(
         // holds are not known here, and without them no deletion could be
         // told apart from someone else's write.
         Some(n) if seen.is_none() => n,
-        _ => match seed(out, db, &sub, &mut seen, quiet, show) {
+        _ => match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
             Ok(seq) => {
                 // The seed left out every row past its time by then.
                 if let Some(x) = &mut expiry {
@@ -324,19 +331,50 @@ pub fn serve(
             );
             return;
         }
-        let step = {
+        let (step, members) = {
             let guard = crate::held::read(db);
-            let mut step = guard.changes_since(
-                &sub.collection,
-                cursor,
-                sub.filter.as_ref(),
-                sub.project.as_deref(),
-                &[],
-            );
-            if let (Ok(Changes::Batch(b)), Some((scope, mask))) = (&mut step, show) {
-                scope.shown_rows(mask, &guard, &mut b.puts);
+            // Rules reading another collection, bound again where it was
+            // written: rows may enter and leave the shape, and show other
+            // fields, with no write to its own collection.
+            let moved = match &reach {
+                Some(r) => r.rebind(&guard, cursor, &mut sub, &mut view),
+                None => Ok(false),
+            };
+            let shown = shows(&view);
+            let step = moved.and_then(|moved| {
+                let mut step = guard.changes_since(
+                    &sub.collection,
+                    cursor,
+                    sub.filter.as_ref(),
+                    sub.project.as_deref(),
+                    &[],
+                )?;
+                if let (Changes::Batch(b), Some((scope, mask))) = (&mut step, shown) {
+                    scope.shown_rows(mask, &guard, &mut b.puts);
+                }
+                // The rows the shape holds now, read under the same lock,
+                // where the rules' answer moved.
+                let members = match (&step, moved) {
+                    (Changes::Batch(_), true) => {
+                        let stmt = Statement::Select(api::seed_select(&sub));
+                        match guard.query(&stmt, &[])? {
+                            Response::Rows(mut rs) => {
+                                if let Some((scope, mask)) = shown {
+                                    scope.shown_rows(mask, &guard, &mut rs);
+                                }
+                                Some(rs)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                Ok((step, members))
+            });
+            match step {
+                Ok((step, members)) => (Ok(step), members),
+                Err(e) => (Err(e), None),
             }
-            step
         };
         match step {
             Err(e) => {
@@ -347,7 +385,7 @@ pub fn serve(
             }
             Ok(Changes::Reseed) => {
                 let began = now_ms() as i64;
-                match seed(out, db, &sub, &mut seen, quiet, show) {
+                match seed(out, db, (&mut sub, &reach, &mut view), &mut seen, quiet) {
                     Ok(seq) => cursor = seq,
                     Err(_) => return,
                 }
@@ -362,6 +400,9 @@ pub fn serve(
                     if let Some(x) = &mut expiry {
                         x.stale = true;
                     }
+                }
+                if let (Some(now), Some(seen)) = (members, &seen) {
+                    enter_and_leave(&mut b, now, seen);
                 }
                 if let Some(seen) = &mut seen {
                     b.dels.retain(|id| seen.left(*id));
@@ -551,6 +592,124 @@ impl Expiry {
     }
 }
 
+/// What a scoped stream's rows are shown through: its token's scope -- as
+/// bound, where its rules read other collections ([`Reach`]) -- and the
+/// mask its shape took ([`Scope::shaped`]).
+struct View {
+    scope: Arc<Scope>,
+    mask: Option<Mask>,
+}
+
+/// The scope and mask a stream's rows are shown through, where a mask is.
+fn shows(view: &Option<View>) -> Option<(&Scope, &Mask)> {
+    let v = view.as_ref()?;
+    Some((&*v.scope, v.mask.as_ref()?))
+}
+
+/// A scoped stream of a collection whose rules, for its token, read other
+/// collections ([`crate::access::Scope::bound`]): its shape is the rules
+/// as they answer, made again under each look's lock where one of those
+/// collections was written since the stream's change -- or at every look
+/// where an inner `get` reads the time -- and run again where the answer
+/// moved, its rows diffed by id against those the stream was sent
+/// ([`enter_and_leave`]). A customer following the courier carrying their
+/// order hears the courier once the order is claimed and nothing of them
+/// once it is delivered, with no write to `positions` between. The cost
+/// is an inner `get` a stream at each write to what its rules read: a
+/// bucket's read for a customer's orders.
+struct Reach {
+    scope: Arc<Scope>,
+    collection: String,
+    /// The subscriber's own filter and list, which the rules are held to.
+    shape: Option<Expr>,
+    project: Option<Vec<String>>,
+    /// The collections the rules read, at any depth.
+    reads: Vec<String>,
+    /// An inner `get` reads the time.
+    clock: bool,
+}
+
+impl Reach {
+    fn of(
+        scope: &Arc<Scope>,
+        collection: &str,
+        shape: &Option<Expr>,
+        project: &Option<Vec<String>>,
+    ) -> Option<Reach> {
+        let (reads, clock) = scope.reached_from(collection)?;
+        Some(Reach {
+            scope: Arc::clone(scope),
+            collection: collection.to_string(),
+            shape: shape.clone(),
+            project: project.clone(),
+            reads,
+            clock,
+        })
+    }
+
+    /// The stream's filter, list and view as the rules answer over `db`
+    /// now.
+    fn bind(
+        &self,
+        db: &Database,
+    ) -> fenec_core::error::Result<(Option<Expr>, Option<Vec<String>>, View)> {
+        let bound = Arc::new(self.scope.bound_over(db, &[&self.collection])?);
+        let mut project = self.project.clone();
+        let (shape, mask) = bound.shaped(&self.collection, self.shape.clone(), &mut project)?;
+        let filter = bound.restrict(&self.collection, shape)?;
+        Ok((filter, project, View { scope: bound, mask }))
+    }
+
+    /// The stream bound again where what its rules read was written after
+    /// `since`; whether its filter moved.
+    fn rebind(
+        &self,
+        db: &Database,
+        since: u64,
+        sub: &mut api::Subscription,
+        view: &mut Option<View>,
+    ) -> fenec_core::error::Result<bool> {
+        let written = self.clock
+            || db
+                .changed_collections_since(since)
+                .is_none_or(|w| w.iter().any(|c| self.reads.contains(c)));
+        if !written {
+            return Ok(false);
+        }
+        let (filter, project, v) = self.bind(db)?;
+        if filter == sub.filter {
+            return Ok(false);
+        }
+        (sub.filter, sub.project) = (filter, project);
+        *view = Some(v);
+        Ok(true)
+    }
+}
+
+/// The rows the shape holds `now`, as a change to a stream that was sent
+/// `seen`: those it was not sent enter, and those it was sent and the
+/// shape no longer holds leave -- a deletion, told only of a row it was
+/// sent. Where its rows are masked every row goes, and those that show
+/// what they showed when sent are left out by their digests: a row the
+/// rules now admit by another field list shows other fields.
+fn enter_and_leave(b: &mut ChangeBatch, now: ResultSet, seen: &Seen) {
+    let held: std::collections::HashSet<DocId> = now.rows.iter().map(|r| r.id).collect();
+    let put: std::collections::HashSet<DocId> = b.puts.rows.iter().map(|r| r.id).collect();
+    if b.puts.rows.is_empty() {
+        b.puts.columns = now.columns;
+    }
+    b.puts.rows.extend(
+        now.rows
+            .into_iter()
+            .filter(|r| !put.contains(&r.id) && (seen.digests || !seen.ids.contains_key(&r.id))),
+    );
+    for id in seen.ids.keys() {
+        if !held.contains(id) && !b.dels.contains(id) {
+            b.dels.push(*id);
+        }
+    }
+}
+
 /// The rows a scoped stream was sent, by id: the ones it may be told
 /// left. Where its rows are masked, each with a digest of the row as sent.
 struct Seen {
@@ -615,17 +774,23 @@ fn expired_json(seq: u64, dels: &[DocId]) -> String {
 fn seed(
     out: &mut TcpStream,
     db: &Arc<RwLock<Database>>,
-    sub: &api::Subscription,
+    (sub, reach, view): (&mut api::Subscription, &Option<Reach>, &mut Option<View>),
     seen: &mut Option<Seen>,
     quiet: bool,
-    show: Option<(&Scope, &Mask)>,
 ) -> std::io::Result<u64> {
     let (rows, seq) = {
         let guard = crate::held::read(db);
+        let answered = match reach {
+            Some(r) => r.bind(&guard).map(|(filter, project, v)| {
+                (sub.filter, sub.project) = (filter, project);
+                *view = Some(v);
+            }),
+            None => Ok(()),
+        };
         let stmt = Statement::Select(api::seed_select(sub));
-        match guard.query(&stmt, &[]) {
+        match answered.and_then(|_| guard.query(&stmt, &[])) {
             Ok(Response::Rows(mut rs)) => {
-                if let Some((scope, mask)) = show {
+                if let Some((scope, mask)) = shows(view) {
                     scope.shown_rows(mask, &guard, &mut rs);
                 }
                 if let Some(seen) = seen {
