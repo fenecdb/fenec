@@ -822,6 +822,7 @@ journal        append-only
 accounts       update(balance, held)                              for app
 orders         update(status, run_at)  where customer = $jwt.sub and status = "ready" and new.status = "cancelled"
 orders         read(pickup, run_at)    where run_at &lt;= now()                    for courier
+positions      read           where courier in (get orders select courier where customer = $jwt.sub)
 *              read                                               for dashboard
 </pre>
 
@@ -847,6 +848,10 @@ orders         read(pickup, run_at)    where run_at &lt;= now()                 
     tokens, and refuse every update and delete with 403.</li>
   <li><b>A list claim</b>, such as <code>"rooms": ["r1", "r2"]</code>,
     goes after <code>in</code>.</li>
+  <li><b>Another collection.</b> <code>in (get …)</code> reads a rule's
+    list from rows: the <code>positions</code> rule above lets a customer
+    read where the courier carrying their order is, and nothing of the
+    others.</li>
   <li><b>The server's own <code>--http-token</code></b> still has full
     access.</li>
 </ul>
@@ -1030,8 +1035,59 @@ orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub an
     403) and subscriptions alike. A token whose list claim holds more than
     1 000 values is refused (401). A <code>role</code> claim may be a list
     too, and a rule <code>for</code> a role applies when the list holds
-    it. Membership kept in another collection cannot be a rule: a rule
-    takes no <code>in (get …)</code>.</li>
+    it. Membership kept in another collection is a rule's <code>in (get
+    …)</code> (below).</li>
+  <li><b>Rules that read another collection.</b> A rule's filter takes
+    <code>in (get …)</code>, its claims bound inside as anywhere else:
+<pre data-lang="text"># a customer follows the courier carrying their order
+positions  read  where courier in (get orders select courier where customer = $jwt.sub and (status = "assigned" or status = "picked"))  for customer
+# a member reads and posts in the rooms they belong to
+messages   read,insert  where room in (get members select room where user = $jwt.sub)
+</pre>
+    The inner <code>get</code> reads the rows of its collection the
+    token's own <code>get</code> would, held to the token's rules there;
+    one no rule lets the token read gives none of its rows, as
+    PostgreSQL's row security gives a policy's subquery none of a table no
+    policy grants. The fields it reads are the policy's own: its list is
+    never shown, only what it admits. It is answered before each
+    statement, under the lock that runs it, as the <code>in</code> list it
+    is: reads, a <code>lookup</code> level, a facet, a <code>match</code>
+    and an agent's MCP tools see the list as it stands, and a write's
+    <code>WITH CHECK</code> — an insert's document, an update's row before
+    and after, a transition's pair, an upsert's row written over,
+    <code>returning</code>'s rows — is tested by it where no query could
+    run. A rule naming the fields it shows may read another collection
+    too, <code>positions read(courier, at, loc) where courier in (get
+    orders …)</code>: each row is shown the fields of the rules admitting
+    it as their lists stand, in a read, a <code>lookup</code> level and a
+    stream (<a href="#field-grants">Fields a read shows</a>). A
+    <code>/batch</code> answers it again for each
+    statement: a courier's claim, then a read of the customer's door the
+    claim lets them read, is one round trip. The list is held to a list
+    claim's bound, 1 000 values, and a statement whose list would hold
+    more is refused (400) rather than answered with a list cut short; a
+    value held by many rows counts once. Rules that read each other's
+    collections — <code>positions</code> reading <code>orders</code> whose
+    rules read <code>positions</code>, at any depth, whatever their roles
+    — stop the server at startup, since none of them could be answered
+    first; so do a rule on <code>*</code> that reads a collection, a claim
+    anywhere in the inner <code>get</code> but its <code>where</code>, and
+    what an inner <code>get</code> may not say anyway. A scoped
+    subscription whose rules read another collection is bound again when
+    that collection is written: the courier enters a customer's stream of
+    <code>positions</code> as the order is claimed and leaves it, a
+    deletion of the row it was sent, as it is delivered, with no write to
+    <code>positions</code> between. It costs one inner <code>get</code> a
+    statement — a <code>@hash</code> bucket's read, 1.8 to 2.1 µs in
+    process and 4.3 to 4.7 µs over HTTP on loopback above a rule naming a
+    claim — and a
+    stream one at each write to the collection its rules read: beside 100
+    scoped streams a write took 1.89 ms of the server's CPU against 1.65
+    under a rule naming the courier as a claim, every scoped stream
+    looking at every write either way. A token with no such rule runs as
+    it did (<a
+    href="https://github.com/fenecdb/fenec/tree/main/crates/fenec-http/examples/policy.rs"><code>make
+    policy-bench</code></a>, <code>ARGS=streams</code>).</li>
   <li><b><code>match</code> scores over the rows the token may read.</b>
     BM25's statistics — how many documents, their mean length, how many
     hold each word — are taken over the rows the query's filter selects,
@@ -1047,7 +1103,8 @@ orders  update(status, delivered_at, run_at, claim)  where courier = $jwt.sub an
     scores over the collection, as before.</li>
   <li><b>Subscriptions</b> are told only of rows they were sent: a scoped
     subscriber hears of a row leaving its shape only if the row was in it,
-    so the ids other users write never reach it. Where a rule names the
+    so the ids other users write never reach it — rows leaving as a rule
+    that reads another collection moves among them. Where a rule names the
     fields it shows, a row written again that shows what it showed is not
     sent: a write to a field the subscriber does not see would tell it
     when.</li>

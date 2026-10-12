@@ -246,3 +246,25 @@ test("a customer follows their own order live, and hears nothing of another's", 
   assert.ok(heard.some((r) => r.id === mine.id && JSON.stringify(r.courier_loc) === '[26.99,38.35]'), 'heard their courier move');
   assert.ok(heard.every((r) => r.id === mine.id || (r as unknown as Job).customer === k), 'heard nothing of others');
 });
+
+test('a customer reads the courier carrying their order, and no other', async () => {
+  // The rule finds them in `orders`: the couriers of the customer's own
+  // orders while carried, as the operator's token counts them.
+  const carrying = async (sub: string) =>
+    [...new Set((await rows<{ courier: string }>(operatorDb('co-tandem'), 'get orders select courier where customer = $1 and (status = "assigned" or status = "picked")', [sub])).map((o) => o.courier))].sort();
+  const k = (await order(mine.id))!.customer;
+  const theirsToo = [0, 1, 2].map((i) => tn.customer(i)).filter((c) => c.sub !== k);
+  const who: Who = { sub: k, role: 'customer', company: 'tandem' };
+  const read = async (w: Who) => (await rows<{ user: string }>(asUser(w), 'get couriers select user')).map((c) => c.user).sort();
+  assert.deepEqual(await read(who), await carrying(k));
+  assert.ok((await read(who)).includes(tn.couriers[0].sub), 'the courier carrying their order');
+  for (const c of theirsToo) assert.deepEqual(await read(c), await carrying(c.sub));
+  // Asked for by name, another courier is not there; nor is any written.
+  assert.deepEqual(await rows(asUser(who), 'get couriers where user = $1', [tn.couriers[3].sub]), []);
+  assert.equal(await refusal(asUser(who).run('set couriers {name: "x"} where user = $1', [tn.couriers[0].sub])), 403);
+  // Their name and vehicle, and not the code the company knows them by:
+  // the rule reaching `orders` names its fields too.
+  const seen = await rows<Record<string, unknown>>(asUser(who), 'get couriers');
+  assert.ok(seen.length > 0 && seen.every((c) => typeof c.name === 'string' && typeof c.vehicle === 'string' && !('code' in c)), JSON.stringify(seen));
+  assert.equal(await refusal(asUser(who).run('get couriers select code')), 403);
+});

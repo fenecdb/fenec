@@ -744,6 +744,76 @@ a test of `tests/fields.rs` (and `mcp.rs`), every one failing with its
 part of the holding taken out. Native only: the browser module is the
 same to the byte.
 
+**A rule may read another collection, answered before each statement**
+(`access.rs`: `inner_gets`, `ring`, `Scope::held`, `Scope::bound`).
+`positions read where courier in (get orders select courier where
+customer = $jwt.sub and ...)` lets a customer read the courier carrying
+their order; a rule took no `in (get ...)`, since `admits` tests a lone
+document inside the `Check` hook, where no query runs (`eval` refuses an
+`InSelect`). `$jwt` binds inside the inner `get`'s `where`, and nowhere
+else in it (`max_param` of the rest, at startup); the inner `get` is held
+to the token's read rules on its collection once a token (`held`, from the
+rules as bound: none granting `read` is `false`, no rows, as PostgreSQL's
+RLS gives a policy's subquery none of a table no policy grants -- refused
+as missing, it would fail every read of `positions`). Rules reading each
+other's collections at any depth and whatever their roles, a `*` rule
+reading one, `new.` or `expired()` inside one, are refused at startup
+(`ring`). Under the lock that runs a statement, the rules of the
+collections it reads or writes (`statement_reads`) are answered as the
+`in` lists they are (`bound`, through lib.rs's `scoped_under` and
+`run_bound`): the statement then holds lists the engine reads as any, and
+`within` installs the bound scope, so `Check` -- an insert's document, an
+update's pair, a transition's, an upsert's row written over, `answering`
+-- tests by them; and the mask (`fields::hold`'s `showing_f` guards and
+`case` wraps, made by `rewrite_with` over the bound rules) and its
+application (`Scope::shown`, called on the bound scope), a stream's view
+and digests, are the bound scope's too: a rule naming fields that reads
+another collection shows each row the fields of the rules admitting it as
+their lists stand, where unanswered `eval` refuses the `InSelect` and the
+rule admits no row asked of alone (`tests/reach.rs` fails with either the
+statement's or the stream's bound scope taken out). The inner `get`'s own
+fields are the policy's, not held to the token's field lists: its list is
+never shown, only what it admits. The rewrite before the lock stays, with the rules
+unanswered: it refuses a scoped schema change before `Database::maintain`
+could build it beside the database, and it is what a held write is planned
+from (`waits::plan`), so its look reads what the rule reads and a write
+there wakes it. A `/batch` answers them for each line (a claim, then the
+read the claim opened, one round trip), a read loop and a read batch again
+for each lock they take, the MCP tools as `/query`. The list is held to
+`MAX_CLAIM_VALUES` and refused past it, never cut (`listed`: the inner
+`get` read up to 1 002 rows, and grouped by its field for its distinct
+values only when it fills them -- grouped every time, a `set` under such
+a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach out
+(`sse::Reach`) binds them again under each look's lock where a collection
+they read was written since its change (every look where an inner `get`
+reads the time), runs the shape where the list moved and diffs by id
+against what it sent (`enter_and_leave`), a row leaving a deletion only of
+a row it was sent: a customer's stream gains the courier as the order is
+claimed and loses them at the delivery, no write to `positions` between.
+It costs one inner `get` a statement -- `make policy-bench`, a crew's
+bucket of two: a `set` 2.1 us over a plain rule in process, 4.1 against
+2.0, a read by id 1.7 (3.9 against 2.2), over HTTP 4.7 and 4.3 us of 32.0
+and 30.6 -- and a stream one at each write to what its rules read: beside
+10 and 100 scoped streams a write, half of them to `orders`, took 162 us
+and 1.89 ms of the process's CPU against 129 us and 1.65 ms under a rule
+naming the courier as a claim (`ARGS=streams`), every scoped stream
+looking at every write either way; examples/dispatch's beat, which writes
+`orders`, beside 50 customers following `positions` so took 1.94 ms
+against 0.69 with the courier's point on the order, so Plover keeps
+`courier_loc` and reads the courier's name through such a rule, its code
+withheld by a field list (`ARGS=beats`). A token with no such rule runs
+as it did: `Who::reaches_out` is a field read and the rest is untouched
+-- the policy bench's common sides in four ABBA quartets against main on
+a quiet machine, a `set` in process 1 313-1 335 ns against 1 312-1 327
+under the server's token and 1 975-2 012 against 1 976-2 014 under a
+plain rule, over HTTP 25.1-25.4 us p50 against 24.8-25.3 and a read by
+id 23.7-23.9 either way; `make requests-bench` in three quartets, one
+client the same to the microsecond and eight inside the spread. A read
+in process moved 1-1.5% either way as the bench's own functions were
+laid out (the server token's reaches nothing this changed, only
+`Database::query`), and nothing below fenec-http changed: the browser
+module is the same to the byte.
+
 **A token is bound to the tenant it names** (`Scope::reaches`,
 `route_tenant`). The policy is the node's, not a tenant's, so `owner =
 $jwt.sub` matched alice's rows in every tenant's file: a token minted for

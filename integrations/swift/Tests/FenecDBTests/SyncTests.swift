@@ -16,6 +16,18 @@
 
     let open = Shape("tasks", where: ["status": "open"], key: "key")
 
+    /// The replica offline before the next write: `setOnline` puts the
+    /// signal on the sync's queue, and an event already on it -- a
+    /// stream's bytes, a status -- runs the engine first, which sends what
+    /// a write made meanwhile queued. The insert went out and was refused
+    /// before the read that was to find it, 3 runs in 300 of four strict
+    /// runs at once beside four busy loops (and once on CI's macOS), none
+    /// in 300 since: `refresh` returns once the queue has reached the signal.
+    func offline(_ db: Fenec) async throws {
+        db.replica!.setOnline(false)
+        #expect(await db.replica!.refresh().state == .offline)
+    }
+
     func titles(_ db: Fenec) async throws -> [String] {
         try await db.from("tasks").select("title").order("title").rows().compactMap { $0["title"]?.string }
     }
@@ -59,7 +71,7 @@
             await db.replica!.ready()
             // Offline, nothing is sent: the server's answer cannot replace
             // the row before it is read (see aRefusedWriteIsPutBack).
-            db.replica!.setOnline(false)
+            try await offline(db)
             try await db.from("tasks").insert(["title": "new", "status": "open", "priority": 2] as Value)
             // At once, under a temporary id.
             let row = try await db.from("tasks").where("title", "new").first()
@@ -94,7 +106,7 @@
             // can refuse it: online, the 409 could come back and the row be
             // put back before the read, as it was in the Kotlin test on a
             // loaded runner.
-            db.replica!.setOnline(false)
+            try await offline(db)
             // The server's key is @unique; the replica's a plain hash.
             try await db.from("tasks").insert(["key": "a", "title": "dup", "status": "open"] as Value)
             #expect(try await titles(db) == ["dup", "one", "two"])
@@ -121,7 +133,7 @@
                 for await r in refusals { refused.set { $0 + [r] } }
             }
             // Offline, so both are made before the server answers either.
-            db.replica!.setOnline(false)
+            try await offline(db)
             try await db.from("tasks").insert(["key": "d", "title": "four", "status": "open"] as Value)
             try await db.from("tasks").where("key", "b").delete()
             #expect(try await titles(db) == ["four", "one"])

@@ -73,14 +73,16 @@ fn node(tag: &str, lease: bool) -> Node {
 }
 
 /// A TCP proxy: cut, it drops what it carries and every connection after;
-/// told to hold the next connection, it keeps it from the node until let go.
+/// told to hold the next request, it keeps it from the node until let go.
 struct Proxy {
     addr: String,
-    target: String,
     cut: Arc<AtomicBool>,
     open: Arc<Mutex<Vec<TcpStream>>>,
+    /// The next request's bytes, whatever connection they come on, are to
+    /// be held.
     hold: Arc<AtomicBool>,
-    held: Arc<(Mutex<Vec<TcpStream>>, Condvar)>,
+    /// How many requests are held, and the wait for one.
+    held: Arc<(Mutex<usize>, Condvar)>,
 }
 
 impl Proxy {
@@ -90,9 +92,9 @@ impl Proxy {
         let cut = Arc::new(AtomicBool::new(false));
         let open = Arc::new(Mutex::new(Vec::new()));
         let hold = Arc::new(AtomicBool::new(false));
-        let held = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let held = Arc::new((Mutex::new(0), Condvar::new()));
         let (flag, streams, to) = (Arc::clone(&cut), Arc::clone(&open), target.to_string());
-        let (holding, kept) = (Arc::clone(&hold), Arc::clone(&held));
+        let gate = (Arc::clone(&hold), Arc::clone(&held));
         std::thread::spawn(move || {
             for client in listener.incoming() {
                 let Ok(client) = client else { continue };
@@ -100,17 +102,11 @@ impl Proxy {
                     let _ = client.shutdown(Shutdown::Both);
                     continue;
                 }
-                if holding.swap(false, Ordering::SeqCst) {
-                    kept.0.lock().unwrap().push(client);
-                    kept.1.notify_all();
-                    continue;
-                }
-                carry(client, &to, &streams);
+                carry(client, &to, &streams, &gate);
             }
         });
         Proxy {
             addr,
-            target: target.to_string(),
             cut,
             open,
             hold,
@@ -129,36 +125,40 @@ impl Proxy {
         self.cut.store(false, Ordering::SeqCst);
     }
 
-    /// Holds the next connection made, and ends those open now, so that a
-    /// pooled client connects again for its next request.
+    /// Holds the next request sent through, on whatever connection. It
+    /// held the next connection, the open ones ended so that a pooled
+    /// client would connect again, and no connection came to be held in 1
+    /// run of 20 at background QoS beside eight busy loops (and once on
+    /// CI's macOS): a connection the router looked at before its end
+    /// arrived carried the grant, which met the end as no answer, or one
+    /// being carried as the open ones were ended was not among them and
+    /// stayed pooled. A request held where it comes holds either way.
     fn hold_next(&self) {
         self.hold.store(true, Ordering::SeqCst);
-        for s in self.open.lock().unwrap().drain(..) {
-            let _ = s.shutdown(Shutdown::Both);
-        }
     }
 
-    /// Waits until a connection is held.
+    /// Waits until a request is held.
     fn until_held(&self) {
-        let (kept, arrived) = &*self.held;
-        let (_kept, waited) = arrived
-            .wait_timeout_while(kept.lock().unwrap(), Duration::from_secs(30), |k| {
-                k.is_empty()
-            })
+        let (held, arrived) = &*self.held;
+        let (_held, waited) = arrived
+            .wait_timeout_while(held.lock().unwrap(), Duration::from_secs(30), |n| *n == 0)
             .unwrap();
-        assert!(!waited.timed_out(), "no connection came to be held");
+        assert!(!waited.timed_out(), "no request came to be held");
     }
 
-    /// Lets the held connections through to the node.
+    /// Lets the held request through to the node.
     fn release(&self) {
-        for client in self.held.0.lock().unwrap().drain(..) {
-            carry(client, &self.target, &self.open);
-        }
+        let (held, released) = &*self.held;
+        *held.lock().unwrap() = 0;
+        released.notify_all();
     }
 }
 
-/// Connects `client` to `target`, both ways, kept among `open`.
-fn carry(client: TcpStream, target: &str, open: &Mutex<Vec<TcpStream>>) {
+type Gate = (Arc<AtomicBool>, Arc<(Mutex<usize>, Condvar)>);
+
+/// Connects `client` to `target`, both ways, kept among `open`; what the
+/// client sends held at `gate` where it is the request to hold.
+fn carry(client: TcpStream, target: &str, open: &Mutex<Vec<TcpStream>>, gate: &Gate) {
     let Ok(server) = TcpStream::connect(target) else {
         return;
     };
@@ -166,13 +166,43 @@ fn carry(client: TcpStream, target: &str, open: &Mutex<Vec<TcpStream>>) {
     held.push(client.try_clone().unwrap());
     held.push(server.try_clone().unwrap());
     drop(held);
-    pipe(client.try_clone().unwrap(), server.try_clone().unwrap());
-    pipe(server, client);
+    let gate = (Arc::clone(&gate.0), Arc::clone(&gate.1));
+    pipe(
+        client.try_clone().unwrap(),
+        server.try_clone().unwrap(),
+        Some(gate),
+    );
+    pipe(server, client, None);
 }
 
-fn pipe(mut from: TcpStream, mut to: TcpStream) {
+/// Copies `from` into `to` until either ends; a chunk read while `gate` is
+/// set starts the request held, which waits there until let go.
+fn pipe(mut from: TcpStream, mut to: TcpStream, gate: Option<Gate>) {
     std::thread::spawn(move || {
-        let _ = std::io::copy(&mut from, &mut to);
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            let n = match from.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                // As `io::copy` reads.
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            if let Some((hold, held)) = &gate {
+                if hold.swap(false, Ordering::SeqCst) {
+                    let (count, cv) = &**held;
+                    let mut waiting = count.lock().unwrap();
+                    *waiting += 1;
+                    cv.notify_all();
+                    while *waiting > 0 {
+                        waiting = cv.wait(waiting).unwrap();
+                    }
+                }
+            }
+            if to.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
         let _ = to.shutdown(Shutdown::Write);
     });
 }

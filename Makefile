@@ -265,11 +265,13 @@ quota-bench:
 	$(CARGO) run --release -p fenec-http --example quotas -- 20000
 
 ## What a scoped write's rules cost: a `set` under the server's token and
-## under a policy of a plain rule, a field list, a transition and a field
-## list answering its row, in process and over HTTP, in turns
+## under a policy of a plain rule, a field list, a transition, a field
+## list answering its row and a rule reading another collection, and a read
+## by id under three of them, in process and over HTTP, in turns; ARGS="20000
+## plain,reach" names sides, ARGS=streams a write beside scoped streams
 ## (crates/fenec-http/examples/policy.rs)
 policy-bench:
-	$(CARGO) run --release -p fenec-http --example policy -- 20000
+	$(CARGO) run --release -p fenec-http --example policy -- $(or $(ARGS),20000)
 
 ## Replication: a replica's lag under each sync policy, how fast it
 ## catches up and starts from an image, and what a failover loses.
