@@ -262,13 +262,24 @@ pub fn serve(
     // keeps the rule and holds nothing.
     let mut seen: Option<std::collections::HashSet<DocId>> =
         who.scope().map(|_| Default::default());
+    // A stream of a shape that holds nothing, unscoped, is told of every
+    // write to the collection, and so of every row reaching its time.
+    let everything = seen.is_none() && matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
+    let mut expiry = Expiry::of(&crate::held::read(db), &sub.collection, everything);
+    let began = now_ms() as i64;
     let mut cursor = match sub.since {
         // Resuming, a scoped subscriber is seeded all the same: the rows it
         // holds are not known here, and without them no deletion could be
         // told apart from someone else's write.
         Some(n) if seen.is_none() => n,
         _ => match seed(out, db, &sub, &mut seen, quiet) {
-            Ok(seq) => seq,
+            Ok(seq) => {
+                // The seed left out every row past its time by then.
+                if let Some(x) = &mut expiry {
+                    x.told = Some(began);
+                }
+                seq
+            }
             Err(_) => return,
         },
     };
@@ -313,11 +324,24 @@ pub fn serve(
                 let _ = event(out, "error", &error_json(&e));
                 return;
             }
-            Ok(Changes::Reseed) => match seed(out, db, &sub, &mut seen, quiet) {
-                Ok(seq) => cursor = seq,
-                Err(_) => return,
-            },
+            Ok(Changes::Reseed) => {
+                let began = now_ms() as i64;
+                match seed(out, db, &sub, &mut seen, quiet) {
+                    Ok(seq) => cursor = seq,
+                    Err(_) => return,
+                }
+                if let Some(x) = &mut expiry {
+                    x.told = Some(began);
+                    x.stale = true;
+                }
+            }
             Ok(Changes::Batch(mut b)) => {
+                // A write to the collection may have moved its next moment.
+                if !(b.puts.rows.is_empty() && b.dels.is_empty()) {
+                    if let Some(x) = &mut expiry {
+                        x.stale = true;
+                    }
+                }
                 if let Some(seen) = &mut seen {
                     b.dels.retain(|id| seen.remove(id));
                     seen.extend(b.puts.rows.iter().map(|r| r.id));
@@ -340,17 +364,184 @@ pub fn serve(
             }
         }
 
+        // The shape's rows past their time since the last look, told as
+        // deletions now, with no write to tell of them; then when the next
+        // comes.
+        let mut until = None;
+        if let Some(x) = &mut expiry {
+            let guard = crate::held::read(db);
+            if x.due(now_ms() as i64) {
+                match x.step(&guard, sub.filter.as_ref()) {
+                    Err(e) => {
+                        drop(guard);
+                        let _ = event(out, "error", &error_json(&e));
+                        return;
+                    }
+                    Ok(mut dels) => {
+                        if let Some(seen) = &mut seen {
+                            dels.retain(|id| seen.remove(id));
+                        }
+                        if !dels.is_empty() {
+                            drop(guard);
+                            // A stream of a shape that holds nothing is told
+                            // a change happened, and not which rows.
+                            if quiet {
+                                dels.clear();
+                            }
+                            if event(out, "change", &expired_json(cursor, &dels)).is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            until = x.next_at(&guard);
+        }
+
         // Keep-alive: proxies and NAT tables drop silent connections. A
         // comment line is valid in SSE and produces no event on the client
         // side.
         let keepalive = left().map_or(cfg.stream_keepalive, |l| l.min(cfg.stream_keepalive));
-        if hub.wait(cursor, keepalive) <= cursor && out.write_all(b": keepalive\n\n").is_err() {
+        let wait = match until {
+            Some(at) => {
+                let left = at.saturating_sub(now_ms() as i64).max(1) as u64;
+                keepalive.min(Duration::from_millis(left))
+            }
+            None => keepalive,
+        };
+        // Woken for a row's time rather than the keep-alive's, it looks
+        // and writes no keep-alive line.
+        let expiring = wait < keepalive;
+        if hub.wait(cursor, wait) <= cursor
+            && !expiring
+            && out.write_all(b": keepalive\n\n").is_err()
+        {
             return;
         }
         if out.flush().is_err() {
             return;
         }
     }
+}
+
+/// A subscription's rows past their `@ttl`, told at their time. A row past
+/// its time leaves every read at once and the file only at the sweep, a
+/// minute and its grace later, which is when a subscriber heard of it: a
+/// courier whose phone went quiet stayed on a dispatcher's map 73 s after
+/// it had gone from every read. So the stream works out when the next row
+/// of its collection reaches its time ([`Database::wakes_at`], a step of
+/// the field's index), sleeps until then if no write comes first, and
+/// reads the rows that reached it since it last looked -- `expired()` and
+/// the field's window, the shape ANDed in -- telling each as a deletion,
+/// as the sweep's delete would be told: a scoped stream of the rows it was
+/// sent alone, a shape that holds nothing (`FenecHttp.live`'s) that
+/// something changed. The sweep's delete of the row comes after, a
+/// deletion of what is gone already, which every client takes as it is.
+struct Expiry {
+    collection: String,
+    field: String,
+    ttl: i64,
+    /// Every row of the collection's, not only the shape's: an unscoped
+    /// stream of a shape that holds nothing, told of any write to the
+    /// collection.
+    everything: bool,
+    /// Rows past their time by this moment, ms, have been told. `None` on a
+    /// resumed stream, which tells every row past its time not yet swept.
+    told: Option<i64>,
+    /// The next moment a row of the collection reaches its time.
+    next: Option<i64>,
+    /// `next` is to be worked out again: a write to the collection, or a
+    /// look, may have moved it.
+    stale: bool,
+}
+
+impl Expiry {
+    /// What a stream of `collection` tells of its rows reaching their time,
+    /// if they do.
+    fn of(db: &Database, collection: &str, everything: bool) -> Option<Expiry> {
+        let c = db.collection(collection).ok()?;
+        let (field, ttl) = c
+            .schema
+            .fields
+            .iter()
+            .find_map(|f| f.index.ttl().map(|t| (f.name.clone(), t)))?;
+        Some(Expiry {
+            collection: collection.to_string(),
+            field,
+            ttl: ttl.min(i64::MAX as u64) as i64,
+            everything,
+            told: None,
+            next: None,
+            stale: true,
+        })
+    }
+
+    fn due(&self, now: i64) -> bool {
+        self.told.is_none() || self.next.is_some_and(|at| at <= now)
+    }
+
+    /// The next moment a row reaches its time, worked out again where a
+    /// write or a look may have moved it.
+    fn next_at(&mut self, db: &Database) -> Option<i64> {
+        if self.stale {
+            let at = self.told.unwrap_or_else(|| now_ms() as i64);
+            self.next = db.wakes_at(&self.collection, None, &[], at).ok().flatten();
+            self.stale = false;
+        }
+        self.next
+    }
+
+    /// The rows of `shape` that reached their time since the last look.
+    fn step(
+        &mut self,
+        db: &Database,
+        shape: Option<&Expr>,
+    ) -> fenec_core::error::Result<Vec<DocId>> {
+        let now = now_ms() as i64;
+        let field = || Box::new(Expr::Field(self.field.clone()));
+        let past = |t: i64| Box::new(Expr::Lit(Value::Timestamp(t.saturating_sub(self.ttl))));
+        let mut f = Expr::And(
+            Box::new(Expr::Call("expired".into(), Vec::new())),
+            Box::new(Expr::Cmp(CmpOp::Le, field(), past(now))),
+        );
+        if let Some(told) = self.told {
+            f = Expr::And(
+                Box::new(f),
+                Box::new(Expr::Cmp(CmpOp::Gt, field(), past(told))),
+            );
+        }
+        if let (false, Some(shape)) = (self.everything, shape) {
+            f = Expr::And(Box::new(shape.clone()), Box::new(f));
+        }
+        let sel = Select {
+            collection: self.collection.clone(),
+            project: Some(vec!["id".to_string()]),
+            filter: Some(f),
+            ..Select::default()
+        };
+        let ids = match db.query(&Statement::Select(sel), &[])? {
+            Response::Rows(rs) => rs.rows.iter().map(|r| r.id).collect(),
+            _ => Vec::new(),
+        };
+        self.told = Some(now);
+        self.stale = true;
+        Ok(ids)
+    }
+}
+
+/// A change of the rows `dels` reaching their time, at the change the
+/// stream stands at: no write moved it.
+fn expired_json(seq: u64, dels: &[DocId]) -> String {
+    let mut out = format!("{{\"seq\":{seq},\"puts\":[],\"dels\":[");
+    for (i, id) in dels.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&id.to_string());
+    }
+    out.push_str("],\"schema\":false}");
+    out
 }
 
 /// Sends the whole shape and returns the counter at that moment.
