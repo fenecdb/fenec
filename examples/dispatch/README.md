@@ -93,16 +93,15 @@ the city.
        (a 5-minute token from /api/token: subscribe positions and                                each node: --jwt-secret-file,
         orders, near loc for the 10 nearest, distance <= r by state)                             --policy policy.txt,
                                                                                                  --http-cors <site>,
- courier's phone ── /api/courier/claim ─▶ 1. nearest ready orders (app token, near pickup) ─▶      a quota a company (the router
-   (on shift)       {at}                  2. /batch: the first still ready, claimed under         sends it with the tenant)
-                                             the courier's token
-                                          3. none: a claim held at the node (Fenec-Wait)
+ courier's phone ── /api/courier/claim ─▶ set orders ... order distance(pickup, $4) limit 1    ─▶      a quota a company (the router
+   (on shift)       {at}                  returning *, the courier's token, sent with              sends it with the tenant)
+                                          Fenec-Wait: held at the node while none is ready
                  ── /api/courier/beat ──▶ /batch: put positions ... if absent else set,
                     every 2.5 s            set orders {run_at: now() + lease, courier_loc}
                  ── pickup, deliver ────▶ set orders ... where id = $1 and claim = $2 require 1
 
- customer ── /api/orders ───────────────▶ insert orders ... (customer's token: WITH CHECK pins
-                                          customer = $jwt.sub, status "ready")
+ customer ── /api/orders ───────────────▶ insert orders ... returning id (customer's token: WITH
+                                          CHECK pins customer = $jwt.sub, status "ready")
    tracking page ── subscribe orders id=eq.<n> (customer's token) ─────▶ the order row, its courier_loc moving
 
  npm run simulate: 59 + 19 couriers riding Merrow's streets, each through its own token; orders in the day's waves
@@ -117,7 +116,7 @@ tenant and an `exp`):
 | A dispatcher | role `dispatcher`, their company's tenant | read and write the company's orders, couriers and merchants; read positions |
 | A courier | role `courier` | read their own row, the merchants and the orders they carry; write their own position; update an order whose lease is out -- a claim -- or one they carry, and only the queue's fields |
 | A customer | role `customer` | read their own orders and the merchants; insert an order as themselves, ready and claimed by nobody; cancel one nobody carries |
-| This app | role `app`, a company's tenant or the platform's | read orders, positions, couriers and merchants (the candidates of a claim, the dashboards); on the platform, read accounts to sign people in |
+| This app | role `app`, a company's tenant or the platform's | read orders, positions, couriers and merchants (the dashboards); on the platform, read accounts to sign people in |
 | Grafana | role `app`, a token a company | the same reads, nothing written |
 | The operator | the nodes' `--http-token`, the router's token | setup alone: place tenants, set quotas, load the seed |
 
@@ -176,8 +175,9 @@ Grafana's built-ins bound as the plugin binds them.
 | Couriers on the map | `positions`: `loc geo @geo`, `seen @ttl(2m)`, `courier @unique`; `put positions {...} if absent else set {loc: new.loc, ...}` |
 | The ten nearest idle couriers | `get positions select courier, state, loc, distance(loc, $1) as m where state = "idle" near loc $1 limit 10`, live (`FenecHttp.live`, `collections: ['positions']`) |
 | Who is within reach | `get positions select state, count(*) as n where distance(loc, $1) <= $2 group state`, live |
-| A claim | `set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} where id = $4 and run_at <= now() and not ($2 in (get orders select claim where claim = $2)) returning *`, one a candidate in one `/batch` (below) |
-| Waiting for an order | the same `set` over `distance(pickup, $4) <= $5 order run_at limit 1`, in a `/batch` sent with `Fenec-Wait: 25000` |
+| A claim | `set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} where run_at <= now() and distance(pickup, $4) <= $5 order distance(pickup, $4) limit 1 returning *`: the nearest ready order within 3 km, one statement (below) |
+| Waiting for an order | the same `set`, in a `/batch` sent with `Fenec-Wait: 25000`: run at once, held only while it writes nothing, and taking the nearest ready once one is |
+| An order's id | `insert orders {...} returning id`, the customer's read rules held to the row as written |
 | The lease | every beat: `set orders {run_at: now() + $3, courier_loc: $4} where id = $1 and claim = $2` beside the position, one `/batch`; a lapsed lease is `run_at <= now()` again, and a waiting claim is woken at that moment |
 | Ack, give back, dead letter | `set ... where id = $1 and claim = $2 require 1`: a courier whose lease lapsed finds out (412); backoff `now() + 1000 * attempts * attempts`; `case when attempts >= 5 then "dead"` |
 | Couriers see their own jobs | `orders read where courier = $jwt.sub`, and a claim's `returning *` answers the order as claimed: the read rules are asked of the row the `set` leaves |
@@ -188,30 +188,31 @@ Grafana's built-ins bound as the plugin binds them.
 
 ## Claiming the nearest order
 
-The one step FenecQL could not say in one statement. A job queue's claim
-is `set ... where run_at <= now() order run_at limit 1`: a write picks its
-rows by `order` over fields, and `near`, which orders by distance, is a
-`get`'s alone. So a courier's claim (`lib/dispatch.ts`) is three steps:
+A job queue's claim is `set ... where run_at <= now() order run_at limit
+1 returning *`; a courier's orders it by the distance from where they are
+(`lib/dispatch.ts`):
 
-1. **The nearest ready orders within 3 km**, a read, with the app's token
-   -- a courier's own token reads only orders already theirs:
-   `get orders select id where run_at <= now() and distance(pickup, $1) <= $2 near pickup $1 limit 6`.
-2. **One `/batch` that takes the first of them still ready**, in that
-   order: a `set` a candidate, each also asking that no statement before
-   it in the batch took one -- `not ($2 in (get orders select claim where
-   claim = $2))` -- and answering what it took (`returning *`). Under the
-   one write lock, so another courier's batch between the read and this
-   one costs a candidate, never a double claim.
-3. **None near and ready**: the oldest ready order within 3 km, held at the
-   node with `Fenec-Wait` until one is placed, a lease lapses or a backoff
-   ends.
+```
+set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1}
+  where run_at <= now() and distance(pickup, $4) <= $5 order distance(pickup, $4) limit 1 returning *
+```
+
+The ready orders within 3 km are walked nearest first through the
+pickup's point index, the first one taken under the node's one write
+lock, and answered as claimed -- under the courier's own token, whose read
+rules are asked of the order as the claim leaves it. The phone sends it
+in a `/batch` with `Fenec-Wait`: it runs at once, and with none near and
+ready it is held at the node until an order is placed, a lease lapses or
+a backoff ends, and then takes the nearest one ready -- one write request
+a claim either way.
 
 It holds: 50 couriers claiming 400 orders at once, and 50 waiting while
-150 were placed, took every order once (`test/claims.test.ts`). What it
-costs is below: a batch that loses still counts as a write of the plan,
-and the courier who waits at the server is handed whatever comes within
-3 km first, not the order nearest them, nor the order to the courier
-nearest it.
+150 were placed, took every order once (`test/claims.test.ts`). It was
+three steps while `order` took fields alone (gaps 1 and 2): a read of the
+six nearest ready orders with the app's token, a `/batch` of a
+conditional `set` a candidate, and a held claim of the oldest within the
+radius. A held claim still goes to whichever waiting courier runs first,
+not the one nearest the new order (gap 3).
 
 ## Tests
 
@@ -219,7 +220,7 @@ nearest it.
 
 | File | What |
 | --- | --- |
-| `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one |
+| `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one. Tandem's writes are unmetered here (gap 7): what they hold is exactly-once, and `quotas.test.ts` holds the plan |
 | `lease.test.ts` (3) | a courier as a process of its own claims, picks up and beats every 300 ms, then is killed with SIGKILL: a second courier waiting at the server is handed the order no sooner than the lease (1.5 s) after the last beat and within 2 s of it, `attempts` 2; the dead courier's late pickup, delivery and beat are refused (412, a lease kept `false`); an order given back waits out its backoff; one claimed five times is a dead letter on the sixth draw |
 | `quotas.test.ts` (4) | Tandem (Pro) and Hopper (Starter) on one node: Hopper's 20 couriers beating every 50 ms, ten times its 40 writes a second, are refused (429 `writes`) and land at most its rate, while Tandem's ten are never refused and their median beat is unchanged; a bulk import past 64 KB a second is refused (429 `write_bytes`) and lands after its `Retry-After`; 45 claims waiting at once from a Starter fleet: 40 held, 5 refused (429 `streams`); a company at its rows takes no new order (507 `rows`) and deletes still land |
 | `security.test.ts` (5) | a dispatcher's token against another company and the platform (403), no tenant (403), lapsed (401), forged (401); a courier reads only their order, row and position, cannot deliver another's order (it is not there to them), deliver a ready order nobody claimed (403), change a fee (403), claim for another courier or without counting the attempt (403), give an order back ahead of the queue (403), write another's position (403) or delete; a customer reads only their own, cannot insert as another, pre-assigned or with attempts (403), cannot move an order up the queue or cancel it claimable (403), take a cancelled one back (412), cancel another's or one carried; a customer's subscription hears their courier move on their order and nothing of another's |
@@ -238,9 +239,9 @@ the router as the app reaches it:
 | the same, 10 waiting | 0.42 ms | 2.7 ms | the nearest took it 10%; the one who did a median of 2.0 km further |
 | the same, 50 waiting | 0.46 ms | 11.0 ms | the nearest 2%; 2.6 km further |
 | the same, 100 waiting | 0.64 ms | 14.6 ms | the nearest 1%; 2.5 km further |
-| Claim the nearest, orders ready: 1 courier | 0.42 ms | 1.3 ms | the read and the `/batch` |
-| the same, 16 couriers at once | 2.4 ms | 6.2 ms | 1.2 candidates tried a claim |
-| the same, 50 couriers at once | 7.6 ms | 15.5 ms | 1.5 candidates tried a claim |
+| Claim the nearest, orders ready: 1 courier | 0.20 ms | 0.35 ms | one statement; the three steps it replaced 0.41 ms, 0.59 |
+| the same, 16 couriers at once | 1.44 ms | 6.1 ms | the three steps 2.84 ms, 7.4 |
+| the same, 50 couriers at once | 5.2 ms | 28 ms | the three steps 8.2 ms, 28 |
 | The 10 nearest idle couriers: 60 on the map | 0.15 ms | 0.18 ms | `near loc $1 limit 10` |
 | the same, 1 000 | 0.22 ms | 2.1 ms | |
 | the same, 10 000 | 0.23 ms | 0.88 ms | |
@@ -271,9 +272,13 @@ same medians for the waits and the reads but a claim among 50 couriers at
   every waiting courier's claim is its own group (its point and its `sub`
   are in it), each group's head is woken by the insert, and whichever runs
   first takes it (gap 3).
-- **Claiming the nearest from a crowd costs the contention**: 50 couriers
-  claiming at once wait for each other's batches under the one writer, and
-  1.5 candidates are tried a claim.
+- **Claiming the nearest is one statement**, half the three steps' time
+  alone and still a third less among 50 couriers at once, who wait for
+  each other's claims under the one writer. The claim rows were measured
+  again on their own, the one statement and the three steps in turns over
+  one cluster (one-minute load 2.9 to 3.5), when the claim became one
+  statement: the full bench, run then, met other builds past a load of 18
+  and its other rows are the ones from before.
 - **The nearest couriers are a walk of `@geo`**: about 0.2 ms over HTTP
   whether 60 or 10 000 couriers are on the map; the radius count reads
   every position in it.
@@ -301,11 +306,12 @@ From the tests, on the same machine:
 
 What fenecdb made awkward, slow or impossible here, the most important
 first, each with the statement that showed it and what Plover does
-instead. None was fixed in the example's own change; 4, 5 and 8 are
-fixed since, and say how.
+instead. None was fixed in the example's own change; 1, 2, 4, 5, 8, 9
+and 13 are fixed since, and say how.
 
-1. **A claim cannot pick the nearest row.** A job queue's claim picks its
-   rows with `order` over fields; a courier's is "the nearest ready order":
+1. **Fixed: a claim could not pick the nearest row.** A job queue's claim
+   picked its rows with `order` over fields; a courier's is "the nearest
+   ready order":
 
    ```
    set orders {courier: $1, run_at: now() + 45000} where run_at <= now() near pickup $2 limit 1 returning *
@@ -314,19 +320,22 @@ fixed since, and say how.
    -- query error: position 89: expected `)`, found `,`
    ```
 
-   Plover claims in three steps instead (Claiming the nearest order,
-   above): a read of the nearest candidates with the app's token, a
-   `/batch` of one conditional `set` a candidate, and a held claim of the
-   oldest within the radius. It is correct, and it costs: two round trips
-   where one would do, a losing batch is a write of the plan (435 to 448
-   batches for 400 orders among 50 couriers), and 50 couriers claiming at
-   once wait 7.6 ms p50 for each other's batches where one alone takes 0.4.
-   Smallest: `near <geo field> <point>` -- or `order distance(...)` -- as a
-   write's pick, beside `order`, found and written under the write lock as
-   `order run_at limit 1` is.
+   Plover claimed in three steps: a read of the nearest candidates with
+   the app's token, a `/batch` of one conditional `set` a candidate, and a
+   held claim of the oldest within the radius. It was correct, and it cost
+   two round trips where one would do, a write of the plan for every batch
+   that lost its candidates (435 to 448 batches for 400 orders among 50
+   couriers), and 50 couriers claiming at once waited 7.6 ms p50 for each
+   other's batches where one alone took 0.4. Now a key of `order` may be any
+   expression over the row, `order distance(pickup, $2)` among them, in a
+   `get` and in a write that picks its rows; ascending over a field with
+   `@geo` and a `limit`, it walks the point index to the page as `near`
+   does. The claim is the one statement of Claiming the nearest order,
+   above. A write still takes no `near`: the parser says to write the
+   distance as a key of `order`.
 
-2. **A point inside an inner `get` is refused (a bug).** Which would have
-   made the claim one statement, under the write lock:
+2. **Fixed: a point inside an inner `get` was refused (a bug).** Which
+   would have made the claim one statement, under the write lock:
 
    ```
    set orders {courier: $1} where id in (get orders select id where run_at <= now() near pickup $2 limit 1)
@@ -341,11 +350,12 @@ fixed since, and say how.
    (`crates/fenec-core/src/engine.rs`, `exactly` and `exactly_for`): that
    walks the statement's own filter, its select list and each `lookup`
    level, but not an `Expr::InSelect`'s inner `get`, so the inner point
-   stays a vector and `geo::point_of` refuses it. Not a one-line fix -- the
-   inner `get`'s collection's schema has to be looked up for its own
-   points and json fields -- so not fixed here. With it fixed, `set ...
-   where id in (get ... near pickup $p limit 1)` is the claim, and
-   `Fenec-Wait`'s wake analysis already walks inner `get`s.
+   stays a vector and `geo::point_of` refuses it. Now the walk reaches every
+   place a statement holds a value, each collection by its own schema: an
+   inner `get` at any depth, a `lookup` level, a disjunctive facet's
+   filter, `having`, a comparison under a `case`, an `order` key. `set ...
+   where id in (get orders select id where ... near pickup $p limit 1)` is
+   a claim too, the inner `get` run first under the same lock.
 
 3. **A new order goes to whichever waiting courier runs first, not the
    nearest; and every write wakes every waiting courier.** Each courier's
@@ -364,8 +374,8 @@ fixed since, and say how.
    0.67 to 4.3 ms p99 straight to the node. Smallest: wake only the groups
    whose collections the write touched (the watcher knows them); for the
    dispatch itself, a way for a write to hand a row to the nearest of the
-   held claims -- or the claim of item 1, so that a courier's held claim at
-   least takes what is nearest it.
+   held claims. Since gap 1, a courier's held claim at least takes the
+   order nearest it of those ready when it runs.
 
 4. **Fixed: `returning` under a scoped token picked only rows the token
    could read before the write -- silently.** With the natural policy -- a
@@ -429,7 +439,12 @@ fixed since, and say how.
    plan's bucket of 600 a second refills a token in 1.7 ms: the claims test's
    50 couriers met 50 refusals and, doing as told, waited 50 s between
    them. The bucket is taken as a write request starts, so a claim that
-   takes nothing costs one, and so does every held claim as it comes in:
+   takes nothing costs one, and so does every held claim as it comes in --
+   and again each time a write wakes it, whether it then writes or not:
+   with 50 couriers waiting, the first few orders placed woke 400 to 650
+   runs of held claims in 200 ms, draining Pro's 600 a second, and an order
+   placed then was refused (429) one run in two or three of the claims
+   test, which meters no writes now:
    45 claims sent to a Starter company at once were refused for `writes`
    (6 of them) before any for `streams`. And a held claim is a stream, so a
    plan's `streams` is how many couriers may wait at once (40 held, the
@@ -462,10 +477,14 @@ fixed since, and say how.
    carries an `Idempotency-Key`. Plover's nodes keep the default idle
    timeout.
 
-9. **An insert cannot answer the id it made.** `insert orders {...}
-   returning id` is `unknown command returning`, and `POST /orders`
-   answers `{"inserted":1}`. Plover reads the order back by its unique key
-   in the same `/batch`. Smallest: `returning` on `put`/`insert`.
+9. **Fixed: an insert could not answer the id it made.** `insert orders
+   {...} returning id` was `unknown command returning`, and `POST /orders`
+   answered `{"inserted":1}`; Plover read the order back by its unique key
+   in the same `/batch`. Now `put` and `insert` take `returning`, the rows
+   written in the order of the documents, ids and all, held to a scoped
+   token's read rules as written (an upsert's row set as an update), and
+   `POST /orders?returning=id` answers them; `lib/orders.ts` places an
+   order with `returning id`.
 
 10. **Aggregates and `lookup` do not combine.** The busiest couriers with
     their names:
@@ -487,9 +506,12 @@ fixed since, and say how.
     keeps showing a courier whose phone went quiet; Plover's map drops a
     position whose `seen` is two minutes old itself.
 
-13. **A `nocase` clash names the spelling written, not the one stored:**
+13. **Fixed: a `nocase` clash named the spelling written, not the one
+    stored:**
     ``` `users.email` is unique, and document 1 holds "SAMI.lindqvist@tandem.example" already ```,
-    where document 1 holds `sami.lindqvist@tandem.example`.
+    where document 1 holds `sami.lindqvist@tandem.example`. Now the clash
+    reads the value from the row holding it; a scoped token is still told
+    the field alone.
 
 14. **A node's streams default to 64 for all its tenants together**
     (`--http-max-streams`): a dispatcher's map is two subscriptions and two

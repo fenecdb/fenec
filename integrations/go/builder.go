@@ -1714,8 +1714,15 @@ func (b *Builder) pick(o opts, bind *binder) (string, error) {
 	if b.hasLimit {
 		sql.WriteString(" limit " + bind.bind(b.limit))
 	}
+	returning, err := returningClause(o)
+	return sql.String() + returning, err
+}
+
+// returningClause is " returning ..." for Returning: "*" every field, or
+// the fields named, each a field or a path -- a write's rows answered.
+func returningClause(o opts) (string, error) {
 	if !o.returningSet {
-		return sql.String(), nil
+		return "", nil
 	}
 	if len(o.returning) == 0 {
 		return "", refuse("returning names the fields it answers, or * for every one")
@@ -1725,10 +1732,10 @@ func (b *Builder) pick(o opts, bind *binder) (string, error) {
 			if len(o.returning) > 1 {
 				return "", refuse("returning * answers every field: it takes no other")
 			}
-			sql.WriteString(" returning *")
-			return sql.String(), nil
+			return " returning *", nil
 		}
 	}
+	var sql strings.Builder
 	for i, f := range o.returning {
 		p, err := fieldPath(f)
 		if err != nil {
@@ -2019,10 +2026,12 @@ func IfAbsent() Opt { return func(o *opts) { o.ifAbsent = true } }
 // rows it is refused (412, CodeUnmet) and its batch put back.
 func Require(n int) Opt { return func(o *opts) { o.require = intp(n) } }
 
-// Returning, among Update's and Delete's options, is ... returning: the
-// rows written answered rather than counted, in Result.Rows -- an
-// update's as written, a delete's as they were -- under the fields named,
-// "*" for every one. With Order and Limit it is a job queue's claim:
+// Returning, among Update's and Delete's options -- and an insert's
+// documents, and Upsert's -- is ... returning: the rows written answered
+// rather than counted, in Result.Rows -- an insert's and an update's as
+// written, ids and all, a delete's as they were -- under the fields
+// named, "*" for every one. With Order and Limit it is a job queue's
+// claim:
 //
 //	db.From("jobs").WhereCond(Raw("run_at <= now()")).Order("run_at", "asc").
 //		Limit(10).Update(ctx, D("owner", me, "run_at", Expr("now() + ?", 30000),
@@ -2046,7 +2055,7 @@ func requireClause(o opts) (string, error) {
 }
 
 // ToInsert is the put of the documents, not sent. An Opt among them --
-// IfAbsent, Require -- is an option, not a document.
+// IfAbsent, Returning, Require -- is an option, not a document.
 func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if err := b.assertPlain("insert"); err != nil {
 		return "", nil, err
@@ -2080,11 +2089,15 @@ func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if o.ifAbsent {
 		body += " if absent"
 	}
+	returning, err := returningClause(o)
+	if err != nil {
+		return "", nil, err
+	}
 	required, err := requireClause(o)
 	if err != nil {
 		return "", nil, err
 	}
-	return "put " + b.collection + " " + body + required, bind.params, nil
+	return "put " + b.collection + " " + body + returning + required, bind.params, nil
 }
 
 // ToUpdate is the set of the rows the filter names, not sent; with no
@@ -2146,11 +2159,16 @@ func (b *Builder) ToUpsert(docs []any, patch any, options ...Opt) (string, []any
 	if err != nil {
 		return "", nil, err
 	}
-	required, err := requireClause(gather(options))
+	o := gather(options)
+	returning, err := returningClause(o)
 	if err != nil {
 		return "", nil, err
 	}
-	return "put " + b.collection + " " + body + " if absent else set " + set + required, bind.params, nil
+	required, err := requireClause(o)
+	if err != nil {
+		return "", nil, err
+	}
+	return "put " + b.collection + " " + body + " if absent else set " + set + returning + required, bind.params, nil
 }
 
 // ToDelete is the del of the rows the filter names, not sent; with no
@@ -2280,7 +2298,8 @@ func (b *Builder) exec(ctx context.Context, text string, params []any) (Result, 
 
 // Insert puts the documents -- Docs, maps or structs -- and hands back how
 // many were written (Result.Affected); with IfAbsent among them, those
-// whose id or @unique value was held are left out. None is no request.
+// whose id or @unique value was held are left out, and with Returning
+// the rows written, ids and all, in Result.Rows. None is no request.
 func (b *Builder) Insert(ctx context.Context, docs ...any) (Result, error) {
 	n := 0
 	for _, d := range docs {
@@ -2301,7 +2320,8 @@ func (b *Builder) Insert(ctx context.Context, docs ...any) (Result, error) {
 // Upsert inserts each document, or, where a row holds its id or @unique
 // value, sets that row by patch -- Upsert(ctx, []any{D("key", k, "n", 1)},
 // D("n", Expr("n + new.n"))) -- and hands back the rows set and made
-// together. No document is no request.
+// together, with Returning those rows in Result.Rows. No document is no
+// request.
 func (b *Builder) Upsert(ctx context.Context, docs []any, patch any, options ...Opt) (Result, error) {
 	if len(docs) == 0 {
 		return Result{}, b.err

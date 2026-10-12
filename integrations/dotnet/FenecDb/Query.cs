@@ -1082,15 +1082,20 @@ public sealed class Query
         var sql = new StringBuilder();
         AppendOrder(sql, _s.Order);
         if (_s.Limit is { } n) sql.Append(" limit ").Append(bind.Bind(n));
-        if (returning is null) return sql.ToString();
+        return sql.Append(ReturningClause(returning)).ToString();
+    }
+
+    // " returning ..." for a write's returning: the fields named, each a field or a path, or "*" for every one.
+    static string ReturningClause(IReadOnlyList<string>? returning)
+    {
+        if (returning is null) return "";
         if (returning.Count == 0) throw Builder.Refuse("returning names the fields it answers, or * for every one");
         if (returning.Contains("*"))
         {
             if (returning.Count > 1) throw Builder.Refuse("returning * answers every field: it takes no other");
-            return sql.Append(" returning *").ToString();
+            return " returning *";
         }
-        sql.Append(" returning ").Append(string.Join(", ", returning.Select(Builder.FieldPath)));
-        return sql.ToString();
+        return " returning " + string.Join(", ", returning.Select(Builder.FieldPath));
     }
 
     static List<object?> DocsOf(object? docs) =>
@@ -1100,8 +1105,10 @@ public sealed class Query
     /// them, not sent. With <paramref name="ifAbsent"/>, <c>put ... if absent</c>: a document whose id or
     /// <c>@unique</c> value a row holds is passed over, and not counted. With <paramref name="require"/>, on any
     /// write, <c>... require n</c>: unless it wrote exactly n rows it is refused (412, <c>unmet</c>) and its
-    /// batch put back.</summary>
-    public (string Text, IReadOnlyList<object?> Parameters) ToInsert(object docs, bool ifAbsent = false, long? require = null)
+    /// batch put back. <paramref name="returning"/> answers the rows written, ids and all, the fields named or
+    /// <c>"*"</c> for every one.</summary>
+    public (string Text, IReadOnlyList<object?> Parameters) ToInsert(object docs, bool ifAbsent = false, long? require = null,
+        IReadOnlyList<string>? returning = null)
     {
         AssertPlain("insert");
         var list = DocsOf(docs);
@@ -1109,7 +1116,8 @@ public sealed class Query
         var bind = new Binder();
         var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind, "insert")));
         var absent = ifAbsent ? " if absent" : "";
-        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}{absent}{RequireClause(require)}", bind.Params);
+        var tail = ReturningClause(returning) + RequireClause(require);
+        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}{absent}{tail}", bind.Params);
     }
 
     /// <summary>The <c>set</c> of the rows the filter names, not sent; with no filter it is refused unless
@@ -1130,8 +1138,10 @@ public sealed class Query
     /// <summary>The upsert, <c>put ... if absent else set {patch}</c>, not sent: a document whose id or first
     /// <c>@unique</c> value a row holds sets that row by the patch -- an update's, <c>Inc</c> and <c>Expr</c> with
     /// it, and in an expression <c>new.f</c> the document's own <c>f</c> -- and every other one is inserted. The
-    /// documents' parameters come first, then the patch's.</summary>
-    public (string Text, IReadOnlyList<object?> Parameters) ToUpsert(object docs, object patch, long? require = null)
+    /// documents' parameters come first, then the patch's; <paramref name="returning"/> as
+    /// <see cref="ToInsert"/>'s.</summary>
+    public (string Text, IReadOnlyList<object?> Parameters) ToUpsert(object docs, object patch, long? require = null,
+        IReadOnlyList<string>? returning = null)
     {
         AssertPlain("upsert");
         var list = DocsOf(docs);
@@ -1139,7 +1149,8 @@ public sealed class Query
         var bind = new Binder();
         var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind, "insert")));
         var set = Builder.RenderDoc(patch, bind, "update");
-        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")} if absent else set {set}{RequireClause(require)}", bind.Params);
+        var tail = ReturningClause(returning) + RequireClause(require);
+        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")} if absent else set {set}{tail}", bind.Params);
     }
 
     /// <summary>The <c>del</c> of the rows the filter names, not sent; with no filter it is refused unless
@@ -1216,22 +1227,23 @@ public sealed class Query
     /// result's <c>Affected</c> is how many were written, which with <paramref name="ifAbsent"/> leaves out those
     /// whose id or <c>@unique</c> value was held: a lock taken answers 1, one held 0. None is no request. With
     /// <paramref name="require"/> (on an update and a delete too) a write that did not write exactly that many rows
-    /// is refused, 412 (<c>unmet</c>), and its batch put back.</summary>
+    /// is refused, 412 (<c>unmet</c>), and its batch put back. With <paramref name="returning"/> the result's
+    /// <c>Rows</c> are the rows written, ids and all, in the documents' order.</summary>
     public Task<ExecResult> InsertAsync(object docs, bool ifAbsent = false, long? require = null,
-        CancellationToken cancellationToken = default) =>
+        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
         DocsOf(docs).Count == 0
-            ? Task.FromResult(new ExecResult(0, null, 0, false))
-            : ExecAsync(ToInsert(docs, ifAbsent, require), cancellationToken);
+            ? Task.FromResult(new ExecResult(0, null, 0, false, returning is null ? null : []))
+            : ExecAsync(ToInsert(docs, ifAbsent, require, returning), cancellationToken);
 
     /// <summary>Inserts each document, or, where a row holds its id or <c>@unique</c> value, sets that row by the
     /// patch -- <c>UpsertAsync(new { key, n = 1 }, new Dictionary&lt;string, object?&gt; { ["n"] =
     /// Computed.Expr("n + new.n") })</c>; the result's <c>Affected</c> is the rows set and made together. None is
-    /// no request.</summary>
+    /// no request. With <paramref name="returning"/> the result's <c>Rows</c> are those rows as written.</summary>
     public Task<ExecResult> UpsertAsync(object docs, object patch, long? require = null,
-        CancellationToken cancellationToken = default) =>
+        IReadOnlyList<string>? returning = null, CancellationToken cancellationToken = default) =>
         DocsOf(docs).Count == 0
-            ? Task.FromResult(new ExecResult(0, null, 0, false))
-            : ExecAsync(ToUpsert(docs, patch, require), cancellationToken);
+            ? Task.FromResult(new ExecResult(0, null, 0, false, returning is null ? null : []))
+            : ExecAsync(ToUpsert(docs, patch, require, returning), cancellationToken);
 
     /// <summary>Sets the patch's fields on the rows the filter names; with no filter it is refused unless
     /// <paramref name="all"/> or a <c>Limit</c> bounds it. With <paramref name="returning"/> the result's

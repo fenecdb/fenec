@@ -88,6 +88,7 @@ make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M 
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 make geo-bench           # a million points: radii, the nearest, through @geo and by the scan, against PostGIS and Redis in Docker (GEO_ARGS)
 make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; `held` (or `held pickup|delayed|idle|busy`): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims
+make nearest-bench       # the nearest ready order claimed over HTTP, 1, 16 and 50 claimers: order distance(...) limit 1 returning id and an inner get's near, against examples/dispatch's read and /batch (ORDERS, CLAIMS)
 ```
 
 Single tests:
@@ -1701,6 +1702,72 @@ the time's check out did not move (0.61-0.62) -- where the code lands; a
 `set` over 100 000 rows 1-2% slower in `make counters-bench`, whose runs
 of one build move as much, and `make requests-bench` inside its spread.
 
+**A key of `order` may be an expression** (`Sort::expr`), in a `get` and
+in a write that picks its rows: `set orders {courier: $1} where run_at <=
+now() and distance(pickup, $2) <= 3000 order distance(pickup, $2) limit 1
+returning *` is a courier's claim of the nearest ready order, which the
+dispatch example wrote in three steps (a read of the six nearest with
+`near`, a `/batch` of a conditional `set` a candidate, a held claim of
+the oldest) while `order` took fields alone. `order_list` parses an
+expression: a field, or an aggregate of one, stays a name -- over groups a
+key names a column -- and anything else is `Sort::expr`, `field` empty.
+`page_ids` hands a key list holding one to `order_ids_by` (out of line,
+so an order of fields keeps its path): the computed columns' `Reader`
+decodes every field and path the keys read in one pass a row, a field key
+keeps its collation and fold, an expression's text orders by its bytes
+or the `collate` named, and ties go in id order, as the scan leaves them
+(`tests/order_expr.rs` holds 7 keys x 4 filters x 5 pages x both ways to
+the rows read with the key as a column and sorted in the test).
+`distance(<field>, <point>)` ascending with a `limit` over a field with
+`@geo` walks the point index to the page (`walk_distance`, through
+`walk_geo_near`) where no row the filter passes can lack a point -- the
+index holds every row, or the filter's `and` chain puts a radius or a box
+on the field -- since the scan puts a null distance first and the index
+holds no such row; natively only, the browser module sorting the same
+rows, where the walk was 1.9 KB of it, 0.9 KB brotli. A pin declines it,
+`exactly` walks a key's points, and `check_order` refuses an inner `get`,
+an aggregate and `expired()` in a key (a `get`'s `check`, a pick's
+`page_of`), an expression over groups (named with `as` first) and one in
+a `lookup` level. A write takes no `near`: the parser says to write the
+distance as a key. Over HTTP, 300 000 ready orders over a 20 km city
+(`make nearest-bench`): one claimer 0.059 ms p50 against the three
+steps' 0.135, 16 at once 0.61 ms and 19.3-20.5k claims/s against 1.06-1.10
+and 12.9-13.6k, 50 at once 2.24-2.42 ms p50 and 12.5-13.3 p99 against
+3.09-3.86 and 14.3-21.2, 15.2-15.8k/s against 10.7-10.9k; the inner
+`get`'s `near` (`set ... where id in (get ... near pickup $2 limit 1)`)
+answers as the `order` does. 16 threads claiming 3 000 orders one at a
+time each took the nearest still ready, none twice, both ways. An order
+of fields alone measured as before in process, in ABBA turns on a quiet
+machine: a scan of 50 000 matches put in order 6.70 and 6.68 ms against
+6.78 and 6.68, a pick of one 5.54 against 5.63 and 5.53, a lone put and
+a read by id inside their spread; `make wasm-speed` the same or a little
+quicker in every column. With a `put`'s `returning` (below), the exact
+walk and a clash's stored value, the browser module grew 4.4 KB, 1.9 KB
+gzip, 1.5 KB brotli -- `order_ids_by` 1.3 KB of it, the parser's clauses
+0.4 -- after the distance walk and the refusals' long texts came out.
+
+**A `put` answers the rows it wrote with `returning`.** An app inserting
+an order read it back by a key of its own in the same `/batch` to learn
+its id (`insert ... returning id` was `unknown command returning`, `POST
+/<name>` `{"inserted": n}`). `Statement::Put` carries a `pick` too, its
+`returning` alone (`order` and `limit` are a parse error after a `put`),
+so `Statement::pick` and `returns_rows` take it as they take a `set`'s;
+`put_with` gathers each written row's id and the write it was -- an
+insert, an update of a row written over or an upsert's `else set` -- only
+when asked, and `returned` reads them back as the statement left them, in
+the documents' order: a row `if absent` passed over is not one, a key
+twice is its row twice, and `require` counts them. Each row goes to
+`Hook::answering` as the write it was (`returned` takes one op for every
+row or one a row), so a scoped token's insert is held to its read rules
+as written and refused whole (403) where one falls outside them, with no
+rule of `access.rs` of its own. `POST /<name>?returning=id,...` answers
+the rows (201). A sync replica refuses one on a synced collection as it
+refuses a claim (`PICKED`, a scenario step): its ids are the replica's
+until the server answers. Every builder takes it (`insert(docs, {
+returning })`, Python's `returning=`, Go's `Returning` among the
+documents, .NET's `returning:`, Swift's, Kotlin's and Dart's
+`insertReturning`/`upsertReturning`), held to the golden file.
+
 **`Fenec-Wait` holds a `set` or a `del` that writes nothing until it
 can** (`fenec_http::waits`, `Database::wakes_at` in `engine/wake.rs`). A
 worker whose claim found no job slept and claimed again: late by its
@@ -1798,10 +1865,13 @@ collection with no unique field writes as before (848 against 852). `create
 index ... @unique` over a value held twice is refused naming it and two of
 its documents, under the lock or beside the database, where it is asked of
 the index once the writes made meanwhile are in. `Database::apply` builds
-it and asks nothing: the primary did. A scoped token is told the field
-alone (`access::told`, in `within`): the clash names the other row's id
-and echoes its value, which told alice that bob's profile existed, where,
-and what it held.
+it and asks nothing: the primary did. The clash names the value as the
+row holding it stores it, read from that row (the refusal alone pays it):
+under `nocase` the spelling written is not that one, and a sign-up as
+`SAMI.lindqvist@...` was told the row held `SAMI...` where it held
+`sami...`. A scoped token is told the field alone (`access::told`, in
+`within`): the clash names the other row's id and echoes its value, which
+told alice that bob's profile existed, where, and what it held.
 
 **A `@hash` bucket holds its ids ascending, in runs** (`engine/bucket.rs`).
 A bucket was a `Vec` in the order its ids came, and a row left it by
@@ -2014,6 +2084,15 @@ browser module's vectors handed apart -- so a vector given to one, or
 compared with a path into one, is refused (`json_value`,
 `Database::refuse_inexact`) and the caller reads that part again as
 written: `Database::exactly` names it (the text, or parameters by place),
+walking every place a statement holds a value, each collection by its
+own schema (`statement_needs`, `Known`) -- an inner `get` at any depth, a
+`lookup` level, a disjunctive facet's filter, `having`, `group`, each
+item of the list, an `order` key, a `set`'s values, a comparison under
+any call, `case`'s among them. It walked the statement's own filter, list
+and `lookup` levels alone, so a point in an inner `get` stayed `f32`s
+that `distance` refused as no point (the dispatch example's claim of the
+nearest); `exactly_for`, which knows one collection, reads another's
+lists as written, slower for a vector and never wrong. Then
 `fenec_ql::parse_for` / `parse_exact`, `json::parse_params_exact`,
 `/query`, `/batch`, a REST `where=`, and the module, which answers
 `"exact": [places]` for `run` to send those as JSON. A statement with no

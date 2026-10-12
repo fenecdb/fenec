@@ -244,6 +244,19 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   db.from('articles').order('year', 'desc').limit(1).toDelete({ returning: ['id'], require: 1 });
   // @ts-expect-error -- returning is true or the fields
   db.from('articles').where('id', 1).toDelete({ returning: 'id' });
+  // An insert's rows, ids and all; an upsert's rows made and set.
+  const made = await db.from('articles').insert({ title: 'new' }, { returning: ['id'] });
+  expect<number>(made[0].id);
+  // @ts-expect-error -- only the fields named come back
+  made[0].title;
+  const all = await db.from('articles').insert([{ title: 'a' }, { title: 'b' }], { returning: true });
+  expect<string>(all[1].title);
+  expect<number>(await db.from('articles').insert({ title: 'counted' }));
+  const upserted = await db.from('articles').upsert({ title: 'k' }, { year: inc(1) }, { returning: ['year'] });
+  expect<number | null>(upserted[0].year);
+  db.from('articles').toInsert({ title: 'x' }, { ifAbsent: true, returning: ['id'], require: 1 });
+  // @ts-expect-error -- returning is true or the fields
+  db.from('articles').toInsert({ title: 'x' }, { returning: 'id' });
   // A claim held at a server until a row comes, and given up by a signal.
   const giveUp = new AbortController();
   const held = await db

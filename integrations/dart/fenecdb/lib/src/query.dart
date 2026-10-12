@@ -1007,13 +1007,19 @@ class Query {
     final sql = StringBuffer();
     _orderText(sql, _order);
     if (_limit != null) sql.write(' limit ${bind(_limit)}');
-    if (returning == null) return sql.toString();
+    return (sql..write(_returningClause(returning))).toString();
+  }
+
+  // ` returning ...` for a write's [returning]: the fields named, each a
+  // field or a path, or `*` for every one.
+  static String _returningClause(List<String>? returning) {
+    if (returning == null) return '';
     if (returning.isEmpty) throw _refuse('returning names the fields it answers, or * for every one');
     if (returning.contains('*')) {
       if (returning.length > 1) throw _refuse('returning * answers every field: it takes no other');
-      return (sql..write(' returning *')).toString();
+      return ' returning *';
     }
-    return (sql..write(' returning ${returning.map(_pathOf).join(', ')}')).toString();
+    return ' returning ${returning.map(_pathOf).join(', ')}';
   }
 
   static String _renderDoc(Object? doc, String Function(Object?) bind, {bool insert = false}) {
@@ -1040,7 +1046,8 @@ class Query {
   /// document whose id or `@unique` value a row holds and counts only what
   /// it wrote -- a lock taken, or not, in one statement. [require]: refused,
   /// and nothing written, unless it wrote exactly that many rows.
-  Statement toInsert(Object docs, {bool ifAbsent = false, int? require}) {
+  /// [returning]: the rows written answered, ids and all ([insertReturning]).
+  Statement toInsert(Object docs, {bool ifAbsent = false, int? require, List<String>? returning}) {
     _assertPlain('insert');
     final list = docs is List ? docs : [docs];
     if (list.isEmpty) throw _refuse('cannot write an empty document list');
@@ -1048,8 +1055,8 @@ class Query {
     final bind = _binder(params);
     final body = list.map((d) => _renderDoc(d, bind, insert: true)).join(', ');
     final absent = ifAbsent ? ' if absent' : '';
-    final required = _requireClause(require);
-    return (text: 'put $collection ${list.length == 1 ? body : '[$body]'}$absent$required', params: params);
+    final tail = _returningClause(returning) + _requireClause(require);
+    return (text: 'put $collection ${list.length == 1 ? body : '[$body]'}$absent$tail', params: params);
   }
 
   /// The `set` of the rows the filter names, not run; with no filter it is
@@ -1071,8 +1078,9 @@ class Query {
   /// whose id or first `@unique` value a row holds sets that row by [patch]
   /// -- an update's, [Computed.inc] and [Computed.expr] with it, and in an
   /// expression `new.f` the document's own `f` -- and every other one is
-  /// inserted. The documents' parameters come first, then the patch's.
-  Statement toUpsert(Object docs, Object patch, {int? require}) {
+  /// inserted. The documents' parameters come first, then the patch's;
+  /// [returning] as [toInsert]'s.
+  Statement toUpsert(Object docs, Object patch, {int? require, List<String>? returning}) {
     _assertPlain('upsert');
     final list = docs is List ? docs : [docs];
     if (list.isEmpty) throw _refuse('cannot write an empty document list');
@@ -1080,9 +1088,9 @@ class Query {
     final bind = _binder(params);
     final body = list.map((d) => _renderDoc(d, bind, insert: true)).join(', ');
     final set = _renderDoc(patch, bind);
-    final required = _requireClause(require);
+    final tail = _returningClause(returning) + _requireClause(require);
     return (
-      text: 'put $collection ${list.length == 1 ? body : '[$body]'} if absent else set $set$required',
+      text: 'put $collection ${list.length == 1 ? body : '[$body]'} if absent else set $set$tail',
       params: params,
     );
   }
@@ -1178,4 +1186,20 @@ class Query {
   /// [delete] that answers the rows it deleted, as they were: a pop.
   Future<Rows> deleteReturning({List<String> returning = const ['*'], bool all = false, int? require}) async =>
       (await _run(toDelete(all: all, require: require, returning: returning))).rows;
+
+  /// [insert] that answers the rows it wrote, ids and all, in the
+  /// documents' order, under the fields named -- `*` every one:
+  /// `from('orders').insertReturning({'item': 'tea'}, returning: ['id'])`.
+  Future<Rows> insertReturning(Object docs,
+      {List<String> returning = const ['*'], bool ifAbsent = false, int? require}) async {
+    if (docs is List && docs.isEmpty) return const Rows([]);
+    return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require, returning: returning))).rows;
+  }
+
+  /// [upsert] that answers the rows it set and made, as written, in the
+  /// documents' order.
+  Future<Rows> upsertReturning(Object docs, Object patch, {List<String> returning = const ['*'], int? require}) async {
+    if (docs is List && docs.isEmpty) return const Rows([]);
+    return (await _run(toUpsert(docs, patch, require: require, returning: returning))).rows;
+  }
 }

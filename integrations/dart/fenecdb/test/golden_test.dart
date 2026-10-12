@@ -159,9 +159,9 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
           };
       final made = switch (op) {
         'toFenecQL' => q.toFenecQL(),
-        'toInsert' => q.toInsert(value(a[0])!, ifAbsent: absent(), require: require(1)),
+        'toInsert' => q.toInsert(value(a[0])!, ifAbsent: absent(), require: require(1), returning: returning(1)),
         'toUpdate' => q.toUpdate(value(a[0])!, all: all(1), require: require(1), returning: returning(1)),
-        'toUpsert' => q.toUpsert(value(a[0])!, value(a[1])!, require: require(2)),
+        'toUpsert' => q.toUpsert(value(a[0])!, value(a[1])!, require: require(2), returning: returning(2)),
         'toDelete' => q.toDelete(all: all(0), require: require(0), returning: returning(0)),
         _ => null,
       };
@@ -171,11 +171,15 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
         'first' => q.first(),
         'count' => q.count(),
         'explain' => q.explain(),
-        'insert' => q.insert(value(a[0])!, ifAbsent: absent(), require: require(1)),
+        'insert' => returning(1) == null
+            ? q.insert(value(a[0])!, ifAbsent: absent(), require: require(1))
+            : q.insertReturning(value(a[0])!, returning: returning(1)!, ifAbsent: absent(), require: require(1)),
         'update' => returning(1) == null
             ? q.update(value(a[0])!, all: all(1), require: require(1))
             : q.updateReturning(value(a[0])!, returning: returning(1)!, all: all(1), require: require(1)),
-        'upsert' => q.upsert(value(a[0])!, value(a[1])!, require: require(2)),
+        'upsert' => returning(2) == null
+            ? q.upsert(value(a[0])!, value(a[1])!, require: require(2))
+            : q.upsertReturning(value(a[0])!, value(a[1])!, returning: returning(2)!, require: require(2)),
         'delete' => returning(0) == null
             ? q.delete(all: all(0), require: require(0))
             : q.deleteReturning(returning: returning(0)!, all: all(0), require: require(0)),

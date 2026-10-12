@@ -22,22 +22,20 @@ export interface NewOrder {
  * Places an order as `who`, a customer. A second send of the same
  * reference answers the order already there rather than a second one.
  *
- * An insert answers its count, not the id it made -- `returning` is a
- * `set`'s and a `del`'s -- so the order is read back by its key in the same
- * /batch: one round trip, and the read sees the insert before it.
+ * The insert answers the id it made (`returning id`), held to the
+ * customer's read rules as written: their own order. (Before `returning`
+ * on an insert, the order was read back by its key in the same /batch.)
  */
 export async function placeOrder(who: Who, o: NewOrder): Promise<{ id: number; again: boolean }> {
   const db = asUser(who);
   try {
-    const r = await db.batch([
-      [
-        'insert orders {ref: $1, merchant: $2, customer: $3, pickup: $4, pickup_name: $5, dropoff: $6, dropoff_addr: $7, ' +
-          'items: $8, fee: $9, status: "ready", run_at: now(), attempts: 0, created: now(), promised: now() + $10}',
-        [o.ref, o.merchant.code, who.sub, o.merchant.loc, o.merchant.name, o.dropoff, o.dropoffAddr, o.items, o.fee, (o.promise ?? 45) * 60_000],
-      ],
-      ['get orders select id where merchant = $1 and ref = $2', [o.merchant.code, o.ref]],
-    ]);
-    return { id: (r.results[1] as { rows: { id: number }[] }).rows[0].id, again: false };
+    const made = await one<{ id: number }>(
+      db,
+      'insert orders {ref: $1, merchant: $2, customer: $3, pickup: $4, pickup_name: $5, dropoff: $6, dropoff_addr: $7, ' +
+        'items: $8, fee: $9, status: "ready", run_at: now(), attempts: 0, created: now(), promised: now() + $10} returning id',
+      [o.ref, o.merchant.code, who.sub, o.merchant.loc, o.merchant.name, o.dropoff, o.dropoffAddr, o.items, o.fee, (o.promise ?? 45) * 60_000],
+    );
+    return { id: made!.id, again: false };
   } catch (e) {
     if (!(e instanceof FenecError) || e.status !== 409) throw e;
     const kept = await one<{ id: number }>(db, 'get orders select id where merchant = $1 and ref = $2', [o.merchant.code, o.ref]);

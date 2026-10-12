@@ -55,6 +55,7 @@ fn put(db: &mut Database, collection: &str, docs: Vec<Vec<(String, Expr)>>) {
             docs_param: None,
             else_set: None,
             require: None,
+            pick: None,
         })
         .expect("put");
     }

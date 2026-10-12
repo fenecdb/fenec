@@ -120,8 +120,8 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
         };
         let body: Vec<String> = docs.iter().map(|d| doc(d, params, &mut bind)).collect();
         return match body.as_slice() {
-            [one] => format!("put {c} {one}{required}"),
-            _ => format!("put {c} [{}]{required}", body.join(", ")),
+            [one] => format!("put {c} {one}{pick}{required}"),
+            _ => format!("put {c} [{}]{pick}{required}", body.join(", ")),
         };
     }
     if let Some(Value::Text(c)) = member(w, "upsert") {
@@ -138,7 +138,7 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
             params,
             &mut bind,
         );
-        return format!("put {c} {body} if absent else set {set}{required}");
+        return format!("put {c} {body} if absent else set {set}{pick}{required}");
     }
     if let Some(Value::Text(c)) = member(w, "update") {
         let set = doc(

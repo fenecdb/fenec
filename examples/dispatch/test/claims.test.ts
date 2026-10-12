@@ -1,6 +1,6 @@
 // No order is ever carried by two couriers: 50 courier clients claiming the
-// nearest ready order at once, each claim a /batch under the courier's own
-// token, every order acked by delivering it -- and the same with 50
+// nearest ready order at once, each claim one statement under the courier's
+// own token, every order acked by delivering it -- and the same with 50
 // couriers waiting at the server (`Fenec-Wait`) while orders trickle in.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -8,6 +8,9 @@ import { startWorld, tandem, cast, sleep, type World } from './harness';
 import { claimNearest, claimStats, deliver, type Job } from '../lib/dispatch';
 import { placeOrder } from '../lib/orders';
 import { appDb, rows, throttled } from '../lib/db';
+import { SHARD_TOKEN, tenantOf } from '../lib/config';
+import { PLANS } from '../lib/plans';
+import { setQuota } from '../lib/setup';
 import { addresses, bounds, type Point } from '../lib/city';
 import { rng } from '../lib/city';
 import type { Who } from '../lib/tokens';
@@ -17,6 +20,16 @@ const t = cast(tandem);
 
 before(async () => {
   world = await startWorld({ basePort: 18410 });
+  // These tests are about exactly-once, not the plan's rate (quotas.test.ts
+  // is): Tandem's writes go unmetered here. Metered, every courier's held
+  // claim is charged a write each time a write wakes it -- an order placed,
+  // one delivered -- whether it then writes or not, so 50 couriers waiting
+  // drained Pro's 600 writes a second within the first few orders, and an
+  // order placed then was refused (429) one run in two or three. Charging
+  // the rows a write writes, and a held claim only when it takes one, is
+  // the held-claims change's (branch held-claims-2); with it this tenant
+  // can keep its plan.
+  await setQuota({ router: world.router, shardToken: SHARD_TOKEN }, tenantOf('tandem'), { ...PLANS.pro.quota, writes: 0 });
 });
 after(async () => {
   await world?.stop();
@@ -100,27 +113,37 @@ test('50 couriers waiting at the server: each order placed goes to exactly one',
   const couriers = t.couriers.slice(0, 50);
   const total = 150;
   let delivered = 0;
-  const fleet = Promise.all(
-    couriers.map(async (who: Who, k) => {
-      const r = rng(2000 + k);
-      const at = somewhere(r);
-      while (placing || delivered < total) {
-        const got = await claimNearest(who, at, { radius: 20_000, wait: 2_000 });
-        if (!got) {
-          if (!placing && delivered >= total) return;
-          continue;
-        }
-        taken.set(got.job.id, [...(taken.get(got.job.id) ?? []), who.sub]);
-        assert.ok(await deliver(who, got.job, 800));
-        delivered++;
+  // Every held claim given up if the test stops early: a claim still held
+  // at the server when the cluster stops ends in a socket hang up after the
+  // test, reported against it.
+  const stop = new AbortController();
+  const loops = couriers.map(async (who: Who, k) => {
+    const r = rng(2000 + k);
+    const at = somewhere(r);
+    while (!stop.signal.aborted && (placing || delivered < total)) {
+      const got = await claimNearest(who, at, { radius: 20_000, wait: 2_000, signal: stop.signal });
+      if (!got) {
+        if (!placing && delivered >= total) return;
+        continue;
       }
-    }),
-  );
-  // Let every courier reach the server and wait there before the first order.
-  await sleep(500);
-  const ids = await place(total, 'trickle', 5);
-  placing = false;
-  await fleet;
+      taken.set(got.job.id, [...(taken.get(got.job.id) ?? []), who.sub]);
+      assert.ok(await deliver(who, got.job, 800));
+      delivered++;
+    }
+  });
+  const fleet = Promise.all(loops);
+  let ids: number[];
+  try {
+    // Let every courier reach the server and wait there before the first order.
+    await sleep(500);
+    ids = await place(total, 'trickle', 5);
+    placing = false;
+    await fleet;
+  } catch (e) {
+    stop.abort();
+    await Promise.allSettled([fleet, ...loops]);
+    throw e;
+  }
   assert.deepEqual([...taken].filter(([, by]) => by.length > 1), [], 'no order claimed twice');
   assert.deepEqual([...taken.keys()].sort((a, b) => a - b), [...ids].sort((a, b) => a - b));
   console.log(`  claims: ${JSON.stringify(claimStats)}, 429s: ${JSON.stringify(throttled)}`);

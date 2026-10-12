@@ -46,6 +46,7 @@ fn put_all(db: &mut Database, collection: &str, docs: &[Vec<(String, Expr)>]) {
             docs_param: None,
             else_set: None,
             require: None,
+            pick: None,
         })
         .unwrap();
     }
@@ -229,6 +230,7 @@ fn writes(n: usize, owners: usize) {
                     docs_param: None,
                     else_set: None,
                     require: None,
+                    pick: None,
                 })
                 .collect();
             let s = Instant::now();
@@ -294,6 +296,7 @@ fn unique(n: usize) {
                     docs_param: None,
                     else_set: None,
                     require: None,
+                    pick: None,
                 })
                 .collect();
             let s = Instant::now();
@@ -411,6 +414,7 @@ fn sorted(n: usize) {
                 docs_param: None,
                 else_set: None,
                 require: None,
+                pick: None,
             })
             .collect();
         let s = Instant::now();

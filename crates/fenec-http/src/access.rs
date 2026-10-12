@@ -1350,6 +1350,7 @@ impl Scope {
                 if_absent,
                 else_set,
                 require,
+                pick,
             } => {
                 // `scoped()` writes a parameter's documents in first, so
                 // that each is held to the rules below.
@@ -1392,6 +1393,7 @@ impl Scope {
                     if_absent,
                     else_set,
                     require,
+                    pick,
                 }
             }
             // `require` counts the rows the token's filter let it write, and

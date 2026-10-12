@@ -28,6 +28,7 @@
 use crate::http::{Method, Request, Response};
 use fenec_core::json;
 use fenec_core::prelude::*;
+use fenec_core::query::Pick;
 use std::sync::Arc;
 
 /// Query keys that are read as clauses rather than as filters. A field with
@@ -57,6 +58,8 @@ pub enum Shape {
     Count,
     /// `{"<name>": N}` -- write counter
     Affected(&'static str, u16),
+    /// A write's rows (`?returning=`), under its status: `POST`'s 201.
+    Written(u16),
     /// `{"fenecdb": "...", "collections": [...]}`
     Info,
     /// Schema list
@@ -93,10 +96,26 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
         }
         (Method::Post, [name]) => {
             let schema = &db.collection(name)?.schema;
-            Ok(Routed {
-                statement: put_from_body(schema, req)?,
-                shape: Shape::Affected("inserted", 201),
-            })
+            let mut statement = put_from_body(schema, req)?;
+            // `?returning=id` or `?returning=*`: the documents made, ids and
+            // all, rather than their count -- what `insert ... returning`
+            // answers.
+            let returning = req.query.iter().find(|(k, _)| k == "returning");
+            let shape = match (returning, &mut statement) {
+                (Some((_, v)), Statement::Put { pick, .. }) => {
+                    let list = match v.trim() {
+                        "*" => None,
+                        v => Some(projection(schema, v)?),
+                    };
+                    *pick = Some(Box::new(Pick {
+                        returning: Some(list),
+                        ..Pick::default()
+                    }));
+                    Shape::Written(201)
+                }
+                _ => Shape::Affected("inserted", 201),
+            };
+            Ok(Routed { statement, shape })
         }
         (Method::Patch | Method::Put, [name]) | (Method::Patch | Method::Put, [name, "all"]) => {
             let schema = &db.collection(name)?.schema;
@@ -370,6 +389,7 @@ fn order(schema: &Schema, raw: &str) -> Result<Vec<Sort>> {
             field: name,
             asc,
             collate,
+            expr: None,
         });
     }
     Ok(out)
@@ -631,6 +651,7 @@ fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
         docs_param: None,
         else_set: None,
         require: None,
+        pick: None,
     })
 }
 
@@ -1193,6 +1214,7 @@ pub fn render(resp: &Response2, shape: &Shape, version: &'static str) -> Respons
         (Shape::Affected(name, status), Response2::Affected(n)) => {
             Response::json(*status, format!("{{\"{name}\":{n}}}"))
         }
+        (Shape::Written(status), Response2::Rows(rs)) => Response::json(*status, rows_body(rs)),
         (Shape::Info, Response2::Schemas(list)) => {
             let mut out = String::from("{\"fenecdb\":");
             json::escape_into(&mut out, version);

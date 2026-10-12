@@ -1461,6 +1461,57 @@ fn a_worker_token_claims_through_its_rules() {
     assert_eq!(body, r#"[{"id":1}]"#);
 }
 
+const PLACING: &str = "\
+orders  read    where customer = $jwt.sub
+orders  insert  where customer = $jwt.sub
+events  insert
+tips    insert
+tips    read    where public = true
+";
+
+/// A scoped `insert ... returning` answers the rows it wrote, held to the
+/// token's read rules as written: a customer's new order with its id, its
+/// pinned owner filled in; a row its rules do not let it read refuses the
+/// write rather than answer it, or answer nothing with no word why -- an
+/// append to a stream it cannot read, and a tip it may write but not see.
+#[test]
+fn a_scoped_insert_answers_the_rows_it_reads() {
+    let n = start_with(
+        PLACING,
+        &[
+            "create collection orders (customer text, item text)",
+            "create collection events (kind text)",
+            "create collection tips (public bool, text text)",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let (status, body) = n.query(
+        &alice,
+        "insert orders {item: \"tea\"} returning id, customer",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"id":1,"customer":"alice"}]"#);
+    // No read rule at all: refused before it runs.
+    let (status, body) = n.query(&alice, "insert events {kind: \"click\"} returning id");
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("nothing was written"), "{body}");
+    assert_eq!(n.query(&alice, "insert events {kind: \"click\"}").0, 200);
+    // A row the read rules leave out: refused, and put back.
+    let (status, body) = n.query(
+        &alice,
+        "insert tips [{public: true, text: \"a\"}, {public: false, text: \"b\"}] returning id",
+    );
+    assert_eq!(status, 403, "{body}");
+    let (_, left) = n.query(ROOT, "get tips count");
+    assert_eq!(left, r#"[{"count":0}]"#);
+    let (status, body) = n.query(
+        &alice,
+        "insert tips {public: true, text: \"a\"} returning text",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"text":"a"}]"#);
+}
+
 /// A page's counts as parameters are read after the token's rules are
 /// ANDed in, as numbers written are: a scoped `get ... limit $1 offset $2`
 /// pages through the token's rows alone, and a scoped `set ... order id

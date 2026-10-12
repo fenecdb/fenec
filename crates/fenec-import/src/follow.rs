@@ -401,6 +401,7 @@ fn write_marker(
         docs_param: None,
         else_set: None,
         require: None,
+        pick: None,
     })?;
     db.sync()?;
     let marker = read_marker(db, collection)?;
@@ -1224,6 +1225,7 @@ impl<'a> Mirror<'a> {
                         docs_param: None,
                         else_set: None,
                         require: None,
+                        pick: None,
                     }
                 }
                 Op::Delete(_) => {

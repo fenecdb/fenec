@@ -266,6 +266,31 @@ set tasks {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run
     order instead.</li>
 </ul>
 
+<h2 id="nearest">The nearest job</h2>
+
+<p>Where a job has a place and a worker one of its own — a pickup and a
+courier, a ride and a driver — the claim takes the nearest ready job, in
+the same one statement: a key of <code>order</code> may be an expression,
+and the distance from a point is walked to the page by a <code>@geo</code>
+index (<a href="/docs/geo#dispatch">The nearest job</a>):</p>
+
+<pre data-lang="fenecql">create collection rides (pickup geo @geo, run_at timestamp @sorted, owner text, attempts int)
+put rides [{pickup: [29.0100, 41.0400], run_at: now(), attempts: 0}, {pickup: [29.0300, 41.0500], run_at: now(), attempts: 0}]
+set rides {owner: "w1", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order distance(pickup, [29.0290, 41.0490]) limit 1 returning id   -- → 2: the nearer
+set rides {owner: "w2", run_at: now() + 30000, attempts: attempts + 1} where run_at &lt;= now() order distance(pickup, [29.0290, 41.0490]) limit 1 returning id   -- → 1: the one left
+</pre>
+
+<ul>
+  <li><b>Any expression orders the claim</b> — <code>order priority * 10 -
+    attempts desc</code>, <code>order case when vip then 0 else 1 end,
+    run_at</code> — every ready job's key worked out and the page put in
+    order. Only the distance from a point over <code>@geo</code> and an
+    <code>@sorted</code> field are walked to the page.</li>
+  <li><b>Not the nearest worker to each job.</b> A claim takes the job
+    nearest the worker that asks; a job handed to whichever of the waiting
+    workers is nearest it is a dispatcher's choice, made by the app.</li>
+</ul>
+
 <h2 id="pop">A pop</h2>
 
 <p>Where a job may be lost but never run twice — Redis's

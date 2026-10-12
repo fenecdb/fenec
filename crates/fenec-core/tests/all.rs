@@ -19,6 +19,7 @@ mod composite;
 mod counts;
 mod crash;
 mod derived;
+mod exact_places;
 mod explain;
 mod facets;
 mod filtered;
@@ -41,6 +42,7 @@ mod memory;
 // without the feature has no fold to call.
 #[cfg(feature = "nocase")]
 mod nocase;
+mod order_expr;
 mod paging;
 mod persist;
 mod pinned;
@@ -50,6 +52,7 @@ mod queues_docs;
 mod redis_docs;
 mod replica;
 mod require;
+mod returning;
 mod rewrite;
 mod sorted;
 mod sparse;

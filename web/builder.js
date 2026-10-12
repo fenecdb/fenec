@@ -1183,7 +1183,9 @@ export class Query {
    * over a document whose id or `@unique` value a row holds, and counts
    * only what it wrote -- a lock taken, or not, in one statement.
    * `{ require: n }` on any write: `... require n`, refused (412) and its
-   * batch put back unless it wrote exactly `n` rows.
+   * batch put back unless it wrote exactly `n` rows. `{ returning }`
+   * answers the rows it wrote, ids and all, in the documents' order: `true`
+   * every field, or the fields named.
    */
   toInsert(docs, opts = {}) {
     this.#assertPlain('insert');
@@ -1193,8 +1195,8 @@ export class Query {
     const bind = binder(params);
     const body = list.map((d) => renderDoc(d, bind, 'insert')).join(', ');
     const absent = opts?.ifAbsent === true ? ' if absent' : '';
-    const required = requireClause(opts);
-    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}${absent}${required}`, params];
+    const tail = returningClause(opts) + requireClause(opts);
+    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}${absent}${tail}`, params];
   }
 
   /**
@@ -1237,8 +1239,8 @@ export class Query {
     const bind = binder(params);
     const body = list.map((d) => renderDoc(d, bind, 'insert')).join(', ');
     const set = renderDoc(patch, bind, 'update');
-    const required = requireClause(opts);
-    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`} if absent else set ${set}${required}`, params];
+    const tail = returningClause(opts) + requireClause(opts);
+    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`} if absent else set ${set}${tail}`, params];
   }
 
   /**
@@ -1255,23 +1257,27 @@ export class Query {
 
   /**
    * `put` -- a single document or an array. Returns: documents written,
-   * which with `{ ifAbsent: true }` leaves out those already held.
+   * which with `{ ifAbsent: true }` leaves out those already held, or with
+   * `{ returning }` the rows written, ids and all, in the documents' order.
    */
   async insert(docs, opts = {}) {
     const list = Array.isArray(docs) ? docs : [docs];
-    if (list.length === 0) return 0;
-    return (await this.#exec(...this.toInsert(list, opts))).count ?? 0;
+    if (list.length === 0) return opts?.returning ? [] : 0;
+    const r = await this.#exec(...this.toInsert(list, opts));
+    return opts?.returning ? rowsOf(r) : r.count ?? 0;
   }
 
   /**
    * `put ... if absent else set` -- a single document or an array, each
    * inserted or, where a row holds its id or `@unique` value, that row set
-   * by the patch. Returns: rows set and made together.
+   * by the patch. Returns: rows set and made together, or with `{
+   * returning }` those rows as written, in the documents' order.
    */
   async upsert(docs, patch, opts = {}) {
     const list = Array.isArray(docs) ? docs : [docs];
-    if (list.length === 0) return 0;
-    return (await this.#exec(...this.toUpsert(list, patch, opts))).count ?? 0;
+    if (list.length === 0) return opts?.returning ? [] : 0;
+    const r = await this.#exec(...this.toUpsert(list, patch, opts));
+    return opts?.returning ? rowsOf(r) : r.count ?? 0;
   }
 
   /**

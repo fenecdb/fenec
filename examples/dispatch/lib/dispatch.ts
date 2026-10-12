@@ -3,31 +3,27 @@
 // Every step is one statement or one /batch under the courier's own token,
 // so policy.txt -- not this code -- decides what a courier may write.
 //
-// "Claim the nearest" is the one step FenecQL cannot say in one statement.
-// A claim is `set ... where ... order <field> limit n returning *`: its
-// `order` takes fields, and `near`, which orders by distance, is a `get`'s
-// alone. And `set ... where id in (get orders select id ... near pickup $1
-// limit 1)`, which would pick the nearest under the write lock, refuses its
-// point: a point inside an inner `get` is read as a vector's f32s and
-// refused ("a point is [lon, lat] ... found [27.01, 38.36]"). So a claim is:
+// "Claim the nearest" is one statement under the courier's own token:
 //
-//   1. the nearest ready orders within the radius, a read (`near pickup`),
-//      with the app's token -- a courier's own reads only their orders;
-//   2. one /batch that takes the first of them still ready, in that order:
-//      a `set` each, each also asking that none before it took one
-//      (`not ($claim in (get orders select claim where claim = $claim))`),
-//      all under the one write lock;
-//   3. none near and ready: a claim of the oldest ready order within the
-//      radius, held at the server until one is placed (`Fenec-Wait`).
+//   set orders {...} where run_at <= now() and distance(pickup, $4) <= $5
+//     order distance(pickup, $4) limit 1 returning *
 //
-// Each `set` answers the order it took (`returning *`). A courier reads
-// only the orders they carry, which a ready order is not until the claim
-// is written: the read rules are asked of the order as the claim leaves it,
-// so it is answered as claimed. (Asked of it as it stood, the claim picked
-// nothing and said nothing, and each batch read the order back by its
-// claim token.)
-import { CLAIM_RADIUS_M, CLAIM_WAIT_MS, LEASE_MS, MAX_ATTEMPTS } from './config';
-import { appDb, asUser, FenecError, retrying, rows, type Db } from './db';
+// -- the ready orders within the radius walked nearest first through the
+// pickup's point index, the first taken under the write lock, and answered
+// as written. It was three steps while `order` took fields alone: a read of
+// the six nearest ready orders with the app's token, a /batch of a
+// conditional `set` a candidate, and a held claim of the oldest within the
+// radius -- two round trips, a write of the plan for every batch that lost
+// its candidates, and 50 couriers at once waiting 7.6 ms p50 for each
+// other's batches. With nothing near and ready, the same statement is held
+// at the server (`Fenec-Wait`) and takes the nearest once one is.
+//
+// `returning *` answers the order taken. A courier reads only the orders
+// they carry, which a ready order is not until the claim is written: the
+// read rules are asked of the order as the claim leaves it, so it is
+// answered as claimed.
+import { CLAIM_RADIUS_M, LEASE_MS, MAX_ATTEMPTS } from './config';
+import { asUser, FenecError, retrying } from './db';
 import type { Point } from './city';
 import type { Who } from './tokens';
 import { randomUUID } from 'node:crypto';
@@ -57,28 +53,17 @@ export interface Job {
   error: string | null;
 }
 
-/** How many of the nearest ready orders a claim tries, in order. */
-export const CANDIDATES = 6;
-
 /** The lease a claim takes and each heartbeat extends; the lease tests shorten it. */
 export const queue = { leaseMs: LEASE_MS };
 
-/** What claims cost: batches sent, batches that took an order, held claims and what they took. */
-export const claimStats = { batches: 0, won: 0, held: 0, heldWon: 0 };
+/** What claims cost: claims sent at once, held claims, and the orders each took. */
+export const claimStats = { claims: 0, won: 0, held: 0, heldWon: 0 };
 
-const NEAREST =
-  'get orders select id where run_at <= now() and distance(pickup, $1) <= $2 near pickup $1 limit $3';
-
-// Each statement of the claim's /batch: this candidate, if it is still
-// ready and no statement before it in the batch took one, answered as taken.
-const TAKE_IF_FIRST =
+// The nearest ready order within the radius, taken and answered: what a
+// courier claims at once, and waits on.
+const TAKE_NEAREST =
   'set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} ' +
-  'where id = $4 and run_at <= now() and not ($2 in (get orders select claim where claim = $2)) returning *';
-
-// The oldest ready order within the radius: what a courier waits on.
-const TAKE_OLDEST_NEAR =
-  'set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} ' +
-  'where run_at <= now() and distance(pickup, $4) <= $5 order run_at limit 1 returning *';
+  'where run_at <= now() and distance(pickup, $4) <= $5 order distance(pickup, $4) limit 1 returning *';
 
 /** The order a statement of a claim's batch answered, if it took one. */
 const taken = (result: unknown): Job | undefined => (result as { rows?: Job[] }).rows?.[0];
@@ -88,16 +73,16 @@ export interface ClaimOptions {
   /** Milliseconds to wait at the server when nothing is near; 0 answers at once. */
   wait?: number;
   signal?: AbortSignal;
-  /** The connection the candidates are read with: the app's, by default. */
-  reader?: Db;
 }
 
 export interface Claimed {
   job: Job;
-  /** How it was found: among the nearest, or by waiting. */
-  how: 'nearest' | 'waited';
-  /** Statements the batch tried before one took it. */
-  tried: number;
+  /**
+   * How it was asked for: answered at once, or held at the server
+   * (`Fenec-Wait`) -- which takes an order ready when it comes in as at
+   * once, and waits only while none is.
+   */
+  how: 'nearest' | 'held';
 }
 
 /** A claim's own token: one claim of one order, so a lapsed one is told apart. */
@@ -113,41 +98,25 @@ export async function claimNearest(who: Who, at: Point, opts: ClaimOptions = {})
   const db = asUser(who);
   const radius = opts.radius ?? CLAIM_RADIUS_M;
   for (let round = 0; round < 3; round++) {
-    const reader = opts.reader ?? appDb(who.company!);
-    const ids = (await rows<{ id: number }>(reader, NEAREST, [at, radius, CANDIDATES])).map((r) => r.id);
-    let got: Claimed | null = null;
-    if (ids.length) {
-      const claim = claimToken(who.sub);
-      // Refused for the company's rate (429) before it ran: sent again.
-      const r = await retrying(() =>
-        db.batch(ids.map((id): [string, unknown[]] => [TAKE_IF_FIRST, [who.sub, claim, queue.leaseMs, id]])),
-      );
-      const i = r.results.findIndex((x) => taken(x) !== undefined);
-      claimStats.batches++;
-      if (i >= 0) {
-        claimStats.won++;
-        got = { job: taken(r.results[i])!, how: 'nearest', tried: i + 1 };
-      }
-    }
-    if (!got && opts.wait) {
-      // Nothing near is ready: wait at the server for the oldest one within
-      // the radius, the batch held while its `set` writes nothing. A held
-      // claim is a stream of the company's quota.
-      const claim = claimToken(who.sub);
-      const r = await retrying(() =>
-        db.batch([[TAKE_OLDEST_NEAR, [who.sub, claim, queue.leaseMs, at, radius]]], {
-          wait: opts.wait ?? CLAIM_WAIT_MS,
-          signal: opts.signal,
-        }),
-      );
-      const job = taken(r.results[0]);
-      claimStats.held++;
-      if (job) {
-        claimStats.heldWon++;
-        got = { job, how: 'waited', tried: 0 };
-      }
-    }
-    if (!got) return null;
+    const take: [string, unknown[]] = [TAKE_NEAREST, [who.sub, claimToken(who.sub), queue.leaseMs, at, radius]];
+    // With `wait`, one request: a held claim runs at once first and is held
+    // only while it writes nothing, then run once an order within the radius
+    // is ready -- placed, its lease lapsed, its backoff ended -- taking the
+    // nearest then. Sent at once first and held after, each idle round was
+    // two writes of the company's rate where one does. A held claim is a
+    // stream of the company's quota. Refused for the rate (429) before it
+    // ran: sent again.
+    const held = !!opts.wait;
+    const r = await retrying(() =>
+      held ? db.batch([take], { wait: opts.wait, signal: opts.signal }) : db.batch([take]),
+    );
+    const job = taken(r.results[0]);
+    if (held) claimStats.held++;
+    else claimStats.claims++;
+    if (!job) return null;
+    if (held) claimStats.heldWon++;
+    else claimStats.won++;
+    const got: Claimed = { job, how: held ? 'held' : 'nearest' };
     if (got.job.attempts > MAX_ATTEMPTS) {
       await deadLetter(who, got.job, `claimed ${got.job.attempts} times without a delivery`);
       continue;

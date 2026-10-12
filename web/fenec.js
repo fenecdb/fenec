@@ -1777,7 +1777,7 @@ export class FenecSync {
     const shape = this.#shapes.get(c);
     const base = q.plain();
     const key = shape.key;
-    if ((verb === 'update' || verb === 'delete') && (q.picks || opts?.returning)) {
+    if (opts?.returning || ((verb === 'update' || verb === 'delete') && q.picks)) {
       throw new FenecError(PICKED);
     }
     if (verb === 'insert') {

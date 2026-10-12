@@ -951,13 +951,19 @@ class Query private constructor(private val s: State) {
         val sql = StringBuilder()
         appendOrder(sql, s.order)
         s.limit?.let { sql.append(" limit ").append(bind.bind(it)) }
-        if (returning == null) return sql.toString()
+        return sql.append(returningClause(returning)).toString()
+    }
+
+    // ` returning ...` for a write's [returning]: the fields named, each a
+    // field or a path, or `*` for every one.
+    private fun returningClause(returning: List<String>?): String {
+        if (returning == null) return ""
         if (returning.isEmpty()) throw refuse("returning names the fields it answers, or * for every one")
         if ("*" in returning) {
             if (returning.size > 1) throw refuse("returning * answers every field: it takes no other")
-            return sql.append(" returning *").toString()
+            return " returning *"
         }
-        return sql.append(" returning ").append(returning.joinToString(", ") { Builder.path(it) }).toString()
+        return " returning " + returning.joinToString(", ") { Builder.path(it) }
     }
 
     private fun docsOf(docs: Any?): List<Any?> = when (docs) {
@@ -972,17 +978,18 @@ class Query private constructor(private val s: State) {
      * document whose id or `@unique` value a row holds and counts only what
      * it wrote -- a lock taken, or not, in one statement. [require]: refused,
      * and nothing written, unless it wrote exactly that many rows.
+     * [returning]: the rows written answered, ids and all ([insertReturning]).
      */
     @JvmOverloads
-    fun toInsert(docs: Any?, ifAbsent: Boolean = false, require: Long? = null): Statement {
+    fun toInsert(docs: Any?, ifAbsent: Boolean = false, require: Long? = null, returning: List<String>? = null): Statement {
         assertPlain("insert")
         val list = docsOf(docs)
         if (list.isEmpty()) throw refuse("cannot write an empty document list")
         val bind = Binder()
         val body = list.joinToString(", ") { Builder.renderDoc(it, bind, insert = true) }
         val absent = if (ifAbsent) " if absent" else ""
-        val required = requireClause(require)
-        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"}$absent$required", bind.params)
+        val tail = returningClause(returning) + requireClause(require)
+        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"}$absent$tail", bind.params)
     }
 
     /**
@@ -1007,18 +1014,19 @@ class Query private constructor(private val s: State) {
      * whose id or first `@unique` value a row holds sets that row by [patch]
      * -- an update's, [Computed.inc] and [Computed.expr] with it, and in an
      * expression `new.f` the document's own `f` -- and every other one is
-     * inserted. The documents' parameters come first, then the patch's.
+     * inserted. The documents' parameters come first, then the patch's;
+     * [returning] as [toInsert]'s.
      */
     @JvmOverloads
-    fun toUpsert(docs: Any?, patch: Any?, require: Long? = null): Statement {
+    fun toUpsert(docs: Any?, patch: Any?, require: Long? = null, returning: List<String>? = null): Statement {
         assertPlain("upsert")
         val list = docsOf(docs)
         if (list.isEmpty()) throw refuse("cannot write an empty document list")
         val bind = Binder()
         val body = list.joinToString(", ") { Builder.renderDoc(it, bind, insert = true) }
         val set = Builder.renderDoc(patch, bind)
-        val required = requireClause(require)
-        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"} if absent else set $set$required", bind.params)
+        val tail = returningClause(returning) + requireClause(require)
+        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"} if absent else set $set$tail", bind.params)
     }
 
     /**
@@ -1116,6 +1124,27 @@ class Query private constructor(private val s: State) {
     suspend fun deleteReturning(returning: List<String> = listOf("*"), all: Boolean = false, require: Long? = null): Rows =
         run(toDelete(all, require, returning)).page
 
+    /**
+     * [insert] that answers the rows it wrote, ids and all, in the documents'
+     * order, under the fields named -- `*` every one:
+     * `from("orders").insertReturning(mapOf("item" to "tea"), listOf("id"))`.
+     */
+    suspend fun insertReturning(
+        docs: Any?,
+        returning: List<String> = listOf("*"),
+        ifAbsent: Boolean = false,
+        require: Long? = null,
+    ): Rows {
+        if (docsOf(docs).isEmpty()) return Rows(emptyList())
+        return run(toInsert(docs, ifAbsent, require, returning)).page
+    }
+
+    /** [upsert] that answers the rows it set and made, as written, in the documents' order. */
+    suspend fun upsertReturning(docs: Any?, patch: Any?, returning: List<String> = listOf("*"), require: Long? = null): Rows {
+        if (docsOf(docs).isEmpty()) return Rows(emptyList())
+        return run(toUpsert(docs, patch, require, returning)).page
+    }
+
     /** [rows] on the calling thread, for Java. */
     fun rowsBlocking(): Rows = kotlinx.coroutines.runBlocking { rows() }
 
@@ -1153,6 +1182,20 @@ class Query private constructor(private val s: State) {
         all: Boolean = false,
         require: Long? = null,
     ): Rows = kotlinx.coroutines.runBlocking { updateReturning(patch, returning, all, require) }
+
+    /** [insertReturning] on the calling thread, for Java. */
+    @JvmOverloads
+    fun insertReturningBlocking(
+        docs: Any?,
+        returning: List<String> = listOf("*"),
+        ifAbsent: Boolean = false,
+        require: Long? = null,
+    ): Rows = kotlinx.coroutines.runBlocking { insertReturning(docs, returning, ifAbsent, require) }
+
+    /** [upsertReturning] on the calling thread, for Java. */
+    @JvmOverloads
+    fun upsertReturningBlocking(docs: Any?, patch: Any?, returning: List<String> = listOf("*"), require: Long? = null): Rows =
+        kotlinx.coroutines.runBlocking { upsertReturning(docs, patch, returning, require) }
 
     /** [deleteReturning] on the calling thread, for Java. */
     @JvmOverloads

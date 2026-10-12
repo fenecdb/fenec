@@ -14,7 +14,8 @@
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
-//!            [order <field> [collate und|tr] [asc|desc], ...] [limit N] [offset N] [count]
+//!            [order <key> [collate und|tr] [asc|desc], ...] [limit N] [offset N] [count]
+//!            -- a key: a field, or any expression over the row, `distance(loc, $1)`, `a * b`
 //!            [facet <field> [top N], ...]   -- value counts over every matched row
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
 //! get    <name> select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
@@ -31,10 +32,11 @@
 //! put    <name> { ... } if absent         -- a document whose id or @unique value is held is passed over
 //! put    <name> { ... } if absent else set { n: n + new.n }   -- or sets the row holding it
 //! put    <name> $1                       -- the documents a parameter holds: an object or a list
+//! put | insert ... [returning * | a, b]  -- the rows written, ids and all, in the documents' order
 //! set    <name> { k: v, ... } [where <expr>] -- v may read the row: {n: n + 1, at: now()}
 //! <expr> + - * / <expr>                  -- numbers, or a timestamp and milliseconds
 //! del    <name> [where <expr>]
-//! set | del ... [order <field> [desc], ...] [limit N] [returning * | a, b]
+//! set | del ... [order <key> [desc], ...] [limit N] [returning * | a, b]
 //!                                        -- the rows a get would page to, answered as written
 //! collections | describe <name> | compact [<name>]
 //! ```
@@ -983,7 +985,20 @@ impl Parser {
                 else_set = Some(self.object()?);
             }
         }
-        let require = self.require()?;
+        // `require` and `returning`, either first.
+        let (mut require, mut pick) = (None, None);
+        loop {
+            if self.peek_kw("require") {
+                require = self.require()?;
+            } else if self.eat_kw("returning") {
+                pick = Some(Box::new(Pick {
+                    returning: Some(self.projection_list()?),
+                    ..Pick::default()
+                }));
+            } else {
+                break;
+            }
+        }
         Ok(Statement::Put {
             collection,
             docs,
@@ -992,6 +1007,7 @@ impl Parser {
             if_absent,
             else_set,
             require,
+            pick,
         })
     }
 
@@ -1225,23 +1241,21 @@ impl Parser {
 
     /// `order year desc, title asc` -- keys in priority order. Over groups a
     /// key may be an aggregate, `order sum(total) desc`, named by its column.
+    /// Any other expression is a key worked out of each row: `order
+    /// distance(loc, $1)`, `order price * qty desc`.
     fn order_list(&mut self, out: &mut Vec<Sort>) -> Result<()> {
         self.eat_kw("by");
         loop {
-            let mut field = self.path()?;
-            if matches!(self.peek(), Tok::LParen) {
-                self.next();
-                let name = field.to_ascii_lowercase();
-                if matches!(self.peek(), Tok::Star) {
-                    self.next();
-                    field = COUNT_COLUMN.to_string();
-                } else if name == "count" && self.eat_kw("distinct") {
-                    field = format!("count(distinct {})", self.path()?);
-                } else {
-                    field = format!("{name}({})", self.path()?);
-                }
-                self.expect(Tok::RParen)?;
-            }
+            // A field, or an aggregate of one, by the name it answers
+            // under -- what a key was before it could be an expression.
+            let (field, expr) = match self.expr()? {
+                Expr::Field(f) => (f, None),
+                e @ Expr::Call(..) if e.aggregate_name().is_some() => match label_of(&e) {
+                    Some(label) => (label, None),
+                    None => (String::new(), Some(e)),
+                },
+                e => (String::new(), Some(e)),
+            };
             // `collate` comes before the direction, as in SQL; written
             // after it, it reads just as well and is taken there too.
             let mut collate = self.collate()?;
@@ -1258,6 +1272,7 @@ impl Parser {
                 field,
                 asc,
                 collate,
+                expr,
             });
             if !matches!(self.peek(), Tok::Comma) {
                 break;
@@ -1588,6 +1603,15 @@ impl Parser {
             if self.peek_kw("require") {
                 require = self.require()?;
                 continue;
+            }
+            // `near` ranks a `get`'s rows, scores and all; a write picks
+            // its rows by `order`, which takes the distance as a key.
+            if self.peek_kw("near") {
+                return self.err(
+                    "a write picks its rows with `order`: `order distance(<field>, <point>) \
+                     limit 1` for the nearest, or `where id in (get ... near <field> <vector> \
+                     limit 1)`",
+                );
             }
             break;
         }

@@ -1911,8 +1911,19 @@ impl Collection {
     /// document keeping its own value is not a second one. A field without
     /// `@unique` costs the look at its index kind.
     fn unique_clash(&self, doc: &Document) -> Result<()> {
-        let at = |k: &str| crate::json::to_string(doc.at(k).unwrap_or(&Value::Null));
-        match self.unique_holders(doc)?.first() {
+        let holders = self.unique_holders(doc)?;
+        let Some((_, other)) = holders.first() else {
+            return Ok(());
+        };
+        // The value as the row holding it stores it: under `nocase` the
+        // spelling written is not always the one stored, and the message
+        // named `SAMI.lindqvist@...` where the row held `sami.lindqvist@...`.
+        let held = self.store.read(&self.schema, *other)?;
+        let at = |k: &str| {
+            let v = held.as_ref().and_then(|d| d.at(k)).or_else(|| doc.at(k));
+            crate::json::to_string(v.unwrap_or(&Value::Null))
+        };
+        match holders.first() {
             Some((Unique::Field(f), other)) => Err(Error::Duplicate(format!(
                 "`{}.{}` is unique, and document {other} holds {} already",
                 self.schema.name,
@@ -5807,6 +5818,7 @@ impl Database {
                 if_absent,
                 else_set,
                 require,
+                pick,
             } => required(
                 if *insert { "insert" } else { "put" },
                 collection,
@@ -5818,6 +5830,7 @@ impl Database {
                     *insert,
                     *if_absent,
                     else_set.as_deref(),
+                    pick.as_deref(),
                     params,
                 ),
             ),
@@ -6695,30 +6708,52 @@ impl Database {
         insert: bool,
         if_absent: bool,
         else_set: Option<&[(String, Expr)]>,
+        pick: Option<&Pick>,
         params: &[Value],
     ) -> Result<Response> {
         // Taken out for the statement, as `set` takes it: an upsert's
         // values call its functions while the row is written.
         let registry = std::mem::take(&mut self.registry);
+        let list = pick.and_then(|p| p.returning.as_ref());
+        let mut answered = list.map(|_| (Vec::new(), Vec::new()));
         let out = self.put_with(
-            collection, docs, docs_param, insert, if_absent, else_set, &registry, params,
+            collection,
+            docs,
+            docs_param,
+            (insert, if_absent),
+            else_set,
+            &registry,
+            params,
+            answered.as_mut(),
         );
         self.registry = registry;
-        out
+        // `returning`: the rows it wrote, ids and all, each as the
+        // statement left it, and each handed to the hooks as the write it
+        // was -- a scoped token's read rules hold it (`Hook::answering`).
+        match (out, list, answered) {
+            (Ok(_), Some(list), Some((ids, ops))) => {
+                Ok(Response::Rows(self.returned(collection, list, &ids, &ops)?))
+            }
+            (out, ..) => out.map(Response::Affected),
+        }
     }
 
+    /// The documents of a `put` written, how many rows it wrote, and --
+    /// into `answered`, when `returning` asks -- each row's id in the
+    /// order of the documents, and the write it was: an insert, or an
+    /// update of a row a `put` wrote over or an upsert set.
     #[allow(clippy::too_many_arguments)]
     fn put_with(
         &mut self,
         collection: &str,
         docs: &[Vec<(String, Expr)>],
         docs_param: Option<usize>,
-        insert: bool,
-        if_absent: bool,
+        (insert, if_absent): (bool, bool),
         else_set: Option<&[(String, Expr)]>,
         registry: &Registry,
         params: &[Value],
-    ) -> Result<Response> {
+        mut answered: Option<&mut (Vec<DocId>, Vec<WriteOp>)>,
+    ) -> Result<usize> {
         let schema = self.collection(collection)?.schema.clone();
         let cid = self.collection(collection)?.id;
         let hooks: Vec<_> = registry.hooks().to_vec();
@@ -6889,6 +6924,10 @@ impl Database {
                     for h in &hooks {
                         h.after_write(collection, op, &doc)?;
                     }
+                    if let Some((ids, ops)) = answered.as_deref_mut() {
+                        ids.push(doc.id);
+                        ops.push(op);
+                    }
                     written.push(doc);
                     n += 1;
                     continue;
@@ -6914,11 +6953,15 @@ impl Database {
                 &hooks,
                 Some(&doc),
             )? {
+                if let Some((ids, ops)) = answered.as_deref_mut() {
+                    ids.push(id);
+                    ops.push(WriteOp::Update);
+                }
                 n += 1;
             }
         }
         self.index_written(collection, &mut written);
-        Ok(Response::Affected(n))
+        Ok(n)
     }
 
     /// The vectors of the documents a `put` wrote, indexed in a batch:
@@ -7654,6 +7697,19 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Option<Vec<DocId>>> {
+        // A key worked out of the row walks no index of a field's, but the
+        // distance from a point one of a point's -- natively: a page's
+        // module sorts the distances, the same rows, where the walk and
+        // its call were 1.9 KB of it, 0.9 KB brotli, for a speed its few
+        // thousand rows do not need.
+        if let Some(i) = sel.order.iter().position(|s| s.expr.is_some()) {
+            return match (&sel.order[..], &sel.order[i].expr) {
+                ([s], Some(e)) if !cfg!(target_arch = "wasm32") => {
+                    self.walk_distance(c, sel, s, e, params, ctx)
+                }
+                _ => Ok(None),
+            };
+        }
         if cfg!(feature = "composite") && !c.composites.is_empty() {
             if let Some(ids) = self.walk_composite(c, sel, params, ctx)? {
                 return Ok(Some(ids));
@@ -7663,6 +7719,7 @@ impl Database {
             field,
             asc,
             collate,
+            ..
         }] = sel.order.as_slice()
         else {
             return Ok(None);
@@ -8315,6 +8372,62 @@ impl Database {
         _: &EvalCtx,
     ) -> Result<Option<Vec<(DocId, f32)>>> {
         Ok(None)
+    }
+
+    /// `order distance(<field>, <point>) limit N` over a field with `@geo`
+    /// answered by walking the point index nearest first, as `near` walks
+    /// it ([`Self::walk_geo_near`]), and stopping at the page -- `None`
+    /// where the scan answers. The walk's order is the scan's sort of every
+    /// distance, ties in id order, but it meets no row without a point,
+    /// whose null distance the scan puts first: so only where none can
+    /// pass -- the index holds every row, or the filter's `and` chain puts
+    /// a radius or a box on the field. Descending, it is the scan's.
+    fn walk_distance(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        s: &Sort,
+        e: &Expr,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Option<Vec<DocId>>> {
+        let (true, None, Some(limit)) = (s.asc, s.collate, sel.limit.map(|l| l.at(params))) else {
+            return Ok(None);
+        };
+        let Some((field, from)) = crate::geo::distance_call(e, params) else {
+            return Ok(None);
+        };
+        if sel.lookup.as_ref().is_some_and(|l| l.required) {
+            return Ok(None);
+        }
+        let Some(ix) = c.geo_index(field)? else {
+            return Ok(None);
+        };
+        let shaped = sel.filter.as_ref().is_some_and(|f| {
+            let mut shapes = Vec::new();
+            crate::geo::conjunct_shapes(f, params, &mut shapes);
+            shapes.iter().any(|(n, _)| *n == field)
+        });
+        if ix.len() != c.store.len() && !shaped {
+            plan(|| {
+                format!(
+                    "order: the point index on {field} not walked, {} rows hold no point",
+                    c.store.len() - ix.len()
+                )
+            });
+            return Ok(None);
+        }
+        let near = Near {
+            field: field.to_string(),
+            vector: Expr::Lit(Value::Null),
+            ef: None,
+            exact: false,
+        };
+        let want = limit.saturating_add(sel.offset.at(params));
+        plan(|| format!("order: distance from a point on {field}, by its point index"));
+        Ok(self
+            .walk_geo_near(c, sel, &near, from, want, params, ctx)?
+            .map(|hits| hits.into_iter().map(|(id, _)| id).collect()))
     }
 
     /// `near` over a `sparse<N>` field: the documents with the largest dot
@@ -9287,7 +9400,13 @@ impl Database {
                     ids.truncate(k);
                 }
             }
-            if !sel.order.is_empty() {
+            if sel.order.iter().any(|s| s.expr.is_some()) {
+                let k = sel
+                    .limit
+                    .map(|l| l.at(params).saturating_add(sel.offset.at(params)))
+                    .unwrap_or(usize::MAX);
+                ids = self.order_ids_by(c, &sel.order, &ids, k, params)?;
+            } else if !sel.order.is_empty() {
                 // `id` is not a schema field but must still be sortable -- the
                 // field lookup used to happen first, so `order id` raised an
                 // error.
@@ -9328,6 +9447,70 @@ impl Database {
             }
             Ok((ids, facet_ids))
         }
+    }
+
+    /// `ids` in the order of `sorts`, an expression among them -- `order
+    /// distance(loc, $1)`, `order price * qty desc` -- the first `k`: what
+    /// [`order_ids`] does with keys read, each key worked out of each row,
+    /// every field and path the keys read decoded in one pass a row
+    /// ([`aggregate::Reader`], as a computed column's are). A field among
+    /// them orders as it does alone, in its collation and by its fold; an
+    /// expression's text in the one `collate` names, its bytes' otherwise.
+    /// Out of line, so an order of fields alone keeps the code it had.
+    #[inline(never)]
+    fn order_ids_by(
+        &self,
+        c: &Collection,
+        sorts: &[Sort],
+        ids: &[DocId],
+        k: usize,
+        params: &[Value],
+    ) -> Result<Vec<DocId>> {
+        let fields: Vec<Expr> = sorts.iter().map(|s| Expr::Field(s.field.clone())).collect();
+        let (mut exprs, mut keys) = (Vec::with_capacity(sorts.len()), Vec::new());
+        for (s, f) in sorts.iter().zip(&fields) {
+            match &s.expr {
+                Some(e) => {
+                    exprs.push(e);
+                    let text = TextOrder {
+                        coll: s.collate,
+                        fold: None,
+                    };
+                    keys.push((None, s.asc, text, None));
+                }
+                None => {
+                    exprs.push(f);
+                    keys.push(order_key(&c.schema, s, "")?);
+                }
+            }
+        }
+        let mut rd = aggregate::Reader::new(c, &exprs, params)?;
+        let mut slots = Vec::with_capacity(exprs.len());
+        for e in &exprs {
+            slots.push(rd.bind(e)?);
+        }
+        let n = keys.len();
+        let mut flat: Vec<Value> = Vec::with_capacity(ids.len() * n);
+        for &id in ids {
+            let found = rd.read(id, &self.registry, self.clock)?;
+            for &at in &slots {
+                flat.push(match found {
+                    true => rd.env[at].clone(),
+                    false => Value::Null,
+                });
+            }
+        }
+        let unfolded: Vec<OrderKey>;
+        let keys = match keys.iter().any(|k| k.2.fold.is_some()) {
+            false => &keys,
+            true => {
+                unfolded = folded_keys(&mut flat, &keys);
+                &unfolded
+            }
+        };
+        plan(|| format!("order: keys worked out of each row, {} matches", ids.len()));
+        let idx = order_rows(&flat, n, ids.len(), keys, k);
+        Ok(idx.into_iter().map(|i| ids[i]).collect())
     }
 
     /// What each `highlight()` and `snippet()` of the list needs once a
@@ -9781,7 +9964,7 @@ impl Database {
                 collection,
                 list,
                 &ids,
-                WriteOp::Update,
+                &[WriteOp::Update],
             )?)),
             (out, _) => out.map(Response::Affected),
         }
@@ -9829,8 +10012,10 @@ impl Database {
             ..Default::default()
         };
         // `limit $1` checked here, where the write's parameters are, as a
-        // `get`'s is where it is answered.
+        // `get`'s is where it is answered, and an expression's key as a
+        // `get`'s `check` holds it.
         sel.check_counts(params)?;
+        crate::query::check_order(&sel.order, false)?;
         Ok(self.page_ids(c, &sel, params, &ctx, false, false, false)?.0)
     }
 
@@ -9838,14 +10023,16 @@ impl Database {
     /// store as it stands -- a `set`'s rows as written, a `del`'s before
     /// they go -- under the columns `select` names in a `get`, `list`
     /// every field after the id when `None`. Each is handed to the hooks
-    /// first (`Hook::answering`), as the write `op` answers it.
+    /// first (`Hook::answering`), as the write it was answers it: `ops`
+    /// one for every row, or one a row -- a `put`'s rows are inserts and
+    /// updates.
     #[inline(never)]
     fn returned(
         &self,
         collection: &str,
         list: &Option<Vec<String>>,
         ids: &[DocId],
-        op: WriteOp,
+        ops: &[WriteOp],
     ) -> Result<ResultSet> {
         let c = self.collection(collection)?;
         let columns = projection_columns(&c.schema, list);
@@ -9857,7 +10044,7 @@ impl Database {
         // reading by places (`one_pass`) was 1.4 KB more of the browser
         // module, and took `one_pass` out of line from `select`.
         let mut rows = Vec::with_capacity(ids.len());
-        for &id in ids {
+        for (i, &id) in ids.iter().enumerate() {
             // A row the write did not find is not answered: the count and
             // the rows agree.
             let Some(doc) = c.store.read(&c.schema, id)? else {
@@ -9867,10 +10054,10 @@ impl Database {
             // are a server's -- and the loop was 147 bytes of it.
             #[cfg(not(target_arch = "wasm32"))]
             for h in self.registry.hooks() {
-                h.answering(&c.schema, op, &doc)?;
+                h.answering(&c.schema, ops[i.min(ops.len() - 1)], &doc)?;
             }
             #[cfg(target_arch = "wasm32")]
-            let _ = op;
+            let _ = (i, ops);
             // A loop rather than a `map` and `collect`: a copy of the
             // adapter of its own, 249 bytes of the browser module.
             let mut values = Vec::with_capacity(columns.len());
@@ -10003,7 +10190,7 @@ impl Database {
         }
         // Read before they go: what a pop hands back.
         let rows = match pick.and_then(|p| p.returning.as_ref()) {
-            Some(list) => Some(self.returned(collection, list, &ids, WriteOp::Delete)?),
+            Some(list) => Some(self.returned(collection, list, &ids, &[WriteOp::Delete])?),
             None => None,
         };
         let schema = self.collection(collection)?.schema.clone();
@@ -10552,23 +10739,61 @@ impl Database {
         }
     }
 
-    /// What of `stmt` a json field needs read as written ([`Exactly`]).
+    /// What of `stmt` a json field needs read as written ([`Exactly`]):
+    /// every collection it reads by its own schema -- an inner `get`'s at
+    /// any depth, each `lookup` level's. A collection it names that is not
+    /// here asks nothing: the statement is refused for it when it runs.
     pub fn exactly(&self, stmt: &Statement) -> Exactly {
-        let mut out = match self.collection(stmt_collection(stmt)) {
-            Ok(c) => exactly_for(&c.schema, stmt),
-            Err(_) => Exactly::default(),
+        let mut out = Exactly::default();
+        let of = |name: &str| match self.collections.get(name) {
+            Some(c) => Known::of(&c.schema),
+            None => Known::Missing,
         };
-        // Each `lookup` level's filter, by its own collection.
-        if let Statement::Select(s) | Statement::Explain(s) = stmt {
-            let mut level = s.lookup.as_ref();
-            while let Some(l) = level {
-                if let (Some(f), Ok(c)) = (&l.filter, self.collection(&l.collection)) {
-                    filter_needs(&c.schema, f, &mut out);
-                }
-                level = l.next.as_deref();
-            }
-        }
+        statement_needs(&of, stmt, &mut out);
         out
+    }
+}
+
+/// What [`exactly_for`]'s walk knows of a collection a statement reads.
+#[derive(Clone, Copy)]
+enum Known<'a> {
+    /// Its schema, and whether a field of it keeps a list of numbers as
+    /// written: a collection with none is asked of no comparison.
+    Schema(&'a Schema, bool),
+    /// Another collection than the one [`exactly_for`] was handed: every
+    /// field is taken to keep numbers, so its lists are read as written --
+    /// slower for a vector, never wrong.
+    Unknown,
+    /// None by that name: the statement is refused for it as it runs.
+    Missing,
+}
+
+impl<'a> Known<'a> {
+    fn of(schema: &'a Schema) -> Known<'a> {
+        Known::Schema(schema, schema.fields.iter().any(|f| f.ty.keeps_numbers()))
+    }
+
+    /// Whether `name` keeps a list of numbers as written ([`names_json`]).
+    fn keeps(self, name: &str) -> bool {
+        match self {
+            Known::Schema(schema, true) => names_json(schema, name),
+            Known::Unknown => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `e` is such a field.
+    fn field(self, e: &Expr) -> bool {
+        matches!(e, Expr::Field(n) if self.keeps(n))
+    }
+
+    /// Whether `field` is a point: `near` over it takes one.
+    fn geo(self, field: &str) -> bool {
+        match self {
+            Known::Schema(schema, _) => schema.field(field).is_some_and(|f| f.ty == DataType::Geo),
+            Known::Unknown => true,
+            Known::Missing => false,
+        }
     }
 }
 
@@ -10586,39 +10811,147 @@ fn stmt_collection(stmt: &Statement) -> &str {
 /// What of `stmt`, a statement over a collection of `schema`, a json field
 /// or a point needs read as written ([`Exactly`]): what a json or `geo`
 /// field is given or compared with, a point or a box given to `distance`
-/// or `within` anywhere, and the point of a `near` over a `geo` field.
+/// or `within` anywhere, and the point of a `near` over a `geo` field. An
+/// inner `get` or a `lookup` level over another collection, whose schema
+/// it has not got, has every list of numbers in it read as written
+/// ([`Known::Unknown`]): a REST `where=` and an MCP tool's filter, which
+/// read the text alone, take it that way.
 pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
     let mut out = Exactly::default();
-    geo_needs(schema, stmt, &mut out);
-    if !schema.fields.iter().any(|f| f.ty.keeps_numbers()) {
-        return out;
+    let of = |name: &str| match name == schema.name {
+        true => Known::of(schema),
+        false => Known::Unknown,
+    };
+    statement_needs(&of, stmt, &mut out);
+    out
+}
+
+/// [`exactly_for`]'s walk, each collection known through `of`.
+fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &mut Exactly) {
+    let k = of(stmt_collection(stmt));
+    if matches!(k, Known::Missing) {
+        return;
     }
-    // The value first: a key is looked up only for a list of numbers or a
-    // parameter, so a `put` of 1 000 rows looks up the vector field's name
-    // and none of the others.
-    let mut pair = |(k, e): &(String, Expr)| {
-        if (matches!(e, Expr::Param(_)) || e.reads_vectors()) && names_json(schema, k) {
-            given(e, &mut out);
+    // The value given first: a key is looked up only for a list of numbers
+    // or a parameter, so a `put` of 1 000 rows looks up the vector field's
+    // name and none of the others.
+    // A collection with no json field or point is asked nothing of its
+    // values (`Known::Schema(_, false)`), checked once.
+    let any = !matches!(k, Known::Schema(_, false));
+    let mut pair = |(key, e): &(String, Expr)| {
+        if any && (matches!(e, Expr::Param(_)) || e.reads_vectors()) && k.keeps(key) {
+            given(e, out);
+        }
+        // A literal or a parameter holds no call and no inner `get`: a
+        // `put`'s values, nearly all of them one, are not walked. Walked,
+        // and each asked whether it holds a vector before `any`, `exactly`
+        // over a `put` of 1 000 128-dim rows took 10.3 us against the 3.2
+        // of the walk before; this way 2.7 to 3.0 against its 3.5 to 3.7.
+        if !matches!(e, Expr::Lit(_) | Expr::Param(_)) {
+            expr_needs(of, k, e, out);
         }
     };
-    let filter = match stmt {
+    match stmt {
         Statement::Put { docs, else_set, .. } => {
             docs.iter().flatten().for_each(&mut pair);
             else_set.iter().flatten().for_each(&mut pair);
-            None
         }
-        Statement::Update { set, filter, .. } => {
+        Statement::Update {
+            set, filter, pick, ..
+        } => {
             set.iter().for_each(&mut pair);
-            filter.as_ref()
+            filter.iter().for_each(|f| expr_needs(of, k, f, out));
+            sorts_need(of, k, pick.as_deref(), out);
         }
-        Statement::Delete { filter, .. } => filter.as_ref(),
-        Statement::Select(s) | Statement::Explain(s) => s.filter.as_ref(),
-        _ => None,
-    };
-    if let Some(f) = filter {
-        json_needs(schema, f, &mut out);
+        Statement::Delete { filter, pick, .. } => {
+            filter.iter().for_each(|f| expr_needs(of, k, f, out));
+            sorts_need(of, k, pick.as_deref(), out);
+        }
+        Statement::Select(s) | Statement::Explain(s) => select_needs(of, s, out),
+        _ => {}
     }
-    out
+}
+
+/// What a `set`'s or a `del`'s `order` expressions need: `order
+/// distance(loc, [29.09, 41.09]) limit 1`.
+fn sorts_need<'a>(
+    of: &dyn Fn(&str) -> Known<'a>,
+    k: Known<'a>,
+    pick: Option<&Pick>,
+    out: &mut Exactly,
+) {
+    for s in pick.iter().flat_map(|p| &p.order) {
+        if let Some(e) = &s.expr {
+            expr_needs(of, k, e, out);
+        }
+    }
+}
+
+/// What a `get` needs, by its collection's schema: every expression it
+/// holds -- its filter, a disjunctive facet's, `having`, `group`, each item
+/// of its list, each `order` key -- the point of a `near` over a point,
+/// and each `lookup` level's filter by the level's own collection. An
+/// inner `get` is walked where it is met, by its own.
+fn select_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, s: &Select, out: &mut Exactly) {
+    let k = of(&s.collection);
+    if matches!(k, Known::Missing) {
+        return;
+    }
+    // Loops rather than a chain of the lists: each `Chain` was a copy of
+    // its own in the browser module.
+    let mut each = |e: &Expr| expr_needs(of, k, e, out);
+    s.filter.iter().for_each(&mut each);
+    s.having.iter().for_each(&mut each);
+    s.group.iter().for_each(&mut each);
+    for c in s.aggregate.iter().chain(&s.computed) {
+        each(&c.expr);
+    }
+    for o in &s.order {
+        o.expr.iter().for_each(&mut each);
+    }
+    for f in &s.facets {
+        if let Some(Some(rest)) = &f.rest {
+            each(rest);
+        }
+    }
+    if let Some(n) = &s.near {
+        if k.geo(&n.field) {
+            given(&n.vector, out);
+        }
+    }
+    let mut level = s.lookup.as_ref();
+    while let Some(l) = level {
+        let lk = of(&l.collection);
+        if let (Some(f), false) = (&l.filter, matches!(lk, Known::Missing)) {
+            expr_needs(of, lk, f, out);
+        }
+        level = l.next.as_deref();
+    }
+}
+
+/// What an expression over a collection known as `k` needs, at every
+/// depth: each argument of a `distance` or `within`, each value compared
+/// with a json field or a point, or with a path into one -- under a `case`
+/// or any call as much as in an `and` chain -- and each inner `get`, by its
+/// own collection.
+fn expr_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, k: Known<'a>, e: &Expr, out: &mut Exactly) {
+    match e {
+        Expr::Call(name, args) if crate::geo::is_geo_call(name) => {
+            args.iter().for_each(|a| given(a, out));
+        }
+        Expr::Cmp(_, a, b) | Expr::Has(a, b) => {
+            if k.field(a) {
+                given(b, out);
+            }
+            if k.field(b) {
+                given(a, out);
+            }
+        }
+        Expr::In(a, items) if k.field(a) => items.iter().for_each(|i| given(i, out)),
+        Expr::InSelect(_, sel) => select_needs(of, sel, out),
+        _ => {}
+    }
+    e.each_child(&mut |c| expr_needs(of, k, c, out));
 }
 
 /// Whether `name` is a json field of `schema` or a path into one, or a
@@ -10629,99 +10962,15 @@ fn names_json(schema: &Schema, name: &str) -> bool {
     schema.field(field).is_some_and(|f| f.ty.keeps_numbers())
 }
 
-/// What the points and boxes of `stmt` need: each argument of a
-/// `distance` or `within` call, wherever one is -- a filter, an item of
-/// the select list, a value set -- and the point of a `near` over a point
-/// field. Asked of a statement only once a list of numbers is in it.
-fn geo_needs(schema: &Schema, stmt: &Statement, out: &mut Exactly) {
-    let mut each = |e: &Expr| geo_args(e, &mut |a| given(a, out));
-    match stmt {
-        Statement::Put { docs, else_set, .. } => {
-            for (_, e) in docs.iter().flatten().chain(else_set.iter().flatten()) {
-                each(e);
-            }
-        }
-        Statement::Update { set, filter, .. } => {
-            set.iter().for_each(|(_, e)| each(e));
-            filter.iter().for_each(&mut each);
-        }
-        Statement::Delete { filter, .. } => filter.iter().for_each(&mut each),
-        Statement::Select(s) | Statement::Explain(s) => {
-            // Loops rather than a chain of the lists: each `Chain` was a
-            // copy of its own in the browser module.
-            s.filter.iter().for_each(&mut each);
-            s.having.iter().for_each(&mut each);
-            s.group.iter().for_each(&mut each);
-            for c in s.aggregate.iter().chain(&s.computed) {
-                each(&c.expr);
-            }
-            if let Some(n) = &s.near {
-                if schema
-                    .field(&n.field)
-                    .is_some_and(|f| f.ty == DataType::Geo)
-                {
-                    given(&n.vector, out);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Calls `given` on each argument of each `distance` and `within` in `e`.
-fn geo_args(e: &Expr, given: &mut dyn FnMut(&Expr)) {
-    if let Expr::Call(name, args) = e {
-        if crate::geo::is_geo_call(name) {
-            args.iter().for_each(&mut *given);
-        }
-    }
-    e.each_child(&mut |c| geo_args(c, given));
-}
-
-/// What a value given a json field, or compared with one, needs.
+/// What a value given a json field, or compared with one, needs: a
+/// parameter by its place, once, or the text where a literal holds a list
+/// of numbers.
 fn given(e: &Expr, out: &mut Exactly) {
     match e {
-        Expr::Param(i) => out.params.push(*i),
+        Expr::Param(i) if !out.params.contains(i) => out.params.push(*i),
+        Expr::Param(_) => {}
         e => out.text |= e.reads_vectors(),
     }
-}
-
-/// What a `lookup` level's filter over a collection of `schema` needs
-/// ([`Exactly`]): each argument of a `distance` or `within`, and what
-/// [`json_needs`] names.
-fn filter_needs(schema: &Schema, filter: &Expr, out: &mut Exactly) {
-    geo_args(filter, &mut |a| given(a, out));
-    json_needs(schema, filter, out);
-}
-
-/// What a filter over a collection of `schema` needs for its json fields
-/// and points: each value compared with one, or with a path into one.
-fn json_needs(schema: &Schema, filter: &Expr, out: &mut Exactly) {
-    if !schema.fields.iter().any(|f| f.ty.keeps_numbers()) {
-        return;
-    }
-    let json = |name: &str| names_json(schema, name);
-    fn walk(e: &Expr, json: &dyn Fn(&str) -> bool, given: &mut dyn FnMut(&Expr)) {
-        let field = |e: &Expr| matches!(e, Expr::Field(n) if json(n));
-        match e {
-            Expr::And(a, b) | Expr::Or(a, b) => {
-                walk(a, json, given);
-                walk(b, json, given);
-            }
-            Expr::Not(a) => walk(a, json, given),
-            Expr::Cmp(_, a, b) | Expr::Has(a, b) => {
-                if field(a) {
-                    given(b);
-                }
-                if field(b) {
-                    given(a);
-                }
-            }
-            Expr::In(a, items) if field(a) => items.iter().for_each(given),
-            _ => {}
-        }
-    }
-    walk(filter, &json, &mut |e| given(e, out));
 }
 
 /// Sets `k` of `doc` to `v`: a field, coerced to its type, or a path into

@@ -184,9 +184,9 @@ public sealed class BuilderTests(Servers servers)
                 (string, IReadOnlyList<object?>)? text = op switch
                 {
                     "toFenecQL" => q.ToFenecQL(),
-                    "toInsert" => q.ToInsert(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "toInsert" => q.ToInsert(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Returning(Opt(a, 1, "returning"))),
                     "toUpdate" => q.ToUpdate(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Returning(Opt(a, 1, "returning"))),
-                    "toUpsert" => q.ToUpsert(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require"))),
+                    "toUpsert" => q.ToUpsert(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require")), Returning(Opt(a, 2, "returning"))),
                     "toDelete" => q.ToDelete(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require")), Returning(Opt(a, 0, "returning"))),
                     _ => null,
                 };
@@ -203,9 +203,9 @@ public sealed class BuilderTests(Servers servers)
                     "first" => q.FirstAsync(),
                     "count" => q.CountAsync(),
                     "explain" => q.ExplainAsync(),
-                    "insert" => q.InsertAsync(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "insert" => q.InsertAsync(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), returning: Returning(Opt(a, 1, "returning"))),
                     "update" => q.UpdateAsync(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require")), Returning(Opt(a, 1, "returning"))),
-                    "upsert" => q.UpsertAsync(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require"))),
+                    "upsert" => q.UpsertAsync(Docs(a[0]), Value(a[1])!, Long(Opt(a, 2, "require")), returning: Returning(Opt(a, 2, "returning"))),
                     "delete" => q.DeleteAsync(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require")), Returning(Opt(a, 0, "returning"))),
                     _ => null,
                 };

@@ -95,6 +95,7 @@ fn measure(
                 docs_param: None,
                 else_set: None,
                 require: None,
+                pick: None,
             };
             db.execute_with(&put, &[]).unwrap();
         }

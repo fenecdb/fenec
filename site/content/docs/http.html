@@ -22,6 +22,9 @@ curl 'http://127.0.0.1:8080/articles?year=gte.2024&count'
 
 curl -X POST http://127.0.0.1:8080/articles -d '{"title":"new","year":2025}'
 # {"inserted":1}
+
+curl -X POST 'http://127.0.0.1:8080/articles?returning=id' -d '{"title":"newer","year":2026}'
+# [{"id":3}]
 </pre>
 
 <details class="deep"><summary>Details</summary>
@@ -49,6 +52,7 @@ GET    /&lt;name&gt;?select=status,count(*),sum(total)&group=status&order=sum(to
 GET    /&lt;name&gt;?&lt;filter&gt;&facet=brand%20top%205,color
                                 rows, and each value's count beside them
 POST   /&lt;name&gt;                  body: {...} or [{...}] -- an id that is taken: 409
+POST   /&lt;name&gt;?returning=id,title   the rows made, ids and all (* every field), not their count
 PATCH  /&lt;name&gt;?&lt;filter&gt;         body: {...}
 DELETE /&lt;name&gt;?&lt;filter&gt;
 PATCH  /&lt;name&gt;/all              no filter — deliberately explicit
