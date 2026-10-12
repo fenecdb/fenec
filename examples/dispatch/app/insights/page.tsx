@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { TopBar } from '../../components/top-bar';
 import { Key, StackedBars } from '../../components/charts';
-import { asUser, rows } from '../../lib/db';
+import { asUser } from '../../lib/db';
 import { insights, MERROW_OFFSET } from '../../lib/insights';
 import { need, whoOf } from '../../lib/session';
 
@@ -17,7 +17,6 @@ export default async function Insights() {
   const a = await need('dispatcher');
   const db = asUser(whoOf(a));
   const r = await insights(db);
-  const roster = new Map((await rows<{ user: string; name: string; code: string }>(db, 'get couriers select user, name, code')).map((c) => [c.user, c]));
   const perDay = r.seven.n / 7;
   return (
     <>
@@ -98,7 +97,7 @@ export default async function Insights() {
                 {r.leaders.map((l) => (
                   <tr key={l.courier}>
                     <td>
-                      {roster.get(l.courier)?.name ?? l.courier} <span className="muted">{roster.get(l.courier)?.code}</span>
+                      {l.couriers[0]?.name ?? l.courier} <span className="muted">{l.couriers[0]?.code}</span>
                     </td>
                     <td className="n">{l.n}</td>
                     <td className="n">{pct(l.on_time, l.n)}</td>

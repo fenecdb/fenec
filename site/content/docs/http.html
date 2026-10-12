@@ -274,6 +274,13 @@ each row, such as each product's latest reviews.</p>
   <li><b>A key over several fields</b> lists a field of each side:
     <code>lines.on=org,order&amp;lines.parent=org,id</code>, FenecQL's
     <code>on (org, order) = (org, id)</code>.</li>
+  <li><b>A level that folds</b> aggregates in its <code>select</code>, as
+    the query's own does: <code>orders.select=count(*),sum(total)</code>,
+    each parent's children folded, and <code>orders.group=status</code> a
+    row a group, its <code>order</code> naming columns
+    (<code>orders.order=count(*).desc</code>). Off a query's groups,
+    <code>&lt;name&gt;.parent</code> names a column of its list:
+    <code>/orders?select=courier,count(*)&amp;group=courier&amp;lookup=couriers&amp;couriers.on=user&amp;couriers.parent=courier</code>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>

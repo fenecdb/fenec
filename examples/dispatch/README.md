@@ -306,8 +306,8 @@ From the tests, on the same machine:
 
 What fenecdb made awkward, slow or impossible here, the most important
 first, each with the statement that showed it and what Plover does
-instead. None was fixed in the example's own change; 1 to 5, 7 to 9 and
-12 to 14 are fixed since, and say how.
+instead. None was fixed in the example's own change; 1 to 5 and 7 to 14
+are fixed since, and say how.
 
 1. **Fixed: a claim could not pick the nearest row.** A job queue's claim
    picked its rows with `order` over fields; a courier's is "the nearest
@@ -502,20 +502,30 @@ instead. None was fixed in the example's own change; 1 to 5, 7 to 9 and
    `POST /orders?returning=id` answers them; `lib/orders.ts` places an
    order with `returning id`.
 
-10. **Aggregates and `lookup` do not combine.** The busiest couriers with
-    their names:
+10. **Fixed: aggregates and `lookup` did not combine.** The busiest
+    couriers with their names:
 
     ```
     get orders select courier, count(*) as delivered where delivered_at >= $1 group courier order delivered desc limit 10 lookup couriers on user = courier select name, code
     -- aggregates cannot be used together with `lookup`
     ```
 
-    Insights reads the roster apart and joins in the page; the Grafana
-    table shows courier ids.
+    Insights read the roster apart and joined it in the page. Now a
+    `lookup` hangs off a `get`'s groups, keyed by a column of its list --
+    the statement above answers each group with its courier -- and a
+    level's own list may aggregate, each parent's children folded: `get
+    couriers lookup orders on courier = user order delivered_at desc limit
+    50 select count(*) as n, avg(driven) as metres` is each courier's
+    latest 50. Insights asks the busiest ten with their names in the one
+    statement.
 
-11. **`bucket` has no time zone.** Merrow keeps UTC+3: a local day or hour is
-    `bucket(t + 10800000, 86400000)`, an offset written into every
-    statement, which cannot follow a zone with daylight saving.
+11. **Fixed: `bucket` had no time zone.** Merrow keeps UTC+3: a local day
+    or hour was `bucket(t + 10800000, 86400000)`, an offset written into
+    every statement, which cannot follow a zone with daylight saving. Now
+    `bucket(t, 1d, '+03:00')` counts by Merrow's clock, and `bucket(t, 1d,
+    'Europe/Berlin')` by a zone's whose days are 23 or 25 hours twice a
+    year -- IANA's rules from 2000 on, carried by the server. Insights
+    reads the hour of Merrow's day off its own bucket.
 
 12. **Fixed: a row past its `@ttl` left every read at once, but a
     subscriber heard of it only when the sweeper deleted it**: a position

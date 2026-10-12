@@ -404,6 +404,11 @@ children per parent.</p>
     index, or an index over several fields it leads.</b> A key of several
     fields is written <code>on (org, order) = (org, id)</code>.</li>
   <li><b><code>required</code> keeps only parents that have a match.</b></li>
+  <li><b>A level's list may aggregate</b> — <code>lookup orders on shop
+    select count(*) as n, sum(total) as revenue</code> — each parent's
+    children folded, one row a parent; and a <code>get</code> whose list
+    aggregates takes a <code>lookup</code> off its groups. See <a
+    href="#lookup-folds">A level that folds</a>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -499,6 +504,54 @@ with the parent's <code>id</code> and the child filter holds a
 parents by that part, each held to the rest of the key by its own parts
 against its parent's — the same bytes the probe from the parent would
 find.</p>
+
+<h3 id="lookup-folds">A level that folds</h3>
+
+<pre data-lang="fenecql">get shops limit 20 lookup orders on shop select count(*) as n, sum(total) as revenue
+get couriers limit 20 lookup deliveries on courier order at desc limit 50
+  select count(*) as n, avg(km) as km
+get shops lookup lines on shop select product, sum(qty) as sold group product
+  order sold desc limit 3
+get orders select courier, count(*) as n where at &gt;= $1 group courier
+  order n desc limit 10 lookup couriers on user = courier select name
+</pre>
+
+<p>A level's list may aggregate, as a <code>get</code>'s does, by the same
+rules: each parent's children — probed once, as any level's are, held to
+its <code>where</code> — folded into one row, or with <code>group</code>
+into one row a group, ordered and paged a parent at a time. A level is the
+<code>get</code> its children would be with the parent's key in its
+<code>where</code>, and its clauses mean what they mean there: ungrouped,
+<code>order</code>, <code>limit</code> and <code>offset</code> pick the
+children folded — a courier's latest 50, walked off <code>@sorted(courier,
+at desc)</code> as far as the page and no further — and grouped they order
+and page the groups, a shop's three best sellers, a window function's
+question in SQL. A parent with no child gets the one row every ungrouped
+list answers, <code>count</code> 0 and a sum null, and no group.</p>
+
+<p>A <code>get</code> whose list aggregates takes a <code>lookup</code> too:
+it hangs off the rows the list answers, its groups, and <code>on child =
+parent</code> names a column of the list — the busiest ten couriers with
+their names, above, where the list named the courier. The same holds below
+a level that folds. The positional rule does not move: the names on the left
+are the looked-up collection's, those on the right the level immediately
+above's, and that level's rows are its groups.</p>
+
+<p>What stays out is a list of two collections: grouping parents by a field
+of theirs and folding their children's — revenue by the shops' city — would
+put a parent's name and a child's beside each other in one list, which is
+the qualified name the scoping keeps out. Fold the level a parent at a time
+and group the parents in the client, or keep the field on the child.</p>
+
+<p><code>required</code> on a level that folds asks of its children, as on
+any level: an ungrouped list answers a row for every parent, so asked of the
+rows it would keep them all, and "couriers who delivered, with their counts"
+is the question. A <code>required</code> level below one that folds drops
+its groups. Over 2 000 couriers and 200 000 deliveries, a page of 20 with
+the count and mean of each one's latest 50 takes 72 µs in process, against
+92 for the 50 attached and folded by the client; the ten busiest with their
+names off a week's groups 4.6 ms, the groups and a query for the names
+apart 4.6 ms and a round trip (<code>make analytics-bench</code>).</p>
 
 <pre data-lang="fenecql">get products limit 20 lookup reviews on product_id required where stars = 5
 get products count lookup reviews on product_id required where stars = 5
@@ -1752,9 +1805,16 @@ get events select props.plan, sum(props.v) group props.plan
   <li><b>An aggregate folds any expression</b> — <code>sum(px * qty)</code>
     — and an item can be an expression over aggregates and keys —
     <code>sum(px * qty) / sum(qty)</code>.</li>
-  <li><b>Groups can be ordered and paged</b> by any column of the list.</li>
-  <li><b>Aggregates do not combine</b> with <code>near</code>,
-    <code>match</code> or <code>lookup</code>.</li>
+  <li><b>Groups can be ordered and paged</b> by any column of the list.
+    Without <code>group</code>, <code>order</code>, <code>limit</code> and
+    <code>offset</code> pick the rows the one row folds: <code>get deliveries
+    where courier = $1 order at desc limit 50 select count(*), avg(km)</code>
+    is the latest 50.</li>
+  <li><b>A <code>lookup</code> hangs off the groups</b>, keyed by a column
+    of the list, and a <a href="#lookup-folds">lookup level's list may
+    aggregate</a>, each parent's children folded.</li>
+  <li><b>Aggregates do not combine</b> with <code>near</code> or
+    <code>match</code>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -1819,12 +1879,28 @@ was written as — <code>sum(total)</code>, <code>count(distinct user)</code>,
   <li><b>Groups</b> come out by their keys, in the order <code>group</code>
     names them, the null key first, unless <code>order</code> names a column
     of the list — <code>order sum(total) desc</code>, <code>order
-    vwap</code> — and <code>limit</code> and <code>offset</code> page them. A
-    whole-set aggregate is one row, which <code>order</code> and
-    <code>limit</code> have nothing to do with; they are refused there.</li>
-  <li><b>What does not combine</b> is what does not combine with
-    <code>count</code>: <code>near</code>, <code>match</code> and
-    <code>lookup</code> rank or attach rows that an aggregate collapses.</li>
+    vwap</code> — and <code>limit</code> and <code>offset</code> page them.</li>
+  <li><b>Ungrouped</b>, a list answers one row, which an order or a page
+    would have nothing to do with; so there <code>order</code>,
+    <code>limit</code> and <code>offset</code> pick the rows it folds, as
+    they pick a <code>get</code>'s page — an <code>@sorted</code> field's
+    index walked to it — and the one row folds those: <code>order at desc
+    limit 50 select avg(km)</code> is the mean of the latest 50, what SQL
+    writes as a subquery. Its keys are the rows' values; a column of the
+    list among them is refused.</li>
+  <li><b>A <code>lookup</code> after the list</b> hangs off its rows — the
+    groups, or the one row — and names a column of the list as the
+    parent's key: <code>get orders select courier, count(*) as n group
+    courier order n desc limit 10 lookup couriers on user = courier select
+    name</code> is the ten busiest couriers with their names. The column
+    holds a field's values: a key, its <code>bucket</code>, its
+    <code>min</code>, <code>max</code>, <code>first</code> or
+    <code>last</code>; a sum's or a count's is refused, having no type to
+    hold the child's key to. <code>required</code> there drops the groups
+    no child matches, before <code>order</code> and <code>limit</code>, and
+    <code>count</code> after <code>group</code> counts those kept.</li>
+  <li><b>What does not combine</b> is what ranks rows an aggregate
+    collapses: <code>near</code> and <code>match</code>.</li>
 </ul>
 
 <p><b>How it runs.</b> Every item is bound to the collection once a query:
@@ -1871,6 +1947,23 @@ get orders select id, case when total is null then 0 when total &lt; 0 then -1 e
     duration, <code>15m</code>, or passed as a parameter holding one as
     text or a number of milliseconds. An <code>int</code> of epoch
     milliseconds gives an <code>int</code>.</li>
+  <li><b><code>bucket(ts, interval, zone)</code></b> is the same by a zone's
+    clock: an IANA name, <code>bucket(at, 1d, 'Europe/Istanbul')</code>, in
+    any case, or an offset written out — <code>'+03:00'</code>,
+    <code>'-0530'</code>, <code>'+03'</code>, <code>'Z'</code>,
+    <code>'UTC'</code> — or a parameter holding either, which is how a
+    page passes its own. A day, a week, a month or a year starts at local
+    midnight — the first instant whose clock reads that date, where a clock
+    skips midnight the instant it jumps past it — so where daylight time
+    begins or ends a day is 23 or 25 hours. A shorter interval starts each
+    time the clock reads its start or jumps past it: the hour a clock shows
+    twice is two buckets, and one it skips none. The rules are IANA's from
+    2000 on, of the tzdata the build was made with (2026c), each zone's
+    transitions and the rule after them; a time before 2000 in a named zone
+    is refused rather than answered by rules the build does not hold, and
+    an offset answers any time. A named zone's table is 25 KB that native
+    builds carry and the browser module is handed beside its collation data
+    the first time a statement names one.</li>
   <li><b><code>greatest(a, b, …)</code> and <code>least(a, b, …)</code></b>
     are the largest and smallest of their values, as PostgreSQL's are: a
     null is passed over, and the answer is null only when every value

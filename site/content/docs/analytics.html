@@ -70,6 +70,37 @@ field written at ingest, which reads the rows, takes 19.5. A raw collection unde
 runs these statements writes the rollups into a collection without one
 before the raw rows go.</p>
 
+<h3 id="zones">A day by a zone's clock</h3>
+
+<p><code>bucket</code> counts in UTC; a third argument counts by a zone's
+clock — an IANA name, or an offset written out. A day then starts at local
+midnight: Istanbul's 3rd of May began at 21:00 UTC on the 2nd.</p>
+
+<pre data-lang="fenecql">get events select bucket(at, 1d, "Europe/Istanbul") as day, count(*) as n group day order day   -- → "2026-05-02T21:00:00Z"
+get events select count(*) as n, bucket(at, 1d, "Europe/Istanbul") as day group day order day   -- → 7: the 3rd in Istanbul
+get events select count(*) as n, bucket(at, 1h, "+05:30") as hour where at < "2026-05-04" group hour order hour   -- → 4: 14:00 to 15:00 in India
+</pre>
+
+<p>Where daylight time begins or ends a local day is 23 or 25 hours, and
+an offset written into the statement — <code>bucket(at + 10800000,
+1d)</code> — cannot follow it. Berlin's clocks went back on the 25th of
+October 2026, so that day holds the hour its clock showed twice.</p>
+
+<pre data-lang="fenecql">create collection beats (at timestamp @sorted)
+put beats [{at: "2026-10-24T22:30:00Z"}, {at: "2026-10-25T22:30:00Z"}, {at: "2026-10-26T00:30:00Z"}]
+get beats select bucket(at, 1d, "Europe/Berlin") as day, count(*) as n group day order day   -- → "2026-10-24T22:00:00Z"
+get beats select count(*) as n, bucket(at, 1d, "Europe/Berlin") as day group day order day   -- → 2: one day of 25 hours
+get beats select count(*) as n, bucket(at, 1d) as day group day order day   -- → 1: in UTC, three days
+</pre>
+
+<p>A page passes its own zone as a parameter —
+<code>Intl.DateTimeFormat().resolvedOptions().timeZone</code> in a browser.
+The rules are IANA's from 2000 on; a time before it in a named zone is
+refused, and an offset answers any time. Counted off the ordered index,
+a week's days by Istanbul's clock take 0.47 ms over a million events
+against 0.43 in UTC, and its hours by Berlin's 2.0 against 1.7; where the
+rows are read, 31.2 ms against 29.4 (<code>make analytics-bench</code>).</p>
+
 <p>A rollup kept as the events come is a row a key, made at its first
 count and added to after: <code>if absent else set</code> is that upsert,
 one statement for a page of keys, the set reading the row it finds and
