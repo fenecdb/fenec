@@ -263,11 +263,22 @@ fn lookup_from_query(db: &Database, parent: &Schema, req: &Request) -> Result<Op
     }
     // Built innermost-last, then linked from the back, so each level owns the
     // one below it.
-    let mut levels = Vec::with_capacity(names.len());
+    let mut levels: Vec<Lookup> = Vec::with_capacity(names.len());
     let mut above = parent;
     for name in &names {
         let child = &db.collection(name)?.schema;
-        levels.push(lookup_level(name, above, child, req)?);
+        // Off groups -- the query's, or a level's that folds -- a key
+        // names a column of their list.
+        let folded = match levels.last() {
+            Some(l) => l.folds(),
+            None => (req.query.iter()).any(|(k, v)| {
+                k == "group"
+                    || (k == "select"
+                        && v.contains('(')
+                        && fenec_ql::parse_select_list(v).is_ok_and(|l| !l.aggregate.is_empty()))
+            }),
+        };
+        levels.push(lookup_level(name, above, child, folded, req)?);
         above = child;
     }
     let mut chain: Option<Box<Lookup>> = None;
@@ -278,8 +289,45 @@ fn lookup_from_query(db: &Database, parent: &Schema, req: &Request) -> Result<Op
     Ok(chain.map(|b| *b))
 }
 
+/// Whether the level `prefix` names groups its list: its `order` names
+/// columns.
+fn folds(req: &Request, prefix: &str) -> bool {
+    req.query
+        .iter()
+        .any(|(k, _)| k.strip_prefix(prefix) == Some("group"))
+}
+
+/// A grouped level's `order`: each key a column of its list -- a name, or
+/// an aggregate as written -- with `.asc` or `.desc`.
+fn order_of_columns(raw: &str) -> Vec<Sort> {
+    let mut out = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (name, asc) = match part.rsplit_once('.') {
+            Some((n, "desc")) => (n, false),
+            Some((n, "asc")) => (n, true),
+            _ => (part, true),
+        };
+        let name = match name.split_once('(') {
+            Some((f, rest)) => match (f.to_ascii_lowercase().as_str(), rest) {
+                ("count", "*)" | ")") => "count".to_string(),
+                (f, rest) => format!("{f}({rest}"),
+            },
+            None => name.to_string(),
+        };
+        out.push(Sort::new(name, asc));
+    }
+    out
+}
+
 /// One level of the chain: every key prefixed with its collection's name.
-fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> Result<Lookup> {
+/// `folded`: the level above answers groups, whose columns a key names.
+fn lookup_level(
+    name: &str,
+    parent: &Schema,
+    child: &Schema,
+    folded: bool,
+    req: &Request,
+) -> Result<Lookup> {
     let prefix = format!("{name}.");
     let mut l = Lookup {
         collection: name.to_string(),
@@ -295,8 +343,30 @@ fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> R
             // `on=org,order&parent=org,id`: a key over several fields, as
             // FenecQL's `on (org, order) = (org, id)`.
             "on" => on = fields_of(child, raw)?,
+            // A key off groups names a column of the list above, which
+            // the engine checks against it.
+            "parent" if folded => above = raw.split(',').map(|f| f.trim().to_string()).collect(),
             "parent" => above = fields_of(parent, raw)?,
+            // `orders.select=count(*),sum(total)`: a list that aggregates
+            // each parent's children, read by FenecQL's parser as the
+            // query's own is.
+            "select" if raw.contains('(') || raw.contains(" as ") => {
+                let list = fenec_ql::parse_select_list(raw)
+                    .map_err(|e| Error::Query(format!("`{name}.select`: {e}")))?;
+                if !list.computed.is_empty() || !list.marks.is_empty() {
+                    return Err(Error::Query(format!(
+                        "`{name}.select` selects the children's fields, or aggregates of them"
+                    )));
+                }
+                (l.project, l.aggregate) = (list.project, list.aggregate);
+            }
             "select" => l.project = Some(projection(child, raw)?),
+            "group" => {
+                l.group = fenec_ql::parse_group_list(raw)
+                    .map_err(|e| Error::Query(format!("`{name}.group`: {e}")))?
+            }
+            // Over groups a key names a column; the engine checks it.
+            "order" if folds(req, &prefix) => l.order = order_of_columns(raw),
             "order" => l.order = order(child, raw)?,
             "limit" => l.limit = Some(Count::N(number(raw, "limit")?)),
             "offset" => l.offset = Count::N(number(raw, "offset")?),

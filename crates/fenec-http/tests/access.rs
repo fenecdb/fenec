@@ -153,6 +153,48 @@ fn a_lookup_over_several_fields_holds_each_level_to_its_rules() {
     assert_eq!(n.query(&bob, count).1, r#"[{"count":0}]"#);
 }
 
+/// A level that folds folds what the token may read of each level, and a
+/// lookup off groups reaches only the rows the token may read: in a page,
+/// under `required`, and counted.
+#[test]
+fn a_level_that_folds_holds_each_level_to_its_rules() {
+    let n = start_with(
+        "docs   read  where org = $jwt.org\nlines  read  where owner = $jwt.sub\n",
+        &[
+            "create collection docs (org int, ref text)",
+            "create collection lines (org int, doc int @hash, owner text, n int)",
+            r#"put docs [{org: 1, ref: "a"}, {org: 2, ref: "b"}, {org: 1, ref: "c"}]"#,
+            r#"put lines [{org: 1, doc: 1, owner: "alice", n: 1}, {org: 1, doc: 1, owner: "bob", n: 2},
+               {org: 1, doc: 1, owner: "alice", n: 3}, {org: 2, doc: 2, owner: "alice", n: 4},
+               {org: 1, doc: 3, owner: "bob", n: 5}]"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice","org":1}"#);
+    let bob = n.token(r#"{"sub":"bob","org":1}"#);
+    let page = "get docs select ref lookup lines on doc select count() as k, sum(n) as total";
+    let (status, body) = n.query(&alice, page);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        r#"[{"ref":"a","lines":[{"k":2,"total":4}]},{"ref":"c","lines":[{"k":0,"total":null}]}]"#
+    );
+    let (_, body) = n.query(&bob, page);
+    assert_eq!(
+        body,
+        r#"[{"ref":"a","lines":[{"k":1,"total":2}]},{"ref":"c","lines":[{"k":1,"total":5}]}]"#
+    );
+    // Off the lines' groups: alice's alone, each with the doc her org reads.
+    let groups = "get lines select doc, sum(n) as total group doc order total desc \
+                  lookup docs on id = doc select ref required";
+    let (status, body) = n.query(&alice, groups);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"[{"doc":1,"total":4,"docs":[{"ref":"a"}]}]"#);
+    let counted = "get lines select doc, sum(n) as total group doc count \
+                   lookup docs on id = doc required";
+    assert_eq!(n.query(&alice, counted).1, r#"[{"count":1}]"#);
+    assert_eq!(n.query(&bob, counted).1, r#"[{"count":2}]"#);
+}
+
 #[test]
 fn two_users_see_and_change_only_their_own_rows() {
     let n = start();
