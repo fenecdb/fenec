@@ -337,8 +337,13 @@ for (;;) {
   <li><b>A worker's token</b> claims through its rules: a policy line
     <code>jobs update(owner, run_at, attempts) where queue = $jwt.queue for
     worker</code> lets it take its queue's jobs alone and change nothing
-    else of them, and what it answers is held to its read rules as well
-    (<a href="/docs/server#security">Security</a>).</li>
+    else of them, and what it answers is held to its read rules as well,
+    as it writes them: a worker that reads only <code>where owner =
+    $jwt.sub</code> is answered the jobs it claims. A transition says what
+    a claim may make of a job — <code>where run_at &lt;= now() and
+    new.owner = $jwt.sub and new.attempts = attempts + 1</code>, so no
+    claim is made for another worker or wipes the count a dead letter
+    keeps (<a href="/docs/http#scoped-access">Scoped access</a>).</li>
   <li><b>Not on a sync replica.</b> A replica would pick its own rows and
     answer them, and the server its own: a claim there is refused, and goes
     to the server itself.</li>

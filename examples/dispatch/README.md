@@ -176,11 +176,12 @@ Grafana's built-ins bound as the plugin binds them.
 | Couriers on the map | `positions`: `loc geo @geo`, `seen @ttl(2m)`, `courier @unique`; `put positions {...} if absent else set {loc: new.loc, ...}` |
 | The ten nearest idle couriers | `get positions select courier, state, loc, distance(loc, $1) as m where state = "idle" near loc $1 limit 10`, live (`FenecHttp.live`, `collections: ['positions']`) |
 | Who is within reach | `get positions select state, count(*) as n where distance(loc, $1) <= $2 group state`, live |
-| A claim | `set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} where id = $4 and run_at <= now() and not ($2 in (get orders select claim where claim = $2))`, one a candidate in one `/batch` (below) |
+| A claim | `set orders {status: "assigned", courier: $1, claim: $2, run_at: now() + $3, attempts: attempts + 1} where id = $4 and run_at <= now() and not ($2 in (get orders select claim where claim = $2)) returning *`, one a candidate in one `/batch` (below) |
 | Waiting for an order | the same `set` over `distance(pickup, $4) <= $5 order run_at limit 1`, in a `/batch` sent with `Fenec-Wait: 25000` |
 | The lease | every beat: `set orders {run_at: now() + $3, courier_loc: $4} where id = $1 and claim = $2` beside the position, one `/batch`; a lapsed lease is `run_at <= now()` again, and a waiting claim is woken at that moment |
 | Ack, give back, dead letter | `set ... where id = $1 and claim = $2 require 1`: a courier whose lease lapsed finds out (412); backoff `now() + 1000 * attempts * attempts`; `case when attempts >= 5 then "dead"` |
-| Couriers see their own jobs | `orders read where courier = $jwt.sub`; `update(status, run_at, courier, ...) where run_at <= now() or courier = $jwt.sub`: the row before and after must pass, so a claim naming another courier is 403 |
+| Couriers see their own jobs | `orders read where courier = $jwt.sub`, and a claim's `returning *` answers the order as claimed: the read rules are asked of the row the `set` leaves |
+| An order's steps | each a transition, `new.` the order as the write leaves it: a claim `where run_at <= now() and new.status = "assigned" and new.courier = $jwt.sub and new.attempts = attempts + 1`, a delivery `where courier = $jwt.sub and (status = "assigned" or status = "picked") and new.status = "delivered" and new.run_at is null`, a customer's cancel `where ... status = "ready" and new.status = "cancelled" and new.run_at is null`: a claim for another courier, an order delivered unclaimed, a cancelled one taken back or one moved up the queue are 403 |
 | Customers follow their courier | a subscription to their own order row (`{ id: 'eq.<n>' }`), the courier's point written onto it with each beat |
 | Deliveries an hour, on time | `bucket(delivered_at, 3600000)`, `sum(case when delivered_at <= promised then 1 else 0 end)`, `avg(delivered_at - created)` over `@sorted(delivered_at)` |
 | Grafana | fenecdb-datasource over `/t/co-<slug>`, `$__from`, `$__to`, `$__interval_ms` bound as parameters |
@@ -198,9 +199,9 @@ rows by `order` over fields, and `near`, which orders by distance, is a
 2. **One `/batch` that takes the first of them still ready**, in that
    order: a `set` a candidate, each also asking that no statement before
    it in the batch took one -- `not ($2 in (get orders select claim where
-   claim = $2))` -- and a last `get orders where claim = $2` that answers
-   what was taken. Under the one write lock, so another courier's batch
-   between the read and this one costs a candidate, never a double claim.
+   claim = $2))` -- and answering what it took (`returning *`). Under the
+   one write lock, so another courier's batch between the read and this
+   one costs a candidate, never a double claim.
 3. **None near and ready**: the oldest ready order within 3 km, held at the
    node with `Fenec-Wait` until one is placed, a lease lapses or a backoff
    ends.
@@ -221,7 +222,7 @@ nearest it.
 | `claims.test.ts` (2) | 50 couriers claim 400 orders at once, each delivering what it took: no order claimed twice, every one delivered by the courier who claimed it, each claimed once (`attempts = 1`); 50 couriers waiting at the server while 150 orders are placed 5 ms apart: each goes to exactly one |
 | `lease.test.ts` (3) | a courier as a process of its own claims, picks up and beats every 300 ms, then is killed with SIGKILL: a second courier waiting at the server is handed the order no sooner than the lease (1.5 s) after the last beat and within 2 s of it, `attempts` 2; the dead courier's late pickup, delivery and beat are refused (412, a lease kept `false`); an order given back waits out its backoff; one claimed five times is a dead letter on the sixth draw |
 | `quotas.test.ts` (4) | Tandem (Pro) and Hopper (Starter) on one node: Hopper's 20 couriers beating every 50 ms, ten times its 40 writes a second, are refused (429 `writes`) and land at most its rate, while Tandem's ten are never refused and their median beat is unchanged; a bulk import past 64 KB a second is refused (429 `write_bytes`) and lands after its `Retry-After`; 45 claims waiting at once from a Starter fleet: 40 held, 5 refused (429 `streams`); a company at its rows takes no new order (507 `rows`) and deletes still land |
-| `security.test.ts` (5) | a dispatcher's token against another company and the platform (403), no tenant (403), lapsed (401), forged (401); a courier reads only their order, row and position, cannot deliver another's order (it is not there to them), change a fee (403), claim for another courier (403), write another's position (403) or delete; a customer reads only their own, cannot insert as another, pre-assigned or with attempts (403), cannot cancel another's or one carried; a customer's subscription hears their courier move on their order and nothing of another's |
+| `security.test.ts` (5) | a dispatcher's token against another company and the platform (403), no tenant (403), lapsed (401), forged (401); a courier reads only their order, row and position, cannot deliver another's order (it is not there to them), deliver a ready order nobody claimed (403), change a fee (403), claim for another courier or without counting the attempt (403), give an order back ahead of the queue (403), write another's position (403) or delete; a customer reads only their own, cannot insert as another, pre-assigned or with attempts (403), cannot move an order up the queue or cancel it claimable (403), take a cancelled one back (412), cancel another's or one carried; a customer's subscription hears their courier move on their order and nothing of another's |
 | `grafana.test.ts` (7) | every panel of `grafana/plover.json` runs under Grafana's token with the built-ins bound; that token writes nothing and reaches no other company |
 | `pages.test.ts` (5) | over the site `scripts/ci.sh` starts: sign-in with the email in another case, a wrong password, each role's pages, an order placed and followed, another customer's order a 404, a courier's claim, pickup, delivery and a second ack refused through the phone's routes, a write from another site refused |
 
@@ -300,7 +301,8 @@ From the tests, on the same machine:
 
 What fenecdb made awkward, slow or impossible here, the most important
 first, each with the statement that showed it and what Plover does
-instead. None is fixed in this example's change.
+instead. None was fixed in the example's own change; 4 and 5 are fixed
+since, and say how.
 
 1. **A claim cannot pick the nearest row.** A job queue's claim picks its
    rows with `order` over fields; a courier's is "the nearest ready order":
@@ -365,9 +367,10 @@ instead. None is fixed in this example's change.
    held claims -- or the claim of item 1, so that a courier's held claim at
    least takes what is nearest it.
 
-4. **`returning` under a scoped token picks only rows the token could
-   read before the write -- silently.** With the natural policy -- a courier
-   reads the orders they carry, and updates ready ones to claim them:
+4. **Fixed: `returning` under a scoped token picked only rows the token
+   could read before the write -- silently.** With the natural policy -- a
+   courier reads the orders they carry, and updates ready ones to claim
+   them:
 
    ```
    -- courier's token; order 10714 is ready, courier null
@@ -377,18 +380,19 @@ instead. None is fixed in this example's change.
    -- {"affected":1}
    ```
 
-   `Scope::returning` (`crates/fenec-http/src/access.rs`) ANDs the read
-   rules into the write's filter, so they judge the row as it was. Nothing
-   says why the claim took nothing; a queue's claim with `returning *` --
-   the docs' own recipe -- is a no-op under the policy that keeps couriers
-   off other people's orders. Plover claims without `returning` and reads
-   the row back by its claim token in the same `/batch`. Smallest: hold the
-   answered rows to the read rules after the write (the row as written is
-   what is handed back), or refuse with 403 where the read rules hide a row
-   the write would touch.
+   `Scope::returning` (`crates/fenec-http/src/access.rs`) ANDed the read
+   rules into the write's filter, so they judged the row as it was, and
+   Plover claimed without `returning`, reading the row back by its claim
+   token in the same `/batch`. Now a `set`'s answer is held to the read
+   rules as it wrote the row: their terms over a field the `set` writes
+   are asked of the row after (`courier = $jwt.sub`, true once claimed),
+   and a `set` that would leave a row its token may not read is refused
+   whole (403) rather than written and left out of the answer. The claim
+   above answers the order, claimed, and Plover's claims say `returning
+   *`.
 
-5. **A rule cannot say what a write may change a row from and to.** WITH
-   CHECK holds the row before and after to the same filter, so:
+5. **Fixed: a rule could not say what a write may change a row from and
+   to.** WITH CHECK held the row before and after to the same filter, so:
 
    ```
    -- customer: orders update(status, run_at) where customer = $jwt.sub and courier is null and (status = "ready" or status = "cancelled")
@@ -398,10 +402,16 @@ instead. None is fixed in this example's change.
    set orders {status: "delivered", courier: $1, delivered_at: now(), run_at: null} where id = $2   -- a ready order delivered unclaimed: affected 1
    ```
 
-   Plover's routes never send these, but the tokens may. Smallest: the
-   row before as `old.` in a rule (`update(status) where old.status =
-   "ready" and status = "cancelled"`), or a field grant taking the values
-   a field may be set to.
+   Plover's routes never sent these, but the tokens could. Now a rule's
+   filter names the row as the write leaves it with `new.`, as an upsert's
+   `else set` does, and each step of an order is a rule of its own
+   (`policy.txt`): the customer's cancel is `where customer = $jwt.sub and
+   courier is null and status = "ready" and new.status = "cancelled" and
+   new.run_at is null`, so the first statement above reaches no row (its
+   order is not ready) and the second is 403; the courier's delivery is
+   `where courier = $jwt.sub and (status = "assigned" or status =
+   "picked") and new.status = "delivered" and new.run_at is null`, so the
+   third is 403. `test/security.test.ts` sends all three.
 
 6. **A rule cannot reach another collection, and reads have no field
    grants.** A customer may follow "the courier carrying my order" -- a

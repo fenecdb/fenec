@@ -2286,9 +2286,14 @@ del jobs where run_at &lt;= now() order run_at limit 10 returning id, payload.to
   <li><b><code>require N</code></b> counts the rows answered: <code>limit 1
     require 1</code> is one row or a refusal.</li>
   <li><b>A scoped token</b> picks among the rows its rules let it update or
-    delete, and what it answers is held to its read rules as well; every
-    row it writes is held to them after the write, its fields to an
-    <code>update(…)</code> grant's.</li>
+    delete, and what it answers is held to its read rules as well — a
+    <code>set</code>'s rows as it writes them, so a worker that reads only
+    the jobs it holds is answered the job it claims, and a
+    <code>set</code> that would leave a row it may not read is refused
+    whole (403). Every row it writes is held to its rules after the write,
+    its fields to an <code>update(…)</code> grant's and its change to a
+    transition's (<a href="/docs/http#scoped-access">Scoped
+    access</a>).</li>
   <li><b>A sync replica refuses one</b> on a synced collection: it would
     pick and answer the replica's rows, and the server, sent the text, its
     own.</li>
