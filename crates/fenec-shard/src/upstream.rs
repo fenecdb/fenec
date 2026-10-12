@@ -232,7 +232,11 @@ impl Pool {
             .map_err(|e| {
                 // Timed out, the node is there and not reading: sent again,
                 // it would wait as long.
-                let stage = if timed_out(&e) { Stage::Other } else { Stage::Unsent };
+                let stage = if timed_out(&e) {
+                    Stage::Other
+                } else {
+                    Stage::Unsent
+                };
                 Failure(stage, e)
             })?;
 
@@ -240,7 +244,10 @@ impl Pool {
         let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                return Err(Failure(Stage::Unanswered, io::ErrorKind::UnexpectedEof.into()))
+                return Err(Failure(
+                    Stage::Unanswered,
+                    io::ErrorKind::UnexpectedEof.into(),
+                ))
             }
             Ok(_) => {}
             Err(e) if line.is_empty() && !timed_out(&e) => {
@@ -318,7 +325,10 @@ fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
 }
 
 fn timed_out(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 /// Whether a pooled connection is still open: a read that does not wait
@@ -449,7 +459,9 @@ mod tests {
         let (mut ours, theirs) = pair();
         ours.write_all(b"x").unwrap();
         // The byte is there before the close, or the close would be a FIN.
-        theirs.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        theirs
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         assert_eq!(theirs.peek(&mut [0u8]).unwrap(), 1);
         drop(theirs);
         let reset = arrived(&ours).unwrap_err();
