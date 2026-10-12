@@ -113,13 +113,6 @@ export class Cluster {
       this.opts.sync ?? '250',
       '--max-connections',
       '2000',
-      // A connection the router pooled and the node then closed for its
-      // silence (60 s by default) is answered 502 on macOS the next time the
-      // router takes it -- `setsockopt` there refuses a socket its peer
-      // closed with EINVAL, which the router does not take for "closed while
-      // idle" -- so the nodes keep a quiet connection open.
-      '--idle-timeout',
-      '0',
       // Every dispatcher's map holds a stream for positions and one for
       // orders, each live query one more, each customer following an order
       // one: 64, the default, is a node's for all its tenants together.
