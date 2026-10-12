@@ -845,6 +845,116 @@ const OWN_CLAIM: &str = "set jobs {owner: $1, run_at: now() + 600000, attempts: 
 /// One job at a time to `n` claims held, each a group of its own that the
 /// job matches: from its put sent to a worker holding it, the runs and the
 /// heads' looks a job costs, and how often the claim held longest took it.
+/// A courier's claim: the order nearest its point, a group of its own.
+const NEAREST: &str = "set orders {courier: $1, run_at: now() + 600000} where run_at <= now() \
+                       order distance(pickup, $2) limit 1 returning id, sent";
+
+/// Metres between two points, as `distance()` measures them.
+fn metres(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let r = 6_372_797.56f64;
+    let (la1, la2) = (a.1.to_radians(), b.1.to_radians());
+    let (dla, dlo) = ((b.1 - a.1).to_radians(), (b.0 - a.0).to_radians());
+    let h = (dla / 2.0).sin().powi(2) + la1.cos() * la2.cos() * (dlo / 2.0).sin().powi(2);
+    2.0 * r * h.sqrt().asin()
+}
+
+/// One order at a time, at a point of its own in a city of 10 km, to `n`
+/// couriers waiting at points of theirs, each claim the order nearest it
+/// (`order distance(pickup, $2) limit 1`): from the put to a courier
+/// holding it, the runs a job costs, how often the nearest courier took it
+/// and how much further the one that did was.
+fn nearest(n: usize) {
+    let jobs = if n >= 1000 { 100 } else { 300 };
+    let (server, addr, dir) =
+        empty_queue(&["--max-connections", "5000", "--http-max-streams", "5000"]);
+    let mut c = http::Http::connect(&addr);
+    c.query(
+        "create collection orders (pickup geo @geo, sent int, run_at timestamp @sorted, \
+         courier text)",
+        "",
+    );
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % 1_000_000) as f64 / 1_000_000.0
+    };
+    // About 10 km across, at 41 degrees north.
+    let mut spot = move || (29.0 + rnd() * 0.12, 41.0 + rnd() * 0.09);
+    let points: Vec<(f64, f64)> = (0..n).map(|_| spot()).collect();
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, i64, i64)>();
+    let mut hs = Vec::with_capacity(n);
+    for (w, p) in points.iter().copied().enumerate() {
+        let addr = addr.clone();
+        let tx = tx.clone();
+        hs.push(std::thread::spawn(move || {
+            let mut c = http::Http::connect(&addr);
+            for k in 0.. {
+                let params = format!("\"c{w}:{k}\",[{},{}]", p.0, p.1);
+                let body = c
+                    .query_with(NEAREST, &params, "Fenec-Wait: 30000\r\n")
+                    .to_vec();
+                let at = micros();
+                let sent = http::ints(&body, "sent");
+                if sent.contains(&-1) {
+                    break;
+                }
+                for s in sent {
+                    tx.send((w, s, at)).unwrap();
+                }
+            }
+        }));
+        until_held(&mut c, w as u64 + 1);
+    }
+    let runs0 = metric(&mut c, "fenec_held_runs_total");
+    let (cpu0, _, _) = usage(server.pid());
+    let (mut lat, mut nearest, mut further) = (Vec::with_capacity(jobs), 0, Vec::new());
+    for _ in 0..jobs {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let at = spot();
+        c.query(
+            "put orders {pickup: $1, sent: $2, run_at: now()}",
+            &format!("[{},{}],{}", at.0, at.1, micros()),
+        );
+        let (w, sent, got) = rx.recv().unwrap();
+        lat.push((got - sent) as f64);
+        let best = (0..n)
+            .min_by(|&a, &b| metres(points[a], at).total_cmp(&metres(points[b], at)))
+            .unwrap();
+        if best == w {
+            nearest += 1;
+        }
+        further.push(metres(points[w], at) - metres(points[best], at));
+        until_held(&mut c, n as u64);
+    }
+    let (cpu1, _, _) = usage(server.pid());
+    let runs = metric(&mut c, "fenec_held_runs_total") - runs0;
+    // A stop order at each courier's own point, the one nearest it.
+    for p in &points {
+        c.query(
+            "put orders {pickup: $1, sent: -1, run_at: 0}",
+            &format!("[{},{}]", p.0, p.1),
+        );
+    }
+    for h in hs {
+        h.join().unwrap();
+    }
+    server.terminate();
+    let _ = std::fs::remove_dir_all(&dir);
+    further.sort_by(|a, b| a.total_cmp(b));
+    println!(
+        "  {n} couriers waiting, each the order nearest it, {jobs} orders one at a time: put to \
+         held {}; {:.2} runs an order, the server's CPU {:.1} ms an order; the nearest took it \
+         {:.0}%, the one that did a median of {:.0} m further",
+        ms_percentiles(lat),
+        runs as f64 / jobs as f64,
+        (cpu1 - cpu0) * 1e3 / jobs as f64,
+        nearest as f64 * 100.0 / jobs as f64,
+        further[further.len() / 2]
+    );
+}
+
 /// Each job waits for the last one's taker to be held again, so which
 /// claim was held longest is the order they came back in.
 fn contested(n: usize) {
@@ -990,6 +1100,11 @@ fn main() {
         if part("contested") {
             for held in [10, 100, 1000] {
                 contested(held);
+            }
+        }
+        if part("nearest") {
+            for held in [10, 100, 1000] {
+                nearest(held);
             }
         }
     }
