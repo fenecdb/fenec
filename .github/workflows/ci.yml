@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue tests each pull request as it would land on main, with
+  # the ones queued before it: two that pass apart can fail together (#292
+  # and #293 each held the studio's quoted size, and together passed it).
+  merge_group:
   workflow_dispatch:
 
 env:
