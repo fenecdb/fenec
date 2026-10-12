@@ -53,6 +53,7 @@ fn put_all(db: &mut Database, collection: &str, docs: &[Vec<(String, Expr)>]) {
             docs_param: None,
             else_set: None,
             require: None,
+            pick: None,
         })
         .unwrap();
     }
