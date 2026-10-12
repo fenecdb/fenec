@@ -628,8 +628,35 @@ fn the_sketches_and_buckets_are_refused_and_the_standard_aggregates_answer() {
         "get e select hll_accumulate(user)",
         "get e select hll_combine(user)",
         "get e select bucket(at, 1h) as h, count() group h",
+        "get e select bucket(at, 1d, 'Europe/Berlin') as h, count() group h",
         "get e select n where hll_estimate(null) = 0",
     ] {
         refused(&mut db, sql, "analytics");
     }
+    // A level that folds is the aggregates' and the lookup's, in every
+    // build: each user's rows of `e` folded beside them.
+    run(&mut db, "create collection u (name text)").unwrap();
+    run(&mut db, "create collection v (user text @hash, n int)").unwrap();
+    run(&mut db, r#"put u [{name: "a"}, {name: "b"}, {name: "c"}]"#).unwrap();
+    run(
+        &mut db,
+        r#"put v [{user: "a", n: 1}, {user: "a", n: 2}, {user: "b", n: 4}]"#,
+    )
+    .unwrap();
+    let r = run(
+        &mut db,
+        "get u select name lookup v on user = name select count() as c, sum(n) as s",
+    )
+    .unwrap();
+    let rs = r.rows().unwrap();
+    let n = rs.nested.as_ref().unwrap();
+    let folds: Vec<Vec<Value>> = (0..3).map(|i| n.group(i)[0].values.clone()).collect();
+    assert_eq!(
+        folds,
+        [
+            vec![Value::Int(2), Value::Int(3)],
+            vec![Value::Int(1), Value::Int(4)],
+            vec![Value::Int(0), Value::Null]
+        ]
+    );
 }

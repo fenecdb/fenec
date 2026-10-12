@@ -1119,3 +1119,82 @@ fn what_does_not_fold_is_refused() {
         assert!(e.contains(says), "{sql}: {e}");
     }
 }
+
+/// `explain` names the fold of a level -- how its children were reached,
+/// how many were folded into how many rows -- and a `get`'s groups the
+/// lookup hangs off.
+#[test]
+fn explain_names_the_fold() {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection couriers (code text @hash, name text)",
+    );
+    exec(
+        &mut db,
+        "create collection orders (courier text, at timestamp, km float, @sorted(courier, at desc))",
+    );
+    exec(
+        &mut db,
+        "put couriers [{code: \"a\", name: \"Ada\"}, {code: \"b\", name: \"Bo\"}]",
+    );
+    for i in 0..30 {
+        let c = if i % 3 == 0 { "b" } else { "a" };
+        exec(
+            &mut db,
+            &format!(
+                "put orders {{courier: \"{c}\", at: {}, km: {}.5}}",
+                1_790_000_000_000i64 + i * 60_000,
+                i
+            ),
+        );
+    }
+    let plan = |sql: &str| -> Vec<String> {
+        result(&db, &format!("explain {sql}"), &[])
+            .rows
+            .iter()
+            .map(|r| match &r.values[0] {
+                Value::Text(t) => t.clone(),
+                v => format!("{v:?}"),
+            })
+            .collect()
+    };
+    let got = plan(
+        "get couriers lookup orders on courier = code order at desc limit 5 \
+         select count() as n, avg(km) as km",
+    );
+    assert!(
+        got.iter().any(|l| l
+            == "lookup: orders on courier, the index on (courier, at desc) walked for 2 parents, \
+                10 children folded into 2 rows"),
+        "{got:?}"
+    );
+    let got = plan(
+        "get orders select courier, count() as n group courier order n desc \
+         lookup couriers on code = courier select name",
+    );
+    assert!(
+        got.iter().any(|l| l == "aggregate: 30 rows into 2 groups"),
+        "{got:?}"
+    );
+    assert!(
+        got.iter().any(|l| l.starts_with("lookup: couriers on code, the hash index probed for 2 parents")),
+        "{got:?}"
+    );
+    // The latest five of each, folded: what the walk picked.
+    let rs = result(
+        &db,
+        "get couriers lookup orders on courier = code order at desc limit 5 \
+         select count() as n, min(km) as least",
+        &[],
+    );
+    let n = rs.nested.unwrap();
+    assert_eq!(
+        n.group(0)[0].values,
+        vec![Value::Int(5), Value::Float(23.5)]
+    );
+    assert_eq!(
+        n.group(1)[0].values,
+        vec![Value::Int(5), Value::Float(15.5)]
+    );
+}
