@@ -2737,9 +2737,10 @@ impl Step<'_> {
     /// Fills `out` with the children of the row `id` of the level above:
     /// ascending, alive and free of duplicates. A key over several fields
     /// asks its index apart, so a single key's probe -- `key` and
-    /// [`Probe::ids`] over a value -- is the code it was: through a key
+    /// [`Probe::ids`] over a value -- is the code it was: through one key
     /// that was a value or an index's bytes, a page of 20 x 3 x 5 by one
-    /// `@hash` field took 1% longer.
+    /// `@hash` field ran 1 to 2% longer in quiet runs (`make
+    /// lookup-bench`).
     fn ids(&self, id: DocId, out: &mut Vec<DocId>) -> Result<()> {
         if let Probe::Tuple(t) = &self.probe {
             out.clear();
@@ -2959,9 +2960,7 @@ impl<'a> Tuple<'a> {
     /// The prefix the row `id` of the level above probes with: its fields'
     /// values, each made its child field's type, or `None` where one is
     /// null -- a NULL key matches nothing, as a single key's -- or cannot
-    /// be. Out of line, as `ids` is, so the single key's probe each parent
-    /// runs stays the code it was: inlined there, a page of 20 x 3 x 5 by
-    /// one `@hash` field took 1% longer.
+    /// be. Out of line: its callers are four.
     #[inline(never)]
     fn prefix(&self, parent: &Collection, id: DocId) -> Result<Option<crate::composite::KeyBytes>> {
         let mut vals = Vec::with_capacity(self.parts.len());
@@ -3018,7 +3017,6 @@ impl<'a> Tuple<'a> {
 
     /// [`Probe::ids`] over the run `key` names: in the index's order, put in
     /// id order, the order a bucket holds them in and a tie goes by.
-    #[inline(never)]
     fn ids(&self, child: &Collection, key: &[u8], out: &mut Vec<DocId>) {
         let _ = self.ix.run(key, &mut |id| {
             if child.store.contains(id) {
@@ -9144,10 +9142,11 @@ impl Database {
             // part paired with `id`, and holds the rest of the key or not.
             // Probing each parent so named for the whole key instead read
             // every child of every one again, where a tenth of the children
-            // named most of the parents: 57 against 36 ms for the parents'
-            // side alone; and mapping each child's key back whole, sorted
-            // beside the parent named, was a sort of its own, 4.5 KB of the
-            // browser module.
+            // named most of the parents: over 20 000 orders and 200 000
+            // lines, 11.7 ms against 5.7, and 9.5 for the parents' side
+            // alone (`make lookup-bench`); and mapping each child's key back
+            // whole, sorted beside the parent named, was a sort of its own,
+            // 4.5 KB of the browser module.
             if let Probe::Tuple(t) = &steps[0].probe {
                 if t.parts.len() > 1 && !t.holds(child, cid, steps[0].parent, id)? {
                     continue;
