@@ -908,3 +908,47 @@ fn a_burst_goes_to_held_claims_in_the_order_they_came() {
         "{before:?} -> {s:?}"
     );
 }
+
+/// A claim that looked and found nothing does not look again for
+/// `LOOK_GAP` however many writes of its queue land, a round of bids
+/// waiting for it apart: 300 jobs it cannot take cost it a look a
+/// millisecond at most, where ending its gap at every look had it look
+/// at every write.
+#[test]
+fn a_held_claim_looks_once_a_gap_beside_writes_it_cannot_take() {
+    let node = start();
+    let port = node.port;
+    let held = own_claim(port, 0);
+    until_held(&node, 1);
+    let t = Instant::now();
+    while node.server.waits().looks < 1 {
+        assert!(t.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let before = node.server.waits().looks;
+    let began = Instant::now();
+    // Eight writers at once, so writes land while it looks.
+    let writers: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut c = Conn::open(port);
+                for _ in 0..100 {
+                    let a = c.query(
+                        "put jobs {kind: \"other\", run_at: 0, attempts: 99999}",
+                        "[]",
+                    );
+                    assert_eq!(a.status, 200, "{}", a.body);
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().unwrap();
+    }
+    let ms = began.elapsed().as_millis() as u64;
+    let looks = node.server.waits().looks - before;
+    assert!(looks <= ms + 2, "{looks} looks in {ms} ms");
+    put(port, "mail", now_ms() - 1);
+    let a = held.join().unwrap();
+    assert_eq!(rows(&a.body).len(), 1, "{}", a.body);
+}

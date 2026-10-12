@@ -854,11 +854,14 @@ fn settle(st: &mut State) {
         ahead |= g.bid.is_some();
     }
     if let Some(i) = first {
-        // A head in its gap holds the round up: its gap ends, as a bid
+        // A head in its gap holds a round up: its gap ends, where a bid
         // waits for it -- kept, a job to claims that had looked a moment
-        // before waited out the gap, the round with it.
+        // before waited out the gap, the round with it. Where none waits,
+        // the gap stands: ended at every look, a claim held beside a busy
+        // queue looked 1 500 times a second against 700.
+        let waited = ahead || st.groups[i + 1..].iter().any(|g| g.bid.is_some());
         let g = &mut st.groups[i];
-        if g.owes(horizon, now) && g.quiet.is_some_and(|q| instant < q) {
+        if waited && g.owes(horizon, now) && g.quiet.is_some_and(|q| instant < q) {
             g.quiet = None;
             if let Some(head) = g.queue.front() {
                 head.cv.notify_one();
