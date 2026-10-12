@@ -95,7 +95,11 @@ fn median<T>(mut f: impl FnMut() -> T) -> (f64, T) {
 }
 
 fn line(what: &str, ms: f64, n: usize) {
-    println!("  {what:<58} {ms:>9.2} ms  ({n})");
+    // Under a millisecond, three places: a page of folds is tens of us.
+    match ms < 1.0 {
+        true => println!("  {what:<58} {ms:>9.3} ms  ({n})"),
+        false => println!("  {what:<58} {ms:>9.2} ms  ({n})"),
+    }
 }
 
 fn main() {
