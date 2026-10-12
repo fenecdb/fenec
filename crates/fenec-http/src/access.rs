@@ -856,7 +856,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         );
     }
     let before = match (transition, &filter) {
-        (true, Some(f)) => relaxed(f, &|name| name.starts_with(NEW)),
+        (true, Some(f)) => relaxed(f.clone(), &|name| name.starts_with(NEW)),
         _ => None,
     };
     Ok(Rule {
@@ -879,9 +879,20 @@ const NEW: &str = "new.";
 
 /// Whether `e` reads the row after (`new.<field>`).
 fn names_new(e: &Expr) -> bool {
-    let mut fields = Vec::new();
-    e.referenced_fields(&mut fields);
-    fields.iter().any(|f| f.starts_with(NEW))
+    reads(e, &|name| name.starts_with(NEW))
+}
+
+/// Whether `e` reads a field `which` names, outside an inner `get` (a
+/// rule holds none). A walk of its own rather than `referenced_fields`,
+/// which copies every name: asked of a `set ... returning`'s read rules
+/// each statement, the copies were most of what `answerable` cost.
+fn reads(e: &Expr, which: &dyn Fn(&str) -> bool) -> bool {
+    if let Expr::Field(f) = e {
+        return which(f);
+    }
+    let mut any = false;
+    e.each_child(&mut |c| any = any || reads(c, which));
+    any
 }
 
 /// `e` as a row that cannot answer every term of it answers it: each term
@@ -891,15 +902,19 @@ fn names_new(e: &Expr) -> bool {
 /// odd one, and the `and`s and `or`s it decides worked out. What is left
 /// admits every row `e` admits, whatever those terms come to, so it picks
 /// rows without leaving one out; the terms are asked once they can be, of
-/// each row as it is written. `None` where nothing is left to ask.
-fn relaxed(e: &Expr, unseen: &dyn Fn(&str) -> bool) -> Option<Expr> {
+/// each row as it is written. `None` where nothing is left to ask. Taken
+/// by value: a filter reading none of them is handed back as it came.
+fn relaxed(e: Expr, unseen: &dyn Fn(&str) -> bool) -> Option<Expr> {
+    if !reads(&e, unseen) {
+        return Some(e);
+    }
     match loosened(e, true, unseen) {
         Expr::Lit(Value::Bool(true)) => None,
         e => Some(e),
     }
 }
 
-fn loosened(e: &Expr, pass: bool, unseen: &dyn Fn(&str) -> bool) -> Expr {
+fn loosened(e: Expr, pass: bool, unseen: &dyn Fn(&str) -> bool) -> Expr {
     let known = |e: &Expr| match e {
         Expr::Lit(Value::Bool(b)) => Some(*b),
         _ => None,
@@ -907,7 +922,7 @@ fn loosened(e: &Expr, pass: bool, unseen: &dyn Fn(&str) -> bool) -> Expr {
     let is = |b: bool| Expr::Lit(Value::Bool(b));
     match e {
         Expr::And(a, b) => {
-            let (a, b) = (loosened(a, pass, unseen), loosened(b, pass, unseen));
+            let (a, b) = (loosened(*a, pass, unseen), loosened(*b, pass, unseen));
             match (known(&a), known(&b)) {
                 (Some(false), _) | (_, Some(false)) => is(false),
                 (Some(true), _) => b,
@@ -916,7 +931,7 @@ fn loosened(e: &Expr, pass: bool, unseen: &dyn Fn(&str) -> bool) -> Expr {
             }
         }
         Expr::Or(a, b) => {
-            let (a, b) = (loosened(a, pass, unseen), loosened(b, pass, unseen));
+            let (a, b) = (loosened(*a, pass, unseen), loosened(*b, pass, unseen));
             match (known(&a), known(&b)) {
                 (Some(true), _) | (_, Some(true)) => is(true),
                 (Some(false), _) => b,
@@ -925,20 +940,14 @@ fn loosened(e: &Expr, pass: bool, unseen: &dyn Fn(&str) -> bool) -> Expr {
             }
         }
         Expr::Not(a) => {
-            let a = loosened(a, !pass, unseen);
+            let a = loosened(*a, !pass, unseen);
             match known(&a) {
                 Some(b) => is(!b),
                 None => Expr::Not(Box::new(a)),
             }
         }
-        e => {
-            let mut fields = Vec::new();
-            e.referenced_fields(&mut fields);
-            match fields.iter().any(|f| unseen(f)) {
-                true => is(pass),
-                false => e.clone(),
-            }
-        }
+        e if reads(&e, unseen) => is(pass),
+        e => e,
     }
 }
 
@@ -1167,9 +1176,12 @@ impl Scope {
         }
     }
 
-    /// Whether the token may read `collection` at all.
+    /// Whether the token may read `collection` at all: a rule granting
+    /// `read` there, its filter not made -- every scoped write asks.
     pub fn readable(&self, collection: &str) -> bool {
-        self.filter(collection, READ).is_some()
+        self.rules
+            .iter()
+            .any(|r| r.ops & READ != 0 && r.collection.as_deref().is_none_or(|c| c == collection))
     }
 
     /// Whether any rule grants the token anything on `collection`: one
@@ -1304,7 +1316,7 @@ impl Scope {
         }
         let read = self.filter(collection, READ).flatten();
         match (set, read) {
-            (Some(set), Some(read)) => and(f, Self::answerable(&read, set)),
+            (Some(set), Some(read)) => and(f, Self::answerable(read, set)),
             (_, read) => and(f, read),
         }
     }
@@ -1317,10 +1329,14 @@ impl Scope {
     /// answer. The terms over the fields it leaves alone are what they will
     /// be after, and pass over a row the token will not be able to read
     /// whatever the `set` writes, as a `get` passes it over.
-    fn answerable(read: &Expr, set: &[(String, Expr)]) -> Option<Expr> {
-        let field = |name: &str| name.split('.').next().unwrap_or(name).to_string();
-        let written: Vec<String> = set.iter().map(|(k, _)| field(k)).collect();
-        relaxed(read, &|name| written.contains(&field(name)))
+    fn answerable(read: Expr, set: &[(String, Expr)]) -> Option<Expr> {
+        // A path is its field's: `meta.owner` is written by `{meta: ...}`.
+        fn field(name: &str) -> &str {
+            name.split('.').next().unwrap_or(name)
+        }
+        relaxed(read, &|name| {
+            set.iter().any(|(k, _)| field(k) == field(name))
+        })
     }
 
     /// The statement as this token may run it, or why it may not.
@@ -1547,19 +1563,37 @@ impl Scope {
     /// Whether `doc`, as `op` would write it to `collection`, is one this
     /// token may write: an insert's by the rules granting `insert`, an
     /// update's by those granting `update`.
+    ///
+    /// The rules are asked one after another, as the `or` of their filters
+    /// [`Self::filter`] makes would be, without making it: a copy of each
+    /// filter a write, twice for an update, was a third of what a scoped
+    /// `set` cost beside the server's token's.
     fn admits(&self, schema: &Schema, op: u8, doc: &Document, registry: &Registry) -> Result<bool> {
-        match self.filter(&schema.name, op) {
-            None => Ok(false),
-            Some(None) => Ok(true),
-            Some(Some(f)) => {
-                let ctx = EvalCtx {
-                    params: &[],
-                    registry,
-                    clock: None,
-                };
-                Ok(truthy(&eval(&f, &mut Written(doc, schema), &ctx)?))
+        let name = schema.name.as_str();
+        if op & (UPDATE | DELETE) != 0 && self.append_only(name) {
+            return Ok(false);
+        }
+        let granting = || {
+            self.rules.iter().filter(move |r| {
+                r.ops & op != 0 && r.collection.as_deref().is_none_or(|c| c == name)
+            })
+        };
+        if granting().any(|r| r.using().is_none()) {
+            return Ok(true);
+        }
+        let ctx = EvalCtx {
+            params: &[],
+            registry,
+            clock: None,
+        };
+        for r in granting() {
+            if let Some(f) = r.using() {
+                if truthy(&eval(f, &mut Written(doc, schema), &ctx)?) {
+                    return Ok(true);
+                }
             }
         }
+        Ok(false)
     }
 }
 
@@ -2129,7 +2163,7 @@ mod tests {
         };
         let values = [Value::Int(0), Value::Int(1), Value::Null];
         for e in &every {
-            let loose = relaxed(e, &|name| name.starts_with(NEW));
+            let loose = relaxed(e.clone(), &|name| name.starts_with(NEW));
             for k in 0..81 {
                 let v = |i: u32| values[(k / 3usize.pow(i)) % 3].clone();
                 let mut row = Row([v(0), v(1), v(2), v(3)]);
