@@ -2006,7 +2006,8 @@ busy workers beside 16 claims 149 000-167 000 jobs a second against
 of another collection beside 150 claims 23 us either way, a delayed job
 p99 0.0 ms after its time against 1.5-2.2, and a thousand held claims
 use no CPU and 46 KB each against 63, their threads no longer each
-running a pick.
+running a pick. `fenec-server` grew 16.2 KB (aarch64-apple-darwin), and
+the browser module not by a byte: `wake.rs` is native only.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
