@@ -1955,7 +1955,7 @@ struct RedisClient {
 /// map under RESP3.
 fn redis_pairs(v: &redis::Value) -> Vec<(&redis::Value, &redis::Value)> {
     match v {
-        redis::Value::Array(a) => a.chunks_exact(2).map(|p| (&p[0], &p[1])).collect(),
+        redis::Value::Array(a) => a.as_chunks::<2>().0.iter().map(|[k, v]| (k, v)).collect(),
         redis::Value::Map(m) => m.iter().map(|(k, v)| (k, v)).collect(),
         _ => Vec::new(),
     }
