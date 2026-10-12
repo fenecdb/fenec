@@ -250,6 +250,33 @@ impl Set {
     }
 }
 
+/// The part of a node's connections each tenant's streams, and each
+/// tenant's held writes, may take where the node sets no quota of either
+/// ([`shared`]): a quarter each, so that no one tenant's dashboards and
+/// workers together hold more than half of what every tenant shares.
+pub const SHARE: usize = 4;
+
+/// A node's quota with each tenant's streams and held writes bounded by a
+/// share of its `max_connections` where the node's flags set neither
+/// (`given` the kinds they set; 0 among them is none, as given). Every
+/// stream and every held write is a connection -- a thread -- and the
+/// node's `--max-connections` is the one bound every tenant shares:
+/// `--http-max-streams` counts a database's subscriptions, so a tenant's
+/// own on a `--dir` node, and nothing bounded a tenant's held writes, so
+/// 100 workers of one tenant waiting for jobs took every connection of a
+/// default node and its other tenants were answered 503. A node with no
+/// ceiling of connections (0) has nothing to share.
+pub fn shared(q: Quota, given: &[Kind], max_connections: usize) -> Quota {
+    if max_connections == 0 {
+        return q;
+    }
+    let share = (max_connections / SHARE).max(1) as u64;
+    [Kind::Streams, Kind::Held]
+        .into_iter()
+        .filter(|k| !given.contains(k))
+        .fold(q, |q, k| q.with(k, share))
+}
+
 /// A size as a flag gives one: bytes, or a number and `K`, `M`, `G` or `T`
 /// (powers of 1024), `B` and `iB` allowed after.
 pub fn size(text: &str) -> Option<u64> {
@@ -805,6 +832,20 @@ mod tests {
             body.contains(r#""retry_after":3,"retry_after_ms":2200"#),
             "{body}"
         );
+    }
+
+    /// A node that sets no quota of streams or of held writes gives each
+    /// tenant a quarter of its connections of each; one it sets, 0 among
+    /// them, stands; a node with no ceiling shares nothing.
+    #[test]
+    fn a_tenants_waits_default_to_a_share_of_the_nodes_connections() {
+        let q = shared(Quota::default(), &[], 100);
+        assert_eq!((q.get(Kind::Streams), q.get(Kind::Held)), (25, 25));
+        let set = Quota::default().with(Kind::Streams, 0);
+        let q = shared(set, &[Kind::Streams], 100);
+        assert_eq!((q.get(Kind::Streams), q.get(Kind::Held)), (0, 25));
+        assert_eq!(shared(Quota::default(), &[], 0), Quota::default());
+        assert_eq!(shared(Quota::default(), &[], 2).get(Kind::Held), 1);
     }
 
     #[test]

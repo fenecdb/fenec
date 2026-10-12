@@ -57,8 +57,11 @@ usage: fenec-server [options]
       --tenant-write-bytes-per-sec <size>  each tenant's bytes written a
                             second, charged as each write lands: 429 with
                             Retry-After while it is in debt
-                            Every quota is 0 (none) unless given, and set per
-                            tenant over these with
+                            Every quota is 0 (none) unless given, but for
+                            streams and held writes: a quarter of
+                            --max-connections each, so no one tenant's waits
+                            hold more than half the node's connections. Set
+                            per tenant over these with
                             PUT /_admin/tenants/<t>/quota, which a router
                             sends with the tenant (PUT /_shard/tenants/<t>/quota)
       --warm <all|off|list> build the hash, text, ordered and sparse indexes
@@ -162,10 +165,13 @@ usage: fenec-server [options]
                             (0 = no bound)  default: 20
       --idempotency-ttl <s>  how long a write's Idempotency-Key and answer
                             are kept, in seconds. default: 86400
-      --http-max-streams <n>  ceiling on concurrent subscriptions (0 = unlimited)
+      --http-max-streams <n>  ceiling on a database's concurrent subscriptions,
+                            on a --dir node each tenant's (0 = unlimited)
                             default: 64. Subscriptions (`GET /<name>/changes`)
-                            are long lived and each holds a thread, so they
-                            are counted apart from --max-connections
+                            are long lived and each holds a thread and one of
+                            --max-connections, which every tenant of a node
+                            shares: --tenant-max-streams and
+                            --tenant-max-held bound each tenant's share
       --http-keepalive <s>  keep-alive interval while a subscription is silent
                             default: 20. Proxies drop silent connections
       --changes <n>         entry count of the change ring  default: 4096.
@@ -343,6 +349,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut metrics: Option<String> = None;
     let mut quota = fenec_http::quota::Quota::default();
+    // The quotas the flags set, 0 among them: the rest of streams and held
+    // writes are a share of the node's connections (`quota::shared`).
+    let mut quota_given: Vec<fenec_http::quota::Kind> = Vec::new();
     let mut http_cfg = fenec_http::Config {
         token: std::env::var("FENEC_HTTP_TOKEN")
             .ok()
@@ -430,6 +439,7 @@ fn main() {
                     ))
                 });
                 quota = quota.with(kind, n);
+                quota_given.push(kind);
             }
             "--otlp-endpoint" => tracing.endpoint = Some(next(&mut i, "--otlp-endpoint")),
             "--otlp-header" => {
@@ -797,6 +807,7 @@ fn main() {
                 sync_on_write: sync == SyncPolicy::Always,
             }
         });
+        let quota = fenec_http::quota::shared(quota, &quota_given, http_cfg.max_connections);
         serve_dir(
             &dir,
             http_cfg,
@@ -1028,6 +1039,22 @@ fn serve_dir(
         "serving tenants from: {dir}  ({} on disk)",
         tenants.names().len()
     );
+    {
+        use fenec_http::quota::Kind;
+        let n = |k| match quota.get(k) {
+            0 => "any number".to_string(),
+            n => n.to_string(),
+        };
+        fenec_http::log!(
+            "each tenant may hold {} streams and {} held writes of the node's {} connections",
+            n(Kind::Streams),
+            n(Kind::Held),
+            match http_cfg.max_connections {
+                0 => "unbounded".to_string(),
+                c => c.to_string(),
+            }
+        );
+    }
     // A replica's tenants have to be open to follow: nothing else touches
     // them there, and a follower that is not running is a replica falling
     // behind. Opening one starts its follower -- every tenant on a standby,
