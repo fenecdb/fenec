@@ -432,8 +432,9 @@ impl Router {
             // request and read the answer -- forwarded, the preflight to
             // any of them failed, and the page saw nothing but a network
             // error. It reads nothing and says only what the headers on
-            // every answer say. No refusal count is touched: a preflight
-            // carrying `Authorization` would otherwise clear its address's.
+            // every answer say. No refusal count is touched: it verifies no
+            // token, so a preflight carrying `Authorization` clears nothing
+            // (`audit::verified`), and it is refused for none.
             if req.method == Method::Options
                 && fenec_http::cors::allows(self.cfg.cors.as_deref(), &req)
             {
@@ -657,19 +658,19 @@ impl Router {
         if status >= 500 {
             forwarding.error(status.to_string());
         }
-        // A refusal waits here, by the client's address, before it is
-        // answered -- the node waits none for what the router forwards --
-        // and a token taken starts that address's count again, no other.
-        fenec_http::audit::http(req, status, peer);
         let mut head = format!("HTTP/1.1 {status} {}\r\n", http::reason(status));
         let cors = self.cfg.cors.as_deref();
+        let mut verified = false;
         for (k, v) in &answer.headers {
             // The node answers with the id it was sent; the router's own
             // goes out in its place all the same, which a node from before
             // the ids leaves out. So do the router's CORS headers, where it
             // has its own: a page is told one rule, the one the router's
-            // preflight told it.
-            if !hop_by_hop(k)
+            // preflight told it. Whether the node verified a token is the
+            // router's to know and no one else's.
+            if k.eq_ignore_ascii_case(fenec_http::audit::VERIFIED_HEADER) {
+                verified = true;
+            } else if !hop_by_hop(k)
                 && !k.eq_ignore_ascii_case("content-length")
                 && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
                 && !(cors.is_some() && fenec_http::cors::is_cors_header(k, v))
@@ -680,6 +681,17 @@ impl Router {
         if let Some(origin) = cors {
             fenec_http::cors::push_into(&mut head, origin);
         }
+        // A token the node verified starts the client's count again -- by
+        // its own address, no other -- and the node's word is the only
+        // thing that does: a status says nothing of the token, and a node
+        // answers a preflight, a body over its ceiling or a server asking
+        // no token without looking at one. Then a refusal waits here, by
+        // the client's address, before it is answered: the node waits none
+        // for what the router forwards.
+        if verified {
+            fenec_http::audit::verified();
+        }
+        fenec_http::audit::http(req, status, peer);
         fenec_http::request_id::with(|id| {
             head.push_str(fenec_http::request_id::HEADER);
             head.push_str(": ");
@@ -823,9 +835,11 @@ impl Router {
             .header("authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        (!constant_eq(given.as_bytes(), token.as_bytes())).then(|| {
-            Response::error(401, "invalid or missing token").header("WWW-Authenticate", "Bearer")
-        })
+        if constant_eq(given.as_bytes(), token.as_bytes()) {
+            fenec_http::audit::verified();
+            return None;
+        }
+        Some(Response::error(401, "invalid or missing token").header("WWW-Authenticate", "Bearer"))
     }
 
     /// `GET /_metrics`: the counters ([`metrics`]), what the directory

@@ -803,9 +803,14 @@ impl Replication {
             .header("authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        self.token
+        let ok = self
+            .token
             .as_ref()
-            .is_some_and(|t| constant_eq(given.as_bytes(), t.as_bytes()))
+            .is_some_and(|t| constant_eq(given.as_bytes(), t.as_bytes()));
+        if ok {
+            crate::audit::verified();
+        }
+        ok
     }
 
     /// The writes kept for replicas, which `/_changes` reads too.
@@ -1027,6 +1032,7 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
             head.push_str("\r\n");
         }
     });
+    crate::audit::push_verified(&mut head);
     head.push_str("\r\n");
     let key = fresh_id();
     lock(&repl.streams).push(Stream {

@@ -23,6 +23,16 @@
 //! at most. A token guessed went from as many tries as the round trips
 //! allow to about one every five seconds an address, and a client whose
 //! token is right is not slowed at all.
+//!
+//! **Only a token verified starts the count again** ([`verified`], called
+//! where a token is compared or a JWT's signature checked and found good).
+//! It was inferred from the answer -- any status but 401 to a request
+//! carrying `Authorization` -- and most answers verify nothing: an unknown
+//! path's 404, the studio's files, `/_health`, a preflight, an open
+//! `/_metrics`, a `POST /_whoami`'s 405, a body over the ceiling's 413, a
+//! server that asks for no token at all. A client guessing tokens sent
+//! `GET /nosuch` with any `Authorization` between its guesses and never
+//! waited past the first 100 ms.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -77,7 +87,19 @@ thread_local! {
     // The request this thread serves came through the router, from this
     // client: the router waits out its refusals, keyed by it.
     static ROUTED: std::cell::Cell<Option<IpAddr>> = const { std::cell::Cell::new(None) };
+    // A token of the request this thread serves was verified, and the
+    // router forwarded it: the answer's head says so ([`VERIFIED_HEADER`]),
+    // since the router holds no keys and keeps the client's count.
+    static VERIFIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+/// The header a node's answer to a forwarded request carries when a token
+/// of it was verified ([`verified`]): the router, which holds no keys,
+/// starts its client's count again on it alone. The router reads it only
+/// off a node's answer, over its own connection to the node, and drops it
+/// from what it sends on; a node writes it only on what the router
+/// forwarded ([`ROUTER_HEADER`]'s mark), so a client never sees it.
+pub const VERIFIED_HEADER: &str = "Fenec-Verified";
 
 /// The header a router names a forwarded request's client in: its address
 /// and the router's mark ([`router_mark`]), `<address> <mark>`. One header
@@ -118,6 +140,9 @@ pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr>
         client.parse::<IpAddr>().ok()
     });
     ROUTED.with(|r| r.set(client));
+    // The request before on this connection -- the router's pool hands one
+    // connection to many clients -- verified nothing of this one's.
+    VERIFIED.with(|v| v.set(false));
     client
 }
 
@@ -260,9 +285,9 @@ pub fn statement(tenant: Option<&str>, shape: &str, failed: bool) {
 }
 
 /// An HTTP request answered with `status`: refused for its token (401), it
-/// waits and is logged; one that changes a node's
-/// tenants or a router's placement is logged. A request with a token that
-/// is not refused starts its address's count again.
+/// waits and is logged; one that changes a node's tenants or a router's
+/// placement is logged. Nothing here starts a count again: the status says
+/// nothing of whether a token was verified, and only [`verified`] does.
 pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::SocketAddr>) {
     use crate::http::Method;
     let ip = peer.map(|p| p.ip());
@@ -283,9 +308,6 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
             std::thread::sleep(failed(ip));
         }
         return;
-    }
-    if req.header("authorization").is_some() && ROUTED.with(|r| r.get()).is_none() {
-        succeeded(ip);
     }
     let admin = path.starts_with("/_admin/") || path.starts_with("/_shard/");
     if admin && on() && !matches!(req.method, Method::Get | Method::Head | Method::Options) {
@@ -357,7 +379,37 @@ fn wait(base: u64, n: u32) -> Duration {
     Duration::from_millis(doubled).min(MOST)
 }
 
-/// A token from `peer` was taken: its count starts again.
+/// A token the request this thread serves carries was verified good: the
+/// server's token or a JWT (`authenticate`), the admin token, a
+/// replication token, a scrape's token, a router's own `--token` -- each
+/// where it is compared, never inferred from an answer. Its address's count
+/// starts again ([`succeeded`]); on a node the router forwarded to, which
+/// counts nothing of the client's, the answer tells the router instead
+/// ([`VERIFIED_HEADER`]), and the router calls this for its client.
+///
+/// An address with no count takes no lock: one relaxed load, and a
+/// thread-local's where the request came through the router.
+pub fn verified() {
+    if ROUTED.with(|r| r.get()).is_some() {
+        VERIFIED.with(|v| v.set(true));
+        return;
+    }
+    if FAILING.load(Ordering::Relaxed) > 0 {
+        succeeded(WHO.with(|w| w.borrow().peer).map(|p| p.ip()));
+    }
+}
+
+/// The [`VERIFIED_HEADER`] line, onto an answer's `head`, where a token of
+/// the forwarded request it answers was verified; taken, so the next
+/// request on the connection starts without it.
+pub fn push_verified(head: &mut String) {
+    if VERIFIED.with(|v| v.replace(false)) {
+        head.push_str(VERIFIED_HEADER);
+        head.push_str(": 1\r\n");
+    }
+}
+
+/// A token from `peer` was verified: its count starts again.
 pub fn succeeded(peer: Option<IpAddr>) {
     if let Some(ip) = peer.filter(|_| FAILING.load(Ordering::Relaxed) > 0) {
         let mut map = failures().lock().unwrap_or_else(|e| e.into_inner());

@@ -50,6 +50,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         return Response::error(401, "invalid or missing admin token")
             .header("WWW-Authenticate", "Bearer");
     }
+    crate::audit::verified();
 
     let segs = req.segments();
     let result = match (req.method, &segs[1..]) {

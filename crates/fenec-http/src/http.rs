@@ -443,6 +443,7 @@ impl Response {
                 head.push_str("\r\n");
             }
         });
+        crate::audit::push_verified(&mut head);
         head.push_str("\r\n");
         let body: &[u8] = if head_only { &[] } else { &self.body };
         let mut parts = [IoSlice::new(head.as_bytes()), IoSlice::new(body)];

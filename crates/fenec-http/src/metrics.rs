@@ -292,12 +292,17 @@ pub(crate) fn allowed(cfg: &Config, req: &Request, admin: bool) -> bool {
     let given = req
         .header("authorization")
         .and_then(|v| v.strip_prefix("Bearer "));
-    open || given.is_some_and(|g| {
+    let taken = given.is_some_and(|g| {
         tokens
             .iter()
             .flatten()
             .any(|t| constant_eq(g.as_bytes(), t.as_bytes()))
-    })
+    });
+    // Open, a scrape verifies nothing, whatever it carries.
+    if taken {
+        crate::audit::verified();
+    }
+    open || taken
 }
 
 /// The version running and when the process started, which every

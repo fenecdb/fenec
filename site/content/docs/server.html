@@ -133,7 +133,9 @@ output.</p>
 
 <p>A request refused for its token waits before it is answered — 100 ms,
 twice as long for each refusal from the same address within a minute, 5 s at
-most (<code>--auth-delay</code>; 0 turns it off). <code>--audit
+most (<code>--auth-delay</code>; 0 turns it off). A token the server
+verifies clears its address's count; an answer that looked at no token,
+whatever <code>Authorization</code> it carried, clears nothing. <code>--audit
 &lt;path&gt;</code> appends a JSON line for each refused request, each change
 of the schema and each admin request (<a href="/docs/monitoring#audit">The
 audit log</a>).</p>
