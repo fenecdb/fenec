@@ -496,9 +496,11 @@ as it outgrew 1 MB, under the write lock, held four readers beside blocks of
 buffer, with no fsync, for the caller to run once it has let the lock go,
 as it runs a durability: a server asks after every write that `--sync
 always` does not fsync (`flush_for`), the buffer once it holds 64 KB
-(`BEHIND_AT`). A sink asked once leaves its buffer for it from then on, an
-append writing it only past `WRITE_HELD`, should the writes behind fall
-back. A handover writes what is pending, so for a database written behind
+(`BEHIND_AT`). It passes over a disk a durability holds (`try_lock`), whose
+fsync writes the bytes anyway: waiting, a ledger's transfer beside the
+syncer's `F_FULLFSYNC` took 126 ms, where it had touched no disk. A sink
+asked once leaves its buffer for it from then on, an append writing it
+only past `WRITE_HELD`, should the writes behind fall back. A handover writes what is pending, so for a database written behind
 it is put off to the next block's start (`hand_over_before`), where the
 write behind -- every byte, once a handover is due -- left nothing pending,
 and runs at the end of a block only past twice its bounds: written there,
