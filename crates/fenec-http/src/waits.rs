@@ -115,7 +115,13 @@ struct State {
     /// The tenant was closed on this node -- moved, deleted -- and every
     /// held request is answered 503, to come back through the router.
     closed: bool,
+    /// In the order their heads came, the longest held first: the first
+    /// still to bid is the one a tie could go to ([`settle`]), and a
+    /// write wakes the heads in that order.
     groups: Vec<Group>,
+    /// Groups whose tests rank rows by their own order (`near`): while any
+    /// waits, a round settles only once every group has looked.
+    ranked: usize,
     next: u64,
     /// Writes announced so far ([`Waits::wrote`]).
     writes: u64,
@@ -552,6 +558,7 @@ impl<'h> Ticket<'h> {
                 st.next += 1;
                 let id = st.next;
                 let ranked = plan.tests.iter().any(|t| t.near.is_some());
+                st.ranked += usize::from(ranked);
                 st.groups.push(Group {
                     id,
                     tests: Arc::new(plan.tests),
@@ -647,19 +654,34 @@ impl<'h> Ticket<'h> {
                     match look.found {
                         Some((row, rank)) => {
                             g.quiet = None;
-                            g.bid = Some(Bid {
-                                row,
-                                rank,
-                                joined: self.turn.joined,
+                            let (seen, joined) = (g.seen, self.turn.joined);
+                            let gone = row.is_some()
+                                && st.gone.iter().any(|(r, at)| *r == row && seen < *at);
+                            let taker = row.as_ref().and_then(|_| {
+                                st.taken.iter().find(|(r, _)| *r == row).map(|(_, w)| *w)
                             });
-                            // The writes announced by now, not as it began:
-                            // a look waits for the read lock, and reads what
-                            // landed meanwhile. Held to its start, a bid for
-                            // a job announced while it waited set a horizon
-                            // the claim held longest had looked past, and
-                            // the job went to the bidder.
-                            let writes = st.writes;
-                            st.horizon.get_or_insert(writes);
+                            let g = group(&mut st, self.group);
+                            if gone {
+                                // A run took it after this look began: it
+                                // looks again rather than run for nothing.
+                                g.now = true;
+                            } else if let Some(taker) = taker {
+                                // Given already, its run under way: behind
+                                // it at once, no round to wait for.
+                                g.behind = Some(taker);
+                                g.line = rank.is_none().then_some(joined);
+                            } else {
+                                g.bid = Some(Bid { row, rank, joined });
+                                // The writes announced by now, not as it
+                                // began: a look waits for the read lock, and
+                                // reads what landed meanwhile. Held to its
+                                // start, a bid for a job announced while it
+                                // waited set a horizon the claim held
+                                // longest had looked past, and the job went
+                                // to the bidder.
+                                let writes = st.writes;
+                                st.horizon.get_or_insert(writes);
+                            }
                         }
                         None => {
                             g.quiet = Some(Instant::now() + LOOK_GAP);
@@ -736,28 +758,42 @@ impl<'h> Ticket<'h> {
                 g.running = false;
             }
             if g.queue.is_empty() {
-                // Kept in the order they came, so a write wakes the heads
-                // held longest first: the one a tie goes to looks soonest.
-                st.groups.remove(i);
+                let g = st.groups.remove(i);
+                st.ranked -= usize::from(g.ranked);
             } else if was_head {
                 g.now |= hand_on || held;
                 if let Some(next) = g.queue.front() {
                     next.cv.notify_one();
                 }
+                // Its next head came later: the group goes where that puts
+                // it, so the order stays the heads'.
+                let g = st.groups.remove(i);
+                let joined = g.queue.front().map(|t| t.joined);
+                let at = st
+                    .groups
+                    .partition_point(|o| o.queue.front().map(|t| t.joined) <= joined);
+                st.groups.insert(at, g);
             }
             if was_head {
-                // Its run took what it was given: a bid for that from a
-                // look begun before is stale.
+                // Its run took what it was given: a look begun before then
+                // that finds it is stale, and looks again.
                 if hand_on {
                     let writes = st.writes;
                     let id = self.group;
-                    let took: Vec<Row> = st
-                        .taken
-                        .iter()
-                        .filter(|(_, g)| *g == id)
-                        .map(|(r, _)| r.clone())
-                        .collect();
-                    st.gone.extend(took.into_iter().map(|r| (r, writes)));
+                    let state = &mut *st;
+                    let groups = &state.groups;
+                    state
+                        .gone
+                        .retain(|(_, at)| groups.iter().any(|g| g.looking && g.seen < *at));
+                    if st.groups.iter().any(|g| g.looking && g.seen < writes) {
+                        let took: Vec<Row> = st
+                            .taken
+                            .iter()
+                            .filter(|(r, g)| *g == id && r.is_some())
+                            .map(|(r, _)| r.clone())
+                            .collect();
+                        st.gone.extend(took.into_iter().map(|r| (r, writes)));
+                    }
                 }
                 release(&mut st, self.group);
             }
@@ -799,89 +835,56 @@ pub fn answered() {
 /// wait behind that run; a row given already, its run not ended, keeps
 /// every bidder for it behind that run.
 fn settle(st: &mut State) {
-    // A bid for a row a run took after its look began looks again; a row
-    // is kept while a look begun before its run took it may bid for it.
-    if !st.gone.is_empty() {
-        let gone = std::mem::take(&mut st.gone);
-        for g in &mut st.groups {
-            let stale = g
-                .bid
-                .as_ref()
-                .is_some_and(|b| gone.iter().any(|(row, at)| *row == b.row && g.seen < *at));
-            if stale {
-                g.bid = None;
-                g.now = true;
-                if let Some(head) = g.queue.front() {
-                    head.cv.notify_one();
-                }
+    let horizon = st.horizon.unwrap_or(st.writes);
+    let (now, instant) = (now_us() / 1000, Instant::now());
+    // The groups are in the order their heads came: the first still to bid
+    // -- looking, woken and yet to look, or behind a run, which bids once
+    // it ends -- is the one held longest of them, and a bid ahead of it is
+    // one no bid to come can beat on a tie. Asked at every look, so the
+    // scan stops there: a full one, and a sort, at every look held the
+    // mutex every look waits for through a thousand of each when a job
+    // came to a thousand claims.
+    let mut first = None;
+    let mut ahead = false;
+    for (i, g) in st.groups.iter().enumerate() {
+        if g.looking || g.owes(horizon, now) || g.behind.is_some() {
+            first = Some(i);
+            break;
+        }
+        ahead |= g.bid.is_some();
+    }
+    if let Some(i) = first {
+        // A head in its gap holds the round up: its gap ends, as a bid
+        // waits for it -- kept, a job to claims that had looked a moment
+        // before waited out the gap, the round with it.
+        let g = &mut st.groups[i];
+        if g.owes(horizon, now) && g.quiet.is_some_and(|q| instant < q) {
+            g.quiet = None;
+            if let Some(head) = g.queue.front() {
+                head.cv.notify_one();
             }
         }
-        st.gone = gone;
-        let groups = &st.groups;
-        st.gone
-            .retain(|(_, at)| groups.iter().any(|g| g.looking && g.seen < *at));
-    }
-    // No bid waits: the next is the first of a round of its own. Kept from
-    // a round whose bids were all dropped as stale, a horizon below the
-    // next round's write let the claim held longest, which had looked past
-    // it, go unwaited for, and the job to whichever claim bid first.
-    if !st.groups.iter().any(|g| g.bid.is_some()) {
+        // Nothing ahead of it, or a group ranking rows its own way among
+        // those to come, which every bid waits for.
+        if !ahead || st.ranked > 0 {
+            return;
+        }
+    } else if !ahead {
+        // No bid waits: the next is the first of a round of its own. Kept
+        // from a round whose bids were all dropped as stale, a horizon
+        // below the next round's write let the claim held longest, which
+        // had looked past it, go unwaited for, and the job to whichever
+        // claim bid first.
         st.horizon = None;
         return;
     }
-    let horizon = st.horizon.unwrap_or(st.writes);
-    let (now, instant) = (now_us() / 1000, Instant::now());
-    // Who is yet to bid: the head held longest of them, and whether any
-    // ranks rows by its own order. A group behind a run bids once it ends:
-    // passed over, the claim second in a burst's line lost the second job
-    // to a claim that came after it and looked while it waited.
-    let (mut first, mut ranked, mut gapped) = (None::<Instant>, false, false);
-    for g in &st.groups {
-        let owes = g.owes(horizon, now);
-        if g.looking || owes || g.behind.is_some() {
-            ranked |= g.ranked;
-            if let Some(t) = g.queue.front() {
-                first = Some(first.map_or(t.joined, |f| f.min(t.joined)));
-            }
-        }
-        gapped |= owes && g.quiet.is_some_and(|q| instant < q);
-    }
-    // A bid waiting for a head in its gap ends the gap: kept, a job to
-    // claims that had looked a moment before waited out the gap, the
-    // round with it.
-    if gapped {
-        for g in &mut st.groups {
-            if g.owes(horizon, now) && g.quiet.is_some_and(|q| instant < q) {
-                g.quiet = None;
-                if let Some(head) = g.queue.front() {
-                    head.cv.notify_one();
-                }
-            }
-        }
-    }
     // A row settles once no bid to come could beat its best: none is to
-    // come, or each would be a tie's from a head held after the best. A
-    // job of a queue every claim orders alike goes to the claim held
-    // longest as soon as that claim has looked: waiting for every look,
-    // a job to 1 000 claims held, each a group of its own, waited for the
-    // slowest of a thousand.
+    // come, or each would be a tie's from a head held after the best.
+    let first = first.and_then(|i| st.groups[i].queue.front().map(|t| t.joined));
     let settles = |b: &Bid| match first {
         None => true,
-        Some(first) => !ranked && b.rank.is_none() && b.joined < first,
+        Some(first) => b.rank.is_none() && b.joined < first,
     };
-    // Asked of every look's settle, so most often the answer is no: each
-    // bid a scan of the given rows, before any bid is sorted -- sorted at
-    // every look, a job to a thousand claims held the mutex every look
-    // waits for through a thousand sorts.
-    let taken = |b: &Bid| b.row.is_some() && st.taken.iter().any(|(r, _)| *r == b.row);
-    let due = st
-        .groups
-        .iter()
-        .filter_map(|g| g.bid.as_ref())
-        .any(|b| settles(b) || taken(b));
-    if !due {
-        return;
-    }
     let mut bidders: Vec<usize> = (0..st.groups.len())
         .filter(|&i| st.groups[i].bid.is_some())
         .collect();

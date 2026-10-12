@@ -856,7 +856,9 @@ fn contested(n: usize) {
     let mut hs = Vec::with_capacity(n);
     // The workers in the order they sent their claims, the longest held
     // first: a claim whose wait ran out is sent again, to the back.
-    let order = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(n)));
+    let order = Arc::new(std::sync::Mutex::new(
+        std::collections::VecDeque::with_capacity(n),
+    ));
     for w in 0..n {
         let addr = addr.clone();
         let tx = tx.clone();
@@ -894,6 +896,11 @@ fn contested(n: usize) {
     let (cpu0, _, _) = usage(server.pid());
     let (mut lat, mut longest) = (Vec::with_capacity(jobs), 0);
     for _ in 0..jobs {
+        // Past the gap a claim that found nothing keeps between two looks
+        // (`LOOK_GAP`, a millisecond): a job put the moment the last was
+        // taken meets the claims that looked for it in their gap, and is
+        // taken as the gap ends, whoever arbitrates it.
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let first = order.lock().unwrap().front().copied();
         c.query(
             "put jobs {kind: \"mail\", sent: $1, run_at: now(), attempts: 0}",
