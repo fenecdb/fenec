@@ -7726,9 +7726,9 @@ impl Database {
     ) -> Result<Option<Vec<DocId>>> {
         // A key worked out of the row walks no index of a field's, but the
         // distance from a point one of a point's -- natively: a page's
-        // module sorts the distances, the same rows, where the walk was
-        // WALKED_DISTANCE bytes of it for a speed its few thousand rows do
-        // not need.
+        // module sorts the distances, the same rows, where the walk and
+        // its call were 1.9 KB of it, 0.9 KB brotli, for a speed its few
+        // thousand rows do not need.
         if let Some(i) = sel.order.iter().position(|s| s.expr.is_some()) {
             return match (&sel.order[..], &sel.order[i].expr) {
                 ([s], Some(e)) if !cfg!(target_arch = "wasm32") => {
