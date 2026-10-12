@@ -63,7 +63,9 @@ impl Loose {
 /// most 10 000 rows: FiQA's 80 426 words hold no prefix of one letter
 /// reaching more (`s` reaches 7 020, `co` 2 245, `con` 794), so a search
 /// box is refused only at a first letter over a larger vocabulary. Each
-/// word reached is a list merged into its word's, `make fuzzy-bench`.
+/// word reached is a list merged into its word's: over 100 000 documents of
+/// 60 000 made-up words a word's first two letters took 3.0 ms, its first
+/// three 0.44 (`make fuzzy-bench`).
 pub const MAX_EXPANSIONS: usize = 10_000;
 
 /// What a word found near a query's word counts for, by its distance: one

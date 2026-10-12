@@ -14,11 +14,14 @@
 //! the row, only the characters it holds near that depth are looked for.
 //!
 //! Measured over FiQA's and SciFact's 99 558 words, 3 000 query words each
-//! with a typo: this walk 39 us a word at one edit and 396 at two, 1.2 MB;
-//! SymSpell's deletions 9.4 us, but 303.6 MB and 2.0 s to build; an index of
-//! the words' trigrams 8.4 MB and 316 us, and no prefixes; every word read
-//! with the bounded table, 4.3 ms. The same walk over a `Box<str>` a word
-//! was 2.4 MB, and 25% slower for the pointer each comparison followed.
+//! with a typo, against what else finds the words near one: SymSpell's
+//! deletions answered in 9.4 us a word, but took 303.6 MB and 2.0 s to
+//! build; an index of the words' trigrams 8.4 MB and 316 us, and finds no
+//! prefixes; every word read with the bounded table, 4.3 ms. This walk,
+//! over FiQA's 135 500 words in 1.9 MB: 14 us a word at one edit, 120 at
+//! two, a prefix's words in 4 (`make fuzzy-bench`). Over a `Box<str>` a
+//! word it took twice the memory and was 25% slower, for the pointer each
+//! comparison followed; comparing through `memcmp`, a third slower.
 //!
 //! **The distance is Damerau's, restricted** -- optimal string alignment:
 //! two letters swapped are one edit, as a letter added, dropped or changed
@@ -29,8 +32,8 @@
 //! default to. **An edit that touches a word's first character counts two**,
 //! as Meilisearch counts it: a first letter is mistyped least often (7% of
 //! misspellings in Pollock and Zamora's 50 000), and allowing it at one edit
-//! makes every first letter a branch to walk -- the walk went 186 -> 790 us
-//! a word, finding 9% more, mostly words no one meant.
+//! makes every first letter a branch to walk -- 4.6 times the nodes, for 9%
+//! more words found, mostly words no one meant.
 
 #![cfg_attr(not(feature = "text"), allow(dead_code))]
 

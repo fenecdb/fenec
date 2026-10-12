@@ -31,7 +31,7 @@ put &lt;name&gt; { ... } if absent else set { n: n + new.n }   -- an upsert: the
 put &lt;name&gt; $1 [if absent ...]                -- the documents a parameter holds: an object, or a list of them
 get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
-           [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
+           [match &lt;field&gt; &lt;text&gt; [fuzzy [N]] [prefix]] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
            [fuse [k N] [candidates N]]             -- match and near, both ranking
            [order &lt;key&gt; [collate und|tr] [asc|desc], ...] [limit N] [offset N]   -- N or a parameter, $2
                                                    -- a key: a field, or an expression, distance(loc, $1)
@@ -126,12 +126,13 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Ordering</b></td><td><code>order year desc, title asc</code> — a tie on the first key is decided by the second; <code>id</code> can be ordered too; a key may be any expression over the row, <code>order distance(loc, $1)</code>, <code>order price * qty desc</code> (see <a href="#order-by-expression">Ordering by an expression</a>); <code>order name collate und</code> puts text in Unicode's order for every language and <code>collate tr</code> in Turkish order, and a field declared <code>name text collate und</code> is in it wherever it compares — see <a href="#collation">Collation</a></td></tr>
 <tr><td><b>Picking</b></td><td><code>set … order run_at limit 10 returning *</code> writes the rows a <code>get</code> with the clauses answers and hands them back, as written; <code>del … returning</code> as they were; <code>insert … returning id</code> the rows it made — see <a href="#pick">Writes that pick their rows</a></td></tr>
 <tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
+<tr><td><b>Typos</b></td><td><code>match body $1 fuzzy</code> matches each word within the edits its length allows, a word as typed ranking first; <code>prefix</code> matches the last word as the start of one, as a search box is typed into — see <a href="#typos">Typos and words begun</a></td></tr>
 <tr><td><b>Highlights</b></td><td><code>highlight(body)</code> and <code>snippet(body, 20)</code> in the select list mark the words a <code>match</code> found, as UTF-16 offsets or between tags you pass — see <a href="#highlights">Highlights and snippets</a></td></tr>
 <tr><td><b>Facets</b></td><td><code>facet brand, color top 10</code> counts each value over every row the query matches, beside the page — see <a href="#facets">Facets</a></td></tr>
 <tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
 <tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>count(distinct …)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> <code>first(… by …)</code> <code>last(… by …)</code> <code>approx_count_distinct</code> <code>hll_accumulate</code> <code>hll_combine</code> over fields, paths or expressions, whole or per <code>group</code> of one key or several, the groups kept by <code>having</code> — see <a href="#aggregates">Aggregates</a> and the <a href="/docs/analytics">analytics and market-data recipes</a></td></tr>
 <tr><td><b>Columns</b></td><td><code>select px * qty as notional</code>: an expression over the row, named with <code>as</code> — see <a href="#columns">Columns worked out</a></td></tr>
-<tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>, a parameter's as a number written), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; expression depth 512 levels; a <code>json</code> value 64 levels deep, a path 64 keys; <code>in (get …)</code> 100 000 values and 4 levels — see <a href="limits.html">Limits</a></td></tr>
+<tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>, a parameter's as a number written), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; a word of a <code>fuzzy</code> or <code>prefix</code> <code>match</code> 10 000 words of the index; expression depth 512 levels; a <code>json</code> value 64 levels deep, a path 64 keys; <code>in (get …)</code> 100 000 values and 4 levels — see <a href="limits.html">Limits</a></td></tr>
 </tbody>
 </table>
 </div>
@@ -264,6 +265,83 @@ all. <code>candidates</code> sets how many of the matched rows are rescored
   same vectors, and on FiQA 1 000 candidates come within 0.0001 of the full scan —
   each while scoring under 2% of the corpus. If the lexical stage cannot find
   the answer at all, no amount of reranking will.</p>
+</div>
+</details>
+
+<h2 id="typos">Typos and words begun</h2>
+
+<p><code>fuzzy</code> lets a word of a <code>match</code> find the words a
+typo or two away from it, and <code>prefix</code> lets the last word find
+the words it begins — what a search box needs as someone types into it.</p>
+
+<pre data-lang="fenecql">get products match title $1 fuzzy limit 10             -- "databse" finds "database"
+get products match title $1 prefix limit 10            -- "datab" finds "database", "databases"
+get products match title $1 fuzzy prefix limit 10      -- both, the last word a misspelt beginning
+get products match title $1 fuzzy 1 limit 10           -- one edit at most
+</pre>
+
+<ul>
+  <li><b>A word's length decides its edits</b>: none under 5 characters,
+    one from 5 to 8, two from 9. <code>fuzzy 1</code> allows one at most,
+    <code>fuzzy 0</code> none.</li>
+  <li><b>A word as typed ranks first.</b> A document holding the word
+    itself scores more from it than one holding only a word near it.</li>
+  <li><b>A word reaches 10 000 words of the index at most</b>, and the query
+    is refused past that rather than cut — a prefix of one letter over a
+    large vocabulary is.</li>
+  <li><b><code>highlight()</code> and <code>snippet()</code> mark what was
+    found</b>: <code>databse</code> marks <code>database</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>An edit is a letter added, dropped, changed, or two letters next to
+each other swapped — Damerau's distance in its restricted form, as Lucene,
+Elasticsearch and Meilisearch count it: the four are what Damerau found
+four misspellings in five to be, and a swap counted as two edits would put
+a five-letter word with one out of reach. An edit that touches a word's first letter counts two, as
+Meilisearch counts it: a first letter is rarely the mistyped one, and
+letting it be multiplies what is found by words no one meant. The bounds by
+length are Meilisearch's too: a short word has too many neighbours —
+<code>cart</code> is one letter from <code>card</code>, <code>care</code>,
+<code>cars</code>, <code>cat</code> and <code>art</code>. Words are folded
+as the index folds them before they are compared, so
+<code>İSTANBL</code> finds <code>istanbul</code>. Only the last word is a
+prefix; the words before it are whole.</p>
+
+<p>The words a word reaches count as one term of the query, a document's
+counts of them summed, so BM25's saturation holds over them as over a word
+written three times, and the term's rarity is theirs together — a rare
+misspelling in the corpus ranks no higher than the word it misspells. A
+word one edit away, or one a prefix begins, counts as the word would; two
+edits away, a quarter as much. Where the index holds the word as typed,
+its variants together are kept below the least it adds to a document, so a
+one-word query ranks every document holding it above every document
+holding only what is near it. Measured on BEIR with one typo put into each
+query, a word one edit away was the word meant and two edits away as often
+another word, which the weights follow.</p>
+
+<p>The words are found in a sorted copy of the index's words, made the
+first time a <code>match</code> asks for <code>fuzzy</code> or
+<code>prefix</code> and kept up by every write after it, as the index is:
+derived, never in the file. A prefix is a range of it; the words within a
+few edits are found by walking it as the tree of prefixes it is, giving a
+branch up once no word below it can be near enough. Over 100 000 documents
+of 60 000 words, sorting them took 6 ms and 1.3 MB; finding a word's
+neighbours over FiQA's 135 500 words, 14 µs at one edit and 120 at two, its
+completions 4 µs.</p>
+
+<div class="note">
+  <p><b>Measured on BEIR</b>, nDCG@10 (<code>make beir</code>), one
+  realistic typo put into a word of each query — a letter dropped, a key
+  beside it typed as well or instead, or two letters swapped, the first
+  letter 7% of the time:
+  SciFact's queries as written score 0.662 and 0.665 with
+  <code>fuzzy</code>; with the typo 0.636, and 0.663 with
+  <code>fuzzy</code>. FiQA's 0.232 and 0.233; with the typo 0.213, and
+  0.229. With each query's last word half typed, <code>prefix</code> takes
+  SciFact from 0.616 to 0.655 and FiQA from 0.188 to 0.208, and leaves the
+  queries written whole where they were. See <a
+  href="benchmarks.html#typos">the whole table</a>.</p>
 </div>
 </details>
 
