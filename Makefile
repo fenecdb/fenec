@@ -685,9 +685,10 @@ subquery-bench:
 ## Expressions, `group` by several keys and by `bucket`, `count(distinct)`,
 ## `first`/`last`: a million events and a million ticks, each question as one
 ## query against the queries a client sent before; then the fixed aggregates
-## of before (`analytics old` asks only those, for another commit).
+## of before (`ARGS=old` asks only those, for another commit; `ARGS=writes`
+## and `ARGS=folds` the write and lookup-fold parts).
 analytics-bench:
-	$(CARGO) run --release -p fenec-core --example analytics
+	$(CARGO) run --release -p fenec-core --example analytics -- $(ARGS)
 
 ## `@ttl`: reads of a million rows half past their time against the same
 ## rows with no expiry and with the expiry written out by hand, then a
