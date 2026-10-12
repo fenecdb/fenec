@@ -49,8 +49,9 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
 - A `[]float32` goes out as the decimals that read back as each `f32`, so a vector round-trips to the bit.
 
 - The builder's options are functional: `Ef`, `Exact`, `K`, `Candidates`, `Collate`, `All`, and `On`, `ParentKey`,
-  `Select`, `Where`, `Required`, `Sort`, `Limit`, `Offset` for `Lookup`. An object condition is `Fields` and `Ops`,
-  names and values in turn, and a document a `D(...)` in its order, a map in its sorted keys, or a struct.
+  `Select`, `Where`, `Required`, `Sort`, `Limit`, `Offset` for `Lookup` -- `On("org", "order"), ParentKey("org",
+  "id")` a key over several fields. An object condition is `Fields` and `Ops`, names and values in turn, and a
+  document a `D(...)` in its order, a map in its sorted keys, or a struct.
 - `Facet(field, Ranges(0, 25, 50))` counts by ranges of numbers, each value `[from, to]`; `Disjunctive()` counts past
   the filter's own condition on the field, as a shop's filter list does.
 - Aggregates go in `Select` as FenecQL spells them (`"count(*)"`, `"sum(total)"`), and `Group` takes one key or
