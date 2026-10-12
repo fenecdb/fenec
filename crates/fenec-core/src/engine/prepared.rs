@@ -122,8 +122,14 @@ impl Database {
     /// not here, or whose documents fail to build, is left to build as it
     /// runs -- where it fails as it always did.
     pub fn prepare(&self, stmts: &[(&Statement, &[Value])]) -> Prepared {
+        // A document a statement, as a `/batch` of single puts has, and
+        // its payload a few dozen bytes: grown from nothing, the buffers'
+        // copies were 1% of a block of 1 000.
         let mut p = Prepared {
             stmts: Vec::with_capacity(stmts.len()),
+            docs: Vec::with_capacity(stmts.len()),
+            payloads: Vec::with_capacity(stmts.len() * 32),
+            ends: Vec::with_capacity(stmts.len()),
             ..Prepared::default()
         };
         for (s, params) in stmts {
@@ -144,10 +150,9 @@ impl Database {
             return None;
         };
         let c = self.collections.get(collection)?;
-        // Refused as it runs, and building nothing for it.
-        if self.refuse_inexact(stmt, params).is_err() {
-            return None;
-        }
+        // A statement a json field's list of numbers refuses
+        // (`refuse_inexact`) is refused as it runs, before its documents
+        // are taken: asked here as well, the walk was 1% of a block.
         let ctx = EvalCtx {
             params,
             registry: &self.registry,

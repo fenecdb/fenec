@@ -284,9 +284,11 @@ replica-bench:
 
 ## Writers and readers at once, fenecdb against SQLite in one process:
 ## durable and buffered writes from 1, 4 and 16 threads, and reads alone,
-## beside writers and beside blocks of 1 000 writes (a /batch's).
+## beside writers and beside blocks of 1 000 writes (a /batch's). ARGS=blocks
+## the reads beside blocks alone, three times (NOPREP=1: the block's puts
+## built under the write lock); ARGS=long the writers beside long reads.
 concurrency-bench:
-	$(CARGO) run --release -p fenec-bench --bin concurrency
+	$(CARGO) run --release -p fenec-bench --bin concurrency -- $(ARGS)
 
 ## A `set` of a constant against one of `n + 1`, over 100 000 rows and
 ## one row by id; 16 threads and 16 HTTP clients each incrementing one key

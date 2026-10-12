@@ -15,9 +15,14 @@
 //!     SQLite's reach the operating system (`synchronous=NORMAL`);
 //!   * a read by id, alone and beside four writers, p50 and p99;
 //!   * a read by id beside a writer landing blocks of 1 000 writes one after
-//!     another, as `POST /batch` of 1 000 lines does: fenecdb's block holds
-//!     the write lock until it lands, SQLite's readers read the last commit
-//!     (WAL) beside its transaction. p50, p99 and the longest.
+//!     another, as `POST /batch` of 1 000 lines does: fenecdb's block has its
+//!     puts' documents built and encoded under the read lock, beside the
+//!     readers (`Database::prepare`), holds the write lock while it lands,
+//!     and writes its buffer once it has let the lock go
+//!     (`Database::write_behind`), as `fenec-server` runs a batch; SQLite's
+//!     readers read the last commit (WAL) beside its transaction. p50, p99
+//!     and the longest. `blocks` runs this alone, three times, and with
+//!     `NOPREP` set the block builds its documents under the write lock.
 //!
 //! SQLite threads each hold a connection with a 30 s busy timeout, the
 //! usual answer to `SQLITE_BUSY`; fenecdb's share one database behind a
@@ -233,16 +238,13 @@ fn sqlite_readers(path: &Path, beside: impl FnOnce(&AtomicBool) + Send) -> Vec<f
 }
 
 /// Reads by id from four threads beside blocks of 1 000 writes landing one
-/// after another, as `POST /batch` of 1 000 lines runs them: the block
-/// holds the write lock while it lands, its documents built and encoded
-/// before under the read lock (`Database::prepare`), beside the readers --
-/// SQLite's WAL reads the last commit meanwhile. With `NOPREP` set the
-/// block builds them under the write lock, as before the preparation.
+/// after another, as `POST /batch` of 1 000 lines runs them: the block's
+/// documents built and encoded under the read lock (`Database::prepare`),
+/// beside the readers, the write lock held while it lands and its buffer
+/// written once that is let go (`Database::write_behind`) -- SQLite's WAL
+/// reads the last commit meanwhile. With `NOPREP` set the block builds its
+/// documents under the write lock, as every block did before.
 fn beside_blocks(db: &Arc<RwLock<Database>>, spath: &Path) {
-    // Blocks of 1 000 writes, one after another, as `POST /batch` of 1 000
-    // lines runs them: the block holds the write lock from its first write
-    // to its record, and a reader waits for it -- SQLite's WAL reads the
-    // last commit meanwhile.
     let mut f = fenec_readers(db, |stop| {
         let put = stmt("put t {k: $1, n: $2}");
         let end = Instant::now() + RUN;
