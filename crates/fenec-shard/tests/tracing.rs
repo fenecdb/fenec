@@ -14,7 +14,7 @@ use otlp::{by_id, children, Got, Receiver};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
 const CLIENT: &str = "b7ad6b7169203331";
@@ -33,6 +33,15 @@ fn call(addr: &str, target: &str, body: &str, extra: &str) -> u16 {
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
     out[9..12].parse().unwrap()
+}
+
+/// Now, as the spans are timed: nanoseconds since the epoch, by the wall
+/// clock.
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
 }
 
 /// The server span of `trace` the process at `kind` answered: the router's
@@ -139,13 +148,45 @@ fn a_request_through_the_router_is_one_trace_with_the_node() {
         assert_eq!(g.state.as_deref(), Some("rojo=00f067aa0ba902b7"), "{g:#?}");
     }
     assert!(forward.start >= router.start && forward.end <= router.end);
-    assert!(node_span.start >= forward.start && node_span.end <= forward.end);
+    // The node begins its span once it has read the request, which the
+    // router sent after its forward began: the start is inside the forward.
+    assert!(
+        node_span.start >= forward.start,
+        "the node's span starts {} ns before the forward",
+        forward.start - node_span.start
+    );
+    // Its end is not: the node ends its span once its answer is written,
+    // and the router may read that answer and end the forward before the
+    // node's thread is back from the write -- in a container of three
+    // cores beside six busy loops, 82 us to 1.3 ms before in 22 runs of
+    // 203, which this test asserted could not be. What the node did before
+    // writing does end inside the forward, since the router cannot read an
+    // answer not yet written: the span outlasts the forward by its write.
+    let inner: Vec<&Got> = spans
+        .iter()
+        .filter(|g| g.parent.as_deref() == Some(node_span.id.as_str()))
+        .collect();
+    assert!(!inner.is_empty(), "{spans:#?}");
+    for g in &inner {
+        assert!(
+            g.end <= forward.end,
+            "{} ends {} ns past the forward",
+            g.name,
+            g.end - forward.end
+        );
+    }
     let lock = children(&spans, &node_span, "lock.wait");
     assert_eq!(lock.len(), 1, "{spans:#?}");
     assert_eq!(children(&spans, &node_span, "execute").len(), 1);
 
     // No context sent: the router starts the trace, and the node joins it.
+    // The router's connection to the node has stood idle in its pool since
+    // the first request, the node's thread waiting on it: the node's span
+    // starts once this request is read, not when that wait began. Read
+    // before the request is sent, the clock bounds the router's spans from
+    // below, and the node's starts after the forward's.
     let put = r#"{"query":"put notes {title: 'a'}"}"#;
+    let sent = now();
     assert_eq!(
         call(&front, "/t/acme/query", put, "X-Request-Id: put-1\r\n"),
         200
@@ -160,8 +201,14 @@ fn a_request_through_the_router_is_one_trace_with_the_node() {
         .iter()
         .find(|g| g.attr("fenec.request_id") == Some("put-1") && g.parent.is_none())
         .expect("the router's root span");
-    let (router, _, node_span) = servers(&spans, &started.trace);
+    let (router, forward, node_span) = servers(&spans, &started.trace);
     assert_eq!(router.id, started.id);
+    assert!(router.start >= sent && forward.start >= sent);
+    assert!(
+        node_span.start >= forward.start,
+        "the node's span starts {} ns before the forward",
+        forward.start - node_span.start
+    );
     assert_eq!(node_span.attr("fenec.request_id"), Some("put-1"));
     assert_eq!(node_span.state, None);
 

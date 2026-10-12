@@ -151,10 +151,6 @@ struct Ctx {
     /// it on as the parent even when nothing is recorded.
     root: [u8; 8],
     parent: Option<[u8; 8]>,
-    /// The request's start, on both clocks: children are timed by the
-    /// monotonic one and placed on the wall clock from here.
-    begun: Option<Instant>,
-    begun_unix: u64,
     /// The spans, the server span first; a child's `end` is 0 while open.
     spans: Vec<Rec>,
     /// The children open now, innermost last: a new child's parent.
@@ -203,6 +199,21 @@ fn fresh() -> u64 {
     }
 }
 
+/// Now, in nanoseconds since the epoch: every start and end of every span
+/// is one read of the wall clock. A request's children were timed by the
+/// monotonic clock from an anchor its start took of both, two reads apart,
+/// and whatever passed between them moved all of them: two requests of one
+/// process -- a router's forward and the node's span under it, in one test
+/// or one binary -- were each off by their own anchor, and two such reads
+/// land far apart: 188 pairs of 8 million past 100 us and the widest 83
+/// ms in a container of three cores beside six busy loops, 41 of 2 million
+/// with nothing beside them, 180 of 8 million on an M1 beside eight. One
+/// clock orders every span of the process as it happened, as
+/// OpenTelemetry's Go, Rust and Python SDKs time theirs. A step of the
+/// clock inside a span shows in it -- an end before its start is written
+/// as the start (`encode`) -- and on macOS the clock reads in microseconds;
+/// a read costs what the monotonic one did (59.6 ns against 52.2 in that
+/// container, 56.6 against 63.2 on the M1), and `begin` makes one fewer.
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -382,8 +393,7 @@ pub fn begin(req: &Request) {
         if !keep {
             return;
         }
-        c.begun = Some(Instant::now());
-        c.begun_unix = now_unix();
+        let start = now_unix();
         let route = route(&req.path);
         let mut attrs: Vec<(&'static str, Val)> = Vec::with_capacity(16);
         attrs.push(("http.request.method", Val::from(req.method.name())));
@@ -405,7 +415,6 @@ pub fn begin(req: &Request) {
         let name = format!("{} {route}", req.method.name());
         attrs.push(("http.route", Val::from(route)));
         let (root, parent) = (c.root, c.parent);
-        let start = c.begun_unix;
         c.spans.push(Rec {
             name: Cow::Owned(name),
             id: root,
@@ -462,7 +471,7 @@ pub fn end(status: u16) {
             c.spans.clear();
             return None;
         }
-        let now = elapsed_unix(&c);
+        let now = now_unix();
         // A child still open -- a guard held past the answer -- ends with it.
         for i in std::mem::take(&mut c.open) {
             if c.spans[i].end == 0 {
@@ -508,13 +517,6 @@ pub fn discard() {
     });
 }
 
-fn elapsed_unix(c: &Ctx) -> u64 {
-    match c.begun {
-        Some(b) => c.begun_unix + b.elapsed().as_nanos() as u64,
-        None => now_unix(),
-    }
-}
-
 /// A child span of this thread's request, open until the guard is dropped.
 /// Off, or with no request recorded, it is nothing and costs one atomic.
 #[must_use = "the span ends when the guard is dropped"]
@@ -558,7 +560,7 @@ fn open_span(name: &'static str, kind: Kind) -> Span {
             Some(&i) => c.spans[i].id,
             None => c.root,
         };
-        let start = elapsed_unix(&c);
+        let start = now_unix();
         let at = c.spans.len();
         c.spans.push(Rec {
             name: Cow::Borrowed(name),
@@ -638,7 +640,7 @@ impl Drop for Span {
             if c.generation != self.generation || !c.active {
                 return;
             }
-            let now = elapsed_unix(&c);
+            let now = now_unix();
             if let Some(r) = c.spans.get_mut(self.at) {
                 r.end = now;
             }
