@@ -854,16 +854,23 @@ fn contested(n: usize) {
     let mut c = http::Http::connect(&addr);
     let (tx, rx) = std::sync::mpsc::channel::<(usize, i64, i64)>();
     let mut hs = Vec::with_capacity(n);
-    // The workers in the order they were held, the longest first.
-    let mut order = std::collections::VecDeque::with_capacity(n);
+    // The workers in the order they sent their claims, the longest held
+    // first: a claim whose wait ran out is sent again, to the back.
+    let order = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(n)));
     for w in 0..n {
         let addr = addr.clone();
         let tx = tx.clone();
+        let order = Arc::clone(&order);
         hs.push(std::thread::spawn(move || {
             let mut c = http::Http::connect(&addr);
             for k in 0.. {
                 let owner = format!("\"c{w}:{k}\"");
                 let params = format!("{owner},\"mail\",{}", -1_000_000 - w as i64);
+                {
+                    let mut order = order.lock().unwrap();
+                    order.retain(|&o| o != w);
+                    order.push_back(w);
+                }
                 let body = c
                     .query_with(OWN_CLAIM, &params, "Fenec-Wait: 30000\r\n")
                     .to_vec();
@@ -879,7 +886,6 @@ fn contested(n: usize) {
             }
         }));
         until_held(&mut c, w as u64 + 1);
-        order.push_back(w);
     }
     let (runs0, looks0) = (
         metric(&mut c, "fenec_held_runs_total"),
@@ -888,17 +894,16 @@ fn contested(n: usize) {
     let (cpu0, _, _) = usage(server.pid());
     let (mut lat, mut longest) = (Vec::with_capacity(jobs), 0);
     for _ in 0..jobs {
+        let first = order.lock().unwrap().front().copied();
         c.query(
             "put jobs {kind: \"mail\", sent: $1, run_at: now(), attempts: 0}",
             &micros().to_string(),
         );
         let (w, sent, at) = rx.recv().unwrap();
         lat.push((at - sent) as f64);
-        if order.front() == Some(&w) {
+        if first == Some(w) {
             longest += 1;
         }
-        order.retain(|&o| o != w);
-        order.push_back(w);
         until_held(&mut c, n as u64);
     }
     let (cpu1, _, _) = usage(server.pid());
