@@ -2136,7 +2136,7 @@ mod tests {
             })
             .collect();
         let not = |e: &Expr| Expr::Not(Box::new(e.clone()));
-        let mut one: Vec<Expr> = terms.iter().cloned().collect();
+        let mut one: Vec<Expr> = terms.to_vec();
         one.extend(terms.iter().map(not));
         let mut two = Vec::new();
         for x in &one {
