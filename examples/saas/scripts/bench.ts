@@ -39,7 +39,7 @@ async function rate(n: number, f: (i: number, k: number) => Promise<void>): Prom
 }
 
 log(`bench on ${cpus().length} cores (${cpus()[0].model}), ${SECONDS} s a rate`);
-const env = await start(19900, { scryptN: 2 ** 15, ipLimit: 1e9, accountLimit: 1e9 });
+const env = await start({ scryptN: 2 ** 15, ipLimit: 1e9, accountLimit: 1e9 });
 try {
   // ---- sign-ins: scrypt N = 2^15, r = 8 (32 MB, about 50 ms a hash)
   const people: Browser[] = [];

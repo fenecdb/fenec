@@ -4,7 +4,8 @@
 // organisations the way a browser would -- through the API, a cookie jar
 // each.
 import { mkdtempSync, rmSync } from 'node:fs';
-import { type Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
+import { type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startApp } from '../src/app.ts';
@@ -25,19 +26,29 @@ export interface Env {
   stop(): Promise<void>;
 }
 
+/** A server listening on a port the system picks, with no handler yet. */
+async function listening(): Promise<{ server: Server; url: string }> {
+  const server = createServer();
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
+}
+
 /**
- * Everything on ports from `base`: the router at base, nodes after it, the
- * app at base + 10 and the identity provider at base + 11.
+ * Everything on ports the system picks, so a test file never meets
+ * another's, or any other server, on one. The app's and the identity
+ * provider's servers listen first, since the nodes' CORS names the app's
+ * origin before the app, which needs the router's address, can start;
+ * the cluster's processes each say where they listen.
  */
-export async function start(base: number, over: Partial<Config> & { lease?: number; nodeFlags?: string[] } = {}): Promise<Env> {
+export async function start(over: Partial<Config> & { lease?: number; nodeFlags?: string[] } = {}): Promise<Env> {
   const dir = mkdtempSync(join(tmpdir(), 'trellis-test-'));
   const { lease, nodeFlags, ...rest } = over;
-  const cfg = config({
-    routerUrl: `http://127.0.0.1:${base}`,
-    publicRouterUrl: `http://127.0.0.1:${base}`,
+  const app = await listening();
+  const idpAt = await listening();
+  const site = config({
     keysDir: join(dir, 'keys'),
-    origin: `http://127.0.0.1:${base + 10}`,
-    oidcIssuer: `http://127.0.0.1:${base + 11}`,
+    origin: app.url,
+    oidcIssuer: idpAt.url,
     insecureCookies: true,
     trustProxy: true,
     scryptN: 2 ** 12,
@@ -47,18 +58,17 @@ export async function start(base: number, over: Partial<Config> & { lease?: numb
   });
   const cluster = new Cluster({
     dir,
-    basePort: base,
     lease: lease ?? 0,
-    keysDir: cfg.keysDir,
-    operatorToken: cfg.operatorToken,
-    shardToken: cfg.shardToken,
-    cors: cfg.origin,
+    keysDir: site.keysDir,
+    operatorToken: site.operatorToken,
+    shardToken: site.shardToken,
+    cors: site.origin,
     nodeFlags: ['--http-max-streams', '512', ...(nodeFlags ?? [])],
   });
   await cluster.start();
-  const { trellis, server, url } = await startApp(cfg, base + 10);
-  const idp: Server = idpServer({ issuer: cfg.oidcIssuer, keysDir: cfg.keysDir, clients: { [cfg.oidcClientId]: `${cfg.origin}/api/auth/sso/callback` } });
-  await new Promise<void>((r) => idp.listen(base + 11, '127.0.0.1', r));
+  const cfg: Config = { ...site, routerUrl: cluster.routerUrl, publicRouterUrl: cluster.routerUrl };
+  const { trellis, server, url } = await startApp(cfg, app.server);
+  const idp: Server = idpServer({ issuer: cfg.oidcIssuer, keysDir: cfg.keysDir, clients: { [cfg.oidcClientId]: `${cfg.origin}/api/auth/sso/callback` } }, idpAt.server);
   return {
     cfg,
     cluster,

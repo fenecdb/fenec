@@ -98,7 +98,7 @@ const until = async (pred: () => boolean | Promise<boolean>, ms = 15_000) => {
 describe('a tenant moved under load', () => {
   let env: Env;
   before(async () => {
-    env = await start(19700);
+    env = await start();
   });
   after(() => env.stop());
 
@@ -184,7 +184,7 @@ describe('a node killed under load', () => {
   before(async () => {
     // Nodes write only under the router's lease of a second, and the router
     // fails a silent node over once that has certainly lapsed.
-    env = await start(19800, { lease: 1 });
+    env = await start({ lease: 1 });
   });
   after(() => env.stop());
 

@@ -24,7 +24,7 @@ async function opRows<R = Record<string, unknown>>(q: string, params: unknown[] 
 }
 
 before(async () => {
-  env = await start(19500);
+  env = await start();
   people.owner = await person(env, 'olivia@acme.io', 'Olivia');
   await organisation(people.owner, 'acme', 'Acme');
   teamA = people.owner.access.get('acme')?.teams[0] ?? (await people.owner.refresh('acme'), people.owner.access.get('acme')!.teams[0]);

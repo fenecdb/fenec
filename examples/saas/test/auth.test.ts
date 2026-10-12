@@ -10,7 +10,7 @@ import { Browser, mailedLink, PASSWORD, person, query, start, type Env } from '.
 
 let env: Env;
 before(async () => {
-  env = await start(19300);
+  env = await start();
 });
 after(() => env.stop());
 

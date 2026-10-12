@@ -20,7 +20,7 @@ let miaT: string;
 let beaT: string;
 
 before(async () => {
-  env = await start(19600);
+  env = await start();
   owner = await person(env, 'olivia@acme.io', 'Olivia');
   await organisation(owner, 'acme', 'Acme');
   await owner.refresh('acme');
