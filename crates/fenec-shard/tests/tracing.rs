@@ -157,10 +157,11 @@ fn a_request_through_the_router_is_one_trace_with_the_node() {
     );
     // Its end is not: the node ends its span once its answer is written,
     // and the router may read that answer and end the forward before the
-    // node's thread is back from the write -- beside load in a container,
-    // 147 to 223 us before. What the node did before writing does end
-    // inside the forward, since the router cannot read an answer not yet
-    // written: so the span outlasts the forward by its write at most.
+    // node's thread is back from the write -- in a container of three
+    // cores beside six busy loops, 82 us to 1.3 ms before in 22 runs of
+    // 203, which this test asserted could not be. What the node did before
+    // writing does end inside the forward, since the router cannot read an
+    // answer not yet written: the span outlasts the forward by its write.
     let inner: Vec<&Got> = spans
         .iter()
         .filter(|g| g.parent.as_deref() == Some(node_span.id.as_str()))

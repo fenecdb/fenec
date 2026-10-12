@@ -205,8 +205,8 @@ fn fresh() -> u64 {
 /// and whatever passed between them moved all of them: two requests of one
 /// process -- a router's forward and the node's span under it, in one test
 /// or one binary -- were each off by their own anchor, and beside load two
-/// such reads landed up to 12.6 ms apart (58 pairs of 4 million past 100
-/// us on an M1 with every core busy). One clock orders every span of the
+/// such reads landed up to 62 ms apart (180 pairs of 8 million past 100 us
+/// on an M1 beside eight busy loops). One clock orders every span of the
 /// process as it happened, as OpenTelemetry's Go, Rust and Python SDKs time
 /// theirs. A step of the clock inside a span shows in it -- an end before
 /// its start is written as the start (`encode`) -- and on macOS the clock

@@ -2171,7 +2171,18 @@ so it has its route alone -- `fenec.request_id`, `fenec.tenant`),
 `fenec.wait_for_write` for `Fenec-After`, and the router's `forward`, a
 client span whose id `Pool::send` sends the node as its `traceparent` --
 the client's dropped from the forwarded headers while the router traces,
-passed through as they came while it does not. A finished trace goes into
+passed through as they came while it does not. Every start and end is a
+read of the wall clock (`now_unix`), as OpenTelemetry's Go, Rust and
+Python SDKs take theirs: a request's children were timed by the monotonic
+clock from an anchor of both, two reads that load put up to 62 ms apart,
+so two requests of one process -- a router's `forward` and the node's span
+under it -- were each off by their own; a step of the clock shows inside a
+span, and macOS reads it in microseconds. A server span ends once its
+answer is written, so a node's outlasts the router's `forward` by its write:
+`fenec-shard`'s test held the whole span inside the forward and failed 22
+runs of 203 in three cores beside six busy loops, the node ending 82 us to
+1.3 ms after, and now holds its start and every span it ended before
+writing. A finished trace goes into
 a queue (`OTEL_BSP_MAX_QUEUE_SIZE`, 2 048 spans) under a mutex held for a
 push, the exporter taking it whole in one swap; full, the spans are dropped
 and counted (`fenec_trace_spans_dropped_total{reason}`), so a request never
