@@ -55,6 +55,12 @@ class GoldenTest {
 
         fun opt(a: List<Any?>, at: Int, name: String): Any? = (a.getOrNull(at) as? Row)?.get(name)
 
+        fun names(v: Any?): List<String>? = when (v) {
+            null -> null
+            is String -> listOf(v)
+            else -> (v as List<*>).map { it as String }
+        }
+
         fun keys(v: Any?): List<SortKey> = when (v) {
             null -> emptyList()
             is String -> listOf(SortKey(v))
@@ -93,8 +99,9 @@ class GoldenTest {
             op == "facet" -> q.facetOf(a[0] as String, opt(a, 1, "top") as Long?, opt(a, 1, "ranges") as List<Any?>?, opt(a, 1, "disjunctive"))
             op == "lookup" -> q.lookup(
                 a[0] as String,
-                on = opt(a, 1, "on") as String?,
-                parentKey = opt(a, 1, "parentKey") as String?,
+                // A name, or a list of them: a key over several fields too.
+                on = names(opt(a, 1, "on")).orEmpty(),
+                parentKey = names(opt(a, 1, "parentKey")),
                 select = opt(a, 1, "select")?.let { s -> if (s is String) listOf(s) else (s as List<*>).map { it as String } },
                 where = opt(a, 1, "where")?.let(::cond),
                 required = opt(a, 1, "required") as Boolean? ?: false,
