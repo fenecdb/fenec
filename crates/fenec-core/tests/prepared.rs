@@ -523,3 +523,62 @@ fn writes_behind_the_lock_leave_the_file_what_it_was() {
         Value::Int(40_000)
     );
 }
+
+/// Panics at a document whose `k` is `boom`: a thread that unwinds out of
+/// a block, as a server's connection thread may, leaves the database to the
+/// next request.
+struct Boom;
+impl Hook for Boom {
+    fn name(&self) -> &str {
+        "boom"
+    }
+    fn rewrites(&self) -> bool {
+        false
+    }
+    fn before_write(&self, _: &Schema, _: WriteOp, doc: &mut Document) -> Result<()> {
+        if let Some(Value::Text(t)) = doc.get("k") {
+            assert_ne!(t, "boom", "a hook that panics");
+        }
+        Ok(())
+    }
+}
+impl Plugin for Boom {
+    fn name(&self) -> &str {
+        "boom"
+    }
+    fn init(&self, reg: &mut Registry) -> Result<()> {
+        reg.register_hook(Arc::new(Boom));
+        Ok(())
+    }
+}
+
+/// A preparation a panic left half way is no later block's: its second
+/// `put` never ran, and a block run after it with no preparation of its
+/// own writes its own documents into the same collection, not those.
+#[test]
+fn a_preparation_a_panic_left_is_let_go_of() {
+    let mut db = Database::new();
+    run(&mut db, "create collection ev (k text, n int)");
+    db.install_plugin(&Boom).unwrap();
+    let put = stmt("put ev $1");
+    let first = vec![Value::List(vec![Value::Object(vec![(
+        "k".into(),
+        Value::Text("boom".into()),
+    )])])];
+    let second = vec![objects(0, 20)];
+    let stmts: Vec<(&Statement, &[Value])> = vec![(&put, &first[..]), (&put, &second[..])];
+    let mut p = db.prepare(&stmts);
+    assert_eq!(p.built(), 2);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = db.execute_prepared(&stmts, &mut p);
+    }));
+    assert!(unwound.is_err());
+    db.rollback();
+    let mine = vec![objects(500, 20)];
+    let again: Vec<(&Statement, &[Value])> = vec![(&put, &mine[..]), (&put, &mine[..])];
+    db.execute_block(&again).unwrap();
+    let rows = answer(&db, "get ev select n order id");
+    let ns: Vec<Value> = rows.rows.iter().map(|r| r.values[0].clone()).collect();
+    let want: Vec<Value> = (0..2).flat_map(|_| (500..520).map(Value::Int)).collect();
+    assert_eq!(ns, want);
+}

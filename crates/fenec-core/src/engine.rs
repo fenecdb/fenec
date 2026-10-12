@@ -3563,6 +3563,11 @@ pub struct Database {
     preparation: Prepared,
     #[cfg(not(target_arch = "wasm32"))]
     ready_at: Option<usize>,
+    /// Whether [`Self::execute_prepared`] or [`Self::execute_ready`] has
+    /// just handed the preparation over: one found otherwise is one a panic
+    /// left half way, and let go of ([`Self::disarm`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    armed: bool,
     /// Whether the caller writes the sink's buffer once it has let go of
     /// the database ([`Self::write_behind`]): a handover then waits for the
     /// next block's start, where it finds the records in the file.
@@ -3664,6 +3669,8 @@ impl Database {
             preparation: Prepared::default(),
             #[cfg(not(target_arch = "wasm32"))]
             ready_at: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            armed: false,
             #[cfg(not(target_arch = "wasm32"))]
             behind: false,
         }
@@ -5995,6 +6002,8 @@ impl Database {
         &mut self,
         stmts: &[(&Statement, &[Value])],
     ) -> std::result::Result<Vec<Response>, (usize, Error)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disarm();
         if let Some(i) = stmts.iter().position(|(s, _)| !s.fits_block()) {
             return Err((
                 i,
@@ -6241,6 +6250,8 @@ impl Database {
     /// statement finishes -- not per document: a `put` of 10 000 documents is
     /// a single wake-up, and the subscriber will read one batch anyway.
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disarm();
         // A write is a block of one: a `put` of many documents stopped half
         // way -- a hook's refusal, a crash -- left the ones before applied.
         // Its writes land as one record, which for a lone document is the

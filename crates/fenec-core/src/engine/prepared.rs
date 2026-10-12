@@ -185,6 +185,7 @@ impl Database {
         prepared: &mut Prepared,
     ) -> std::result::Result<Vec<Response>, (usize, Error)> {
         self.preparation = std::mem::take(prepared);
+        self.armed = true;
         let out = self.execute_block(stmts);
         *prepared = std::mem::take(&mut self.preparation);
         out
@@ -204,10 +205,24 @@ impl Database {
     ) -> Result<Response> {
         self.preparation = std::mem::take(prepared);
         self.offer(i);
+        self.armed = true;
         let out = self.execute_with(stmt, params);
         self.ready_at = None;
         *prepared = std::mem::take(&mut self.preparation);
         out
+    }
+
+    /// As [`Self::execute_block`] and [`Self::execute_with`] start: the
+    /// preparation is theirs only where one of the two above handed it over
+    /// just now. Any other is one a panic left half way, and let go of, so
+    /// that no statement takes the documents built for another.
+    pub(super) fn disarm(&mut self) {
+        if !std::mem::take(&mut self.armed)
+            && (self.ready_at.is_some() || !self.preparation.stmts.is_empty())
+        {
+            self.ready_at = None;
+            self.preparation = Prepared::default();
+        }
     }
 
     /// Statement `i` of a block run with a preparation is the one running.
