@@ -66,7 +66,7 @@ fn fixture(n: u64, holes: bool) -> Database {
         run(
             &mut db,
             &format!(
-                "create collection {name} (a int, b float, name text, loc geo {geo}, \
+                "create collection {name} (a int @hash, b float, name text, loc geo {geo}, \
                  ready bool, courier int)"
             ),
             &[],
