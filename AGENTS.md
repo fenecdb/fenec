@@ -331,7 +331,7 @@ frames and copied from there into the segment (`Store::append_onto`), the
 hooks borrowed and the collection looked up once -- which took a lone put in
 memory from 599-618 to 412-431 ns, 687-691 to 482 under `@hash`, a `del`
 705-714 to 617-626 (`make ttl-bench`'s `writes`, in turns), and a writer
-with no fsync from 1.48M to 1.78-1.88M a second. Then `prepare`, under the
+with no fsync from 1.47-1.49M to 1.78-1.91M a second. Then `prepare`, under the
 read lock, builds and encodes the documents of every `put` among a block's
 statements into one buffer for the block -- buffers of its own a statement
 were three allocations each, a quarter of what they saved -- and the block
@@ -350,9 +350,12 @@ preparation a panic left half way is let go of as the next statement starts
 (`disarm`): taken, a block that came after it wrote another's documents. A
 server prepares a `/batch` or a `/query` whose `put`s write `PREPARE_AT`
 (16) documents or more: fewer spend more on the read lock and the buffers
-than they take off. The lock is held 0.15 ms p50 for the block, 0.40 at
-p99, 0.97 at most over 10 000 blocks; a writer alone does the same work as
-before, the read lock and the buffers a few percent of it. Rejected: a pin
+than they take off. The lock is held 0.14-0.15 ms p50 for the block,
+0.38-0.39 at p99 and 0.44-0.50 at most over 10 000 blocks, against
+0.31-0.35, 0.59-0.73 and 4.6-50 built under it on this branch; a writer
+alone lands 1.6% fewer blocks prepared than built under the lock (the read
+lock, the buffers, the documents cold again), and a fifth more than on
+main. Rejected: a pin
 taken as each block starts, for the readers to read the database as it
 stood -- it copies the id index, 12 bytes a row, 0.25-0.37 ms over a
 million rows, as long as the block and growing with the collection, and a
