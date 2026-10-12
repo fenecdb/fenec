@@ -849,11 +849,9 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
     // it cannot answer.
     let transition = filter.as_ref().is_some_and(names_new);
     if transition && ops != UPDATE {
-        return Err(
-            "a rule naming `new.` judges an update -- the row before it and the row it \
-                    leaves -- and grants `update` alone"
-                .into(),
-        );
+        let why = "a rule naming `new.` judges an update -- the row before it and the row \
+                   it leaves -- and grants `update` alone";
+        return Err(why.into());
     }
     let before = match (transition, &filter) {
         (true, Some(f)) => relaxed(f.clone(), &|name| name.starts_with(NEW)),
@@ -884,8 +882,8 @@ fn names_new(e: &Expr) -> bool {
 
 /// Whether `e` reads a field `which` names, outside an inner `get` (a
 /// rule holds none). A walk of its own rather than `referenced_fields`,
-/// which copies every name: asked of a `set ... returning`'s read rules
-/// each statement, the copies were most of what `answerable` cost.
+/// which copies every name it meets: it is asked of the read rules of
+/// every `set ... returning` a token sends.
 fn reads(e: &Expr, which: &dyn Fn(&str) -> bool) -> bool {
     if let Expr::Field(f) = e {
         return which(f);
@@ -1565,9 +1563,11 @@ impl Scope {
     /// update's by those granting `update`.
     ///
     /// The rules are asked one after another, as the `or` of their filters
-    /// [`Self::filter`] makes would be, without making it: a copy of each
-    /// filter a write, twice for an update, was a third of what a scoped
-    /// `set` cost beside the server's token's.
+    /// [`Self::filter`] makes would be, without making it, which copied
+    /// each filter a write, twice an update: with that copy and
+    /// [`Self::readable`]'s, a scoped `set`'s rules cost 2.2-2.9 us over
+    /// the server token's in process, without them 1.6-1.9 (`make
+    /// policy-bench`, in turns).
     fn admits(&self, schema: &Schema, op: u8, doc: &Document, registry: &Registry) -> Result<bool> {
         let name = schema.name.as_str();
         if op & (UPDATE | DELETE) != 0 && self.append_only(name) {
