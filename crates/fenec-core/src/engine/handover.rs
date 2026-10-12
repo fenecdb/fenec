@@ -52,7 +52,7 @@ const HANDOVER_RUNS: usize = 1 << 16;
 /// lock far past the bytes' measure: 930 000 rows of a text and an int
 /// written 1 000 a block, 16 to 17.5 ms each time, which was the longest
 /// wait of four readers beside them. The same work in pauses of 1 ms.
-pub(super) const HANDOVER_DOCS: u64 = 1 << 16;
+pub(super) const HANDOVER_DOCS: u64 = 1 << 14;
 
 /// Notes a run of `len` bytes of collection `cid`'s frames at `at` in the
 /// file.
@@ -164,12 +164,32 @@ impl Database {
     /// thousand writes later; put off to twice its bounds, as writes under
     /// `--sync always` would keep it, it waits the fsync out.
     pub(super) fn hand_over_when_due(&mut self) {
-        let past = |n: u64| {
-            self.landed_bytes >= self.handover_at.saturating_mul(n)
-                || self.landed.len() as u64 >= HANDOVER_RUNS as u64 * n
-                || (self.landed_writes >= HANDOVER_DOCS * n && self.handover_at != u64::MAX)
-        };
-        if past(1) && (past(2) || !self.sink_mut().syncing()) {
+        // Written behind the database, the handover is the next block's,
+        // as it starts, unless the writes behind fell back by its bounds.
+        let put_off = self.behind || self.sink_mut().syncing();
+        if self.handover_due(1) && (self.handover_due(2) || !put_off) {
+            let _ = self.hand_over();
+        }
+    }
+
+    /// Whether what is noted amounts to `n` times a handover's bounds.
+    pub(super) fn handover_due(&self, n: u64) -> bool {
+        self.landed_bytes >= self.handover_at.saturating_mul(n)
+            || self.landed.len() as u64 >= HANDOVER_RUNS as u64 * n
+            || (self.landed_writes >= HANDOVER_DOCS * n && self.handover_at != u64::MAX)
+    }
+
+    /// The handover due, as a block starts, where the writes behind the
+    /// database put every record it takes in into the file already
+    /// ([`Self::write_behind`]): it writes nothing under the lock. Written
+    /// there, its bytes waited on the disk as a buffer outgrown did -- on
+    /// macOS each time the file's dirty pages passed 8 MB.
+    pub(super) fn hand_over_before(&mut self) {
+        if !self.handover_due(1) {
+            return;
+        }
+        let sink = self.sink_mut();
+        if sink.written_all() && !sink.syncing() {
             let _ = self.hand_over();
         }
     }

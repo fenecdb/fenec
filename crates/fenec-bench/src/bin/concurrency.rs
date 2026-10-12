@@ -256,7 +256,15 @@ fn beside_blocks(db: &Arc<RwLock<Database>>, spath: &Path) {
                 Some(_) => drop(db.write().unwrap().execute_block(&stmts).unwrap()),
                 None => {
                     let mut p = db.read().unwrap().prepare(&stmts);
-                    db.write().unwrap().execute_prepared(&stmts, &mut p).unwrap();
+                    let behind = {
+                        let mut g = db.write().unwrap();
+                        g.execute_prepared(&stmts, &mut p).unwrap();
+                        g.write_behind()
+                    };
+                    drop(p);
+                    if let Some(write) = behind {
+                        write().unwrap();
+                    }
                 }
             }
             n += BLOCK;

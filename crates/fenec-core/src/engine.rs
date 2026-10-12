@@ -1075,6 +1075,26 @@ pub trait Sink: Send {
     fn write_out(&mut self) -> Result<()> {
         Ok(())
     }
+    /// What writes the appends it holds into the file, with no fsync, for
+    /// a caller to run once it has let go of the database
+    /// ([`Database::write_behind`]); `None` while it holds too few to be
+    /// worth a write. A sink asked once leaves its appends for it from then
+    /// on, rather than write them as they outgrow its buffer -- under the
+    /// write lock, where every reader waits for the disk.
+    ///
+    /// `all` asks for every append it holds, however few: a handover is
+    /// due, which takes the records in from the file, and finds them there
+    /// rather than write them under the lock ([`Self::written_all`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_behind(&mut self, _all: bool) -> Option<Durability> {
+        None
+    }
+    /// Whether every append it took is in the file, or on its way there
+    /// in a write under way: a handover then writes nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn written_all(&self) -> bool {
+        true
+    }
     fn sync(&mut self) -> Result<()> {
         Ok(())
     }
@@ -3543,6 +3563,11 @@ pub struct Database {
     preparation: Prepared,
     #[cfg(not(target_arch = "wasm32"))]
     ready_at: Option<usize>,
+    /// Whether the caller writes the sink's buffer once it has let go of
+    /// the database ([`Self::write_behind`]): a handover then waits for the
+    /// next block's start, where it finds the records in the file.
+    #[cfg(not(target_arch = "wasm32"))]
+    behind: bool,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -3639,6 +3664,8 @@ impl Database {
             preparation: Prepared::default(),
             #[cfg(not(target_arch = "wasm32"))]
             ready_at: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            behind: false,
         }
     }
 
@@ -5205,6 +5232,22 @@ impl Database {
         self.storage(r)
     }
 
+    /// What writes the buffered writes into the file with no fsync, for
+    /// the caller to run once it has let go of the database, as it runs a
+    /// [`Durability`] -- a failure reported back with [`Self::fail`] --
+    /// and `None` while there are too few to be worth a write
+    /// ([`Sink::write_behind`]). A caller that asks after its writes keeps
+    /// the write, and the disk's waits, out of the lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_behind(&mut self) -> Option<Durability> {
+        if self.failed.is_some() {
+            return None;
+        }
+        self.behind = true;
+        let due = self.handover_due(1);
+        self.sink_mut().write_behind(due)
+    }
+
     /// Records a storage failure found outside the engine, a
     /// [`Durability`] that failed: every later write and sync is refused, as
     /// after one the engine saw itself.
@@ -5685,6 +5728,10 @@ impl Database {
     }
 
     fn open_block(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.behind {
+            self.hand_over_before();
+        }
         self.block = Some(std::mem::take(&mut self.spare).cleared());
     }
 

@@ -533,6 +533,15 @@ impl Sink for Tee {
     fn syncing(&self) -> bool {
         self.file.syncing()
     }
+    /// Passed on: a write with no fsync makes nothing sendable.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_behind(&mut self, all: bool) -> Option<fenec_core::engine::Durability> {
+        self.file.write_behind(all)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn written_all(&self) -> bool {
+        self.file.written_all()
+    }
     /// Passed on, so a primary's `compact` writes its file beside the
     /// database as a server without replicas does.
     #[cfg(not(target_arch = "wasm32"))]

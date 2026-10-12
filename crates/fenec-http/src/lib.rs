@@ -2550,12 +2550,16 @@ fn refused(why: String) -> Response {
 /// Under `sync_on_write`, hands the writes over while the write lock is
 /// held and returns what the answer has to wait for. The fsync itself runs
 /// in [`await_durable`], after the lock is let go: readers do not wait on
-/// the disk, and writes arriving together share one fsync.
+/// the disk, and writes arriving together share one fsync. Otherwise what
+/// writes the buffered writes into the file once there are enough of them
+/// ([`Database::write_behind`]), after the lock as well: written as they
+/// outgrew the buffer, under it, every reader waited for the disk -- on
+/// macOS up to 11 ms each time the file's dirty pages passed 8 MB.
 fn flush_for(cfg: &Config, db: &mut Database) -> fenec_core::error::Result<Option<Durability>> {
     if cfg.sync_on_write {
         db.flush()
     } else {
-        Ok(None)
+        Ok(db.write_behind())
     }
 }
 
