@@ -350,6 +350,12 @@ function tick() {
   ticking = setInterval(paint, 1000);
 }
 
+/** A rule's grants as the policy writes them: `read(a, b)` the fields a read shows, `update(c)` those an update may change. */
+function grantsOf(r) {
+  const listed = { read: r.read_fields, update: r.fields };
+  return r.grants.map((g) => (listed[g] ? `${g}(${listed[g].join(', ')})` : g)).join(', ');
+}
+
 function identity() {
   const w = state.who ?? {};
   const c = state.claims ?? {};
@@ -366,7 +372,7 @@ function identity() {
       'tr',
       {},
       h('td', {}, r.collection),
-      h('td', {}, r.grants.join(', '), r.fields ? ` (${r.fields.join(', ')})` : ''),
+      h('td', {}, grantsOf(r)),
       h('td', { class: 'mono' }, r.rows ?? 'every row'),
     ),
   );

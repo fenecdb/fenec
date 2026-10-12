@@ -475,20 +475,48 @@ fn full(cfg: &Config, req: &Request) -> bool {
     matches!(authenticate(cfg, req), Ok(Who::Full)) || metrics::allowed(cfg, req, true)
 }
 
-/// The statement as `who` may run it.
-fn scoped(who: &Who, stmt: Statement, params: &[Value]) -> fenec_core::error::Result<Statement> {
+/// The statement as `who` may run it, and in `mask` what its answer must
+/// not show `who` (`access::Mask`, [`shown`]): `None` but where a rule
+/// names the fields a read shows.
+fn scoped(
+    who: &Who,
+    stmt: Statement,
+    params: &[Value],
+    mask: &mut Option<access::Mask>,
+) -> fenec_core::error::Result<Statement> {
     match who.scope() {
         None => Ok(stmt),
         // A parameter's documents written in, each held to the rules.
-        Some(scope) => scope.rewrite(stmt.with_documents(params)?),
+        Some(scope) => scope.rewrite_with(stmt.with_documents(params)?, params, mask),
     }
 }
 
-/// A list of collections, cut to those `who` may read.
+/// An answer as `who` is shown it: each row's fields a read rule withholds
+/// taken out (`mask`, from [`scoped`]), and [`visible`]. `db` is what
+/// answered, for the schemas.
+fn shown(who: &Who, mask: Option<&access::Mask>, db: &Database, resp: Response2) -> Response2 {
+    visible(who, masked(who, mask, db, resp))
+}
+
+/// An answer's rows with the fields `mask` withholds from `who` taken out.
+fn masked(who: &Who, mask: Option<&access::Mask>, db: &Database, mut resp: Response2) -> Response2 {
+    if let (Some(scope), Some(mask)) = (who.scope(), mask) {
+        scope.shown(mask, db, &mut resp);
+    }
+    resp
+}
+
+/// A list of collections, cut to those `who` may read, each without the
+/// fields no read rule grants it.
 fn visible(who: &Who, resp: Response2) -> Response2 {
     match (who.scope(), resp) {
         (Some(scope), fenec_core::query::Response::Schemas(mut list)) => {
             list.retain(|s| scope.readable(&s.name));
+            for s in &mut list {
+                if let Some(shown) = scope.shown_schema(s) {
+                    *s = shown;
+                }
+            }
             fenec_core::query::Response::Schemas(list)
         }
         (_, resp) => resp,
@@ -1344,7 +1372,8 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(r) => r,
             Err(e) => return error_response(&e),
         };
-        let stmt = match scoped(&who, routed.statement, &[]) {
+        let mut mask = None;
+        let stmt = match scoped(&who, routed.statement, &[], &mut mask) {
             Ok(s) => s,
             Err(e) => return error_response(&e),
         };
@@ -1357,7 +1386,8 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             }
         }
         let running = trace::span("execute");
-        let result = access::within(&who, || guard.execute_with(&stmt, &[]));
+        let result = access::within(&who, || guard.execute_with(&stmt, &[]))
+            .map(|r| shown(&who, mask.as_ref(), &guard, r));
         drop(running);
         let answer =
             |result: &fenec_core::error::Result<fenec_core::prelude::Response>| match result {
@@ -1398,7 +1428,8 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(r) => r,
             Err(e) => return error_response(&e),
         };
-        let stmt = match scoped(&who, routed.statement, &[]) {
+        let mut mask = None;
+        let stmt = match scoped(&who, routed.statement, &[], &mut mask) {
             Ok(s) => s,
             Err(e) => return error_response(&e),
         };
@@ -1407,7 +1438,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         drop(running);
         match result {
             Ok(resp) => {
-                let resp = visible(&who, resp);
+                let resp = shown(&who, mask.as_ref(), &guard, resp);
                 statements::rows(counted(&resp));
                 api::render(&resp, &routed.shape, fenec_core::VERSION)
             }
@@ -1438,11 +1469,17 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
     let body = std::str::from_utf8(&req.body).unwrap_or("");
     let follow = req.query.iter().any(|(k, v)| k == "mode" && v == "follow");
     let full = matches!(who, Who::Full);
+    // A scoped token's: the collections it may read, each without the
+    // fields no read rule grants it.
     let visible = |db: &Database| -> Vec<fenec_core::schema::Schema> {
         db.collection_names()
             .iter()
             .filter(|n| who.scope().is_none_or(|s| s.readable(n)))
-            .filter_map(|n| db.collection(n).ok().map(|c| c.schema.clone()))
+            .filter_map(|n| {
+                let c = db.collection(n).ok()?;
+                let shown = who.scope().and_then(|s| s.shown_schema(&c.schema));
+                Some(shown.unwrap_or_else(|| c.schema.clone()))
+            })
             .collect()
     };
     let outcome = match (req.method, req.segments().as_slice()) {
@@ -1585,13 +1622,15 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     }
     // The statement parsed is shared (`api::parse_query`): a scope is ANDed
     // into a copy of it.
+    let mut mask = None;
     let stmt = match who.scope() {
         None => stmt,
-        Some(_) => match scoped(who, Arc::unwrap_or_clone(stmt), &params) {
+        Some(_) => match scoped(who, Arc::unwrap_or_clone(stmt), &params, &mut mask) {
             Ok(s) => Arc::new(s),
             Err(e) => return error_response(&e),
         },
     };
+    let mask = mask.as_ref();
     if cfg.read_only && !stmt.is_read_only() {
         return Response::error(403, "the server is in read-only mode");
     }
@@ -1620,7 +1659,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
     }
     if let Some(k) = &key {
-        return keyed_query(db, cfg, who, k, &stmt, &params, wait);
+        return keyed_query(db, cfg, who, k, (&stmt, mask), &params, wait);
     }
     // The change a write left the database at, for `Fenec-Seq`.
     let mut seq = None;
@@ -1664,16 +1703,25 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             };
             let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
             let running = trace::span("execute");
+            // Rows with a field masked are rows to mask, not the stored
+            // bytes: `Ok(None)` is a `get` the JSON path leaves to `query`.
             let (json, guard) = match &pinned {
                 Some(p) => {
                     drop(guard);
                     running.attr("fenec.pinned", true);
-                    (p.query_json(&stmt, &params, &mut body), None)
+                    let json = match mask {
+                        Some(_) => Some(Ok(None)),
+                        None => p.query_json(&stmt, &params, &mut body),
+                    };
+                    (json, None)
                 }
-                None => (
-                    Some(guard.query_json(&stmt, &params, &mut body)),
-                    Some(guard),
-                ),
+                None => {
+                    let json = match mask {
+                        Some(_) => Ok(None),
+                        None => guard.query_json(&stmt, &params, &mut body),
+                    };
+                    (Some(json), Some(guard))
+                }
             };
             match json {
                 Some(Ok(Some(n))) => {
@@ -1701,8 +1749,10 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                 }
             }
             let r = match (&pinned, &guard) {
-                (Some(p), _) => p.query(&stmt, &params),
-                (None, Some(g)) => Some(g.query(&stmt, &params)),
+                (Some(p), _) => p
+                    .query(&stmt, &params)
+                    .map(|r| r.map(|r| masked(who, mask, p.database(), r))),
+                (None, Some(g)) => Some(g.query(&stmt, &params).map(|r| masked(who, mask, g, r))),
                 (None, None) => unreachable!("a read runs pinned or under the lock"),
             };
             drop(guard);
@@ -1747,7 +1797,8 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         let mut guard = held::write(db);
         let before = waits::now_ms();
         let running = trace::span("execute");
-        let r = access::within(who, || guard.execute_with(&stmt, &params));
+        let r = access::within(who, || guard.execute_with(&stmt, &params))
+            .map(|r| masked(who, mask, &guard, r));
         drop(running);
         if wait && waits::wrote_nothing(&stmt, &r) {
             waits::plan(&guard, &[(&stmt, &params)], before);
@@ -1882,7 +1933,7 @@ fn keyed_query(
     cfg: &Config,
     who: &Who,
     key: &idempotent::Key,
-    stmt: &Statement,
+    (stmt, mask): (&Statement, Option<&access::Mask>),
     params: &[fenec_core::value::Value],
     wait: bool,
 ) -> Response {
@@ -1898,10 +1949,11 @@ fn keyed_query(
     let running = trace::span("execute");
     let result = access::within(who, || guard.execute_with(stmt, params));
     drop(running);
+    // The answer kept with the key is the one the token is shown.
     let resp = match &result {
         Ok(r) => {
             statements::rows(counted(r));
-            api::render_any(&visible(who, r.clone()), fenec_core::VERSION)
+            api::render_any(&shown(who, mask, &guard, r.clone()), fenec_core::VERSION)
         }
         Err(e) => error_response(e),
     };
@@ -1959,10 +2011,17 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Err(e) => return error_response(&e),
     };
     // Every statement is checked before any runs: a refusal halfway would
-    // leave the ones before it applied.
+    // leave the ones before it applied. What each answer must not show
+    // the token, beside it.
+    let mut masks = Vec::new();
     let stmts = match stmts
         .into_iter()
-        .map(|(s, p)| scoped(who, s, &p).map(|s| (s, p)))
+        .map(|(s, p)| {
+            let mut mask = None;
+            let s = scoped(who, s, &p, &mut mask);
+            masks.push(mask);
+            s.map(|s| (s, p))
+        })
         .collect::<fenec_core::error::Result<Vec<_>>>()
     {
         Ok(s) => s,
@@ -1981,7 +2040,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     let writes = stmts.iter().any(|(s, _)| !s.is_read_only());
     // A batch of reads makes nothing to make once: its key is not asked.
     if !writes {
-        return read_batch(db, &stmts, who);
+        return read_batch(db, &stmts, &masks, who);
     }
     // `Fenec-Wait`: a batch whose writes are `set`s and `del`s, held while
     // it writes nothing ([`waits`]).
@@ -2028,7 +2087,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     let mut results = Vec::with_capacity(stmts.len());
     let running = trace::span("execute");
     running.attr("fenec.statements", stmts.len() as i64);
-    for (stmt, params) in &stmts {
+    for ((stmt, params), mask) in stmts.iter().zip(&masks) {
         // Measured before each statement, as a lone one is: the batch
         // stops at the first the ceiling refuses, as at an error.
         let r = match over_ceiling(cfg.max_memory, &guard, stmt) {
@@ -2038,7 +2097,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         };
         match r {
             Ok(r) => {
-                let r = visible(who, r);
+                let r = shown(who, mask.as_ref(), &guard, r);
                 statements::rows(counted(&r));
                 results.push(r)
             }
@@ -2144,6 +2203,7 @@ fn batch_stop(status: u16, why: &str, completed: usize, at: usize) -> Response {
 fn read_batch(
     db: &Arc<RwLock<Database>>,
     stmts: &[(Statement, Vec<Value>)],
+    masks: &[Option<access::Mask>],
     who: &Who,
 ) -> Response {
     let pairs: Vec<(&Statement, &[Value])> = stmts.iter().map(|(s, p)| (s, &p[..])).collect();
@@ -2153,33 +2213,42 @@ fn read_batch(
         let running = trace::span("execute");
         running.attr("fenec.statements", stmts.len() as i64);
         running.attr("fenec.pinned", true);
-        if let Some(resp) = answer_reads(&pairs, who, p.change_seq(), |s, ps| p.query(s, ps)) {
+        let shown = (who, masks, p.database());
+        if let Some(resp) = answer_reads(&pairs, shown, p.change_seq(), |s, ps| p.query(s, ps)) {
             return resp;
         }
         // A statement reached for an index the pin left out: the whole
         // batch again under the lock, at the one change that holds then.
         running.forget();
         let guard = held::read(db);
-        return locked_reads(&guard, &pairs, who);
+        return locked_reads(&guard, &pairs, masks, who);
     }
-    locked_reads(&guard, &pairs, who)
+    locked_reads(&guard, &pairs, masks, who)
 }
 
 /// A read-only batch under the read lock `guard` is.
-fn locked_reads(guard: &Database, pairs: &[(&Statement, &[Value])], who: &Who) -> Response {
+fn locked_reads(
+    guard: &Database,
+    pairs: &[(&Statement, &[Value])],
+    masks: &[Option<access::Mask>],
+    who: &Who,
+) -> Response {
     let running = trace::span("execute");
     running.attr("fenec.statements", pairs.len() as i64);
     let seq = guard.change_seq();
-    answer_reads(pairs, who, seq, |s, ps| Some(guard.query(s, ps)))
-        .expect("a read under the lock answers")
+    answer_reads(pairs, (who, masks, guard), seq, |s, ps| {
+        Some(guard.query(s, ps))
+    })
+    .expect("a read under the lock answers")
 }
 
 /// A read-only batch's answer, each statement run by `run` -- `None` where
 /// one of them answered `None`, a pin's refusal to reach past what it
 /// holds, before any was counted. Stopped at the first error, as a block.
+/// Each answer is shown `who` as its mask says, out of `db`, what ran it.
 fn answer_reads(
     pairs: &[(&Statement, &[Value])],
-    who: &Who,
+    (who, masks, db): (&Who, &[Option<access::Mask>], &Database),
     seq: u64,
     run: impl Fn(
         &Statement,
@@ -2194,7 +2263,7 @@ fn answer_reads(
     };
     for (at, (stmt, params)) in pairs.iter().enumerate() {
         match run(stmt, params)? {
-            Ok(r) => results.push(visible(who, r)),
+            Ok(r) => results.push(shown(who, masks[at].as_ref(), db, r)),
             Err(e) => {
                 count(&results);
                 let why = e.to_string();

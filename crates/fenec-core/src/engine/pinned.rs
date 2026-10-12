@@ -89,6 +89,13 @@ impl Pinned {
         self.held
     }
 
+    /// The database as it stood at the pin: its schemas, for what reads
+    /// an answer after it -- a scoped token's mask reads a field's
+    /// collation there.
+    pub fn database(&self) -> &Database {
+        &self.db
+    }
+
     /// [`Database::query`] as at the pin; `None` where it would use an
     /// index, for the caller to run it under the lock.
     pub fn query(&self, stmt: &Statement, params: &[Value]) -> Option<Result<Response>> {

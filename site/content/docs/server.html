@@ -114,7 +114,10 @@ deliberately with <code>--insecure</code>.</p>
 server also takes JSON Web Tokens, each held to the rules of
 <code>--policy</code>: which collections, to read, insert, update or delete,
 which rows (<code>where owner = $jwt.sub</code>, <code>where room in
-$jwt.rooms</code>), and what an update may make of a row (<code>where
+$jwt.rooms</code>), which fields of them a read shows (<code>read(pickup,
+run_at) where run_at &lt;= now()</code>,
+<a href="/docs/http#field-grants">Fields a read shows</a>), and what an
+update may make of a row (<code>where
 status = "ready" and new.status = "cancelled"</code>). A token that may only read is the reporting login a
 dashboard needs, one that may only insert a client appending events, and an
 <code>append-only</code> collection takes no update or delete from any token

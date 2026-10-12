@@ -1,4 +1,4 @@
-//! What a scoped write's rules cost: `make policy-bench`
+//! What a scoped token's rules cost: `make policy-bench`
 //! (`cargo run --release -p fenec-http --example policy -- [ROUNDS]`).
 //!
 //! The same `set` -- a lease moved on and a counter counted, a row of the
@@ -23,6 +23,12 @@
 //! laptop under minutes of load -- slows each alike. A side whose policy
 //! the build cannot read (one from before transitions) is left out, so the
 //! same program measures the build before beside this one.
+//!
+//! Then reads -- a row by id and a page of twenty, every field -- under the
+//! server's token, a courier's two read rules (`plain`), and the same rules
+//! with the first naming the fields it shows (`fields`), so that half the
+//! rows answer two of their fields `null`: in process, held to the token,
+//! run, masked and written as JSON, and over HTTP as above.
 
 use fenec_core::prelude::*;
 use fenec_http::access::{self, Access, CheckPlugin, Who};
@@ -273,6 +279,179 @@ fn http(rounds: usize) {
     }
 }
 
+// ------------------------------------------------------------------ reads
+
+/// The reads: a row by id, and a page of twenty, every field of each.
+const READS: [(&str, &str); 2] = [
+    ("a row by id", "get orders where id = $1"),
+    ("a page of 20", "get orders where id > $1 limit 20"),
+];
+
+/// Each read side: its name and its policy (`None`: the server's token).
+/// `plain` and `fields` admit the same rows, every one, by the same two
+/// filters; under `fields` the first names what it shows, so the other
+/// courier's half of the orders answers its customer and door `null`.
+const READ_SIDES: [(&str, Option<&str>); 3] = [
+    ("server token", None),
+    (
+        "plain",
+        Some(
+            "orders read where n >= 0\n\
+             orders read where courier = $jwt.sub",
+        ),
+    ),
+    (
+        "fields",
+        Some(
+            "orders read(run_at, n) where n >= 0\n\
+             orders read where courier = $jwt.sub",
+        ),
+    ),
+];
+
+/// Orders of two couriers in turn, with what one shows the other.
+fn shared_orders() -> Database {
+    let mut db = Database::new();
+    let rows: Vec<String> = (0..ROWS)
+        .map(|i| {
+            format!(
+                "{{courier: \"c{}\", run_at: {i}, n: {i}, customer: \"k{i}\", dropoff: \"door {i}\"}}",
+                1 + i % 2
+            )
+        })
+        .collect();
+    for sql in [
+        "create collection orders (courier text, run_at timestamp, n int, customer text, \
+         dropoff text)"
+            .to_string(),
+        format!("put orders [{}]", rows.join(", ")),
+    ] {
+        db.execute(&fenec_ql::parse_one(&sql).unwrap()).unwrap();
+    }
+    db
+}
+
+fn read_sides() -> Vec<(&'static str, Option<Arc<Access>>, Who)> {
+    let mut out = Vec::new();
+    for (name, policy) in READ_SIDES {
+        let Some(policy) = policy else {
+            out.push((name, None, Who::Full));
+            continue;
+        };
+        match Access::new(SECRET, policy) {
+            Ok(a) => {
+                let token = a.mint(r#"{"sub":"c1"}"#).unwrap();
+                let scope = a.scope(&token, 1).unwrap();
+                out.push((name, Some(Arc::new(a)), Who::Scoped(Arc::new(scope))));
+            }
+            Err(e) => println!("  ({name} left out: {e})"),
+        }
+    }
+    out
+}
+
+/// A read as a server answers it, rendered: held to the token, run, its
+/// rows shown as the token is shown them.
+fn answered(who: &Who, db: &Database, stmt: &Statement, params: &[Value], out: &mut String) {
+    let resp = match who.scope() {
+        None => db.query(stmt, params).unwrap(),
+        Some(s) => {
+            let mut mask = None;
+            let stmt = s.rewrite_with(stmt.clone(), params, &mut mask).unwrap();
+            let mut resp = db.query(&stmt, params).unwrap();
+            if let Some(m) = &mask {
+                s.shown(m, db, &mut resp);
+            }
+            resp
+        }
+    };
+    out.clear();
+    if let Response::Rows(rs) = &resp {
+        fenec_core::json::rows_array_into(out, rs);
+    }
+}
+
+fn read_engine(rounds: usize) {
+    let sides = read_sides();
+    let db = shared_orders();
+    for (what, sql) in READS {
+        let stmt = fenec_ql::parse_one(sql).unwrap();
+        let mut times = vec![Vec::new(); sides.len()];
+        let mut out = String::new();
+        let mut id = 0;
+        for round in 0..rounds {
+            for k in 0..sides.len() {
+                let side = (k + round) % sides.len();
+                let t = Instant::now();
+                for _ in 0..TURN {
+                    id = (id + 7) % (ROWS - 25) + 1;
+                    answered(&sides[side].2, &db, &stmt, &[Value::Int(id)], &mut out);
+                }
+                times[side].push(t.elapsed().as_nanos() as f64 / TURN as f64);
+            }
+        }
+        println!(
+            "\n{what} read in process and written as JSON, the median of {rounds} turns of {TURN}:"
+        );
+        let base = pct(&mut times[0], 0.5);
+        for (k, s) in sides.iter().enumerate() {
+            let f = pct(&mut times[k], 0.5);
+            println!(
+                "  {:<14} {f:>7.0} ns   ({:+.0} ns against the server's token)",
+                s.0,
+                f - base
+            );
+        }
+    }
+}
+
+fn read_http(rounds: usize) {
+    let sides = read_sides();
+    let mut clients = Vec::new();
+    for (_, access, _) in &sides {
+        let cfg = fenec_http::Config {
+            addr: "127.0.0.1:0".into(),
+            token: Some(ROOT.into()),
+            access: access.clone(),
+            ..fenec_http::Config::default()
+        };
+        let server = fenec_http::Server::new(Arc::new(RwLock::new(shared_orders())), cfg);
+        let listener = server.bind().unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let _ = server.serve_on(listener);
+        });
+        let token = match access {
+            None => ROOT.to_string(),
+            Some(a) => a.mint(r#"{"sub":"c1"}"#).unwrap(),
+        };
+        clients.push(Client::new(&addr, token));
+    }
+    for (what, sql) in READS {
+        let mut lat = vec![Vec::new(); sides.len()];
+        let mut id = 0;
+        for round in 0..rounds {
+            for k in 0..sides.len() {
+                let side = (k + round) % sides.len();
+                id = (id + 7) % (ROWS - 25) + 1;
+                let mut body = String::from("{\"query\":");
+                fenec_core::json::escape_into(&mut body, sql);
+                body.push_str(&format!(",\"params\":[{id}]}}"));
+                let start = Instant::now();
+                let status = clients[side].post(body.as_bytes());
+                lat[side].push(start.elapsed().as_secs_f64() * 1e6);
+                assert_eq!(status, 200, "{}", sides[side].0);
+            }
+        }
+        println!("\n{what} as a `POST /query` over HTTP on loopback, {rounds} a side in turns:");
+        println!("                    p50        p99");
+        for (k, s) in sides.iter().enumerate() {
+            let (p50, p99) = (pct(&mut lat[k], 0.5), pct(&mut lat[k], 0.99));
+            println!("  {:<14} {p50:>6.1} us  {p99:>6.1} us", s.0);
+        }
+    }
+}
+
 fn main() {
     fenec_http::audit::set_delay(0);
     let rounds: usize = std::env::args()
@@ -281,4 +460,6 @@ fn main() {
         .unwrap_or(20_000);
     engine((rounds / 10).max(200));
     http(rounds);
+    read_engine((rounds / 10).max(200));
+    read_http(rounds);
 }

@@ -10,6 +10,7 @@ mod archive;
 mod cdc;
 mod changes;
 mod claims;
+mod fields;
 mod idempotency;
 mod mcp;
 mod replication;

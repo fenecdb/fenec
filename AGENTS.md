@@ -687,6 +687,63 @@ collection of those rows alone gives -- alice's memo went 9.87 -> 4.79
 once bob wrote 200 holding the word -- 0.16 -> 0.24 ms for 2.5% of 100
 000 rows; the browser module leaves the counting out.
 
+**A read rule may name the fields it shows, and a field it withholds is
+held out of what a statement does, not only of its rows**
+(`fenec-http/src/access/fields.rs`). `read(pickup, run_at)` grants the
+rows its filter admits with those fields and `id`
+(`Rule::read_fields`); a row shows the union of the fields of the read
+rules admitting it, the rest `null` (`Scope::shown`, asked of each row
+over its own columns -- the fields the rules read appended to the list
+where it leaves them out, `Level::added`, and taken off after), in
+`/query`, `/batch`, REST, each `lookup` level by its own collection's
+rules, `returning`, a stream's seed and changes and the MCP tools. A field
+no rule grants is not there: dropped from `select *`, from `describe`,
+`/collections`, `/_schema` and MCP `schema` (`Scope::shown_schema`), and
+refused by name (403) as a name the collection lacks is, so a name tried
+says nothing. Masking alone leaked the field through everything else a
+statement does with it: `where dropoff = $1` answered the order going
+there, `order dropoff` sorted the doors, `{n: dropoff}` wrote one into a
+field the token reads, `1 / n` failed with an error naming the division.
+So `fields::hold` and `fields::write` run before the rules are ANDed in:
+each `where` term reading a field a row may not show becomes
+`(showing_f and term)`, `showing_f` the `or` of the filters of the rules
+granting it (`View::guard`) -- false, under any `not`, wherever the row
+does not show it, and never worked out there since `and` stops at the
+first false (the bound `Filter` and `eval` alike) -- in a `get`, a `set`,
+a `del`, a `lookup` level, a facet's rest and an inner `get`, whose column
+is listed from the rows showing it; `order`, `group`, `having`, `facet`,
+an aggregate, `match`, `near`, `rerank`, a highlight, a `lookup` key (both
+sides) and a `set`'s or upsert's values are refused (403, naming the
+field) unless every row they reach shows it (`View::open`): every read
+rule grants it, or one granting it has no filter or one whose `and` terms
+are each an `and` term of the statement's own `where`, parameters bound
+(`Reach::implies`, structural: a courier's `where courier = $1` is their
+rule's `courier = $jwt.sub`) -- nothing finer is proved. A computed column
+over one is `case when showing_f then <it> end`, null and never worked out
+where hidden. Writes reach the rows they reached: a field every read rule
+grants is as exposed to an update rule wider than the read rules as every
+field was before field lists. A stream keeps a digest of each row as sent
+(`sse::Seen`) and sends no row a write left showing the same, which would
+tell it when a hidden field changed, as the scoped poll's content tag
+keeps it from a poll. PostgreSQL's column privileges are a role's, the
+same on every row, and refuse a statement naming the column, `SELECT *`
+included; a per-row column is a view of `CASE WHEN` columns, whose
+`WHERE` reads `NULL` where this reads false. A token none of whose rules
+name fields takes the path it took (`Scope::fielded`, one bool a
+statement, its mask `None`, its plain `get`s through `query_json`): in
+eight ABBA turns against main a scoped `set` in process took 1 988 ns
+against 1 981, over HTTP 26.9-27.2 us against 26.8-27.1, and `make
+requests-bench` stayed at 0.022 ms a row by id either way. The mask goes
+out beside the statement (`rewrite_with`'s out-parameter): returned in a
+pair, the kilobyte `Statement` was copied twice more, 1 990 -> 2 060 ns.
+One whose rules do name fields pays its rules over each row answered:
+a row by id 2.12 -> 2.75 us in process and a page of twenty 12.6 -> 15.1
+(0.13 us a row), over HTTP 26.0 -> 28.0 and 34.4 -> 39.5 us, the rest of
+that the stored-bytes path a masked `get` gives up. Each attack is
+a test of `tests/fields.rs` (and `mcp.rs`), every one failing with its
+part of the holding taken out. Native only: the browser module is the
+same to the byte.
+
 **A token is bound to the tenant it names** (`Scope::reaches`,
 `route_tenant`). The policy is the node's, not a tenant's, so `owner =
 $jwt.sub` matched alice's rows in every tenant's file: a token minted for

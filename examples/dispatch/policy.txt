@@ -30,6 +30,12 @@ merchants      read,write                                                       
 couriers       read            where user = $jwt.sub                                for courier
 merchants      read                                                                 for courier
 orders         read            where courier = $jwt.sub                             for courier
+# An order a courier may claim -- ready, or its lease lapsed -- by what a
+# courier needs to choose it: where to pick it up, what it pays, when it is
+# due. Not the customer, nor their door, until the claim makes it theirs:
+# the rest of the row reads null, a filter over it finds nothing, and an
+# order by it is refused.
+orders         read(id, merchant, pickup, pickup_name, items, fee, status, run_at, attempts, promised)  where run_at <= now()  for courier
 # Their own position, written over as they move.
 positions      read,insert,update(loc, seen, state, heading, job, vehicle)  where courier = $jwt.sub  for courier
 

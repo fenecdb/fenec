@@ -31,8 +31,9 @@ rides it to the door. It has:
   courier's latest deliveries a run of `@sorted(courier, delivered_at
   desc)`;
 - **scoped access** held by the nodes: a dispatcher reaches their own
-  company alone, a courier reads only the orders they carry and writes
-  only claims that name themselves, a customer reads and places only
+  company alone, a courier reads the orders they carry and the pickup --
+  not the door -- of the ones they may claim, and writes only claims that
+  name themselves, a customer reads and places only
   their own orders and follows their courier on them;
 - **analytics**: deliveries an hour on time and late, the day's waves,
   order-to-door time, kilometres ridden, the busiest couriers -- an
@@ -444,8 +445,23 @@ are fixed since, and say how.
    beat (`courier_loc`), the customer's subscription to their own order
    carrying it, at the price of writing the order every 2.5 s. A courier
    should see a ready order's pickup to claim it but not the customer's
-   door before they take it; a read rule gives whole rows, so the
-   candidates are read with the app's token on the server.
+   door before they take it; a read rule gave whole rows, so the
+   candidates were read with the app's token on the server.
+
+   **Fixed for the fields: a read rule names the fields it shows.**
+   `orders read(id, merchant, pickup, pickup_name, items, fee, status,
+   run_at, attempts, promised) where run_at <= now() for courier` beside
+   `orders read where courier = $jwt.sub` (`policy.txt`): a row shows the
+   fields of the rules admitting it, so a courier reads every claimable
+   order's pickup, fee and due time -- the phone draws the ones farther
+   out than a claim reaches, read under the courier's own token
+   (`readyNear`) -- and its customer and door read `null` until the claim
+   makes it theirs, when `returning *` answers it whole. Masking the rows
+   is not all of it: `where dropoff_addr = $1` matches no ready order
+   whatever the door (and its `not` every one), and `order dropoff_addr`,
+   `group customer` or `facet dropoff_addr` is refused (403) naming the
+   field, since the order or the counts would tell the doors.
+   `test/security.test.ts` asks for each.
 
 7. **Fixed: a quota's 429 says its wait to the millisecond
    (`retry_after_ms`, which every SDK and a replica's sync read first),

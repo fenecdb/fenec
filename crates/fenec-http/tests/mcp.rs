@@ -633,6 +633,72 @@ fn a_scoped_token_s_agent_sees_what_its_query_sees() {
     assert_eq!(at(&s, &["count"]), &Value::Int(0));
 }
 
+/// A token whose rules name the fields a read shows: the `schema` tool
+/// lists those alone, `query` and `get` answer each row with the fields of
+/// the rules admitting it, and `search` ranks by no field some row does
+/// not show -- its agent sees what its `/query` sees.
+#[test]
+fn a_scoped_agent_sees_the_fields_its_rules_show() {
+    let policy = "\
+docs  read(title, year)  where year >= 2024       for reader
+docs  read               where owner = $jwt.sub   for reader
+docs  read(title)                                 for viewer
+";
+    let n = serve(
+        Config {
+            token: Some(ROOT.into()),
+            access: Some(Arc::new(Access::new(SECRET, policy).unwrap())),
+            mcp: Some(Arc::new(opts())),
+            ..Config::default()
+        },
+        DOCS,
+    );
+    let viewer = n.token(r#"{"sub":"v","role":"viewer"}"#);
+    let (_, s) = n.call(Some(&viewer), "schema", "{}");
+    let fenecql = text(at(&s, &["fenecql"]));
+    assert!(fenecql.contains("title"), "{fenecql}");
+    for hidden in ["body", "embed", "year", "owner"] {
+        assert!(!fenecql.contains(hidden), "{hidden}: {fenecql}");
+    }
+    let (_, s) = n.call(Some(&viewer), "get", r#"{"collection":"docs","ids":[1]}"#);
+    assert_eq!(text(at(&s, &["rows", "0", "title"])), "fox");
+    assert_eq!(at(&s, &["rows", "0", "body"]), &Value::Null, "{s:?}");
+    let (err, s) = n.call(
+        Some(&viewer),
+        "query",
+        r#"{"query":"get docs select body"}"#,
+    );
+    assert!(err && int(at(&s, &["status"])) == 403, "{s:?}");
+
+    // Bob reads his dog whole, alice's cat by its title and year alone.
+    let bob = n.token(r#"{"sub":"bob","role":"reader"}"#);
+    let (_, s) = n.call(Some(&bob), "query", r#"{"query":"get docs order id"}"#);
+    assert_eq!(at(&s, &["count"]), &Value::Int(2), "{s:?}");
+    assert_eq!(
+        text(at(&s, &["rows", "0", "body"])),
+        "a lazy dog sleeps all day"
+    );
+    assert_eq!(text(at(&s, &["rows", "1", "title"])), "cat");
+    assert_eq!(at(&s, &["rows", "1", "body"]), &Value::Null, "{s:?}");
+    assert_eq!(at(&s, &["rows", "1", "owner"]), &Value::Null, "{s:?}");
+    // The cat's words would rank it: `match` over a body it does not show.
+    for args in [
+        r#"{"collection":"docs","text":"fox"}"#,
+        r#"{"collection":"docs","vector":[1,0,0]}"#,
+    ] {
+        let (err, s) = n.call(Some(&bob), "search", args);
+        assert!(err && int(at(&s, &["status"])) == 403, "{args}: {s:?}");
+    }
+    // Over his own, which a rule shows whole, it searches.
+    let (err, s) = n.call(
+        Some(&bob),
+        "search",
+        r#"{"collection":"docs","text":"dog","filter":"owner = $1","params":["bob"]}"#,
+    );
+    assert!(!err, "{s:?}");
+    assert_eq!(at(&s, &["count"]), &Value::Int(1), "{s:?}");
+}
+
 #[test]
 fn memories_are_found_by_words_then_by_meaning_and_go_when_they_expire() {
     let n = start(Options {

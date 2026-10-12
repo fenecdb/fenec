@@ -28,7 +28,7 @@
 //! copy. `change` is an incremental diff and **carries state**, not an
 //! operation (see `fenec_core::changes`): re-applying it is harmless.
 
-use crate::access::Who;
+use crate::access::{Mask, Scope, Who};
 use crate::api;
 use crate::http::Request;
 use crate::Config;
@@ -215,22 +215,30 @@ pub fn serve(
     // matched no row, a scoped stream hears only of rows it was sent, and
     // such a live query never ran again; told of every write, it would hand
     // the token the moments of other users' writes.
+    //
+    // A token whose read rules name fields is held to them as a read is
+    // (`Scope::shaped`): the shape's terms over a field a row may not show
+    // asked only where it does, and each row sent with the fields of the
+    // rules admitting it (`mask`).
     let sub = {
         let guard = crate::held::read(db);
         api::subscription(&guard, req).and_then(|mut sub| {
             let mut quiet = false;
+            let mut mask = None;
             if let Some(scope) = who.scope() {
                 quiet = matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
                 let shape = if quiet { None } else { sub.filter.take() };
                 if quiet {
                     sub.project = Some(vec!["id".to_string()]);
                 }
+                let (shape, m) = scope.shaped(&sub.collection, shape, &mut sub.project)?;
+                mask = m;
                 sub.filter = scope.restrict(&sub.collection, shape)?;
             }
-            Ok((sub, quiet))
+            Ok((sub, quiet, mask))
         })
     };
-    let (sub, quiet) = match sub {
+    let (sub, quiet, mask) = match sub {
         Ok(s) => s,
         Err(e) => {
             let _ = write_head(
@@ -260,8 +268,17 @@ pub fn serve(
     // deletion -- would otherwise hand every user the ids everyone else
     // writes. It costs the ids of the rows sent; an unscoped subscription
     // keeps the rule and holds nothing.
-    let mut seen: Option<std::collections::HashSet<DocId>> =
-        who.scope().map(|_| Default::default());
+    //
+    // Masked, each id keeps a digest of the row as it was sent, and a row
+    // written again that shows the same is not sent: a write to a field
+    // the token does not see would otherwise tell it when that field
+    // changed, which a scoped poll's content tag (`same_answer`) keeps
+    // from it as well.
+    let show = who.scope().zip(mask.as_ref());
+    let mut seen: Option<Seen> = who.scope().map(|_| Seen {
+        ids: Default::default(),
+        digests: show.is_some(),
+    });
     // A stream of a shape that holds nothing, unscoped, is told of every
     // write to the collection, and so of every row reaching its time.
     let everything = seen.is_none() && matches!(sub.filter, Some(Expr::Lit(Value::Bool(false))));
@@ -272,7 +289,7 @@ pub fn serve(
         // holds are not known here, and without them no deletion could be
         // told apart from someone else's write.
         Some(n) if seen.is_none() => n,
-        _ => match seed(out, db, &sub, &mut seen, quiet) {
+        _ => match seed(out, db, &sub, &mut seen, quiet, show) {
             Ok(seq) => {
                 // The seed left out every row past its time by then.
                 if let Some(x) = &mut expiry {
@@ -309,13 +326,17 @@ pub fn serve(
         }
         let step = {
             let guard = crate::held::read(db);
-            guard.changes_since(
+            let mut step = guard.changes_since(
                 &sub.collection,
                 cursor,
                 sub.filter.as_ref(),
                 sub.project.as_deref(),
                 &[],
-            )
+            );
+            if let (Ok(Changes::Batch(b)), Some((scope, mask))) = (&mut step, show) {
+                scope.shown_rows(mask, &guard, &mut b.puts);
+            }
+            step
         };
         match step {
             Err(e) => {
@@ -326,7 +347,7 @@ pub fn serve(
             }
             Ok(Changes::Reseed) => {
                 let began = now_ms() as i64;
-                match seed(out, db, &sub, &mut seen, quiet) {
+                match seed(out, db, &sub, &mut seen, quiet, show) {
                     Ok(seq) => cursor = seq,
                     Err(_) => return,
                 }
@@ -343,8 +364,8 @@ pub fn serve(
                     }
                 }
                 if let Some(seen) = &mut seen {
-                    b.dels.retain(|id| seen.remove(id));
-                    seen.extend(b.puts.rows.iter().map(|r| r.id));
+                    b.dels.retain(|id| seen.left(*id));
+                    b.puts.rows.retain(|r| seen.sent(r));
                 }
                 // The cursor advances every round, even when the batch is
                 // empty. The counter and the ring are shared across all
@@ -379,7 +400,7 @@ pub fn serve(
                     }
                     Ok(mut dels) => {
                         if let Some(seen) = &mut seen {
-                            dels.retain(|id| seen.remove(id));
+                            dels.retain(|id| seen.left(*id));
                         }
                         if !dels.is_empty() {
                             drop(guard);
@@ -530,6 +551,48 @@ impl Expiry {
     }
 }
 
+/// The rows a scoped stream was sent, by id: the ones it may be told
+/// left. Where its rows are masked, each with a digest of the row as sent.
+struct Seen {
+    ids: std::collections::HashMap<DocId, u64>,
+    digests: bool,
+}
+
+impl Seen {
+    fn seed(&mut self, rows: &[Row]) {
+        self.ids = rows.iter().map(|r| (r.id, self.digest(r))).collect();
+    }
+
+    /// Whether the row `id` was sent, forgetting it: a deletion is told.
+    fn left(&mut self, id: DocId) -> bool {
+        self.ids.remove(&id).is_some()
+    }
+
+    /// Whether `row`, written, is to be sent: unless it is masked and
+    /// shows what it showed when last sent.
+    fn sent(&mut self, row: &Row) -> bool {
+        let d = self.digest(row);
+        self.ids.insert(row.id, d) != Some(d) || !self.digests
+    }
+
+    /// The row's values as their encodings take them, hashed: `==` takes
+    /// -0.0 for 0.0.
+    fn digest(&self, row: &Row) -> u64 {
+        use std::hash::{Hash, Hasher};
+        if !self.digests {
+            return 0;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut buf = Vec::new();
+        for v in &row.values {
+            buf.clear();
+            fenec_core::codec::encode_value(&mut buf, v);
+            buf.hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
 /// A change of the rows `dels` reaching their time, at the change the
 /// stream stands at: no write moved it.
 fn expired_json(seq: u64, dels: &[DocId]) -> String {
@@ -553,16 +616,20 @@ fn seed(
     out: &mut TcpStream,
     db: &Arc<RwLock<Database>>,
     sub: &api::Subscription,
-    seen: &mut Option<std::collections::HashSet<DocId>>,
+    seen: &mut Option<Seen>,
     quiet: bool,
+    show: Option<(&Scope, &Mask)>,
 ) -> std::io::Result<u64> {
     let (rows, seq) = {
         let guard = crate::held::read(db);
         let stmt = Statement::Select(api::seed_select(sub));
         match guard.query(&stmt, &[]) {
-            Ok(Response::Rows(rs)) => {
+            Ok(Response::Rows(mut rs)) => {
+                if let Some((scope, mask)) = show {
+                    scope.shown_rows(mask, &guard, &mut rs);
+                }
                 if let Some(seen) = seen {
-                    *seen = rs.rows.iter().map(|r| r.id).collect();
+                    seen.seed(&rs.rows);
                 }
                 let rows = match quiet {
                     true => String::from("[]"),
