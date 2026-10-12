@@ -4,8 +4,8 @@ This file provides guidance to Codex and other coding agents when working with c
 
 fenecdb — a minimal, vector-native embedded database in Rust. Compiles to WASM for
 the browser, has its own query language (FenecQL), and its server (`fenec-server`)
-speaks HTTP; every language reaches it that way, Python, JavaScript, Go and
-.NET through official clients. The docs under `site/content/docs/` are the long-form reference (design
+speaks HTTP; every language reaches it that way, Python, JavaScript, Go,
+.NET, Swift, Kotlin and Dart through official clients. The docs under `site/content/docs/` are the long-form reference (design
 rationale, benchmarks, full FenecQL and HTTP surface); `README.md` is the
 front door and links into them, and this file is the working summary.
 `AGENTS.md` is this file for other agents, the same text under its own title
@@ -15,7 +15,7 @@ and first line: `make agents-md` writes it from `CLAUDE.md`
 ## Commands
 
 ```bash
-make test          # cargo test (no fenec-bench, no examples), fenec-core without its indexes, then the JS tests
+make test          # cargo test (no fenec-bench, no examples), fenec-core without its indexes and without any feature, then the JS tests and sync-scenarios-check
 make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # with those features alone (indexes, language: a group; none: none)
 make wasm-lite     # the test build without the indexes, to web/fenec-lite.wasm (web/fenec.test.js; shipped by nothing)
@@ -24,6 +24,7 @@ make wasm-sizes    # what each feature adds to the module with none, and what le
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's; FEATURES=none: that build's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
 make wasm-exact-speed   # near without the graph (the wasm-lite build), 1k-50k rows x 128/384, against the graph and exact
+make file-bench    # what keeping a database costs a page: IndexedDB (persist) against an OPFS file (openFile), 32 MB, headless Chrome (BROWSER=safari|firefox)
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
 make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
@@ -46,25 +47,31 @@ make go-test       # the Go SDK (integrations/go) against a primary, a replica a
 make dotnet-test   # the .NET SDK (integrations/dotnet) the same way, xunit; the dotnet/sdk:8.0 image on Linux without .NET
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
 make schema-golden    # integrations/schema-golden.json: declarations, FenecQL texts and plans, through the module (web/schema-golden.mjs)
+make types-check  # web/fenec.d.ts held to web/fenec.js and to a caller's code under tsc --strict, then make docs-types (web/types)
 make docs-types   # every data-lang="ts" example on the site under tsc --strict (web/types/docs.mjs; part of make types-check)
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
+make langchain-test   # the LangChain.js vector store over a database in the page and over fenec-server (needs `make wasm`)
+make ai-sdk-test   # integrations/ai-sdk/rag.js against the Vercel AI SDK's own mock models (needs `make wasm`)
+make cloudflare-test  # a database in a Durable Object's storage: persist, restore, storage failing part way, the example Worker under wrangler dev
+make cloudflare-bench # a Durable Object's first near after an eviction, under wrangler dev, against the ones after (SIZES=1000,10000 to choose)
 make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP and stdio, both eras, the docs' configs
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
+make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js and build.py's rules
 make grafana-check # monitoring/'s compose (Docker): both data dashboards, Infinity's and the Grafana plugin's (integrations/grafana), and its alert rule held to fenec-server
-make grafana-check # monitoring/'s compose (Docker): every panel of the data dashboard (Infinity) asked of Grafana, held to fenec-server's answer
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
-make mirror-bench  # fenec-server --follow: commit to a subscriber, a server killed and started again
+make mirror-bench  # fenec-server --follow: commit to a subscriber, a server killed and started again (pgvector-up first)
+make pgvector-up   # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432, wal_level=logical, for the comparisons and --follow (pgvector-down removes it)
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make server TOKEN=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part)
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
-make policy-bench        # a scoped set under a plain rule, a field list, a transition and answering its row, against the server's token, in process and over HTTP
+make policy-bench        # a scoped set under a plain rule, a field list, a transition, answering its row and a rule reading another collection, and a read by id, against the server's token, in process and over HTTP (ARGS=streams|beats: writes beside scoped streams)
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
-make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
+make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes (ARGS=blocks those alone, NOPREP=1 a block built under the lock; ARGS=long writers beside long reads)
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
 make mcp-bench           # an MCP tool call against the /query it runs: in process, and over HTTP
 make pages-bench         # pages of every size and place, limit and offset written in against as parameters: the parse cache's hits
@@ -80,15 +87,18 @@ make scale-bench         # fenec-server over HTTP against pgvector at scale: loa
 make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server vs PostgreSQL, MongoDB and Redis in Docker, durable and buffered (YCSB_ARGS; ycsb/run-redis.sh the Redis runs)
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
+make composite-bench     # an index over several fields: a user's latest twenty and a feed over ten through @sorted(owner, created desc) against @hash, @sorted and the scan; @unique(org, slug)
+make lookup-bench        # a lookup over a key of several fields: a tenant's 20 shops x 3 orders x 5 lines against the key joined into one @hash field (ARGS="all 500 2", ARGS=single)
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
 make fuzzy-bench         # match ... fuzzy and prefix over 100 000 documents: the sorted words' build and size, the walk at one edit and two, a query plain, with a typo and half typed (BEIR=dir: its words too)
 make nocase-bench        # a `nocase` field against a plain one over 100 000 rows: a put asking @unique, lookups, scans, `~`, an order, group and facet (ARGS=scan for some)
-make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M
+make collate-bench       # order ... collate tr over a million Turkish names, against PostgreSQL's tr-x-icu (that side after pgvector-up)
+make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M, a lone put and del beside such a field (`writes`)
 make growth-bench        # indexes growing a put at a time, the longest (a table's growth), p50/p99.99: @unique to 4M keys, @text to 4M terms, @hnsw to 1.1M x 128 and 300k x 768; then builds, lookups, match, near, the first put after an open (GROWTH=unique|text|vector)
-make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
+make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`ARGS=old`: those alone, for another commit; `ARGS=writes` and `folds` the parts quoted below)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 make geo-bench           # a million points: radii, the nearest, through @geo and by the scan, against PostGIS and Redis in Docker (GEO_ARGS)
-make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; `held` (or `held pickup|delayed|idle|busy|other|contested|nearest`): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims, a put of another collection beside claims held, one job to 10, 100 and 1 000 claims of their own, one order to couriers each claiming the nearest
+make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; QUEUE_ARGS=held (or "held pickup|delayed|idle|busy|other|contested|nearest"): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims, a put of another collection beside claims held, one job to 10, 100 and 1 000 claims of their own, one order to couriers each claiming the nearest
 make nearest-bench       # the nearest ready order claimed over HTTP, 1, 16 and 50 claimers: order distance(...) limit 1 returning id and an inner get's near, against examples/dispatch's read and /batch (ORDERS, CLAIMS)
 ```
 
@@ -129,10 +139,10 @@ fenec-wire  (a PostgreSQL     fenec-shard (tenant router: directory,
      |      client: framing,             placement, move)
      |      SCRAM, COPY out, pgoutput)
 fenec-import (SQLite file reader + PG COPY source + --follow)
-     |
-fenec-server (the server: HTTP, the syncer and shutdown,
-     |        --follow running the importer's follower)
-fenec-cli   (`fenec` shell, `fenec import`, `fenec types`)
+     |                                  \
+fenec-server (the server: HTTP, the      fenec-cli (`fenec` shell,
+     syncer and shutdown, --follow        `fenec import`, `fenec types`)
+     running the importer's follower)
 ```
 
 `fenec-bench` is a measurement harness (`publish = false`) and is the only crate
@@ -149,9 +159,14 @@ tailoring, generated tables in chunks),
 case, as the standard library's, without its code), `time` (calendar arithmetic), `tz`
 (the time zones `bucket` reads a clock by, IANA's rules since 2000), `sparse`
 (sparse vectors and their inverted index), `changes`
-(the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
-`std-fs` feature), `off` (what stands in for an index a build is made
-without).
+(the change ring), `plugin` (registry), `sorted` (the ordered index),
+`composite` (an index over several fields), `fuzzy` (the sorted words
+`match ... fuzzy` and `prefix` walk), `geo` (points and `@geo`), `hll`
+(HyperLogLog), `maps` (the hash maps the derived indexes are built into),
+`history` (which history a database's writes belong to), `error`, `fs`
+(buffered file I/O, behind the `std-fs` feature, as are `cache`, the page
+cache's room, and `synclog`, the sync log), `off` (what stands in for an
+index a build is made without).
 
 The browser client is `web/fenec.js` — WASM glue (~545 lines), persistence and
 the sync layer -- with the query builder (`web/builder.js`) and the HTTP client
@@ -353,7 +368,7 @@ server prepares a `/batch` or a `/query` whose `put`s write `PREPARE_AT`
 (16) documents or more: fewer spend more on the read lock and the buffers
 than they take off. The lock is held 0.14-0.15 ms p50 for the block,
 0.38-0.39 at p99 and 0.44-0.50 at most over 10 000 blocks, against
-0.31-0.35, 0.59-0.73 and 4.6-50 built under it on this branch; a writer
+0.31-0.35, 0.59-0.73 and 4.6-50 built under it with the rest of the change; a writer
 alone lands 1.6% fewer blocks prepared than built under the lock (the read
 lock, the buffers, the documents cold again), and a fifth more than on
 main. Rejected: a pin
@@ -376,7 +391,7 @@ of three aggregates over a million entries, 140-200 ms) held transfers up
 to 187-512 ms, 36 past 50 ms in ten seconds (`make recon-bench`), and an
 aggregate of 50 000 groups over a million events four writers' puts --
 and every read by id behind a waiting one -- for its 0.8 s (`make
-concurrency-bench long`). `pin`, under the read lock, takes what a read
+concurrency-bench ARGS=long`). `pin`, under the read lock, takes what a read
 of the documents alone needs into a `Database` of its own: each
 collection's schema and its store as `Store::pinned` takes it -- the
 segments and the mapped file shared, the id index copied, 12 bytes a row,
@@ -450,7 +465,7 @@ dropped -- kept whole until the block lands, then let go -- which comes
 back where it stood, and an index built, which goes. It lands inside the
 block's record (kind 9) as the record it is on its own, and a lone one as
 that record alone, so only a block mixing one with other writes is new to
-a binary from before 10.4, which refuses it as corrupt. Undone in one pass
+a binary from before 0.1.5, which refuses it as corrupt. Undone in one pass
 the last write first, the collection a write is of is looked up by id, not
 kept: a drop and a create of the same name in one block are two
 collections. It cost the browser module 3.0 KB, 0.6 KB brotli, the
@@ -461,7 +476,7 @@ a time, the last first, each the inverse of what it did: 3.0 ms for 50 000
 writes, where finding each id's first write by searching took 402 ms, and
 a sort was 4.6 KB of the browser module. The buffers are kept from one block to the next (`Block::cleared`),
 the record's header written into room left before the frames: allocated
-anew they took a lone `put` from 832 to 985 ns; kept, a put costs 841
+anew they took a lone `put` from 832 to 985 ns; kept, a put cost 841
 against the 829 before blocks, a `del` 648 against 634.
 
 **A storage error stops writes.** Once the sink refuses an append, a sync or a
@@ -1021,7 +1036,7 @@ rules that apply to it, the filter as the policy writes it
 (`Scope::summary_into`). The grid reads 100 rows a block, the block after
 one in id order by `id > $last`, a jump or an order by offset, and draws
 only the rows in view: a scroll down 100 000 rows and back took no long task,
-the longest frame 18.7 ms in headless Chrome. Its first load is 63 KB of JS
+the longest frame 18.7 ms in headless Chrome. Its first load is 64 KB of JS
 and CSS gzipped (`site/build.py` holds the docs to it), served uncompressed.
 The query editor, the schema, the live rows and the admin view are modules
 fetched the first time each opens (`app.js`'s `LOAD`, their stylesheet
@@ -1098,7 +1113,8 @@ tenant path; GET and DELETE 405, a batch refused, an answer one JSON
 object, never a stream), with the 2026-07-28 headers held to the body
 (`-32020`); stdio is `fenec mcp --file` (`serve_lines`) and `--url`
 (`bridge`, the token from `FENEC_TOKEN`, never argv). The tools are
-`schema`, `search` (`match`, `near` or `fuse`, a snippet in `**bold**`),
+`schema`, `search` (`match`, its `fuzzy` and `prefix` too, `near` or
+`fuse`, a snippet in `**bold**`),
 `query`, `get`; `write` with `--mcp-write` (put, insert, set and del:
 never a schema change or a compact, by any token); `remember`, `recall`
 and `forget` with `--mcp-memory`, whose collection `remember` makes at the
@@ -1149,8 +1165,8 @@ fails the maintenance rather than installing what no longer fits. At 100 000 x
 mapped file a compact copies no record: the graphs holding tombstones are
 rebuilt beside the database, then each store is cloned under the read lock --
 the records in the old file and the sealed segments shared (`SegmentBytes` is
-an `Arc` natively), the index copied, each graph's record written -- the live
-records written into `<file>.fenec.beside` with no lock held and fsynced, and
+an `Arc`, in the browser module too now), the index copied, each graph's record written -- the live
+records written into `<file>.beside` with no lock held and fsynced, and
 the clones relocated onto it without reading it back (`relocate_live`). Under
 the write lock only the documents written meanwhile go in, as a data record
 inside the image, whose header then takes the counter as it stands, and the
@@ -1384,7 +1400,8 @@ a dense array where the ids are, as the store's id index, which the text
 index's lengths share: filled as a `HashMap` it was 2.1 of a 16.7 ms open.
 
 **A graph record is laid out flat.** Versions 7, an image's, and 8, a
-server's tail, hold the nodes' documents, flags, levels and level-0 lengths
+server's tail -- 9 and 10, the aliases added, are what is written now
+(below) -- hold the nodes' documents, flags, levels and level-0 lengths
 as arrays, then every list sorted, its first link in as many bytes as the
 node count needs and its steps in as many as its widest (`put_links`).
 Decoding a varint a link was a quarter of an open; written 4 bytes a link
@@ -1407,9 +1424,10 @@ pruning reads only the list it prunes and the vectors, so every list ends
 as linking the nodes one after another left it, and
 `a_batch_links_as_its_nodes_would_one_after_another` holds the graph
 records to that byte for byte over every arena. Linked on one core, the
-pruning was 70% of a 100 000 x 128 build: 10.6 s then, 5.3 now; 48.9 ->
-23.4 s at 768 dimensions, and 50.6 -> 22.0 s for a crashed file's vectors
-linked at the open. A share of the work a thread left the M1's efficiency
+pruning was 70% of a 100 000 x 128 build: 10.6 s then, 5.3 after (3.6-3.8
+s since, with NEON's strips and the prefetch, below); 48.9 -> 23.4 s at
+768 dimensions, and 50.6 -> 22.0 s for a crashed file's vectors linked at
+the open. A share of the work a thread left the M1's efficiency
 cores finishing last while the rest waited, so the work goes out an item
 at a time. The browser has one thread and links in turn (`link_node`),
 through the same pruning (`GraphView::pruned`).
@@ -1544,8 +1562,8 @@ against 3.66 k, with each server's part of a read under 0.02 of 0.29 ms
 and PostgreSQL's own B at 2.65 k beside its C: the rest moves with the VM.
 
 **A block's `put`s link their vectors together.** A block
-`Database::begin` opened -- a `/batch`, a keyed write, the browser module's
-`run` of several -- is its statements' batch: a `put` in it leaves its vectors waiting
+`Database::begin` opened -- a `/batch`, a keyed write -- is natively its
+statements' batch: a `put` in it leaves its vectors waiting
 (`defer_batch`, `Block::waiting`), and they are linked on every core 512
 at a time a field (`LINK_AT`, `link_waiting`), the rest as the block lands,
 before its record is written, so that a block put back after all is put
@@ -1553,7 +1571,9 @@ back as any other. A search in the block measures the waiting ones
 exactly, as it does a server's backlog, and a rollback drops those its
 undo made tombstones (`forget_waiting`) -- the newest of the waiting, since
 nothing else leaves one while a block is open. A lone statement links as
-it did. Linked a row at a time, as a `/batch` of single puts would have
+it did, and so does the browser module's `run` of several: its one thread
+links a vector as it is written (`DEFERS`), the waiting being 843 bytes
+brotli of it for nothing. Linked a row at a time, as a `/batch` of single puts would have
 them, 100 000 128-dim rows went in at 5.3k rows/s with the graph kept;
 linked together, at 16.0k, and 18.3k as a `/batch` of single puts over HTTP now (`make load-bench`).
 
@@ -1562,7 +1582,7 @@ on its way down, so a crash after a long run leaves every vector written
 since in the tail, and linking them at the open kept the port closed for as
 long as they took: at 100 000 x 768 never checkpointed, `fenec-server` answered
 its first `near` 67.7 s after it started, and linking at the open still
-takes 18.4 s with the lists pruned in parallel. `fenec-server`, a tenant and a replica
+took 18.4 s with the lists pruned in parallel (14.9-16.3 s now, below). `fenec-server`, a tenant and a replica
 open with `fs::open_serving` instead, and it answers after 1.23 s: those
 vectors go into the arena unlinked (`VectorIndex::defer_batch`, every vector
 of a graph the open cannot restore too), a search measures each of them
@@ -1572,8 +1592,9 @@ about 10 ms under the write lock, each at most twice the last (a pace taken
 over a small graph had a slice hold the lock for 112 ms). `near` takes the
 exact scan's 10.5 ms until the 19.2 s of linking are done and 0.31 ms after,
 recall 0.976 against 0.978 (`make reopen-bench`). A checkpoint meanwhile
-writes the waiting nodes flagged -- graph record version 5 and only then in
-the varint layout, a node's flag in the flat one -- and an open that does not
+writes the waiting nodes flagged -- a node's flag in the flat layout, where
+the varint one, which only the tests write now, took graph record version 5
+and only then -- and an open that does not
 defer links them there. The linking needs the
 lock to let a waiting writer in: Linux's std lock does, while on macOS
 readers slip past it, and four clients asking back to back kept it from
@@ -1593,8 +1614,8 @@ with the graph kept held the keeper 3.0 to 4.3 s, and every other database
 it keeps with it. The record holds the whole graph, so a bound
 on the linking alone would have a big graph written over and over for a
 little of it; waiting for the linking kept a crash from leaving the nodes
-waiting again. It is a graph record (kind 4) of version 6, 8 laid out flat,
-which an older binary does not know and rebuilds from -- it restored a record in the tail
+waiting again. It is a graph record (kind 4) of version 6, 8 laid out flat
+and 10 with the aliases (below), which an older binary does not know and rebuilds from -- it restored a record in the tail
 against the documents the whole file left, and a vector rewritten after it
 kept the links of the one before -- and like the history it moves no
 counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
@@ -1886,8 +1907,8 @@ both, which the scenario file holds.
 `returning` answers them.** A job queue's claim was a read of the ready
 page and a compare-and-set of it, and two workers that read the same page
 raced, one of them told only by an `affected` short of its page. `Update`
-and `Delete` carry `pick: Option<Box<Pick>>` (boxed: no other write has
-one), and `picked_ids` hands the filter, `order` and `limit` to a `get`'s
+and `Delete` carry `pick: Option<Box<Pick>>` (boxed: most writes have
+none), and `picked_ids` hands the filter, `order` and `limit` to a `get`'s
 `page_ids`, so `set jobs {owner: $1, run_at: now() + 30000, attempts:
 attempts + 1} where run_at <= now() order run_at limit 10 returning *`
 walks `@sorted` to its page and writes it under the one lock --
@@ -2301,13 +2322,14 @@ the one map and its `Fx` (`cfg`), byte for byte the size it was.
 
 **`in (get ...)` is answered before the query, as the list it is.**
 `Expr::InSelect` holds an inner `Select`; `Database::answered` (from
-`query` and `execute_inner`, and `explain` inside its plan) runs each
-inner `get` once, with the statement's parameters, and puts an
+`query`, `query_json` and `execute_inner`, and `explain` inside its
+plan) runs each inner `get` once, with the statement's parameters, and puts an
 `Expr::In` of its one column's values in its place -- so every place a
 filter goes, and the planner's "every element resolves or the list goes
 to the scan" rule, take it unchanged, and `eval` never meets one. Only
-a statement holding one, or reading a collection whose rows expire, is
-cloned: the rest costs a look at its filters. A null is left out of the
+a statement holding one, reading a collection whose rows expire, or
+calling `now()` over a collection with an ordered index (`fold_now`,
+above) is cloned: the rest costs a look at its filters. A null is left out of the
 list; past `MAX_SUBQUERY_VALUES` (100 000) distinct values it is a query
 error: an inner `get` with no `limit`, `group` or ranking lists its
 matches' ids, as `count` does, and reads its column, the values told
@@ -2316,11 +2338,11 @@ apart by their encodings only once there are more than the bound
 937 users were refused, and told apart as they came, a bucket of 1 967
 went 0.15 -> 0.36 ms; one with them is read one row past the bound; past
 `MAX_SUBQUERY_DEPTH` (4) refused in the parser and the engine. The inner
-`get` selects one column -- a field or one aggregate -- and no `lookup`
-or `count` (`Select::check_subquery`). A scoped token's `scoped()` holds
+`get` selects one column -- a field or one aggregate -- and no `lookup`,
+`count` or `require` (`Select::check_subquery`). A scoped token's `scoped()` holds
 each inner `get` to the read rules as any `get` (`Scope::inner`), and a
-rule's filter takes none: `admits` tests a document on its own, where no
-query runs. A long `in` list is looked up, not walked (`Test::InSet`,
+rule's filter may hold one too, answered before each statement as the
+list it is (`Scope::bound`, above). A long `in` list is looked up, not walked (`Test::InSet`,
 `IN_SET_AT` = 8, over an int, a text, a timestamp or a boolean typed
 field and `id`, the values' encodings in a `HashIndex` made at the first
 row tested): 2 000 codes over a scan of 200 000 rows took 2 302 ms
@@ -2517,7 +2539,7 @@ another holding its vector, and only the last makes it a tombstone
 order by the documents' own vectors anyway. The level is drawn only for a
 new node, so a graph with no vector twice is byte for byte the graph it
 was. Graph records 9 and 10 carry the aliases after the tombstones (and
-natively the copies table's hash halves after those, below); a restore
+the copies table's hash halves after those, below); a restore
 checks each alias's document holds the node's vector. Tests whose
 data repeated vectors (`i % 13`) to count nodes and tombstones now write a
 vector a row. The browser module 2.2 KB brotli; builds, searches and
@@ -2696,7 +2718,9 @@ on average over four turns against main, inside its spread of 21.2-23.0. A brows
 answered 204 before any token is asked, where `--http-cors` lets its origin
 in (`cors_allows`): authenticated first, it was 401 and a page on another
 origin could send nothing.
-Reads and writes are no events. A test that opens the log is a `[[test]]`
+Reads and writes are no events, but for an MCP write tool's call (`mcp`)
+and a quota's refusal (`quota`), above. A test that opens the log is a
+`[[test]]`
 of its own: the log and the counts are the process's.
 
 **Every request has an id, in its answer and in every line it wrote**
@@ -2786,15 +2810,17 @@ nothing but a sampled parent's trace, and a collector that hangs or is down
 to costing no request its time; `fenec-shard`'s, a `[[test]]` of its own
 since tracing is the process's, a trace through the router into the node.
 
-**Limits error, they do not truncate.** `near` results cap at 10 000 rows
-(`limit + offset`), expression depth at 512 levels, a `lookup` chain at 8 and
-an `in (get ...)` at 100 000 values and 4 levels; all of them return a query
-error, because a silently cut result is a wrong answer
-believed right. Full table in `site/content/docs/limits.html`.
+**Limits error, they do not truncate.** `near`, `match` and `fuse` results
+cap at 10 000 rows (`limit + offset`), expression depth at 512 levels, a
+`lookup` chain at 8 and an `in (get ...)` at 100 000 values and 4 levels;
+all of them return a query error, because a silently cut result is a wrong
+answer believed right. Full table in `site/content/docs/limits.html`.
 
 **Threads are `cfg`'d out of WASM.** The parallel HNSW build path must not enter
-the wasm32 target. Likewise `now()` errors there — wasm32-unknown-unknown has no
-clock, so time is passed in as a parameter.
+the wasm32 target. Likewise wasm32-unknown-unknown has no clock: `now()` reads
+the time the module is handed with every statement (`fenec_query`'s last
+argument, `db.now`'s `Date.now()`, through `Database::set_clock`) and
+errors where it is handed none.
 
 **The wasm32 build has SIMD, and its kernels match the scalar ones bit for
 bit.** `.cargo/config.toml` turns on `simd128` for that target, and
@@ -2880,7 +2906,7 @@ without `sorted`.
 alone.
 
 **The rest of the language is features too, and the smallest module is
-142 KB brotli.** `language` is what a page may go without past the
+149 KB brotli.** `language` is what a page may go without past the
 indexes: `geo` (`distance`, `within`, `near` over a point and `@geo`,
 which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 (which marks what `match` found, so needs `text`) and `analytics` (the
@@ -2944,9 +2970,9 @@ schema check, search -- `match`, `highlight` and `snippet`, facets,
 `near` with its graph, `fuse` -- and the standard query features. A
 plugin is an extra one kind of app needs: geo, sparse vectors, a
 language's collation, `bucket` and the HLL sketches. Held to that rule
-the core is about 212 KB brotli and the extras about 17 together (`geo`
+the core is about 224 KB brotli and the extras about 17 together (`geo`
 5.9, `collate` 8.3, `sparse` 0.9, `bucket` and the sketches 2.1), 7% of
-the full module's 229: too little to pay for modules built ahead
+the full module's 242: too little to pay for modules built ahead
 for sets of features and a choice of one per page, let alone a module a
 plugin loaded beside the engine, which would carry its own copy of the
 standard library's allocator and panic machinery and reach into the write
@@ -2961,7 +2987,7 @@ build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
 check, 241.7 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
-module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
+module. `fenec-lite.wasm` (no index, no schema check, 172 KB brotli; `make
 wasm-lite`, as `make wasm FEATURES=language SCHEMA=0` now) was shipped
 beside it and is a test build now -- built in CI, packed and released by
 nothing -- because it holds the invariant above: a build without an index
@@ -3155,7 +3181,7 @@ into `char`s first, 23.7; read where the page left it rather than copied
 1 281 ms against 1 706 (`make wasm-speed`), for 368 bytes brotli.
 Natively an array of numbers alone is read straight into a vector's `f32`s,
 each number in the one pass that finds its end where Clinger's path takes
-it (`json::clinger`) and handed to the readers above otherwise: read a
+it (`num::clinger`) and handed to the readers above otherwise: read a
 `Value` at a time, each number's text found and then read twice over, a
 128-dim vector took 5.26 us, now 2.05, and 100 000 128-dim rows without an
 index go in at 220k rows/s over HTTP against 123k (`make load-bench`;
@@ -3167,8 +3193,8 @@ stays out of it: there it was 474 bytes brotli for nothing.
 `run` takes each parameter that is a typed array or an array of finite
 numbers -- which the module reads as a vector either way -- out of the
 JSON, where it leaves `null`, and hands it over beside it: its place, its
-length and its values (`vectorsApart`; `fenec_query`'s last two
-arguments, `with_vectors`). A `-0` goes over as `0`, as JSON writes it,
+length and its values (`vectorsApart`; `fenec_query`'s two arguments
+before its last, the clock; `with_vectors`). A `-0` goes over as `0`, as JSON writes it,
 so the file is the same either way (`web/fenec.test.js`). 200 768-dim
 vectors went in in 21.9 ms as JSON and take 4.4, and `make wasm-speed`
 builds 10 000 128-dim ones with their graph in 1 165 ms against 1 307.
@@ -3274,7 +3300,9 @@ and a filter keeping 1% 0.69 against 1.22 (`make scale-bench`). The
 browser module grew 2.9 KB, 1.0 KB brotli.
 
 **Only an `and` chain reaches an index** -- equality (`=` or `in [..]`) over a
-`@hash` field or over `id`, and comparisons over a `@sorted` field. `in` is a set
+`@hash` field or over `id`, comparisons over a `@sorted` field, the leading
+parts of an index over several fields and a radius or a box over `@geo`
+(both below). `in` is a set
 of equalities written short, so it is answered as the union of one bucket per
 element, and only when *every* element resolves to something the field's type
 can express: one it cannot sends the whole list back to the scan, because a
@@ -3430,7 +3458,7 @@ and `>` in `where` (`RowAccess::text_order`), `min` and `max`, and a
 collation passed in. Equality stays the bytes' (a `nocase` field's is its
 fold's, below). The schema writes a collated field behind type tag 11 (`TAG_COLLATED`) and the collation's code (1 `tr`,
 2 `und`), which an older binary refuses rather than read the field in byte
-order; `\d` shows `tr-x-icu` and `und-x-icu`. A native build carries every
+order. A native build carries every
 chunk. The browser module carries `latin` (9 KB) and is handed the rest
 (`fenec_add_chunk`), which `make wasm` puts in `web/collate/`: a comparison
 that meets a script it has not got notes the chunk (`collate::take_missing`)
@@ -3948,8 +3976,8 @@ their rules since 2000 that `tools/tz/gen.py` writes out of the system's
 compiled tzdata (`tz/zones.bin`, 2026c: 597 names in 196 tables, a zone the
 offset it had at the start of 1999, its transitions since that its TZif
 footer's POSIX rule does not make, and that rule from its first change --
-not from the year's start: Turks and Caicos kept -4 into 2018 -- 25.2 KB,
-8.9 gzip, 7.7 brotli). A day, a week, a month or a year starts at local
+not from the year's start: Turks and Caicos kept -4 into 2018 -- 30.6 KB,
+10.1 gzip, 8.5 brotli). A day, a week, a month or a year starts at local
 midnight, the first instant whose clock reads it or jumps past it, so a
 day is 23 or 25 hours where daylight time begins or ends; a shorter
 interval starts at the last instant at or before the time whose clock read
@@ -3963,7 +3991,7 @@ hold; an offset answers any time. Native builds carry the table
 collation chunks -- listed after them as `zones` by `fenec_collation`,
 taken by `fenec_add_chunk`, `make wasm` putting it in `web/collate/` -- a
 statement naming a zone before refused with `chunks: ["zones"]`, which
-`Fenec.query` fetches and runs again (7.7 KB brotli of every page
+`Fenec.query` fetches and runs again (8.5 KB brotli of every page
 otherwise). A select list binds a constant zone once a query (`Calc::Bucket`
 with the zone); a `where`'s `bucket` keeps the zone it named last
 (`tz::cached`); the count off an ordered index looks a zoned group up by
@@ -4009,7 +4037,10 @@ for row. Only a document sharing a dimension with the query is ranked. Like
 the text index it is derived and never persisted. It sorts through the
 engine's one `(DocId, f32)` sort and maps dimensions through `DocMap`'s
 `HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
-feature costs 16.2 KB, 4.3 KB brotli. SPLADE++ (`beir/splade.mjs`) scores
+feature cost 16.2 KB, 4.3 KB brotli, as it came, and `make wasm-sizes`
+weighs it at 2.7 KB brotli added to the module with none and 0.9 left out
+of the full one, the sort and the map being the other indexes' too.
+SPLADE++ (`beir/splade.mjs`) scores
 nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
 0.232 (the dense vectors 0.366), at 0.68 ms p50 over 57 638 documents: its
 queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut texts
@@ -4033,7 +4064,8 @@ its last bit its own way, so a point on a radius's edge could be in on a
 server and out in a page, and in the browser module it brought libm's range
 reduction and tables. A list of numbers going to a `geo` field, a
 `distance`, a `within` or a `near` over one is read again as written
-(`DataType::keeps_numbers`, `exactly_for`'s `geo_needs`), as a json
+(`DataType::keeps_numbers`, `geo::is_geo_call` in `exactly_for`'s
+walk), as a json
 field's is: read the quick way into `f32`s, a point moved by up to 1.7 m at
 the antimeridian. `within(p, [w, s, e, n])` holds the box's edges, a west
 east of its east crossing the antimeridian; `near loc p` orders by
@@ -4178,8 +4210,9 @@ number's text read for its end, for a `_` and for its value, a `put` of
 1 000 128-dim rows parsed in 5.4 ms, now 2.4, and
 `a_list_read_as_a_vector_parses_as_its_tokens_did` holds 20 000 generated
 texts to the token-at-a-time parse. The browser module reads such a list
-into a vector too, each number the general way: token by token, a `put`
-of 1 000 768-dim rows had 39 MB of tokens, which its memory keeps. The text is sliced with
+into a vector too, at once, each number the general way, for its memory
+rather than the time: read a token a number, a `put` of 1 000 768-dim rows
+as text took it from 58 to 130 MB, which it never gives back. The text is sliced with
 `get`: an index that can panic brought 2.7 KB brotli of a `char`'s
 formatting back into the browser module, which is 1 KB smaller instead.
 `the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and
@@ -4297,8 +4330,9 @@ several reads is one pin) -- a write the exclusive one, a lone `create
 index` or `compact` runs beside the database (`Database::maintain`), and a
 write's fsync runs once the lock is let go (`Database::flush`'s
 `Durability`, a failure to `Database::fail`), as a server's do. Every call
-runs under `catch_unwind` and returns a code -- an `Error`'s kind 1-10, or
-`FENEC_PANIC`, `FENEC_MISUSE`, `FENEC_LOCKED` -- with the error's JSON, so
+runs under `catch_unwind` and returns a code -- an `Error`'s kind 1-10, 14
+(`FENEC_UNMET`) or 15 (`FENEC_QUOTA`), or `FENEC_PANIC`, `FENEC_MISUSE`,
+`FENEC_LOCKED` -- with the error's JSON, so
 the library is built in the `ffi` profile, which unwinds. `<file>.lock` is
 held while a file is open (a checkpoint renames a new file over the
 database, which a lock on it would not survive): a second open, here or in
@@ -4683,14 +4717,15 @@ builder-golden`), `web/fenec.test.js` runs every case through the JS
 builder again so the file cannot drift, and `make python-test`, `go-test`
 and `dotnet-test` run every case through their own builder, the
 endpoints' statements read off a recording transport. A builder change
-starts in `web/fenec.js` and a case in `golden.mjs`, then the three
-follow. Go's object conditions are `Fields`/`Ops` and a document a
+starts in `web/builder.js` and a case in `golden.mjs`, then the three
+follow, and the Swift, Kotlin and Dart builders with them. Go's object conditions are `Fields`/`Ops` and a document a
 `D(...)`, names and values in turn, since a map has no order and the order
 is the text's; its options are functional, since a struct cannot tell
-`limit 0` from none. CI also builds the three packages as a release
+`limit 0` from none. CI also builds the five packages as a release
 publishes them and installs and uses them (`integrations/packages.sh`):
-PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, both modules and
-`collate/`, `web/package.json` -- and `@fenecdb/react`. They go out when a
+PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, the module and
+`collate/`, `web/package.json`, and no test build -- `@fenecdb/react`,
+`@fenecdb/cloudflare` and `@fenecdb/langchain`. They go out when a
 release's draft is published (`packages.yml`), only after that same check,
 with a token where the registry's secret holds one (`NPM_TOKEN`,
 `PYPI_API_TOKEN`), with the workflow's OIDC identity (trusted publishing)
@@ -4758,8 +4793,9 @@ the studio's.
 abort`, single process, nothing to recover). `fenec-server` stays on `release`: a
 panicking connection thread unwinds and drops only its own request. A cold
 crate is built for size in the profile it is cold in: in `cli`, `fenec-http`, which the shell reaches only for
-`backup`, `archive` and `restore`, waiting on the network and the disk
-(16.3 KB of the released binary). Not the importer, whose SQLite import of
+`backup`, `archive` and `restore`, waiting on the network and the disk,
+and for `fenec mcp`, waiting on a model (16.3 KB of the released binary,
+measured before `mcp`). Not the importer, whose SQLite import of
 200 000 rows took 285 ms against 251 for 32.6 KB, nor the root crate, which
 built for size made the binary 129 KB larger (`make size-report BIN=fenec`).
 Both binaries hold 72 KB of the standard library's backtrace symbolizer
@@ -4776,7 +4812,8 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   line there, or it is never built). One that reads the process's own
   counts, `/_metrics` or the statements', is a `[[test]]` of its own:
   beside the others it would count theirs. Measurement programs are
-  `crates/fenec-core/examples/` and are wired to `make` targets, not to CI.
+  each crate's `examples/` (most of them `fenec-core`'s) and `fenec-bench`'s
+  binaries, and are wired to `make` targets, not to CI.
 - The wait after a refusal is the process's, so the servers of a test binary
   that holds many tests ask with none (`audit::set_delay(0)` in their
   helpers): every test asks from 127.0.0.1, and their refusals together
