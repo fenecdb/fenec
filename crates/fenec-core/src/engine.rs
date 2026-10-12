@@ -41,7 +41,7 @@ pub use pinned::{Pinned, PIN_AT, PIN_BUDGET};
 #[cfg(not(target_arch = "wasm32"))]
 mod wake;
 #[cfg(not(target_arch = "wasm32"))]
-pub use wake::placeable;
+pub use wake::{placeable, Moments};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use garbage::{

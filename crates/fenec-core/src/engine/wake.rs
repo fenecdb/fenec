@@ -27,6 +27,17 @@
 //!
 //! Native only: a browser module's queue has its one page to drain it, and
 //! no thread to hold.
+//!
+//! **What a held write's pick answers among a few rows.** A server holding
+//! a thousand couriers' claims, each a group of its own, ran each claim's
+//! whole pick under the read lock when an order came -- a thousand plans,
+//! a thousand clones of the statement, for one row written. A claim that
+//! looked and found nothing knows the rows its filter passes: none. Until
+//! the time reaches its next moment, the rows it passes are among those
+//! written since ([`Database::written_since`], the change ring), so its
+//! pick is that filter and that order over those rows alone
+//! ([`Database::pick_among`]): the same test a scan gives a row, the same
+//! order a page is put in.
 
 use super::*;
 
@@ -52,8 +63,22 @@ impl Database {
         params: &[Value],
         at: i64,
     ) -> Result<Option<i64>> {
+        self.wakes_at_with(collection, filter, params, at, &mut Moments::default())
+    }
+
+    /// [`Self::wakes_at`], each step of an index asked once: `moments`
+    /// holds the steps asked of this database as it stands, so a batch of
+    /// looks under one read lock passes the same one to each.
+    pub fn wakes_at_with(
+        &self,
+        collection: &str,
+        filter: Option<&Expr>,
+        params: &[Value],
+        at: i64,
+        moments: &mut Moments,
+    ) -> Result<Option<i64>> {
         let mut next = None;
-        self.moments(collection, filter, params, at, &mut next)?;
+        self.moments(collection, filter, params, at, &mut next, moments)?;
         Ok(next)
     }
 
@@ -64,6 +89,7 @@ impl Database {
         params: &[Value],
         at: i64,
         next: &mut Option<i64>,
+        asked: &mut Moments,
     ) -> Result<()> {
         // A row lives until its field and the ttl: the next to go is the
         // least value past `at - ttl`.
@@ -74,7 +100,7 @@ impl Database {
                 op: CmpOp::Gt,
                 bound: at.saturating_sub(ttl),
             };
-            if let Some(v) = self.next_value(collection, &probe, params)? {
+            if let Some(v) = self.next_value(collection, &probe, params, asked)? {
                 keep(next, v.saturating_add(ttl));
             }
         }
@@ -87,6 +113,7 @@ impl Database {
             params,
             at,
             next,
+            asked,
         }
         .expr(filter)
     }
@@ -94,8 +121,38 @@ impl Database {
     /// The least value of `probe.field` past its bound among the living
     /// rows, as milliseconds: `get <c> select f where f > bound order f
     /// limit 1`, which an `@sorted` field answers with a step of its index.
-    /// A value that is no time or number has no moment.
-    fn next_value(&self, collection: &str, probe: &Probe, params: &[Value]) -> Result<Option<i64>> {
+    /// A value that is no time or number has no moment. Asked once while
+    /// `asked` holds it.
+    fn next_value(
+        &self,
+        collection: &str,
+        probe: &Probe,
+        params: &[Value],
+        asked: &mut Moments,
+    ) -> Result<Option<i64>> {
+        let key = |a: &(String, String, CmpOp, i64, Option<i64>)| {
+            a.0 == collection && a.1 == probe.field && a.2 == probe.op && a.3 == probe.bound
+        };
+        if let Some(a) = asked.asked.iter().find(|a| key(a)) {
+            return Ok(a.4);
+        }
+        let v = self.next_value_asked(collection, probe, params)?;
+        asked.asked.push((
+            collection.to_string(),
+            probe.field.to_string(),
+            probe.op,
+            probe.bound,
+            v,
+        ));
+        Ok(v)
+    }
+
+    fn next_value_asked(
+        &self,
+        collection: &str,
+        probe: &Probe,
+        params: &[Value],
+    ) -> Result<Option<i64>> {
         let filter = Expr::Cmp(
             probe.op,
             Box::new(Expr::Field(probe.field.to_string())),
@@ -122,6 +179,156 @@ impl Database {
                 _ => None,
             }))
     }
+
+    /// The rows of `collection` written since change `since`, ascending,
+    /// beside the collection's number -- one dropped and made again under
+    /// the name is another -- or `None` when the change ring no longer
+    /// reaches back there or there is no such collection. A schema change
+    /// is among them as [`SCHEMA_MARK`].
+    pub fn written_since(&self, collection: &str, since: u64) -> Option<(u32, Vec<DocId>)> {
+        let c = self.collections.get(collection)?;
+        match self.changes.since(since, c.id) {
+            Since::Ids(ids) => Some((c.id, ids)),
+            Since::Reseed => None,
+        }
+    }
+
+    /// What `sel` -- a held write's pick as a `get`: a filter, an order,
+    /// its columns -- answers among `ids` alone, ascending, at `now` unless
+    /// the database's clock says otherwise: every row of them its filter
+    /// lets through, in its order and the page's `limit` aside, each with
+    /// its columns. Where `ids` hold every row the filter lets through, the
+    /// first is the row the `get` picks: each row is tested as a scan tests
+    /// it ([`Filter`], what an index's answer is held to row for row), the
+    /// time folded first where `answered` folds it, and put in order as a
+    /// page is ([`Self::order_ids_by`], `order_ids`), ties in id order as
+    /// a scan leaves them. `None` for a `get` it does not answer so: an
+    /// inner `get`, which reads another collection, rows that expire, a
+    /// time read in the order or a column, a `near`, an aggregate, an
+    /// `offset`.
+    pub fn pick_among(&self, sel: &Select, ids: &[DocId], now: i64) -> Result<Option<ResultSet>> {
+        let plain = sel.near.is_none()
+            && sel.matcher.is_none()
+            && sel.rerank.is_none()
+            && sel.fuse.is_none()
+            && sel.lookup.is_none()
+            && !sel.count
+            && sel.aggregate.is_empty()
+            && sel.group.is_empty()
+            && sel.having.is_none()
+            && sel.marks.is_empty()
+            && sel.facets.is_empty()
+            && sel.require.is_none()
+            && matches!(sel.offset, Count::N(0));
+        let timed = |e: &Expr| e.calls_now() || e.asks_expired() || e.has_subquery();
+        let Some(c) = self.collections.get(&sel.collection) else {
+            return Ok(None);
+        };
+        if !plain
+            || self.ttl_of(&sel.collection).is_some()
+            || sel
+                .filter
+                .as_ref()
+                .is_some_and(|f| f.has_subquery() || f.asks_expired())
+            || sel.order.iter().filter_map(|s| s.expr.as_ref()).any(timed)
+            || sel.computed.iter().any(|k| timed(&k.expr))
+        {
+            return Ok(None);
+        }
+        sel.check()?;
+        let ctx = EvalCtx {
+            params: &[],
+            registry: &self.registry,
+            clock: self.clock.or(Some(now)),
+        };
+        // As `answered` runs it: the time made a literal where an ordered
+        // index could take it for a range.
+        let folded;
+        let filter = match &sel.filter {
+            Some(f) if f.calls_now() && self.ordered(&sel.collection) => {
+                let now = eval(&Expr::Call("now".into(), Vec::new()), &mut NoRow, &ctx)?;
+                let mut f = f.clone();
+                f.fold_now(&now, &[]);
+                folded = f;
+                Some(&folded)
+            }
+            f => f.as_ref(),
+        };
+        let test = filter.map(|f| Filter::new(c, f, &ctx));
+        let mut kept = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if !c.store.contains(id) {
+                continue;
+            }
+            if let Some(t) = &test {
+                if !t.matches(id, &ctx)? {
+                    continue;
+                }
+            }
+            kept.push(id);
+        }
+        let kept = if sel.order.iter().any(|s| s.expr.is_some()) {
+            self.order_ids_by(c, &sel.order, &kept, usize::MAX, &[])?
+        } else if !sel.order.is_empty() {
+            let mut keys = Vec::with_capacity(sel.order.len());
+            for s in &sel.order {
+                keys.push(order_key(&c.schema, s, "")?);
+            }
+            order_ids(&c.store, &kept, &keys, usize::MAX)?
+        } else {
+            kept
+        };
+        let columns = projection_columns(&c.schema, &sel.project);
+        let mut sources = Vec::with_capacity(columns.len());
+        for col in &columns {
+            sources.push(
+                match (sel.computed.iter().position(|k| k.name == *col), col == "id") {
+                    (Some(i), _) => Source::Calc(i),
+                    (None, true) => Source::Id,
+                    (None, false) => Source::At(source_or_err(&c.schema, col, "")?),
+                },
+            );
+        }
+        let exprs: Vec<&Expr> = sel.computed.iter().map(|k| &k.expr).collect();
+        let mut calc = aggregate::Reader::new(c, &exprs, &[])?;
+        let mut calcs = Vec::with_capacity(exprs.len());
+        for e in &exprs {
+            calcs.push(calc.bind(e)?);
+        }
+        let mut rows = Vec::with_capacity(kept.len());
+        for id in kept {
+            let found = calcs.is_empty() || calc.read(id, &self.registry, self.clock)?;
+            let mut values = Vec::with_capacity(sources.len());
+            for src in &sources {
+                values.push(match src {
+                    Source::Id => Value::Int(id as i64),
+                    Source::At(at) => read_source(&c.store, id, *at)?,
+                    Source::Calc(i) if found => calc.env[calcs[*i]].clone(),
+                    Source::Calc(_) | Source::Mark(_) => Value::Null,
+                });
+            }
+            rows.push(Row {
+                id,
+                values,
+                score: None,
+            });
+        }
+        Ok(Some(ResultSet {
+            columns,
+            rows,
+            nested: None,
+            facets: Vec::new(),
+        }))
+    }
+}
+
+/// The steps of an index [`Database::wakes_at_with`] has asked, and their
+/// answers, over one database as it stands: a batch of held writes' looks
+/// at one time asks each once, where a thousand couriers' claims, each
+/// `run_at <= now()`, asked the same step a thousand times.
+#[derive(Default)]
+pub struct Moments {
+    asked: Vec<(String, String, CmpOp, i64, Option<i64>)>,
 }
 
 /// A field's values past a bound: those `>` it, or `>=`.
@@ -171,6 +378,7 @@ pub fn placeable(filter: Option<&Expr>) -> Result<()> {
         params: &[],
         at: 0,
         next: &mut next,
+        asked: &mut Moments::default(),
     }
     .expr(f)
 }
@@ -182,6 +390,7 @@ struct Walk<'w> {
     params: &'w [Value],
     at: i64,
     next: &'w mut Option<i64>,
+    asked: &'w mut Moments,
 }
 
 impl Walk<'_> {
@@ -221,6 +430,7 @@ impl Walk<'_> {
                     self.params,
                     self.at,
                     self.next,
+                    self.asked,
                 ),
                 None => placeable(inner.filter.as_ref()),
             };
@@ -255,7 +465,7 @@ impl Walk<'_> {
             op: past,
             bound: self.at.saturating_add(k),
         };
-        if let Some(v) = db.next_value(self.collection, &probe, self.params)? {
+        if let Some(v) = db.next_value(self.collection, &probe, self.params, self.asked)? {
             keep(self.next, v.saturating_sub(k).saturating_add(after));
         }
         Ok(())

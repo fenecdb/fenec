@@ -292,6 +292,7 @@ impl Server {
                 held: 0,
                 looks: 0,
                 runs: 0,
+                picks: 0,
             },
         }
     }

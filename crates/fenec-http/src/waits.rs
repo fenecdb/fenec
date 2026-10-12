@@ -26,20 +26,43 @@
 //! the one or the other, so a quiet server holding a thousand claims does
 //! nothing at all.
 //!
-//! **One awake in each group, the longest waiting first.** Woken on every
+//! **One run in each group, the longest waiting first.** Woken on every
 //! write, a hundred workers holding the same claim would each run it, and a
 //! job enqueued would be taken by one and looked for by ninety-nine, each
 //! under the write lock. Requests are grouped by what they would pick --
 //! each `set` and `del` as the `get` of one row it amounts to, scope and
 //! parameters bound in, the values it writes and the rows it answers left
-//! out -- and of a group only the head, the request held longest, is woken.
-//! It looks, under the read lock, whether a collection it reads was written
-//! and whether a row is there to take now; finding one, it runs the
-//! request, and having written it hands the turn to the next, since more
-//! may be ready. One that found nothing is the group's answer: the rest
-//! would have found nothing either. So a job goes to the worker that has
-//! waited longest, as Redis serves `BLPOP`'s clients, and a write costs a
-//! group one look, not a run a worker.
+//! out -- and a group looks, under the read lock, whether a collection it
+//! reads was written and whether a row is there to take now; finding one,
+//! its head, the request held longest, runs, and having written hands the
+//! turn to the next, since more may be ready. A look that found nothing is
+//! the group's answer: the rest would have found nothing either. So a job
+//! goes to the worker that has waited longest, as Redis serves `BLPOP`'s
+//! clients, and a write costs a group one look, not a run a worker.
+//!
+//! **One held request looks for every group.** Each head woken to look
+//! for itself, an order placed beside a thousand couriers' claims, each a
+//! group, woke a thousand threads, each taking the mutex, the read lock
+//! and its whole pick in turn: 19 ms from the put to the nearest courier,
+//! and 165 ms of the server's CPU an order. So the looks are one held
+//! request's -- whichever waits when none looks, until it leaves for its
+//! run or its answer and hands them to another ([`resign`]) -- made for
+//! every group a write, a moment or a run's end left to look, under one
+//! read lock ([`look_all`]); a head is woken only when its group's bid
+//! wins, or its wait ends.
+//!
+//! **A group that found nothing looks among the rows written since.** Its
+//! look knows every row its one test passes then -- none, or the few a
+//! look among rows found ([`Known`]) -- and until the time reaches the
+//! test's next moment ([`Database::wakes_at`]) no row it did not pass
+//! starts to pass but by a write. So its next look tests those rows and the
+//! rows written since alone ([`Database::written_since`], the change ring)
+//! with its own filter, and puts them in its own order
+//! ([`Database::pick_among`]): the row a whole pick would give, at a few
+//! rows' cost. A write the ring no longer reaches back to, a schema
+//! change, a load or a compact, more rows than [`AMONG`], an inner `get`,
+//! rows that expire, a time in the order, two tests, or a moment come:
+//! the whole pick, as before.
 //!
 //! **A row several groups would take goes to the one whose claim ranks it
 //! first, the one held longest on a tie.** A courier's claim is a group of
@@ -78,6 +101,8 @@
 //! the run that answers, under the scope, as any request's.
 
 use crate::sse::Hub;
+use fenec_core::changes::SCHEMA_MARK;
+use fenec_core::engine::Moments;
 use fenec_core::prelude::*;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -96,10 +121,17 @@ pub struct Waits {
     /// Requests held here: what a write asks before taking the mutex, so a
     /// database holding none pays a load a write.
     held: AtomicUsize,
-    /// Heads' looks under the read lock, and held requests run again: what
-    /// a write cost the requests held beside it.
+    /// Groups' looks under the read lock, and held requests run again:
+    /// what a write cost the requests held beside it.
     looks: AtomicU64,
     runs: AtomicU64,
+    /// Looks that ran a group's whole pick, not its test among the rows
+    /// written since ([`Known`]).
+    picks: AtomicU64,
+    /// Moved by a write that says nothing of what it wrote -- a load, a
+    /// compact, a maintenance: what a group knew of its rows before, it
+    /// knows no more.
+    epoch: AtomicU64,
 }
 
 /// What a database's held requests did ([`Waits::stats`]).
@@ -108,6 +140,8 @@ pub struct Stats {
     pub held: usize,
     pub looks: u64,
     pub runs: u64,
+    /// Of the looks, those that ran a group's whole pick.
+    pub picks: u64,
 }
 
 #[derive(Default)]
@@ -137,7 +171,40 @@ struct State {
     /// rather than running for a row that is gone. A round settled early
     /// left such bids to land after the winner had run.
     gone: Vec<(Row, u64)>,
+    /// The held request that looks for every group ([`Ticket::next`]):
+    /// the first to wait while none did, until it leaves.
+    leader: Option<Arc<Turn>>,
+    /// Its looks are under way, outside the mutex: what it would be told,
+    /// it sees as they end.
+    looking: bool,
 }
+
+/// What a group's last look knows of its one test: every row it passed --
+/// `ids`, ascending, none or a few -- with the database at change `seq`
+/// (its collection numbered `cid`, its writes' `epoch`) and the time at
+/// `at`; and that until `until`, the test's next moment, no row starts or
+/// stops passing but by a write. So the rows it passes now are among `ids`
+/// and those written since `seq`.
+struct Known {
+    epoch: u64,
+    seq: u64,
+    cid: u32,
+    ids: Vec<DocId>,
+    at: i64,
+    until: Option<i64>,
+}
+
+/// The most rows a look among them tests, those known and those written
+/// since: past it the whole pick runs, which steps an index to its row
+/// where the test reads each of these whole. A burst of a thousand jobs is
+/// a thousand rows written since every claim's last look.
+const AMONG: usize = 32;
+
+/// The longest the looks of a batch hold the read lock before letting it
+/// go and taking it again: a thousand groups' whole picks over a
+/// collection no index narrows would hold every write out for as long as
+/// all of them took, where each group's own look held it for its own.
+const LOOK_HOLD: Duration = Duration::from_millis(2);
 
 /// A row a look found: its collection and id. `None` is a look that met an
 /// error, which the run is to meet and answer, and no other group bids for.
@@ -196,9 +263,23 @@ struct Group {
     /// Its tenant's rate refused its run: it looks again, at once, from
     /// this moment ([`Ticket::pause`]).
     back: Option<Instant>,
+    /// What its last look knew of the rows its test passes: its next looks
+    /// among the rows written since. Taken out while it looks.
+    known: Option<Known>,
 }
 
 impl Group {
+    /// Whether nothing holds it from looking: no look under way, no bid,
+    /// no run won or under way, no run it waits behind, no rate's pause.
+    fn idle(&self) -> bool {
+        !self.looking
+            && self.bid.is_none()
+            && !self.go
+            && !self.running
+            && self.behind.is_none()
+            && self.back.is_none()
+    }
+
     /// Whether its head is to look before a round whose first bidder had
     /// seen `horizon` writes settles, at `now` (ms): woken by a write and
     /// not yet looked past them, told to look at once -- a run before it
@@ -477,36 +558,47 @@ impl Waits {
     }
 
     /// A write landed to `written`, or to whatever a held request may read
-    /// (`None`: a load, a drop, a compact): the head of each group reading
-    /// one of them looks. Called by the database's watcher under its write
-    /// lock, so it is a load when nothing is held. Woken by every write
-    /// whatever it wrote, 150 claims held on `orders`, each a group of its
-    /// own, took a put of `positions` beside them from 0.16 to 0.29 ms p50
-    /// and 0.67 to 4.3 ms p99 at the node, every head a wake-up and a look
-    /// under the read lock that found nothing written.
+    /// (`None`: a load, a drop, a compact): each group reading one of them
+    /// looks. Called by the database's watcher under its write lock, so it
+    /// is a load when nothing is held. Woken by every write whatever it
+    /// wrote, 150 claims held on `orders`, each a group of its own, took a
+    /// put of `positions` beside them from 0.16 to 0.29 ms p50 and 0.67 to
+    /// 4.3 ms p99 at the node, every head a wake-up and a look under the
+    /// read lock that found nothing written.
     pub fn wrote(&self, written: Option<&[String]>) {
+        if written.is_none() {
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+        }
         if !self.holds() {
             return;
         }
         let mut st = lock(&self.state);
         st.writes += 1;
         let mut now = None;
+        let mut tell = false;
         for g in &mut st.groups {
             if let Some(cs) = written {
                 if !g.collections.iter().any(|c| cs.contains(c)) {
                     continue;
                 }
             }
-            g.stale = true;
-            // A head in its gap looks at its end, and wakes for that.
+            let was = std::mem::replace(&mut g.stale, true);
+            if !g.idle() {
+                continue;
+            }
+            // A group in its gap looks at its end: the looks are told of
+            // the first write in it, for that, and of no other -- told of
+            // each, a claim held beside a busy queue was a wake-up a write.
             if let Some(q) = g.quiet {
                 if *now.get_or_insert_with(Instant::now) < q {
+                    tell |= !was;
                     continue;
                 }
             }
-            if let Some(head) = g.queue.front() {
-                head.cv.notify_one();
-            }
+            tell = true;
+        }
+        if tell {
+            kick(&st);
         }
     }
 
@@ -528,6 +620,7 @@ impl Waits {
             held: self.held.load(Ordering::Acquire),
             looks: self.looks.load(Ordering::Relaxed),
             runs: self.runs.load(Ordering::Relaxed),
+            picks: self.picks.load(Ordering::Relaxed),
         }
     }
 }
@@ -541,6 +634,49 @@ fn wake_all(st: &State) {
         for t in &g.queue {
             t.cv.notify_one();
         }
+    }
+}
+
+/// A group has a look to make, or a moment to wake for: the request that
+/// looks for every group is told -- once its looks under way end, it sees
+/// it -- and where none does, one waiting is woken to.
+fn kick(st: &State) {
+    if st.looking {
+        return;
+    }
+    match &st.leader {
+        Some(l) => l.cv.notify_one(),
+        None => {
+            if let Some(t) = waiting(st, None) {
+                t.cv.notify_one();
+            }
+        }
+    }
+}
+
+/// A held request waiting in [`Ticket::next`], `but` aside: any but a head
+/// whose group runs, or is about to.
+fn waiting<'s>(st: &'s State, but: Option<&Arc<Turn>>) -> Option<&'s Arc<Turn>> {
+    st.groups.iter().find_map(|g| {
+        g.queue
+            .iter()
+            .enumerate()
+            .find(|(i, t)| {
+                !but.is_some_and(|b| Arc::ptr_eq(b, t)) && (*i > 0 || !(g.running || g.go))
+            })
+            .map(|(_, t)| t)
+    })
+}
+
+/// `me` leaves [`Ticket::next`]: where it looked for every group, or none
+/// did, one still waiting is woken to.
+fn resign(st: &mut State, me: &Arc<Turn>) {
+    if st.leader.as_ref().is_some_and(|l| !Arc::ptr_eq(l, me)) {
+        return;
+    }
+    st.leader = None;
+    if let Some(t) = waiting(st, Some(me)) {
+        t.cv.notify_one();
     }
 }
 
@@ -603,7 +739,9 @@ impl<'h> Ticket<'h> {
                     line: None,
                     ranked,
                     back: None,
+                    known: None,
                 });
+                kick(&st);
                 id
             }
         };
@@ -612,117 +750,70 @@ impl<'h> Ticket<'h> {
     }
 
     /// Waits until this request should run again, or ends. `db` is read
-    /// for a head's looks, never under the mutex a write announces itself
+    /// for the looks, never under the mutex a write announces itself
     /// through.
+    ///
+    /// The first request to wait while none looks for every group does,
+    /// until it leaves: it looks for each group with a look to make, under
+    /// one read lock, settles the round, and sleeps to the next moment a
+    /// group has to look at. The rest sleep until their group's bid wins or
+    /// their wait ends.
     pub fn next(&self, until: Instant, db: &RwLock<Database>) -> Next {
         let waits = self.hub.waits();
         let mut st = lock(&waits.state);
         loop {
-            if st.closed || self.hub.is_closed() {
-                return Next::Closed;
+            let ended = if st.closed || self.hub.is_closed() {
+                Some(Next::Closed)
+            } else if ENDING.load(Ordering::Acquire) {
+                Some(Next::End)
+            } else {
+                None
+            };
+            if let Some(ended) = ended {
+                resign(&mut st, &self.turn);
+                return ended;
             }
-            if ENDING.load(Ordering::Acquire) {
-                return Next::End;
-            }
-            let writes = st.writes;
             let g = group(&mut st, self.group);
             let head = g.queue.front().is_some_and(|t| Arc::ptr_eq(t, &self.turn));
             // Its bid won: the row is run for, though the wait end as it
             // does -- answered nothing, the row would go round again.
             if head && std::mem::take(&mut g.go) {
                 g.running = true;
+                resign(&mut st, &self.turn);
                 return run(waits);
             }
             let now = Instant::now();
             if now >= until {
+                resign(&mut st, &self.turn);
                 return Next::End;
             }
             let mut wait = until - now;
-            // Held back by its tenant's rate: it looks once the rate lets a
-            // write through.
-            if let Some(back) = g.back.filter(|_| head) {
-                if now < back {
-                    wait = wait.min(back - now);
-                } else {
-                    g.back = None;
-                    g.now = true;
+            let leads = match &st.leader {
+                Some(l) => Arc::ptr_eq(l, &self.turn),
+                None => {
+                    st.leader = Some(Arc::clone(&self.turn));
+                    true
                 }
-            }
-            // A bid waits for its round, a loser for the winner's run.
-            if head && g.bid.is_none() && g.behind.is_none() && g.back.is_none() {
-                // The head before wrote: more may be ready, so this one
-                // looks at once -- a look, not a run, since most often the
-                // one job is gone.
-                let due =
-                    std::mem::take(&mut g.now) || g.at.is_some_and(|at| at <= now_us() / 1000);
-                let quiet = g.quiet.filter(|q| now < *q);
-                if due || (g.stale && quiet.is_none()) {
-                    let (since, tests, collections) =
-                        (g.since, Arc::clone(&g.tests), Arc::clone(&g.collections));
-                    g.stale = false;
-                    g.looking = true;
-                    g.seen = writes;
+            };
+            if leads {
+                let jobs = jobs(&mut st);
+                if !jobs.is_empty() {
+                    st.looking = true;
                     drop(st);
-                    waits.looks.fetch_add(1, Ordering::Relaxed);
-                    LOOKS.fetch_add(1, Ordering::Relaxed);
-                    let look = look(db, since, &tests, &collections, due);
+                    let n = jobs.len() as u64;
+                    waits.looks.fetch_add(n, Ordering::Relaxed);
+                    LOOKS.fetch_add(n, Ordering::Relaxed);
+                    let looks = look_all(db, jobs, waits);
                     st = lock(&waits.state);
-                    let g = group(&mut st, self.group);
-                    g.looking = false;
-                    g.since = look.seq;
-                    if let Some(at) = look.at {
-                        g.at = at;
-                    }
-                    match look.found {
-                        Some((row, rank)) => {
-                            g.quiet = None;
-                            let (seen, joined) = (g.seen, self.turn.joined);
-                            let gone = row.is_some()
-                                && st.gone.iter().any(|(r, at)| *r == row && seen < *at);
-                            let taker = row.as_ref().and_then(|_| {
-                                st.taken.iter().find(|(r, _)| *r == row).map(|(_, w)| *w)
-                            });
-                            let g = group(&mut st, self.group);
-                            if gone {
-                                // A run took it after this look began: it
-                                // looks again rather than run for nothing.
-                                g.now = true;
-                            } else if let Some(taker) = taker {
-                                // Given already, its run under way: behind
-                                // it at once, no round to wait for.
-                                g.behind = Some(taker);
-                                g.line = rank.is_none().then_some(joined);
-                            } else {
-                                g.bid = Some(Bid { row, rank, joined });
-                                // The writes announced by now, not as it
-                                // began: a look waits for the read lock, and
-                                // reads what landed meanwhile. Held to its
-                                // start, a bid for a job announced while it
-                                // waited set a horizon the claim held
-                                // longest had looked past, and the job went
-                                // to the bidder.
-                                let writes = st.writes;
-                                st.horizon.get_or_insert(writes);
-                            }
-                        }
-                        None => {
-                            g.quiet = Some(Instant::now() + LOOK_GAP);
-                            // Nothing is left for the line behind it, most
-                            // likely: each looks for itself, at once.
-                            disband(&mut st, self.group);
-                        }
+                    st.looking = false;
+                    for (id, look) in looks {
+                        record(&mut st, id, look);
                     }
                     settle(&mut st);
                     continue;
                 }
-                if let Some(q) = quiet {
-                    wait = wait.min(q - now);
-                }
-                if let Some(at) = g.at {
-                    // To the microsecond: a millisecond's rounding woke a
-                    // head before a delayed job's time, to wait one more.
-                    let left = (at * 1000).saturating_sub(now_us()).max(1) as u64;
-                    wait = wait.min(Duration::from_micros(left));
+                if let Some(next) = deadline(&st, now) {
+                    wait = wait.min(next);
                 }
             }
             st = self
@@ -745,6 +836,7 @@ impl<'h> Ticket<'h> {
         g.at = plan.at;
         g.running = false;
         release(&mut st, self.group);
+        kick(&st);
     }
 
     /// Its run was refused by its tenant's rate of writes before it wrote:
@@ -760,6 +852,7 @@ impl<'h> Ticket<'h> {
         g.back = Some(Instant::now() + wait);
         release(&mut st, self.group);
         settle(&mut st);
+        kick(&st);
     }
 
     /// Answered: it leaves its group. One that wrote -- or whose client
@@ -784,9 +877,6 @@ impl<'h> Ticket<'h> {
                 st.ranked -= usize::from(g.ranked);
             } else if was_head {
                 g.now |= hand_on || held;
-                if let Some(next) = g.queue.front() {
-                    next.cv.notify_one();
-                }
                 // Its next head came later: the group goes where that puts
                 // it, so the order stays the heads'.
                 let g = st.groups.remove(i);
@@ -820,6 +910,7 @@ impl<'h> Ticket<'h> {
                 release(&mut st, self.group);
             }
             settle(&mut st);
+            kick(&st);
         }
         waits.held.fetch_sub(1, Ordering::AcqRel);
     }
@@ -831,17 +922,19 @@ fn run(waits: &Waits) -> Next {
     Next::Run
 }
 
-/// Heads' looks and held requests run again, across the process: what
+/// Groups' looks and held requests run again, across the process: what
 /// `/_metrics` counts.
 static LOOKS: AtomicU64 = AtomicU64::new(0);
 static RUNS: AtomicU64 = AtomicU64::new(0);
+static PICKS: AtomicU64 = AtomicU64::new(0);
 
-/// The process's held requests now, heads' looks and runs so far.
+/// The process's held requests now, groups' looks and runs so far.
 pub fn totals() -> Stats {
     Stats {
         held: OPEN.load(Ordering::Acquire),
         looks: LOOKS.load(Ordering::Relaxed),
         runs: RUNS.load(Ordering::Relaxed),
+        picks: PICKS.load(Ordering::Relaxed),
     }
 }
 
@@ -884,10 +977,9 @@ fn settle(st: &mut State) {
         let waited = ahead || st.groups[i + 1..].iter().any(|g| g.bid.is_some());
         let g = &mut st.groups[i];
         if waited && g.owes(horizon, now) && g.quiet.is_some_and(|q| instant < q) {
+            // Looked for at once: by the looks that settled the round, or
+            // told by whoever did ([`kick`]).
             g.quiet = None;
-            if let Some(head) = g.queue.front() {
-                head.cv.notify_one();
-            }
         }
         // Nothing ahead of it, or a group ranking rows its own way among
         // those to come, which every bid waits for.
@@ -959,6 +1051,7 @@ fn settle(st: &mut State) {
                 let g = &mut st.groups[bidders[at]];
                 g.bid = None;
                 g.go = true;
+                // The one head woken: it runs.
                 if let Some(head) = g.queue.front() {
                     head.cv.notify_one();
                 }
@@ -1019,14 +1112,12 @@ fn disband(st: &mut State, id: u64) {
     }
 }
 
-/// A group out of a line or from behind a run: its head looks at once.
+/// A group out of a line or from behind a run: it looks at once, once
+/// the looks are told ([`kick`]).
 fn wake(g: &mut Group) {
     g.behind = None;
     g.line = None;
     g.now = true;
-    if let Some(head) = g.queue.front() {
-        head.cv.notify_one();
-    }
 }
 
 fn group(st: &mut State, id: u64) -> &mut Group {
@@ -1036,6 +1127,141 @@ fn group(st: &mut State, id: u64) -> &mut Group {
         .expect("a ticket's group stays while it holds a place")
 }
 
+/// A group's look to make: what it reads, from where it last looked, and
+/// what it knows of its rows.
+struct Job {
+    id: u64,
+    since: u64,
+    tests: Arc<Vec<Select>>,
+    collections: Arc<Vec<String>>,
+    /// Its moment came, or the run before wrote: it looks whether or not
+    /// a collection it reads was written.
+    due: bool,
+    known: Option<Known>,
+}
+
+/// The looks each group with one to make is to make now, the longest held
+/// first: each marked looking and its look taken out to make.
+fn jobs(st: &mut State) -> Vec<Job> {
+    let (instant, now) = (Instant::now(), now_us() / 1000);
+    let writes = st.writes;
+    let mut jobs = Vec::new();
+    for g in &mut st.groups {
+        // Held back by its tenant's rate: it looks once the rate lets a
+        // write through.
+        if let Some(back) = g.back.filter(|_| !g.running && !g.go) {
+            if instant < back {
+                continue;
+            }
+            g.back = None;
+            g.now = true;
+        }
+        if g.queue.is_empty() || !g.idle() {
+            continue;
+        }
+        // The head before wrote: more may be ready, so it looks at once --
+        // a look, not a run, since most often the one job is gone.
+        let due = g.now || g.at.is_some_and(|at| at <= now);
+        let quiet = g.quiet.is_some_and(|q| instant < q);
+        if !due && !(g.stale && !quiet) {
+            continue;
+        }
+        g.now = false;
+        g.stale = false;
+        g.looking = true;
+        g.seen = writes;
+        jobs.push(Job {
+            id: g.id,
+            since: g.since,
+            tests: Arc::clone(&g.tests),
+            collections: Arc::clone(&g.collections),
+            due,
+            known: g.known.take(),
+        });
+    }
+    jobs
+}
+
+/// How long until a group not looking now has to: its rate's pause over,
+/// the end of its gap where a write landed in it, its moment.
+fn deadline(st: &State, now: Instant) -> Option<Duration> {
+    let us = now_us();
+    let mut least: Option<Duration> = None;
+    let mut keep = |d: Duration| least = Some(least.map_or(d, |l| l.min(d)));
+    for g in &st.groups {
+        if let Some(back) = g.back {
+            keep(back.saturating_duration_since(now));
+            continue;
+        }
+        if g.queue.is_empty() || !g.idle() {
+            continue;
+        }
+        if let (true, Some(q)) = (g.stale, g.quiet) {
+            keep(q.saturating_duration_since(now));
+        }
+        if let Some(at) = g.at {
+            // To the microsecond: a millisecond's rounding woke a head
+            // before a delayed job's time, to wait one more.
+            let left = (at * 1000).saturating_sub(us).max(1) as u64;
+            keep(Duration::from_micros(left));
+        }
+    }
+    least
+}
+
+/// What a look found, kept for its group under the mutex.
+fn record(st: &mut State, id: u64, look: Look) {
+    let writes = st.writes;
+    let Some(g) = st.groups.iter_mut().find(|g| g.id == id) else {
+        // Its last request left while it was looked for.
+        return;
+    };
+    g.looking = false;
+    g.since = look.seq;
+    g.known = look.known;
+    if let Some(at) = look.at {
+        g.at = at;
+    }
+    let (seen, joined) = (g.seen, g.queue.front().map(|t| t.joined));
+    let Some(joined) = joined else {
+        return;
+    };
+    match look.found {
+        Some((row, rank)) => {
+            g.quiet = None;
+            let gone = row.is_some() && st.gone.iter().any(|(r, at)| *r == row && seen < *at);
+            let taker = row
+                .as_ref()
+                .and_then(|_| st.taken.iter().find(|(r, _)| *r == row).map(|(_, w)| *w));
+            let g = group(st, id);
+            if gone {
+                // A run took it after this look began: it looks again
+                // rather than run for nothing.
+                g.now = true;
+            } else if let Some(taker) = taker {
+                // Given already, its run under way: behind it at once, no
+                // round to wait for.
+                g.behind = Some(taker);
+                g.line = rank.is_none().then_some(joined);
+            } else {
+                g.bid = Some(Bid { row, rank, joined });
+                // The writes announced by now, not as it began: a look
+                // waits for the read lock, and reads what landed meanwhile.
+                // Held to its start, a bid for a job announced while it
+                // waited set a horizon the claim held longest had looked
+                // past, and the job went to the bidder.
+                st.horizon.get_or_insert(writes);
+            }
+        }
+        None => {
+            g.quiet = Some(Instant::now() + LOOK_GAP);
+            // Nothing is left for the line behind it, most likely: each
+            // looks for itself, at once.
+            disband(st, id);
+        }
+    }
+}
+
 struct Look {
     /// The row a test found and where the claim's order ranks it.
     found: Option<(Row, Option<f64>)>,
@@ -1043,53 +1269,249 @@ struct Look {
     /// The next moment, worked out again where a write or the time made
     /// the old one stale.
     at: Option<Option<i64>>,
+    /// What it knows of the rows its test passes, for its next look.
+    known: Option<Known>,
 }
 
-/// A head's look, under the read lock: was a collection its tests read
-/// written since `since`, and if so -- or if its moment came -- is a row
-/// there to take now.
-fn look(
-    db: &RwLock<Database>,
-    since: u64,
-    tests: &[Select],
-    collections: &[String],
-    due: bool,
-) -> Look {
-    let before = now_ms();
+/// Each group's look, under the read lock -- let go and taken again each
+/// [`LOOK_HOLD`], so a writer waits out a part of them, not all: was a
+/// collection its tests read written since it last looked, and if so -- or
+/// if its moment came -- is a row there to take now.
+fn look_all(db: &RwLock<Database>, jobs: Vec<Job>, waits: &Waits) -> Vec<(u64, Look)> {
     let _looking = crate::trace::span("fenec.wait_look");
-    let g = crate::held::read(db);
-    let seq = g.change_seq();
-    let written = seq != since
-        && g.changed_collections_since(since)
-            .is_none_or(|cs| cs.iter().any(|c| collections.contains(c)));
-    if !written && !due {
-        return Look {
-            found: None,
-            seq,
-            at: None,
-        };
+    let mut out = Vec::with_capacity(jobs.len());
+    let mut jobs = jobs.into_iter().peekable();
+    while jobs.peek().is_some() {
+        let t = now_ms();
+        let g = crate::held::read(db);
+        let held = Instant::now();
+        let mut looks = Looks::new(&g, waits.epoch.load(Ordering::Acquire), t);
+        for job in jobs.by_ref() {
+            let id = job.id;
+            out.push((id, looks.look(job)));
+            if held.elapsed() >= LOOK_HOLD {
+                break;
+            }
+        }
+        waits.picks.fetch_add(looks.picks, Ordering::Relaxed);
+        PICKS.fetch_add(looks.picks, Ordering::Relaxed);
     }
-    for t in tests {
-        let stmt = Statement::Select(t.clone());
-        let found = match g.query(&stmt, &[]) {
-            Ok(Response::Rows(rs)) => match rs.rows.first() {
-                None => continue,
-                Some(r) => (Some((t.collection.clone(), r.id)), rank(&g, t, &rs)),
+    out
+}
+
+/// Looks under one read lock, at the time `t` read before it: what one
+/// asks of the database as it stands, the others ask again for nothing --
+/// the collections written since a change, the rows, an index's step.
+struct Looks<'d> {
+    db: &'d Database,
+    epoch: u64,
+    t: i64,
+    seq: u64,
+    changed: Vec<(u64, Option<Vec<String>>)>,
+    written: Vec<(u64, String, Option<(u32, Vec<DocId>)>)>,
+    moments: Moments,
+    /// Whole picks run.
+    picks: u64,
+}
+
+impl<'d> Looks<'d> {
+    fn new(db: &'d Database, epoch: u64, t: i64) -> Looks<'d> {
+        Looks {
+            db,
+            epoch,
+            t,
+            seq: db.change_seq(),
+            changed: Vec::new(),
+            written: Vec::new(),
+            moments: Moments::default(),
+            picks: 0,
+        }
+    }
+
+    fn look(&mut self, mut job: Job) -> Look {
+        let seq = self.seq;
+        let written = seq != job.since && self.wrote(job.since, &job.collections);
+        if !written && !job.due {
+            return Look {
+                found: None,
+                seq,
+                at: None,
+                known: job.known.take(),
+            };
+        }
+        if let Some(look) = self.among(&job) {
+            return look;
+        }
+        self.whole(&job)
+    }
+
+    /// Whether a collection of `collections` was written since `since`.
+    fn wrote(&mut self, since: u64, collections: &[String]) -> bool {
+        let at = match self.changed.iter().position(|(s, _)| *s == since) {
+            Some(at) => at,
+            None => {
+                let cs = self.db.changed_collections_since(since);
+                self.changed.push((since, cs));
+                self.changed.len() - 1
+            }
+        };
+        self.changed[at]
+            .1
+            .as_ref()
+            .is_none_or(|cs| cs.iter().any(|c| collections.contains(c)))
+    }
+
+    /// The look among the rows its group knows and those written since,
+    /// where what it knows still holds: `None` runs the whole pick.
+    fn among(&mut self, job: &Job) -> Option<Look> {
+        let known = job.known.as_ref()?;
+        let [test] = job.tests.as_slice() else {
+            return None;
+        };
+        // A load or a compact since, the clock set back, or a moment come:
+        // a row neither known nor written may pass now.
+        if known.epoch != self.epoch || self.t < known.at || known.until.is_some_and(|u| self.t >= u)
+        {
+            return None;
+        }
+        let at = match self
+            .written
+            .iter()
+            .position(|(s, c, _)| *s == known.seq && *c == test.collection)
+        {
+            Some(at) => at,
+            None => {
+                let w = self.db.written_since(&test.collection, known.seq);
+                self.written.push((known.seq, test.collection.clone(), w));
+                self.written.len() - 1
+            }
+        };
+        let (cid, written) = self.written[at].2.as_ref()?;
+        // Dropped and made again, its schema changed, or too many rows to
+        // test one by one.
+        if *cid != known.cid
+            || written.first() == Some(&SCHEMA_MARK)
+            || known.ids.len() + written.len() > AMONG
+        {
+            return None;
+        }
+        let mut ids = Vec::with_capacity(known.ids.len() + written.len());
+        ids.extend_from_slice(&known.ids);
+        ids.extend_from_slice(written);
+        ids.sort_unstable();
+        ids.dedup();
+        let cid = *cid;
+        // An error the whole pick meets, or not, as it plans: it answers.
+        let rs = self.db.pick_among(test, &ids, self.t).ok()??;
+        let until = self
+            .db
+            .wakes_at_with(
+                &test.collection,
+                test.filter.as_ref(),
+                &[],
+                self.t,
+                &mut self.moments,
+            )
+            .ok()?;
+        let found = rs
+            .rows
+            .first()
+            .map(|r| (Some((test.collection.clone(), r.id)), rank(self.db, test, &rs)));
+        let known = (rs.rows.len() <= AMONG).then(|| Known {
+            epoch: self.epoch,
+            seq: self.seq,
+            cid,
+            ids: rs.rows.iter().map(|r| r.id).collect(),
+            at: self.t,
+            until,
+        });
+        Some(Look {
+            at: found.is_none().then_some(until),
+            found,
+            seq: self.seq,
+            known,
+        })
+    }
+
+    /// The whole pick: each test run as a `get`, the first that finds a row
+    /// the look's. One that finds none knows its one test passes no row.
+    fn whole(&mut self, job: &Job) -> Look {
+        self.picks += 1;
+        for t in job.tests.iter() {
+            let stmt = Statement::Select(t.clone());
+            let found = match self.db.query(&stmt, &[]) {
+                Ok(Response::Rows(rs)) => match rs.rows.first() {
+                    None => continue,
+                    Some(r) => (Some((t.collection.clone(), r.id)), rank(self.db, t, &rs)),
+                },
+                // An error the run should meet and answer.
+                _ => (None, None),
+            };
+            return Look {
+                found: Some(found),
+                seq: self.seq,
+                at: None,
+                known: None,
+            };
+        }
+        let (at, known) = match job.tests.as_slice() {
+            [test] => match self.db.wakes_at_with(
+                &test.collection,
+                test.filter.as_ref(),
+                &[],
+                self.t,
+                &mut self.moments,
+            ) {
+                Ok(until) => (until, self.none_known(test, until)),
+                Err(_) => (None, None),
             },
-            // An error the run should meet and answer.
-            _ => (None, None),
+            tests => (
+                next_moment_with(self.db, tests, self.t, &mut self.moments),
+                None,
+            ),
         };
-        return Look {
-            found: Some(found),
-            seq,
-            at: None,
-        };
+        Look {
+            found: None,
+            seq: self.seq,
+            at: Some(at),
+            known,
+        }
     }
-    Look {
-        found: None,
-        seq,
-        at: Some(next_moment(&g, tests, before)),
+
+    /// That `test` passes no row from `t` to its next moment, `until`: its
+    /// pick read the clock as it ran, after `t`, and what it answered holds
+    /// from `t` only where no moment came before that.
+    fn none_known(&self, test: &Select, until: Option<i64>) -> Option<Known> {
+        if until.is_some_and(|u| now_ms() >= u) {
+            return None;
+        }
+        let (cid, _) = self.db.written_since(&test.collection, self.seq)?;
+        Some(Known {
+            epoch: self.epoch,
+            seq: self.seq,
+            cid,
+            ids: Vec::new(),
+            at: self.t,
+            until,
+        })
     }
+}
+
+/// [`next_moment`] with each step of an index asked once a batch.
+fn next_moment_with(
+    db: &Database,
+    tests: &[Select],
+    at: i64,
+    moments: &mut Moments,
+) -> Option<i64> {
+    tests
+        .iter()
+        .filter_map(|t| {
+            db.wakes_at_with(&t.collection, t.filter.as_ref(), &[], at, moments)
+                .ok()
+                .flatten()
+        })
+        .min()
 }
 
 /// The column a test answers its first key under, where that key is worked
