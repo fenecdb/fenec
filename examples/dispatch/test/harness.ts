@@ -1,7 +1,8 @@
 // A world of its own for each test file: two tenant nodes and the router
-// over a new directory, the platform's tenant and the companies placed and
-// filled with their people, couriers and merchants -- no history unless
-// asked, so a test counts only what it did.
+// over a new directory, each on a port the system picks, the platform's
+// tenant and the companies placed and filled with their people, couriers
+// and merchants -- no history unless asked, so a test counts only what it
+// did.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,11 +19,10 @@ export interface World {
   stop(): Promise<void>;
 }
 
-export async function startWorld(opts: { basePort: number; node?: string; companies?: CompanySpec[]; cors?: string; historyDays?: number }): Promise<World> {
+export async function startWorld(opts: { node?: string; companies?: CompanySpec[]; cors?: string; historyDays?: number } = {}): Promise<World> {
   const dir = mkdtempSync(join(tmpdir(), 'plover-test-'));
   const cluster = new Cluster({
     dir,
-    basePort: opts.basePort,
     nodes: 2,
     operatorToken: OPERATOR_TOKEN,
     shardToken: SHARD_TOKEN,

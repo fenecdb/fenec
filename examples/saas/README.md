@@ -112,7 +112,7 @@ database and the app apart; `npm run shots` takes the screenshots of a
 running `npm run dev`.
 
 ```sh
-npm test         # every test file starts a cluster of its own
+npm test         # every test file starts a cluster of its own, on ports the system picks
 npm run lint     # tsc and eslint
 npm run bench    # the measurements below
 ```

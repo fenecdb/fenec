@@ -9,7 +9,6 @@
 import { spawn } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,12 +44,9 @@ export const ROUTER = 'studio-test-router-token';
  */
 export async function startRouter(node, tenants, { token = ROUTER, extra = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'fenec-studio-router-'));
-  const port = await freePort();
-  const args = ['--listen', `127.0.0.1:${port}`, '--directory', join(dir, 'shard.fenec'), '--token', token, '--auth-delay', '0', '--studio', ...extra];
+  const args = ['--listen', '127.0.0.1:0', '--directory', join(dir, 'shard.fenec'), '--token', token, '--auth-delay', '0', '--studio', ...extra];
   const child = spawn(binary('fenec-shard', 'FENEC_SHARD'), args, { stdio: ['ignore', 'ignore', 'pipe'] });
-  let log = '';
-  child.stderr.on('data', (d) => (log += d));
-  const url = `http://127.0.0.1:${port}`;
+  const { url, log } = await listening(child, 'fenec-shard');
   const admin = (method, path, body) =>
     fetch(`${url}${path}`, { method, headers: { authorization: `Bearer ${token}` }, body: body && JSON.stringify(body) });
   for (let i = 0; ; i++) {
@@ -59,7 +55,7 @@ export async function startRouter(node, tenants, { token = ROUTER, extra = [] } 
     } catch {
       /* not yet */
     }
-    if (child.exitCode !== null || i > 400) throw new Error(`fenec-shard did not start: ${log}`);
+    if (child.exitCode !== null || i > 400) throw new Error(`fenec-shard did not start: ${log()}`);
     await new Promise((r) => setTimeout(r, 25));
   }
   const r = await admin('PUT', '/_shard/nodes/n1', { addr: new URL(node.url).host, token: ADMIN });
@@ -80,31 +76,30 @@ export async function startRouter(node, tenants, { token = ROUTER, extra = [] } 
 
 /**
  * A standby fenec-shard following a primary router that is not there, so
- * its directory never arrives: every tenant's request is its 503. `extra`
- * goes on its command line.
+ * its directory never arrives: every tenant's request is its 503. The
+ * primary is port 1, where no test can listen -- a port found free could
+ * be another test's server by the time the standby asked it. `extra` goes
+ * on its command line.
  */
 export async function startStandby({ extra = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'fenec-studio-standby-'));
-  const port = await freePort();
   const args = [
-    '--listen', `127.0.0.1:${port}`,
+    '--listen', '127.0.0.1:0',
     '--directory', join(dir, 'shard.fenec'),
     '--replication-token', 'studio-test-replication',
-    '--replica-of', `http://127.0.0.1:${await freePort()}`,
+    '--replica-of', 'http://127.0.0.1:1',
     '--auth-delay', '0',
     ...extra,
   ];
   const child = spawn(binary('fenec-shard', 'FENEC_SHARD'), args, { stdio: ['ignore', 'ignore', 'pipe'] });
-  let log = '';
-  child.stderr.on('data', (d) => (log += d));
-  const url = `http://127.0.0.1:${port}`;
+  const { url, log } = await listening(child, 'fenec-shard');
   for (let i = 0; ; i++) {
     try {
       if ((await fetch(`${url}/t/any/collections`)).status === 503) break;
     } catch {
       /* not yet */
     }
-    if (child.exitCode !== null || i > 400) throw new Error(`fenec-shard did not start: ${log}`);
+    if (child.exitCode !== null || i > 400) throw new Error(`fenec-shard did not start: ${log()}`);
     await new Promise((r) => setTimeout(r, 25));
   }
   return {
@@ -151,13 +146,27 @@ export async function browser() {
   });
 }
 
-async function freePort() {
-  return new Promise((resolve) => {
-    const s = createServer();
-    s.listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => resolve(port));
-    });
+/**
+ * Where a server started on port 0 listens, off its `listening on:
+ * http://<address>` line, read to the space after it so a line that came
+ * in two pieces is not read short; and what it has logged since. A port
+ * found free and handed over was free only until someone else took it,
+ * and a server of someone else's could answer the health checks in its
+ * place.
+ */
+function listening(child, name) {
+  let log = '';
+  child.stderr.on('data', (d) => (log += d));
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const look = () => {
+      const at = /listening on: (http:\/\/\S+)\s/.exec(log);
+      if (at) return resolve({ url: at[1], log: () => log });
+      if (child.exitCode !== null) return reject(new Error(`${name} exited: ${log}`));
+      if (Date.now() - t0 > 20_000) return reject(new Error(`${name} did not start: ${log}`));
+      setTimeout(look, 25);
+    };
+    look();
   });
 }
 
@@ -178,10 +187,9 @@ export async function startServer({ studio = true, tenants = false, extra = [] }
   const dir = mkdtempSync(join(tmpdir(), 'fenec-studio-'));
   writeFileSync(join(dir, 'policy.txt'), POLICY);
   writeFileSync(join(dir, 'jwt.secret'), SECRET);
-  const port = await freePort();
   const args = [
     ...(tenants ? ['--dir', join(dir, 'tenants'), '--admin-token', ADMIN] : ['--file', join(dir, 'data.fenec')]),
-    '--http', `127.0.0.1:${port}`,
+    '--http', '127.0.0.1:0',
     '--http-token', TOKEN,
     '--jwt-secret-file', join(dir, 'jwt.secret'),
     '--policy', join(dir, 'policy.txt'),
@@ -192,10 +200,8 @@ export async function startServer({ studio = true, tenants = false, extra = [] }
     ...extra,
   ];
   const child = spawn(serverBinary(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
-  let log = '';
-  child.stderr.on('data', (d) => (log += d));
-  const url = `http://127.0.0.1:${port}`;
-  // Waits for the listener: the health check answers once it is up.
+  const { url, log } = await listening(child, 'fenec-server');
+  // And answering: the health check answers once it is up.
   for (let i = 0; ; i++) {
     try {
       const r = await fetch(`${url}/_health`);
@@ -203,14 +209,14 @@ export async function startServer({ studio = true, tenants = false, extra = [] }
     } catch {
       /* not yet */
     }
-    if (child.exitCode !== null) throw new Error(`fenec-server exited: ${log}`);
-    if (i > 400) throw new Error(`fenec-server did not start: ${log}`);
+    if (child.exitCode !== null) throw new Error(`fenec-server exited: ${log()}`);
+    if (i > 400) throw new Error(`fenec-server did not start: ${log()}`);
     await new Promise((r) => setTimeout(r, 25));
   }
   return {
     url,
     dir,
-    log: () => log,
+    log,
     async stop() {
       child.kill('SIGTERM');
       await new Promise((r) => (child.exitCode !== null ? r() : child.once('exit', r)));

@@ -4,7 +4,7 @@
 // address -- it is a mock, for development and the tests, in place of
 // Okta, Entra ID or Google.
 import { createHash, randomBytes } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { loadOrMakeKey, signJwt } from './jwt.ts';
 
 interface Grant {
@@ -17,11 +17,12 @@ interface Grant {
   at: number;
 }
 
-export function idpServer(opts: { issuer: string; keysDir: string; clients: Record<string, string> }): Server {
+/** The provider's requests answered by `server`, a new one unless given. */
+export function idpServer(opts: { issuer: string; keysDir: string; clients: Record<string, string> }, server: Server = createServer()): Server {
   const { signing, jwks } = loadOrMakeKey(opts.keysDir, 'idp', 'idp-1');
   const codes = new Map<string, Grant>();
 
-  return createServer(async (req, res) => {
+  return server.on('request', async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', opts.issuer);
     const send = (status: number, type: string, body: string, headers: Record<string, string> = {}) => {
       res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', ...headers });

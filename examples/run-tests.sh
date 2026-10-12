@@ -3,7 +3,10 @@
 # examples-test`): each example's `smoke` -- create, search, filter, a live
 # update where the platform has one, a reopen where the engine is local --
 # run on the packages built here rather than the published ones. A server
-# example gets a fenec-server of its own over a new file.
+# example gets a fenec-server of its own over a new file. Every server, here
+# and in the examples' own scripts, listens on a port the system picks and
+# says which, so two runs -- or a run beside any other suite -- never meet
+# on one.
 #
 #   examples/run-tests.sh                  every example whose toolchain is here
 #   examples/run-tests.sh python go rust   those alone
@@ -16,23 +19,24 @@ cargo=${CARGO:-cargo}
 [ -x "$HOME/.cargo/bin/cargo" ] && cargo="$HOME/.cargo/bin/cargo"
 
 dir=$(mktemp -d)
-port=${FENEC_TEST_PORT:-18190}
-url="http://127.0.0.1:$port"
+url=
 token=examples-test
 server=
 trap 'stop; rm -rf "$dir"' EXIT INT TERM
 
+# On :0, the url read off the server's `listening on: http://<address>` line.
 serve() {
     rm -f "$dir/server.log"
-    "$root/target/debug/fenec-server" --file "$dir/$1.fenec" --http "127.0.0.1:$port" \
+    "$root/target/debug/fenec-server" --file "$dir/$1.fenec" --http 127.0.0.1:0 \
         --http-token "$token" --cdc 2>"$dir/server.log" &
     server=$!
     i=0
-    until grep -q "listening on: http://" "$dir/server.log" 2>/dev/null; do
+    until grep -q "listening on: http://.* " "$dir/server.log" 2>/dev/null; do
         i=$((i + 1))
         [ $i -gt 100 ] && { cat "$dir/server.log"; exit 1; }
         sleep 0.1
     done
+    url=$(sed -n 's/.*listening on: \(http:[^ ]*\) .*/\1/p' "$dir/server.log" | head -1)
 }
 
 stop() {
@@ -116,8 +120,7 @@ run_react() {
 run_shop() {
     has node || { missing node "shop"; return; }
     w=$(npm_example shop)
-    (cd "$w" && FENEC_SERVER="${SHOP_FENEC_SERVER:-$root/target/debug/fenec-server}" \
-        FENEC_PORT=$port SHOP_PORT=$((port + 1)) sh scripts/ci.sh)
+    (cd "$w" && FENEC_SERVER="${SHOP_FENEC_SERVER:-$root/target/debug/fenec-server}" sh scripts/ci.sh)
 }
 
 # The ledger (examples/ledger/scripts/ci.sh): a tenant node of its own over a
@@ -128,8 +131,7 @@ run_ledger() {
     w=$(npm_example ledger)
     [ -x "${LEDGER_FENEC_CLI:-$root/target/debug/fenec}" ] || "$cargo" build -q -p fenec-cli --manifest-path "$root/Cargo.toml"
     (cd "$w" && FENEC_SERVER="${LEDGER_FENEC_SERVER:-$root/target/debug/fenec-server}" \
-        FENEC_CLI="${LEDGER_FENEC_CLI:-$root/target/debug/fenec}" \
-        FENEC_PORT=$((port + 2)) sh scripts/ci.sh)
+        FENEC_CLI="${LEDGER_FENEC_CLI:-$root/target/debug/fenec}" sh scripts/ci.sh)
 }
 
 # Trellis (examples/saas/scripts/ci.sh): lint, and its auth, token, role,
@@ -151,8 +153,7 @@ run_saas() {
 run_analytics() {
     has node || { missing node "analytics"; return; }
     w=$(npm_example analytics)
-    (cd "$w" && FENEC_SERVER="${ANALYTICS_FENEC_SERVER:-$root/target/debug/fenec-server}" \
-        FENEC_PORT=$((port + 4)) KESTREL_PORT=$((port + 5)) sh scripts/ci.sh)
+    (cd "$w" && FENEC_SERVER="${ANALYTICS_FENEC_SERVER:-$root/target/debug/fenec-server}" sh scripts/ci.sh)
 }
 
 # Plover (examples/dispatch/scripts/ci.sh): lint; its claims, lease, quota
@@ -164,8 +165,7 @@ run_dispatch() {
     w=$(npm_example dispatch)
     [ -x "${DISPATCH_FENEC_SHARD:-$root/target/debug/fenec-shard}" ] || "$cargo" build -q -p fenec-shard --manifest-path "$root/Cargo.toml"
     (cd "$w" && FENEC_SERVER="${DISPATCH_FENEC_SERVER:-$root/target/debug/fenec-server}" \
-        FENEC_SHARD="${DISPATCH_FENEC_SHARD:-$root/target/debug/fenec-shard}" \
-        DISPATCH_PORT=$((port + 6)) sh scripts/ci.sh)
+        FENEC_SHARD="${DISPATCH_FENEC_SHARD:-$root/target/debug/fenec-shard}" sh scripts/ci.sh)
 }
 
 run_python() {

@@ -45,7 +45,8 @@ const PASS_DOWN = ['content-type', 'etag', 'fenec-seq', 'fenec-next', 'retry-aft
 
 const PAGE_ROUTES = /^\/(?:$|signin$|signup$|forgot$|reset$|verify$|account$|orgs\/new$|invite\/[^/]+\/[^/]+$|o\/[a-z0-9-]+(?:\/(?:board|members|search|audit)(?:\/[^/]*)?)?$)/;
 
-export function trellisServer(trellis: Trellis): Server {
+/** Trellis's requests answered by `server`, a new one unless given. */
+export function trellisServer(trellis: Trellis, server: Server = createServer()): Server {
   const cfg = trellis.cfg;
   const oidc = new Oidc(cfg.oidcIssuer, cfg.oidcClientId, `${cfg.origin}/api/auth/sso/callback`);
   const secure = cfg.insecureCookies ? '' : '; Secure';
@@ -218,7 +219,7 @@ export function trellisServer(trellis: Trellis): Server {
     req.pipe(up);
   }
 
-  return createServer((req, res) => {
+  return server.on('request', (req: IncomingMessage, res: ServerResponse) => {
     handle(req, res).catch((e) => {
       console.error(e);
       if (!res.headersSent) json(res, 500, { error: 'Something went wrong on our side. Try again.' });

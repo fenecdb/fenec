@@ -7,7 +7,8 @@
 # its text index was built inside it, against 1.40 s warm.
 #
 #   FENEC_SERVER   the binary (default: this repository's target/release, then target/debug)
-#   FENEC_PORT     8080
+#   FENEC_PORT     8080; 0 takes a port the system picks, which the server's
+#                  `listening on: http://<address>` line names
 #   FENEC_FILE     data/shop.fenec
 #   FENEC_TOKEN, FENEC_JWT_SECRET, SITE_URL   as lib/db.ts and lib/jwt.ts read them
 set -eu

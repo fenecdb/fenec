@@ -588,18 +588,21 @@ docker-down:
 
 ## The "fenecdb data" Grafana dashboards end to end (Docker): monitoring/'s
 ## compose with fenec-server and Grafana's fenecdb-datasource built from this
-## checkout, under a project and on ports of its own so it runs beside a
-## stack already up; every panel's query and the variables' asked of
+## checkout, under a project of its own (the recipe's shell's pid in its
+## name) and on loopback ports Docker picks (0), read back with `docker
+## compose port`, so it runs beside a stack already up and beside another
+## check; every panel's query and the variables' asked of
 ## Grafana's /api/ds/query, through the Infinity data source and through the
 ## plugin, and held to fenec-server's own answer, the plugin's alert rule
 ## evaluated; then down with its volumes, whatever happened
 GRAFANA_CHECK = FENEC_HTTP_TOKEN=grafana-check FENEC_METRICS_TOKEN=grafana-check-scrape \
 	FENEC_JWT_SECRET=grafana-check-secret-of-32-bytes-at-least \
-	FENEC_PORT=18780 GRAFANA_PORT=13780 PROMETHEUS_PORT=19780 \
-	docker compose -p fenec-grafana-check -f monitoring/docker-compose.yml
+	FENEC_PORT=0 GRAFANA_PORT=0 PROMETHEUS_PORT=0 \
+	docker compose -p fenec-grafana-check-$$$$ -f monitoring/docker-compose.yml
 grafana-check:
 	@$(GRAFANA_CHECK) up -d --build && \
-	  GRAFANA_URL=http://127.0.0.1:13780 FENEC_URL=http://127.0.0.1:18780 FENEC_HTTP_TOKEN=grafana-check \
+	  GRAFANA_URL=http://$$($(GRAFANA_CHECK) port grafana 3000) \
+	  FENEC_URL=http://$$($(GRAFANA_CHECK) port fenecdb 8080) FENEC_HTTP_TOKEN=grafana-check \
 	    sh -c 'node monitoring/grafana/check.mjs && node monitoring/grafana/check-plugin.mjs'; \
 	  status=$$?; \
 	  if [ $$status -ne 0 ]; then $(GRAFANA_CHECK) logs --no-color --tail 60; fi; \

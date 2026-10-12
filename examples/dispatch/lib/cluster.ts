@@ -27,8 +27,17 @@ export function binary(name: 'fenec-server' | 'fenec-shard'): string {
 
 export interface ClusterOptions {
   dir: string;
-  /** The router listens here, the nodes on the ports after it. */
-  basePort: number;
+  /**
+   * The router listens here and the nodes on the ports after it: for a
+   * cluster over a directory kept from one run to the next, whose router
+   * the site's PLOVER_ROUTER names. Without it every process takes a port
+   * the system picks (`127.0.0.1:0`) and says which on its `listening on:`
+   * line, so a test's cluster never meets another's, or anything else, on
+   * a port it took for free -- a fixed one was "Address already in use"
+   * beside any other suite on the machine, or a server of someone else's
+   * answering in its place.
+   */
+  basePort?: number;
   nodes?: number;
   cors?: string;
   operatorToken: string;
@@ -46,17 +55,33 @@ interface Proc {
 }
 
 export class Cluster {
-  readonly routerUrl: string;
   readonly nodeNames: string[];
   #procs = new Map<string, Proc>();
+  /** Where each process said it listens, by name: `router`, `n1`, ... */
+  #urls = new Map<string, string>();
 
   constructor(readonly opts: ClusterOptions) {
-    this.routerUrl = `http://127.0.0.1:${opts.basePort}`;
     this.nodeNames = Array.from({ length: opts.nodes ?? 2 }, (_, i) => `n${i + 1}`);
   }
 
+  get routerUrl(): string {
+    return this.#url('router');
+  }
+
   nodeUrl(name: string): string {
-    return `http://127.0.0.1:${this.opts.basePort + 1 + this.nodeNames.indexOf(name)}`;
+    return this.#url(name);
+  }
+
+  #url(name: string): string {
+    const url = this.#urls.get(name);
+    if (!url) throw new Error(`${name} has not started`);
+    return url;
+  }
+
+  /** The address `name` is to listen on: its own port past the base, or one the system picks. */
+  #listen(name: string): string {
+    const base = this.opts.basePort;
+    return `127.0.0.1:${base === undefined ? 0 : name === 'router' ? base : base + 1 + this.nodeNames.indexOf(name)}`;
   }
 
   adminToken(name: string): string {
@@ -73,7 +98,7 @@ export class Cluster {
     for (const n of this.nodeNames) await this.startNode(n);
     await this.#run('router', binary('fenec-shard'), [
       '--listen',
-      `127.0.0.1:${this.opts.basePort}`,
+      this.#listen('router'),
       '--directory',
       join(this.opts.dir, 'shard.fenec'),
       '--token',
@@ -89,7 +114,9 @@ export class Cluster {
       const res = await fetch(`${this.routerUrl}/_shard/nodes/${n}`, {
         method: 'PUT',
         headers: { authorization: `Bearer ${this.opts.shardToken}` },
-        body: JSON.stringify({ addr: this.nodeUrl(n).slice('http://'.length), token: this.adminToken(n) }),
+        // By the address the node said it listens on, which is the one the
+        // system gave it.
+        body: JSON.stringify({ addr: new URL(this.nodeUrl(n)).host, token: this.adminToken(n) }),
       });
       if (!res.ok) throw new Error(`register ${n}: ${res.status} ${await res.text()}`);
     }
@@ -102,7 +129,7 @@ export class Cluster {
       '--dir',
       dir,
       '--http',
-      this.nodeUrl(name).slice('http://'.length),
+      this.#listen(name),
       '--admin-token',
       this.adminToken(name),
       '--jwt-secret-file',
@@ -151,11 +178,20 @@ export class Cluster {
     child.stdout!.on('data', keep);
     child.stderr!.on('data', keep);
     const exited = new Promise<void>((r) => child.on('exit', () => r()));
-    // A test or the bench that dies leaves no node behind on its ports.
+    // A test or the bench that dies leaves no node behind.
     process.on('exit', () => child.kill('SIGKILL'));
     this.#procs.set(name, { child, out, exited });
+    // Up once it says where it listens: fenec-server's and fenec-shard's
+    // `listening on: http://<address>  [...]` line names the port it bound,
+    // the one the system picked for `:0` -- read to the space after it, so
+    // a line that came in two pieces is not read short.
     const t0 = Date.now();
-    while (!out.join('').match(/listening/)) {
+    for (;;) {
+      const at = /listening on: (http:\/\/\S+)\s/.exec(out.join(''));
+      if (at) {
+        this.#urls.set(name, at[1]);
+        return;
+      }
       if (child.exitCode !== null) throw new Error(`${name} exited: ${out.join('')}`);
       if (Date.now() - t0 > 30_000) throw new Error(`${name} did not start: ${out.join('')}`);
       await new Promise((r) => setTimeout(r, 20));

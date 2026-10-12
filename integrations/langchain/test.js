@@ -9,7 +9,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Document } from '@langchain/core/documents';
@@ -23,31 +22,31 @@ const binary = new URL('target/debug/fenec-server', root).pathname;
 const hasBinary = await access(binary).then(() => true, () => false);
 const embeddings = new SyntheticEmbeddings({ vectorSize: 16 });
 
-const port = () =>
-  new Promise((res) => {
-    const s = createServer().listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => res(port));
+/**
+ * Where a fenec-server started on port 0 listens, off its `listening on:
+ * http://<address>` line, read to the space after it so a line that came
+ * in two pieces is not read short. A port found free and handed over was
+ * free only until someone else took it, and a server of someone else's
+ * could answer in its place.
+ */
+const listening = (child) =>
+  new Promise((res, rej) => {
+    let log = '';
+    child.stderr.on('data', (d) => {
+      log += d;
+      const at = /listening on: (http:\/\/\S+)\s/.exec(log);
+      if (at) res(at[1]);
     });
+    child.on('exit', () => rej(new Error(`fenec-server ended before it listened: ${log}`)));
   });
 
-/** fenec-server over a file of its own, its HTTP endpoint up; `stop()` ends it. */
+/** fenec-server over a file of its own, on a port the system picks; `stop()` ends it. */
 async function server() {
   const dir = await mkdtemp(join(tmpdir(), 'fenecdb-langchain-'));
-  const http = await port();
-  const child = spawn(binary, ['--http', `127.0.0.1:${http}`, '--file', join(dir, 'db.fenec')], {
-    stdio: 'ignore',
+  const child = spawn(binary, ['--http', '127.0.0.1:0', '--file', join(dir, 'db.fenec')], {
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
-  const url = `http://127.0.0.1:${http}`;
-  for (let i = 0; ; i++) {
-    try {
-      await fetch(`${url}/_health`);
-      break;
-    } catch {
-      if (i > 200) throw new Error('fenec-server did not start');
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  }
+  const url = await listening(child);
   return {
     client: new FenecHttp(url),
     async stop() {

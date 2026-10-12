@@ -4,7 +4,8 @@
 # tenant, the change stream kept for the rollup worker, and an audit log.
 #
 #   FENEC_SERVER   the binary (default: this repository's target/release, then target/debug)
-#   FENEC_PORT     8080
+#   FENEC_PORT     8080; 0 takes a port the system picks, which the server's
+#                  `listening on: http://<address>` line names
 #   FENEC_DIR      data/tenants
 #   FENEC_SYNC     250: a write is on disk within 250 ms. Events are
 #                  counted, not money; `always` costs ingest an fsync a batch

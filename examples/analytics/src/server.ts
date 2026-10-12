@@ -2,7 +2,8 @@
 // on node:http with no framework, and -- unless told otherwise -- the rollup
 // workers, the market feed and a trickle of demo traffic beside them.
 //
-//   PORT                     3000
+//   PORT                     3000; 0 takes a port the system picks, which the
+//                            `Kestrel on <url>` line names
 //   KESTREL_ROLLUPS=0        run no rollup workers here (scripts/rollup.ts runs them apart)
 //   KESTREL_ROLLUP_SITES     the sites whose workers run here, by commas (default: every site)
 //   KESTREL_FEED=0           write no ticks
@@ -323,8 +324,12 @@ if (isMain) {
   process.on('unhandledRejection', (e) => console.error('unhandled:', e));
   if (!existsSync(pub('app.js'))) console.warn('public/app.js is missing: npm run build');
   const server = createServer({ keepAliveTimeout: 65_000 }, (req, res) => void handle(req, res));
-  server.listen(PORT, () => console.log(`Kestrel on http://127.0.0.1:${PORT}`));
+  // The port bound, which is the one the system picked for PORT=0.
+  server.listen(PORT, () => {
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    console.log(`Kestrel on ${url}`);
+    if (process.env.KESTREL_DEMO_TRAFFIC !== '0') startDemoTraffic(url);
+  });
   if (process.env.KESTREL_ROLLUPS !== '0') startRollups();
   if (process.env.KESTREL_FEED !== '0') runFeed({ onError: (e) => console.error('feed:', (e as Error).message) });
-  if (process.env.KESTREL_DEMO_TRAFFIC !== '0') startDemoTraffic(`http://127.0.0.1:${PORT}`);
 }

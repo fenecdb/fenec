@@ -23,9 +23,8 @@ import { addresses, bounds, metresBetween, rng, type Point } from '../lib/city';
 import { COMPANIES, merchants, people, type CompanySpec } from '../lib/world';
 import type { Who } from '../lib/tokens';
 
-const base = Number(process.env.PLOVER_BENCH_PORT ?? 18470);
 const dir = mkdtempSync(join(tmpdir(), 'plover-bench-'));
-const cluster = new Cluster({ dir, basePort: base, nodes: 2, operatorToken: OPERATOR_TOKEN, shardToken: SHARD_TOKEN });
+const cluster = new Cluster({ dir, nodes: 2, operatorToken: OPERATOR_TOKEN, shardToken: SHARD_TOKEN });
 await cluster.start();
 routeTo(cluster.routerUrl);
 // A company of 200 couriers with no quota.

@@ -21,7 +21,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const b64 = (v: unknown) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
 
 before(async () => {
-  env = await start(19400);
+  env = await start();
   owner = await person(env, 'owner@acme.io', 'Owner');
   await organisation(owner, 'acme');
   await organisation(owner, 'globex');

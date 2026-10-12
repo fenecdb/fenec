@@ -18,7 +18,9 @@ usage: fenec-server [options]
 
   -f, --file <path>         persistent fenecdb file (in-memory when absent)
       --http <address>      where the HTTP/JSON endpoint listens
-                            default: 127.0.0.1:8080
+                            default: 127.0.0.1:8080. Port 0 takes one the
+                            system picks: the `listening on: http://<address>`
+                            line on stderr names it
       --dir <path>          one file per tenant in this directory, served
                             under /t/<tenant>/
       --admin-token <value> token for /_admin/ (--dir only): create, delete,

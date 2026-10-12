@@ -13,19 +13,21 @@ cargo=${CARGO:-cargo}
 "$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 
 dir=$(mktemp -d)
-port=${FENEC_TEST_PORT:-18181}
 token=python-tests
 # Outside loopback, so the container reaches it: a token is required there.
+# On a port the system picks, read off the server's `listening on:` line: a
+# run never meets another, or any other server, on one.
 "$root/target/debug/fenec-server" --file "$dir/python.fenec" \
-    --http "0.0.0.0:$port" --http-token "$token" --cdc 2>"$dir/server.log" &
+    --http 0.0.0.0:0 --http-token "$token" --cdc 2>"$dir/server.log" &
 server=$!
 trap 'kill $server 2>/dev/null; rm -rf "$dir"' EXIT INT TERM
 i=0
-until grep -q "listening on: http://" "$dir/server.log"; do
+until grep -q "listening on: http://.* " "$dir/server.log"; do
     i=$((i + 1))
     [ $i -gt 100 ] && { cat "$dir/server.log"; exit 1; }
     sleep 0.1
 done
+port=$(sed -n 's/.*listening on: http:[^ ]*:\([0-9]*\) .*/\1/p' "$dir/server.log" | head -1)
 
 # The source is copied inside, so the build and pytest's caches stay there.
 # host.docker.internal is Docker Desktop's name for the machine; a Linux

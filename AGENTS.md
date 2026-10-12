@@ -4356,6 +4356,19 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   just the one it is about: a router's upstream timeout of 600 ms failed a
   tenant's create at background QoS, and an SDK client's 100 ms left
   around a held claim's 400 failed nearly every run there.
+- A server a test or a harness starts listens on port 0 (`--http
+  127.0.0.1:0`, `--listen 127.0.0.1:0`, Node's `listen(0)`) and is found
+  by the address it says it took: fenec-server's and fenec-shard's
+  `listening on: http://<address>` line on stderr, which both binaries'
+  usage names and `fenec-shard`'s `tests/listen.rs` holds. A fixed port was
+  "Address already in use" beside another suite on the machine (the
+  examples' clusters), and a port found free and handed over was free only
+  until someone else took it, a health check then answered by another's
+  server. A router is told its nodes by the addresses they said. Only a
+  site whose address is needed before it binds -- a Next.js build renders
+  it, the database's CORS names it -- takes a port the system picks held
+  by a stand-in listener until the moment it starts (`examples/shop`,
+  `examples/dispatch`'s `ci.sh`).
 - Comments explain *why* a thing is the way it is — a measured cost, a trap that
   was hit, an alternative that was rejected. Match that when adding code.
 - All prose in the repo (comments, docs, README) is English.

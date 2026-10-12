@@ -20,7 +20,7 @@ const t = cast(tandem);
 const LEASE = 1_500;
 
 before(async () => {
-  world = await startWorld({ basePort: 18420 });
+  world = await startWorld();
   queue.leaseMs = LEASE;
 });
 after(async () => {
