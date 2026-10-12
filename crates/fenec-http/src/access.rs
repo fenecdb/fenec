@@ -40,6 +40,17 @@
 //! statement asking it is held to those rules' filters as well, and
 //! neither `write` nor `*` grants it.
 //!
+//! **Fields a read shows.** `read(pickup, run_at)` grants the rows its
+//! filter admits with those fields alone, and `id`: a row shows the fields
+//! of every read rule admitting it, the rest answering `null` -- a courier
+//! sees a ready order's pickup, and the customer's door once the order is
+//! theirs. A field no rule grants is not there for the token (`\d`,
+//! `/_schema`, `select *`). One a rule withholds must not show through what
+//! a statement does with it either, so a `where` term reading it holds only
+//! where the row shows it, and `order`, `group`, `facet`, an aggregate,
+//! `match`, `near`, a `lookup` key and a `set`'s values may read it only
+//! where every row they reach shows it (`fields`).
+//!
 //! **Transitions.** A rule's filter reads the row as it stands, and
 //! `new.<field>` reads it as the write leaves it -- as `new.` names the
 //! document in an upsert's `else set`. A rule that names `new.` is a
@@ -124,6 +135,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
+
+mod fields;
+pub use fields::Mask;
 
 /// Who a request is.
 #[derive(Clone)]
@@ -333,6 +347,9 @@ struct Rule {
     /// `update(a, b)`: the fields an update by this rule may change; `None`
     /// for every one (`update`, `write`).
     fields: Option<Vec<String>>,
+    /// `read(a, b)`: the fields a row this rule admits shows; `None` for
+    /// every one (`read`).
+    read_fields: Option<Vec<String>>,
     /// With `$jwt.<claim>` as parameter `k`, the claim `claims[k]`.
     filter: Option<Expr>,
     /// A transition's (a filter naming `new.`): what it asks of the row
@@ -361,12 +378,16 @@ pub struct Scope {
     unbound: bool,
     /// The policy's `append-only` collections, `*` for every one.
     append_only: Arc<[String]>,
+    /// Whether a read rule of the token names its fields (`read(a, b)`):
+    /// a token none of whose do takes the path it took before them.
+    fielded: bool,
 }
 
 struct Bound {
     collection: Option<String>,
     ops: u8,
     fields: Option<Vec<String>>,
+    read_fields: Option<Vec<String>>,
     filter: Option<Expr>,
     /// [`Rule::before`], its claims bound.
     before: Option<Expr>,
@@ -569,6 +590,7 @@ impl Access {
                 collection: r.collection.clone(),
                 ops: r.ops,
                 fields: r.fields.clone(),
+                read_fields: r.read_fields.clone(),
                 filter: r.filter.as_ref().map(|f| bind(f, &values)),
                 before: r.before.as_ref().map(|f| bind(f, &values)),
                 transition: r.transition,
@@ -594,6 +616,9 @@ impl Access {
             Some(Value::Float(f)) => Some((f.max(0.0) * 1000.0) as u64),
             _ => None,
         };
+        let fielded = rules
+            .iter()
+            .any(|r| r.ops & READ != 0 && r.read_fields.is_some());
         Ok(Scope {
             subject: match claim("sub") {
                 Some(Value::Text(s)) => Some(s.clone()),
@@ -604,6 +629,7 @@ impl Access {
             tenants,
             unbound: self.demands.unbound_tenants,
             append_only: Arc::clone(&self.append_only),
+            fielded,
         })
     }
 
@@ -727,12 +753,18 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         .unwrap_or(rest.len());
     let (grants, mut rest) = rest.split_at(end);
     let (mut ops, mut named) = (0, 0);
-    // `update(a, b)`: the fields an update may change, `None` for every one.
+    // `update(a, b)`: the fields an update may change, `None` for every one;
+    // `read(a, b)` the fields a read shows.
     let mut fields: Option<Vec<String>> = None;
     let mut every_field = false;
+    let mut read_fields: Option<Vec<String>> = None;
+    let mut every_read = false;
     for g in split_grants(grants)? {
         match g {
-            "read" => ops |= READ,
+            "read" => {
+                ops |= READ;
+                every_read = true;
+            }
             "write" => {
                 ops |= WRITES;
                 every_field = true;
@@ -747,24 +779,21 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
             g if g.starts_with("update(") && g.ends_with(')') => {
                 named |= UPDATE;
                 let list = fields.get_or_insert_with(Vec::new);
-                for f in g["update(".len()..g.len() - 1].split(',') {
-                    let f = f.trim();
-                    let ok = !f.is_empty()
-                        && f.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && !f.starts_with(|c: char| c.is_ascii_digit());
-                    if !ok {
-                        return Err(format!("`{g}`: a field list names fields, `update(a, b)`"));
-                    }
-                    if f == "id" {
-                        return Err("`update(id)`: no write changes a document's id".into());
-                    }
-                    list.push(f.to_string());
+                field_list(g, "update(".len(), list)?;
+                if list.iter().any(|f| f == "id") {
+                    return Err("`update(id)`: no write changes a document's id".into());
                 }
+            }
+            // `id` may be named, and is shown whether or not it is: a row
+            // is told apart by it, and every write and deletion names it.
+            g if g.starts_with("read(") && g.ends_with(')') => {
+                ops |= READ;
+                field_list(g, "read(".len(), read_fields.get_or_insert_with(Vec::new))?;
             }
             other => {
                 return Err(format!(
-                    "`{other}` is none of read, insert, update, update(<fields>), delete, \
-                     write and expired"
+                    "`{other}` is none of read, read(<fields>), insert, update, \
+                     update(<fields>), delete, write and expired"
                 ))
             }
         }
@@ -772,6 +801,9 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
     ops |= named;
     if every_field {
         fields = None;
+    }
+    if every_read {
+        read_fields = None;
     }
     let mut role = None;
     let words: Vec<&str> = rest.split_whitespace().collect();
@@ -862,6 +894,7 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         ops,
         named,
         fields,
+        read_fields,
         filter,
         before,
         transition,
@@ -947,6 +980,23 @@ fn loosened(e: Expr, pass: bool, unseen: &dyn Fn(&str) -> bool) -> Expr {
         e if reads(&e, unseen) => is(pass),
         e => e,
     }
+}
+
+/// The fields of a grant's list, `update(a, b)` or `read(a, b)`, its
+/// parenthesis at `open`, pushed onto `list`.
+fn field_list(g: &str, open: usize, list: &mut Vec<String>) -> std::result::Result<(), String> {
+    for f in g[open..g.len() - 1].split(',') {
+        let f = f.trim();
+        let ok = !f.is_empty()
+            && f.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !f.starts_with(|c: char| c.is_ascii_digit());
+        if !ok {
+            let verb = &g[..open - 1];
+            return Err(format!("`{g}`: a field list names fields, `{verb}(a, b)`"));
+        }
+        list.push(f.to_string());
+    }
+    Ok(())
 }
 
 /// The grants of a rule, split at the commas outside a field list.
@@ -1085,8 +1135,9 @@ impl Scope {
 
     /// What the token may do, as `/_whoami` answers it: its `sub`, the
     /// tenants its claim names, and each rule that applies to it -- the
-    /// collection, the grants, the fields an update may change and the
-    /// rows, the filter as the policy writes it. A token is shown its own
+    /// collection, the grants, the fields an update may change, the fields
+    /// a read shows and the rows, the filter as the policy writes it. A
+    /// token is shown its own
     /// rules and no other's: a rule for a role it does not hold, or naming
     /// a claim it lacks, never became one of its own.
     pub fn summary_into(&self, out: &mut String) {
@@ -1126,6 +1177,8 @@ impl Scope {
             }
             out.push_str("],\"fields\":");
             texts_into(out, r.fields.as_deref());
+            out.push_str(",\"read_fields\":");
+            texts_into(out, r.read_fields.as_deref());
             out.push_str(",\"rows\":");
             match &r.text {
                 Some(t) => escape_into(out, t),
@@ -1213,9 +1266,26 @@ impl Scope {
     /// ...)` in any of them -- which reads its collection as any `get`
     /// does, so a token that may not read a row there learns nothing of
     /// it through the list it would have made.
-    fn select(&self, mut sel: Select) -> Result<Select> {
+    ///
+    /// `mask` takes what the answer's rows must not show, where a rule
+    /// names the fields it shows; `None` for an inner `get`, whose column
+    /// is a list rather than rows.
+    fn select(
+        &self,
+        mut sel: Select,
+        params: &[Value],
+        mask: Option<&mut Option<fields::Mask>>,
+    ) -> Result<Select> {
+        // What a rule withholds is held out of what the statement does
+        // with it before the rules are ANDed in, which read it as they must.
+        if self.fielded {
+            let m = fields::hold(self, &mut sel, params, mask.is_none())?;
+            if let Some(mask) = mask {
+                *mask = m;
+            }
+        }
         sel.each_filter_mut(&mut |collection, filter| {
-            self.inner(filter)?;
+            self.inner(filter, params)?;
             let f = self.reaping(collection, filter.take())?;
             *filter = self.restrict(collection, f)?;
             Ok(())
@@ -1251,13 +1321,13 @@ impl Scope {
     }
 
     /// Each inner `get` in `filter` held to the read rules ([`Self::select`]).
-    fn inner(&self, filter: &mut Option<Expr>) -> Result<()> {
+    fn inner(&self, filter: &mut Option<Expr>, params: &[Value]) -> Result<()> {
         let Some(f) = filter else {
             return Ok(());
         };
         f.each_subquery_mut(&mut |e| {
             if let Expr::InSelect(_, sel) = e {
-                **sel = self.select(std::mem::take(&mut **sel))?;
+                **sel = self.select(std::mem::take(&mut **sel), params, None)?;
             }
             Ok(())
         })
@@ -1339,9 +1409,26 @@ impl Scope {
 
     /// The statement as this token may run it, or why it may not.
     pub fn rewrite(&self, stmt: Statement) -> Result<Statement> {
-        Ok(match stmt {
-            Statement::Select(sel) => Statement::Select(self.select(sel)?),
-            Statement::Explain(sel) => Statement::Explain(self.select(sel)?),
+        Ok(self.rewrite_with(stmt, &[])?.0)
+    }
+
+    /// [`Self::rewrite`] with the statement's parameters, and what its
+    /// answer must not show ([`Self::shown`]): `None` where it shows all
+    /// it holds -- a token none of whose rules name fields, a statement
+    /// answering no rows, or only fields every row shows.
+    pub fn rewrite_with(
+        &self,
+        stmt: Statement,
+        params: &[Value],
+    ) -> Result<(Statement, Option<fields::Mask>)> {
+        let mut mask = None;
+        let stmt = match stmt {
+            Statement::Select(sel) => {
+                Statement::Select(self.select(sel, params, Some(&mut mask))?)
+            }
+            Statement::Explain(sel) => {
+                Statement::Explain(self.select(sel, params, Some(&mut None))?)
+            }
             Statement::Put {
                 collection,
                 mut docs,
@@ -1350,7 +1437,7 @@ impl Scope {
                 if_absent,
                 else_set,
                 require,
-                pick,
+                mut pick,
             } => {
                 // `scoped()` writes a parameter's documents in first, so
                 // that each is held to the rules below.
@@ -1365,6 +1452,10 @@ impl Scope {
                 // is one it may update (`Check::before_overwrite`).
                 if else_set.is_some() {
                     self.writable(&collection, UPDATE)?;
+                }
+                if self.fielded {
+                    let set = (else_set.as_deref(), true);
+                    mask = fields::write(self, &collection, &mut None, set, &mut pick, params)?;
                 }
                 let mut pins = Vec::new();
                 if let Some(f) = &f {
@@ -1404,10 +1495,14 @@ impl Scope {
                 set,
                 mut filter,
                 require,
-                pick,
+                mut pick,
             } => {
                 let f = self.writable(&collection, UPDATE)?;
-                self.inner(&mut filter)?;
+                if self.fielded {
+                    let s = (Some(&set[..]), false);
+                    mask = fields::write(self, &collection, &mut filter, s, &mut pick, params)?;
+                }
+                self.inner(&mut filter, params)?;
                 let filter = self.reaping(&collection, filter)?;
                 Statement::Update {
                     filter: self.returning(&collection, &pick, Some(&set), and(filter, f)),
@@ -1421,10 +1516,14 @@ impl Scope {
                 collection,
                 mut filter,
                 require,
-                pick,
+                mut pick,
             } => {
                 let f = self.writable(&collection, DELETE)?;
-                self.inner(&mut filter)?;
+                if self.fielded {
+                    let s = (None, false);
+                    mask = fields::write(self, &collection, &mut filter, s, &mut pick, params)?;
+                }
+                self.inner(&mut filter, params)?;
                 let filter = self.reaping(&collection, filter)?;
                 Statement::Delete {
                     filter: self.returning(&collection, &pick, None, and(filter, f)),
@@ -1445,7 +1544,8 @@ impl Scope {
                     "a scoped token reads and writes documents; it changes no schema".into(),
                 ))
             }
-        })
+        };
+        Ok((stmt, mask))
     }
 
     /// Whether a rule granting the token `update` in `collection` is a

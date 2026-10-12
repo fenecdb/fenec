@@ -375,17 +375,26 @@ fn limit(args: Args, opts: &Options, default: usize) -> Checked<usize> {
 // ------------------------------------------------------------ running
 
 /// The schema of `collection` as the token may see it: one it may not read
-/// is answered as one that is not there, so a refusal names nothing.
+/// is answered as one that is not there, so a refusal names nothing, and
+/// a field no read rule grants it is not among its fields.
 fn schema_of(ctx: &Ctx, collection: &str) -> Checked<Schema> {
     let g = crate::held::read(ctx.db);
     let visible = ctx.who.scope().is_none_or(|s| s.readable(collection));
     match g.collection(collection) {
-        Ok(c) if visible => Ok(c.schema.clone()),
+        Ok(c) if visible => Ok(shown_schema(ctx, &c.schema)),
         _ => Err(Outcome::refused(
             404,
             format!("no collection `{collection}`: `schema` lists the ones there are"),
         )),
     }
+}
+
+/// `schema` as the token is shown it (`Scope::shown_schema`).
+fn shown_schema(ctx: &Ctx, schema: &Schema) -> Schema {
+    ctx.who
+        .scope()
+        .and_then(|s| s.shown_schema(schema))
+        .unwrap_or_else(|| schema.clone())
 }
 
 fn read(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checked<Response2> {
@@ -399,7 +408,7 @@ fn through_query(ctx: &Ctx, text: &str, params: &[Value]) -> crate::http::Respon
 /// A read as `/query` runs one: held to the token's rules, pinned and run
 /// with no lock held when it is long, under the read lock otherwise.
 pub(super) fn read_served(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checked<Response2> {
-    let stmt = crate::scoped(ctx.who, stmt, params).map_err(|e| refusal(&e))?;
+    let (stmt, mask) = crate::scoped(ctx.who, stmt, params).map_err(|e| refusal(&e))?;
     let mut pin = true;
     loop {
         let guard = crate::held::read(ctx.db);
@@ -408,19 +417,22 @@ pub(super) fn read_served(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Check
             true => guard.pin(&[(&stmt, params)]),
             false => None,
         };
+        // Shown as the token is shown it, out of what answered.
+        let shown = |r: Response2, db: &Database| crate::shown(ctx.who, mask.as_ref(), db, r);
         let answered = match &pinned {
             Some(p) => {
                 drop(guard);
                 running.attr("fenec.pinned", true);
                 p.query(&stmt, params)
+                    .map(|r| r.map(|r| shown(r, p.database())))
             }
-            None => Some(guard.query(&stmt, params)),
+            None => Some(guard.query(&stmt, params).map(|r| shown(r, &guard))),
         };
         match answered {
             Some(r) => {
                 let r = r.map_err(|e| refusal(&e))?;
                 crate::statements::rows(crate::counted(&r));
-                return Ok(crate::visible(ctx.who, r));
+                return Ok(r);
             }
             // It reached for an index the pin left out: again under the lock.
             None => {
@@ -461,11 +473,10 @@ fn query_body(text: &str, params: &[Value]) -> String {
 /// --file`): under the read lock, held to the token's rules all the same.
 /// Nothing writes beside it, so nothing is pinned.
 pub(super) fn read_local(ctx: &Ctx, stmt: Statement, params: &[Value]) -> Checked<Response2> {
-    let stmt = crate::scoped(ctx.who, stmt, params).map_err(|e| refusal(&e))?;
-    let r = crate::held::read(ctx.db)
-        .query(&stmt, params)
-        .map_err(|e| refusal(&e))?;
-    Ok(crate::visible(ctx.who, r))
+    let (stmt, mask) = crate::scoped(ctx.who, stmt, params).map_err(|e| refusal(&e))?;
+    let g = crate::held::read(ctx.db);
+    let r = g.query(&stmt, params).map_err(|e| refusal(&e))?;
+    Ok(crate::shown(ctx.who, mask.as_ref(), &g, r))
 }
 
 /// A write over a database this process holds for one caller: run under
@@ -481,7 +492,7 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
         Ok(v) => v,
         Err(e) => return crate::error_response(&e),
     };
-    let stmt = match crate::scoped(ctx.who, Arc::unwrap_or_clone(stmt), &params) {
+    let (stmt, mask) = match crate::scoped(ctx.who, Arc::unwrap_or_clone(stmt), &params) {
         Ok(s) => s,
         Err(e) => return crate::error_response(&e),
     };
@@ -489,7 +500,8 @@ pub(super) fn write_local(ctx: &Ctx, text: &str, params: &[Value]) -> crate::htt
         return crate::http::Response::error(403, "this session is read-only (--read-only)");
     }
     let mut g = crate::held::write(ctx.db);
-    let r = crate::access::within(ctx.who, || g.execute_with(&stmt, &params));
+    let r = crate::access::within(ctx.who, || g.execute_with(&stmt, &params))
+        .map(|r| crate::shown(ctx.who, mask.as_ref(), &g, r));
     let durability = match (&r, ctx.cfg.sync_on_write) {
         (Ok(_), true) => match g.flush() {
             Ok(d) => d,
@@ -872,7 +884,7 @@ fn schema(ctx: &Ctx, args: Args) -> Checked<String> {
             json::int_into(&mut out, c.stats().documents as i64);
         }
         out.push('}');
-        schemas.push(c.schema.clone());
+        schemas.push(shown_schema(ctx, &c.schema));
     }
     out.push_str("],\"fenecql\":");
     json::escape_into(&mut out, &fenec_core::declared::fenecql(&schemas));
