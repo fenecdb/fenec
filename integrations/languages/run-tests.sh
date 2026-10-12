@@ -9,8 +9,9 @@
 # integrations/dotnet) with the .NET and Rust (ureq) with the Rust on the
 # machine.
 # Each language gets a server of its own over a new file, so every program
-# starts from an empty database and makes the same collection. Under CI a
-# missing toolchain fails the run rather than skip it.
+# starts from an empty database and makes the same collection, on a port
+# the system picks: a run never meets another, or any other server, on one.
+# Under CI a missing toolchain fails the run rather than skip it.
 #
 #   integrations/languages/run-tests.sh
 set -eu
@@ -21,23 +22,26 @@ cargo=${CARGO:-cargo}
 "$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 
 dir=$(mktemp -d)
-port=${FENEC_TEST_PORT:-18182}
+port=
 token=language-tests
 server=
 trap 'stop; rm -rf "$dir"' EXIT INT TERM
 
 # Outside loopback, so a container reaches it: a token is required there.
+# On :0, the port read off the server's `listening on: http://<address>` line.
 serve() {
     rm -f "$dir/server.log"
     "$root/target/debug/fenec-server" --file "$dir/$1.fenec" \
-        --http "0.0.0.0:$port" --http-token "$token" 2>"$dir/server.log" &
+        --http 0.0.0.0:0 --http-token "$token" 2>"$dir/server.log" &
     server=$!
     i=0
-    until grep -q "listening on: http://" "$dir/server.log" 2>/dev/null; do
+    until grep -q "listening on: http://.* " "$dir/server.log" 2>/dev/null; do
         i=$((i + 1))
         [ $i -gt 100 ] && { cat "$dir/server.log"; exit 1; }
         sleep 0.1
     done
+    port=$(sed -n 's/.*listening on: http:[^ ]*:\([0-9]*\) .*/\1/p' "$dir/server.log" | head -1)
+    local_url="http://127.0.0.1:$port"
 }
 
 stop() {
@@ -63,8 +67,6 @@ container() {
         -e FENEC_URL="http://host.docker.internal:$port" -e FENEC_TOKEN="$token" \
         "$image" sh -c "cp -r /src /work && cd /work && $*"
 }
-
-local_url="http://127.0.0.1:$port"
 
 serve python
 container python:3.13-slim "$here/python" \

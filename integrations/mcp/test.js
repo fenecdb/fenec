@@ -12,7 +12,6 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -24,12 +23,22 @@ const shell = new URL('target/debug/fenec', root).pathname;
 const TOKEN = 'mcp-integration-token';
 const dir = await mkdtemp(join(tmpdir(), 'fenecdb-mcp-'));
 
-const port = () =>
-  new Promise((res) => {
-    const s = createServer().listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => res(port));
+/**
+ * Where a fenec-server started on port 0 listens, off its `listening on:
+ * http://<address>` line, read to the space after it so a line that came
+ * in two pieces is not read short. A port found free and handed over was
+ * free only until someone else took it, and a server of someone else's
+ * could answer in its place.
+ */
+const listening = (child) =>
+  new Promise((res, rej) => {
+    let log = '';
+    child.stderr.on('data', (d) => {
+      log += d;
+      const at = /listening on: (http:\/\/\S+)\s/.exec(log);
+      if (at) res(at[1]);
     });
+    child.on('exit', () => rej(new Error(`fenec-server ended before it listened: ${log}`)));
   });
 
 const SEED = [
@@ -42,23 +51,13 @@ const SEED = [
 /** fenec-server with every tool on, over a file of its own, seeded. A
  * test's calls come quicker than an agent's: no rate. */
 async function startServer() {
-  const http = await port();
   const child = spawn(
     server,
-    ['--http', `127.0.0.1:${http}`, '--file', join(dir, 'server.fenec'), '--http-token', TOKEN,
+    ['--http', '127.0.0.1:0', '--file', join(dir, 'server.fenec'), '--http-token', TOKEN,
       '--mcp-write', '--mcp-memory', 'memories', '--mcp-calls-per-sec', '0'],
-    { stdio: 'ignore' },
+    { stdio: ['ignore', 'ignore', 'pipe'] },
   );
-  const url = `http://127.0.0.1:${http}`;
-  for (let i = 0; ; i++) {
-    try {
-      await fetch(`${url}/_health`);
-      break;
-    } catch {
-      if (i > 200) throw new Error('fenec-server did not start');
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  }
+  const url = await listening(child);
   for (const query of SEED) {
     const r = await fetch(`${url}/query`, {
       method: 'POST',
