@@ -2842,10 +2842,10 @@ impl<'a> Tuple<'a> {
     /// The index on the child for `l`'s key: one whose leading parts are
     /// its child fields in any order -- of several, one whose next parts
     /// the level's `order` walks, then the first; only one that walks it
-    /// where `walk_only`. `None` where none is, which a key over several
-    /// fields is refused for, naming the index to declare, as a single
-    /// field with no `@hash` is: a scan per parent would be another feature
-    /// under the same name.
+    /// where `walk_only`. `None` where none is for one field, which has its
+    /// `@hash` to be probed by; a key over several fields is refused,
+    /// naming the index to declare, as a single field with neither is: a
+    /// scan per parent would be another feature under the same name.
     fn resolve(
         child: &'a Collection,
         parent: &Collection,
@@ -2886,7 +2886,17 @@ impl<'a> Tuple<'a> {
             }
         }
         let Some((at, walk)) = best else {
-            return Ok(None);
+            if n == 1 {
+                return Ok(None);
+            }
+            // Here, where a build without the index never reaches, so it
+            // holds none of the text.
+            let fields = l.side(true);
+            return Err(Error::Query(format!(
+                "`lookup` on `{}` {fields} needs an index whose first fields are those \
+                 (declare it with @sorted{fields})",
+                l.collection
+            )));
         };
         let Some(ix) = child.composite(at)? else {
             return Ok(None);
@@ -8901,12 +8911,7 @@ impl Database {
             ([], _) => return Err(Error::Query("`lookup` needs `on`".into())),
             _ => {
                 let Some(t) = Tuple::resolve(child, parent, l, false)? else {
-                    let fields = l.side(true);
-                    return Err(Error::Query(format!(
-                        "`lookup` on `{}` {fields} needs an index whose first fields are those \
-                         (declare it with @sorted{fields})",
-                        l.collection
-                    )));
+                    return Err(Error::Query("`lookup` needs an index".into()));
                 };
                 return Ok((child, Probe::Tuple(t), None));
             }

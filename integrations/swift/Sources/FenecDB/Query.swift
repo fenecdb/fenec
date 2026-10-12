@@ -602,8 +602,8 @@ public struct Query: Sendable {
 
     struct Level: Sendable {
         let collection: String
-        let on: String
-        let parent: String?
+        let on: [String]
+        let parent: [String]
         let project: [String]?
         let cond: [Node]
         let required: Bool
@@ -894,11 +894,31 @@ public struct Query: Sendable {
         _ name: String, on: String?, parentKey: String? = nil, select: [String]? = nil, where cond: Cond? = nil,
         required: Bool = false, order: [SortKey] = [], limit: Int? = nil, offset: Int? = nil
     ) throws -> Query {
-        guard let on, !on.isEmpty else { throw FenecError.builder("lookup needs `on`: the child field holding the key") }
+        try lookup(
+            name, on: on.map { [$0] } ?? [], parentKey: parentKey.map { [$0] }, select: select, where: cond,
+            required: required, order: order, limit: limit, offset: offset)
+    }
+
+    /// `lookup name on (child, ...) = (parent, ...) ...`: a key over several
+    /// fields, a field of each side for each part, in order --
+    /// `on: ["org", "order"], parentKey: ["org", "id"]`.
+    public func lookup(
+        _ name: String, on: [String], parentKey: [String]? = nil, select: [String]? = nil, where cond: Cond? = nil,
+        required: Bool = false, order: [SortKey] = [], limit: Int? = nil, offset: Int? = nil
+    ) throws -> Query {
+        guard let first = on.first, !first.isEmpty else {
+            throw FenecError.builder("lookup needs `on`: the child field holding the key")
+        }
+        let child = try on.map { try Builder.ident($0) }
+        let parent = try (parentKey ?? []).map { try Builder.ident($0) }
+        // One child field alone pairs with `id` unless named; several, each with its own.
+        if (child.count > 1 || parentKey != nil) && parent.count != child.count {
+            throw FenecError.builder("lookup pairs \(child.count) child fields with \(parent.count) parent fields")
+        }
         let level = Level(
             collection: try Builder.ident(name, "collection"),
-            on: try Builder.ident(on),
-            parent: try parentKey.map { try Builder.ident($0) },
+            on: child,
+            parent: parent,
             project: select == nil || select!.contains("*") ? nil : try select!.map(Builder.path),
             cond: try cond.map { [try Builder.node($0)] } ?? [],
             required: required,
@@ -1059,8 +1079,9 @@ public struct Query: Sendable {
         // Terminal, so every clause after it is the child's -- and last, so
         // its parameters come after the parent's.
         for l in lookups {
-            sql += " lookup \(l.collection) on \(l.on)"
-            if let p = l.parent { sql += " = \(p)" }
+            let side = { (names: [String]) in names.count > 1 ? "(\(names.joined(separator: ", ")))" : names[0] }
+            sql += " lookup \(l.collection) on \(side(l.on))"
+            if !l.parent.isEmpty { sql += " = \(side(l.parent))" }
             if l.required { sql += " required" }
             if let project = l.project { sql += " select " + project.joined(separator: ", ") }
             if let w = try whereOf(l.cond, bind) { sql += " where \(w)" }
