@@ -180,6 +180,12 @@ impl Database {
             }))
     }
 
+    /// The time a statement run now reads as `now()`, in milliseconds:
+    /// the database's clock where one is set, the system's otherwise.
+    pub fn now_ms(&self) -> Result<i64> {
+        self.now()
+    }
+
     /// The rows of `collection` written since change `since`, ascending,
     /// beside the collection's number -- one dropped and made again under
     /// the name is another -- or `None` when the change ring no longer
@@ -236,6 +242,12 @@ impl Database {
             return Ok(None);
         }
         sel.check()?;
+        // As `query` refuses it: a point compared with a list of numbers
+        // read into a vector's `f32`s. Asked only of a `get` holding one,
+        // the clone with it.
+        if sel.reads_vectors() {
+            self.refuse_inexact(&Statement::Select(sel.clone()), &[])?;
+        }
         let ctx = EvalCtx {
             params: &[],
             registry: &self.registry,
@@ -282,7 +294,10 @@ impl Database {
         let mut sources = Vec::with_capacity(columns.len());
         for col in &columns {
             sources.push(
-                match (sel.computed.iter().position(|k| k.name == *col), col == "id") {
+                match (
+                    sel.computed.iter().position(|k| k.name == *col),
+                    col == "id",
+                ) {
                     (Some(i), _) => Source::Calc(i),
                     (None, true) => Source::Id,
                     (None, false) => Source::At(source_or_err(&c.schema, col, "")?),

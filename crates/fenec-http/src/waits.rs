@@ -1282,8 +1282,8 @@ fn look_all(db: &RwLock<Database>, jobs: Vec<Job>, waits: &Waits) -> Vec<(u64, L
     let mut out = Vec::with_capacity(jobs.len());
     let mut jobs = jobs.into_iter().peekable();
     while jobs.peek().is_some() {
-        let t = now_ms();
         let g = crate::held::read(db);
+        let t = g.now_ms().unwrap_or_else(|_| now_ms());
         let held = Instant::now();
         let mut looks = Looks::new(&g, waits.epoch.load(Ordering::Acquire), t);
         for job in jobs.by_ref() {
@@ -1299,6 +1299,10 @@ fn look_all(db: &RwLock<Database>, jobs: Vec<Job>, waits: &Waits) -> Vec<(u64, L
     out
 }
 
+/// The rows of a collection written since a change, as
+/// [`Database::written_since`] gave them, by the change and the collection.
+type Written = (u64, String, Option<(u32, Vec<DocId>)>);
+
 /// Looks under one read lock, at the time `t` read before it: what one
 /// asks of the database as it stands, the others ask again for nothing --
 /// the collections written since a change, the rows, an index's step.
@@ -1308,7 +1312,7 @@ struct Looks<'d> {
     t: i64,
     seq: u64,
     changed: Vec<(u64, Option<Vec<String>>)>,
-    written: Vec<(u64, String, Option<(u32, Vec<DocId>)>)>,
+    written: Vec<Written>,
     moments: Moments,
     /// Whole picks run.
     picks: u64,
@@ -1370,7 +1374,9 @@ impl<'d> Looks<'d> {
         };
         // A load or a compact since, the clock set back, or a moment come:
         // a row neither known nor written may pass now.
-        if known.epoch != self.epoch || self.t < known.at || known.until.is_some_and(|u| self.t >= u)
+        if known.epoch != self.epoch
+            || self.t < known.at
+            || known.until.is_some_and(|u| self.t >= u)
         {
             return None;
         }
@@ -1413,10 +1419,12 @@ impl<'d> Looks<'d> {
                 &mut self.moments,
             )
             .ok()?;
-        let found = rs
-            .rows
-            .first()
-            .map(|r| (Some((test.collection.clone(), r.id)), rank(self.db, test, &rs)));
+        let found = rs.rows.first().map(|r| {
+            (
+                Some((test.collection.clone(), r.id)),
+                rank(self.db, test, &rs),
+            )
+        });
         let known = (rs.rows.len() <= AMONG).then(|| Known {
             epoch: self.epoch,
             seq: self.seq,
@@ -1482,7 +1490,7 @@ impl<'d> Looks<'d> {
     /// pick read the clock as it ran, after `t`, and what it answered holds
     /// from `t` only where no moment came before that.
     fn none_known(&self, test: &Select, until: Option<i64>) -> Option<Known> {
-        if until.is_some_and(|u| now_ms() >= u) {
+        if until.is_some_and(|u| self.db.now_ms().map_or(true, |now| now >= u)) {
             return None;
         }
         let (cid, _) = self.db.written_since(&test.collection, self.seq)?;
@@ -1593,6 +1601,7 @@ pub fn end_all(grace: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access::Access;
 
     /// A point read as written, not into a vector's `f32`s.
     fn parse(text: &str) -> Statement {
@@ -1687,5 +1696,383 @@ mod tests {
             ))
         };
         assert_eq!(first_run(vec![within(3.0), within(1.0), within(2.0)]), 0);
+    }
+
+    /// The waves are the seed's: a failure is one seed run again.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+
+        fn chance(&mut self, percent: u64) -> bool {
+            self.below(100) < percent
+        }
+
+        fn of<'a>(&mut self, items: &[&'a str]) -> &'a str {
+            items[self.below(items.len() as u64) as usize]
+        }
+    }
+
+    const SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
+
+    /// Couriers' tokens, as Plover's: a claim holds the rules the token's
+    /// update and read rules make of it, `or`s and lists among them.
+    const POLICY: &str = "\
+orders  read                   where owner = $jwt.sub or team in $jwt.teams  for courier
+orders  update(owner, run_at)  where team in $jwt.teams                      for courier
+orders  update(owner, run_at)  where kind = $jwt.kind and prio >= 2          for courier
+kinds   read                                                                 for courier
+";
+
+    fn exec(db: &mut Database, text: &str) {
+        db.execute(&parse(text))
+            .unwrap_or_else(|e| panic!("{text}: {e}"));
+    }
+
+    /// A point in a kilometre or so, three in ten on a grid of sixteen so
+    /// that distances tie.
+    fn point(rng: &mut Rng) -> String {
+        if rng.chance(30) {
+            let (x, y) = (rng.below(4) as f64, rng.below(4) as f64);
+            format!("[{}, {}]", 29.0 + x * 0.002, 41.0 + y * 0.002)
+        } else {
+            let (x, y) = (rng.below(1000) as f64, rng.below(1000) as f64);
+            format!("[{}, {}]", 29.0 + x / 100_000.0, 41.0 + y / 100_000.0)
+        }
+    }
+
+    /// An order as a `put` writes it at `t`: ready `ready` times in a
+    /// hundred, else delayed a wave or a few, or leased; a priority null now
+    /// and then; ties of every field.
+    fn order(rng: &mut Rng, t: i64, ready: u64) -> String {
+        let run_at = if rng.chance(ready) {
+            t - rng.below(600) as i64
+        } else if rng.chance(25) {
+            t + 50 + rng.below(900) as i64
+        } else {
+            t + 600_000
+        };
+        let mut fields = vec![
+            format!("pickup: {}", point(rng)),
+            format!("run_at: {run_at}"),
+            format!("kind: \"{}\"", rng.of(&["a", "b", "c"])),
+            format!("team: {}", 1 + rng.below(3)),
+            format!("fee: {}.5", rng.below(9)),
+            format!("owner: \"{}\"", rng.of(&["alice", "bob", ""])),
+        ];
+        if !rng.chance(15) {
+            fields.push(format!("prio: {}", rng.below(4)));
+        }
+        format!("{{{}}}", fields.join(", "))
+    }
+
+    /// A courier's claim, under a token one time in three: the plan the
+    /// server makes of it once its run wrote nothing.
+    fn claim(rng: &mut Rng, db: &Database, access: &Access, t: i64) -> Option<Plan> {
+        let mut params = vec!["\"w\"".to_string()];
+        let mut bind = |v: String| {
+            params.push(v);
+            format!("${}", params.len())
+        };
+        let p = bind(point(rng));
+        let mut terms = Vec::new();
+        if rng.chance(85) {
+            terms.push("run_at <= now()".to_string());
+        }
+        if rng.chance(15) {
+            // Rows that stop passing as the time moves on.
+            terms.push("run_at > now() - 500".to_string());
+        }
+        if rng.chance(35) {
+            let k = bind(format!("\"{}\"", rng.of(&["a", "b", "c"])));
+            terms.push(format!("kind = {k}"));
+        }
+        if rng.chance(40) {
+            terms.push(format!("distance(pickup, {p}) <= {}", 100 + rng.below(900)));
+        }
+        if rng.chance(25) {
+            let q = bind(rng.below(4).to_string());
+            terms.push(format!("prio >= {q}"));
+        }
+        if rng.chance(15) {
+            terms.push("(team = 1 or fee > 5.0)".to_string());
+        }
+        if rng.chance(10) {
+            terms.push("team in [1, 3]".to_string());
+        }
+        if rng.chance(10) {
+            terms.push("not (owner = \"bob\")".to_string());
+        }
+        if rng.chance(5) {
+            terms.push("kind in (get kinds select name where live = true)".to_string());
+        }
+        if terms.is_empty() {
+            terms.push("run_at <= now()".to_string());
+        }
+        let order = match rng.below(9) {
+            0 | 1 => format!("order distance(pickup, {p})"),
+            2 => format!("order distance(pickup, {p}) desc"),
+            3 => "order run_at".to_string(),
+            4 => "order prio desc".to_string(),
+            5 => "order prio desc, run_at".to_string(),
+            6 => "order prio * 2 + team".to_string(),
+            7 => format!("order distance(pickup, {p}), prio desc"),
+            _ => String::new(),
+        };
+        let returning = if rng.chance(50) { " returning id" } else { "" };
+        let text = format!(
+            "set orders {{owner: $1, run_at: now() + 600000}} where {} {order} limit 1{returning}",
+            terms.join(" and ")
+        );
+        let stmt = parse(&text);
+        // Read as a server reads them for a point: as written.
+        let params =
+            fenec_core::json::parse_params_exact(&format!("[{}]", params.join(", "))).unwrap();
+        let stmt = if rng.chance(35) {
+            let claims = format!(
+                r#"{{"sub":"{}","role":"courier","teams":[{},{}],"kind":"{}"}}"#,
+                rng.of(&["alice", "bob"]),
+                1 + rng.below(3),
+                1 + rng.below(3),
+                rng.of(&["a", "b", "c"])
+            );
+            let token = access.mint(&claims).unwrap();
+            // Checked at the time it was minted, the waves' clock aside.
+            let secs = (now_ms() / 1000) as u64;
+            let scope = access.scope(&token, secs).unwrap();
+            scope.rewrite(stmt).ok()?
+        } else {
+            stmt
+        };
+        holdable(&stmt, &params).ok()?;
+        plan(db, &[(&stmt, &params)], t);
+        planned()
+    }
+
+    /// A wave's writes: orders placed, moved, taken back to the queue and
+    /// cancelled; now and then a burst past [`AMONG`], a schema change, a
+    /// compact or a write of the collection an inner `get` reads.
+    fn writes(rng: &mut Rng, db: &mut Database, t: i64, epoch: &mut u64) {
+        let ids: Vec<DocId> = match db.query(&parse("get orders select id"), &[]) {
+            Ok(Response::Rows(rs)) => rs.rows.iter().map(|r| r.id).collect(),
+            other => panic!("{other:?}"),
+        };
+        match rng.below(100) {
+            0..=2 => {
+                let burst: Vec<String> = (0..40).map(|_| order(rng, t, 60)).collect();
+                exec(db, &format!("put orders [{}]", burst.join(", ")));
+            }
+            3..=4 => exec(
+                db,
+                &format!(
+                    "alter collection orders add field n{} int",
+                    rng.next() % 1_000_000
+                ),
+            ),
+            5..=6 => {
+                exec(db, "compact orders");
+                // As the hub hears of it: a write that says not what it wrote.
+                *epoch += 1;
+            }
+            7..=9 => exec(db, "set kinds {live: not live}"),
+            _ => {
+                for _ in 0..rng.below(3) {
+                    exec(db, &format!("put orders {}", order(rng, t, 60)));
+                }
+                for _ in 0..rng.below(4) {
+                    let Some(&id) = ids.get(rng.below(ids.len().max(1) as u64) as usize) else {
+                        break;
+                    };
+                    let mut set = Vec::new();
+                    if rng.chance(60) {
+                        let run_at = match rng.below(3) {
+                            0 => t + 600_000,
+                            1 => t + 50 + rng.below(900) as i64,
+                            _ => t - rng.below(300) as i64,
+                        };
+                        set.push(format!("run_at: {run_at}"));
+                    }
+                    if rng.chance(40) {
+                        set.push(format!("pickup: {}", point(rng)));
+                    }
+                    if rng.chance(30) {
+                        set.push(format!("prio: {}", rng.below(4)));
+                    }
+                    if rng.chance(20) {
+                        set.push(format!("kind: \"{}\"", rng.of(&["a", "b", "c"])));
+                    }
+                    if !set.is_empty() {
+                        exec(
+                            db,
+                            &format!("set orders {{{}}} where id = {id}", set.join(", ")),
+                        );
+                    }
+                }
+                if rng.chance(30) {
+                    if let Some(&id) = ids.get(rng.below(ids.len().max(1) as u64) as usize) {
+                        exec(db, &format!("del orders where id = {id}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Each row bid for and the group that takes it, as `settle` gives it:
+    /// the bid ranking it first, then the group held longest -- here the
+    /// first in `bids`.
+    fn winners(bids: &[Option<(Row, Option<f64>)>]) -> Vec<(DocId, usize)> {
+        let mut best: Vec<(DocId, f64, usize)> = Vec::new();
+        for (g, found) in bids.iter().enumerate() {
+            let Some((Some((_, id)), rank)) = found else {
+                continue;
+            };
+            let r = rank.unwrap_or(f64::INFINITY);
+            match best.iter_mut().find(|b| b.0 == *id) {
+                Some(b) if r.total_cmp(&b.1).is_lt() => *b = (*id, r, g),
+                Some(_) => {}
+                None => best.push((*id, r, g)),
+            }
+        }
+        best.into_iter().map(|(id, _, g)| (id, g)).collect()
+    }
+
+    /// Every row a test passes, in its order: what a look's knowledge of
+    /// its rows is held to.
+    fn passing(db: &Database, test: &Select) -> Vec<DocId> {
+        let all = Select {
+            limit: None,
+            ..test.clone()
+        };
+        match db.query(&Statement::Select(all), &[]) {
+            Ok(Response::Rows(rs)) => rs.rows.iter().map(|r| r.id).collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A look among the rows a group knows and those written since picks
+    /// what the whole pick picks, ranked as it ranks it, so every row goes
+    /// to the claim the whole picks' arbiter gives it; and what it knows
+    /// next is every row its test passes, in its order. Thousands of waves
+    /// of couriers' claims -- points, radii, kinds, priorities, orders by a
+    /// distance, a field, an expression, ties of each, tokens' rules --
+    /// beside orders placed, moved, taken by the winners and cancelled, the
+    /// time moving past rows' moments, bursts, schema changes, compacts.
+    #[test]
+    fn a_look_among_the_rows_written_picks_as_the_whole_pick() {
+        const SEEDS: u64 = 120;
+        const WAVES: usize = 25;
+        let access = Access::new(SECRET, POLICY).unwrap();
+        let (mut among, mut whole, mut waves, mut won) = (0u64, 0u64, 0u64, 0u64);
+        for seed in 1..=SEEDS {
+            let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+            let mut db = Database::new();
+            let geo = if rng.chance(50) { " @geo" } else { "" };
+            let sorted = if rng.chance(70) { " @sorted" } else { "" };
+            let hash = if rng.chance(40) { " @hash" } else { "" };
+            exec(
+                &mut db,
+                &format!(
+                    "create collection orders (pickup geo{geo}, run_at timestamp{sorted}, \
+                     kind text{hash}, prio int, team int, fee float, owner text)"
+                ),
+            );
+            exec(&mut db, "create collection kinds (name text, live bool)");
+            exec(
+                &mut db,
+                "put kinds [{name: \"a\", live: true}, {name: \"b\", live: false}]",
+            );
+            let mut t = 1_800_000_000_000i64;
+            db.set_clock(Some(t));
+            for _ in 0..rng.below(25) {
+                exec(&mut db, &format!("put orders {}", order(&mut rng, t, 15)));
+            }
+            let mut epoch = 0;
+            let mut groups = Vec::new();
+            for _ in 0..2 + rng.below(12) {
+                if let Some(plan) = claim(&mut rng, &db, &access, t) {
+                    let known: Option<Known> = None;
+                    groups.push((Arc::new(plan.tests), Arc::new(plan.collections), known));
+                }
+            }
+            for _ in 0..WAVES {
+                waves += 1;
+                // The time moves on, a few milliseconds a wave and past a
+                // row's moment now and then, and once in a while back.
+                t += match rng.below(100) {
+                    0..=1 => -400,
+                    2..=11 => 200 + rng.below(800) as i64,
+                    _ => rng.below(20) as i64,
+                };
+                db.set_clock(Some(t));
+                writes(&mut rng, &mut db, t, &mut epoch);
+                // Rounds as the arbiter's: every claim looks, each row goes
+                // to the claim ranking it first, the winners' runs take
+                // theirs, and the rest look again -- until none finds one.
+                for _ in 0..64 {
+                    let mut looks = Looks::new(&db, epoch, t);
+                    let (mut by_among, mut by_whole) = (Vec::new(), Vec::new());
+                    for (i, (tests, collections, known)) in groups.iter_mut().enumerate() {
+                        let job = |known| Job {
+                            id: i as u64,
+                            since: 0,
+                            tests: Arc::clone(tests),
+                            collections: Arc::clone(collections),
+                            due: true,
+                            known,
+                        };
+                        let full = looks.whole(&job(None));
+                        by_whole.push(full.found.clone());
+                        let look = match looks.among(&job(known.take())) {
+                            Some(look) => {
+                                among += 1;
+                                let what = || format!("seed {seed}, claim {i}: {:?}", tests[0]);
+                                assert_eq!(look.found, full.found, "{}", what());
+                                // What it knows next: every row its test
+                                // passes, in its order.
+                                if let Some(k) = &look.known {
+                                    assert_eq!(k.ids, passing(&db, &tests[0]), "{}", what());
+                                }
+                                look
+                            }
+                            None => {
+                                whole += 1;
+                                full
+                            }
+                        };
+                        by_among.push(look.found);
+                        *known = look.known;
+                    }
+                    let given = winners(&by_whole);
+                    assert_eq!(winners(&by_among), given, "seed {seed}");
+                    drop(looks);
+                    if given.is_empty() {
+                        break;
+                    }
+                    // Each winner's run takes its row out of every claim's
+                    // reach -- a claim of no time but its point's would take
+                    // a leased one again -- the next round's looks among it.
+                    for (id, _) in given {
+                        won += 1;
+                        exec(&mut db, &format!("del orders where id = {id}"));
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{waves} waves: {among} looks among the rows written, {whole} whole picks, {won} rows won"
+        );
+        // The looks among the rows were held, not the fallback alone.
+        assert!(among > 2 * whole, "{among} among, {whole} whole");
     }
 }
