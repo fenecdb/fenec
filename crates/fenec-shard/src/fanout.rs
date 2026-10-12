@@ -37,8 +37,8 @@
 //!   aggregates that add across tenants, folded by the group columns. A
 //!   count is a sum of counts; an average is not a merge of averages, so
 //!   there is none (fold its sum and its count). Every column of a row is
-//!   a group column or folded, or the merge is refused: a column it would
-//!   drop is an answer cut.
+//!   a group column or folded, or its tenant fails: a column the merge
+//!   would drop is an answer cut.
 //!
 //! **Never cut.** A tenant that failed, timed out or could not be read is
 //! named, with its node, status and why; by default the whole query fails
