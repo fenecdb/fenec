@@ -547,11 +547,13 @@ and group the parents in the client, or keep the field on the child.</p>
 any level: an ungrouped list answers a row for every parent, so asked of the
 rows it would keep them all, and "couriers who delivered, with their counts"
 is the question. A <code>required</code> level below one that folds drops
-its groups. Over 2 000 couriers and 200 000 deliveries, a page of 20 with
-the count and mean of each one's latest 50 takes 72 µs in process, against
-92 for the 50 attached and folded by the client; the ten busiest with their
-names off a week's groups 4.6 ms, the groups and a query for the names
-apart 4.6 ms and a round trip (<code>make analytics-bench</code>).</p>
+its groups. Over 2 000 couriers and 200 000 deliveries, a page of the 20
+busiest with the count and mean of each one's latest 50 takes 53 µs in
+process, against 81 for the 50 attached and folded by the client; every
+delivery of each folded, 3.5 to 4.1 ms against 6.4 to 6.5; the ten busiest
+with their names off a week's groups 8.3 ms, as the groups and a query for
+the names apart do, less the round trip between them (<code>make
+analytics-bench</code>).</p>
 
 <pre data-lang="fenecql">get products limit 20 lookup reviews on product_id required where stars = 5
 get products count lookup reviews on product_id required where stars = 5

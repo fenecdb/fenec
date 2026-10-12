@@ -145,7 +145,8 @@ kernels), `text` (tokenizer, inverted index, BM25), `highlight` (the spans a
 execution), `schema`, `value`, `codec`, `collate` (ICU's root order and its Turkish
 tailoring, generated tables in chunks),
 `json`, `num` (decimal text to `f64` and back), `case` (a string's Unicode
-case, as the standard library's, without its code), `time` (calendar arithmetic), `sparse`
+case, as the standard library's, without its code), `time` (calendar arithmetic), `tz`
+(the time zones `bucket` reads a clock by, IANA's rules since 2000), `sparse`
 (sparse vectors and their inverted index), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature), `off` (what stands in for an index a build is made
@@ -2613,7 +2614,7 @@ which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (421.3 KB, 144.9 brotli, against 675.1 and 228.8 with
+module with none (432.1 KB, 148.7 brotli, against 694.4 and 235.9 with
 every one) and left out of the full one, brotli added and saved:
 `vector` 20.7 and 18.7, `sorted` 8.8 and 23.4 with `composite`,
 `composite` beside it 11.5 and 10.5, `collate` 9.0 and 8.3, `text` 5.7 and
@@ -2684,7 +2685,7 @@ and `first`/`last` are standard, and are in the core.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 228.8 KB brotli) and `@fenecdb/web/client`, so a user has two
+check, 235.9 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
@@ -3324,6 +3325,55 @@ KB, 3.1 KB brotli (`Tuple::resolve` the most of it, 1.7 KB), the one without
 the indexes 2.5 KB, 0.8 KB brotli, and the one with no feature 2.5 KB, 0.9
 KB brotli: the parse, the check and the refusal by name.
 
+**A `lookup` level may fold its children, and a `lookup` hangs off
+groups.** `Lookup` carries `aggregate`, `group` and `having`: a level whose
+list aggregates (`Lookup::folds`) answers each parent's children -- probed
+once by the code a plain level runs (`kept_children`), held to its `where`
+and to any `required` level below -- folded by one `Folding` bound for the
+level (`engine/aggregate.rs`: the list, its keys, its `having`, the `Fold`
+each item starts at, which a `get`'s aggregate goes through too), its
+`Groups` emptied a parent. A level is the `get` its children would be with
+the parent's key in its `where`, so its clauses mean what they mean there:
+ungrouped, `order`, `limit` and `offset` pick the children folded -- a
+courier's latest 50, walked off `@sorted(courier, at desc)` to the page --
+and grouped they order and page each parent's groups (a level that groups
+takes no walk: its `order` names columns). A `get`'s ungrouped aggregate
+takes them the same way now (`page_ids`, the `lookup` left out), where
+they were refused, and a column of the list among its keys is refused
+(`picks_by_rows`). A `lookup` after a list that aggregates -- a `get`'s or
+a level's -- hangs off its rows: `Parents::Rows`, the key read from a
+column (`Above::Rows`, `Step::ids_of`, `Tuple::prefix_of`), which must
+carry a field's values -- a key, its `bucket`, its `min`, `max`, `first` or
+`last` -- so the key's types are held before a row is read
+(`check_key_types`). `required` on a level that folds asks of its
+children, as on any level (an ungrouped list answers a row for every
+parent, so asked of its rows it would keep them all); a `required` level
+below one that folds drops its groups (`Folding::rows`'s `keep`), before
+the order and the page, and `survives` does not reach past a level that
+folds. Grouping parents by a field of theirs beside their children's folds
+would be two collections in one list -- the qualified names the scoping
+keeps out -- and is no shape. `tests/lookup_aggregate.rs` holds every fold,
+page and level to a reference folded by hand from plain `get`s over a twin
+without indexes, through writes, a block read inside and put back, a reopen
+and `@ttl`; dropping the level's `offset` or letting `survives` past a
+folding level each fails it. Over 2 000
+couriers and 200 000 deliveries, a page of the 20 busiest with each one's
+latest 50 folded takes 53 us in process against 81 for the 50 attached and
+folded by the client, every delivery of each 3.5-4.1 ms against 6.4-6.5,
+and the ten busiest with their names off a week's groups 8.3 ms, as the
+groups and a query for the names apart do less the round trip between them
+(`make analytics-bench`'s `folds`). The `get`'s aggregate through the same
+`Folding` lost nothing: the aggregates of before over a million rows, eight
+runs each in turns against main, 52.0 -> 49.0 ms in 100 groups, 29.6 ->
+29.2 whole, 5.5 -> 5.2 over a range; the lookup page (`make lookup-bench`)
+89.9-94.4 us against 90.2-93.8 by `@hash`, the same within its spread for
+the composite and the walk. An ungrouped level's one row is not put in
+order: through `page`, a page of 20 parents took 24 us against 18. The
+browser module grew 11.6 KB, 4.0 KB brotli -- the `Folding` split out of
+`select` into functions its two callers share, `fold_level`,
+`kept_children`, the key read off a column -- and the builders took
+`select` of aggregates and `group` on a level, held to the golden file.
+
 **`match` prunes with MaxScore.** The exhaustive merge is not selective --
 on BEIR FiQA the average query reaches 86% of the corpus -- so terms whose
 remaining ceiling cannot beat the worst kept score stop driving the frontier.
@@ -3568,6 +3618,50 @@ visitor's first start and first finish, `having b >= a count` -- is one
 row where every visitor's row left the node: 968 ms of Kestrel's month at
 ten million events. The browser module grew 9.1 KB, 2.9 KB brotli, the
 estimator, the sketch's bytes and `having`'s rewrite most of it.
+
+**`bucket(at, 1d, 'Europe/Berlin')` reads a zone's clock** (`tz.rs`). A
+third argument names the zone: an offset written out (`'+03:00'`,
+`'-0530'`, `'Z'`, `'UTC'`) or one of IANA's names, read from a table of
+their rules since 2000 that `tools/tz/gen.py` writes out of the system's
+compiled tzdata (`tz/zones.bin`, 2026c: 597 names in 196 tables, a zone the
+offset it had at the start of 1999, its transitions since that its TZif
+footer's POSIX rule does not make, and that rule from its first change --
+not from the year's start: Turks and Caicos kept -4 into 2018 -- 25.2 KB,
+8.9 gzip, 7.7 brotli). A day, a week, a month or a year starts at local
+midnight, the first instant whose clock reads it or jumps past it, so a
+day is 23 or 25 hours where daylight time begins or ends; a shorter
+interval starts at the last instant at or before the time whose clock read
+its start or jumped past it, so an hour a clock shows twice is two buckets
+and one it skips none. Both are a walk over the zone's pieces (stretches of
+one offset) near the time, the last piece asked kept (`Rules::last`): rows
+in time order ask one piece for months of them. A time before 2000 in a
+named zone is refused rather than answered by rules the table does not
+hold; an offset answers any time. Native builds carry the table
+(`include_bytes!`); the browser module is handed it as it is handed the
+collation chunks -- listed after them as `zones` by `fenec_collation`,
+taken by `fenec_add_chunk`, `make wasm` putting it in `web/collate/` -- a
+statement naming a zone before refused with `chunks: ["zones"]`, which
+`Fenec.query` fetches and runs again (7.7 KB brotli of every page
+otherwise). A select list binds a constant zone once a query (`Calc::Bucket`
+with the zone); a `where`'s `bucket` keeps the zone it named last
+(`tz::cached`); the count off an ordered index looks a zoned group up by
+its key, since such a bucket may come back (an interval cut across a
+fall-back), where UTC's walk asks none. `tests/zones.rs` holds every zone's
+offsets, sampled over 45 years and hashed, to zoneinfo's, and the start of
+seven intervals around the transitions of twelve zones -- midnight skipped
+(Havana, Santiago, Beirut), a day skipped (Apia, 2011), half an hour (Lord
+Howe), daylight time in winter (Dublin), Gaza -- worked out in Python by
+the definition, not the walk (`zones.txt`), through a select list's, a
+`where`'s and the index's paths. Over a million events, a week's days
+counted off the index by Istanbul's clock take 29-34 ms against 23-27 in
+UTC, where the offset written in -- `bucket(at + 10800000, 1d)` -- read
+every row in 133-154; hours by Berlin's 31 against 25 (252 before the piece
+was kept); with a filter that reads the rows, 94-103 against 91-98. The
+table is read where it lies (a header, offsets and rules as records of a
+fixed size, an index of entries): parsed into lists, its names front-coded,
+the reader was 7.5 KB of the browser module against 5.9, for a table 5.4 KB
+smaller. The module grew 7.8 KB, 3.1 KB brotli, with the table out of it;
+every native binary carries the table's 30.6 KB.
 
 **`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
 sparse vector is held as its non-zero entries, `(index, weight)` ascending

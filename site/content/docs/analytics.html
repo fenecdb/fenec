@@ -97,9 +97,10 @@ get beats select count(*) as n, bucket(at, 1d) as day group day order day   -- â
 <code>Intl.DateTimeFormat().resolvedOptions().timeZone</code> in a browser.
 The rules are IANA's from 2000 on; a time before it in a named zone is
 refused, and an offset answers any time. Counted off the ordered index,
-a week's days by Istanbul's clock take 0.47 ms over a million events
-against 0.43 in UTC, and its hours by Berlin's 2.0 against 1.7; where the
-rows are read, 31.2 ms against 29.4 (<code>make analytics-bench</code>).</p>
+a week's days of a million events by Istanbul's clock take 29 to 34 ms
+against 23 to 27 in UTC, where the offset written in reads every row, 133
+to 154; its hours by Berlin's clock 31 against 25; with a filter that reads
+the rows, 94 to 103 against 91 to 98 (<code>make analytics-bench</code>).</p>
 
 <p>A rollup kept as the events come is a row a key, made at its first
 count and added to after: <code>if absent else set</code> is that upsert,
