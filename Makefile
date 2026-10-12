@@ -254,9 +254,11 @@ node:
 shard:
 	$(CARGO) run --release -p fenec-shard -- --listen 127.0.0.1:8090 --directory shard.fenec
 
-## What the router adds per request, and how long a tenant move takes.
+## What the router adds per request, how long a tenant move takes, and a
+## query across 100 tenants against asking each (ARGS=latency or fanout
+## for that part alone).
 shard-bench:
-	$(CARGO) run --release -p fenec-shard --example overhead -- 100000 128
+	$(CARGO) run --release -p fenec-shard --example overhead -- $(or $(ARGS),100000 128)
 
 ## What a tenant's quota costs: a put held to a limit in process, and a
 ## tenant with every quota against one with none over HTTP, in turns

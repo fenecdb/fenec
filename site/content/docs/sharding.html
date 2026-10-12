@@ -490,6 +490,150 @@ interrupted attempt left on the target, which is stale by definition, since the
 directory never pointed at it.</p>
 </details>
 
+<h2 id="across-tenants">A query across tenants</h2>
+
+<p>An operator's question about every tenant — how many orders each took
+since yesterday, the twenty newest sign-ups of all of them — is one request
+to the router, which runs the read on each tenant and merges the answers as
+the request says.</p>
+
+<pre data-lang="bash"># each tenant's count, a row each with its tenant
+curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
+     -d '{"query":"get orders select count() as n where at >= $1","params":["2026-10-11T00:00:00Z"]}'
+# {"rows":[{"tenant":"acme","n":31},{"tenant":"globex","n":7}],"tenants":2,"answered":2,"failed":[],"ms":2}
+
+# the twenty newest of all of them: each tenant's twenty, merged
+curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
+     -d '{"query":"get users select email, created order created desc limit 20",
+          "merge":{"order":["created desc"],"limit":20}}'
+
+# counts added up by day, over the tenants whose names start with eu-
+curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
+     -d '{"query":"get orders select bucket(at, 1d) as day, count() as n group day",
+          "merge":{"sum":["n"],"group":["day"]},"prefix":"eu-"}'
+</pre>
+
+<ul>
+  <li><b>The router's token alone.</b> A user's token, bound to its tenant,
+    and the nodes' data token are refused (401).</li>
+  <li><b>Reads only.</b> A statement that writes is refused on every node
+    (403) and writes nothing.</li>
+  <li><b>Never cut.</b> A tenant that fails or times out fails the query,
+    named; <code>"partial": true</code> answers the others' rows with the
+    failures listed. The rows and bytes gathered are bounded, and a query
+    past either is refused (413).</li>
+  <li><b>Each answer is its tenant's own.</b> Tenants are read at different
+    moments: there is no one moment across them.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Tenants are the isolation boundary, and this crosses it, so it is a
+<code>/_shard/</code> endpoint behind the router's <code>--token</code>. A
+JSON Web Token is refused there as any token other than the router's is:
+the router holds no keys, and a token bound to one tenant must not reach
+the others through it. The router asks each tenant through its node's
+<code>POST /_admin/tenants/&lt;t&gt;/query</code> with the node's admin
+token, which it holds already: a token that can take a tenant's whole
+image (<code>GET /_admin/tenants/&lt;t&gt;/file</code>) learns nothing more
+by reading it, where the nodes' data token, which nothing else here needs,
+would reach every tenant and write. The node refuses a statement that
+writes before it runs, and runs the rest in read-only mode besides.</p>
+
+<p>The router still parses no FenecQL. The statement and its parameters go
+to every node as they came, and what is done with the rows is said in the
+request, never read out of the query:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Member</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>query</code>, <code>params</code></td><td>the statement each tenant runs, as <code>/query</code> takes it</td></tr>
+<tr><td><code>tenants</code> or <code>prefix</code></td><td>the tenants named, or those whose names start so; every tenant in the directory without either. A name the directory does not hold is refused (404), nothing asked</td></tr>
+<tr><td><code>merge</code></td><td>none: the rows one after another, tenants in name order, each with its tenant's name first; <code>{"order": [..], "limit": n}</code>; <code>{"sum": [..], "min": [..], "max": [..], "group": [..]}</code> (below)</td></tr>
+<tr><td><code>column</code></td><td>the name of the tenant's column, <code>tenant</code> by default</td></tr>
+<tr><td><code>partial</code></td><td>answer the rows of the tenants that answered, the failures listed beside them</td></tr>
+<tr><td><code>timeout_ms</code></td><td>the query's one timeout, under the router's <code>--fanout-timeout</code> (30 s)</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Three merges, each exact from the tenants' answers alone:</p>
+
+<ul>
+  <li><b>One after another</b>, the default: every row, its tenant
+    named.</li>
+  <li><b>An order</b>: a k-way merge by the named columns, each
+    <code>asc</code> or <code>desc</code>, of rows each tenant gives in that
+    order. With each tenant's own <code>order ... limit 20</code>, the first
+    twenty of the merge are the first twenty of all of them. The router
+    checks each tenant's rows come in the order, and a tenant whose do not
+    — its statement orders otherwise, or by a collation, which is the
+    engine's alone — fails, never merged wrong. Values compare as the engine
+    compares them, text by its bytes; a timestamp travels as ISO text, which
+    leaves its milliseconds out where they are 0, so a text that is one
+    compares as its time. Ties go in tenant name order.</li>
+  <li><b>A fold</b>: <code>sum</code>, <code>min</code> and
+    <code>max</code> of the named columns, by the <code>group</code>
+    columns, groups in order. These are the aggregates that combine across
+    tenants: a count is a sum of counts. An average of averages is not an
+    average, so there is none: sum its sum and its count. Every column of a
+    row must be grouped by or folded, or the tenant fails: a column the
+    merge would drop is an answer cut. A sum of whole numbers past 64 bits
+    is refused, as the engine refuses one.</li>
+</ul>
+
+<p>A tenant that fails — its node unreachable, its call past the timeout,
+an answer that does not fit the merge, or one the node refused — is named
+with its node, the status and why. Without <code>"partial": true</code>
+the query fails with every failure named; the first stops the asking, and
+the answer says how many tenants were not asked. Its status is the
+tenants' own where they all failed alike — a statement every node refused
+is 400 or 403 — and 502 otherwise. A tenant moved while the query runs is
+asked again on the node the directory names now; one deleted meanwhile is
+a failure. The tenants come from the directory as the query begins: one
+created after that is not in it.</p>
+
+<p>The rows gathered from the tenants together are bounded by
+<code>--fanout-max-rows</code> (100 000) and the bytes of their answers by
+<code>--fanout-max-bytes</code> (64 MiB), counted as the answers arrive: a
+query past either is refused (413), its partial rows or not, and the
+asking stops. The calls go out over the router's connections to the nodes,
+<code>--fanout-concurrency</code> (16) at once, the tenants taken node by
+node in turn, and each tenant's answer is read for the merge on the thread
+that fetched it, beside the calls still out.</p>
+
+<p>Each tenant's answer is one statement's, as <code>/query</code>'s is.
+Tenants are separate databases read at different moments, so two answers
+are of no one moment, and a write landing in one while the query runs may
+or may not be in its answer. A read that opens a tenant opens it on its
+node, which closes it again once idle.</p>
+
+<p>A query across tenants is a span of the router's trace, a span a node
+under it, and each tenant's read on its node under that node's span, all
+with the request's id; the router counts them in
+<code>fenec_router_fanouts_total</code> and two more (<a
+href="monitoring.html#router">Monitoring</a>), no label naming a tenant.
+Each is a line of the router's audit log; the nodes' reads for it are not,
+as a read is not.</p>
+
+<p>Over 100 tenants of 200 rows on three nodes, on one machine
+(<code>make shard-bench ARGS=fanout</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">a count, summed</th><th class="n">the 20 newest, merged</th></tr></thead>
+<tbody>
+<tr><td><code>POST /_shard/query</code></td><td class="n">1.15–1.23 ms</td><td class="n">1.35–1.39 ms</td></tr>
+<tr><td>each tenant through the router, in turn</td><td class="n">4.28–5.16 ms</td><td class="n">5.11–5.45 ms</td></tr>
+<tr><td>each tenant through the router, 16 at once</td><td class="n">1.92–1.98 ms</td><td class="n">1.86–2.17 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>p50 over 300 rounds in three runs; the client asking 16 at once merges
+nothing. A request forwarded to one tenant costs what it did.</p>
+</details>
+
 <h2>What it costs</h2>
 
 <p>The router adds about 21 µs a request on one machine: one extra round trip.
