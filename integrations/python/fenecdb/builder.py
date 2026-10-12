@@ -1018,12 +1018,14 @@ class _Builder:
         *,
         if_absent: bool = False,
         require: int | None = None,
+        returning: Any = None,
     ) -> tuple[str, list]:
         """The `put` of a document or a list of them, not sent. With
         `if_absent=True`, `put ... if absent`: a document whose id or
         `@unique` value is held is passed over, and not counted. With
         `require=n` on any write, `... require n`: unless it wrote exactly
-        `n` rows it is refused (412) and its batch put back."""
+        `n` rows it is refused (412) and its batch put back. `returning=True`,
+        or a list of fields, answers the rows written, ids and all."""
         self._assert_plain("insert")
         items = list(docs) if isinstance(docs, (list, tuple)) else [docs]
         if not items:
@@ -1031,9 +1033,9 @@ class _Builder:
         bind = _Binder()
         body = ", ".join(_render_doc(d, bind, "insert") for d in items)
         absent = " if absent" if if_absent is True else ""
-        required = _require_clause(require)
+        tail = _returning_clause(returning) + _require_clause(require)
         many = body if len(items) == 1 else f"[{body}]"
-        return f"put {self.collection} {many}{absent}{required}", bind.params
+        return f"put {self.collection} {many}{absent}{tail}", bind.params
 
     def to_update(
         self,
@@ -1062,6 +1064,7 @@ class _Builder:
         patch: Mapping,
         *,
         require: int | None = None,
+        returning: Any = None,
     ) -> tuple[str, list]:
         """The upsert, `put ... if absent else set {patch}`, not sent: a
         document whose id or first `@unique` value a row holds sets that row
@@ -1076,9 +1079,9 @@ class _Builder:
         bind = _Binder()
         body = ", ".join(_render_doc(d, bind, "insert") for d in items)
         patched = _render_doc(patch, bind, "update")
-        required = _require_clause(require)
+        tail = _returning_clause(returning) + _require_clause(require)
         many = body if len(items) == 1 else f"[{body}]"
-        return f"put {self.collection} {many} if absent else set {patched}{required}", bind.params
+        return f"put {self.collection} {many} if absent else set {patched}{tail}", bind.params
 
     def to_delete(
         self, *, all: bool = False, require: int | None = None, returning: Any = None
@@ -1268,16 +1271,18 @@ class Query(_Builder):
         *,
         if_absent: bool = False,
         require: int | None = None,
-    ) -> int:
+        returning: Any = None,
+    ) -> Any:
         """`put` of a document or a list of them: how many were written --
         with `if_absent=True` those whose id or `@unique` value was held
-        left out, so a lock taken answers 1 and one held 0. With
-        `require=n` (on `update` and `delete` too) a write that did not
+        left out, so a lock taken answers 1 and one held 0 -- or with
+        `returning` the rows written, ids and all, in the documents' order.
+        With `require=n` (on `update` and `delete` too) a write that did not
         write exactly `n` rows is refused, 412, and its batch put back."""
         if isinstance(docs, (list, tuple)) and not docs:
-            return 0
-        text = self.to_insert(docs, if_absent=if_absent, require=require)
-        return _affected(self._client().query(*text))
+            return _written({}, returning)
+        text = self.to_insert(docs, if_absent=if_absent, require=require, returning=returning)
+        return _written(self._client().query(*text), returning)
 
     def upsert(
         self,
@@ -1285,14 +1290,16 @@ class Query(_Builder):
         patch: Mapping,
         *,
         require: int | None = None,
-    ) -> int:
+        returning: Any = None,
+    ) -> Any:
         """`put ... if absent else set`: each document inserted, or where a
         row holds its id or `@unique` value, that row set by the patch --
         `upsert({"key": k, "n": 1}, {"n": expr("n + new.n")})`. How many
-        rows it set and made together."""
+        rows it set and made together, or with `returning` those rows."""
         if isinstance(docs, (list, tuple)) and not docs:
-            return 0
-        return _affected(self._client().query(*self.to_upsert(docs, patch, require=require)))
+            return _written({}, returning)
+        text = self.to_upsert(docs, patch, require=require, returning=returning)
+        return _written(self._client().query(*text), returning)
 
     def update(
         self,

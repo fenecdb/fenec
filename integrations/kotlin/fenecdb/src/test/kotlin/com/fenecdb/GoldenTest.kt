@@ -132,22 +132,33 @@ class GoldenTest {
                     }
                     val made: Statement? = when (op) {
                         "toFenecQL" -> q.toFenecQL()
-                        "toInsert" -> q.toInsert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1))
+                        "toInsert" -> q.toInsert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1), returning(1))
                         "toUpdate" -> q.toUpdate(value(a[0]), all(1), require(1), returning(1))
-                        "toUpsert" -> q.toUpsert(value(a[0]), value(a[1]), require(2))
+                        "toUpsert" -> q.toUpsert(value(a[0]), value(a[1]), require(2), returning(2))
                         "toDelete" -> q.toDelete(all(0), require(0), returning(0))
                         "rows" -> null.also { q.rows() }
                         "first" -> null.also { q.first() }
                         "count" -> null.also { q.count() }
                         "explain" -> null.also { q.explain() }
-                        "insert" -> null.also { q.insert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1)) }
+                        "insert" -> null.also {
+                            val absent = opt(a, 1, "ifAbsent") as Boolean? ?: false
+                            when (val r = returning(1)) {
+                                null -> q.insert(value(a[0]), absent, require(1))
+                                else -> q.insertReturning(value(a[0]), r, absent, require(1))
+                            }
+                        }
                         "update" -> null.also {
                             when (val r = returning(1)) {
                                 null -> q.update(value(a[0]), all(1), require(1))
                                 else -> q.updateReturning(value(a[0]), r, all(1), require(1))
                             }
                         }
-                        "upsert" -> null.also { q.upsert(value(a[0]), value(a[1]), require(2)) }
+                        "upsert" -> null.also {
+                            when (val r = returning(2)) {
+                                null -> q.upsert(value(a[0]), value(a[1]), require(2))
+                                else -> q.upsertReturning(value(a[0]), value(a[1]), r, require(2))
+                            }
+                        }
                         "delete" -> null.also {
                             when (val r = returning(0)) {
                                 null -> q.delete(all(0), require(0))

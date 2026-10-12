@@ -294,6 +294,12 @@ func insertOpts(o object) []any {
 		if k == "require" {
 			out = append(out, fenecdb.Require(o.vals[i].(int)))
 		}
+		// As an update's: JavaScript's true is every field.
+		if k == "returning" {
+			for _, opt := range options(object{keys: []string{k}, vals: []any{o.vals[i]}}) {
+				out = append(out, opt)
+			}
+		}
 	}
 	return out
 }

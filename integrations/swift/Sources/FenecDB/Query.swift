@@ -1139,13 +1139,19 @@ public struct Query: Sendable {
     private func pick(_ returning: [String]?, _ bind: Binder) throws -> String {
         var out = Query.orderText(order)
         if let limit { out += " limit " + bind.bind(.int(Int64(limit))) }
-        guard let returning else { return out }
+        return out + (try Query.returningClause(returning))
+    }
+
+    // ` returning ...` for a write's `returning`: the fields named, each a
+    // field or a path, or `*` for every one.
+    private static func returningClause(_ returning: [String]?) throws -> String {
+        guard let returning else { return "" }
         if returning.isEmpty { throw FenecError.builder("returning names the fields it answers, or * for every one") }
         if returning.contains("*") {
             if returning.count > 1 { throw FenecError.builder("returning * answers every field: it takes no other") }
-            return out + " returning *"
+            return " returning *"
         }
-        return out + " returning " + (try returning.map { try Builder.path($0) }).joined(separator: ", ")
+        return " returning " + (try returning.map { try Builder.path($0) }).joined(separator: ", ")
     }
 
     private static func docs(_ v: Value) -> [Value] {
@@ -1158,16 +1164,17 @@ public struct Query: Sendable {
     /// `ifAbsent`: `put ... if absent`, which passes over a document whose
     /// id or `@unique` value a row holds and counts only what it wrote -- a
     /// lock taken, or not, in one statement. `require`: refused, and nothing
-    /// written, unless it wrote exactly that many rows.
-    public func toInsert(_ docs: any FenecValue, ifAbsent: Bool = false, require: Int? = nil) throws -> (text: String, params: [Value]) {
+    /// written, unless it wrote exactly that many rows. `returning`: the
+    /// rows written answered, ids and all (`insertReturning`).
+    public func toInsert(_ docs: any FenecValue, ifAbsent: Bool = false, require: Int? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("insert")
         let list = Query.docs(try docs.fenecValue())
         guard !list.isEmpty else { throw FenecError.builder("cannot write an empty document list") }
         let bind = Binder()
         let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
         let absent = ifAbsent ? " if absent" : ""
-        let required = try Query.requireClause(require)
-        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]")\(absent)\(required)", bind.params)
+        let tail = try Query.returningClause(returning) + Query.requireClause(require)
+        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]")\(absent)\(tail)", bind.params)
     }
 
     /// The `set` of the rows the filter names, not run; with no filter it is
@@ -1188,16 +1195,17 @@ public struct Query: Sendable {
     /// whose id or first `@unique` value a row holds sets that row by the
     /// patch -- an update's, `.inc` and `.expr` with it, and in an
     /// expression `new.f` the document's own `f` -- and every other one is
-    /// inserted. The documents' parameters come first, then the patch's.
-    public func toUpsert(_ docs: any FenecValue, _ patch: any FenecValue, require: Int? = nil) throws -> (text: String, params: [Value]) {
+    /// inserted. The documents' parameters come first, then the patch's;
+    /// `returning` as `toInsert`'s.
+    public func toUpsert(_ docs: any FenecValue, _ patch: any FenecValue, require: Int? = nil, returning: [String]? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("upsert")
         let list = Query.docs(try docs.fenecValue())
         guard !list.isEmpty else { throw FenecError.builder("cannot write an empty document list") }
         let bind = Binder()
         let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
         let set = try Builder.renderDoc(try patch.fenecValue(), bind)
-        let required = try Query.requireClause(require)
-        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]") if absent else set \(set)\(required)", bind.params)
+        let tail = try Query.returningClause(returning) + Query.requireClause(require)
+        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]") if absent else set \(set)\(tail)", bind.params)
     }
 
     /// The `del` of the rows the filter names, not run; with no filter it is
@@ -1300,5 +1308,24 @@ public struct Query: Sendable {
     @discardableResult
     public func deleteReturning(returning: [String] = ["*"], all: Bool = false, require: Int? = nil) async throws -> [Row] {
         try await run(toDelete(all: all, require: require, returning: returning)).rows
+    }
+
+    /// `insert` that answers the rows it wrote, ids and all, in the
+    /// documents' order, under the fields named -- `["*"]` every one:
+    /// `from("orders").insertReturning(["item": "tea"], returning: ["id"])`.
+    @discardableResult
+    public func insertReturning(_ docs: any FenecValue, returning: [String] = ["*"], ifAbsent: Bool = false, require: Int? = nil) async throws -> [Row] {
+        let v = try docs.fenecValue()
+        if case .array(let list) = v, list.isEmpty { return [] }
+        return try await run(toInsert(v, ifAbsent: ifAbsent, require: require, returning: returning)).rows
+    }
+
+    /// `upsert` that answers the rows it set and made, as written, in the
+    /// documents' order.
+    @discardableResult
+    public func upsertReturning(_ docs: any FenecValue, _ patch: any FenecValue, returning: [String] = ["*"], require: Int? = nil) async throws -> [Row] {
+        let v = try docs.fenecValue()
+        if case .array(let list) = v, list.isEmpty { return [] }
+        return try await run(toUpsert(v, patch, require: require, returning: returning)).rows
     }
 }
