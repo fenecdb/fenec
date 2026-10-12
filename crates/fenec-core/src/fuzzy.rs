@@ -264,9 +264,18 @@ impl Dictionary {
         if lo == hi {
             return lo;
         }
+        // A byte at a time: the keys are a character or the few left of a
+        // word, where a call to `memcmp` a probe cost more than the bytes.
         let holds = |w: &[u8]| {
             let rest = w.get(off..).unwrap_or(&[]);
-            rest < key || (through && rest.starts_with(key))
+            for (i, &k) in key.iter().enumerate() {
+                match rest.get(i) {
+                    None => return true,
+                    Some(&b) if b != k => return b < k,
+                    _ => {}
+                }
+            }
+            through
         };
         // The chunks the range reaches past its first: the last of them
         // whose first word still holds is where the run ends.
@@ -283,12 +292,17 @@ impl Dictionary {
         let chunk = &self.chunks[c];
         let mut i = if c == lo.0 { lo.1 } else { 0 };
         let mut j = if c == hi.0 { hi.1 } else { chunk.len() };
-        while i < j {
+        // A few words are read in turn: the run that holds is mostly short
+        // there, and each probe of a search is a branch mispredicted.
+        while j - i > 8 {
             let mid = i + (j - i) / 2;
             match holds(chunk.at(mid)) {
                 true => i = mid + 1,
                 false => j = mid,
             }
+        }
+        while i < j && holds(chunk.at(i)) {
+            i += 1;
         }
         match i < chunk.len() {
             true => (c, i),
@@ -458,17 +472,19 @@ impl<'a> Walk<'a, '_> {
         }
         let w = self.q.len() + 1;
         let base = self.rows.len() - w;
-        // A swap of the path's last character with the next is counted from
-        // the row above this one: while that row could pay for it, the next
-        // character is no exact continuation.
+        // Spent: no cell under `k`, and no swap of the path's last
+        // character with the next to come -- a swap is counted from the row
+        // above this one, which may still pay for it.
         let d = self.path.len() + 1;
-        let swapped = base >= w
-            && (2..w).any(|j| {
-                self.path.last() == self.q.get(j - 1)
-                    && self.rows[base - w + j - 2].saturating_add(1 + (d == 2 || j == 2) as u8)
-                        <= k
-            });
-        if least == k && !swapped {
+        let spent = least == k
+            && !(base >= w
+                && (2..w).any(|j| {
+                    self.path.last() == self.q.get(j - 1)
+                        && (self.rows[base - w + j - 2])
+                            .saturating_add(1 + (d == 2 || j == 2) as u8)
+                            <= k
+                }));
+        if spent {
             // No edit is left: a word below is the path, then the rest of
             // the query from a cell at `k`, exactly -- looked up, rather
             // than walked a character at a time. Shortest rest first: a
@@ -484,7 +500,12 @@ impl<'a> Walk<'a, '_> {
                 let a = self.dict.part(lo, hi, off, rest, false);
                 let b = match self.prefix {
                     true => self.dict.part(a, hi, off, rest, true),
-                    false if a != hi && self.dict.at(a).get(off..) == Some(rest) => {
+                    false
+                        if a != hi
+                            && (self.dict.at(a).get(off..)).is_some_and(|r| {
+                                r.len() == rest.len() && r.iter().zip(rest).all(|(x, y)| x == y)
+                            }) =>
+                    {
                         self.dict.next(a)
                     }
                     false => a,
