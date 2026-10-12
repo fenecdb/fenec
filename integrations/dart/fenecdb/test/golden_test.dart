@@ -32,7 +32,7 @@ Object? value(Object? v) {
     }
     if (v.containsKey(r'$bucket')) {
       final b = v[r'$bucket'] as List;
-      return Computed.bucket(b[0] as String, b[1] as String);
+      return Computed.bucket(b[0] as String, b[1] as String, b.length > 2 ? b[2] as String : null);
     }
     if (v.containsKey(r'$countDistinct')) return Computed.countDistinct(v[r'$countDistinct'] as String);
     if (v.containsKey(r'$distance')) {
@@ -112,10 +112,16 @@ Query step(Query q, String op, List a) => switch ((op, a.length)) {
           // A name, or a list of them: a key over several fields too.
           on: switch (opt(a, 1, 'on')) { final List l => l.cast<String>(), final v => v },
           parentKey: switch (opt(a, 1, 'parentKey')) { final List l => l.cast<String>(), final v => v },
+          // A column, or a list of them: an aggregate, an expression too.
           select: switch (opt(a, 1, 'select')) {
             null => null,
             String s => [s],
-            final l => (l as List).cast<String>(),
+            final l => [for (final c in l as List) value(c)!],
+          },
+          group: switch (opt(a, 1, 'group')) {
+            null => null,
+            String s => s,
+            final l => [for (final k in l as List) value(k)!],
           },
           where: opt(a, 1, 'where') == null ? null : cond(opt(a, 1, 'where')),
           required: opt(a, 1, 'required') as bool? ?? false,

@@ -20,6 +20,7 @@
 //   {"$inc": n}                                           inc(n), a value
 //   {"$expr": [text, param, ...]}                         expr(), a value or a column
 //   {"$bucket": [field, interval]}                        bucket(field, interval)
+//   {"$bucket": [field, interval, zone]}                  bucket(field, interval, zone)
 //   {"$countDistinct": field}                             countDistinct(field)
 //   {"$distance": [field, [lon, lat]]}                    distance(field, point)
 //   {"$first": [field]}, {"$first": [field, by]}          first(field [, by]); "$last" too
@@ -320,10 +321,10 @@ c('aggregates grouped, ordered by one', ['from', 'orders'], ['select', 'status',
 c('aggregates over the whole collection', ['from', 'orders'], ['select', 'min(at)', 'max(at)', 'Count()'], Q);
 c('aggregate names keep their field as written', ['from', 'orders'], ['select', ' Max(Total_2) '], Q);
 c('group needs an aggregate', ['from', 'orders'], ['select', 'status'], ['group', 'status'], Q);
-c('a whole-collection aggregate takes no limit', ['from', 'orders'], ['select', 'count(*)'], ['limit', 3], Q);
+c('a whole-collection aggregate folds the rows its order and limit pick', ['from', 'orders'], ['select', 'count(*)', 'avg(distance)'], ['where', 'courier', 5], ['order', 'at', 'desc'], ['limit', 50], ['offset', 2], Q);
 c('an aggregate takes no near', ['from', 'orders'], ['select', 'count(*)'], ['near', 'v', [1, 0]], Q);
 c('an aggregate takes no match', ['from', 'orders'], ['select', 'sum(total)'], ['match', 'body', 'x'], Q);
-c('an aggregate takes no lookup', ['from', 'orders'], ['select', 'count(*)'], ['lookup', 'lines', { on: 'order_id' }], Q);
+c('an aggregate hangs a lookup off its groups', ['from', 'orders'], ['select', 'courier', 'count(*)'], ['where', 'status', 'done'], ['group', 'courier'], ['order', 'count', 'desc'], ['limit', 10], ['lookup', 'couriers', { on: 'user', parentKey: 'courier', select: ['name', 'code'] }], Q);
 c('an aggregate that is not there', ['from', 'orders'], ['select', 'median(total)'], Q);
 c('an aggregate of two fields', ['from', 'orders'], ['select', 'sum(a b)'], Q);
 c('an aggregate of a path', ['from', 'orders'], ['select', 'sum(meta.total)', 'Count( Distinct meta.user )'], Q);
@@ -336,6 +337,8 @@ c('one-minute bars', ticks, ['select', { $as: [{ $bucket: ['at', '1m'] }, 'minut
 c('first and last without by, as written', ticks, ['select', 'first(px)', 'LAST(px)', { $first: ['meta.px'] }], Q);
 c('vwap: an expression over aggregates', ticks, ['select', 'sym', { $as: [{ $expr: ['sum(px * qty) / sum(qty)'] }, 'vwap'] }], ['group', 'sym'], ['order', 'vwap', 'desc'], Q);
 c('distinct users an hour', ['from', 'events'], ['select', { $as: [{ $bucket: ['at', '1h'] }, 'hour'] }, { $countDistinct: 'user' }], ['where', 'at', '>=', { $date: '2026-09-19T00:00:00.000Z' }], ['group', 'hour'], ['order', 'count(distinct user)', 'desc'], Q);
+c('a day by a zone\'s clock, the zone a parameter', ['from', 'orders'], ['select', { $as: [{ $bucket: ['at', '1d', 'Europe/Istanbul'] }, 'day'] }, 'count(*)'], ['where', 'status', 'done'], ['group', 'day'], ['order', 'day'], Q);
+c('a bucket\'s zone is a name or an offset', ['from', 'orders'], ['select', { $as: [{ $bucket: ['at', '1d', ''] }, 'day'] }, 'count(*)'], ['group', 'day'], Q);
 c('group by several keys and an expression', ['from', 'events'], ['select', 'name', 'country', 'count(*)'], ['group', 'name', 'country', { $bucket: ['at', '1d'] }], Q);
 c('group by a list of keys', ['from', 'events'], ['select', 'name', 'count(*)'], ['group', ['name', 'meta.plan']], Q);
 c('an expression in group takes its values bound', ['from', 'events'], ['select', 'count(*)'], ['where', 'name', 'buy'], ['group', { $expr: ['coalesce(country, ?)', 'none'] }], Q);
@@ -360,6 +363,14 @@ c('lookup order as one name', ['from', 'articles'], ['lookup', 'remarks', { on: 
 c('lookup where takes or', ['from', 'products'], ['lookup', 'reviews', { on: 'product_id', where: { $or: [{ stars: 5 }, { verified: true }] } }], Q);
 c('lookup limit 0 and offset 0', ['from', 'products'], ['lookup', 'reviews', { on: 'product_id', limit: 0, offset: 0 }], Q);
 c('a lookup chain numbers its parameters in order', ['from', 'shops'], ['where', 'city', 'İzmir'], ['lookup', 'orders', { on: 'shop_id', where: { total: { gt: 100 } }, limit: 3 }], ['lookup', 'lines', { on: 'order_id', required: true, where: { qty: { gte: 2 } }, limit: 5 }], Q);
+// A lookup level that folds each parent's children.
+c('lookup folds each parent\'s children', ['from', 'shops'], ['lookup', 'orders', { on: 'shop', select: ['count(*)', 'sum(total)', 'count(distinct courier)'], where: { status: 'paid' } }], Q);
+c('lookup folds the children its order and limit pick', ['from', 'couriers'], ['lookup', 'orders', { on: 'courier', order: [['at', 'desc']], limit: 50, select: ['count(*)', 'avg(distance)'] }], Q);
+c('lookup groups each parent\'s children', ['from', 'shops'], ['lookup', 'lines', { on: 'shop', select: ['product', 'sum(qty)'], group: ['product'], order: [['sum(qty)', 'desc'], 'product'], limit: 3, offset: 1 }], Q);
+c('lookup folds an expression, its values bound in order', ['from', 'shops'], ['where', 'city', 'x'], ['lookup', 'orders', { on: 'shop', select: [{ $as: [{ $expr: ['sum(total) / ?', 2] }, 'half'] }, { $as: [{ $bucket: ['at', '1d'] }, 'day']}, 'count(*)'], group: ['day'], where: { status: 'paid' }, limit: 7 }], Q);
+c('a lookup off a level\'s groups', ['from', 'shops'], ['lookup', 'orders', { on: 'shop', select: ['courier', 'count(*)'], group: 'courier' }], ['lookup', 'couriers', { on: 'user', parentKey: 'courier', required: true, select: ['name'] }], Q);
+c('lookup group needs an aggregate', ['from', 'shops'], ['lookup', 'orders', { on: 'shop', select: ['status'], group: ['status'] }], Q);
+c('lookup selects fields or aggregates', ['from', 'shops'], ['lookup', 'orders', { on: 'shop', select: [{ $as: [{ $expr: ['total * 2'] }, 'x'] }] }], Q);
 c('lookup needs on', ['from', 'products'], ['lookup', 'reviews', { limit: 3 }], Q);
 c('lookup names are names', ['from', 'products'], ['lookup', 'reviews; del products', { on: 'product_id' }], Q);
 c('lookup on is a name', ['from', 'products'], ['lookup', 'reviews', { on: 'meta.pid' }], Q);

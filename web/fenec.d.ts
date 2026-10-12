@@ -279,14 +279,30 @@ export interface LookupOptions<C extends Fields = Fields> {
    * before `limit`, so the page still comes back full.
    */
   required?: boolean;
-  select?: ChildKey<C> | ChildKey<C>[];
+  /**
+   * The children's fields, or a list that aggregates them -- `'count(*)'`,
+   * `'sum(total)'`, `expr(...).as(name)` -- each parent's children folded
+   * into one row, or one a group with `group`. Ungrouped, `order`, `limit`
+   * and `offset` pick the children folded. A folding level's rows are its
+   * columns, which the attached row type does not narrow to.
+   */
+  select?: LookupItem<C> | LookupItem<C>[];
+  /** With an aggregating `select`: a row a group of each parent's children. */
+  group?: string | Expression | (string | Expression)[];
   where?: Where<C> | Cond<C>;
   order?:
     | ChildKey<C>
-    | Array<ChildKey<C> | [ChildKey<C>, ('asc' | 'desc')?, { collate?: Collation }?]>;
+    | Array<
+        | ChildKey<C>
+        | Aggregate<C>
+        | [ChildKey<C> | Aggregate<C>, ('asc' | 'desc')?, { collate?: Collation }?]
+      >;
   limit?: number;
   offset?: number;
 }
+
+/** An item of a `lookup`'s list: a field, an aggregate of one, a named expression. */
+type LookupItem<C extends Fields> = ChildKey<C> | Aggregate<C> | Named<string> | Expression;
 
 type ChildKey<C extends Fields> = keyof Row<C> & string;
 
@@ -459,10 +475,12 @@ export interface Named<N extends string> extends Expression {
 export type Interval = `${number}${'ms' | 's' | 'm' | 'h' | 'd' | 'w' | 'mo' | 'y'}`;
 
 /**
- * `bucket(field, interval)`: the start of the interval a timestamp falls
- * in, in UTC -- weeks from a Monday, months and years by the calendar.
+ * `bucket(field, interval [, zone])`: the start of the interval a timestamp
+ * falls in, in UTC -- weeks from a Monday, months and years by the
+ * calendar -- or by a zone's clock: an IANA name, `'Europe/Istanbul'`, or
+ * an offset, `'+03:00'`, bound as a parameter.
  */
-export function bucket(field: string, interval: Interval): Expression;
+export function bucket(field: string, interval: Interval, zone?: string): Expression;
 
 /** `count(distinct field)`: how many distinct values the rows hold. */
 export function countDistinct(field: string): Expression;

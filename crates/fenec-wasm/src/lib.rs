@@ -445,7 +445,8 @@ pub extern "C" fn fenec_block(handle: u32, op: u32) -> *mut u8 {
 
 /// The collation data: `{"chunks":[names],"loaded":mask}`, a chunk's bit its
 /// place in the list. The module carries `latin`; the others are handed to
-/// it (`fenec_add_chunk`) from `collate/<name>.bin` beside it.
+/// it (`fenec_add_chunk`) from `collate/<name>.bin` beside it -- and, after
+/// them, `zones`, the time zones' table a `bucket` by a zone's name reads.
 #[no_mangle]
 pub extern "C" fn fenec_collation() -> *mut u8 {
     let mut s = String::from("{\"chunks\":[");
@@ -455,7 +456,12 @@ pub extern "C" fn fenec_collation() -> *mut u8 {
         }
         json::escape_into(&mut s, name);
     }
-    s.push_str(&format!("],\"loaded\":{}}}", collate::loaded()));
+    let mut loaded = collate::loaded();
+    if fenec_core::tz::PARTIAL {
+        s.push_str(",\"zones\"");
+        loaded |= (fenec_core::tz::loaded() as u32) << collate::CHUNKS.len();
+    }
+    s.push_str(&format!("],\"loaded\":{loaded}}}"));
     boxed(s.as_bytes())
 }
 
@@ -476,6 +482,7 @@ pub unsafe extern "C" fn fenec_add_chunk(ptr: *const u8, len: usize) -> i32 {
             .iter()
             .position(|n| *n == name)
             .map_or(-1, |i| i as i32),
+        None if fenec_core::tz::add_chunk(bytes) => collate::CHUNKS.len() as i32,
         None => -1,
     }
 }

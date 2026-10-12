@@ -41,7 +41,8 @@ public sealed class BuilderTests(Servers servers)
         _ when e.TryGetProperty("$inc", out var n) => Computed.Inc(Value(n)),
         _ when e.TryGetProperty("$expr", out var x) =>
             Computed.Expr(x[0].GetString()!, x.EnumerateArray().Skip(1).Select(Value).ToArray()),
-        _ when e.TryGetProperty("$bucket", out var b) => Computed.Bucket(b[0].GetString()!, b[1].GetString()!),
+        _ when e.TryGetProperty("$bucket", out var b) =>
+            Computed.Bucket(b[0].GetString()!, b[1].GetString()!, b.GetArrayLength() > 2 ? b[2].GetString() : null),
         _ when e.TryGetProperty("$countDistinct", out var f) => Computed.CountDistinct(f.GetString()!),
         _ when e.TryGetProperty("$distance", out var g) => Computed.Distance(g[0].GetString()!, Value(g[1])),
         _ when e.TryGetProperty("$first", out var f) => Computed.First(f[0].GetString()!, f.GetArrayLength() > 1 ? f[1].GetString() : null),
@@ -132,7 +133,13 @@ public sealed class BuilderTests(Servers servers)
             {
                 null => null,
                 { ValueKind: JsonValueKind.String } s => [s.GetString()!],
-                { } list => list.EnumerateArray().Select(x => x.GetString()!).ToList(),
+                { } list => list.EnumerateArray().Select(Value).ToList(),
+            },
+            group: Opt(a, 1, "group") switch
+            {
+                null => null,
+                { ValueKind: JsonValueKind.String } s => [s.GetString()!],
+                { } list => list.EnumerateArray().Select(Value).ToList(),
             },
             where: Opt(a, 1, "where") is { } w ? Condition(w) : null,
             required: Opt(a, 1, "required")?.GetBoolean() ?? false,

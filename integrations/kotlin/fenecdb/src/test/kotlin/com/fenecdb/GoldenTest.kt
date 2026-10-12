@@ -32,7 +32,9 @@ class GoldenTest {
                 v.containsKey("\$f32") -> v.list("\$f32")!!.let { l -> FloatArray(l.size) { (l[it] as Number).toFloat() } }
                 v.containsKey("\$inc") -> Computed.inc(v["\$inc"])
                 v.containsKey("\$expr") -> v.list("\$expr")!!.let { Computed.expr(it[0] as String, *it.drop(1).map(::value).toTypedArray()) }
-                v.containsKey("\$bucket") -> v.list("\$bucket")!!.let { Computed.bucket(it[0] as String, it[1] as String) }
+                v.containsKey("\$bucket") -> v.list("\$bucket")!!.let {
+                    Computed.bucket(it[0] as String, it[1] as String, it.getOrNull(2) as String?)
+                }
                 v.containsKey("\$countDistinct") -> Computed.countDistinct(v.string("\$countDistinct")!!)
                 v.containsKey("\$distance") -> v.list("\$distance")!!.let { Computed.distance(it[0] as String, value(it[1])) }
                 v.containsKey("\$first") -> v.list("\$first")!!.let { Computed.first(it[0] as String, it.getOrNull(1) as String?) }
@@ -102,7 +104,9 @@ class GoldenTest {
                 // A name, or a list of them: a key over several fields too.
                 on = names(opt(a, 1, "on")).orEmpty(),
                 parentKey = names(opt(a, 1, "parentKey")),
-                select = opt(a, 1, "select")?.let { s -> if (s is String) listOf(s) else (s as List<*>).map { it as String } },
+                // A column, or a list of them: an aggregate, an expression too.
+                select = opt(a, 1, "select")?.let { s -> if (s is String) listOf(s) else (s as List<*>).map { value(it)!! } },
+                group = opt(a, 1, "group")?.let { g -> if (g is String) listOf(g) else (g as List<*>).map { value(it)!! } },
                 where = opt(a, 1, "where")?.let(::cond),
                 required = opt(a, 1, "required") as Boolean? ?: false,
                 order = keys(opt(a, 1, "order")),

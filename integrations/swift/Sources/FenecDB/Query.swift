@@ -119,13 +119,22 @@ public struct Column: Sendable, ExpressibleByStringLiteral {
     /// `bucket(field, interval)`: the start of the interval a timestamp
     /// falls in -- `"15m"`, `"1h"`, `"1d"`, `"1w"` (from a Monday), `"1mo"`,
     /// `"1y"`, in UTC. The interval is written into the text, since it is a
-    /// part of the statement's shape, so it is checked here.
-    public static func bucket(_ field: String, _ interval: String) throws -> Column {
+    /// part of the statement's shape, so it is checked here. Given a zone --
+    /// an IANA name, `"Europe/Istanbul"`, or an offset, `"+03:00"` -- by its
+    /// clock: a day from local midnight, 23 or 25 hours where it changes to
+    /// or from daylight time. The zone goes as a parameter:
+    /// `.bucket("at", "1d", TimeZone.current.identifier)`.
+    public static func bucket(_ field: String, _ interval: String, _ zone: String? = nil) throws -> Column {
         guard Builder.isInterval(interval) else {
             throw FenecError.builder(
                 "bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': \(Builder.quote(interval))")
         }
-        return expr("bucket(\(try Builder.path(field)), \(interval))", [])
+        guard let zone else { return expr("bucket(\(try Builder.path(field)), \(interval))", []) }
+        if zone.isEmpty {
+            throw FenecError.builder(
+                "bucket() takes a zone's name, such as 'Europe/Istanbul', or an offset, such as '+03:00': \(Builder.quote(zone))")
+        }
+        return expr("bucket(\(try Builder.path(field)), \(interval), ?)", [.string(zone)])
     }
 
     /// `count(distinct field)`: how many distinct values the rows hold.
@@ -604,7 +613,8 @@ public struct Query: Sendable {
         let collection: String
         let on: [String]
         let parent: [String]
-        let project: [String]?
+        let project: [Column]?
+        let group: [Column]?
         let cond: [Node]
         let required: Bool
         let order: [(field: String, asc: Bool, collate: String?)]
@@ -890,21 +900,28 @@ public struct Query: Sendable {
     /// `limit` counts children per parent. `required` drops a parent no
     /// child matches. Called again, it chains onto the collection the call
     /// before named.
+    ///
+    /// `select` may aggregate, as the query's own list does -- `"count(*)"`,
+    /// `"sum(total)"`, `.expr(...).as(name)` -- each parent's children
+    /// folded, one row a parent, or with `group` one a group, ordered and
+    /// paged a parent at a time; ungrouped, `order`, `limit` and `offset`
+    /// pick the children folded. A query whose list aggregates hangs a
+    /// lookup off its groups, `parentKey` a column.
     public func lookup(
-        _ name: String, on: String?, parentKey: String? = nil, select: [String]? = nil, where cond: Cond? = nil,
-        required: Bool = false, order: [SortKey] = [], limit: Int? = nil, offset: Int? = nil
+        _ name: String, on: String?, parentKey: String? = nil, select: [Column]? = nil, group: [Column]? = nil,
+        where cond: Cond? = nil, required: Bool = false, order: [SortKey] = [], limit: Int? = nil, offset: Int? = nil
     ) throws -> Query {
         try lookup(
-            name, on: on.map { [$0] } ?? [], parentKey: parentKey.map { [$0] }, select: select, where: cond,
-            required: required, order: order, limit: limit, offset: offset)
+            name, on: on.map { [$0] } ?? [], parentKey: parentKey.map { [$0] }, select: select, group: group,
+            where: cond, required: required, order: order, limit: limit, offset: offset)
     }
 
     /// `lookup name on (child, ...) = (parent, ...) ...`: a key over several
     /// fields, a field of each side for each part, in order --
     /// `on: ["org", "order"], parentKey: ["org", "id"]`.
     public func lookup(
-        _ name: String, on: [String], parentKey: [String]? = nil, select: [String]? = nil, where cond: Cond? = nil,
-        required: Bool = false, order: [SortKey] = [], limit: Int? = nil, offset: Int? = nil
+        _ name: String, on: [String], parentKey: [String]? = nil, select: [Column]? = nil, group: [Column]? = nil,
+        where cond: Cond? = nil, required: Bool = false, order: [SortKey] = [], limit: Int? = nil, offset: Int? = nil
     ) throws -> Query {
         guard let first = on.first, !first.isEmpty else {
             throw FenecError.builder("lookup needs `on`: the child field holding the key")
@@ -915,14 +932,47 @@ public struct Query: Sendable {
         if (child.count > 1 || parentKey != nil) && parent.count != child.count {
             throw FenecError.builder("lookup pairs \(child.count) child fields with \(parent.count) parent fields")
         }
+        var project: [Column]? = nil
+        var aggregate = false
+        let star = { (c: Column) -> Bool in if case .name("*") = c.kind { true } else { false } }
+        if let select, !select.contains(where: star) {
+            let cs = try select.map(Builder.column)
+            project = cs.map(\.column)
+            aggregate = cs.contains { $0.aggregate }
+        }
+        var keys: [Column]? = nil
+        if let group {
+            if group.isEmpty { throw FenecError.builder("group takes at least one key") }
+            let ks = try group.map { k -> Column in
+                if case .name(let name) = k.kind { return Column(try Builder.path(name)) }
+                return k
+            }
+            // The engine refuses it too; failing here never sends a query.
+            if !aggregate {
+                let text = ks.map { k -> String in
+                    switch k.kind {
+                    case .name(let name): return name
+                    case .expr(let sql, _, _): return sql
+                    }
+                }
+                throw FenecError.builder("group \(text.joined(separator: ", ")) needs an aggregate in select: 'count(*)'")
+            }
+            keys = ks
+        }
+        // A level selects its children's fields, or aggregates of them.
+        if !aggregate, let project, project.contains(where: { if case .expr = $0.kind { true } else { false } }) {
+            throw FenecError.builder("a lookup selects its children's fields, or aggregates of them")
+        }
         let level = Level(
             collection: try Builder.ident(name, "collection"),
             on: child,
             parent: parent,
-            project: select == nil || select!.contains("*") ? nil : try select!.map(Builder.path),
+            project: project,
+            group: keys,
             cond: try cond.map { [try Builder.node($0)] } ?? [],
             required: required,
-            order: try order.map { (try Builder.path($0.field), try Builder.direction($0.direction), try Builder.collation($0.collate)) },
+            // Over groups a key may name an aggregate of the list.
+            order: try order.map { (try Builder.column($0.field).text, try Builder.direction($0.direction), try Builder.collation($0.collate)) },
             limit: try limit.map { try Builder.whole($0, "limit") },
             offset: try offset.map { try Builder.whole($0, "offset") } ?? 0)
         return with { $0.lookups.append(level) }
@@ -976,11 +1026,10 @@ public struct Query: Sendable {
             throw FenecError.builder("group \(keys.joined(separator: ", ")) needs an aggregate in select: 'count(*)'")
         }
         if aggregate {
-            let clash = near != nil ? "near" : match != nil ? "match" : !lookups.isEmpty ? "lookup" : count ? "count" : nil
+            // Ungrouped, `order`, `limit` and `offset` pick the rows folded; a
+            // lookup hangs off the groups, keyed by a column.
+            let clash = near != nil ? "near" : match != nil ? "match" : count && group == nil ? "count" : nil
             if let clash { throw FenecError.builder("aggregates cannot be combined with \(clash)") }
-            if group == nil, !order.isEmpty || limit != nil || offset > 0 {
-                throw FenecError.builder("aggregates answer one row; group makes a row per value")
-            }
             if group == nil, !requirement.isEmpty {
                 throw FenecError.builder("require counts the rows a query answers, and an aggregate answers one")
             }
@@ -1083,8 +1132,13 @@ public struct Query: Sendable {
             sql += " lookup \(l.collection) on \(side(l.on))"
             if !l.parent.isEmpty { sql += " = \(side(l.parent))" }
             if l.required { sql += " required" }
-            if let project = l.project { sql += " select " + project.joined(separator: ", ") }
+            if let project = l.project {
+                sql += " select " + (try project.map { try Builder.columnText($0, bind) }).joined(separator: ", ")
+            }
             if let w = try whereOf(l.cond, bind) { sql += " where \(w)" }
+            if let keys = l.group {
+                sql += " group " + (try keys.map { try Builder.columnText($0, bind) }).joined(separator: ", ")
+            }
             sql += Query.orderText(l.order)
             if let n = l.limit { sql += " limit " + bind.bind(.int(Int64(n))) }
             if l.offset > 0 { sql += " offset " + bind.bind(.int(Int64(l.offset))) }

@@ -2787,6 +2787,143 @@ impl Step<'_> {
         let test = self.test.get_or_init(|| Filter::new(self.child, f, ctx));
         test.matches(id, ctx)
     }
+
+    /// [`Step::ids`] for a row of a level above that answered groups: its
+    /// key is in its columns, at the places `lookup_plan` found.
+    fn ids_of(&self, row: &[Value], out: &mut Vec<DocId>) {
+        out.clear();
+        match &self.probe {
+            Probe::Tuple(t) => {
+                if let Some(k) = t.prefix_of(row) {
+                    t.ids(self.child, &k, out);
+                }
+            }
+            p => p.ids(self.child, &column(row, self.parent_pos), out),
+        }
+    }
+
+    /// [`Step::any`] for a row of a level above that answered groups. The
+    /// test by reference and out of line: its two callers each held a copy,
+    /// 0.8 KB of the browser module.
+    #[inline(never)]
+    fn any_of(&self, row: &[Value], pred: &mut dyn FnMut(DocId) -> Result<bool>) -> Result<bool> {
+        match &self.probe {
+            Probe::Tuple(t) => match t.prefix_of(row) {
+                Some(k) => t.any(self.child, &k, pred),
+                None => Ok(false),
+            },
+            p => p.any(self.child, &column(row, self.parent_pos), pred),
+        }
+    }
+
+    /// How `explain` says the children were reached.
+    fn probed(&self) -> String {
+        match &self.probe {
+            Probe::Id => "the id probed".to_string(),
+            Probe::Hash(..) => "the hash index probed".to_string(),
+            Probe::Tuple(t) => format!(
+                "the index on ({}) {}",
+                t.comp.keys_text(),
+                match t.walk {
+                    Some((false, _)) => "walked",
+                    Some((true, _)) => "walked backwards",
+                    None => "probed",
+                }
+            ),
+        }
+    }
+}
+
+/// The value at `at` of a group's row, a null where there is none.
+fn column(row: &[Value], at: Option<usize>) -> Value {
+    at.and_then(|i| row.get(i)).cloned().unwrap_or(Value::Null)
+}
+
+/// What a level reads its key from in the level above: a field of its
+/// documents, or -- where that level answered groups, a `get` or a level
+/// whose list aggregates -- a column of its rows.
+#[derive(Clone, Copy)]
+enum Above<'a> {
+    Docs(&'a Collection),
+    Rows(&'a Collection, &'a [Column]),
+}
+
+impl<'a> Above<'a> {
+    fn collection(&self) -> &'a Collection {
+        match self {
+            Above::Docs(c) | Above::Rows(c, _) => c,
+        }
+    }
+
+    /// Where `name` is read -- a field's position (`None` for `id`), or a
+    /// column's place in a group's row -- and the type the child's key is
+    /// held to. A column holds a field's values where it is the field, a
+    /// group key's `bucket` of it, or its `min`, `max`, `first` or `last`;
+    /// any other is refused, since what a sum or a count holds has no type
+    /// before it is worked out, and a key's types are matched before a
+    /// row is read ([`check_key_types`]).
+    fn key(&self, name: &str) -> Result<(Option<usize>, DataType)> {
+        let (c, list) = match self {
+            Above::Docs(c) if name == "id" => return Ok((None, DataType::Int)),
+            Above::Docs(c) => {
+                let p = (c.schema.field_pos(name))
+                    .ok_or_else(|| Error::NotFound(format!("field `{name}`")))?;
+                return Ok((Some(p), c.schema.fields[p].ty.clone()));
+            }
+            Above::Rows(c, list) => (c, list),
+        };
+        let at = (list.iter().position(|col| col.name == name))
+            .ok_or_else(|| Error::NotFound(format!("column `{name}`")))?;
+        let e = match &list[at].expr {
+            Expr::Call(b, a) if b == "bucket" && !a.is_empty() => &a[0],
+            e => e,
+        };
+        let ty = match carried_field(e) {
+            Some("id") => Some(DataType::Int),
+            Some(f) => c.schema.field(f).map(|f| f.ty.clone()),
+            None => None,
+        };
+        match ty {
+            Some(t) => Ok((Some(at), t)),
+            None => Err(Error::Query(format!(
+                "`lookup` reads its key from `{name}`, a column of the groups above that holds \
+                 no field's values: key it by a group key, or a `min`, `max`, `first` or `last` \
+                 of a field"
+            ))),
+        }
+    }
+}
+
+/// The rows a level hangs its children from: the documents of the level
+/// above, or -- where that level answered groups -- its rows, each key read
+/// from their columns.
+#[derive(Clone, Copy)]
+enum Parents<'r> {
+    Ids(&'r [DocId]),
+    Rows(&'r [Row]),
+}
+
+/// One of [`Parents`].
+#[derive(Clone, Copy)]
+enum Parent<'r> {
+    Doc(DocId),
+    Row(&'r [Value]),
+}
+
+impl<'r> Parents<'r> {
+    fn len(&self) -> usize {
+        match self {
+            Parents::Ids(ids) => ids.len(),
+            Parents::Rows(rows) => rows.len(),
+        }
+    }
+
+    fn at(&self, i: usize) -> Parent<'r> {
+        match self {
+            Parents::Ids(ids) => Parent::Doc(ids[i]),
+            Parents::Rows(rows) => Parent::Row(&rows[i].values),
+        }
+    }
 }
 
 /// Whether a row at `depth` survives -- it passes that level's `where`, and
@@ -2806,7 +2943,10 @@ fn survives(steps: &[Step], depth: usize, id: DocId, ctx: &EvalCtx) -> Result<bo
     if !steps[depth].passes(id, ctx)? {
         return Ok(false);
     }
-    let Some(next) = steps.get(depth + 1).filter(|n| n.l.required) else {
+    // A level that folds hangs the level below off its groups, which a
+    // `required` there sifts (`fold_level`), not off its children.
+    let Some(next) = (steps.get(depth + 1)).filter(|n| n.l.required && !steps[depth].l.folds())
+    else {
         return Ok(true);
     };
     next.any(id, |g| survives(steps, depth + 1, g, ctx))
@@ -2882,8 +3022,9 @@ impl<'a> Tuple<'a> {
     /// scan per parent would be another feature under the same name.
     fn resolve(
         child: &'a Collection,
-        parent: &Collection,
+        above: Above,
         l: &Lookup,
+        order: &[Sort],
         walk_only: bool,
     ) -> Result<Option<Tuple<'a>>> {
         let n = l.on.len();
@@ -2912,7 +3053,7 @@ impl<'a> Tuple<'a> {
             if !leads(comp) {
                 continue;
             }
-            let walk = walks(comp, n, 0, &l.order, &child.schema);
+            let walk = walks(comp, n, 0, order, &child.schema);
             if (!walk_only || walk.is_some())
                 && best.is_none_or(|b| b.1.is_none() && walk.is_some())
             {
@@ -2946,17 +3087,8 @@ impl<'a> Tuple<'a> {
             let Some(p) = l.on.iter().position(|c| c == k).map(|i| &l.parent[i]) else {
                 continue;
             };
-            let pos = match p.as_str() {
-                "id" => None,
-                _ => Some(
-                    parent
-                        .schema
-                        .field_pos(p)
-                        .ok_or_else(|| Error::NotFound(format!("field `{p}`")))?,
-                ),
-            };
+            let (pos, pty) = above.key(p)?;
             let ty = child.schema.part_type(k)?;
-            let pty = pos.map_or(DataType::Int, |q| parent.schema.fields[q].ty.clone());
             check_key_types(&pty, &ty, p, &l.collection, k)?;
             parts.push((pos, ty));
             child_pos.push(child.schema.field_pos(k).unwrap_or(0));
@@ -2986,6 +3118,16 @@ impl<'a> Tuple<'a> {
             vals.push(v.coerce(ty).unwrap_or(Value::Null));
         }
         Ok(self.laid(&vals))
+    }
+
+    /// [`Tuple::prefix`] for a row of a level above that answered groups:
+    /// its key's values are in its columns.
+    fn prefix_of(&self, row: &[Value]) -> Option<crate::composite::KeyBytes> {
+        let mut vals = Vec::with_capacity(self.parts.len());
+        for (pos, ty) in &self.parts {
+            vals.push(column(row, *pos).coerce(ty).unwrap_or(Value::Null));
+        }
+        self.laid(&vals)
     }
 
     /// `vals`, a value a leading part, laid end to end as the index keys
@@ -8970,15 +9112,18 @@ impl Database {
     /// sits. Resolved once per level by both passes.
     fn lookup_plan<'a>(
         &'a self,
-        parent: &Collection,
+        above: Above,
         l: &Lookup,
     ) -> Result<(&'a Collection, Probe<'a>, Option<usize>)> {
         let child = self.collection(&l.collection)?;
+        // A level that groups orders its groups, by its columns, and reads
+        // its children in no order: no walk is its.
+        let order: &[Sort] = if l.group.is_empty() { &l.order } else { &[] };
         let (child_field, parent_field) = match (&l.on[..], &l.parent[..]) {
-            ([one], [above]) => (one, above),
+            ([one], [up]) => (one, up),
             ([], _) => return Err(Error::Query("`lookup` needs `on`".into())),
             _ => {
-                let Some(t) = Tuple::resolve(child, parent, l, false)? else {
+                let Some(t) = Tuple::resolve(child, above, l, order, false)? else {
                     return Err(Error::Query("`lookup` needs an index".into()));
                 };
                 return Ok((child, Probe::Tuple(t), None));
@@ -8994,26 +9139,13 @@ impl Database {
                 .schema
                 .field(child_field)
                 .is_some_and(|f| matches!(f.index, IndexKind::Hash { .. }));
-            if let Some(t) = Tuple::resolve(child, parent, l, hashed)? {
+            if let Some(t) = Tuple::resolve(child, above, l, order, hashed)? {
                 return Ok((child, Probe::Tuple(t), None));
             }
         }
         let probe = Probe::resolve(child, child_field, &l.collection)?;
         // `id` is not a schema field but is the commonest key on both sides.
-        let parent_pos = if parent_field == "id" {
-            None
-        } else {
-            Some(
-                parent
-                    .schema
-                    .field_pos(parent_field)
-                    .ok_or_else(|| Error::NotFound(format!("field `{parent_field}`")))?,
-            )
-        };
-        let parent_ty = match parent_pos {
-            None => DataType::Int,
-            Some(p) => parent.schema.fields[p].ty.clone(),
-        };
+        let (parent_pos, parent_ty) = above.key(parent_field)?;
         check_key_types(
             &parent_ty,
             &probe.key_type(),
@@ -9031,21 +9163,36 @@ impl Database {
     /// collecting pass and the existence check behind `required` walk rows
     /// at every depth. Holding the resolved levels in a slice also turns the
     /// recursion into an index, so nothing below has to re-derive where it is.
-    fn lookup_chain<'a>(&'a self, parent: &'a Collection, l: &'a Lookup) -> Result<Vec<Step<'a>>> {
+    ///
+    /// `list`: the aggregating list of the `get` the chain hangs off, whose
+    /// rows are its groups and keep the first level's key in their columns;
+    /// a level whose list aggregates keeps the next one's so.
+    fn lookup_chain<'a>(
+        &'a self,
+        parent: &'a Collection,
+        l: &'a Lookup,
+        list: Option<&'a [Column]>,
+    ) -> Result<Vec<Step<'a>>> {
         let mut steps: Vec<Step<'a>> = Vec::new();
-        let mut above = parent;
+        let mut above = match list {
+            Some(list) => Above::Rows(parent, list),
+            None => Above::Docs(parent),
+        };
         let mut cur = Some(l);
         while let Some(step) = cur {
             let (child, probe, parent_pos) = self.lookup_plan(above, step)?;
             steps.push(Step {
                 l: step,
-                parent: above,
+                parent: above.collection(),
                 child,
                 probe,
                 parent_pos,
                 test: std::cell::OnceCell::new(),
             });
-            above = child;
+            above = match step.folds() {
+                true => Above::Rows(child, &step.aggregate),
+                false => Above::Docs(child),
+            };
             cur = step.next.as_deref();
         }
         Ok(steps)
@@ -9205,7 +9352,7 @@ impl Database {
         ids: Vec<DocId>,
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
-        let steps = self.lookup_chain(parent, l)?;
+        let steps = self.lookup_chain(parent, l, None)?;
         let child = steps[0].child;
 
         // Two plans answer this question, and every number that decides
@@ -9284,8 +9431,99 @@ impl Database {
         ids: &[DocId],
         ctx: &EvalCtx,
     ) -> Result<Nested> {
-        let steps = self.lookup_chain(parent, l)?;
-        self.run_level(&steps, 0, ids, ctx)
+        let steps = self.lookup_chain(parent, l, None)?;
+        self.run_level(&steps, 0, Parents::Ids(ids), ctx)
+    }
+
+    /// The children of one row of the level above that survive -- the
+    /// level's own `where`, any `required` level below -- and where the
+    /// level orders them (`keys`), the first `want` in that order: walked
+    /// off an index over several fields whose order is the level's, or
+    /// probed and put in order. Unordered, every survivor in id order.
+    #[allow(clippy::too_many_arguments)]
+    fn kept_children(
+        &self,
+        steps: &[Step],
+        depth: usize,
+        parent: Parent,
+        keys: &[OrderKey],
+        want: usize,
+        bucket: &mut Vec<DocId>,
+        ctx: &EvalCtx,
+    ) -> Result<Vec<DocId>> {
+        let step = &steps[depth];
+        let child = step.child;
+        let mut kept: Vec<DocId> = Vec::new();
+        // A key over several fields whose index holds the level's `order`
+        // past its leading parts walks each parent's run in it, as far as
+        // its page: "the latest five lines of each order" reads five.
+        if let Probe::Tuple(
+            t @ Tuple {
+                walk: Some((back, ties)),
+                ..
+            },
+        ) = &step.probe
+        {
+            let prefix = match parent {
+                Parent::Doc(pid) => t.prefix(step.parent, pid)?,
+                Parent::Row(row) => t.prefix_of(row),
+            };
+            if let (true, Some(k)) = (want > 0, prefix) {
+                let mut take = |cid| {
+                    if child.store.contains(cid) && survives(steps, depth, cid, ctx)? {
+                        kept.push(cid);
+                    }
+                    Ok(kept.len() < want)
+                };
+                // Forwards over every part, the run is in the order as it
+                // lies, ties and all; the rest a walk puts in order.
+                match !back && *ties >= t.ix.parts().len() {
+                    true => t.ix.run(&k, &mut take)?,
+                    false => {
+                        t.ix.walk(&[t.span(&k)], t.parts.len(), *back, *ties, &mut take)?
+                    }
+                }
+            }
+            return Ok(kept);
+        }
+        match parent {
+            Parent::Doc(pid) => step.ids(pid, bucket)?,
+            Parent::Row(row) => step.ids_of(row, bucket),
+        }
+        // The child filter is evaluated over the bucket rather than sent
+        // through `matching_ids`. The bucket is already one parent's
+        // children, so a second index lookup would have to be intersected
+        // with it and would almost always cost more than reading the
+        // handful of rows it is narrowing.
+        //
+        // `survives` also drops a child a `required` level below has nothing
+        // for, and it does so here -- before the ordering and before
+        // `offset` and `limit` -- for the reason `required` already runs
+        // there: it decides who is on the page, so cutting afterwards would
+        // answer a request for three with one.
+        for &cid in bucket.iter() {
+            if survives(steps, depth, cid, ctx)? {
+                kept.push(cid);
+            }
+        }
+        if !keys.is_empty() {
+            // Put in order as the parent path is, through `order_ids`, which
+            // reads the keys up front -- comparing through the store would
+            // read every row log(n) times. Its ties go by position, so the
+            // children go in ascending id first: a hash bucket holds them
+            // that way almost always, not always, and a tie has gone to the
+            // lower id. A sort of its own, of `(Vec<Value>, DocId)` rows,
+            // was 8.1 KB of the browser module.
+            //
+            // `lookup` is the one place a bounded `order` is known up front:
+            // the clause carries its own `limit`, so only `offset + limit`
+            // children can ever be emitted and the rest never need an order
+            // at all. Elsewhere `order` has no such guarantee, which is why
+            // the engine sorts in full there.
+            kept.sort_unstable();
+            kept = order_ids(&child.store, &kept, keys, want)?;
+        }
+        Ok(kept)
     }
 
     /// One level of the chain, then the level below it.
@@ -9294,18 +9532,21 @@ impl Database {
     /// are what the next call is given -- concatenated in group order, which
     /// is exactly the alignment `Nested` documents. Only the ids travel: a
     /// level reads its keys out of the store, never out of the projected
-    /// values, so a chain works no matter what the level above selected.
+    /// values, so a chain works no matter what the level above selected --
+    /// but for a level above that answered groups, whose rows are no
+    /// documents and keep the keys in their columns.
     fn run_level(
         &self,
         steps: &[Step],
         depth: usize,
-        ids: &[DocId],
+        parents: Parents,
         ctx: &EvalCtx,
     ) -> Result<Nested> {
-        let Step {
-            l, child, probe, ..
-        } = &steps[depth];
+        let Step { l, child, .. } = &steps[depth];
         let (l, child) = (*l, *child);
+        if l.folds() {
+            return self.fold_level(steps, depth, parents, ctx);
+        }
 
         let columns = projection_columns(&child.schema, &l.project);
         let mut sources = Vec::with_capacity(columns.len());
@@ -9329,78 +9570,12 @@ impl Database {
             l.limit.map_or(usize::MAX, |l| l.at(params)),
             l.offset.at(params),
         );
-        let mut groups = Vec::with_capacity(ids.len());
+        let mut groups = Vec::with_capacity(parents.len());
         let mut bucket: Vec<DocId> = Vec::new();
-
-        // A key over several fields whose index holds the level's `order`
-        // past its leading parts walks each parent's run in it, as far as
-        // its page: "the latest five lines of each order" reads five.
-        let walk = match probe {
-            Probe::Tuple(t) => t.walk.map(|w| (t, w)),
-            _ => None,
-        };
         let want = offset.saturating_add(limit);
-        for &pid in ids {
-            let mut kept: Vec<DocId> = Vec::new();
-            if let Some((t, (back, ties))) = walk {
-                if let (true, Some(k)) = (want > 0, t.prefix(steps[depth].parent, pid)?) {
-                    let mut take = |cid| {
-                        if child.store.contains(cid) && survives(steps, depth, cid, ctx)? {
-                            kept.push(cid);
-                        }
-                        Ok(kept.len() < want)
-                    };
-                    // Forwards over every part, the run is in the order as
-                    // it lies, ties and all; the rest a walk puts in order.
-                    match !back && ties >= t.ix.parts().len() {
-                        true => t.ix.run(&k, &mut take)?,
-                        false => {
-                            t.ix.walk(&[t.span(&k)], t.parts.len(), back, ties, &mut take)?
-                        }
-                    }
-                }
-            } else {
-                steps[depth].ids(pid, &mut bucket)?;
-
-                // The child filter is evaluated over the bucket rather than
-                // sent through `matching_ids`. The bucket is already one
-                // parent's children, so a second index lookup would have to
-                // be intersected with it and would almost always cost more
-                // than reading the handful of rows it is narrowing.
-                //
-                // `survives` also drops a child a `required` level below has
-                // nothing for, and it does so here -- before the ordering
-                // and before `offset` and `limit` -- for the reason
-                // `required` already runs there: it decides who is on the
-                // page, so cutting afterwards would answer a request for
-                // three with one.
-                for &cid in &bucket {
-                    if survives(steps, depth, cid, ctx)? {
-                        kept.push(cid);
-                    }
-                }
-
-                if !keys.is_empty() {
-                    // Put in order as the parent path is, through
-                    // `order_ids`, which reads the keys up front --
-                    // comparing through the store would read every row
-                    // log(n) times. Its ties go by position, so the children
-                    // go in ascending id first: a hash bucket holds them
-                    // that way almost always, not always, and a tie has gone
-                    // to the lower id. A sort of its own, of `(Vec<Value>,
-                    // DocId)` rows, was 8.1 KB of the browser module.
-                    //
-                    // `lookup` is the one place a bounded `order` is known
-                    // up front: the clause carries its own `limit`, so only
-                    // `offset + limit` children can ever be emitted and the
-                    // rest never need an order at all. Elsewhere `order` has
-                    // no such guarantee, which is why the engine sorts in
-                    // full there.
-                    kept.sort_unstable();
-                    kept = order_ids(&child.store, &kept, &keys, want)?;
-                }
-            }
-
+        for i in 0..parents.len() {
+            let kept =
+                self.kept_children(steps, depth, parents.at(i), &keys, want, &mut bucket, ctx)?;
             let mut group = Vec::new();
             for cid in kept.into_iter().skip(offset) {
                 if group.len() >= limit {
@@ -9423,24 +9598,12 @@ impl Database {
         }
 
         plan(|| {
-            let by = match probe {
-                Probe::Id => "the id probed".to_string(),
-                Probe::Hash(..) => "the hash index probed".to_string(),
-                Probe::Tuple(t) => format!(
-                    "the index on ({}) {}",
-                    t.comp.keys_text(),
-                    match t.walk {
-                        Some((false, _)) => "walked",
-                        Some((true, _)) => "walked backwards",
-                        None => "probed",
-                    }
-                ),
-            };
             format!(
-                "lookup: {} on {}, {by} for {} parents, {} children",
+                "lookup: {} on {}, {} for {} parents, {} children",
                 l.collection,
                 l.side(true),
-                ids.len(),
+                steps[depth].probed(),
+                parents.len(),
                 groups.iter().map(Vec::len).sum::<usize>()
             )
         });
@@ -9450,7 +9613,12 @@ impl Database {
             None => None,
             Some(_) => {
                 let below: Vec<DocId> = groups.iter().flatten().map(|r| r.id).collect();
-                Some(Box::new(self.run_level(steps, depth + 1, &below, ctx)?))
+                Some(Box::new(self.run_level(
+                    steps,
+                    depth + 1,
+                    Parents::Ids(&below),
+                    ctx,
+                )?))
             }
         };
 

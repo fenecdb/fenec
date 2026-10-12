@@ -81,12 +81,20 @@ class Computed {
   /// `bucket(field, interval)`: the start of the interval a timestamp falls
   /// in -- `'15m'`, `'1h'`, `'1d'`, `'1w'` (from a Monday), `'1mo'`, `'1y'`,
   /// in UTC -- for a select list or a group. The interval is written into
-  /// the text, since it is a part of the statement's shape.
-  static Computed bucket(String field, String interval) {
+  /// the text, since it is a part of the statement's shape. Given a [zone]
+  /// -- an IANA name, `'Europe/Istanbul'`, or an offset, `'+03:00'` -- by
+  /// its clock: a day from local midnight, 23 or 25 hours where it changes
+  /// to or from daylight time. The zone goes as a parameter.
+  static Computed bucket(String field, String interval, [String? zone]) {
     if (!_interval.hasMatch(interval)) {
       throw _refuse("bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': ${_quote(interval)}");
     }
-    return Computed._(null, 'bucket(${_pathOf(field)}, $interval)', const []);
+    if (zone == null) return Computed._(null, 'bucket(${_pathOf(field)}, $interval)', const []);
+    if (zone.isEmpty) {
+      throw _refuse(
+          "bucket() takes a zone's name, such as 'Europe/Istanbul', or an offset, such as '+03:00': ${_quote(zone)}");
+    }
+    return Computed._(null, 'bucket(${_pathOf(field)}, $interval, ?)', [zone]);
   }
 
   /// `count(distinct field)`: how many distinct values the rows hold.
@@ -461,14 +469,14 @@ class _Key {
 class _Level {
   final String collection;
   final List<String> on, parent;
-  final List<String>? project;
+  final List<Object>? project, group;
   final List<Node> cond;
   final bool required;
   final List<_Key> order;
   final int? limit;
   final int offset;
-  _Level(this.collection, this.on, this.parent, this.project, this.cond, this.required, this.order, this.limit,
-      this.offset);
+  _Level(this.collection, this.on, this.parent, this.project, this.group, this.cond, this.required, this.order,
+      this.limit, this.offset);
 }
 
 /// A `highlight` (no [words]) or a `snippet` in the select list.
@@ -752,10 +760,18 @@ class Query {
   /// and [limit] counts children per parent. [required] drops a parent no
   /// child matches. Called again, it chains onto the collection the call
   /// before named.
+  ///
+  /// [select] may aggregate, as the query's own list does -- `'count(*)'`,
+  /// `'sum(total)'`, a [Computed] -- each parent's children folded, one row
+  /// a parent, or with [group] one a group, ordered and paged a parent at a
+  /// time; ungrouped, [order], [limit] and [offset] pick the children
+  /// folded. A query whose list aggregates hangs a lookup off its groups,
+  /// [parentKey] a column.
   Query lookup(String name,
       {required Object? on,
       Object? parentKey,
-      List<String>? select,
+      List<Object>? select,
+      Object? group,
       Object? where,
       bool required = false,
       List<SortKey> order = const [],
@@ -769,14 +785,33 @@ class Query {
     if ((child.length > 1 || parentKey != null) && parent.length != child.length) {
       throw _refuse('lookup pairs ${child.length} child fields with ${parent.length} parent fields');
     }
+    final cs = select == null || select.contains('*') ? null : select.map(_column).toList();
+    final aggregate = cs?.any((c) => c.$2) ?? false;
+    List<Object>? keys;
+    if (group != null) {
+      final list = group is List ? group.cast<Object>() : [group];
+      if (list.isEmpty) throw _refuse('group takes at least one key');
+      keys = list.map(_groupKey).toList();
+      // The engine refuses it too; failing here never sends a query.
+      if (!aggregate) {
+        final text = keys.map((k) => k is Computed ? k._sql : k as String).join(', ');
+        throw _refuse("group $text needs an aggregate in select: 'count(*)'");
+      }
+    }
+    // A level selects its children's fields, or aggregates of them.
+    if (!aggregate && cs != null && cs.any((c) => c.$1 is Computed)) {
+      throw _refuse("a lookup selects its children's fields, or aggregates of them");
+    }
     final level = _Level(
       _identOf(name, 'collection'),
       child,
       parent,
-      select == null || select.contains('*') ? null : select.map(_pathOf).toList(),
+      cs == null ? null : [for (final c in cs) c.$1],
+      keys,
       where == null ? const [] : [_toNode(where)],
       required,
-      [for (final k in order) _Key(_pathOf(k.field), _direction(k.direction), _collation(k.collate))],
+      // Over groups a key may name an aggregate of the list.
+      [for (final k in order) _Key(_columnName(k.field).$1, _direction(k.direction), _collation(k.collate))],
       limit == null ? null : _whole(limit, 'limit'),
       offset == null ? 0 : _whole(offset, 'offset'),
     );
@@ -820,19 +855,16 @@ class Query {
       throw _refuse("group $keys needs an aggregate in select: 'count(*)'");
     }
     if (_aggregate) {
+      // Ungrouped, order, limit and offset pick the rows folded; a lookup
+      // hangs off the groups, keyed by a column.
       final clash = _near != null
           ? 'near'
           : _match != null
               ? 'match'
-              : _lookups.isNotEmpty
-                  ? 'lookup'
-                  : _count
-                      ? 'count'
-                      : null;
+              : _count && _group == null
+                  ? 'count'
+                  : null;
       if (clash != null) throw _refuse('aggregates cannot be combined with $clash');
-      if (_group == null && (_order.isNotEmpty || _limit != null || _offset > 0)) {
-        throw _refuse('aggregates answer one row; group makes a row per value');
-      }
       if (_group == null && _require.isNotEmpty) {
         throw _refuse('require counts the rows a query answers, and an aggregate answers one');
       }
@@ -938,9 +970,10 @@ class Query {
       sql.write(' lookup ${l.collection} on ${side(l.on)}');
       if (l.parent.isNotEmpty) sql.write(' = ${side(l.parent)}');
       if (l.required) sql.write(' required');
-      if (l.project != null) sql.write(' select ${l.project!.join(', ')}');
+      if (l.project != null) sql.write(' select ${l.project!.map((c) => _columnText(c, bind)).join(', ')}');
       final lw = _whereOf(l.cond, bind);
       if (lw != null) sql.write(' where $lw');
+      if (l.group != null) sql.write(' group ${l.group!.map((k) => _columnText(k, bind)).join(', ')}');
       _orderText(sql, l.order);
       if (l.limit != null) sql.write(' limit ${bind(l.limit)}');
       if (l.offset > 0) sql.write(' offset ${bind(l.offset)}');

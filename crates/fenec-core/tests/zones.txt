@@ -1,0 +1,1192 @@
+# Written by tools/tz/gen.py from zoneinfo: do not edit.
+# offsets <name> <fnv1a-64 of the offsets, in minutes, at 2000-01-01 + k * 11h 13m 7s up to 2045>
+# bucket <zone> <t> then, for 15m 40m 1h 3h 1d 1w 1mo, t minus the start
+offsets Africa/Abidjan 4ee87e35f0f7d785
+offsets Africa/Accra 4ee87e35f0f7d785
+offsets Africa/Addis_Ababa 29c9d982058422c5
+offsets Africa/Algiers 1eca434deffeb5e5
+offsets Africa/Asmara 29c9d982058422c5
+offsets Africa/Asmera 29c9d982058422c5
+offsets Africa/Bamako 4ee87e35f0f7d785
+offsets Africa/Bangui 1eca434deffeb5e5
+offsets Africa/Banjul 4ee87e35f0f7d785
+offsets Africa/Bissau 4ee87e35f0f7d785
+offsets Africa/Blantyre 1d7f76066db8e925
+offsets Africa/Brazzaville 1eca434deffeb5e5
+offsets Africa/Bujumbura 1d7f76066db8e925
+offsets Africa/Cairo 5b1cf09dd294ddb5
+offsets Africa/Casablanca 4ec9d6acaea37729
+offsets Africa/Ceuta 6055d76c3d3c47e1
+offsets Africa/Conakry 4ee87e35f0f7d785
+offsets Africa/Dakar 4ee87e35f0f7d785
+offsets Africa/Dar_es_Salaam 29c9d982058422c5
+offsets Africa/Djibouti 29c9d982058422c5
+offsets Africa/Douala 1eca434deffeb5e5
+offsets Africa/El_Aaiun 4ec9d6acaea37729
+offsets Africa/Freetown 4ee87e35f0f7d785
+offsets Africa/Gaborone 1d7f76066db8e925
+offsets Africa/Harare 1d7f76066db8e925
+offsets Africa/Johannesburg 1d7f76066db8e925
+offsets Africa/Juba 6a2953582cd35315
+offsets Africa/Kampala 29c9d982058422c5
+offsets Africa/Khartoum 5b62b41c79fa7279
+offsets Africa/Kigali 1d7f76066db8e925
+offsets Africa/Kinshasa 1eca434deffeb5e5
+offsets Africa/Lagos 1eca434deffeb5e5
+offsets Africa/Libreville 1eca434deffeb5e5
+offsets Africa/Lome 4ee87e35f0f7d785
+offsets Africa/Luanda 1eca434deffeb5e5
+offsets Africa/Lubumbashi 1d7f76066db8e925
+offsets Africa/Lusaka 1d7f76066db8e925
+offsets Africa/Malabo 1eca434deffeb5e5
+offsets Africa/Maputo 1d7f76066db8e925
+offsets Africa/Maseru 1d7f76066db8e925
+offsets Africa/Mbabane 1d7f76066db8e925
+offsets Africa/Mogadishu 29c9d982058422c5
+offsets Africa/Monrovia 4ee87e35f0f7d785
+offsets Africa/Nairobi 29c9d982058422c5
+offsets Africa/Ndjamena 1eca434deffeb5e5
+offsets Africa/Niamey 1eca434deffeb5e5
+offsets Africa/Nouakchott 4ee87e35f0f7d785
+offsets Africa/Ouagadougou 4ee87e35f0f7d785
+offsets Africa/Porto-Novo 1eca434deffeb5e5
+offsets Africa/Sao_Tome c3d9e96314f099e5
+offsets Africa/Timbuktu 4ee87e35f0f7d785
+offsets Africa/Tripoli 05b0dcce52eecf41
+offsets Africa/Tunis 7f052589b304d8e1
+offsets Africa/Windhoek 7eed23b889820305
+offsets America/Adak 67f22eb4552bb6e5
+offsets America/Anchorage e3f5b50399dc7645
+offsets America/Anguilla 171d32863b0588b5
+offsets America/Antigua 171d32863b0588b5
+offsets America/Araguaina 91da1fa2cd60f9f5
+offsets America/Argentina/Buenos_Aires 012ce55aa2e44471
+offsets America/Argentina/Catamarca 65b401d59de38989
+offsets America/Argentina/ComodRivadavia 65b401d59de38989
+offsets America/Argentina/Cordoba 012ce55aa2e44471
+offsets America/Argentina/Jujuy 43930a7b2c4ade95
+offsets America/Argentina/La_Rioja 65b401d59de38989
+offsets America/Argentina/Mendoza b9f77caa6f3e5725
+offsets America/Argentina/Rio_Gallegos 65b401d59de38989
+offsets America/Argentina/Salta 43930a7b2c4ade95
+offsets America/Argentina/San_Juan 9e6f1f916ce08195
+offsets America/Argentina/San_Luis 80d099735eb0c11d
+offsets America/Argentina/Tucuman 8b143501861b36b1
+offsets America/Argentina/Ushuaia 1b9bc705b8ade949
+offsets America/Aruba 171d32863b0588b5
+offsets America/Asuncion ef6a66499a42a845
+offsets America/Atikokan c6973d1457a83645
+offsets America/Atka 67f22eb4552bb6e5
+offsets America/Bahia d6618bc4ad3d90d1
+offsets America/Bahia_Banderas 4794042e8a30aa1d
+offsets America/Barbados 171d32863b0588b5
+offsets America/Belem a4600aef16417f55
+offsets America/Belize 34805a91bc577ba5
+offsets America/Blanc-Sablon 171d32863b0588b5
+offsets America/Boa_Vista 78536d13fbbc1a85
+offsets America/Bogota c6973d1457a83645
+offsets America/Boise 10cda7fd3dadc901
+offsets America/Buenos_Aires 012ce55aa2e44471
+offsets America/Cambridge_Bay e61e03d02fdccf81
+offsets America/Campo_Grande cfe0d04471787d99
+offsets America/Cancun e4f7f4041c2efd75
+offsets America/Caracas 1992778af7b37348
+offsets America/Catamarca 65b401d59de38989
+offsets America/Cayenne a4600aef16417f55
+offsets America/Cayman c6973d1457a83645
+offsets America/Chicago 37d6c1670b3db799
+offsets America/Chihuahua c97427154549cb01
+offsets America/Ciudad_Juarez ee3984c20944b0e5
+offsets America/Coral_Harbour c6973d1457a83645
+offsets America/Cordoba 012ce55aa2e44471
+offsets America/Costa_Rica 34805a91bc577ba5
+offsets America/Coyhaique 37cd9191054eaa75
+offsets America/Creston 1d003ec9bfd331e5
+offsets America/Cuiaba 64b09c5383374f85
+offsets America/Curacao 171d32863b0588b5
+offsets America/Danmarkshavn 4ee87e35f0f7d785
+offsets America/Dawson 1f703ada05c2e9b9
+offsets America/Dawson_Creek 1d003ec9bfd331e5
+offsets America/Denver 10cda7fd3dadc901
+offsets America/Detroit f7b64495dc4f66e6
+offsets America/Dominica 171d32863b0588b5
+offsets America/Edmonton 7d7e4e3fc02f2ec1
+offsets America/Eirunepe e159f9a72d4bc835
+offsets America/El_Salvador 34805a91bc577ba5
+offsets America/Ensenada 6fb26472d3c14659
+offsets America/Fort_Nelson d4f389c78b412f15
+offsets America/Fort_Wayne 5a46b0c0398a67ce
+offsets America/Fortaleza 7d93484fe6b51ad5
+offsets America/Glace_Bay bcf436b4a1f48219
+offsets America/Godthab c93d88198755abfd
+offsets America/Goose_Bay d34d6a732dd217d9
+offsets America/Grand_Turk 8fe33274caa1fc4e
+offsets America/Grenada 171d32863b0588b5
+offsets America/Guadeloupe 171d32863b0588b5
+offsets America/Guatemala 633e2059e8527539
+offsets America/Guayaquil c6973d1457a83645
+offsets America/Guyana 171d32863b0588b5
+offsets America/Halifax bcf436b4a1f48219
+offsets America/Havana 3ae1a29a2453edb6
+offsets America/Hermosillo 1d003ec9bfd331e5
+offsets America/Indiana/Indianapolis 5a46b0c0398a67ce
+offsets America/Indiana/Knox 7898f41bcf158d99
+offsets America/Indiana/Marengo 5a46b0c0398a67ce
+offsets America/Indiana/Petersburg ab010c409657deb2
+offsets America/Indiana/Tell_City 7898f41bcf158d99
+offsets America/Indiana/Vevay 5a46b0c0398a67ce
+offsets America/Indiana/Vincennes ab010c409657deb2
+offsets America/Indiana/Winamac 8a4674eb81114031
+offsets America/Indianapolis 5a46b0c0398a67ce
+offsets America/Inuvik 10cda7fd3dadc901
+offsets America/Iqaluit 3ea9dd9cbfac2dfd
+offsets America/Jamaica c6973d1457a83645
+offsets America/Jujuy 43930a7b2c4ade95
+offsets America/Juneau e3f5b50399dc7645
+offsets America/Kentucky/Louisville f7b64495dc4f66e6
+offsets America/Kentucky/Monticello 3ea9dd9cbfac2dfd
+offsets America/Knox_IN 7898f41bcf158d99
+offsets America/Kralendijk 171d32863b0588b5
+offsets America/La_Paz 171d32863b0588b5
+offsets America/Lima c6973d1457a83645
+offsets America/Los_Angeles 7940d9903f7f3e79
+offsets America/Louisville f7b64495dc4f66e6
+offsets America/Lower_Princes 171d32863b0588b5
+offsets America/Maceio 7d93484fe6b51ad5
+offsets America/Managua 21833b5ed7ab7255
+offsets America/Manaus 171d32863b0588b5
+offsets America/Marigot 171d32863b0588b5
+offsets America/Martinique 171d32863b0588b5
+offsets America/Matamoros 43b3f0aa7bf4c7a9
+offsets America/Mazatlan 252a8491766c7825
+offsets America/Mendoza b9f77caa6f3e5725
+offsets America/Menominee 37d6c1670b3db799
+offsets America/Merida e4d35a6bd73f8c45
+offsets America/Metlakatla a26e5927991e8cc5
+offsets America/Mexico_City e4d35a6bd73f8c45
+offsets America/Miquelon 934bfb904bbff895
+offsets America/Moncton d63aa690fb97df25
+offsets America/Monterrey e4d35a6bd73f8c45
+offsets America/Montevideo 98ad6c9cd2b7f731
+offsets America/Montreal f7b64495dc4f66e6
+offsets America/Montserrat 171d32863b0588b5
+offsets America/Nassau f7b64495dc4f66e6
+offsets America/New_York f7b64495dc4f66e6
+offsets America/Nipigon f7b64495dc4f66e6
+offsets America/Nome e3f5b50399dc7645
+offsets America/Noronha 3aed9b50dce64f09
+offsets America/North_Dakota/Beulah fdae3943bff47eb9
+offsets America/North_Dakota/Center 37d6c1670b3db799
+offsets America/North_Dakota/New_Salem 85f6884461f6d681
+offsets America/Nuuk c93d88198755abfd
+offsets America/Ojinaga fd77d2e5441d3631
+offsets America/Panama c6973d1457a83645
+offsets America/Pangnirtung 3ea9dd9cbfac2dfd
+offsets America/Paramaribo a4600aef16417f55
+offsets America/Phoenix 1d003ec9bfd331e5
+offsets America/Port-au-Prince b144d1413bc6d185
+offsets America/Port_of_Spain 171d32863b0588b5
+offsets America/Porto_Acre e159f9a72d4bc835
+offsets America/Porto_Velho 171d32863b0588b5
+offsets America/Puerto_Rico 171d32863b0588b5
+offsets America/Punta_Arenas cc193c378c863d95
+offsets America/Rainy_River 37d6c1670b3db799
+offsets America/Rankin_Inlet 81d7af9d1113b149
+offsets America/Recife a564a6ad4c6ca191
+offsets America/Regina 34805a91bc577ba5
+offsets America/Resolute e264844f8851e2e5
+offsets America/Rio_Branco e159f9a72d4bc835
+offsets America/Rosario 012ce55aa2e44471
+offsets America/Santa_Isabel 6fb26472d3c14659
+offsets America/Santarem 300955e48dd5a945
+offsets America/Santiago 185272bf942df299
+offsets America/Santo_Domingo 74db2138785bfb0e
+offsets America/Sao_Paulo 46682fb471f3e291
+offsets America/Scoresbysund 74d3e356f417ffe1
+offsets America/Shiprock 10cda7fd3dadc901
+offsets America/Sitka e3f5b50399dc7645
+offsets America/St_Barthelemy 171d32863b0588b5
+offsets America/St_Johns 166b84197d6fbd15
+offsets America/St_Kitts 171d32863b0588b5
+offsets America/St_Lucia 171d32863b0588b5
+offsets America/St_Thomas 171d32863b0588b5
+offsets America/St_Vincent 171d32863b0588b5
+offsets America/Swift_Current 34805a91bc577ba5
+offsets America/Tegucigalpa 2b89f0eaeda2be49
+offsets America/Thule bcf436b4a1f48219
+offsets America/Thunder_Bay f7b64495dc4f66e6
+offsets America/Tijuana 6fb26472d3c14659
+offsets America/Toronto f7b64495dc4f66e6
+offsets America/Tortola 171d32863b0588b5
+offsets America/Vancouver dbd1523148b2c5e9
+offsets America/Virgin 171d32863b0588b5
+offsets America/Whitehorse 1f703ada05c2e9b9
+offsets America/Winnipeg 37d6c1670b3db799
+offsets America/Yakutat e3f5b50399dc7645
+offsets America/Yellowknife 7d7e4e3fc02f2ec1
+offsets Antarctica/Casey 95b44c5ad38b7efd
+offsets Antarctica/Davis 45b30f6b1de1ca4d
+offsets Antarctica/DumontDUrville 5fb94f43bf62aa65
+offsets Antarctica/Macquarie 81f5669dcec4f6a9
+offsets Antarctica/Mawson a68215a6c951dec9
+offsets Antarctica/McMurdo a0b0e4e247afb4f5
+offsets Antarctica/Palmer cc193c378c863d95
+offsets Antarctica/Rothera a4600aef16417f55
+offsets Antarctica/South_Pole a0b0e4e247afb4f5
+offsets Antarctica/Syowa 29c9d982058422c5
+offsets Antarctica/Troll 60fbd7a9827a9f35
+offsets Antarctica/Vostok bb0fc5bffe0b54cd
+offsets Arctic/Longyearbyen 6055d76c3d3c47e1
+offsets Asia/Aden 29c9d982058422c5
+offsets Asia/Almaty 776aeee1bcc4df0d
+offsets Asia/Amman fe1f5d07fb27f239
+offsets Asia/Anadyr b983ed4ff2a16b95
+offsets Asia/Aqtau f4b59d6150b6b386
+offsets Asia/Aqtobe e6c493fefe32ac81
+offsets Asia/Ashgabat d2bcaf3856caf685
+offsets Asia/Ashkhabad d2bcaf3856caf685
+offsets Asia/Atyrau f4b59d6150b6b386
+offsets Asia/Baghdad 67fe5592d23dcc85
+offsets Asia/Bahrain 29c9d982058422c5
+offsets Asia/Baku 01a831b798c509f6
+offsets Asia/Bangkok 8be57b0dac57f405
+offsets Asia/Barnaul 35681eda06447eb9
+offsets Asia/Beirut ae7e57abfe5cfb69
+offsets Asia/Bishkek bdd0dde28ec71b69
+offsets Asia/Brunei 511dd78b52aa1375
+offsets Asia/Calcutta 2988531b392bf32d
+offsets Asia/Chita f773a30040fdc7f1
+offsets Asia/Choibalsan e5560859eb3edfb8
+offsets Asia/Chongqing 511dd78b52aa1375
+offsets Asia/Chungking 511dd78b52aa1375
+offsets Asia/Colombo c7dbb17074eca3cd
+offsets Asia/Dacca b64220709bab1ef9
+offsets Asia/Damascus 7677d9db80baf119
+offsets Asia/Dhaka b64220709bab1ef9
+offsets Asia/Dili 41a77450b041c7b5
+offsets Asia/Dubai 2afd5a39383dad85
+offsets Asia/Dushanbe d2bcaf3856caf685
+offsets Asia/Famagusta 2562a944645ae919
+offsets Asia/Gaza b22c553dac4d42e5
+offsets Asia/Harbin 511dd78b52aa1375
+offsets Asia/Hebron a85cdf53aefd2e55
+offsets Asia/Ho_Chi_Minh 8be57b0dac57f405
+offsets Asia/Hong_Kong 511dd78b52aa1375
+offsets Asia/Hovd d1d30ca4d3b39721
+offsets Asia/Irkutsk 21c8e9fb2eb52555
+offsets Asia/Istanbul 6a78c3a10364fdd5
+offsets Asia/Jakarta 8be57b0dac57f405
+offsets Asia/Jayapura e0a63021a31edd25
+offsets Asia/Jerusalem 0a0cca65d537e889
+offsets Asia/Kabul 84a54449d762fdad
+offsets Asia/Kamchatka b983ed4ff2a16b95
+offsets Asia/Karachi 62a3f632af3ad835
+offsets Asia/Kashgar 3e597e562c02d475
+offsets Asia/Kathmandu f5fdc2e0efae74fd
+offsets Asia/Katmandu f5fdc2e0efae74fd
+offsets Asia/Khandyga 37c41596218ce169
+offsets Asia/Kolkata 2988531b392bf32d
+offsets Asia/Krasnoyarsk 013e3be2746acf19
+offsets Asia/Kuala_Lumpur 511dd78b52aa1375
+offsets Asia/Kuching 511dd78b52aa1375
+offsets Asia/Kuwait 29c9d982058422c5
+offsets Asia/Macao 511dd78b52aa1375
+offsets Asia/Macau 511dd78b52aa1375
+offsets Asia/Magadan 97b5e1f20e852441
+offsets Asia/Makassar 511dd78b52aa1375
+offsets Asia/Manila 511dd78b52aa1375
+offsets Asia/Muscat 2afd5a39383dad85
+offsets Asia/Nicosia 3a77b13e0c330449
+offsets Asia/Novokuznetsk 9a0d03d1742dfb55
+offsets Asia/Novosibirsk f613a2767bf6a0ad
+offsets Asia/Omsk 5e6d7120f4d51aa1
+offsets Asia/Oral f4b59d6150b6b386
+offsets Asia/Phnom_Penh 8be57b0dac57f405
+offsets Asia/Pontianak 8be57b0dac57f405
+offsets Asia/Pyongyang 8285728aac8c9046
+offsets Asia/Qatar 29c9d982058422c5
+offsets Asia/Qostanay 3fcb915e8038e945
+offsets Asia/Qyzylorda e667959a70fcb3bd
+offsets Asia/Rangoon 5e34d45e4e4eef0d
+offsets Asia/Riyadh 29c9d982058422c5
+offsets Asia/Saigon 8be57b0dac57f405
+offsets Asia/Sakhalin 76238f2f59e3b689
+offsets Asia/Samarkand d2bcaf3856caf685
+offsets Asia/Seoul e0a63021a31edd25
+offsets Asia/Shanghai 511dd78b52aa1375
+offsets Asia/Singapore 511dd78b52aa1375
+offsets Asia/Srednekolymsk 72e13b02c29ee741
+offsets Asia/Taipei 511dd78b52aa1375
+offsets Asia/Tashkent d2bcaf3856caf685
+offsets Asia/Tbilisi e94f611129516732
+offsets Asia/Tehran f009ebd2d63a7136
+offsets Asia/Tel_Aviv 0a0cca65d537e889
+offsets Asia/Thimbu 3e597e562c02d475
+offsets Asia/Thimphu 3e597e562c02d475
+offsets Asia/Tokyo e0a63021a31edd25
+offsets Asia/Tomsk 7af46f56deb8cef9
+offsets Asia/Ujung_Pandang 511dd78b52aa1375
+offsets Asia/Ulaanbaatar e5560859eb3edfb8
+offsets Asia/Ulan_Bator e5560859eb3edfb8
+offsets Asia/Urumqi 3e597e562c02d475
+offsets Asia/Ust-Nera c0d606639ba94a45
+offsets Asia/Vientiane 8be57b0dac57f405
+offsets Asia/Vladivostok 5881c5e888d2b8e9
+offsets Asia/Yakutsk c70d2c552e6149c1
+offsets Asia/Yangon 5e34d45e4e4eef0d
+offsets Asia/Yekaterinburg 26ea4e6669a7a601
+offsets Asia/Yerevan 05d668ebbda85b46
+offsets Atlantic/Azores 2c90d04bc461af24
+offsets Atlantic/Bermuda bcf436b4a1f48219
+offsets Atlantic/Canary 03bf1ee60a0e3b19
+offsets Atlantic/Cape_Verde 3d23a873de2ab8d5
+offsets Atlantic/Faeroe 03bf1ee60a0e3b19
+offsets Atlantic/Faroe 03bf1ee60a0e3b19
+offsets Atlantic/Jan_Mayen 6055d76c3d3c47e1
+offsets Atlantic/Madeira 03bf1ee60a0e3b19
+offsets Atlantic/Reykjavik 4ee87e35f0f7d785
+offsets Atlantic/South_Georgia 60f845701fa35995
+offsets Atlantic/St_Helena 4ee87e35f0f7d785
+offsets Atlantic/Stanley 8a411ce7fad03149
+offsets Australia/ACT d1a98a95500a2125
+offsets Australia/Adelaide 500f6d1ab3541c45
+offsets Australia/Brisbane 5fb94f43bf62aa65
+offsets Australia/Broken_Hill 500f6d1ab3541c45
+offsets Australia/Canberra d1a98a95500a2125
+offsets Australia/Currie 638fed93e27314a5
+offsets Australia/Darwin 02b62a7d32f8dfa5
+offsets Australia/Eucla a8e178390ea1c28d
+offsets Australia/Hobart 638fed93e27314a5
+offsets Australia/LHI 11dac0f42e6b1345
+offsets Australia/Lindeman 5fb94f43bf62aa65
+offsets Australia/Lord_Howe 11dac0f42e6b1345
+offsets Australia/Melbourne d1a98a95500a2125
+offsets Australia/NSW d1a98a95500a2125
+offsets Australia/North 02b62a7d32f8dfa5
+offsets Australia/Perth 3b1a44138d09b84d
+offsets Australia/Queensland 5fb94f43bf62aa65
+offsets Australia/South 500f6d1ab3541c45
+offsets Australia/Sydney d1a98a95500a2125
+offsets Australia/Tasmania 638fed93e27314a5
+offsets Australia/Victoria d1a98a95500a2125
+offsets Australia/West 3b1a44138d09b84d
+offsets Australia/Yancowinna 500f6d1ab3541c45
+offsets Brazil/Acre e159f9a72d4bc835
+offsets Brazil/DeNoronha 3aed9b50dce64f09
+offsets Brazil/East 46682fb471f3e291
+offsets Brazil/West 171d32863b0588b5
+offsets CET 6055d76c3d3c47e1
+offsets CST6CDT 37d6c1670b3db799
+offsets Canada/Atlantic bcf436b4a1f48219
+offsets Canada/Central 37d6c1670b3db799
+offsets Canada/Eastern f7b64495dc4f66e6
+offsets Canada/Mountain 7d7e4e3fc02f2ec1
+offsets Canada/Newfoundland 166b84197d6fbd15
+offsets Canada/Pacific dbd1523148b2c5e9
+offsets Canada/Saskatchewan 34805a91bc577ba5
+offsets Canada/Yukon 1f703ada05c2e9b9
+offsets Chile/Continental 185272bf942df299
+offsets Chile/EasterIsland 27d3daa19e0e7cf9
+offsets Cuba 3ae1a29a2453edb6
+offsets EET 3a77b13e0c330449
+offsets EST c6973d1457a83645
+offsets EST5EDT f7b64495dc4f66e6
+offsets Egypt 5b1cf09dd294ddb5
+offsets Eire 03bf1ee60a0e3b19
+offsets Etc/GMT 4ee87e35f0f7d785
+offsets Etc/GMT+0 4ee87e35f0f7d785
+offsets Etc/GMT+1 3d23a873de2ab8d5
+offsets Etc/GMT+10 92f0d1509236f475
+offsets Etc/GMT+11 5d09af8adc4c1085
+offsets Etc/GMT+12 21f7ca4f0b588d55
+offsets Etc/GMT+2 60f845701fa35995
+offsets Etc/GMT+3 a4600aef16417f55
+offsets Etc/GMT+4 171d32863b0588b5
+offsets Etc/GMT+5 c6973d1457a83645
+offsets Etc/GMT+6 34805a91bc577ba5
+offsets Etc/GMT+7 1d003ec9bfd331e5
+offsets Etc/GMT+8 6f50f1535a3c4185
+offsets Etc/GMT+9 e3d674fa28149a05
+offsets Etc/GMT-0 4ee87e35f0f7d785
+offsets Etc/GMT-1 1eca434deffeb5e5
+offsets Etc/GMT-10 5fb94f43bf62aa65
+offsets Etc/GMT-11 4214ac6b172ad2a5
+offsets Etc/GMT-12 ef33c3ef29064be5
+offsets Etc/GMT-13 92ce7a33714b7595
+offsets Etc/GMT-14 6c7671bdc9e82ed5
+offsets Etc/GMT-2 1d7f76066db8e925
+offsets Etc/GMT-3 29c9d982058422c5
+offsets Etc/GMT-4 2afd5a39383dad85
+offsets Etc/GMT-5 d2bcaf3856caf685
+offsets Etc/GMT-6 3e597e562c02d475
+offsets Etc/GMT-7 8be57b0dac57f405
+offsets Etc/GMT-8 511dd78b52aa1375
+offsets Etc/GMT-9 e0a63021a31edd25
+offsets Etc/GMT0 4ee87e35f0f7d785
+offsets Etc/Greenwich 4ee87e35f0f7d785
+offsets Etc/UCT 4ee87e35f0f7d785
+offsets Etc/UTC 4ee87e35f0f7d785
+offsets Etc/Universal 4ee87e35f0f7d785
+offsets Etc/Zulu 4ee87e35f0f7d785
+offsets Europe/Amsterdam 6055d76c3d3c47e1
+offsets Europe/Andorra 6055d76c3d3c47e1
+offsets Europe/Astrakhan 51fe3727af838465
+offsets Europe/Athens 3a77b13e0c330449
+offsets Europe/Belfast 03bf1ee60a0e3b19
+offsets Europe/Belgrade 6055d76c3d3c47e1
+offsets Europe/Berlin 6055d76c3d3c47e1
+offsets Europe/Bratislava 6055d76c3d3c47e1
+offsets Europe/Brussels 6055d76c3d3c47e1
+offsets Europe/Bucharest 3a77b13e0c330449
+offsets Europe/Budapest 6055d76c3d3c47e1
+offsets Europe/Busingen 6055d76c3d3c47e1
+offsets Europe/Chisinau fc37710d1fa891c9
+offsets Europe/Copenhagen 6055d76c3d3c47e1
+offsets Europe/Dublin 03bf1ee60a0e3b19
+offsets Europe/Gibraltar 6055d76c3d3c47e1
+offsets Europe/Guernsey 03bf1ee60a0e3b19
+offsets Europe/Helsinki 3a77b13e0c330449
+offsets Europe/Isle_of_Man 03bf1ee60a0e3b19
+offsets Europe/Istanbul 6a78c3a10364fdd5
+offsets Europe/Jersey 03bf1ee60a0e3b19
+offsets Europe/Kaliningrad f7b874c823a1ff69
+offsets Europe/Kiev 3a77b13e0c330449
+offsets Europe/Kirov 8bca086367d31045
+offsets Europe/Kyiv 3a77b13e0c330449
+offsets Europe/Lisbon 03bf1ee60a0e3b19
+offsets Europe/Ljubljana 6055d76c3d3c47e1
+offsets Europe/London 03bf1ee60a0e3b19
+offsets Europe/Luxembourg 6055d76c3d3c47e1
+offsets Europe/Madrid 6055d76c3d3c47e1
+offsets Europe/Malta 6055d76c3d3c47e1
+offsets Europe/Mariehamn 3a77b13e0c330449
+offsets Europe/Minsk 78c737da826d4ff9
+offsets Europe/Monaco 6055d76c3d3c47e1
+offsets Europe/Moscow 8bca086367d31045
+offsets Europe/Nicosia 3a77b13e0c330449
+offsets Europe/Oslo 6055d76c3d3c47e1
+offsets Europe/Paris 6055d76c3d3c47e1
+offsets Europe/Podgorica 6055d76c3d3c47e1
+offsets Europe/Prague 6055d76c3d3c47e1
+offsets Europe/Riga b52fbe6b883e51c5
+offsets Europe/Rome 6055d76c3d3c47e1
+offsets Europe/Samara fd5de1bed78d2142
+offsets Europe/San_Marino 6055d76c3d3c47e1
+offsets Europe/Sarajevo 6055d76c3d3c47e1
+offsets Europe/Saratov 89c97679fb28cc25
+offsets Europe/Simferopol 28b8db15602c0e0d
+offsets Europe/Skopje 6055d76c3d3c47e1
+offsets Europe/Sofia 3a77b13e0c330449
+offsets Europe/Stockholm 6055d76c3d3c47e1
+offsets Europe/Tallinn bee0752953278845
+offsets Europe/Tirane 6055d76c3d3c47e1
+offsets Europe/Tiraspol fc37710d1fa891c9
+offsets Europe/Ulyanovsk 51fe3727af838465
+offsets Europe/Uzhgorod 3a77b13e0c330449
+offsets Europe/Vaduz 6055d76c3d3c47e1
+offsets Europe/Vatican 6055d76c3d3c47e1
+offsets Europe/Vienna 6055d76c3d3c47e1
+offsets Europe/Vilnius 317a25e8d050f259
+offsets Europe/Volgograd 27be538d0c4d0b05
+offsets Europe/Warsaw 6055d76c3d3c47e1
+offsets Europe/Zagreb 6055d76c3d3c47e1
+offsets Europe/Zaporozhye 3a77b13e0c330449
+offsets Europe/Zurich 6055d76c3d3c47e1
+offsets GB 03bf1ee60a0e3b19
+offsets GB-Eire 03bf1ee60a0e3b19
+offsets GMT 4ee87e35f0f7d785
+offsets GMT+0 4ee87e35f0f7d785
+offsets GMT-0 4ee87e35f0f7d785
+offsets GMT0 4ee87e35f0f7d785
+offsets Greenwich 4ee87e35f0f7d785
+offsets HST 92f0d1509236f475
+offsets Hongkong 511dd78b52aa1375
+offsets Iceland 4ee87e35f0f7d785
+offsets Indian/Antananarivo 29c9d982058422c5
+offsets Indian/Chagos 3e597e562c02d475
+offsets Indian/Christmas 8be57b0dac57f405
+offsets Indian/Cocos 5e34d45e4e4eef0d
+offsets Indian/Comoro 29c9d982058422c5
+offsets Indian/Kerguelen d2bcaf3856caf685
+offsets Indian/Mahe 2afd5a39383dad85
+offsets Indian/Maldives d2bcaf3856caf685
+offsets Indian/Mauritius 5740218e12d11ad6
+offsets Indian/Mayotte 29c9d982058422c5
+offsets Indian/Reunion 2afd5a39383dad85
+offsets Iran f009ebd2d63a7136
+offsets Israel 0a0cca65d537e889
+offsets Jamaica c6973d1457a83645
+offsets Japan e0a63021a31edd25
+offsets Kwajalein ef33c3ef29064be5
+offsets Libya 05b0dcce52eecf41
+offsets MET 6055d76c3d3c47e1
+offsets MST 1d003ec9bfd331e5
+offsets MST7MDT 10cda7fd3dadc901
+offsets Mexico/BajaNorte 6fb26472d3c14659
+offsets Mexico/BajaSur 252a8491766c7825
+offsets Mexico/General e4d35a6bd73f8c45
+offsets NZ a0b0e4e247afb4f5
+offsets NZ-CHAT 01b58cb96d77f751
+offsets Navajo 10cda7fd3dadc901
+offsets PRC 511dd78b52aa1375
+offsets PST8PDT 7940d9903f7f3e79
+offsets Pacific/Apia 701d9482d3156e81
+offsets Pacific/Auckland a0b0e4e247afb4f5
+offsets Pacific/Bougainville 3d26a375bdcdb6a5
+offsets Pacific/Chatham 01b58cb96d77f751
+offsets Pacific/Chuuk 5fb94f43bf62aa65
+offsets Pacific/Easter 27d3daa19e0e7cf9
+offsets Pacific/Efate 4214ac6b172ad2a5
+offsets Pacific/Enderbury 92ce7a33714b7595
+offsets Pacific/Fakaofo 345df1226bf0bbed
+offsets Pacific/Fiji 99fba06a0d050e05
+offsets Pacific/Funafuti ef33c3ef29064be5
+offsets Pacific/Galapagos 34805a91bc577ba5
+offsets Pacific/Gambier e3d674fa28149a05
+offsets Pacific/Guadalcanal 4214ac6b172ad2a5
+offsets Pacific/Guam 5fb94f43bf62aa65
+offsets Pacific/Honolulu 92f0d1509236f475
+offsets Pacific/Johnston 92f0d1509236f475
+offsets Pacific/Kanton 92ce7a33714b7595
+offsets Pacific/Kiritimati 6c7671bdc9e82ed5
+offsets Pacific/Kosrae 4214ac6b172ad2a5
+offsets Pacific/Kwajalein ef33c3ef29064be5
+offsets Pacific/Majuro ef33c3ef29064be5
+offsets Pacific/Marquesas eacf24b7f34ad87d
+offsets Pacific/Midway 5d09af8adc4c1085
+offsets Pacific/Nauru ef33c3ef29064be5
+offsets Pacific/Niue 5d09af8adc4c1085
+offsets Pacific/Norfolk e26279a80988de27
+offsets Pacific/Noumea 4214ac6b172ad2a5
+offsets Pacific/Pago_Pago 5d09af8adc4c1085
+offsets Pacific/Palau e0a63021a31edd25
+offsets Pacific/Pitcairn 6f50f1535a3c4185
+offsets Pacific/Pohnpei 4214ac6b172ad2a5
+offsets Pacific/Ponape 4214ac6b172ad2a5
+offsets Pacific/Port_Moresby 5fb94f43bf62aa65
+offsets Pacific/Rarotonga 92f0d1509236f475
+offsets Pacific/Saipan 5fb94f43bf62aa65
+offsets Pacific/Samoa 5d09af8adc4c1085
+offsets Pacific/Tahiti 92f0d1509236f475
+offsets Pacific/Tarawa ef33c3ef29064be5
+offsets Pacific/Tongatapu eeba83d209f2ac91
+offsets Pacific/Truk 5fb94f43bf62aa65
+offsets Pacific/Wake ef33c3ef29064be5
+offsets Pacific/Wallis ef33c3ef29064be5
+offsets Pacific/Yap 5fb94f43bf62aa65
+offsets Poland 6055d76c3d3c47e1
+offsets Portugal 03bf1ee60a0e3b19
+offsets ROC 511dd78b52aa1375
+offsets ROK e0a63021a31edd25
+offsets Singapore 511dd78b52aa1375
+offsets Turkey 6a78c3a10364fdd5
+offsets UCT 4ee87e35f0f7d785
+offsets US/Alaska e3f5b50399dc7645
+offsets US/Aleutian 67f22eb4552bb6e5
+offsets US/Arizona 1d003ec9bfd331e5
+offsets US/Central 37d6c1670b3db799
+offsets US/East-Indiana 5a46b0c0398a67ce
+offsets US/Eastern f7b64495dc4f66e6
+offsets US/Hawaii 92f0d1509236f475
+offsets US/Indiana-Starke 7898f41bcf158d99
+offsets US/Michigan f7b64495dc4f66e6
+offsets US/Mountain 10cda7fd3dadc901
+offsets US/Pacific 7940d9903f7f3e79
+offsets US/Samoa 5d09af8adc4c1085
+offsets UTC 4ee87e35f0f7d785
+offsets Universal 4ee87e35f0f7d785
+offsets W-SU 8bca086367d31045
+offsets WET 03bf1ee60a0e3b19
+offsets Zulu 4ee87e35f0f7d785
+bucket Europe/Berlin 954028799999 899999 1199999 3599999 3599999 3599999 521999999 2163599999
+bucket Europe/Berlin 954032399999 899999 2399999 3599999 7199999 7199999 525599999 2167199999
+bucket Europe/Berlin 954032400000 0 0 0 0 7200000 525600000 2167200000
+bucket Europe/Berlin 954034200000 0 600000 1800000 1800000 9000000 527400000 2169000000
+bucket Europe/Berlin 954039600000 0 1200000 0 7200000 14400000 532800000 2174400000
+bucket Europe/Berlin 985478399999 899999 1199999 3599999 3599999 3599999 521999999 2077199999
+bucket Europe/Berlin 985481999999 899999 2399999 3599999 7199999 7199999 525599999 2080799999
+bucket Europe/Berlin 985482000000 0 0 0 0 7200000 525600000 2080800000
+bucket Europe/Berlin 985483800000 0 600000 1800000 1800000 9000000 527400000 2082600000
+bucket Europe/Berlin 985489200000 0 1200000 0 7200000 14400000 532800000 2088000000
+bucket Europe/Berlin 1004227199999 899999 2399999 3599999 7199999 7199999 525599999 2339999999
+bucket Europe/Berlin 1004230799999 899999 1199999 3599999 10799999 10799999 529199999 2343599999
+bucket Europe/Berlin 1004230800000 0 0 0 10800000 10800000 529200000 2343600000
+bucket Europe/Berlin 1004232600000 0 1800000 1800000 12600000 12600000 531000000 2345400000
+bucket Europe/Berlin 1004238000000 0 0 0 3600000 18000000 536400000 2350800000
+bucket Europe/Berlin 1055750465664 65664 65664 65664 3665664 36065664 36065664 1332065664
+bucket Europe/Berlin 1110894261120 861120 261120 2661120 9861120 53061120 139461120 1262661120
+bucket Europe/Berlin 1364687999999 899999 1199999 3599999 3599999 3599999 521999999 2595599999
+bucket Europe/Berlin 1364691599999 899999 2399999 3599999 7199999 7199999 525599999 2599199999
+bucket Europe/Berlin 1364691600000 0 0 0 0 7200000 525600000 2599200000
+bucket Europe/Berlin 1364693400000 0 600000 1800000 1800000 9000000 527400000 2601000000
+bucket Europe/Berlin 1364698800000 0 1200000 0 7200000 14400000 532800000 2606400000
+bucket Europe/Berlin 1436063523891 123891 1923891 1923891 5523891 16323891 534723891 361923891
+bucket Europe/Berlin 1449929533142 733142 1933142 733142 733142 54733142 486733142 1005133142
+bucket Europe/Berlin 1477785599999 899999 2399999 3599999 7199999 7199999 525599999 2512799999
+bucket Europe/Berlin 1477789199999 899999 1199999 3599999 10799999 10799999 529199999 2516399999
+bucket Europe/Berlin 1477789200000 0 0 0 10800000 10800000 529200000 2516400000
+bucket Europe/Berlin 1477791000000 0 1800000 1800000 12600000 12600000 531000000 2518200000
+bucket Europe/Berlin 1477796400000 0 0 0 3600000 18000000 536400000 2523600000
+bucket Europe/Berlin 1509235199999 899999 2399999 3599999 7199999 7199999 525599999 2426399999
+bucket Europe/Berlin 1509238799999 899999 1199999 3599999 10799999 10799999 529199999 2429999999
+bucket Europe/Berlin 1509238800000 0 0 0 10800000 10800000 529200000 2430000000
+bucket Europe/Berlin 1509240600000 0 1800000 1800000 12600000 12600000 531000000 2431800000
+bucket Europe/Berlin 1509246000000 0 0 0 3600000 18000000 536400000 2437200000
+bucket Europe/Berlin 1743292799999 899999 1199999 3599999 3599999 3599999 521999999 2509199999
+bucket Europe/Berlin 1743296399999 899999 2399999 3599999 7199999 7199999 525599999 2512799999
+bucket Europe/Berlin 1743296400000 0 0 0 0 7200000 525600000 2512800000
+bucket Europe/Berlin 1743298200000 0 600000 1800000 1800000 9000000 527400000 2514600000
+bucket Europe/Berlin 1743303600000 0 1200000 0 7200000 14400000 532800000 2520000000
+bucket Europe/Berlin 1774742399999 899999 1199999 3599999 3599999 3599999 521999999 2422799999
+bucket Europe/Berlin 1774745999999 899999 2399999 3599999 7199999 7199999 525599999 2426399999
+bucket Europe/Berlin 1774746000000 0 0 0 0 7200000 525600000 2426400000
+bucket Europe/Berlin 1774747800000 0 600000 1800000 1800000 9000000 527400000 2428200000
+bucket Europe/Berlin 1774753200000 0 1200000 0 7200000 14400000 532800000 2433600000
+bucket Europe/Berlin 1837641599999 899999 1199999 3599999 3599999 3599999 521999999 2163599999
+bucket Europe/Berlin 1837645199999 899999 2399999 3599999 7199999 7199999 525599999 2167199999
+bucket Europe/Berlin 1837645200000 0 0 0 0 7200000 525600000 2167200000
+bucket Europe/Berlin 1837647000000 0 600000 1800000 1800000 9000000 527400000 2169000000
+bucket Europe/Berlin 1837652400000 0 1200000 0 7200000 14400000 532800000 2174400000
+bucket Europe/Berlin 2140041599999 899999 2399999 3599999 7199999 7199999 525599999 2080799999
+bucket Europe/Berlin 2140045199999 899999 1199999 3599999 10799999 10799999 529199999 2084399999
+bucket Europe/Berlin 2140045200000 0 0 0 10800000 10800000 529200000 2084400000
+bucket Europe/Berlin 2140047000000 0 1800000 1800000 12600000 12600000 531000000 2086200000
+bucket Europe/Berlin 2140052400000 0 0 0 3600000 18000000 536400000 2091600000
+bucket Europe/Berlin 2147589069259 69259 669259 1869259 1869259 34269259 207069259 1675869259
+bucket Europe/Berlin 2178830049094 249094 849094 2049094 9249094 84849094 603249094 1380849094
+bucket America/New_York 1035694799999 899999 1199999 3599999 3599999 3599999 521999999 2249999999
+bucket America/New_York 1035698399999 899999 2399999 3599999 7199999 7199999 525599999 2253599999
+bucket America/New_York 1035698400000 0 4800000 0 7200000 7200000 525600000 2253600000
+bucket America/New_York 1035700200000 0 600000 1800000 9000000 9000000 527400000 2255400000
+bucket America/New_York 1035705600000 0 1200000 0 0 14400000 532800000 2260800000
+bucket America/New_York 1067144399999 899999 1199999 3599999 3599999 3599999 521999999 2163599999
+bucket America/New_York 1067147999999 899999 2399999 3599999 7199999 7199999 525599999 2167199999
+bucket America/New_York 1067148000000 0 4800000 0 7200000 7200000 525600000 2167200000
+bucket America/New_York 1067149800000 0 600000 1800000 9000000 9000000 527400000 2169000000
+bucket America/New_York 1067155200000 0 1200000 0 0 14400000 532800000 2174400000
+bucket America/New_York 1081058399999 899999 1199999 3599999 3599999 3599999 521999999 262799999
+bucket America/New_York 1081061999999 899999 2399999 3599999 7199999 7199999 525599999 266399999
+bucket America/New_York 1081062000000 0 0 0 0 7200000 525600000 266400000
+bucket America/New_York 1081063800000 0 600000 1800000 1800000 9000000 527400000 268200000
+bucket America/New_York 1081069200000 0 1200000 0 7200000 14400000 532800000 273600000
+bucket America/New_York 1140365821151 121151 2221151 1021151 8221151 40621151 559021151 1595821151
+bucket America/New_York 1268546399999 899999 1199999 3599999 3599999 3599999 521999999 1126799999
+bucket America/New_York 1268549999999 899999 2399999 3599999 7199999 7199999 525599999 1130399999
+bucket America/New_York 1268550000000 0 0 0 0 7200000 525600000 1130400000
+bucket America/New_York 1268551800000 0 600000 1800000 1800000 9000000 527400000 1132200000
+bucket America/New_York 1268557200000 0 1200000 0 7200000 14400000 532800000 1137600000
+bucket America/New_York 1383454799999 899999 1199999 3599999 3599999 3599999 521999999 176399999
+bucket America/New_York 1383458399999 899999 2399999 3599999 7199999 7199999 525599999 179999999
+bucket America/New_York 1383458400000 0 4800000 0 7200000 7200000 525600000 180000000
+bucket America/New_York 1383460200000 0 600000 1800000 9000000 9000000 527400000 181800000
+bucket America/New_York 1383465600000 0 1200000 0 0 14400000 532800000 187200000
+bucket America/New_York 1489298399999 899999 1199999 3599999 3599999 3599999 521999999 953999999
+bucket America/New_York 1489301999999 899999 2399999 3599999 7199999 7199999 525599999 957599999
+bucket America/New_York 1489302000000 0 0 0 0 7200000 525600000 957600000
+bucket America/New_York 1489303800000 0 600000 1800000 1800000 9000000 527400000 959400000
+bucket America/New_York 1489309200000 0 1200000 0 7200000 14400000 532800000 964800000
+bucket America/New_York 1586903613736 213736 2013736 2013736 2013736 66813736 153213736 1190013736
+bucket America/New_York 1604206799999 899999 1199999 3599999 3599999 3599999 521999999 3599999
+bucket America/New_York 1604210399999 899999 2399999 3599999 7199999 7199999 525599999 7199999
+bucket America/New_York 1604210400000 0 4800000 0 7200000 7200000 525600000 7200000
+bucket America/New_York 1604212200000 0 600000 1800000 9000000 9000000 527400000 9000000
+bucket America/New_York 1604217600000 0 1200000 0 0 14400000 532800000 14400000
+bucket America/New_York 1699160399999 899999 1199999 3599999 3599999 3599999 521999999 349199999
+bucket America/New_York 1699163999999 899999 2399999 3599999 7199999 7199999 525599999 352799999
+bucket America/New_York 1699164000000 0 4800000 0 7200000 7200000 525600000 352800000
+bucket America/New_York 1699165800000 0 600000 1800000 9000000 9000000 527400000 354600000
+bucket America/New_York 1699171200000 0 1200000 0 0 14400000 532800000 360000000
+bucket America/New_York 1930802399999 899999 1199999 3599999 3599999 3599999 521999999 694799999
+bucket America/New_York 1930805999999 899999 2399999 3599999 7199999 7199999 525599999 698399999
+bucket America/New_York 1930806000000 0 0 0 0 7200000 525600000 698400000
+bucket America/New_York 1930807800000 0 600000 1800000 1800000 9000000 527400000 700200000
+bucket America/New_York 1930813200000 0 1200000 0 7200000 14400000 532800000 705600000
+bucket America/New_York 1962856799999 899999 1199999 3599999 3599999 3599999 521999999 1126799999
+bucket America/New_York 1962860399999 899999 2399999 3599999 7199999 7199999 525599999 1130399999
+bucket America/New_York 1962860400000 0 0 0 0 7200000 525600000 1130400000
+bucket America/New_York 1962862200000 0 600000 1800000 1800000 9000000 527400000 1132200000
+bucket America/New_York 1962867600000 0 1200000 0 7200000 14400000 532800000 1137600000
+bucket America/New_York 2155536660026 660026 660026 660026 4260026 15060026 274260026 1829460026
+bucket America/New_York 2211960142460 442460 1342460 1342460 4942460 15742460 447742460 274942460
+bucket America/New_York 2310126197298 797298 1397298 2597298 2597298 34997298 34997298 1327397298
+bucket America/New_York 2384246712076 12076 312076 2712076 2712076 24312076 369912076 1752312076
+bucket Europe/Istanbul 954021599999 899999 2399999 3599999 10799999 86399999 518399999 2159999999
+bucket Europe/Istanbul 954025199999 899999 1199999 3599999 3599999 3599999 521999999 2163599999
+bucket Europe/Istanbul 954025200000 0 0 0 3600000 3600000 522000000 2163600000
+bucket Europe/Istanbul 954027000000 0 1800000 1800000 5400000 5400000 523800000 2165400000
+bucket Europe/Istanbul 954032400000 0 0 0 3600000 10800000 529200000 2170800000
+bucket Europe/Istanbul 972770399999 899999 1199999 3599999 3599999 3599999 521999999 2422799999
+bucket Europe/Istanbul 972773999999 899999 2399999 3599999 7199999 7199999 525599999 2426399999
+bucket Europe/Istanbul 972774000000 0 4800000 0 7200000 7200000 525600000 2426400000
+bucket Europe/Istanbul 972775800000 0 600000 1800000 9000000 9000000 527400000 2428200000
+bucket Europe/Istanbul 972781200000 0 1200000 0 0 14400000 532800000 2433600000
+bucket Europe/Istanbul 1017525599999 899999 2399999 3599999 10799999 86399999 518399999 2591999999
+bucket Europe/Istanbul 1017529199999 899999 1199999 3599999 3599999 3599999 521999999 2595599999
+bucket Europe/Istanbul 1017529200000 0 0 0 3600000 3600000 522000000 2595600000
+bucket Europe/Istanbul 1017531000000 0 1800000 1800000 5400000 5400000 523800000 2597400000
+bucket Europe/Istanbul 1017536400000 0 0 0 3600000 10800000 529200000 2602800000
+bucket Europe/Istanbul 1099173599999 899999 1199999 3599999 3599999 3599999 521999999 2595599999
+bucket Europe/Istanbul 1099177199999 899999 2399999 3599999 7199999 7199999 525599999 2599199999
+bucket Europe/Istanbul 1099177200000 0 4800000 0 7200000 7200000 525600000 2599200000
+bucket Europe/Istanbul 1099179000000 0 600000 1800000 9000000 9000000 527400000 2601000000
+bucket Europe/Istanbul 1099184400000 0 1200000 0 0 14400000 532800000 2606400000
+bucket Europe/Istanbul 1238284799999 899999 2399999 3599999 7199999 7199999 525599999 2426399999
+bucket Europe/Istanbul 1238288399999 899999 1199999 3599999 10799999 10799999 529199999 2429999999
+bucket Europe/Istanbul 1238288400000 0 0 0 0 10800000 529200000 2430000000
+bucket Europe/Istanbul 1238290200000 0 1800000 1800000 1800000 12600000 531000000 2431800000
+bucket Europe/Istanbul 1238295600000 0 0 0 0 18000000 536400000 2437200000
+bucket Europe/Istanbul 1256428799999 899999 1199999 3599999 10799999 10799999 529199999 2084399999
+bucket Europe/Istanbul 1256432399999 899999 2399999 3599999 3599999 14399999 532799999 2087999999
+bucket Europe/Istanbul 1256432400000 0 4800000 0 0 14400000 532800000 2088000000
+bucket Europe/Istanbul 1256434200000 0 600000 1800000 1800000 16200000 534600000 2089800000
+bucket Europe/Istanbul 1256439600000 0 1200000 0 7200000 21600000 540000000 2095200000
+bucket Europe/Istanbul 1283961991080 391080 1591080 391080 3991080 68791080 241591080 673591080
+bucket Europe/Istanbul 1288483199999 899999 1199999 3599999 10799999 10799999 529199999 2602799999
+bucket Europe/Istanbul 1288486799999 899999 2399999 3599999 3599999 14399999 532799999 2606399999
+bucket Europe/Istanbul 1288486800000 0 4800000 0 0 14400000 532800000 2606400000
+bucket Europe/Istanbul 1288488600000 0 600000 1800000 1800000 16200000 534600000 2608200000
+bucket Europe/Istanbul 1288494000000 0 1200000 0 7200000 21600000 540000000 2613600000
+bucket Europe/Istanbul 1319932799999 899999 1199999 3599999 10799999 10799999 529199999 2516399999
+bucket Europe/Istanbul 1319936399999 899999 2399999 3599999 3599999 14399999 532799999 2519999999
+bucket Europe/Istanbul 1319936400000 0 4800000 0 0 14400000 532800000 2520000000
+bucket Europe/Istanbul 1319938200000 0 600000 1800000 1800000 16200000 534600000 2521800000
+bucket Europe/Istanbul 1319943600000 0 1200000 0 7200000 21600000 540000000 2527200000
+bucket Europe/Istanbul 1591249320653 720653 120653 2520653 9720653 31320653 290520653 290520653
+bucket Europe/Istanbul 1836286481719 281719 2081719 2081719 5681719 38081719 383681719 815681719
+bucket Europe/Istanbul 1974945530234 830234 1130234 3530234 3530234 25130234 543530234 25130234
+bucket Europe/Istanbul 2049767078852 878852 278852 2678852 2678852 24278852 369878852 1233878852
+bucket Europe/Istanbul 2197899932128 32128 332128 2732128 2732128 67532128 326732128 2141132128
+bucket Australia/Lord_Howe 985442399999 899999 1199999 3599999 3599999 3599999 521999999 2077199999
+bucket Australia/Lord_Howe 985445999999 899999 2399999 3599999 7199999 7199999 525599999 2080799999
+bucket Australia/Lord_Howe 985446000000 0 2400000 3600000 7200000 7200000 525600000 2080800000
+bucket Australia/Lord_Howe 985447800000 0 0 0 9000000 9000000 527400000 2082600000
+bucket Australia/Lord_Howe 985453200000 0 600000 1800000 1800000 14400000 532800000 2088000000
+bucket Australia/Lord_Howe 1035642599999 899999 1199999 3599999 3599999 3599999 521999999 2249999999
+bucket Australia/Lord_Howe 1035646199999 899999 2399999 3599999 7199999 7199999 525599999 2253599999
+bucket Australia/Lord_Howe 1035646200000 0 0 0 7200000 7200000 525600000 2253600000
+bucket Australia/Lord_Howe 1035648000000 0 1200000 0 0 9000000 527400000 2255400000
+bucket Australia/Lord_Howe 1035653400000 0 1800000 1800000 5400000 14400000 532800000 2260800000
+bucket Australia/Lord_Howe 1174744799999 899999 1199999 3599999 3599999 3599999 521999999 2077199999
+bucket Australia/Lord_Howe 1174748399999 899999 2399999 3599999 7199999 7199999 525599999 2080799999
+bucket Australia/Lord_Howe 1174748400000 0 2400000 3600000 7200000 7200000 525600000 2080800000
+bucket Australia/Lord_Howe 1174750200000 0 0 0 9000000 9000000 527400000 2082600000
+bucket Australia/Lord_Howe 1174755600000 0 600000 1800000 1800000 14400000 532800000 2088000000
+bucket Australia/Lord_Howe 1207403999999 899999 1199999 3599999 3599999 3599999 521999999 435599999
+bucket Australia/Lord_Howe 1207407599999 899999 2399999 3599999 7199999 7199999 525599999 439199999
+bucket Australia/Lord_Howe 1207407600000 0 2400000 3600000 7200000 7200000 525600000 439200000
+bucket Australia/Lord_Howe 1207409400000 0 0 0 9000000 9000000 527400000 441000000
+bucket Australia/Lord_Howe 1207414800000 0 600000 1800000 1800000 14400000 532800000 446400000
+bucket Australia/Lord_Howe 1270303199999 899999 1199999 3599999 3599999 3599999 521999999 262799999
+bucket Australia/Lord_Howe 1270306799999 899999 2399999 3599999 7199999 7199999 525599999 266399999
+bucket Australia/Lord_Howe 1270306800000 0 2400000 3600000 7200000 7200000 525600000 266400000
+bucket Australia/Lord_Howe 1270308600000 0 0 0 9000000 9000000 527400000 268200000
+bucket Australia/Lord_Howe 1270314000000 0 600000 1800000 1800000 14400000 532800000 273600000
+bucket Australia/Lord_Howe 1349533799999 899999 1199999 3599999 3599999 3599999 521999999 521999999
+bucket Australia/Lord_Howe 1349537399999 899999 2399999 3599999 7199999 7199999 525599999 525599999
+bucket Australia/Lord_Howe 1349537400000 0 0 0 7200000 7200000 525600000 525600000
+bucket Australia/Lord_Howe 1349539200000 0 1200000 0 0 9000000 527400000 527400000
+bucket Australia/Lord_Howe 1349544600000 0 1800000 1800000 5400000 14400000 532800000 532800000
+bucket Australia/Lord_Howe 1352464875299 675299 1275299 2475299 9675299 85275299 430875299 776475299
+bucket Australia/Lord_Howe 1475332199999 899999 1199999 3599999 3599999 3599999 521999999 89999999
+bucket Australia/Lord_Howe 1475335799999 899999 2399999 3599999 7199999 7199999 525599999 93599999
+bucket Australia/Lord_Howe 1475335800000 0 0 0 7200000 7200000 525600000 93600000
+bucket Australia/Lord_Howe 1475337600000 0 1200000 0 0 9000000 527400000 95400000
+bucket Australia/Lord_Howe 1475343000000 0 1800000 1800000 5400000 14400000 532800000 100800000
+bucket Australia/Lord_Howe 1648907999999 899999 1199999 3599999 3599999 3599999 521999999 176399999
+bucket Australia/Lord_Howe 1648911599999 899999 2399999 3599999 7199999 7199999 525599999 179999999
+bucket Australia/Lord_Howe 1648911600000 0 2400000 3600000 7200000 7200000 525600000 180000000
+bucket Australia/Lord_Howe 1648913400000 0 0 0 9000000 9000000 527400000 181800000
+bucket Australia/Lord_Howe 1648918800000 0 600000 1800000 1800000 14400000 532800000 187200000
+bucket Australia/Lord_Howe 1741710804579 204579 804579 2004579 2004579 12804579 185604579 963204579
+bucket Australia/Lord_Howe 1822487399999 899999 1199999 3599999 3599999 3599999 521999999 176399999
+bucket Australia/Lord_Howe 1822490999999 899999 2399999 3599999 7199999 7199999 525599999 179999999
+bucket Australia/Lord_Howe 1822491000000 0 0 0 7200000 7200000 525600000 180000000
+bucket Australia/Lord_Howe 1822492800000 0 1200000 0 0 9000000 527400000 181800000
+bucket Australia/Lord_Howe 1822498200000 0 1800000 1800000 5400000 14400000 532800000 187200000
+bucket Australia/Lord_Howe 1856775962843 362843 362843 362843 3962843 79562843 338762843 165962843
+bucket Australia/Lord_Howe 1901714399999 899999 1199999 3599999 3599999 3599999 521999999 521999999
+bucket Australia/Lord_Howe 1901717999999 899999 2399999 3599999 7199999 7199999 525599999 525599999
+bucket Australia/Lord_Howe 1901718000000 0 2400000 3600000 7200000 7200000 525600000 525600000
+bucket Australia/Lord_Howe 1901719800000 0 0 0 9000000 9000000 527400000 527400000
+bucket Australia/Lord_Howe 1901725200000 0 600000 1800000 1800000 14400000 532800000 532800000
+bucket Australia/Lord_Howe 2009621176036 376036 2176036 2176036 5776036 81376036 167776036 513376036
+bucket Australia/Lord_Howe 2112473713101 13101 2113101 913101 913101 33313101 206113101 810913101
+bucket Australia/Lord_Howe 2493048336296 636296 1536296 1536296 5136296 15936296 361536296 15936296
+bucket Asia/Kolkata 1007204247032 747032 1647032 1647032 5247032 59247032 491247032 59247032
+bucket Asia/Kolkata 1125374226969 726969 426969 1626969 1626969 34026969 120426969 2539626969
+bucket Asia/Kolkata 1137314021916 221916 221916 221916 7421916 50621916 569021916 1260221916
+bucket Asia/Kolkata 1256913651536 651536 651536 651536 7851536 72651536 418251536 2578251536
+bucket Asia/Kolkata 1366865336059 236059 1136059 1136059 4736059 37136059 296336059 2110736059
+bucket Asia/Kolkata 2070157578827 78827 2178827 978827 978827 33378827 206178827 638178827
+bucket America/Sao_Paulo 970970399999 899999 1199999 3599999 7199999 82799999 514799999 601199999
+bucket America/Sao_Paulo 970973999999 899999 2399999 3599999 10799999 86399999 518399999 604799999
+bucket America/Sao_Paulo 970974000000 0 0 0 0 0 518400000 604800000
+bucket America/Sao_Paulo 970975800000 0 600000 1800000 1800000 1800000 520200000 606600000
+bucket America/Sao_Paulo 970981200000 0 1200000 0 0 7200000 525600000 612000000
+bucket America/Sao_Paulo 974942742052 642052 342052 1542052 8742052 84342052 257142052 1898742052
+bucket America/Sao_Paulo 1099360799999 899999 1199999 3599999 7199999 82799999 82799999 82799999
+bucket America/Sao_Paulo 1099364399999 899999 2399999 3599999 10799999 86399999 86399999 86399999
+bucket America/Sao_Paulo 1099364400000 0 0 0 0 0 86400000 86400000
+bucket America/Sao_Paulo 1099366200000 0 600000 1800000 1800000 1800000 88200000 88200000
+bucket America/Sao_Paulo 1099371600000 0 1200000 0 0 7200000 93600000 93600000
+bucket America/Sao_Paulo 1172365199999 899999 1199999 3599999 7199999 82799999 514799999 2069999999
+bucket America/Sao_Paulo 1172368799999 899999 2399999 3599999 10799999 86399999 518399999 2073599999
+bucket America/Sao_Paulo 1172368800000 0 4800000 0 10800000 86400000 518400000 2073600000
+bucket America/Sao_Paulo 1172370600000 0 600000 1800000 12600000 88200000 520200000 2075400000
+bucket America/Sao_Paulo 1172376000000 0 1200000 0 3600000 3600000 525600000 2080800000
+bucket America/Sao_Paulo 1203209999999 899999 1199999 3599999 7199999 82799999 514799999 1378799999
+bucket America/Sao_Paulo 1203213599999 899999 2399999 3599999 10799999 86399999 518399999 1382399999
+bucket America/Sao_Paulo 1203213600000 0 4800000 0 10800000 86400000 518400000 1382400000
+bucket America/Sao_Paulo 1203215400000 0 600000 1800000 12600000 88200000 520200000 1384200000
+bucket America/Sao_Paulo 1203220800000 0 1200000 0 3600000 3600000 525600000 1389600000
+bucket America/Sao_Paulo 1243106816004 716004 1616004 1616004 5216004 59216004 491216004 1960016004
+bucket America/Sao_Paulo 1312008644642 344642 1844642 3044642 3044642 13844642 445844642 2519444642
+bucket America/Sao_Paulo 1382234399999 899999 1199999 3599999 7199999 82799999 514799999 1637999999
+bucket America/Sao_Paulo 1382237999999 899999 2399999 3599999 10799999 86399999 518399999 1641599999
+bucket America/Sao_Paulo 1382238000000 0 0 0 0 0 518400000 1641600000
+bucket America/Sao_Paulo 1382239800000 0 600000 1800000 1800000 1800000 520200000 1643400000
+bucket America/Sao_Paulo 1382245200000 0 1200000 0 0 7200000 525600000 1648800000
+bucket America/Sao_Paulo 1384590028396 328396 1228396 1228396 1228396 22828396 454828396 1318828396
+bucket America/Sao_Paulo 1413683999999 899999 1199999 3599999 7199999 82799999 514799999 1551599999
+bucket America/Sao_Paulo 1413687599999 899999 2399999 3599999 10799999 86399999 518399999 1555199999
+bucket America/Sao_Paulo 1413687600000 0 0 0 0 0 518400000 1555200000
+bucket America/Sao_Paulo 1413689400000 0 600000 1800000 1800000 1800000 520200000 1557000000
+bucket America/Sao_Paulo 1413694800000 0 1200000 0 0 7200000 525600000 1562400000
+bucket America/Sao_Paulo 1424566799999 899999 1199999 3599999 7199999 82799999 514799999 1810799999
+bucket America/Sao_Paulo 1424570399999 899999 2399999 3599999 10799999 86399999 518399999 1814399999
+bucket America/Sao_Paulo 1424570400000 0 4800000 0 10800000 86400000 518400000 1814400000
+bucket America/Sao_Paulo 1424572200000 0 600000 1800000 12600000 88200000 520200000 1816200000
+bucket America/Sao_Paulo 1424577600000 0 1200000 0 3600000 3600000 525600000 1821600000
+bucket America/Sao_Paulo 1550365199999 899999 1199999 3599999 7199999 82799999 514799999 1378799999
+bucket America/Sao_Paulo 1550368799999 899999 2399999 3599999 10799999 86399999 518399999 1382399999
+bucket America/Sao_Paulo 1550368800000 0 4800000 0 10800000 86400000 518400000 1382400000
+bucket America/Sao_Paulo 1550370600000 0 600000 1800000 12600000 88200000 520200000 1384200000
+bucket America/Sao_Paulo 1550376000000 0 1200000 0 3600000 3600000 525600000 1389600000
+bucket America/Sao_Paulo 1843335750123 750123 150123 2550123 2550123 67350123 153750123 2572950123
+bucket America/Sao_Paulo 1960431274732 874732 2074732 874732 4474732 4474732 522874732 1214074732
+bucket Pacific/Apia 948161146502 346502 1546502 346502 346502 54346502 54346502 1436746502
+bucket Pacific/Apia 1270734401240 101240 401240 2801240 10001240 10001240 269201240 614801240
+bucket Pacific/Apia 1285495199999 899999 1199999 3599999 7199999 82799999 514799999 2156399999
+bucket Pacific/Apia 1285498799999 899999 2399999 3599999 10799999 86399999 518399999 2159999999
+bucket Pacific/Apia 1285498800000 0 0 0 0 0 518400000 2160000000
+bucket Pacific/Apia 1285500600000 0 600000 1800000 1800000 1800000 520200000 2161800000
+bucket Pacific/Apia 1285506000000 0 1200000 0 0 7200000 525600000 2167200000
+bucket Pacific/Apia 1348923599999 899999 2399999 3599999 7199999 7199999 525599999 2512799999
+bucket Pacific/Apia 1348927199999 899999 1199999 3599999 10799999 10799999 529199999 2516399999
+bucket Pacific/Apia 1348927200000 0 0 0 0 10800000 529200000 2516400000
+bucket Pacific/Apia 1348929000000 0 1800000 1800000 1800000 12600000 531000000 2518200000
+bucket Pacific/Apia 1348934400000 0 0 0 0 18000000 536400000 2523600000
+bucket Pacific/Apia 1365253199999 899999 1199999 3599999 10799999 10799999 529199999 529199999
+bucket Pacific/Apia 1365256799999 899999 2399999 3599999 3599999 14399999 532799999 532799999
+bucket Pacific/Apia 1365256800000 0 4800000 0 0 14400000 532800000 532800000
+bucket Pacific/Apia 1365258600000 0 600000 1800000 1800000 16200000 534600000 534600000
+bucket Pacific/Apia 1365264000000 0 1200000 0 7200000 21600000 540000000 540000000
+bucket Pacific/Apia 1380373199999 899999 2399999 3599999 7199999 7199999 525599999 2426399999
+bucket Pacific/Apia 1380376799999 899999 1199999 3599999 10799999 10799999 529199999 2429999999
+bucket Pacific/Apia 1380376800000 0 0 0 0 10800000 529200000 2430000000
+bucket Pacific/Apia 1380378600000 0 1800000 1800000 1800000 12600000 531000000 2431800000
+bucket Pacific/Apia 1380384000000 0 0 0 0 18000000 536400000 2437200000
+bucket Pacific/Apia 1411822799999 899999 2399999 3599999 7199999 7199999 525599999 2339999999
+bucket Pacific/Apia 1411826399999 899999 1199999 3599999 10799999 10799999 529199999 2343599999
+bucket Pacific/Apia 1411826400000 0 0 0 0 10800000 529200000 2343600000
+bucket Pacific/Apia 1411828200000 0 1800000 1800000 1800000 12600000 531000000 2345400000
+bucket Pacific/Apia 1411833600000 0 0 0 0 18000000 536400000 2350800000
+bucket Pacific/Apia 1506171599999 899999 2399999 3599999 7199999 7199999 525599999 1994399999
+bucket Pacific/Apia 1506175199999 899999 1199999 3599999 10799999 10799999 529199999 1997999999
+bucket Pacific/Apia 1506175200000 0 0 0 0 10800000 529200000 1998000000
+bucket Pacific/Apia 1506177000000 0 1800000 1800000 1800000 12600000 531000000 1999800000
+bucket Pacific/Apia 1506182400000 0 0 0 0 18000000 536400000 2005200000
+bucket Pacific/Apia 1538225999999 899999 2399999 3599999 7199999 7199999 525599999 2512799999
+bucket Pacific/Apia 1538229599999 899999 1199999 3599999 10799999 10799999 529199999 2516399999
+bucket Pacific/Apia 1538229600000 0 0 0 0 10800000 529200000 2516400000
+bucket Pacific/Apia 1538231400000 0 1800000 1800000 1800000 12600000 531000000 2518200000
+bucket Pacific/Apia 1538236800000 0 0 0 0 18000000 536400000 2523600000
+bucket Pacific/Apia 1617454799999 899999 1199999 3599999 10799999 10799999 529199999 269999999
+bucket Pacific/Apia 1617458399999 899999 2399999 3599999 3599999 14399999 532799999 273599999
+bucket Pacific/Apia 1617458400000 0 4800000 0 0 14400000 532800000 273600000
+bucket Pacific/Apia 1617460200000 0 600000 1800000 1800000 16200000 534600000 275400000
+bucket Pacific/Apia 1617465600000 0 1200000 0 7200000 21600000 540000000 280800000
+bucket Pacific/Apia 1755223376329 176329 1376329 176329 176329 54176329 399776329 1263776329
+bucket Pacific/Apia 1885242710060 110060 710060 1910060 9110060 41510060 387110060 2374310060
+bucket Pacific/Apia 2183539827437 327437 1827437 3027437 10227437 85827437 517827437 1036227437
+bucket Pacific/Apia 2516952861342 261342 2061342 2061342 5661342 81261342 81261342 340461342
+bucket America/Havana 972791999999 899999 2399999 3599999 10799999 86399999 518399999 2419199999
+bucket America/Havana 972795599999 899999 1199999 3599999 3599999 3599999 521999999 2422799999
+bucket America/Havana 972795600000 0 0 0 0 3600000 522000000 2422800000
+bucket America/Havana 972797400000 0 1800000 1800000 1800000 5400000 523800000 2424600000
+bucket America/Havana 972802800000 0 0 0 7200000 10800000 529200000 2430000000
+bucket America/Havana 1049601599999 899999 1199999 3599999 7199999 82799999 514799999 428399999
+bucket America/Havana 1049605199999 899999 2399999 3599999 10799999 86399999 518399999 431999999
+bucket America/Havana 1049605200000 0 0 0 0 0 518400000 432000000
+bucket America/Havana 1049607000000 0 600000 1800000 1800000 1800000 520200000 433800000
+bucket America/Havana 1049612400000 0 1200000 0 0 7200000 525600000 439200000
+bucket America/Havana 1205639999999 899999 1199999 3599999 7199999 82799999 514799999 1292399999
+bucket America/Havana 1205643599999 899999 2399999 3599999 10799999 86399999 518399999 1295999999
+bucket America/Havana 1205643600000 0 0 0 0 0 518400000 1296000000
+bucket America/Havana 1205645400000 0 600000 1800000 1800000 1800000 520200000 1297800000
+bucket America/Havana 1205650800000 0 1200000 0 0 7200000 525600000 1303200000
+bucket America/Havana 1224993599999 899999 2399999 3599999 10799999 86399999 518399999 2159999999
+bucket America/Havana 1224997199999 899999 1199999 3599999 3599999 3599999 521999999 2163599999
+bucket America/Havana 1224997200000 0 0 0 0 3600000 522000000 2163600000
+bucket America/Havana 1224999000000 0 1800000 1800000 1800000 5400000 523800000 2165400000
+bucket America/Havana 1225004400000 0 0 0 7200000 10800000 529200000 2170800000
+bucket America/Havana 1446350399999 899999 2399999 3599999 10799999 86399999 518399999 2678399999
+bucket America/Havana 1446353999999 899999 1199999 3599999 3599999 3599999 521999999 3599999
+bucket America/Havana 1446354000000 0 0 0 0 3600000 522000000 3600000
+bucket America/Havana 1446355800000 0 1800000 1800000 1800000 5400000 523800000 5400000
+bucket America/Havana 1446361200000 0 0 0 7200000 10800000 529200000 10800000
+bucket America/Havana 1552190399999 899999 1199999 3599999 7199999 82799999 514799999 773999999
+bucket America/Havana 1552193999999 899999 2399999 3599999 10799999 86399999 518399999 777599999
+bucket America/Havana 1552194000000 0 0 0 0 0 518400000 777600000
+bucket America/Havana 1552195800000 0 600000 1800000 1800000 1800000 520200000 779400000
+bucket America/Havana 1552201200000 0 1200000 0 0 7200000 525600000 784800000
+bucket America/Havana 1604203199999 899999 2399999 3599999 10799999 86399999 518399999 2678399999
+bucket America/Havana 1604206799999 899999 1199999 3599999 3599999 3599999 521999999 3599999
+bucket America/Havana 1604206800000 0 0 0 0 3600000 522000000 3600000
+bucket America/Havana 1604208600000 0 1800000 1800000 1800000 5400000 523800000 5400000
+bucket America/Havana 1604214000000 0 0 0 7200000 10800000 529200000 10800000
+bucket America/Havana 1646154607410 607410 607410 607410 607410 43807410 130207410 43807410
+bucket America/Havana 1699156799999 899999 2399999 3599999 10799999 86399999 518399999 345599999
+bucket America/Havana 1699160399999 899999 1199999 3599999 3599999 3599999 521999999 349199999
+bucket America/Havana 1699160400000 0 0 0 0 3600000 522000000 349200000
+bucket America/Havana 1699162200000 0 1800000 1800000 1800000 5400000 523800000 351000000
+bucket America/Havana 1699167600000 0 0 0 7200000 10800000 529200000 356400000
+bucket America/Havana 1847545618456 418456 1618456 418456 7618456 40018456 126418456 1508818456
+bucket America/Havana 1888459199999 899999 2399999 3599999 10799999 86399999 518399999 259199999
+bucket America/Havana 1888462799999 899999 1199999 3599999 3599999 3599999 521999999 262799999
+bucket America/Havana 1888462800000 0 0 0 0 3600000 522000000 262800000
+bucket America/Havana 1888464600000 0 1800000 1800000 1800000 5400000 523800000 264600000
+bucket America/Havana 1888470000000 0 0 0 7200000 10800000 529200000 270000000
+bucket America/Havana 1938389138150 638150 338150 1538150 1538150 77138150 249938150 336338150
+bucket America/Havana 1959885460230 460230 1060230 2260230 2260230 56260230 574660230 661060230
+bucket America/Havana 2025748799999 899999 1199999 3599999 7199999 82799999 514799999 946799999
+bucket America/Havana 2025752399999 899999 2399999 3599999 10799999 86399999 518399999 950399999
+bucket America/Havana 2025752400000 0 0 0 0 0 518400000 950400000
+bucket America/Havana 2025754200000 0 600000 1800000 1800000 1800000 520200000 952200000
+bucket America/Havana 2025759600000 0 1200000 0 0 7200000 525600000 957600000
+bucket America/Havana 2202209144563 44563 344563 2744563 9944563 31544563 377144563 1154744563
+bucket America/Havana 2220882994235 694235 2194235 3394235 10594235 42994235 302194235 1425394235
+bucket Asia/Beirut 985467599999 899999 1199999 3599999 7199999 82799999 514799999 2069999999
+bucket Asia/Beirut 985471199999 899999 2399999 3599999 10799999 86399999 518399999 2073599999
+bucket Asia/Beirut 985471200000 0 0 0 0 0 518400000 2073600000
+bucket Asia/Beirut 985473000000 0 600000 1800000 1800000 1800000 520200000 2075400000
+bucket Asia/Beirut 985478400000 0 1200000 0 0 7200000 525600000 2080800000
+bucket Asia/Beirut 1048971599999 899999 1199999 3599999 7199999 82799999 514799999 2501999999
+bucket Asia/Beirut 1048975199999 899999 2399999 3599999 10799999 86399999 518399999 2505599999
+bucket Asia/Beirut 1048975200000 0 0 0 0 0 518400000 2505600000
+bucket Asia/Beirut 1048977000000 0 600000 1800000 1800000 1800000 520200000 2507400000
+bucket Asia/Beirut 1048982400000 0 1200000 0 0 7200000 525600000 2512800000
+bucket Asia/Beirut 1080421199999 899999 1199999 3599999 7199999 82799999 514799999 2329199999
+bucket Asia/Beirut 1080424799999 899999 2399999 3599999 10799999 86399999 518399999 2332799999
+bucket Asia/Beirut 1080424800000 0 0 0 0 0 518400000 2332800000
+bucket Asia/Beirut 1080426600000 0 600000 1800000 1800000 1800000 520200000 2334600000
+bucket Asia/Beirut 1080432000000 0 1200000 0 0 7200000 525600000 2340000000
+bucket Asia/Beirut 1111870799999 899999 1199999 3599999 7199999 82799999 514799999 2242799999
+bucket Asia/Beirut 1111874399999 899999 2399999 3599999 10799999 86399999 518399999 2246399999
+bucket Asia/Beirut 1111874400000 0 0 0 0 0 518400000 2246400000
+bucket Asia/Beirut 1111876200000 0 600000 1800000 1800000 1800000 520200000 2248200000
+bucket Asia/Beirut 1111881600000 0 1200000 0 0 7200000 525600000 2253600000
+bucket Asia/Beirut 1148970975737 375737 975737 2175737 2175737 34575737 120975737 2540175737
+bucket Asia/Beirut 1204355417196 617196 1817196 617196 617196 33017196 465017196 33017196
+bucket Asia/Beirut 1288468799999 899999 1199999 3599999 7199999 82799999 514799999 2588399999
+bucket Asia/Beirut 1288472399999 899999 2399999 3599999 10799999 86399999 518399999 2591999999
+bucket Asia/Beirut 1288472400000 0 4800000 0 10800000 86400000 518400000 2592000000
+bucket Asia/Beirut 1288474200000 0 600000 1800000 12600000 88200000 520200000 2593800000
+bucket Asia/Beirut 1288479600000 0 1200000 0 3600000 3600000 525600000 2599200000
+bucket Asia/Beirut 1320367257808 657808 57808 2457808 9657808 9657808 355257808 268857808
+bucket Asia/Beirut 1351367999999 899999 1199999 3599999 7199999 82799999 514799999 2329199999
+bucket Asia/Beirut 1351371599999 899999 2399999 3599999 10799999 86399999 518399999 2332799999
+bucket Asia/Beirut 1351371600000 0 4800000 0 10800000 86400000 518400000 2332800000
+bucket Asia/Beirut 1351373400000 0 600000 1800000 12600000 88200000 520200000 2334600000
+bucket Asia/Beirut 1351378800000 0 1200000 0 3600000 3600000 525600000 2340000000
+bucket Asia/Beirut 1373606848859 748859 1648859 1648859 8848859 30448859 376048859 980848859
+bucket Asia/Beirut 1382817599999 899999 1199999 3599999 7199999 82799999 514799999 2242799999
+bucket Asia/Beirut 1382821199999 899999 2399999 3599999 10799999 86399999 518399999 2246399999
+bucket Asia/Beirut 1382821200000 0 4800000 0 10800000 86400000 518400000 2246400000
+bucket Asia/Beirut 1382823000000 0 600000 1800000 12600000 88200000 520200000 2248200000
+bucket Asia/Beirut 1382828400000 0 1200000 0 3600000 3600000 525600000 2253600000
+bucket Asia/Beirut 1635623999999 899999 1199999 3599999 7199999 82799999 514799999 2588399999
+bucket Asia/Beirut 1635627599999 899999 2399999 3599999 10799999 86399999 518399999 2591999999
+bucket Asia/Beirut 1635627600000 0 4800000 0 10800000 86400000 518400000 2592000000
+bucket Asia/Beirut 1635629400000 0 600000 1800000 12600000 88200000 520200000 2593800000
+bucket Asia/Beirut 1635634800000 0 1200000 0 3600000 3600000 525600000 2599200000
+bucket Asia/Beirut 1829309628432 228432 828432 2028432 2028432 56028432 56028432 1697628432
+bucket Asia/Beirut 1919275199999 899999 1199999 3599999 7199999 82799999 514799999 2242799999
+bucket Asia/Beirut 1919278799999 899999 2399999 3599999 10799999 86399999 518399999 2246399999
+bucket Asia/Beirut 1919278800000 0 4800000 0 10800000 86400000 518400000 2246400000
+bucket Asia/Beirut 1919280600000 0 600000 1800000 12600000 88200000 520200000 2248200000
+bucket Asia/Beirut 1919286000000 0 1200000 0 3600000 3600000 525600000 2253600000
+bucket Asia/Beirut 2026933199999 899999 1199999 3599999 7199999 82799999 514799999 2156399999
+bucket Asia/Beirut 2026936799999 899999 2399999 3599999 10799999 86399999 518399999 2159999999
+bucket Asia/Beirut 2026936800000 0 0 0 0 0 518400000 2160000000
+bucket Asia/Beirut 2026938600000 0 600000 1800000 1800000 1800000 520200000 2161800000
+bucket Asia/Beirut 2026944000000 0 1200000 0 0 7200000 525600000 2167200000
+bucket Asia/Beirut 2270595521936 821936 1121936 3521936 10721936 10721936 442721936 1133921936
+bucket America/Santiago 979714167116 267116 1767116 2967116 2967116 13767116 186567116 1396167116
+bucket America/Santiago 983445765083 465083 1365083 1365083 8565083 30165083 289365083 30165083
+bucket America/Santiago 1015725599999 899999 1199999 3599999 7199999 82799999 514799999 773999999
+bucket America/Santiago 1015729199999 899999 2399999 3599999 10799999 86399999 518399999 777599999
+bucket America/Santiago 1015729200000 0 4800000 0 10800000 86400000 518400000 777600000
+bucket America/Santiago 1015731000000 0 600000 1800000 12600000 88200000 520200000 779400000
+bucket America/Santiago 1015736400000 0 1200000 0 3600000 3600000 525600000 784800000
+bucket America/Santiago 1079229599999 899999 1199999 3599999 7199999 82799999 514799999 1119599999
+bucket America/Santiago 1079233199999 899999 2399999 3599999 10799999 86399999 518399999 1123199999
+bucket America/Santiago 1079233200000 0 4800000 0 10800000 86400000 518400000 1123200000
+bucket America/Santiago 1079235000000 0 600000 1800000 12600000 88200000 520200000 1125000000
+bucket America/Santiago 1079240400000 0 1200000 0 3600000 3600000 525600000 1130400000
+bucket America/Santiago 1304819999999 899999 1199999 3599999 7199999 82799999 514799999 601199999
+bucket America/Santiago 1304823599999 899999 2399999 3599999 10799999 86399999 518399999 604799999
+bucket America/Santiago 1304823600000 0 4800000 0 10800000 86400000 518400000 604800000
+bucket America/Santiago 1304825400000 0 600000 1800000 12600000 88200000 520200000 606600000
+bucket America/Santiago 1304830800000 0 1200000 0 3600000 3600000 525600000 612000000
+bucket America/Santiago 1410058799999 899999 1199999 3599999 7199999 82799999 514799999 514799999
+bucket America/Santiago 1410062399999 899999 2399999 3599999 10799999 86399999 518399999 518399999
+bucket America/Santiago 1410062400000 0 0 0 0 0 518400000 518400000
+bucket America/Santiago 1410064200000 0 600000 1800000 1800000 1800000 520200000 520200000
+bucket America/Santiago 1410069600000 0 1200000 0 0 7200000 525600000 525600000
+bucket America/Santiago 1471143599999 899999 1199999 3599999 7199999 82799999 514799999 1119599999
+bucket America/Santiago 1471147199999 899999 2399999 3599999 10799999 86399999 518399999 1123199999
+bucket America/Santiago 1471147200000 0 0 0 0 0 518400000 1123200000
+bucket America/Santiago 1471149000000 0 600000 1800000 1800000 1800000 520200000 1125000000
+bucket America/Santiago 1471154400000 0 1200000 0 0 7200000 525600000 1130400000
+bucket America/Santiago 1567911599999 899999 1199999 3599999 7199999 82799999 514799999 601199999
+bucket America/Santiago 1567915199999 899999 2399999 3599999 10799999 86399999 518399999 604799999
+bucket America/Santiago 1567915200000 0 0 0 0 0 518400000 604800000
+bucket America/Santiago 1567917000000 0 600000 1800000 1800000 1800000 520200000 606600000
+bucket America/Santiago 1567922400000 0 1200000 0 0 7200000 525600000 612000000
+bucket America/Santiago 1586051999999 899999 1199999 3599999 7199999 82799999 514799999 341999999
+bucket America/Santiago 1586055599999 899999 2399999 3599999 10799999 86399999 518399999 345599999
+bucket America/Santiago 1586055600000 0 4800000 0 10800000 86400000 518400000 345600000
+bucket America/Santiago 1586057400000 0 600000 1800000 12600000 88200000 520200000 347400000
+bucket America/Santiago 1586062800000 0 1200000 0 3600000 3600000 525600000 352800000
+bucket America/Santiago 1599361199999 899999 1199999 3599999 7199999 82799999 514799999 428399999
+bucket America/Santiago 1599364799999 899999 2399999 3599999 10799999 86399999 518399999 431999999
+bucket America/Santiago 1599364800000 0 0 0 0 0 518400000 432000000
+bucket America/Santiago 1599366600000 0 600000 1800000 1800000 1800000 520200000 433800000
+bucket America/Santiago 1599372000000 0 1200000 0 0 7200000 525600000 439200000
+bucket America/Santiago 1820113199999 899999 1199999 3599999 7199999 82799999 514799999 341999999
+bucket America/Santiago 1820116799999 899999 2399999 3599999 10799999 86399999 518399999 345599999
+bucket America/Santiago 1820116800000 0 0 0 0 0 518400000 345600000
+bucket America/Santiago 1820118600000 0 600000 1800000 1800000 1800000 520200000 347400000
+bucket America/Santiago 1820124000000 0 1200000 0 0 7200000 525600000 352800000
+bucket America/Santiago 1850224213318 613318 1813318 613318 7813318 40213318 385813318 1509013318
+bucket America/Santiago 1919548279214 379214 679214 3079214 10279214 75079214 161479214 2494279214
+bucket America/Santiago 2059610399999 899999 1199999 3599999 7199999 82799999 514799999 601199999
+bucket America/Santiago 2059613999999 899999 2399999 3599999 10799999 86399999 518399999 604799999
+bucket America/Santiago 2059614000000 0 4800000 0 10800000 86400000 518400000 604800000
+bucket America/Santiago 2059615800000 0 600000 1800000 12600000 88200000 520200000 606600000
+bucket America/Santiago 2059621200000 0 1200000 0 3600000 3600000 525600000 612000000
+bucket America/Santiago 2240381474536 674536 1874536 674536 7874536 18674536 450674536 2437874536
+bucket America/Santiago 2356986530146 830146 530146 1730146 5330146 70130146 329330146 671330146
+bucket Europe/Dublin 993855420236 720236 2220236 3420236 10620236 86220236 431820236 2505420236
+bucket Europe/Dublin 1004227199999 899999 1199999 3599999 3599999 3599999 521999999 2336399999
+bucket Europe/Dublin 1004230799999 899999 2399999 3599999 7199999 7199999 525599999 2339999999
+bucket Europe/Dublin 1004230800000 0 4800000 0 7200000 7200000 525600000 2340000000
+bucket Europe/Dublin 1004232600000 0 600000 1800000 9000000 9000000 527400000 2341800000
+bucket Europe/Dublin 1004238000000 0 1200000 0 0 14400000 532800000 2347200000
+bucket Europe/Dublin 1111881599999 899999 2399999 3599999 10799999 86399999 518399999 2246399999
+bucket Europe/Dublin 1111885199999 899999 1199999 3599999 3599999 3599999 521999999 2249999999
+bucket Europe/Dublin 1111885200000 0 0 0 3600000 3600000 522000000 2250000000
+bucket Europe/Dublin 1111887000000 0 1800000 1800000 5400000 5400000 523800000 2251800000
+bucket Europe/Dublin 1111892400000 0 0 0 3600000 10800000 529200000 2257200000
+bucket Europe/Dublin 1288483199999 899999 1199999 3599999 3599999 3599999 521999999 2595599999
+bucket Europe/Dublin 1288486799999 899999 2399999 3599999 7199999 7199999 525599999 2599199999
+bucket Europe/Dublin 1288486800000 0 4800000 0 7200000 7200000 525600000 2599200000
+bucket Europe/Dublin 1288488600000 0 600000 1800000 9000000 9000000 527400000 2601000000
+bucket Europe/Dublin 1288494000000 0 1200000 0 0 14400000 532800000 2606400000
+bucket Europe/Dublin 1416673352160 452160 1352160 1352160 4952160 58952160 490952160 1873352160
+bucket Europe/Dublin 1466907610856 310856 10856 1210856 1210856 12010856 530410856 2172010856
+bucket Europe/Dublin 1490486399999 899999 2399999 3599999 10799999 86399999 518399999 2159999999
+bucket Europe/Dublin 1490489999999 899999 1199999 3599999 3599999 3599999 521999999 2163599999
+bucket Europe/Dublin 1490490000000 0 0 0 3600000 3600000 522000000 2163600000
+bucket Europe/Dublin 1490491800000 0 1800000 1800000 5400000 5400000 523800000 2165400000
+bucket Europe/Dublin 1490497200000 0 0 0 3600000 10800000 529200000 2170800000
+bucket Europe/Dublin 1521935999999 899999 2399999 3599999 10799999 86399999 518399999 2073599999
+bucket Europe/Dublin 1521939599999 899999 1199999 3599999 3599999 3599999 521999999 2077199999
+bucket Europe/Dublin 1521939600000 0 0 0 3600000 3600000 522000000 2077200000
+bucket Europe/Dublin 1521941400000 0 1800000 1800000 5400000 5400000 523800000 2079000000
+bucket Europe/Dublin 1521946800000 0 0 0 3600000 10800000 529200000 2084400000
+bucket Europe/Dublin 1570126184088 584088 1784088 584088 4184088 68984088 328184088 241784088
+bucket Europe/Dublin 1648339199999 899999 2399999 3599999 10799999 86399999 518399999 2246399999
+bucket Europe/Dublin 1648342799999 899999 1199999 3599999 3599999 3599999 521999999 2249999999
+bucket Europe/Dublin 1648342800000 0 0 0 3600000 3600000 522000000 2250000000
+bucket Europe/Dublin 1648344600000 0 1800000 1800000 5400000 5400000 523800000 2251800000
+bucket Europe/Dublin 1648350000000 0 0 0 3600000 10800000 529200000 2257200000
+bucket Europe/Dublin 1711843199999 899999 2399999 3599999 10799999 86399999 518399999 2591999999
+bucket Europe/Dublin 1711846799999 899999 1199999 3599999 3599999 3599999 521999999 2595599999
+bucket Europe/Dublin 1711846800000 0 0 0 3600000 3600000 522000000 2595600000
+bucket Europe/Dublin 1711848600000 0 1800000 1800000 5400000 5400000 523800000 2597400000
+bucket Europe/Dublin 1711854000000 0 0 0 3600000 10800000 529200000 2602800000
+bucket Europe/Dublin 1748323381876 481876 1381876 1381876 1381876 22981876 109381876 2269381876
+bucket Europe/Dublin 1761436799999 899999 1199999 3599999 3599999 3599999 521999999 2163599999
+bucket Europe/Dublin 1761440399999 899999 2399999 3599999 7199999 7199999 525599999 2167199999
+bucket Europe/Dublin 1761440400000 0 4800000 0 7200000 7200000 525600000 2167200000
+bucket Europe/Dublin 1761442200000 0 600000 1800000 9000000 9000000 527400000 2169000000
+bucket Europe/Dublin 1761447600000 0 1200000 0 0 14400000 532800000 2174400000
+bucket Europe/Dublin 1869091199999 899999 2399999 3599999 10799999 86399999 518399999 2073599999
+bucket Europe/Dublin 1869094799999 899999 1199999 3599999 3599999 3599999 521999999 2077199999
+bucket Europe/Dublin 1869094800000 0 0 0 3600000 3600000 522000000 2077200000
+bucket Europe/Dublin 1869096600000 0 1800000 1800000 5400000 5400000 523800000 2079000000
+bucket Europe/Dublin 1869102000000 0 0 0 3600000 10800000 529200000 2084400000
+bucket Europe/Dublin 2077142399999 899999 1199999 3599999 3599999 3599999 521999999 2336399999
+bucket Europe/Dublin 2077145999999 899999 2399999 3599999 7199999 7199999 525599999 2339999999
+bucket Europe/Dublin 2077146000000 0 4800000 0 7200000 7200000 525600000 2340000000
+bucket Europe/Dublin 2077147800000 0 600000 1800000 9000000 9000000 527400000 2341800000
+bucket Europe/Dublin 2077153200000 0 1200000 0 0 14400000 532800000 2347200000
+bucket Europe/Dublin 2109859028727 728727 2228727 3428727 3428727 57428727 575828727 748628727
+bucket Asia/Gaza 1034884799999 899999 1199999 3599999 7199999 82799999 341999999 1465199999
+bucket Asia/Gaza 1034888399999 899999 2399999 3599999 10799999 86399999 345599999 1468799999
+bucket Asia/Gaza 1034888400000 0 4800000 0 10800000 86400000 345600000 1468800000
+bucket Asia/Gaza 1034890200000 0 600000 1800000 12600000 88200000 347400000 1470600000
+bucket Asia/Gaza 1034895600000 0 1200000 0 3600000 3600000 352800000 1476000000
+bucket Asia/Gaza 1175374799999 899999 1199999 3599999 7199999 82799999 514799999 2674799999
+bucket Asia/Gaza 1175378399999 899999 2399999 3599999 10799999 86399999 518399999 2678399999
+bucket Asia/Gaza 1175378400000 0 0 0 0 0 518400000 0
+bucket Asia/Gaza 1175380200000 0 600000 1800000 1800000 1800000 520200000 1800000
+bucket Asia/Gaza 1175385600000 0 1200000 0 0 7200000 525600000 7200000
+bucket Asia/Gaza 1192645186379 286379 1186379 1186379 8386379 73186379 245986379 1455586379
+bucket Asia/Gaza 1213504102165 802165 502165 1702165 5302165 26902165 545302165 1236502165
+bucket Asia/Gaza 1252011599999 899999 2399999 3599999 10799999 86399999 345599999 259199999
+bucket Asia/Gaza 1252015199999 899999 1199999 3599999 3599999 3599999 349199999 262799999
+bucket Asia/Gaza 1252015200000 0 0 0 0 3600000 349200000 262800000
+bucket Asia/Gaza 1252017000000 0 1800000 1800000 1800000 5400000 351000000 264600000
+bucket Asia/Gaza 1252022400000 0 0 0 7200000 10800000 356400000 270000000
+bucket Asia/Gaza 1323489470989 770989 2270989 3470989 10670989 21470989 453470989 799070989
+bucket Asia/Gaza 1458943199999 899999 2399999 3599999 10799999 86399999 431999999 2159999999
+bucket Asia/Gaza 1458946799999 899999 1199999 3599999 3599999 3599999 435599999 2163599999
+bucket Asia/Gaza 1458946800000 0 0 0 3600000 3600000 435600000 2163600000
+bucket Asia/Gaza 1458948600000 0 1800000 1800000 5400000 5400000 437400000 2165400000
+bucket Asia/Gaza 1458954000000 0 0 0 3600000 10800000 442800000 2170800000
+bucket Asia/Gaza 1504321379221 179221 179221 179221 179221 21779221 453779221 108179221
+bucket Asia/Gaza 1553806799999 899999 1199999 3599999 7199999 82799999 341999999 2415599999
+bucket Asia/Gaza 1553810399999 899999 2399999 3599999 10799999 86399999 345599999 2419199999
+bucket Asia/Gaza 1553810400000 0 0 0 0 0 345600000 2419200000
+bucket Asia/Gaza 1553812200000 0 600000 1800000 1800000 1800000 347400000 2421000000
+bucket Asia/Gaza 1553817600000 0 1200000 0 0 7200000 352800000 2426400000
+bucket Asia/Gaza 1585342799999 899999 1199999 3599999 7199999 82799999 428399999 2329199999
+bucket Asia/Gaza 1585346399999 899999 2399999 3599999 10799999 86399999 431999999 2332799999
+bucket Asia/Gaza 1585346400000 0 0 0 0 0 432000000 2332800000
+bucket Asia/Gaza 1585348200000 0 600000 1800000 1800000 1800000 433800000 2334600000
+bucket Asia/Gaza 1585353600000 0 1200000 0 0 7200000 439200000 2340000000
+bucket Asia/Gaza 1729893599999 899999 1199999 3599999 3599999 3599999 435599999 2163599999
+bucket Asia/Gaza 1729897199999 899999 2399999 3599999 7199999 7199999 439199999 2167199999
+bucket Asia/Gaza 1729897200000 0 4800000 0 7200000 7200000 439200000 2167200000
+bucket Asia/Gaza 1729899000000 0 600000 1800000 9000000 9000000 441000000 2169000000
+bucket Asia/Gaza 1729904400000 0 1200000 0 0 14400000 446400000 2174400000
+bucket Asia/Gaza 1774652399999 899999 1199999 3599999 3599999 3599999 435599999 2336399999
+bucket Asia/Gaza 1774655999999 899999 2399999 3599999 7199999 7199999 439199999 2339999999
+bucket Asia/Gaza 1774656000000 0 0 0 0 7200000 439200000 2340000000
+bucket Asia/Gaza 1774657800000 0 600000 1800000 1800000 9000000 441000000 2341800000
+bucket Asia/Gaza 1774663200000 0 1200000 0 7200000 14400000 446400000 2347200000
+bucket Asia/Gaza 2165210741401 641401 1541401 1541401 5141401 37541401 296741401 987941401
+bucket Asia/Gaza 2352837599999 899999 1199999 3599999 3599999 3599999 435599999 1904399999
+bucket Asia/Gaza 2352841199999 899999 2399999 3599999 7199999 7199999 439199999 1907999999
+bucket Asia/Gaza 2352841200000 0 4800000 0 7200000 7200000 439200000 1908000000
+bucket Asia/Gaza 2352843000000 0 600000 1800000 9000000 9000000 441000000 1909800000
+bucket Asia/Gaza 2352848400000 0 1200000 0 0 14400000 446400000 1915200000
+bucket Asia/Gaza 2356469999999 899999 1199999 3599999 3599999 3599999 435599999 176399999
+bucket Asia/Gaza 2356473599999 899999 2399999 3599999 7199999 7199999 439199999 179999999
+bucket Asia/Gaza 2356473600000 0 0 0 0 7200000 439200000 180000000
+bucket Asia/Gaza 2356475400000 0 600000 1800000 1800000 9000000 441000000 181800000
+bucket Asia/Gaza 2356480800000 0 1200000 0 7200000 14400000 446400000 187200000
+bucket Asia/Gaza 2421790977148 777148 177148 2577148 9777148 9777148 441777148 2428977148

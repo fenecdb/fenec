@@ -330,7 +330,13 @@ fn aggregates_over_the_query_string() {
         "[{\"max(stars)\":5,\"min(body)\":\"dense\"}]"
     );
     assert_eq!(get(h.port, "/remarks?select=sum(body)").status, 400);
-    assert_eq!(get(h.port, "/remarks?select=count(*)&limit=1").status, 400);
+    // Ungrouped, `limit` picks the rows folded: the first one's stars.
+    let r = get(
+        h.port,
+        "/remarks?select=count(*),max(stars)&order=id&limit=1",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body.trim(), "[{\"count\":1,\"max(stars)\":5}]");
     // Expressions: a column worked out, keys of several, a distinct count
     // and `first`, each the list's FenecQL.
     let r = get(
@@ -1366,6 +1372,59 @@ fn a_lookup_over_several_fields_from_the_query_string() {
         assert_eq!(r.status, 400, "{target} -> {}", r.body);
         assert!(r.body.contains(needle), "{target} -> {}", r.body);
     }
+}
+
+/// A level that folds over the query string: `<name>.select` aggregates as
+/// the query's own `select` does, `<name>.group` groups it, and a lookup
+/// off a query's groups names a column of its list in `<name>.parent`.
+#[test]
+fn a_level_that_folds_from_the_query_string() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection shops (name text)",
+        "create collection orders (shop int @hash, total int, status text)",
+        r#"put shops [{name: "Merkez"}, {name: "Depo"}]"#,
+        r#"put orders [{shop: 1, total: 10, status: "paid"}, {shop: 1, total: 5, status: "open"},
+           {shop: 1, total: 1, status: "paid"}]"#,
+    ] {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let h = start_with(Config::default(), db);
+    let r = get(
+        h.port,
+        "/shops?select=name&lookup=orders&orders.on=shop&orders.select=count(*),sum(total)",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body,
+        r#"[{"name":"Merkez","orders":[{"count":3,"sum(total)":16}]},{"name":"Depo","orders":[{"count":0,"sum(total)":null}]}]"#
+    );
+    let r = get(
+        h.port,
+        "/shops?select=name&lookup=orders&orders.on=shop&orders.select=status,count(*)\
+         &orders.group=status&orders.order=count(*).desc&orders.limit=1",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body,
+        r#"[{"name":"Merkez","orders":[{"status":"paid","count":2}]},{"name":"Depo","orders":[]}]"#
+    );
+    let r = get(
+        h.port,
+        "/orders?select=shop,sum(total)&group=shop\
+         &lookup=shops&shops.on=id&shops.parent=shop&shops.select=name",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body,
+        r#"[{"shop":1,"sum(total)":16,"shops":[{"name":"Merkez"}]}]"#
+    );
+    let r = get(
+        h.port,
+        "/orders?select=shop,sum(total)&group=shop&lookup=shops&shops.on=id&shops.parent=nope",
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(r.body.contains("not a column"), "{}", r.body);
 }
 
 /// Every way of getting it wrong, with the status the shape implies.

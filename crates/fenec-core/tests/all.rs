@@ -35,6 +35,7 @@ mod json;
 mod language_file;
 mod limit;
 mod lookup;
+mod lookup_aggregate;
 mod maintenance;
 mod mapped;
 mod mcp_docs;
@@ -67,3 +68,5 @@ mod upsert;
 mod wakes;
 mod within;
 mod writes;
+#[cfg(feature = "analytics")]
+mod zones;

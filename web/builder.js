@@ -126,12 +126,13 @@ const PATH = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*(\.[\p{Alphabetic}_][\p{A
  * ascending key; anything else is a list of pairs, so there is no reading
  * under which `['a','desc']` could mean two fields.
  */
-function orderKeys(spec) {
+function orderKeys(spec, columns = false) {
   if (spec === undefined || spec === null) return [];
-  if (typeof spec === 'string') return [{ field: path(spec), asc: true, collate: null }];
+  const name = (f) => (columns ? column(f).text ?? path(f) : path(f));
+  if (typeof spec === 'string') return [{ field: name(spec), asc: true, collate: null }];
   return spec.map((k) => {
     const [field, dir = 'asc', opts = {}] = [k].flat();
-    return { field: path(field), asc: direction(dir), collate: collation(opts.collate) };
+    return { field: name(field), asc: direction(dir), collate: collation(opts.collate) };
   });
 }
 
@@ -201,6 +202,14 @@ function column(name) {
       ? `count(distinct ${m[2]})`
       : `${m[3].toLowerCase()}(${m[4]})`;
   return { text, aggregate: true };
+}
+
+/** `group`'s keys: a field or a path, a name the list gives, or an expression. */
+function keysOf(flat) {
+  if (flat.length === 0) throw new FenecError('group takes at least one key');
+  return flat.map((k) => (k !== null && typeof k === 'object' && k[EXPR] === 'expr'
+    ? { node: k }
+    : { text: path(k) }));
 }
 
 /** A select item or a group key as text, an expression's values bound. */
@@ -355,19 +364,28 @@ export function expr(sql, ...params) {
 const INTERVAL = /^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$/;
 
 /**
- * `bucket(field, interval)`: the start of the interval a timestamp falls
- * in -- `'15m'`, `'1h'`, `'1d'`, `'1w'` (from a Monday), `'1mo'`, `'1y'`,
- * in UTC -- for a select list or a group:
+ * `bucket(field, interval [, zone])`: the start of the interval a timestamp
+ * falls in -- `'15m'`, `'1h'`, `'1d'`, `'1w'` (from a Monday), `'1mo'`,
+ * `'1y'`, in UTC -- for a select list or a group:
  *
  *   from('ticks').select(bucket('at', '1m').as('minute'), 'count(*)').group('minute')
+ *
+ * Given a zone -- an IANA name, `'Europe/Istanbul'`, or an offset,
+ * `'+03:00'` -- by its clock: a day from local midnight, 23 or 25 hours
+ * where it changes to or from daylight time. It goes as a parameter, so a
+ * page passes its own: `Intl.DateTimeFormat().resolvedOptions().timeZone`.
  */
-export function bucket(field, interval) {
+export function bucket(field, interval, zone) {
   if (typeof interval !== 'string' || !INTERVAL.test(interval)) {
     throw new FenecError(
       `bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': ${JSON.stringify(interval)}`,
     );
   }
-  return new Computed(`bucket(${path(field)}, ${interval})`, []);
+  if (zone === undefined) return new Computed(`bucket(${path(field)}, ${interval})`, []);
+  if (typeof zone !== 'string' || zone === '') {
+    throw new FenecError(`bucket() takes a zone's name, such as 'Europe/Istanbul', or an offset, such as '+03:00': ${JSON.stringify(zone)}`);
+  }
+  return new Computed(`bucket(${path(field)}, ${interval}, ?)`, [zone]);
 }
 
 /**
@@ -781,13 +799,7 @@ export class Query {
    * list gives a column with `as`, or an expression: `bucket('at', '1h')`.
    */
   group(...keys) {
-    const flat = keys.flat();
-    if (flat.length === 0) throw new FenecError('group takes at least one key');
-    return this.#with({
-      group: flat.map((k) => (k !== null && typeof k === 'object' && k[EXPR] === 'expr'
-        ? { node: k }
-        : { text: path(k) })),
-    });
+    return this.#with({ group: keysOf(keys.flat()) });
   }
 
   /**
@@ -890,6 +902,25 @@ export class Query {
    * reviews". It is tested before `limit`, so the page still comes back
    * full.
    *
+   * `select` may aggregate, as a query's own list does: each parent's
+   * children folded -- one row a parent, or with `group` one a group,
+   * ordered and paged a parent at a time. Ungrouped, `order`, `limit` and
+   * `offset` pick the children folded:
+   *
+   *   db.from('couriers')
+   *     .lookup('orders', { on: 'courier', order: [['at', 'desc']], limit: 50,
+   *                         select: ['count(*)', 'avg(distance)'] })
+   *   db.from('shops')
+   *     .lookup('lines', { on: 'shop', select: ['product', 'sum(qty)'], group: ['product'],
+   *                        order: [['sum(qty)', 'desc']], limit: 3 })
+   *
+   * A query whose list aggregates hangs a lookup off its groups, keyed by
+   * a column: `parentKey` names it.
+   *
+   *   db.from('orders').select('courier', 'count(*)').group('courier')
+   *     .order('count', 'desc').limit(10)
+   *     .lookup('couriers', { on: 'user', parentKey: 'courier', select: ['name'] })
+   *
    * Call it again to chain: the second call binds to the collection the
    * first one named, the way position scopes it in FenecQL.
    *
@@ -920,17 +951,30 @@ export class Query {
     if ((on.length > 1 || parent.length) && parent.length !== on.length) {
       throw new FenecError(`lookup pairs ${on.length} child fields with ${parent.length} parent fields`);
     }
+    const list = select === null || select.includes('*') ? null : select.map((c) => column(c));
+    const aggregate = !!list?.some((c) => c.aggregate);
+    const group = opts.group === undefined ? null : keysOf([opts.group].flat());
+    // The engine refuses it too; failing here never sends a query.
+    if (group && !aggregate) {
+      const keys = group.map((k) => k.text ?? k.node.sql).join(', ');
+      throw new FenecError(`group ${keys} needs an aggregate in select: 'count(*)'`);
+    }
     const level = {
       collection: ident(name, 'collection'),
       on,
       parent,
-      project:
-        select === null || select.includes('*')
-          ? null
-          : select.map((c) => path(c)),
+      // A level selects its children's fields, or aggregates of them.
+      project: aggregate ? list : list?.map((c) => {
+        if (c.text === undefined) {
+          throw new FenecError('a lookup selects its children\'s fields, or aggregates of them');
+        }
+        return c;
+      }) ?? null,
+      group,
       cond: opts.where === undefined ? [] : [condOf([opts.where])],
       required: !!opts.required,
-      order: orderKeys(opts.order),
+      // Over groups a key may name an aggregate of the list.
+      order: orderKeys(opts.order, true),
       limit: opts.limit === undefined ? undefined : whole(opts.limit, 'limit'),
       offset: opts.offset === undefined ? 0 : whole(opts.offset, 'offset'),
     };
@@ -1007,11 +1051,10 @@ export class Query {
       throw new FenecError(`group ${keys} needs an aggregate in select: 'count(*)'`);
     }
     if (aggregate) {
-      const clash = near ? 'near' : match ? 'match' : lookups.length ? 'lookup' : count ? 'count' : null;
+      // Ungrouped, `order`, `limit` and `offset` pick the rows folded; a
+      // lookup hangs off the groups, keyed by a column.
+      const clash = near ? 'near' : match ? 'match' : count && !group ? 'count' : null;
       if (clash) throw new FenecError(`aggregates cannot be combined with ${clash}`);
-      if (!group && (order.length || limit !== undefined || offset)) {
-        throw new FenecError('aggregates answer one row; group makes a row per value');
-      }
       if (!group && this.#s.require) {
         throw new FenecError('require counts the rows a query answers, and an aggregate answers one');
       }
@@ -1137,9 +1180,10 @@ export class Query {
       // come back, so it should be read before the clauses that only shape
       // the children.
       if (lookup.required) sql += ' required';
-      if (lookup.project) sql += ` select ${lookup.project.join(', ')}`;
+      if (lookup.project) sql += ` select ${lookup.project.map((c) => columnText(c, bind)).join(', ')}`;
       const root = prune({ t: 'and', items: lookup.cond });
       if (root) sql += ` where ${render(root, bind, null)}`;
+      if (lookup.group) sql += ` group ${lookup.group.map((k) => columnText(k, bind)).join(', ')}`;
       for (const [i, o] of lookup.order.entries()) {
         sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
       }

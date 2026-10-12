@@ -1,11 +1,13 @@
 // What a dispatcher's Insights page asks, each one statement over the
 // company's orders: deliveries an hour, on time or late, metres driven, the
-// waves by hour of the day, and the couriers who carried the most. Merrow
-// keeps UTC+3 and `bucket` has no time zone, so a local day or hour is
-// `bucket(t + 3 h, ...)`: an offset written into every statement.
+// waves by hour of the day, and the couriers who carried the most, with
+// their names. Merrow keeps UTC+3 the year round: a local day is
+// `bucket(t, 1d, '+03:00')`, which a city with daylight saving would name
+// by its zone, `'Europe/Berlin'`, the same way.
 import { rows, type Db } from './db';
 
 export const MERROW_OFFSET = 3 * 3_600_000;
+export const MERROW_ZONE = '+03:00';
 const H = 3_600_000;
 
 export interface Totals {
@@ -34,6 +36,8 @@ export interface Leader {
   on_time: number;
   metres: number;
   ride: number;
+  /** The courier's row, attached by a lookup off the groups. */
+  couriers: { name: string; code: string }[];
 }
 
 /** The start of Merrow's day, in milliseconds. */
@@ -67,15 +71,16 @@ export async function insights(db: Db, now = Date.now()) {
     ),
     rows<ByHour>(
       db,
-      'get orders select (created + $2 - bucket(created + $2, 86400000)) / 3600000 as h, count(*) as n, ' +
+      'get orders select (created - bucket(created, 1d, $2)) / 3600000 as h, count(*) as n, ' +
         'sum(case when delivered_at <= promised then 1 else 0 end) as on_time ' +
         'where delivered_at >= $1 group h order h',
-      [today - 14 * 86_400_000, MERROW_OFFSET],
+      [today - 14 * 86_400_000, MERROW_ZONE],
     ),
     rows<Leader>(
       db,
       'get orders select courier, count(*) as n, sum(case when delivered_at <= promised then 1 else 0 end) as on_time, ' +
-        'sum(driven) as metres, avg(delivered_at - picked_at) as ride where delivered_at >= $1 group courier order n desc limit 10',
+        'sum(driven) as metres, avg(delivered_at - picked_at) as ride where delivered_at >= $1 group courier order n desc limit 10 ' +
+        'lookup couriers on user = courier select name, code',
       [week],
     ),
   ]);

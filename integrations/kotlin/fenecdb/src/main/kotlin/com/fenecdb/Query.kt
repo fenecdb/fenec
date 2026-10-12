@@ -103,13 +103,20 @@ class Computed private constructor(
          * falls in -- `"15m"`, `"1h"`, `"1d"`, `"1w"` (from a Monday),
          * `"1mo"`, `"1y"`, in UTC -- for a select list or a group. The
          * interval is written into the text, since it is a part of the
-         * statement's shape.
+         * statement's shape. Given a [zone] -- an IANA name,
+         * `"Europe/Istanbul"`, or an offset, `"+03:00"` -- by its clock: a
+         * day from local midnight, 23 or 25 hours where it changes to or
+         * from daylight time. The zone goes as a parameter.
          */
-        @JvmStatic fun bucket(field: String, interval: String): Computed {
+        @JvmStatic @JvmOverloads fun bucket(field: String, interval: String, zone: String? = null): Computed {
             if (!INTERVAL.matches(interval)) {
                 throw refuse("bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': ${Builder.quote(interval)}")
             }
-            return Computed(null, "bucket(${Builder.path(field)}, $interval)", emptyList())
+            if (zone == null) return Computed(null, "bucket(${Builder.path(field)}, $interval)", emptyList())
+            if (zone.isEmpty()) {
+                throw refuse("bucket() takes a zone's name, such as 'Europe/Istanbul', or an offset, such as '+03:00': ${Builder.quote(zone)}")
+            }
+            return Computed(null, "bucket(${Builder.path(field)}, $interval, ?)", listOf(zone))
         }
 
         /** `count(distinct field)`: how many distinct values the rows hold. */
@@ -508,8 +515,9 @@ class Query private constructor(private val s: State) {
     private class Facet(val field: String, val top: Long?, val ranges: List<String>?, val disjunctive: Boolean)
 
     private class Level(
-        val collection: String, val on: List<String>, val parent: List<String>, val project: List<String>?, val cond: List<Node>,
-        val required: Boolean, val order: List<Key>, val limit: Long?, val offset: Long,
+        val collection: String, val on: List<String>, val parent: List<String>, val project: List<Any>?,
+        val group: List<Any>?, val cond: List<Node>, val required: Boolean, val order: List<Key>, val limit: Long?,
+        val offset: Long,
     )
 
     private data class State(
@@ -637,12 +645,21 @@ class Query private constructor(private val s: State) {
      * given); the rest binds to the looked-up collection, and [limit] counts
      * children per parent. [required] drops a parent no child matches.
      * Called again, it chains onto the collection the call before named.
+     *
+     * [select] may aggregate, as the query's own list does -- `"count(*)"`,
+     * `"sum(total)"`, a [Computed] -- each parent's children folded, one row
+     * a parent, or with [group] one a group, ordered and paged a parent at a
+     * time; ungrouped, [order], [limit] and [offset] pick the children
+     * folded. A query whose list aggregates hangs a lookup off its groups,
+     * [parentKey] a column.
      */
     @JvmOverloads
     fun lookup(
-        name: String, on: String?, parentKey: String? = null, select: List<String>? = null, where: Any? = null,
+        name: String, on: String?, parentKey: String? = null, select: List<Any>? = null, where: Any? = null,
         required: Boolean = false, order: List<SortKey> = emptyList(), limit: Long? = null, offset: Long? = null,
-    ): Query = lookup(name, listOfNotNull(on), parentKey?.let { listOf(it) }, select, where, required, order, limit, offset)
+        group: List<Any>? = null,
+    ): Query =
+        lookup(name, listOfNotNull(on), parentKey?.let { listOf(it) }, select, where, required, order, limit, offset, group)
 
     /**
      * `lookup name on (child, ...) = (parent, ...) ...`: a key over several
@@ -651,9 +668,9 @@ class Query private constructor(private val s: State) {
      */
     @JvmOverloads
     fun lookup(
-        name: String, on: List<String>, parentKey: List<String>? = null, select: List<String>? = null,
+        name: String, on: List<String>, parentKey: List<String>? = null, select: List<Any>? = null,
         where: Any? = null, required: Boolean = false, order: List<SortKey> = emptyList(), limit: Long? = null,
-        offset: Long? = null,
+        offset: Long? = null, group: List<Any>? = null,
     ): Query {
         if (on.isEmpty() || on[0].isEmpty()) throw refuse("lookup needs `on`: the child field holding the key")
         val child = on.map { Builder.ident(it) }
@@ -662,14 +679,31 @@ class Query private constructor(private val s: State) {
         if ((child.size > 1 || parentKey != null) && parent.size != child.size) {
             throw refuse("lookup pairs ${child.size} child fields with ${parent.size} parent fields")
         }
+        val cs = if (select == null || "*" in select) null else select.map { Builder.column(it) }
+        val aggregate = cs?.any { it.second } ?: false
+        val keys = group?.let { g ->
+            if (g.isEmpty()) throw refuse("group takes at least one key")
+            g.map(Builder::groupKey)
+        }
+        // The engine refuses it too; failing here never sends a query.
+        if (keys != null && !aggregate) {
+            val text = keys.joinToString(", ") { if (it is Computed) it.sql!! else it as String }
+            throw refuse("group $text needs an aggregate in select: 'count(*)'")
+        }
+        // A level selects its children's fields, or aggregates of them.
+        if (!aggregate && cs != null && cs.any { it.first is Computed }) {
+            throw refuse("a lookup selects its children's fields, or aggregates of them")
+        }
         val level = Level(
             collection = Builder.ident(name, "collection"),
             on = child,
             parent = parent,
-            project = if (select == null || "*" in select) null else select.map(Builder::path),
+            project = cs?.map { it.first },
+            group = keys,
             cond = if (where == null) emptyList() else listOf(Builder.toNode(where)),
             required = required,
-            order = order.map { Key(Builder.path(it.field), Builder.direction(it.direction), Builder.collation(it.collate)) },
+            // Over groups a key may name an aggregate of the list.
+            order = order.map { Key(Builder.column(it.field).first, Builder.direction(it.direction), Builder.collation(it.collate)) },
             limit = limit?.let { Builder.whole(it, "limit") },
             offset = offset?.let { Builder.whole(it, "offset") } ?: 0,
         )
@@ -789,17 +823,15 @@ class Query private constructor(private val s: State) {
             throw refuse("group $keys needs an aggregate in select: 'count(*)'")
         }
         if (s.aggregate) {
+            // Ungrouped, order, limit and offset pick the rows folded; a
+            // lookup hangs off the groups, keyed by a column.
             val clash = when {
                 s.near != null -> "near"
                 s.match != null -> "match"
-                s.lookups.isNotEmpty() -> "lookup"
-                s.count -> "count"
+                s.count && s.group == null -> "count"
                 else -> null
             }
             if (clash != null) throw refuse("aggregates cannot be combined with $clash")
-            if (s.group == null && (s.order.isNotEmpty() || s.limit != null || s.offset > 0)) {
-                throw refuse("aggregates answer one row; group makes a row per value")
-            }
             if (s.group == null && s.require.isNotEmpty()) {
                 throw refuse("require counts the rows a query answers, and an aggregate answers one")
             }
@@ -903,8 +935,9 @@ class Query private constructor(private val s: State) {
             sql.append(" lookup ${l.collection} on ${side(l.on)}")
             if (l.parent.isNotEmpty()) sql.append(" = ${side(l.parent)}")
             if (l.required) sql.append(" required")
-            l.project?.let { sql.append(" select ").append(it.joinToString(", ")) }
+            l.project?.let { p -> sql.append(" select ").append(p.joinToString(", ") { Builder.columnText(it, bind) }) }
             whereOf(l.cond, bind)?.let { sql.append(" where ").append(it) }
+            l.group?.let { g -> sql.append(" group ").append(g.joinToString(", ") { Builder.columnText(it, bind) }) }
             appendOrder(sql, l.order)
             l.limit?.let { sql.append(" limit ").append(bind.bind(it)) }
             if (l.offset > 0) sql.append(" offset ").append(bind.bind(l.offset))

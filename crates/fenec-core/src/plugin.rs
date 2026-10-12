@@ -384,9 +384,19 @@ pub mod builtins {
         b(
             "bucket",
             2,
-            Some(2),
-            "the start of the interval a timestamp falls in: bucket(at, 15m)",
-            |a| crate::query::Interval::of(&a[1])?.truncate(&a[0]),
+            Some(3),
+            "the start of the interval a timestamp falls in: bucket(at, 15m), or by a zone's \
+             clock, bucket(at, 1d, 'Europe/Istanbul')",
+            |a| {
+                let iv = crate::query::Interval::of(&a[1])?;
+                match a.get(2) {
+                    None => iv.truncate(&a[0]),
+                    Some(z) => {
+                        let z = crate::tz::cached(z)?;
+                        iv.truncate_in(&a[0], Some(&z))
+                    }
+                }
+            },
         ),
         b("greatest", 1, None, "the largest of its values", |a| {
             Ok(extreme(a, true))

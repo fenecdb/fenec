@@ -20,7 +20,7 @@ the page does.</p>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">9 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">229 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">236 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
 </tbody>
 </table>
 </div>
@@ -741,8 +741,8 @@ feature; another set is a build option.</p>
 <pre data-lang="bash">make wasm                              # every feature: 224 KB brotli
 make wasm FEATURES="text sorted"       # those two alone, and the schema check
 make wasm FEATURES=indexes             # the indexes, none of the rest
-make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 166 KB
-make wasm FEATURES=none SCHEMA=0       # no feature at all: 145 KB
+make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 172 KB
+make wasm FEATURES=none SCHEMA=0       # no feature at all: 149 KB
 </pre>
 
 <div class="tbl">
@@ -928,8 +928,34 @@ collection the first one named, the way position scopes it in FenecQL.</p>
 
 // [{ name: 'Merkez', orders: [{ code: 'A', lines: [ {...} ] }, ...] }, ...]</pre>
 
+<p>A level's <code>select</code> may aggregate, as the query's own does:
+each parent's children folded — one row a parent, or with
+<code>group</code> one a group, ordered and paged a parent at a time.
+Ungrouped, <code>order</code> and <code>limit</code> pick the children
+folded. A query whose list aggregates hangs a lookup off its groups,
+<code>parentKey</code> naming a column; and <code>bucket(field, interval,
+zone)</code> counts by a zone's clock, the zone a parameter.</p>
+
+<pre data-lang="ts">import { bucket } from './fenec.js';
+
+// Each product's latest 50 reviews, counted and averaged.
+const page = await db.from('products').limit(20)
+  .lookup('reviews', { on: 'product_id', order: [['created', 'desc']], limit: 50,
+                       select: ['count(*)', 'avg(stars)'] })
+  .rows();
+// The ten most reviewed, with their names.
+const most = await db.from('reviews')
+  .select('product_id', 'count(*)').group('product_id').order('count(*)', 'desc').limit(10)
+  .lookup('products', { on: 'id', parentKey: 'product_id', select: ['name'] })
+  .rows();
+// Reviews a day, by the page's own clock.
+const days = await db.from('reviews')
+  .select(bucket('created', '1d', Intl.DateTimeFormat().resolvedOptions().timeZone).as('day'), 'count(*)')
+  .group('day').rows();</pre>
+
 <p>The row type follows the nesting, so
-<code>rows[0].orders[0].lines[0]</code> is typed without a cast.
+<code>rows[0].orders[0].lines[0]</code> is typed without a cast; a level
+that folds is typed as the children it folds, its columns not narrowed to.
 <code>required</code> keeps meaning what it means at its own level: on
 <code>lines</code> it drops the <i>orders</i> that have none, and the shops
 stay unless <code>orders</code> asks for it too.</p>

@@ -220,13 +220,18 @@ pub fn refused(e: &Error, ran: usize, at: Option<usize>) -> String {
         out.push('}');
     }
     let missing = collate::take_missing();
-    if missing != 0 {
+    // The time zones' table is handed as the collation data is, under the
+    // name `zones` after theirs.
+    let zones = fenec_core::tz::take_missing();
+    if missing != 0 || zones {
         out.pop();
         out.push_str(",\"chunks\":[");
-        for (i, name) in collate::chunk_names(missing).enumerate() {
-            if i > 0 {
+        let mut first = true;
+        for name in collate::chunk_names(missing).chain(zones.then_some("zones")) {
+            if !first {
                 out.push(',');
             }
+            first = false;
             json::escape_into(&mut out, name);
         }
         out.push(']');

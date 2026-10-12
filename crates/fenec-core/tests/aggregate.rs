@@ -255,8 +255,8 @@ fn what_does_not_combine_is_refused() {
         ("get t select max(v)", "an order"),
         ("get t select sum(n) near v [1.0, 0.0]", "near"),
         ("get t select sum(n) match body \"x\"", "match"),
-        ("get t select sum(n) order n", "one row"),
-        ("get t select sum(n) limit 3", "one row"),
+        // Ungrouped, `order` picks the rows folded: by what a row holds.
+        ("get t select sum(n) order sum(n) limit 3", "picks the rows"),
         ("get t select g, sum(n)", "neither aggregated nor grouped"),
         (
             "get t select n, count(*) group g",

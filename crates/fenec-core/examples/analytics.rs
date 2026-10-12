@@ -61,6 +61,17 @@ fn put(db: &mut Database, collection: &str, docs: Vec<Vec<(String, Expr)>>) {
     }
 }
 
+/// Each row's first row a level below it attached, what a fold answers.
+fn nested(db: &Database, sql: &str) -> Vec<Vec<Value>> {
+    let stmt = fenec_ql::parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let r = db.query(&stmt, &[]).unwrap();
+    let rs = r.rows().unwrap();
+    let n = rs.nested.as_ref().unwrap();
+    (0..rs.rows.len())
+        .map(|i| n.group(i).first().map_or(Vec::new(), |r| r.values.clone()))
+        .collect()
+}
+
 fn rows(db: &Database, sql: &str, params: &[Value]) -> Vec<Vec<Value>> {
     let stmt = fenec_ql::parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
     match db.query(&stmt, params) {
@@ -84,7 +95,11 @@ fn median<T>(mut f: impl FnMut() -> T) -> (f64, T) {
 }
 
 fn line(what: &str, ms: f64, n: usize) {
-    println!("  {what:<58} {ms:>9.2} ms  ({n})");
+    // Under a millisecond, three places: a page of folds is tens of us.
+    match ms < 1.0 {
+        true => println!("  {what:<58} {ms:>9.3} ms  ({n})"),
+        false => println!("  {what:<58} {ms:>9.2} ms  ({n})"),
+    }
 }
 
 fn main() {
@@ -97,6 +112,10 @@ fn main() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
+    if std::env::args().any(|a| a == "folds") {
+        folds(now);
+        return;
+    }
     let lit = |v: Value| Expr::Lit(v);
 
     // The fixed aggregates of before, over a million rows in 100 groups.
@@ -207,6 +226,47 @@ fn main() {
     // The stored minute starts where the bucket does, a minute's ms apart.
     let firsts = |r: &[Vec<Value>]| r.iter().map(|r| r[1].clone()).collect::<Vec<_>>();
     assert_eq!(firsts(&one), firsts(&stored));
+
+    // A day and an hour by a zone's clock, against UTC's: off the ordered
+    // index, and with a filter that reads the rows.
+    let week = [Value::Timestamp(now - 7 * DAY)];
+    for (what, q) in [
+        (
+            "per-day counts, 7 days, bucket(at, 1d), UTC, off the index",
+            "get events select bucket(at, 1d) as d, count(*) where at >= $1 group d",
+        ),
+        (
+            "  bucket(at, 1d, 'Europe/Istanbul')",
+            "get events select bucket(at, 1d, 'Europe/Istanbul') as d, count(*) where at >= $1 \
+             group d",
+        ),
+        (
+            "  bucket(at + 10800000, 1d), the offset written in (before)",
+            "get events select bucket(at + 10800000, 1d) as d, count(*) where at >= $1 group d",
+        ),
+        (
+            "per-hour counts, 7 days, bucket(at, 1h), UTC, off the index",
+            "get events select bucket(at, 1h) as h, count(*) where at >= $1 group h",
+        ),
+        (
+            "  bucket(at, 1h, 'Europe/Berlin')",
+            "get events select bucket(at, 1h, 'Europe/Berlin') as h, count(*) where at >= $1 \
+             group h",
+        ),
+        (
+            "per-hour counts of one country, bucket(at, 1h), rows read",
+            "get events select bucket(at, 1h) as h, count(*) where at >= $1 and country = 'TR' \
+             group h",
+        ),
+        (
+            "  bucket(at, 1h, 'Europe/Berlin')",
+            "get events select bucket(at, 1h, 'Europe/Berlin') as h, count(*) where at >= $1 \
+             and country = 'TR' group h",
+        ),
+    ] {
+        let (ms, r) = median(|| rows(&db, q, &week));
+        line(what, ms, r.len());
+    }
 
     let q = "get events select bucket(at, 1h) as hour, count(distinct user) group hour";
     let (ms, distinct) = median(|| rows(&db, q, &[]));
@@ -419,7 +479,163 @@ fn main() {
     let got: Vec<Value> = latest.iter().map(|r| r[1].clone()).collect();
     assert_eq!(got, each);
     drop(db);
+    folds(now);
     writes();
+}
+
+/// Lookups that fold: 2 000 couriers and 200 000 deliveries, the busiest
+/// ten with their names off the deliveries' groups, and a page of 20
+/// couriers with the count and mean distance of their latest 50 -- each
+/// against what a client did before: the groups and a second query for
+/// the names, the deliveries read out and folded by the client.
+fn folds(now: i64) {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection couriers (name text, city text);
+         create collection deliveries (courier int @hash, at timestamp, km float, fee int, \
+         @sorted(courier, at desc))",
+    );
+    let lit = |v: Value| Expr::Lit(v);
+    let docs = (0..2000)
+        .map(|i| {
+            vec![
+                ("name".into(), lit(Value::Text(format!("courier {i}")))),
+                ("city".into(), lit(Value::Text(["x", "y"][i % 2].into()))),
+            ]
+        })
+        .collect();
+    put(&mut db, "couriers", docs);
+    let mut rng = Rng(0x0123_4567_89ab_cdef);
+    let docs = (0..200_000)
+        .map(|_| {
+            // Some couriers far busier than others, the first ids busiest:
+            // the page of 20 holds 130 to 1 300 deliveries each.
+            let c = 1 + (((1.0 - rng.unit()).powf(-1.0 / 1.5) - 1.0) * 40.0) as i64 % 2000;
+            vec![
+                ("courier".into(), lit(Value::Int(c))),
+                (
+                    "at".into(),
+                    lit(Value::Timestamp(now - rng.below(30 * DAY as u64) as i64)),
+                ),
+                (
+                    "km".into(),
+                    lit(Value::Float((rng.unit() * 120.0).round() / 10.0)),
+                ),
+                ("fee".into(), lit(Value::Int(300 + rng.below(900) as i64))),
+            ]
+        })
+        .collect();
+    put(&mut db, "deliveries", docs);
+    println!("\n2000 couriers, 200000 deliveries:");
+    let since = [Value::Timestamp(now - 7 * DAY)];
+    let q = "get deliveries select courier, count() as n where at >= $1 group courier \
+             order n desc limit 10 lookup couriers on id = courier select name";
+    let (ms, busiest) = median(|| rows(&db, q, &since));
+    line(
+        "the busiest ten with their names, a lookup off the groups",
+        ms,
+        busiest.len(),
+    );
+    let groups = "get deliveries select courier, count() as n where at >= $1 group courier \
+                  order n desc limit 10";
+    // A parameter an element, as a client writes the list.
+    let names = "get couriers select name where id in [$1, $2, $3, $4, $5, $6, $7, $8, $9, $10]";
+    let (ms, two) = median(|| {
+        let g = rows(&db, groups, &since);
+        let ids: Vec<Value> = g.iter().map(|r| r[0].clone()).collect();
+        (g.len(), rows(&db, names, &ids).len())
+    });
+    line(
+        "  the groups, then a query for the names (the workaround)",
+        ms,
+        two.0 + two.1,
+    );
+
+    let q = "get couriers limit 20 lookup deliveries on courier = id order at desc limit 50 \
+             select count() as n, avg(km) as km";
+    let (ms, page) = median(|| rows(&db, q, &[]));
+    line(
+        "a page of 20, each one's latest 50 folded, count and avg(km)",
+        ms,
+        page.len(),
+    );
+    let q = "get couriers limit 20 lookup deliveries on courier = id order at desc limit 50 \
+             select km";
+    let stmt = fenec_ql::parse_one(q).unwrap();
+    let (ms, folded) = median(|| {
+        let r = db.query(&stmt, &[]).unwrap();
+        let rs = r.rows().unwrap();
+        let n = rs.nested.as_ref().unwrap();
+        (0..rs.rows.len())
+            .map(|i| {
+                let g = n.group(i);
+                let sum: f64 = (g.iter())
+                    .map(|r| match r.values[0] {
+                        Value::Float(f) => f,
+                        _ => 0.0,
+                    })
+                    .sum();
+                (g.len(), sum / g.len().max(1) as f64)
+            })
+            .collect::<Vec<_>>()
+    });
+    line(
+        "  the 50 attached and folded by the client (the workaround)",
+        ms,
+        folded.len(),
+    );
+
+    let q = "get couriers limit 20 lookup deliveries on courier = id \
+             select count() as n, sum(fee) as fees";
+    let (ms, all) = median(|| rows(&db, q, &[]));
+    line(
+        "a page of 20, every delivery of each folded, count and sum(fee)",
+        ms,
+        all.len(),
+    );
+    let q = "get couriers limit 20 lookup deliveries on courier = id select fee";
+    let stmt = fenec_ql::parse_one(q).unwrap();
+    let (ms, by_client) = median(|| {
+        let r = db.query(&stmt, &[]).unwrap();
+        let rs = r.rows().unwrap();
+        let n = rs.nested.as_ref().unwrap();
+        (0..rs.rows.len())
+            .map(|i| {
+                (n.group(i).iter())
+                    .map(|r| match r.values[0] {
+                        Value::Int(f) => f,
+                        _ => 0,
+                    })
+                    .sum::<i64>()
+            })
+            .collect::<Vec<_>>()
+    });
+    line(
+        "  every delivery attached and summed by the client (the workaround)",
+        ms,
+        by_client.len(),
+    );
+    // The same answers both ways.
+    assert_eq!(busiest.len(), two.0);
+    let latest = nested(
+        &db,
+        "get couriers limit 20 lookup deliveries on courier = id order at desc limit 50 \
+         select count() as n, avg(km) as km",
+    );
+    for (f, (n, km)) in latest.iter().zip(&folded) {
+        assert_eq!(f[0], Value::Int(*n as i64));
+        if *n > 0 {
+            assert_eq!(f[1], Value::Float(*km));
+        }
+    }
+    let fees = nested(
+        &db,
+        "get couriers limit 20 lookup deliveries on courier = id select sum(fee) as fees",
+    );
+    for (f, sum) in fees.iter().zip(&by_client) {
+        assert!(f[0] == Value::Int(*sum) || (*sum == 0 && f[0] == Value::Null));
+    }
 }
 
 /// A beacon's page of 1 000 events, written out and as a parameter, and a
