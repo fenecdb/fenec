@@ -110,12 +110,11 @@ for (const n of [1, 10, 50, 100]) {
   });
 }
 
-// 2. A claim of the nearest with orders ready: the read and the /batch.
+// 2. A claim of the nearest with orders ready: one statement.
 for (const n of [1, 16, 50]) {
   const r = rng(n * 7);
   for (let i = 0; i < 600; i++) await place(r);
   const lat: number[] = [];
-  let batches = 0;
   await Promise.all(
     couriers.slice(0, n).map(async (who, k) => {
       const rr = rng(1000 + k);
@@ -123,12 +122,11 @@ for (const n of [1, 16, 50]) {
         const t0 = performance.now();
         const got = await claimNearest(who, spot(rr), { radius: 20_000 });
         lat.push(performance.now() - t0);
-        batches += got?.tried ?? 0;
         if (got) await deliver(who, got.job, 1000);
       }
     }),
   );
-  report(`claim the nearest, ${String(n).padStart(2)} couriers at once`, { p50: ms(q(lat, 0.5)), p99: ms(q(lat, 0.99)), claims: lat.length, 'candidates tried a claim': (batches / lat.length).toFixed(2) });
+  report(`claim the nearest, ${String(n).padStart(2)} couriers at once`, { p50: ms(q(lat, 0.5)), p99: ms(q(lat, 0.99)), claims: lat.length });
 }
 
 // 3. The nearest couriers to a pickup, over 60, 1 000 and 10 000 positions.
