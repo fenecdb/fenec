@@ -621,6 +621,42 @@ fn check(ix: &Database, plain: &Database, stage: &str) {
     }
 }
 
+/// A few of `check`'s lookups, read inside a block before it lands.
+fn in_a_block(ix: &Database, plain: &Database) {
+    SEEN.with(|s| s.borrow_mut().clear());
+    KEYS.with(|s| s.borrow_mut().clear());
+    let all = |coll| Top {
+        coll,
+        filter: "",
+        order: "",
+        limit: None,
+        offset: 0,
+    };
+    for required in [false, true] {
+        let orders = Level {
+            order: "order at desc",
+            limit: Some(2),
+            required,
+            ..Level::new("orders", ORDERS_ON)
+        };
+        let lines = Level {
+            filter: "where sku = \"a\"".into(),
+            order: "order line",
+            limit: Some(2),
+            required,
+            ..Level::new("lines", LINES_ON)
+        };
+        let one = Level {
+            order: "order qty desc",
+            required,
+            ..Level::new("lines", ORDER_ON)
+        };
+        holds(ix, plain, &all("shops"), &[orders], false, "in a block");
+        holds(ix, plain, &all("orders"), &[lines], false, "in a block");
+        holds(ix, plain, &all("orders"), &[one], false, "in a block");
+    }
+}
+
 /// Every write a key's part goes through on either side.
 fn write(db: &mut Database) {
     for s in [
@@ -659,7 +695,8 @@ fn a_lookup_over_several_fields_gives_the_references_answer() {
     }
     check(&ix, &plain, "after writes");
 
-    // A block put back leaves every index as it was.
+    // Inside a block its writes are read; put back, every index is as it
+    // was.
     for db in [&mut ix, &mut plain] {
         db.begin().unwrap();
         exec(db, "set lines {org: 1} where org = 2");
@@ -669,6 +706,9 @@ fn a_lookup_over_several_fields_gives_the_references_answer() {
             db,
             "put lines {org: 1, order: 3, line: 1, sku: \"a\", qty: 2, price: 0.0}",
         );
+    }
+    in_a_block(&ix, &plain);
+    for db in [&mut ix, &mut plain] {
         db.rollback();
     }
     check(&ix, &plain, "after a block put back");
