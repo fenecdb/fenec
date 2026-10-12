@@ -136,8 +136,9 @@ impl Chunk {
 }
 
 /// `words`, each once, in byte order: merged a run at a time, the runs
-/// doubling. Not the standard library's sort, which for `&[u8]` was 3.7 KB
-/// of the browser module; 60 000 words sort in as long either way.
+/// doubling. The browser module's: the standard library's sort, for
+/// `&[u8]`, was 3.7 KB of it.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn sorted(words: Vec<&[u8]>) -> Vec<&[u8]> {
     let n = words.len();
     let (mut a, mut b) = (words, Vec::with_capacity(n));
@@ -187,6 +188,11 @@ impl Dictionary {
                 all.push(w.as_bytes());
             }
         }
+        // The standard sort natively: over FiQA's 135 500 words, 10.9 ms
+        // against the merge's 24.9.
+        #[cfg(not(target_arch = "wasm32"))]
+        all.sort_unstable();
+        #[cfg(target_arch = "wasm32")]
         let all = sorted(all);
         let mut d = Dictionary::default();
         // Half full, as an ordered index's chunks start: the first write to
