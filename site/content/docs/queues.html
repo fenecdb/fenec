@@ -115,17 +115,20 @@ wait with no row: Redis's <code>BLPOP</code>, SQS's long poll.</p>
   <li><b>One job, many workers:</b> it goes to the worker that has waited
     longest, and the others stay held. Claims that would take the same
     jobs — the same filter, scope and parameters in it, whatever they
-    write — wait in line, and only the first is woken to look; having
-    taken a job it hands the turn to the next, since more may be ready.
-    A write to the queue costs one look under the read lock, not a claim
-    a worker.</li>
+    write — wait in line, and the line looks once whether a job is there;
+    the first runs, and having taken a job hands the turn to the next,
+    since more may be ready. A write to the queue costs a line one look
+    under the read lock, not a claim a worker.</li>
   <li><b>Claims of their own, one job:</b> it goes to the claim whose own
     order puts it first, and on a tie to the one that has waited longest.
     A courier's claim is a line of its own -- its point is in its filter,
-    its token's subject in its rules -- so every courier is woken by an
-    order placed; each that finds a row bids for it, and once every claim
-    that could beat the best bid has looked, the row is the best's and the
-    rest wait behind its run (<a href="#fairness">Who gets the job</a>).</li>
+    its token's subject in its rules -- so every courier's claim looks
+    when an order is placed, all of them by one held request under one
+    read lock, each among the orders placed since it last looked; each
+    that finds a row bids for it, and once every claim that could beat the
+    best bid has looked, the row is the best's, its claim alone is woken,
+    and the rest wait behind its run (<a href="#fairness">Who gets the
+    job</a>).</li>
   <li><b>At most 30 seconds</b>, and the answer is then what the claim
     answers on an empty queue: <code>[]</code>, or a
     <code>require</code>'s 412. A worker sends the next.</li>
@@ -155,12 +158,14 @@ own order:</p>
     (<a href="#nearest">The nearest job</a>) -- ranks a job by how far it
     is from the courier, so of the couriers waiting the nearest takes it,
     the others looking again once its run is done, each for the job nearest
-    it then. That needs every waiting claim's look: one order at a time to
-    couriers waiting in a city 10 km across, the nearest took every one,
-    run for once, 0.4-0.7 ms from the put at 10 couriers, 1.4-1.6 ms at
-    100 and 19 ms at 1 000, against a raced 0.2-0.4 ms to a courier a
-    median of 3.3-5 km further, two runs an order (<code>make
-    queue-bench</code>'s <code>held nearest</code>, in turns).</li>
+    it then. That needs every waiting claim's look, which costs what was
+    written rather than what each claim would read: one order at a time
+    to couriers waiting in a city 10 km across, the nearest took every
+    one, run for once, 0.18 ms from the put at 10 couriers, 0.31-0.32 ms
+    at 100 and 1.7 ms at 1 000, the server's CPU 0.2, 0.4-0.5 and 3.1-3.2
+    ms an order, against a raced 0.2-0.4 ms to a courier a median of
+    3.3-5 km further, two runs an order (<code>make queue-bench</code>'s
+    <code>held nearest</code>, in turns).</li>
   <li><b>No header turns it on.</b> The claim's order says what "first"
     means, and a tie keeps the order claims came in.</li>
 </ul>
@@ -178,19 +183,38 @@ contested</code>, in turns):</p>
 <table>
 <thead><tr><th>Claims waiting</th><th>Held longest took it</th><th>Runs a job</th><th>Put to taken, p50</th><th>Server CPU a job</th></tr></thead>
 <tbody>
-<tr><td class="n">10</td><td class="n">100% (4-6%)</td><td class="n">1 (5.2-5.3)</td><td class="n">0.43-0.47 ms (0.37-0.43)</td><td class="n">2.0-2.1 ms (1.8-2.1)</td></tr>
-<tr><td class="n">100</td><td class="n">100% (2%)</td><td class="n">1 (5.2-5.5)</td><td class="n">0.83-0.99 ms (0.57-0.68)</td><td class="n">12.6-13.9 ms (11-14)</td></tr>
-<tr><td class="n">1 000</td><td class="n">100% (3%)</td><td class="n">1 (4.7-5.2)</td><td class="n">11-13 ms (2.6-5.2)</td><td class="n">110-131 ms (138-144)</td></tr>
+<tr><td class="n">10</td><td class="n">100% (4-6%)</td><td class="n">1 (5.2-5.3)</td><td class="n">0.30-0.39 ms (0.37-0.43)</td><td class="n">0.7-0.9 ms (1.8-2.1)</td></tr>
+<tr><td class="n">100</td><td class="n">100% (2%)</td><td class="n">1 (5.2-5.5)</td><td class="n">0.75-0.80 ms (0.57-0.68)</td><td class="n">1.8-2.3 ms (11-14)</td></tr>
+<tr><td class="n">1 000</td><td class="n">100% (3%)</td><td class="n">1 (4.7-5.2)</td><td class="n">2.4 ms (2.6-5.2)</td><td class="n">5.9 ms (138-144)</td></tr>
 </tbody>
 </table>
 </div>
 
+<p>Each claim looking for itself, a job placed beside a thousand claims
+of their own woke a thousand threads, each running its whole pick under
+the read lock: 0.38-0.49, 0.86-0.91 and 10-12.5 ms from the put at 10,
+100 and 1 000 claims, the server's CPU 1.9-2.3, 12-13 and 110-126 ms a
+job; over 2 000 leased orders a courier's pick took 80-86 µs, the point
+index walked past every one, and an order took 20 ms to reach the nearest
+of 1 000 couriers and 175 ms of the server's CPU. Now one held request looks
+for every claim under one read lock and wakes only the claim whose bid
+won, and a claim whose last look found nothing knows no job it could take
+is there but those written since, until the time reaches its next moment:
+it tests those alone, with its own filter and in its own order, a
+microsecond a claim, the job its whole pick would have found -- held so
+over 3 000 generated rounds of claims, tokens' rules and writes. A claim
+where that cannot be shown -- an inner <code>get</code>, rows that
+expire, a schema changed, more than 32 rows written since -- runs its
+whole pick, under the same lock. A thousand claims held also take less
+memory, 46 KB each against 63, their threads no longer each running a
+pick.</p>
+
 <p>A tie settles as soon as the claim held longest has looked: no claim
-held after it could take the job before it. That look is what the job
-waits for, among a hundred or a thousand woken at once, where raced it
-went to the fastest of them; the one run a job, against five under the
-write lock, is every other writer's. A row a claim ranking by its own
-point may bid for waits for every claim woken, each looking once. A single
+held after it could take the job before it. That look, made with every
+other claim's, is what the job waits for, where raced it went to the
+fastest of a thousand claims woken at once; the one run a job, against
+five under the write lock, is every other writer's. A row a claim ranking
+by its own point may bid for waits for every claim's look. A single
 line of workers -- the same claim -- is served as before: a job enqueued
 reached one of eight in 0.35 ms either way.</p>
 </details>
@@ -200,10 +224,10 @@ reached one of eight in 0.35 ms either way.</p>
 moment it would write something, or the end of the wait.</p>
 
 <ul>
-  <li><b>When it runs again.</b> A write to a collection it reads wakes the
-    first claim of its line, which looks under the read lock whether a job
-    is there to take — the claim's own filter as a <code>get</code> of one
-    row — and runs the claim only if one is. A write of another collection
+  <li><b>When it runs again.</b> A write to a collection it reads has its
+    line look under the read lock whether a job is there to take — the
+    claim's own filter as a <code>get</code> of one row — and the line's
+    first claim is run only if one is. A write of another collection
     wakes none: woken by every write, 150 claims held on
     <code>orders</code>, each a line of its own, took a put of
     <code>positions</code> beside them from 22 µs at the median to 50-95,

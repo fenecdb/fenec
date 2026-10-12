@@ -368,7 +368,11 @@ are fixed since, and say how.
    the job), and a courier's held claim orders by
    `distance(pickup, $4)` (item 1), so of the couriers waiting the one
    nearest the order takes it: the nearest took every one at 10, 100 and
-   1 000 waiting (`held nearest`). As it was: each courier's
+   1 000 waiting (`held nearest`). Asking every courier was every
+   courier's whole pick under the read lock, 20 ms from the put and 175
+   ms of the server's CPU an order at 1 000 waiting; one held request now
+   looks for all of them, each among the orders placed since it last
+   looked: 1.7 ms and 3.2 ms (queues.html, Who gets the job). As it was: each courier's
    held claim is a group of its own -- its point is in its filter, and its
    token's rule names `$jwt.sub`, a group being the filter with the scope
    bound in -- so "one awake in each group, the longest waiting first"
