@@ -199,7 +199,8 @@ test('aggregates go in the select list, grouped or whole', () => {
 test('aggregates refuse what the engine would', () => {
   const agg = () => from('orders').select('count(*)');
   assert.throws(() => from('orders').select('status').group('status').toFenecQL(), FenecError);
-  assert.throws(() => agg().limit(3).toFenecQL(), FenecError);
+  // Ungrouped, `limit` picks the rows folded.
+  assert.deepEqual(agg().limit(3).toFenecQL(), ['get orders select count(*) limit $1', [3]]);
   assert.throws(() => agg().near('v', [1, 0]).toFenecQL(), FenecError);
   assert.throws(() => from('orders').select('median(total)'), FenecError);
   assert.throws(() => from('orders').select('sum(a b)'), FenecError);
@@ -1454,6 +1455,32 @@ test('collate und on wasm is Intl.Collator("und") in every script, handed the da
   const bare = await Fenec.open(wasm);
   await assert.rejects(bare.collation('greek'), /open the module with \{ collation \}/);
   for (const d of [db, again, plain, stale, bare]) d.close();
+});
+
+// The time zones' table is handed beside the collation data, as `zones`: a
+// `bucket` by a zone's name is refused until it is, an offset written out
+// needs none, and `query` fetches it and runs the statement again.
+test('a bucket by a zone fetches the zones', { skip: !wasm }, async () => {
+  const { readFile } = await import('node:fs/promises');
+  const fetched = [];
+  const collation = (name) => {
+    fetched.push(name);
+    return readFile(new URL(`./collate/${name}.bin`, import.meta.url));
+  };
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm, { collation });
+  db.run('create collection ev (at timestamp)');
+  db.run('put ev [{at: "2026-10-24T22:30:00Z"}, {at: "2026-10-25T22:30:00Z"}]');
+  const sql = "get ev select bucket(at, 1d, $1) as day, count() group day order day";
+  assert.throws(() => db.run(sql, ['Europe/Berlin']), (e) => e.collation?.includes('zones'));
+  assert.deepEqual(fetched, []);
+  const fixed = db.rows(sql, ['+02:00']).map((r) => r.day);
+  assert.deepEqual(fixed, ['2026-10-24T22:00:00Z', '2026-10-25T22:00:00Z']);
+  // Berlin's 25-hour day of October 25 holds both.
+  const rows = (await db.query(sql, ['Europe/Berlin'])).rows;
+  assert.deepEqual(rows, [{ day: '2026-10-24T22:00:00Z', count: 2 }]);
+  assert.deepEqual(fetched, ['zones']);
+  db.close();
 });
 
 // Highlights are UTF-16 offsets: what a JavaScript string's `slice` takes,

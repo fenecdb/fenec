@@ -205,6 +205,29 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   expect<number>(lined[0].reviews[0].stars);
   // @ts-expect-error -- the child's fields are its own
   db.from('articles').lookup<'reviews', Review>('reviews', { on: ['product_id', 'nope'], parentKey: ['id', 'year'] });
+  // A level that folds each parent's children: ungrouped, its order and
+  // limit pick them; grouped, a row a group, ordered by a column.
+  await db
+    .from('articles')
+    .lookup<'reviews', Review>('reviews', {
+      on: 'product_id',
+      order: [['stars', 'desc']],
+      limit: 50,
+      select: ['count(*)', 'avg(stars)', expr('max(stars) - min(stars)').as('spread')],
+    })
+    .rows();
+  await db
+    .from('articles')
+    .lookup<'reviews', Review>('reviews', {
+      on: 'product_id',
+      select: ['stars', 'count(*)'],
+      group: 'stars',
+      order: [['count(*)', 'desc']],
+      limit: 3,
+    })
+    .rows();
+  // @ts-expect-error -- an aggregate of the child's own fields
+  db.from('articles').lookup<'reviews', Review>('reviews', { on: 'product_id', select: ['sum(nope)'] });
 
   await db.from('articles').insert([{ title: 'a', published: new Date(), embed: new Float32Array(3) }]);
   await db.from('articles').where('id', 1).update({ year: 2025 });

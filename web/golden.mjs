@@ -320,10 +320,10 @@ c('aggregates grouped, ordered by one', ['from', 'orders'], ['select', 'status',
 c('aggregates over the whole collection', ['from', 'orders'], ['select', 'min(at)', 'max(at)', 'Count()'], Q);
 c('aggregate names keep their field as written', ['from', 'orders'], ['select', ' Max(Total_2) '], Q);
 c('group needs an aggregate', ['from', 'orders'], ['select', 'status'], ['group', 'status'], Q);
-c('a whole-collection aggregate takes no limit', ['from', 'orders'], ['select', 'count(*)'], ['limit', 3], Q);
+c('a whole-collection aggregate folds the rows its order and limit pick', ['from', 'orders'], ['select', 'count(*)', 'avg(distance)'], ['where', 'courier', 5], ['order', 'at', 'desc'], ['limit', 50], ['offset', 2], Q);
 c('an aggregate takes no near', ['from', 'orders'], ['select', 'count(*)'], ['near', 'v', [1, 0]], Q);
 c('an aggregate takes no match', ['from', 'orders'], ['select', 'sum(total)'], ['match', 'body', 'x'], Q);
-c('an aggregate takes no lookup', ['from', 'orders'], ['select', 'count(*)'], ['lookup', 'lines', { on: 'order_id' }], Q);
+c('an aggregate hangs a lookup off its groups', ['from', 'orders'], ['select', 'courier', 'count(*)'], ['where', 'status', 'done'], ['group', 'courier'], ['order', 'count', 'desc'], ['limit', 10], ['lookup', 'couriers', { on: 'user', parentKey: 'courier', select: ['name', 'code'] }], Q);
 c('an aggregate that is not there', ['from', 'orders'], ['select', 'median(total)'], Q);
 c('an aggregate of two fields', ['from', 'orders'], ['select', 'sum(a b)'], Q);
 c('an aggregate of a path', ['from', 'orders'], ['select', 'sum(meta.total)', 'Count( Distinct meta.user )'], Q);
@@ -360,6 +360,14 @@ c('lookup order as one name', ['from', 'articles'], ['lookup', 'remarks', { on: 
 c('lookup where takes or', ['from', 'products'], ['lookup', 'reviews', { on: 'product_id', where: { $or: [{ stars: 5 }, { verified: true }] } }], Q);
 c('lookup limit 0 and offset 0', ['from', 'products'], ['lookup', 'reviews', { on: 'product_id', limit: 0, offset: 0 }], Q);
 c('a lookup chain numbers its parameters in order', ['from', 'shops'], ['where', 'city', 'İzmir'], ['lookup', 'orders', { on: 'shop_id', where: { total: { gt: 100 } }, limit: 3 }], ['lookup', 'lines', { on: 'order_id', required: true, where: { qty: { gte: 2 } }, limit: 5 }], Q);
+// A lookup level that folds each parent's children.
+c('lookup folds each parent\'s children', ['from', 'shops'], ['lookup', 'orders', { on: 'shop', select: ['count(*)', 'sum(total)', 'count(distinct courier)'], where: { status: 'paid' } }], Q);
+c('lookup folds the children its order and limit pick', ['from', 'couriers'], ['lookup', 'orders', { on: 'courier', order: [['at', 'desc']], limit: 50, select: ['count(*)', 'avg(distance)'] }], Q);
+c('lookup groups each parent\'s children', ['from', 'shops'], ['lookup', 'lines', { on: 'shop', select: ['product', 'sum(qty)'], group: ['product'], order: [['sum(qty)', 'desc'], 'product'], limit: 3, offset: 1 }], Q);
+c('lookup folds an expression, its values bound in order', ['from', 'shops'], ['where', 'city', 'x'], ['lookup', 'orders', { on: 'shop', select: [{ $as: [{ $expr: ['sum(total) / ?', 2] }, 'half'] }, { $as: [{ $bucket: ['at', '1d'] }, 'day']}, 'count(*)'], group: ['day'], where: { status: 'paid' }, limit: 7 }], Q);
+c('a lookup off a level\'s groups', ['from', 'shops'], ['lookup', 'orders', { on: 'shop', select: ['courier', 'count(*)'], group: 'courier' }], ['lookup', 'couriers', { on: 'user', parentKey: 'courier', required: true, select: ['name'] }], Q);
+c('lookup group needs an aggregate', ['from', 'shops'], ['lookup', 'orders', { on: 'shop', select: ['status'], group: ['status'] }], Q);
+c('lookup selects fields or aggregates', ['from', 'shops'], ['lookup', 'orders', { on: 'shop', select: [{ $as: [{ $expr: ['total * 2'] }, 'x'] }] }], Q);
 c('lookup needs on', ['from', 'products'], ['lookup', 'reviews', { limit: 3 }], Q);
 c('lookup names are names', ['from', 'products'], ['lookup', 'reviews; del products', { on: 'product_id' }], Q);
 c('lookup on is a name', ['from', 'products'], ['lookup', 'reviews', { on: 'meta.pid' }], Q);
