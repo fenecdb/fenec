@@ -109,6 +109,21 @@ Future<String> scratch(String name) async =>
 
 const open = Shape('tasks', where: {'status': 'open'}, key: 'key');
 
+/// The replica offline before the next write: `setOnline` puts the signal
+/// on the sync's chain, and an event already on it -- a stream's bytes, a
+/// status -- runs the engine first, which sends what a write made meanwhile
+/// queued, and the server's answer can put the write back before the read
+/// that was to find it: Kotlin's test met it 8 runs in 593 under load. Not
+/// met here in 3 041 runs, four at once beside four busy loops -- the
+/// engine is told on the one worker isolate in turn with the writes and
+/// reads, so the server would have to answer before the worker answers the
+/// next write -- but nothing promises that order: `refresh` completes once
+/// the chain has reached the signal.
+Future<void> offline(Fenec db) async {
+  db.replica!.setOnline(false);
+  expect((await db.replica!.refresh()).state, SyncState.offline);
+}
+
 Future<List<Object?>> titles(Fenec db) async => [
       for (final r in await db.from('tasks').select(['title']).order('title').rows()) r['title']
     ];
@@ -156,7 +171,7 @@ void main() {
     await db.replica!.ready();
     // Offline, nothing is sent: the server's answer cannot replace the row
     // before it is read (see 'a refused write is put back').
-    db.replica!.setOnline(false);
+    await offline(db);
     await db.from('tasks').insert({'title': 'new', 'status': 'open', 'priority': 2});
     // At once, under a temporary id.
     expect((await db.from('tasks').where('title', 'new').first())!['id'] as int, greaterThanOrEqualTo(1 << 52));
@@ -185,7 +200,7 @@ void main() {
     // Offline, nothing is sent, so the row is read before the server can
     // refuse it: online, the 409 could come back and the row be put back
     // before the read, as it was in the Kotlin test on a loaded runner.
-    db.replica!.setOnline(false);
+    await offline(db);
     // The server's key is @unique; the replica's a plain hash.
     await db.from('tasks').insert({'key': 'a', 'title': 'dup', 'status': 'open'});
     expect(await titles(db), ['dup', 'one', 'two']);
@@ -209,7 +224,7 @@ void main() {
     final refused = <Refusal>[];
     final sub = db.replica!.refusals.listen(refused.add);
     // Offline, so both are made before the server answers either.
-    db.replica!.setOnline(false);
+    await offline(db);
     await db.from('tasks').insert({'key': 'd', 'title': 'four', 'status': 'open'});
     await db.from('tasks').where('key', 'b').delete();
     expect(await titles(db), ['four', 'one']);

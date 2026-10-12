@@ -109,6 +109,21 @@ class SyncTest {
         assertTrue(done(), "timed out waiting for $what")
     }
 
+    /**
+     * The replica offline before the next write: `setOnline` puts the
+     * signal on the sync's queue, and an event already on it -- a stream's
+     * bytes, a status -- runs the engine first, which sends what a write
+     * made meanwhile queued. The quota test's insert went out and was
+     * refused and put back before the read that was to find it ([one]), 8
+     * runs in 593 in containers of three CPUs, four at once beside four
+     * busy loops, none in 595 since: `refresh` returns once the queue has
+     * reached the signal.
+     */
+    private suspend fun offline(db: Fenec) {
+        db.replica!!.setOnline(false)
+        assertEquals(SyncStatus.State.OFFLINE, db.replica!!.refresh().state)
+    }
+
     private suspend fun titles(db: Fenec) = db.from("tasks").select("title").order("title").rows().map { it.string("title") }
 
     @Test
@@ -147,7 +162,7 @@ class SyncTest {
         db.replica!!.ready()
         // Offline, nothing is sent: the server's answer cannot replace the
         // row before it is read (see aRefusedWriteIsPutBack).
-        db.replica!!.setOnline(false)
+        offline(db)
         db.from("tasks").insert(mapOf("title" to "new", "status" to "open", "priority" to 2))
         // At once, under a temporary id.
         assertTrue((db.from("tasks").where("title", "new").first()!!.long("id") ?: 0) >= 1L shl 52)
@@ -180,7 +195,7 @@ class SyncTest {
         // Offline, nothing is sent, so the row is read before the server
         // can refuse it: online, the 409 came back and the row was put back
         // before the test read it, on a loaded runner ([one, two]).
-        db.replica!!.setOnline(false)
+        offline(db)
         // The server's key is @unique; the replica's a plain hash.
         db.from("tasks").insert(mapOf("key" to "a", "title" to "dup", "status" to "open"))
         assertEquals(listOf("dup", "one", "two"), titles(db))
@@ -204,7 +219,7 @@ class SyncTest {
         val refused = Collections.synchronizedList(ArrayList<Refusal>())
         val job = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) { db.replica!!.refusals.collect { refused.add(it) } }
         // Offline, so both are made before the server answers either.
-        db.replica!!.setOnline(false)
+        offline(db)
         db.from("tasks").insert(mapOf("key" to "d", "title" to "four", "status" to "open"))
         db.from("tasks").where("key", "b").delete()
         assertEquals(listOf("four", "one"), titles(db))
