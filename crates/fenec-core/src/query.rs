@@ -1115,13 +1115,22 @@ pub fn count_refused(what: &str, v: &Value) -> String {
 pub struct Lookup {
     /// Where the children come from.
     pub collection: String,
-    /// The child field matched against the parent. `id` is allowed; anything
-    /// else must carry `@hash`, because the probe is a bucket lookup and a
-    /// scan per parent would be a different feature wearing the same name.
-    pub child_field: String,
-    /// The parent field holding the key. `id` unless `on a = b` says so,
-    /// which is the foreign-key-to-primary-key case spelled out.
-    pub parent_field: String,
+    /// The key, a pair a part: a child field and the field of the level
+    /// above it equals. `on product_id` is `[("product_id", "id")]` -- the
+    /// parent's side is `id` unless `on a = b` names a field, the
+    /// foreign-key-to-primary-key case spelled out.
+    ///
+    /// One pair is a bucket probe: the child's field is `id` or carries
+    /// `@hash`, because a scan per parent would be a different feature
+    /// wearing the same name. Several -- `on (org, order) = (org, id)`, an
+    /// order's lines in a tenant's file -- are an index over several fields
+    /// whose leading parts are the child's fields, in any order: the
+    /// parent's values laid end to end as its keys hold them are a prefix
+    /// of those keys, and its children one run of the entries, which an
+    /// `order` on the parts after them reads in order. A key joined into
+    /// one text field to have a `@hash` would be a field of each side kept
+    /// up by hand for every write.
+    pub on: Vec<(String, String)>,
     /// None = all fields of the child.
     pub project: Option<Vec<String>>,
     pub filter: Option<Expr>,
@@ -1188,6 +1197,51 @@ pub const MAX_SUBQUERY_VALUES: usize = 100_000;
 pub const MAX_SUBQUERY_DEPTH: usize = 4;
 
 impl Lookup {
+    /// One side of `on` as written: `product_id`, or `(org, order)`.
+    pub fn side(&self, child: bool) -> String {
+        let mut s = String::new();
+        for (i, (c, p)) in self.on.iter().enumerate() {
+            s.push_str(if i > 0 { ", " } else { "" });
+            s.push_str(if child { c } else { p });
+        }
+        match self.on.len() {
+            1 => s,
+            _ => format!("({s})"),
+        }
+    }
+
+    /// What `on` may say: a pair, or as many as an index over several
+    /// fields has parts, each child field once. A child's `id` names its
+    /// row alone, and no index over several fields holds it as a part
+    /// (`Schema::new` reserves the name), so a key of several naming it
+    /// is refused rather than read as `id` and a test of the rest.
+    fn check_key(&self) -> Result<()> {
+        let n = self.on.len();
+        if n == 0 || n > crate::schema::MAX_COMPOSITE_KEYS {
+            return Err(Error::Query(format!(
+                "`lookup {}` matches 1 to {} fields, not {n}",
+                self.collection,
+                crate::schema::MAX_COMPOSITE_KEYS
+            )));
+        }
+        for (i, (c, _)) in self.on.iter().enumerate() {
+            if n > 1 && c == "id" {
+                return Err(Error::Query(format!(
+                    "`lookup {}` on several fields cannot name `id`, which names one row \
+                     alone: `on id = <field>`",
+                    self.collection
+                )));
+            }
+            if self.on[..i].iter().any(|(d, _)| d == c) {
+                return Err(Error::Query(format!(
+                    "`lookup {}` names `{c}` twice",
+                    self.collection
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// This clause and every one hanging off it, outermost first.
     pub fn chain(&self) -> impl Iterator<Item = &Lookup> {
         let mut cur = Some(self);
@@ -1796,6 +1850,7 @@ impl Select {
                         "a `lookup` level orders its children by fields".into(),
                     ));
                 }
+                step.check_key()?;
             }
         }
         check_order(&self.order, !self.group.is_empty())?;
@@ -2920,8 +2975,7 @@ mod tests {
             collection: "products".into(),
             lookup: Some(Lookup {
                 collection: "reviews".into(),
-                child_field: "product_id".into(),
-                parent_field: "id".into(),
+                on: vec![("product_id".into(), "id".into())],
                 ..Default::default()
             }),
             ..Default::default()

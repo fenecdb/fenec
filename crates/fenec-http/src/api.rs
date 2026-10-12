@@ -279,17 +279,19 @@ fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> R
     let prefix = format!("{name}.");
     let mut l = Lookup {
         collection: name.to_string(),
-        parent_field: "id".to_string(),
         ..Default::default()
     };
+    let (mut on, mut above) = (Vec::new(), Vec::new());
     let mut parts: Vec<Expr> = Vec::new();
     for (key, raw) in &req.query {
         let Some(k) = key.strip_prefix(&prefix) else {
             continue;
         };
         match k {
-            "on" => l.child_field = field_of(child, raw)?,
-            "parent" => l.parent_field = field_of(parent, raw)?,
+            // `on=org,order&parent=org,id`: a key over several fields, as
+            // FenecQL's `on (org, order) = (org, id)`.
+            "on" => on = fields_of(child, raw)?,
+            "parent" => above = fields_of(parent, raw)?,
             "select" => l.project = Some(projection(child, raw)?),
             "order" => l.order = order(child, raw)?,
             "limit" => l.limit = Some(Count::N(number(raw, "limit")?)),
@@ -299,15 +301,31 @@ fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> R
             other => parts.push(condition(child, other, raw)?),
         }
     }
-    if l.child_field.is_empty() {
+    if on.is_empty() {
         return Err(Error::Query(format!(
             "`lookup={name}` needs `{name}.on=<field>`: the child field holding the key"
         )));
     }
+    if above.is_empty() && on.len() == 1 {
+        above.push("id".to_string());
+    }
+    if above.len() != on.len() {
+        return Err(Error::Query(format!(
+            "`lookup={name}` pairs {} fields of `{name}.on` with {} of `{name}.parent`",
+            on.len(),
+            above.len()
+        )));
+    }
+    l.on = on.into_iter().zip(above).collect();
     l.filter = parts
         .into_iter()
         .reduce(|a, b| Expr::And(Box::new(a), Box::new(b)));
     Ok(l)
+}
+
+/// A comma-separated list of [`field_of`]s.
+fn fields_of(schema: &Schema, raw: &str) -> Result<Vec<String>> {
+    raw.split(',').map(|f| field_of(schema, f)).collect()
 }
 
 /// A field name from the query string, checked against the schema so an

@@ -1296,8 +1296,9 @@ impl Parser {
         }
     }
 
-    /// `lookup <name> on <child> [= <parent>]` and the clauses that follow,
-    /// all of which belong to the child collection.
+    /// `lookup <name> on <child> [= <parent>]`, or `on (<child>, ...) =
+    /// (<parent>, ...)` for a key over several fields, and the clauses that
+    /// follow, all of which belong to the child collection.
     ///
     /// Written without the second half of `on`, the parent key is `id`: that
     /// is the foreign-key-to-primary-key shape, which is most of them, and
@@ -1322,17 +1323,34 @@ impl Parser {
         }
         let collection = self.ident()?;
         self.expect_kw("on")?;
-        let child_field = self.ident()?;
-        let parent_field = if matches!(self.peek(), Tok::Eq) {
-            self.next();
-            self.ident()?
+        let on = if matches!(self.peek(), Tok::LParen) {
+            // `on (org, order) = (org, id)`: a key over several fields, the
+            // parent's side written out, since `id` alone pairs with one
+            // child field.
+            let child = self.names()?;
+            self.expect(Tok::Eq)?;
+            let parent = self.names()?;
+            if child.len() != parent.len() {
+                return self.err(format!(
+                    "`lookup {collection} on` pairs {} fields with {}",
+                    child.len(),
+                    parent.len()
+                ));
+            }
+            child.into_iter().zip(parent).collect()
         } else {
-            "id".to_string()
+            let child = self.ident()?;
+            let parent = if matches!(self.peek(), Tok::Eq) {
+                self.next();
+                self.ident()?
+            } else {
+                "id".to_string()
+            };
+            vec![(child, parent)]
         };
         let mut l = Lookup {
             collection,
-            child_field,
-            parent_field,
+            on,
             ..Default::default()
         };
         loop {
@@ -1376,6 +1394,18 @@ impl Parser {
             break;
         }
         Ok(l)
+    }
+
+    /// `(org, order)`: names in parentheses, one at least.
+    fn names(&mut self) -> Result<Vec<String>> {
+        self.expect(Tok::LParen)?;
+        let mut out = vec![self.ident()?];
+        while matches!(self.peek(), Tok::Comma) {
+            self.next();
+            out.push(self.ident()?);
+        }
+        self.expect(Tok::RParen)?;
+        Ok(out)
     }
 
     /// `[0, 2500, 5000]`: a facet's range bounds, numbers as written --
