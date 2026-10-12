@@ -1279,14 +1279,13 @@ pub fn label_of(e: &Expr) -> Option<String> {
 pub fn check_order(order: &[Sort], grouped: bool) -> Result<()> {
     for e in order.iter().filter_map(|s| s.expr.as_ref()) {
         let why = if grouped {
-            "over groups `order` names a column of the list: give the expression a name \
-             with `as` there, and order by the name"
+            "over groups `order` names a column: name the expression with `as`"
         } else if e.has_subquery() {
-            "an `order` key is worked out of each row: an inner `get` goes in `where`"
+            "an `order` key holds no inner `get`"
         } else if e.has_aggregate() {
-            "an aggregate in `order` needs `group`: it folds a group's rows, not one row"
+            "an aggregate in `order` needs `group`"
         } else if e.asks_expired() {
-            "`expired()` is a filter's: it goes in `where`"
+            "`expired()` goes in `where`"
         } else {
             continue;
         };
@@ -1800,11 +1799,9 @@ impl Select {
                 // read: an expression would be every group's rows worked
                 // out apart, for a shape nobody has asked for.
                 if step.order.iter().any(|s| s.expr.is_some()) {
-                    return Err(Error::Query(format!(
-                        "a `lookup` level orders its children by their fields: `{}` \
-                         takes `order <field>`",
-                        step.collection
-                    )));
+                    return Err(Error::Query(
+                        "a `lookup` level orders its children by fields".into(),
+                    ));
                 }
             }
         }

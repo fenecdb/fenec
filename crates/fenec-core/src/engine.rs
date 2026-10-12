@@ -7725,10 +7725,15 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Option<Vec<DocId>>> {
         // A key worked out of the row walks no index of a field's, but the
-        // distance from a point one of a point's.
+        // distance from a point one of a point's -- natively: a page's
+        // module sorts the distances, the same rows, where the walk was
+        // WALKED_DISTANCE bytes of it for a speed its few thousand rows do
+        // not need.
         if let Some(i) = sel.order.iter().position(|s| s.expr.is_some()) {
             return match (&sel.order[..], &sel.order[i].expr) {
-                ([s], Some(e)) => self.walk_distance(c, sel, s, e, params, ctx),
+                ([s], Some(e)) if !cfg!(target_arch = "wasm32") => {
+                    self.walk_distance(c, sel, s, e, params, ctx)
+                }
                 _ => Ok(None),
             };
         }
@@ -9530,21 +9535,7 @@ impl Database {
                 &unfolded
             }
         };
-        plan(|| {
-            let kept = if k < ids.len() {
-                format!("the first {k} put in order")
-            } else {
-                "all put in order".to_string()
-            };
-            let keys = match n {
-                1 => "a key".to_string(),
-                n => format!("{n} keys"),
-            };
-            format!(
-                "order: {keys} worked out of each row, {} matches, {kept}",
-                ids.len()
-            )
-        });
+        plan(|| format!("order: keys worked out of each row, {} matches", ids.len()));
         let idx = order_rows(&flat, n, ids.len(), keys, k);
         Ok(idx.into_iter().map(|i| ids[i]).collect())
     }
@@ -10883,25 +10874,26 @@ fn statement_needs<'a>(of: &dyn Fn(&str) -> Known<'a>, stmt: &Statement, out: &m
         } => {
             set.iter().for_each(&mut pair);
             filter.iter().for_each(|f| expr_needs(of, k, f, out));
-            sorts_need(of, k, pick.iter().flat_map(|p| &p.order), out);
+            sorts_need(of, k, pick.as_deref(), out);
         }
         Statement::Delete { filter, pick, .. } => {
             filter.iter().for_each(|f| expr_needs(of, k, f, out));
-            sorts_need(of, k, pick.iter().flat_map(|p| &p.order), out);
+            sorts_need(of, k, pick.as_deref(), out);
         }
         Statement::Select(s) | Statement::Explain(s) => select_needs(of, s, out),
         _ => {}
     }
 }
 
-/// What `order`'s expressions need: `order distance(loc, [29.09, 41.09])`.
-fn sorts_need<'a, 's>(
+/// What a `set`'s or a `del`'s `order` expressions need: `order
+/// distance(loc, [29.09, 41.09]) limit 1`.
+fn sorts_need<'a>(
     of: &dyn Fn(&str) -> Known<'a>,
     k: Known<'a>,
-    sorts: impl Iterator<Item = &'s Sort>,
+    pick: Option<&Pick>,
     out: &mut Exactly,
 ) {
-    for s in sorts {
+    for s in pick.iter().flat_map(|p| &p.order) {
         if let Some(e) = &s.expr {
             expr_needs(of, k, e, out);
         }
