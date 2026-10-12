@@ -292,7 +292,10 @@ time at the next open, never data.</p>
     off) look every 5 s and compact beside the queries once the dead records
     are half the file and 64 MB, so a file under updates stays under about
     twice its data, and its peak while the compact writes is the old file and
-    the new one together. Over a million 1 KB records updated at 150 000 a
+    the new one together. A file that reaches three quarters of the memory
+    the system has for its pages is compacted sooner, once a third of what
+    the compact writes is dead, so its reads stay in memory: up to four
+    bytes written a byte updated against two. Over a million 1 KB records updated at 150 000 a
     second, each compact held the write lock 6 to 13 ms. An embedding
     program calls <code>compact_when_due</code> from a thread of its own or
     starts a <code>Compactor</code>; the browser module has no thread to run

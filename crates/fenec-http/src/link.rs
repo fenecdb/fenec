@@ -13,7 +13,9 @@
 //! for dead records past the policy ([`auto_compact`]), and compacted
 //! beside the queries, since nothing else ever gives them back.
 
-use fenec_core::engine::{compact_when_due, CompactPolicy, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO};
+use fenec_core::engine::{
+    compact_when_due_in, CompactPolicy, Memory, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO,
+};
 use fenec_core::prelude::Database;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, RwLock, Weak};
@@ -116,11 +118,15 @@ pub fn keep_held(what: &str, db: &Arc<RwLock<Database>>, bytes: Option<Bytes>) {
                     continue;
                 };
                 let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                // Asked of the system once a pass: on Linux a few files of
+                // /proc and the cgroup's read, for every database a node
+                // serves.
+                let memory = fenec_core::engine::memory(&policy);
                 for (what, db, bytes) in kept {
                     if let Some(db) = db.upgrade() {
                         let quota = bytes.map_or(0, |b| b());
                         let policy = quota_policy(&db, quota).unwrap_or(policy);
-                        compact(&what, &db, &policy);
+                        compact(&what, &db, &policy, memory);
                     }
                 }
             });
@@ -192,6 +198,7 @@ fn save(what: &str, db: &RwLock<Database>) {
 static POLICY: Mutex<Option<CompactPolicy>> = Mutex::new(Some(CompactPolicy {
     ratio: AUTO_COMPACT_RATIO,
     floor: AUTO_COMPACT_FLOOR,
+    memory: true,
 }));
 static COMPACTER: Once = Once::new();
 
@@ -219,6 +226,7 @@ pub fn quota_policy(db: &RwLock<Database>, quota: u64) -> Option<CompactPolicy> 
     (file >= quota - quota / 4).then_some(CompactPolicy {
         ratio: f64::MIN_POSITIVE,
         floor: (quota / 8).max(1),
+        memory: true,
     })
 }
 
@@ -230,10 +238,10 @@ pub fn quota_policy(db: &RwLock<Database>, quota: u64) -> Option<CompactPolicy> 
 /// their files grow with every update their primary sends -- and an image
 /// a replica adopts meanwhile fails the compact rather than be written
 /// over.
-fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy) {
+fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy, memory: Memory) {
     let before = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
     let t = Instant::now();
-    let Some(r) = compact_when_due(db, policy) else {
+    let Some(r) = compact_when_due_in(db, policy, memory) else {
         return;
     };
     let took = t.elapsed();

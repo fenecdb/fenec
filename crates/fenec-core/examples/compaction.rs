@@ -6,9 +6,12 @@
 //! one thread reads whole records by key as fast as it can; then the reads
 //! alone for a while. Every second a line: the file's size and what it
 //! holds live, the updates and reads that second, the reads' p50, p99 and
-//! longest, and whether a compact ran. With `--auto on` a thread looks
-//! every 5 s and compacts beside the database as `compact_when_due` says
-//! (the policy every host applies); with `--auto off` nothing does. At the
+//! longest, the major faults and the room the page cache has
+//! (`fenec_core::cache::room`), and whether a compact ran. With `--auto
+//! on` a thread looks every 5 s (`--every <ms>`) and compacts beside the
+//! database as `compact_when_due` says (the policy every host applies;
+//! `--memory off` leaves out its rule for a file nearing the room and a
+//! process waiting for the disk); with `--auto off` nothing does. At the
 //! end, the reads' percentiles while a compact ran, while none did, and
 //! after the updates, and how long each compact held the write lock.
 //!
@@ -18,8 +21,15 @@
 //! the rate while none did, and with `--series <file>` every bucket as a
 //! line, the reads' p99 and longest beside it.
 //!
+//! The process's major faults -- a page the kernel read from the disk --
+//! are counted a tenth of a second at a time beside them (`getrusage`), and
+//! the file's size with them: the size curve, and what of the updates' rate
+//! is the page cache's. At the end, what the compacts wrote against what the
+//! updates did: the write amplification.
+//!
 //! Options: `--records 1000000 --updates 5000000 --mode buffered|durable
-//! --auto on|off --writers 1 --after 30 --dir <scratch> --series <file>`.
+//! --auto on|off --ratio 0.5 --memory on|off --every 5000 --writers 1
+//! --after 30 --dir <scratch> --series <file>`.
 //! Durable is a flush and its fsync after each write, outside the lock,
 //! with enough writers to share the fsyncs; buffered a flush every 250 ms,
 //! as `--sync 250` does.
@@ -60,6 +70,9 @@ struct Opts {
     auto: bool,
     writers: usize,
     after: u64,
+    ratio: f64,
+    memory: bool,
+    every: Duration,
     dir: std::path::PathBuf,
     series: Option<std::path::PathBuf>,
 }
@@ -113,6 +126,9 @@ fn opts() -> Opts {
         auto: true,
         writers: 1,
         after: 30,
+        ratio: fenec_core::engine::AUTO_COMPACT_RATIO,
+        memory: true,
+        every: fenec_core::engine::AUTO_COMPACT_EVERY,
         dir: std::env::temp_dir().join("fenec-compaction"),
         series: None,
     };
@@ -127,6 +143,9 @@ fn opts() -> Opts {
             "--auto" => o.auto = v == "on",
             "--writers" => o.writers = v.parse().unwrap(),
             "--after" => o.after = v.parse().unwrap(),
+            "--ratio" => o.ratio = v.parse().unwrap(),
+            "--memory" => o.memory = v == "on",
+            "--every" => o.every = Duration::from_millis(v.parse().unwrap()),
             "--dir" => o.dir = v.into(),
             "--series" => o.series = Some(v.into()),
             a => panic!("unknown option {a}"),
@@ -134,6 +153,35 @@ fn opts() -> Opts {
         i += 2;
     }
     o
+}
+
+/// The process's major and minor faults so far (`getrusage`): a major one
+/// waited for the disk. The struct is `rusage`'s layout on Linux and macOS
+/// alike, two `timeval`s and fourteen longs.
+fn faults() -> (u64, u64) {
+    #[repr(C)]
+    struct Rusage {
+        times: [i64; 4],
+        rest: [i64; 14],
+    }
+    extern "C" {
+        fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+    }
+    let mut r = Rusage {
+        times: [0; 4],
+        rest: [0; 14],
+    };
+    // RUSAGE_SELF.
+    unsafe { getrusage(0, &mut r) };
+    (r.rest[5] as u64, r.rest[4] as u64)
+}
+
+/// What the sampler saw a bucket at a time: the major faults in it, and
+/// the file's size at its end.
+#[derive(Default, Clone, Copy)]
+struct Sample {
+    majflt: u64,
+    file: u64,
 }
 
 /// Microseconds at the given share of `v`, sorted in place.
@@ -157,7 +205,13 @@ fn summary(label: &str, v: &mut [u32]) {
 /// The update rate a bucket at a time: while a compact ran -- the buckets
 /// wholly inside one -- against while none did, up to the last whole
 /// bucket of updates; and with `--series`, every bucket as a line.
-fn rates(series: &[Bucket], spans: &[(Duration, Duration)], reads: &[(f64, f64, usize)], o: &Opts) {
+fn rates(
+    series: &[Bucket],
+    spans: &[(Duration, Duration)],
+    reads: &[(f64, f64, usize)],
+    samples: &[Sample],
+    o: &Opts,
+) {
     let per_s = |b: &Bucket| b.updates as f64 / BUCKET.as_secs_f64();
     let bounds = |i: usize| (BUCKET * i as u32, BUCKET * (i as u32 + 1));
     let inside = |i: usize| {
@@ -182,6 +236,21 @@ fn rates(series: &[Bucket], spans: &[(Duration, Duration)], reads: &[(f64, f64, 
         v.sort_by(f64::total_cmp);
         v.get(v.len() / 2).copied().unwrap_or(0.0)
     };
+    // The major faults a second while a compact ran and while none did.
+    let (mut fd, mut nd, mut fb, mut nb) = (0, 0, 0, 0);
+    for (i, smp) in samples.iter().enumerate().take(last) {
+        match (inside(i), touches(i)) {
+            (true, _) => (fd, nd) = (fd + smp.majflt, nd + 1),
+            (false, false) => (fb, nb) = (fb + smp.majflt, nb + 1),
+            _ => {}
+        }
+    }
+    let per = |f: u64, n: u64| f as f64 / (n.max(1) as f64 * BUCKET.as_secs_f64());
+    println!(
+        "# major faults during the updates: {:.0}/s while a compact ran, {:.0}/s while none did",
+        per(fd, nd),
+        per(fb, nb)
+    );
     let worst = during.iter().cloned().fold(f64::INFINITY, f64::min);
     println!(
         "# updates while a compact ran: {} buckets of {} ms, {:.0}/s at the median, {:.0}/s in the worst",
@@ -207,13 +276,14 @@ fn rates(series: &[Bucket], spans: &[(Duration, Duration)], reads: &[(f64, f64, 
         return;
     };
     let mut out = String::from(
-        "t_s\tupdates_s\twait_ms\thold_ms\tmax_wait_ms\tmax_hold_ms\tstalled_ms\treads\tread_p99_us\tread_max_us\tcompacting\n",
+        "t_s\tupdates_s\twait_ms\thold_ms\tmax_wait_ms\tmax_hold_ms\tstalled_ms\treads\tread_p99_us\tread_max_us\tmajflt\tfile_MB\tcompacting\n",
     );
     for i in 0..series.len().max(reads.len()) {
         let b = series.get(i).copied().unwrap_or_default();
         let (p99, max, n) = reads.get(i).copied().unwrap_or((0.0, 0.0, 0));
+        let smp = samples.get(i).copied().unwrap_or_default();
         out.push_str(&format!(
-            "{:.1}\t{:.0}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.1}\t{n}\t{p99:.1}\t{max:.0}\t{}\n",
+            "{:.1}\t{:.0}\t{:.1}\t{:.1}\t{:.2}\t{:.2}\t{:.1}\t{n}\t{p99:.1}\t{max:.0}\t{}\t{:.0}\t{}\n",
             bounds(i).0.as_secs_f64(),
             per_s(&b),
             b.wait as f64 / 1e6,
@@ -221,6 +291,8 @@ fn rates(series: &[Bucket], spans: &[(Duration, Duration)], reads: &[(f64, f64, 
             b.max_wait as f64 / 1e6,
             b.max_hold as f64 / 1e6,
             b.stalled as f64 / 1e6,
+            smp.majflt,
+            smp.file as f64 / 1e6,
             touches(i) as u8,
         ));
     }
@@ -303,26 +375,54 @@ fn main() {
             }
         }));
     }
+    // The sampler: the major faults and the file's size a bucket at a time.
+    let samples: Arc<Mutex<Vec<Sample>>> = Arc::default();
+    {
+        let (stop, samples, path) = (Arc::clone(&stop), Arc::clone(&samples), path.clone());
+        threads.push(std::thread::spawn(move || {
+            let mut last = faults().0;
+            let mut at = 0;
+            while !stop.load(Ordering::Relaxed) {
+                at += 1;
+                let next = start + BUCKET * at as u32;
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                let now = faults().0;
+                let file = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                samples.lock().unwrap().push(Sample {
+                    majflt: now - last,
+                    file,
+                });
+                last = now;
+            }
+        }));
+    }
     // The compactor: a look every 5 s, as the server and the library look.
     let swaps = Arc::new(Mutex::new(Vec::new()));
+    // What each compact wrote: the file it left.
+    let written = Arc::new(AtomicU64::new(0));
     // The looks that found a compact due and passed it over.
     let passed = Arc::new(AtomicU64::new(0));
     if o.auto {
-        let (db, stop, compacting, swaps, spans, passed) = (
+        let (db, stop, compacting, swaps, spans, passed, written) = (
             Arc::clone(&db),
             Arc::clone(&stop),
             Arc::clone(&compacting),
             Arc::clone(&swaps),
             Arc::clone(&spans),
             Arc::clone(&passed),
+            Arc::clone(&written),
         );
+        let (ratio, memory, every) = (o.ratio, o.memory, o.every);
         threads.push(std::thread::spawn(move || {
-            let policy = CompactPolicy::default();
+            let policy = CompactPolicy {
+                memory,
+                ..CompactPolicy::at(ratio).unwrap()
+            };
             let mut slept = Duration::ZERO;
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
                 slept += Duration::from_millis(100);
-                if slept < fenec_core::engine::AUTO_COMPACT_EVERY {
+                if slept < every {
                     continue;
                 }
                 slept = Duration::ZERO;
@@ -345,6 +445,7 @@ fn main() {
                     spans.lock().unwrap().push((t - start, t - start + took));
                     let g = db.read().unwrap();
                     let held = g.last_compact_held();
+                    written.fetch_add(g.garbage().file, Ordering::Relaxed);
                     println!(
                         "# compact: {:.0} -> {:.0} MB in {:.2} s, the write lock held {:.1} ms",
                         before.file as f64 / 1e6,
@@ -449,7 +550,8 @@ fn main() {
         }));
     }
 
-    println!("t\tfile_MB\tlive_MB\tupdates_s\treads_s\tread_p50_us\tread_p99_us\tread_max_us\tcompacting\tcompactions");
+    println!("t\tfile_MB\tlive_MB\tupdates_s\treads_s\tread_p50_us\tread_p99_us\tread_max_us\tmajflt\troom_MB\tcompacting\tcompactions");
+    let mut majflt = faults().0;
     let (mut during, mut beside, mut after) = (Vec::new(), Vec::new(), Vec::new());
     // The reads' p99 and longest a bucket, in microseconds, and how many.
     let mut read_buckets: Vec<(f64, f64, usize)> = Vec::new();
@@ -481,15 +583,19 @@ fn main() {
         let done = updates.load(Ordering::Relaxed).min(o.updates);
         let n = window.len();
         let max = window.iter().max().copied().unwrap_or(0) as f64 / 1e3;
+        let now = faults().0;
         println!(
-            "{second}\t{:.0}\t{:.0}\t{}\t{n}\t{:.1}\t{:.1}\t{max:.0}\t{}\t{compactions}",
+            "{second}\t{:.0}\t{:.0}\t{}\t{n}\t{:.1}\t{:.1}\t{max:.0}\t{}\t{:.0}\t{}\t{compactions}",
             g.file as f64 / 1e6,
             g.live as f64 / 1e6,
             done - last_updates,
             pct(&mut window, 0.5),
             pct(&mut window, 0.99),
+            now - majflt,
+            fenec_core::cache::room().unwrap_or(0) as f64 / 1e6,
             was_compacting as u8,
         );
+        majflt = now;
         last_updates = done;
         second += 1;
         if updated_at.is_none()
@@ -536,10 +642,21 @@ fn main() {
         g.file as f64 / 1e6,
         g.live as f64 / 1e6
     );
+    // Each update appends its record whole: a live record's bytes on
+    // average, the live bytes over the records.
+    let updated = o.updates as f64 * g.live as f64 / o.records as f64;
+    let compacted = written.load(Ordering::Relaxed) as f64;
+    println!(
+        "# the updates appended {:.2} GB and the compacts wrote {:.2} GB: {:.2} bytes written a byte updated",
+        updated / 1e9,
+        compacted / 1e9,
+        (updated + compacted) / updated
+    );
     rates(
         &series.0.lock().unwrap(),
         &spans.lock().unwrap(),
         &read_buckets,
+        &samples.lock().unwrap(),
         &o,
     );
     drop(db);

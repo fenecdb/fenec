@@ -45,8 +45,8 @@ pub use wake::placeable;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use garbage::{
-    compact_when_due, CompactPolicy, Compactor, Garbage, AUTO_COMPACT_EVERY, AUTO_COMPACT_FLOOR,
-    AUTO_COMPACT_RATIO,
+    compact_when_due, compact_when_due_in, memory, CompactPolicy, Compactor, Garbage, Memory,
+    AUTO_COMPACT_EVERY, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO, ROOM_SHARE,
 };
 
 pub const MAGIC: &[u8; 8] = b"FENECDB\x01";

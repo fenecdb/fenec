@@ -639,6 +639,20 @@ read 438 k. The earlier runs of fenecdb and fenec-server stay in the results,
 marked superseded (<code>crates/fenec-bench/ycsb/superseded.tsv</code>);
 SQLite and MongoDB were not measured again.</p>
 
+<p><b>And once the file nears what the page cache can hold.</b> Since these
+runs a file is also compacted as it nears the memory the system has for
+its pages, or once the process waits for the disk
+(<a href="/docs/server#compaction">Compaction</a>); the cells above predate
+it. Measured apart on 2026-10-11 and 12, in process, buffered, A, B and F at 1
+and 16 threads, the build before it and the one with it in turns, its cells
+in none of the medians: with the machine's memory as it stood, two runs
+each, A at 16 threads went from 82 and 92 k to 133 k twice and the rest
+stayed within the runs' spread; beside 1 GB of memory held by another
+program, one run each, B went from 23.5 k to 63.5 k at one thread and from
+62.3 k to 112.8 k at 16, F from 23.6 k to 48.5 k at 16, the file at its
+largest 1.2 to 1.5 GB against 1.5 to 2.0, and A at one thread from 29.7 k
+to 24.1 k.</p>
+
 <p><b>The one-client server cells, measured again the same day.</b> On
 2026-10-04 fenec-server natively and in Docker (A to F at one thread,
 durable and buffered, A and C at 16) and PostgreSQL beside them, in turns

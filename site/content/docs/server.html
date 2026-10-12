@@ -238,8 +238,11 @@ delete writes a tombstone; the version left behind is dead until a
 <code>compact</code> writes the live records into a new file. The server
 runs one on its own: every 5 s it looks at each file it serves, the
 database, each open tenant and a replica alike, and compacts one once half
-of it is dead and the dead part is at least 64 MB. The compact runs beside
-the queries, and takes the write lock only to put the new file in
+of it is dead and the dead part is at least 64 MB -- or sooner, once a
+third of what the compact writes is dead, where the file has reached three
+quarters of the memory the system has for its pages or the server is
+waiting for the disk, so that its reads stay in memory. The compact runs
+beside the queries, and takes the write lock only to put the new file in
 place.</p>
 
 <div class="tbl">
@@ -285,12 +288,45 @@ updated 400 000 times at about 900 a second: the file went from 103 to
 at 190 MB against 515 without it; that file fits the page cache either way,
 and the reads ran alike, p99 2.2 µs.</p>
 
+<p><b>Before the file outgrows the page cache.</b> fenecdb keeps no cache of
+its own: a document is read where it lies in the mapped file, so what the
+reads need in memory is every page of the file that holds a live record --
+and under updates at keys drawn at random that is every page until a
+compact (a million 1 KB records updated until the file stood at 2.1 GB
+left one on every 16 KB page and on 94% of 4 KB ones). Once the file
+outgrows what the system has for it, every read and update waits for the
+disk in turn. So a file is also compacted once a third of what the
+compact writes is dead, where its live records fit in that memory and the
+file has reached three quarters of it -- which Linux reports exactly, its
+available memory and a container's limit -- or the server takes 500 major
+faults a second, which is how macOS shows it: under pressure it compresses
+the other programs' memory and reports more room than it gives the file.
+That costs up to four bytes written for each byte updated, against two at
+half the file dead. A compact whose new file would not fit beside the old
+one writes it past the page cache and reads it in after the swap, so the
+old file, which the reads need until then, stays in memory. Measured with
+<code>make compact-bench</code> in a container held to 2 GB
+(<code>docker run --memory 2g</code>): at half the file dead the file stood
+over 2 GB for 69 to 74% of the run, the five million updates took 358 to 511
+s, 3 500 to 4 100 a second at the median, and the process took 811 000 to
+900 000 major faults; with the memory rule, 80 to 100 s and 34 000 to
+39 000, the file at most 1.9 GB, the reads during a compact p99 0.44 to
+0.49 ms against 4.6 to 6.5, for 3.0 to 3.2 bytes written a byte updated
+against 1.9 to 2.0. On this Mac beside 1 GB of memory held by another
+program, 191 to 260 s against 82 to 535: macOS gives a growing file more
+of the machine as it compresses the other programs' memory, which it did
+in the fastest run at half the file dead and not in the slowest, and a
+file kept smaller is not given it -- steadier, never the best case. A file
+that fits in memory is compacted as before.</p>
+
 <p>The compact copies what it reads under the read lock, writes the live
 records into a side file with no lock held, and copies the writes made
 meanwhile in rounds -- a few thousand documents looked up under the read
 lock at a time and copied once it is let go -- until a round finds fewer
 than a thousand; it reads every page of the new file in before the swap,
-asking for them ahead in large reads, so no reader waits for one after it.
+asking for them ahead in large reads, so no reader waits for one after it --
+unless the two files would not fit in memory together, when it writes the
+new one past the page cache and reads it in once the old one is gone.
 The write lock is then held for the last of those writes, the side file's
 fsync and the rename. The server looks for a compact due every 5 s, and a
 look waits for a write under way rather than pass a compact over. A replica

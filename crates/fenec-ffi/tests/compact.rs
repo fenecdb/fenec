@@ -60,6 +60,7 @@ fn small() -> CompactPolicy {
     CompactPolicy {
         ratio: 0.5,
         floor: 64 << 10,
+        memory: false,
     }
 }
 

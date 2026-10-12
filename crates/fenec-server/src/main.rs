@@ -68,7 +68,10 @@ usage: fenec-server [options]
                             of it is dead -- versions updates and deletes
                             left behind -- and at least 64 MB, beside the
                             queries: the write lock is taken only to put the
-                            new file in place. Every file served is looked
+                            new file in place; sooner once the file reaches
+                            three quarters of the memory the system has for
+                            its pages and a third of it is dead, so it stays
+                            in the page cache. Every file served is looked
                             at every 5 s, tenants and replicas too
                             default: 0.5 (the file stays under twice its data)
       --no-checkpoint       do not write a checkpoint on shutdown. The
