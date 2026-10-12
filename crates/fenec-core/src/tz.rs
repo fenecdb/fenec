@@ -39,7 +39,7 @@ use crate::value::Value;
 const DAY: i64 = 86_400_000;
 
 /// What `bucket` reads local time by.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Zone {
     /// A fixed offset east of UTC, in milliseconds.
     Fixed(i64),
@@ -48,7 +48,7 @@ pub enum Zone {
 
 /// A zone of the table: its transitions since the start of 1999, and the
 /// rule after them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Rules {
     /// The first instant answered for: a time before it is refused rather
     /// than answered in rules the table does not hold.
@@ -60,6 +60,11 @@ pub struct Rules {
     rule: Option<Rule>,
     /// Where the rule takes over from the transitions.
     rule_from: i64,
+    /// The piece a time was last asked of: rows bucketed in time order
+    /// ask one piece for months of them. Worked out for each, a rule's
+    /// three years of changes a time, a week's hourly counts by Berlin's
+    /// clock off a million rows' index took 252 ms against 22 in UTC.
+    last: std::cell::Cell<Piece>,
 }
 
 /// A POSIX TZ string's rule: standard and daylight offsets, and when
@@ -125,7 +130,7 @@ impl Rule {
 }
 
 /// A stretch of time of one offset: from `start` to `end`, exclusive.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Piece {
     start: i64,
     end: i64,
@@ -137,7 +142,7 @@ impl Zone {
     pub fn offset_at(&self, t: i64) -> i64 {
         match self {
             Zone::Fixed(o) => *o,
-            Zone::Rules(r) => r.offset_at(t),
+            Zone::Rules(_) => self.piece(t).off,
         }
     }
 
@@ -149,11 +154,19 @@ impl Zone {
                 end: i64::MAX,
                 off: *o,
             },
-            Zone::Rules(r) => Piece {
-                start: r.last_change(t),
-                end: r.next_change(t),
-                off: r.offset_at(t),
-            },
+            Zone::Rules(r) => {
+                let held = r.last.get();
+                if held.start <= t && t < held.end {
+                    return held;
+                }
+                let p = Piece {
+                    start: r.last_change(t),
+                    end: r.next_change(t),
+                    off: r.offset_at(t),
+                };
+                r.last.set(p);
+                p
+            }
         }
     }
 
@@ -268,6 +281,11 @@ impl Rules {
         let i = self.trans.partition_point(|&(u, _)| u <= t);
         if let Some(&(u, _)) = self.trans.get(i) {
             return u;
+        }
+        // Before the rule takes over its first change is the next, however
+        // many years off: Egypt kept no daylight time from 2015 to 2022.
+        if self.rule.is_some() && t < self.rule_from {
+            return self.rule_from;
         }
         let mut next = i64::MAX;
         for c in self.rule_changes(t) {
@@ -581,6 +599,11 @@ impl<'a> Table<'a> {
             trans,
             rule,
             rule_from,
+            last: std::cell::Cell::new(Piece {
+                start: 0,
+                end: 0,
+                off: 0,
+            }),
         }))
     }
 }
