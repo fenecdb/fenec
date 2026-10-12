@@ -169,7 +169,7 @@ below.</p>
 <tbody>
 <tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">252 / 487 / <b>516</b></td><td class="n">248 / 248 / 258</td></tr>
 <tr><td>reads/s from 4 threads, beside 4 writers</td><td class="n"><b>701 k</b>, p99 75 µs</td><td class="n">344 k, p99 79 µs</td></tr>
-<tr><td>… beside blocks of 1 000 writes</td><td class="n">213 k, the longest 4.8 ms</td><td class="n"><b>632 k</b>, the longest 0.6 ms</td></tr>
+<tr><td>… beside blocks of 1 000 writes</td><td class="n"><b>2 010 k</b>, p99 2.5 µs, the longest 0.5–1.2 ms</td><td class="n">630 k, p99 59 µs, the longest 0.4–1.9 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -193,8 +193,10 @@ median of three runs (<a href="benchmarks.html#ycsb">every cell</a>):</p>
     update</b>, where SQLite updates its page in place; the file compacts
     itself once half of it is dead, beside the reads. Before it did, C at
     one thread read 30.1 k after the updates, where SQLite read 279 k.</li>
-  <li><b>SQLite opens faster</b> and its readers never wait for a block of
-    writes; fenecdb's do, while the block runs.</li>
+  <li><b>SQLite opens faster</b>, and its readers never wait for a block of
+    writes. fenecdb's wait only while one lands: its rows are built and
+    encoded beside them first, and the block holds the lock about 0.15 ms
+    for 1 000 rows.</li>
   <li><b>Not measured yet:</b> sqlite-vec, by brute force or with its
     alpha indexes; FTS5; and either in the browser.</li>
 </ul>

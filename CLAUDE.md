@@ -223,10 +223,11 @@ record goes into the file as it lands, and the stores held its documents in
 their segments besides, until a restart or a compact: 250 000 768-dim rows
 loaded into a server, the engine counted 1 592 MB against 818 for the same
 file started again. Once the documents since the last handover amount to
-`HANDOVER_AT` (16 MB), 65 536 records or 65 536 writes
+`HANDOVER_AT` (16 MB), 65 536 records or 16 384 writes
 (`HANDOVER_DOCS`: its pause is a document's work each, about 17 ns, and 16
 MB of rows of a text and an int were 930 000 of them, the write lock held
-16 to 17.5 ms), `Database::hand_over` has the sink
+16 to 17.5 ms; at 65 536 writes 0.82-0.89 ms, and at 16 384 0.26-0.31, a
+block's p99 under the lock 1.04 -> 0.45 ms and its mean as it was), `Database::hand_over` has the sink
 write what is pending (`Sink::written_through`) and each store point the
 documents it holds at their places in the file and let its segments go
 (`Store::hand_over`): 820 MB after that load. One due while a durability
@@ -293,11 +294,13 @@ readers (`leave_block`, `park`, savepoints); with the pg wire gone that
 machinery went, since nothing else leaves a block open. What one writer
 costs readers is measured against SQLite in one process (`make
 concurrency-bench`): four threads read 7.1M rows/s by id alone, 701k beside four writers, and
-213k beside blocks of 1 000 writes landing back to back, p99 0.51 ms (a
-block's run) and the longest 4.8 -- a block holds the write lock while it
-runs, where SQLite's WAL reads the last commit meanwhile, 632k/s and 0.6 ms
-at most; before the handover counted writes the longest was 17.4, a handover
-of 930 000 small documents. Durable writes gain from the fsync outside the
+2.0M beside blocks of 1 000 writes landing back to back, p99 2.5 us and the
+longest 0.5-1.2 ms, where SQLite's WAL reads the last commit meanwhile,
+630k/s, p99 59 us and 0.4-1.9 ms at most -- a block's documents built beside
+the readers and its buffer written behind the lock (both below); built under
+it, 76-292k/s, p99 0.52-1.48 ms and 5.5-6.2 at most in the same session (213k
+and 4.8 quoted before), and before the handover counted writes the longest was
+17.4, a handover of 930 000 small documents. Durable writes gain from the fsync outside the
 lock: 252 -> 516 writes/s from 1 to 16 writers, SQLite's 248 -> 258. Two processes opening the same file corrupts
 it, which is why everything that writes one -- the HTTP endpoint, a
 replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
@@ -310,6 +313,57 @@ transfer waiting, 18 waits past 50 ms -> 2), and a long one is pinned now
 (below). Where a writer waits, the std lock holds new readers behind it on
 macOS and Linux alike, so a read under the lock beside a busy writer waits
 as before.
+
+**A block's documents are built beside the readers** (`engine/prepared.rs`,
+`Database::prepare`). A block holds the write lock from its first write to
+its record, and a block of 1 000 single puts held it 0.45 ms p50 on this
+Mac, 1.3 at p99, every reader waiting. Sampled (`sample`, 1 kHz), the time
+under the lock was the schema copied whole for each statement (17%), each
+document built from its pairs and parameters and each value made its field's
+type (20%), its payload encoded with every value copied first (12%), the
+document freed once written (10%), the collection looked up by name five
+times a statement (8%), each frame made in a `Vec` of its own and copied
+twice (6%), the record and the handovers (6%). Natively the schema is an
+`Arc` (`SchemaCell`, a plain value in the browser, its module 80 bytes
+smaller raw and 95 larger brotli, the layout's noise), each value encoded
+where it lies (`encode_doc_into`), the frame written once into the block's
+frames and copied from there into the segment (`Store::append_onto`), the
+hooks borrowed and the collection looked up once -- which took a lone put in
+memory from 599-618 to 412-431 ns, 687-691 to 482 under `@hash`, a `del`
+705-714 to 617-626 (`make ttl-bench`'s `writes`, in turns), and a writer
+with no fsync from 1.48M to 1.78-1.88M a second. Then `prepare`, under the
+read lock, builds and encodes the documents of every `put` among a block's
+statements into one buffer for the block -- buffers of its own a statement
+were three allocations each, a quarter of what they saved -- and the block
+takes them (`execute_prepared`; `execute_ready` for a `/batch` run a
+statement at a time, `fenec_http::held::prepared`) where its collection
+holds the very schema they were built against: the preparation holds the
+`Arc`, so any change copies it and `Arc::ptr_eq` fails, and the `put` builds
+its own as it always did. Everything the database decides -- the id, an
+insert over a held id, `@unique`, `if absent`, the hooks, the indexes, the
+record -- is decided under the lock as before, so the file is the same byte
+for byte (`tests/prepared.rs`, against twins built under the lock). A hook
+that may change a document (`Hook::rewrites`, true unless it says not;
+`Check` and the mirror's `Guard` judge only) has its payload encoded after
+it. The documents written are freed after the lock, with the preparation. A
+preparation a panic left half way is let go of as the next statement starts
+(`disarm`): taken, a block that came after it wrote another's documents. A
+server prepares a `/batch` or a `/query` whose `put`s write `PREPARE_AT`
+(16) documents or more: fewer spend more on the read lock and the buffers
+than they take off. The lock is held 0.15 ms p50 for the block, 0.40 at
+p99, 0.97 at most over 10 000 blocks; a writer alone does the same work as
+before, the read lock and the buffers a few percent of it. Rejected: a pin
+taken as each block starts, for the readers to read the database as it
+stood -- it copies the id index, 12 bytes a row, 0.25-0.37 ms over a
+million rows, as long as the block and growing with the collection, and a
+read an index answers would still wait; a copy-on-write id index in chunks
+to make that pin cheap, a pointer more on every read by id; the whole block
+run beside the readers, applied under the lock as a list of effects -- a
+read in a block sees the block's writes, a `set` reads the row it writes,
+`require` and `@unique` count under the single writer, so every read path
+would have consulted an overlay of the block's writes; readers handed the
+block's undo log to read the rows as they were, which reads by id alone
+could use.
 
 **A long read is pinned, and read with no lock held** (`engine/pinned.rs`,
 `Database::pin`). Under the read lock a write waited for every read, so a
@@ -431,6 +485,25 @@ an earlier fsync already covered runs none, which is the group commit: 268 ->
 <ms>` flushes the same way, a database's and each of a node's tenants'
 (`Tenants::sync_dirty`): the tenants' held their lock through the fsync, and
 every read and write of one waited up to 27 ms a pass on macOS.
+
+**Buffered writes are written behind the lock** (`Database::write_behind`,
+`Sink::write_behind`). On macOS a `write` that takes a file's dirty pages
+past each 8 MB waits for the disk: 1 MB writes appended one after another
+took 1.5-2.9 ms every eighth, 2.0-11 ms with the file mapped, and
+preallocating 128 MB (`F_PREALLOCATE`) changed nothing. The buffer written
+as it outgrew 1 MB, under the write lock, held four readers beside blocks of
+1 000 writes 4-6 ms every 8 MB. `write_behind` hands back what writes the
+buffer, with no fsync, for the caller to run once it has let the lock go,
+as it runs a durability: a server asks after every write that `--sync
+always` does not fsync (`flush_for`), the buffer once it holds 64 KB
+(`BEHIND_AT`). A sink asked once leaves its buffer for it from then on, an
+append writing it only past `WRITE_HELD`, should the writes behind fall
+back. A handover writes what is pending, so for a database written behind
+it is put off to the next block's start (`hand_over_before`), where the
+write behind -- every byte, once a handover is due -- left nothing pending,
+and runs at the end of a block only past twice its bounds: written there,
+its bytes met the same stall under the lock. A replica, the shell and the
+native library write as before.
 
 **A durable write syncs a log beside the file, not the file**
 (`synclog.rs`, Linux and Android). The file only grows, and on ext4 an
