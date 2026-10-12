@@ -192,11 +192,7 @@ class FenecRemote {
             : Duration(seconds: secs);
     return FenecException.http(
         quota == null ? _code(status) : FenecCode.quota, m?['error'] as String? ?? 'HTTP $status',
-        status: status,
-        at: m?['at'] as int?,
-        completed: m?['completed'] as int?,
-        quota: quota,
-        retryAfter: wait);
+        status: status, at: m?['at'] as int?, completed: m?['completed'] as int?, quota: quota, retryAfter: wait);
   }
 
   /// An HTTP status as the error kind the engine would have said; the
