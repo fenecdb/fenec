@@ -368,12 +368,34 @@ pub fn plan(db: &Database, stmts: &[(&Statement, &[Value])], before: i64) {
         if !collections.contains(collection) {
             collections.push(collection.clone());
         }
+        let mut order = order.unwrap_or_default();
+        // A key worked out of the row -- `order distance(pickup, $2)` --
+        // bound as the filter is: a test runs with no parameters, and two
+        // couriers' claims are two groups by the points they name.
+        for e in order.iter_mut().filter_map(|s| s.expr.as_mut()) {
+            bind(e, params);
+        }
+        // Where the first key is worked out of the row, the test answers it
+        // too: what the claim ranks the row it found by, beside every other
+        // claim's rank of it ([`rank`]).
+        let computed: Vec<Column> = order
+            .first()
+            .and_then(|s| s.expr.clone())
+            .map(|expr| Column {
+                expr,
+                name: RANK.to_string(),
+            })
+            .into_iter()
+            .collect();
+        let mut project = vec!["id".to_string()];
+        project.extend(computed.iter().map(|c| c.name.clone()));
         let test = Select {
             collection: collection.clone(),
-            project: Some(vec!["id".to_string()]),
+            project: Some(project),
             filter,
-            order: order.unwrap_or_default(),
+            order,
             limit: Some(Count::N(1)),
+            computed,
             ..Select::default()
         };
         if !tests.contains(&test) {
@@ -557,7 +579,7 @@ impl<'h> Ticket<'h> {
             None => {
                 st.next += 1;
                 let id = st.next;
-                let ranked = plan.tests.iter().any(|t| t.near.is_some());
+                let ranked = plan.tests.iter().any(ranks);
                 st.ranked += usize::from(ranked);
                 st.groups.push(Group {
                     id,
@@ -1052,7 +1074,7 @@ fn look(
         let found = match g.query(&stmt, &[]) {
             Ok(Response::Rows(rs)) => match rs.rows.first() {
                 None => continue,
-                Some(r) => (Some((t.collection.clone(), r.id)), rank(&g, t, r.score)),
+                Some(r) => (Some((t.collection.clone(), r.id)), rank(&g, t, &rs)),
             },
             // An error the run should meet and answer.
             _ => (None, None),
@@ -1070,14 +1092,38 @@ fn look(
     }
 }
 
-/// Where a test's order puts the row it found, lower first: under `near`
-/// the row's `_score` -- metres from a point, a vector's distance -- or a
-/// sparse vector's dot product turned round, the higher being nearer. A
-/// test ordered by fields ranks a row as every other test of that order
-/// does: `None`, and the tie is the arrival's.
-fn rank(db: &Database, test: &Select, score: Option<f32>) -> Option<f64> {
+/// The column a test answers its first key under, where that key is worked
+/// out of the row.
+const RANK: &str = "_rank";
+
+/// Whether a test ranks rows its own way: by `near`, or by a first key
+/// worked out of the row -- a courier's `order distance(pickup, $2)` --
+/// which two claims may rank one row by differently.
+fn ranks(test: &Select) -> bool {
+    test.near.is_some() || test.order.first().is_some_and(|s| s.expr.is_some())
+}
+
+/// Where a test's order puts the row it found, lower first: a first key
+/// worked out of the row, as its column answers it (turned round where the
+/// order is descending); under `near` the row's `_score` -- metres from a
+/// point, a vector's distance -- or a sparse vector's dot product turned
+/// round, the higher being nearer. A test ordered by fields ranks a row as
+/// every other test of that order does: `None`, and the tie is the
+/// arrival's.
+fn rank(db: &Database, test: &Select, rs: &ResultSet) -> Option<f64> {
+    let row = rs.rows.first()?;
+    if let Some(key) = test.order.first().filter(|s| s.expr.is_some()) {
+        let at = rs.columns.iter().position(|c| c == RANK)?;
+        let v = match row.values.get(at)? {
+            Value::Int(n) => *n as f64,
+            Value::Float(x) if x.is_finite() => *x,
+            Value::Timestamp(t) => *t as f64,
+            _ => return None,
+        };
+        return Some(if key.asc { v } else { -v });
+    }
     let near = test.near.as_ref()?;
-    let score = f64::from(score?);
+    let score = f64::from(row.score?);
     let sparse = db
         .collection(&test.collection)
         .ok()

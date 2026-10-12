@@ -952,3 +952,53 @@ fn a_held_claim_looks_once_a_gap_beside_writes_it_cannot_take() {
     let a = held.join().unwrap();
     assert_eq!(rows(&a.body).len(), 1, "{}", a.body);
 }
+
+/// Couriers' claims ordered by distance from their own points, held 3, 1
+/// and 2 km from where an order is placed, in that order: the order goes to
+/// the nearest, though it was not held longest, and is run for once; the
+/// next two orders go to the other two. Raced, whichever ran first took it,
+/// the nearest of ten one time in ten.
+#[test]
+fn an_order_goes_to_the_nearest_claim_held_for_it() {
+    let node = start();
+    let port = node.port;
+    let a = Conn::open(port).query(
+        "create collection orders (pickup geo @geo, run_at timestamp @sorted, courier text)",
+        "[]",
+    );
+    assert_eq!(a.status, 200, "{}", a.body);
+    let claim = "set orders {courier: $1, run_at: now() + 60000} where run_at <= now() \
+                 order distance(pickup, $2) limit 1 returning id, courier";
+    let mut held = Vec::new();
+    for (w, km) in [3.0, 1.0, 2.0].into_iter().enumerate() {
+        let point = format!("[{}, 41.0]", 29.0 + km / 84.0);
+        held.push(std::thread::spawn(move || {
+            Conn::open(port).post(
+                "/query",
+                &line(claim, &format!("[\"c{w}\", {point}]")),
+                &[("Fenec-Wait", "20000")],
+            )
+        }));
+        until_held(&node, w + 1);
+    }
+    let before = node.server.waits();
+    let place = || {
+        let a = Conn::open(port).query(
+            "put orders {pickup: [29.0, 41.0], run_at: $1}",
+            &format!("[{}]", now_ms() - 1),
+        );
+        assert_eq!(a.status, 200, "{}", a.body);
+    };
+    place();
+    let nearest = held.remove(1).join().unwrap();
+    let got = rows(&nearest.body);
+    assert_eq!(got.len(), 1, "{}", nearest.body);
+    assert_eq!(got[0]["courier"], Value::Text("c1".into()));
+    assert_eq!(node.server.waits().runs - before.runs, 1, "run for once");
+    place();
+    place();
+    for h in held {
+        let a = h.join().unwrap();
+        assert_eq!(rows(&a.body).len(), 1, "{}", a.body);
+    }
+}
