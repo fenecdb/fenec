@@ -229,7 +229,10 @@ pub(crate) fn admit<'a>(
     req: &Request,
 ) -> std::result::Result<(&'a Options, Who), Response> {
     let Some(opts) = cfg.mcp.as_deref() else {
-        return Err(Response::error(404, "MCP is off: start the server with --mcp"));
+        return Err(Response::error(
+            404,
+            "MCP is off: start the server with --mcp",
+        ));
     };
     // Before the token, as the binding asks of every connection: a page
     // on another origin, or one a DNS name was rebound under, is refused
