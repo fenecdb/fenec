@@ -22,7 +22,10 @@ fn a_router_on_port_0_names_the_port_it_took() {
     let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
     // "fenec-shard 0.1.10 listening on: http://127.0.0.1:54321  [0 node(s), 0 tenant(s)]"
     let addr = loop {
-        let line = lines.next().expect("fenec-shard ended before it listened").unwrap();
+        let line = lines
+            .next()
+            .expect("fenec-shard ended before it listened")
+            .unwrap();
         if let Some((_, rest)) = line.split_once("listening on: http://") {
             break rest.split_whitespace().next().unwrap().to_string();
         }
