@@ -41,7 +41,7 @@ pub use pinned::{Pinned, PIN_AT, PIN_BUDGET};
 #[cfg(not(target_arch = "wasm32"))]
 mod prepared;
 #[cfg(not(target_arch = "wasm32"))]
-pub use prepared::Prepared;
+pub use prepared::{Prepared, PREPARE_AT};
 #[cfg(not(target_arch = "wasm32"))]
 mod wake;
 #[cfg(not(target_arch = "wasm32"))]

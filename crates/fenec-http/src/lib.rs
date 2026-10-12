@@ -1933,11 +1933,16 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
         built
     } else {
+        // A `put` of many documents builds them beside the readers.
+        let mut ready = match &unscoped {
+            None => held::prepared(db, &[(&stmt, &params[..])]),
+            Some(_) => fenec_core::engine::Prepared::default(),
+        };
         let mut guard = held::write(db);
         let before = waits::now_ms();
         let running = trace::span("execute");
         let r = match &unscoped {
-            None => access::within(who, || guard.execute_with(&stmt, &params))
+            None => access::within(who, || guard.execute_ready(&stmt, &params, &mut ready, 0))
                 .map(|r| masked(who, mask, &guard, r)),
             Some(sent) => run_bound(who, &mut guard, sent, &params),
         };
@@ -2079,6 +2084,10 @@ fn keyed_query(
     params: &[fenec_core::value::Value],
     wait: bool,
 ) -> Response {
+    let mut ready = match unscoped {
+        None => held::prepared(db, &[(stmt, params)]),
+        Some(_) => fenec_core::engine::Prepared::default(),
+    };
     let mut guard = held::write(db);
     let ttl = cfg.idempotency_ttl.as_millis() as i64;
     if let Some(sent) = idempotent::answered(&guard, key, ttl) {
@@ -2092,7 +2101,7 @@ fn keyed_query(
     // A token whose rules read other collections: its rows shown as
     // [`run_bound`] answers them.
     let result = match unscoped {
-        None => access::within(who, || guard.execute_with(stmt, params)),
+        None => access::within(who, || guard.execute_ready(stmt, params, &mut ready, 0)),
         Some(sent) => run_bound(who, &mut guard, sent, params),
     };
     drop(running);
@@ -2219,6 +2228,16 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(k) => k,
         Err(refusal) => return refusal,
     };
+    // Let go of after the write lock, with the documents the block wrote.
+    let mut ready = match &unscoped {
+        None => {
+            let pairs: Vec<(&Statement, &[Value])> =
+                stmts.iter().map(|(s, p)| (s, &p[..])).collect();
+            held::prepared(db, &pairs)
+        }
+        // Each line bound again under the lock as it runs ([`run_bound`]).
+        Some(_) => fenec_core::engine::Prepared::default(),
+    };
     let mut guard = held::write(db);
     let block = stmts.iter().all(|(s, _)| s.fits_block());
     if key.is_some() && !block {
@@ -2249,7 +2268,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         let r = match over_ceiling(cfg.max_memory, &guard, stmt) {
             Some(why) => Err((507, why)),
             None => match &unscoped {
-                None => access::within(who, || guard.execute_with(stmt, params))
+                None => access::within(who, || guard.execute_ready(stmt, params, &mut ready, at))
                     .map(|r| masked(who, mask.as_ref(), &guard, r)),
                 Some(sent) => run_bound(who, &mut guard, &sent[at].0, params),
             }

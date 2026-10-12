@@ -55,10 +55,45 @@ struct Built {
     count: usize,
 }
 
+/// The documents a block's `put`s write at least for them to be built
+/// before the write lock ([`Prepared::worth`]): a preparation is a read
+/// lock taken and let go and its buffers, which a statement of a document
+/// or two would spend more on than it takes off the lock.
+pub const PREPARE_AT: usize = 16;
+
 impl Prepared {
+    /// Whether `stmts` write enough documents to be worth preparing:
+    /// [`PREPARE_AT`] at least, among their `put`s' pairs and the objects
+    /// their parameters hold.
+    pub fn worth(stmts: &[(&Statement, &[Value])]) -> bool {
+        let mut n = 0;
+        for (s, params) in stmts {
+            if let Statement::Put {
+                docs, docs_param, ..
+            } = s
+            {
+                n += docs.len();
+                n += match docs_param.and_then(|i| params.get(i)) {
+                    Some(Value::List(l)) => l.len(),
+                    Some(_) => 1,
+                    None => 0,
+                };
+                if n >= PREPARE_AT {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// How many statements had their documents built.
     pub fn built(&self) -> usize {
         self.stmts.iter().filter(|b| b.is_some()).count()
+    }
+
+    /// How many of the documents built a block took and wrote.
+    pub fn spent(&self) -> usize {
+        self.spent.len()
     }
 
     /// The `i`th document's payload, of the whole block.

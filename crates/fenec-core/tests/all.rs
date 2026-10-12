@@ -47,6 +47,7 @@ mod nocase;
 mod order_expr;
 mod paging;
 mod persist;
+mod prepared;
 mod pinned;
 mod quant;
 mod query_json;
