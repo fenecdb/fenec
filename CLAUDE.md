@@ -87,7 +87,7 @@ make growth-bench        # indexes growing a put at a time, the longest (a table
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 make geo-bench           # a million points: radii, the nearest, through @geo and by the scan, against PostGIS and Redis in Docker (GEO_ARGS)
-make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; `held` (or `held pickup|delayed|idle|busy`): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims
+make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; `held` (or `held pickup|delayed|idle|busy|other|contested`): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims, a put of another collection beside claims held, one job to 10, 100 and 1 000 claims of their own
 make nearest-bench       # the nearest ready order claimed over HTTP, 1, 16 and 50 claimers: order distance(...) limit 1 returning id and an inner get's near, against examples/dispatch's read and /batch (ORDERS, CLAIMS)
 ```
 
@@ -729,15 +729,38 @@ own rows, a keyed `del`'s key among them) always lands and a `compact`
 always runs, and a file within a quarter of its quota is compacted by the
 node once an eighth of the quota is dead (`link::quota_policy`), where the
 policy every file has waits for 64 MB and a tenant at a 10 MB quota would
-have deleted to no avail. Streams (subscriptions, `/_changes` waits, held
-writes, `Fenec-After` waits) and requests in flight are counters a request
-takes in `serve_connection`, `respond` and `handle_tenant`, only where the
-quota is set; writes and bytes a second are token buckets a second deep,
-asked where a write is known to be one (`quota::writing`, a thread-local
-as `access::within` is) and the bytes charged by the limit as they land,
-so a write larger than a second's worth goes through and the next waits
-its debt out: 429 with `Retry-After`. Every refusal carries `Fenec-Quota`
-and `"quota"` (with `"retry_after"`, which SDKs reading no header take),
+have deleted to no avail. Streams (subscriptions, `/_changes` waits,
+`Fenec-After` waits), held writes (`held`, `Fenec-Wait`'s: a plan sizes how
+many workers wait apart from how many dashboards stream, and counted
+together forty couriers waiting left a dispatcher's map no stream to open)
+and requests in flight are counters a request takes in `serve_connection`,
+`respond` and `handle_tenant`, only where the quota is set; rows and bytes
+written a second are token buckets a second deep, a write let through
+where it is known to be one (`quota::writing`, a thread-local as
+`access::within` is) while a row's worth is left, and charged by the limit
+as it lands -- the record's writes to the app's collections
+(`Landing::writes`, `Database::app_writes`: an `Idempotency-Key`'s row is
+the server's), on a request's own thread alone (`writing_here`: the sweep,
+a compact, a replica's apply are the node's) -- so a write larger than a
+second's worth goes through, the next waits its debt out, and a write that
+wrote nothing costs nothing: taken as a write started, 45 claims held at
+once by a fleet on a small plan were refused for `writes` before any for
+being held. A held claim the rate refuses as it is to run stays held
+(`Ticket::pause`, `rated_out`, `Held::write_wait`) and runs once a row's
+worth is back, rather than come back at the end of every group. 429 with
+`Retry-After` in whole seconds rounded up, as HTTP has it, and
+`retry_after_ms` the wait itself (`quota::millis`): a bucket of 600 a
+second refills a row in 1.7 ms, and fifty couriers told a second waited
+fifty seconds between them. On a `--dir` node that sets neither
+`--tenant-max-streams` nor `--tenant-max-held`, each is a quarter of
+`--max-connections` (`quota::shared`, logged at the start): every stream
+and held write is a connection and its thread, `--http-max-streams` counts
+a database's own -- each tenant's on a node, not all of theirs together --
+and nothing counted a tenant's held writes, so a hundred workers of one
+tenant took every connection of a default node and its neighbours were
+answered 503. Every refusal carries `Fenec-Quota`
+and `"quota"` (with `"retry_after"`, a rate's `"retry_after_ms"` too, which
+SDKs reading no header take),
 and `quota::noted` counts it by quota (`fenec_quota_refused_total`, never
 a tenant label) and logs it as an audit `quota` event; its message names
 the bound, never what the tenant holds, so a scoped user is told the
@@ -1785,8 +1808,9 @@ filter reading the time other than as a field compared with `now()` plus
 or minus integers and parameters (`bucket(now(), ..)`, `run_at + 1000 <=
 now()`, `= now()`), is refused before it runs (400, `holdable`,
 `engine::placeable`). Two things wake one: a write to a collection it
-reads -- `Hub::notify` under the write lock, a load when nothing is held
--- and the time reaching a row's moment, which nothing announces:
+reads -- `Hub::landed` under the write lock, with the collections the
+block wrote (below), a load when nothing is held -- and the time reaching
+a row's moment, which nothing announces:
 `wakes_at` (native only) takes each such comparison anywhere in the filter,
 inner `get`s too, and each `@ttl`, and asks the least value past the bound
 (`get c select f where f > bound order f limit 1`, a step of `@sorted`),
@@ -1845,6 +1869,70 @@ the next request's), Go `db.Wait(d)` and .NET `WithWait(d)` copies under
 the context or token, Swift `withWait(seconds)`, Kotlin `withWait(ms)` (a
 cancelled coroutine disconnects the `HttpURLConnection`, whose read heeds
 no interrupt) and Dart `withWait(Duration)`.
+
+**A write wakes the held writes that read what it wrote, and a row several
+groups would take goes to the one ranking it first** (`Watcher::landed`,
+`waits::settle`). Woken by every write, each group's head looked under the
+read lock whatever was written: 150 claims held on `orders`, each a group
+of its own as couriers' claims are (a point and a `sub` in each filter),
+took a put of `positions` beside them from 22 us p50 to 50-95 and from
+30-90 us p99 to 200-480, the heads looking 115 000-132 000 times a second
+(`make queue-bench`'s `held other`, in turns). The engine tells its
+watcher the change a block landed from (`Watcher::landed`, a default
+method calling `notify`; native only, so the browser module, which holds
+no write, is the same size to the byte, 190 bytes moved where
+`engine.rs`'s panics carry their line numbers); `Hub::landed` asks
+`changed_collections_since(before)` only while something is held
+(`Waits::holds`), and `Waits::wrote` marks stale and wakes the groups
+whose collections -- their tests' and their inner `get`s' -- it names
+alone, `None` (a load, a drop, a compact) every one: the same put 22-25
+us p50 and 30-97 p99 beside 150 held, as beside none, and no look. And a
+row several groups would take went to whichever head ran first: of 10
+claims each a group of its own the one held longest took it 4-16% of the
+time, of 100 1-2%, of 1 000 2-4%, and each head that found it ran under
+the write lock, 3.2-6.4 runs a job (`held contested`). A head that finds a
+row bids for it now (`Bid`: the row, its rank by the claim's own order --
+`near`'s `_score`, a sparse dot product turned round, `None` under fields
+-- and when its head was held) and waits; `settle` gives each row to the
+bid ranking it first, the head held longest on a tie, the rest behind the
+winner's run (`behind`): a tie's in a line by arrival (`line`), the next
+looking once the run before ends -- looking all at once after each run, a
+burst of N jobs to N claims was N rounds of N looks -- and a look in the
+line that finds nothing disbanding it; a ranked loser looks again at once.
+A round waits for every group a write before its first bid woke (`horizon`,
+the writes announced as the bid lands: a look waits for the read lock and
+reads what landed meanwhile, and held to the look's start a job went to a
+later claim), told to look, come to its moment or behind a run
+(`Group::owes`), each once, so a round ends however many writes land; but
+a tie settles as soon as no group held before the best bid is still to
+bid. Groups are kept in their heads' order (`remove`, and a group whose
+head left re-placed by its next; `swap_remove` shuffled them), so `settle`
+scans to the first still to bid: a full scan and a sort at every look held
+the mutex every look waits for through a thousand of each, 38-60 ms a job
+at 1 000 claims. A bid for a row given to a run under way goes behind it
+at once; one for a row a run took after its look began (`gone`) looks
+again; a round ends the gap of a head it waits for, and only then (ended at
+every look, a claim beside a busy queue looked 1 500 times a second
+against 700). One job every 2 ms at least: the one held longest took it
+every time, one run a job; from the put to a claim holding it 0.43-0.47 ms
+against 0.37-0.43 at 10 claims, 0.83-0.99 against 0.57-0.68 at 100, 11-13
+against 2.6-5.2 at 1 000 -- the longest held's look, which a hundred or a
+thousand threads woken at once reach late, against the fastest of them --
+and the server's CPU a job 2.0-2.1, 12.6-13.9 and 110-131 ms against
+1.8-2.1, 11-14 and 138-144. Not opt-in: the claim's order says what "first"
+means and a tie keeps the order requests came in, `BLPOP` across groups as
+within one, and the one run a job against five under the write lock is
+every other writer's. A line of workers of one claim is served as before:
+a job enqueued reached one of 8 in 0.34-0.36 ms p50 either way, and 16 busy
+workers beside 16 claims held took 143 000-148 000 jobs a second against
+146 000-148 000, the claims looking 734-779 times a second against
+719-775. `tests/waits.rs` holds the longest held to every job of twelve
+groups, a burst of sixteen to the order they came at three looks a claim at
+most, and a gap to a look a millisecond beside eight writers;
+`waits::tests` a claim ranked by `near` to the job though it was held last.
+A `set` picks by fields today, so a courier's claim ranks orders by
+`run_at` and the tie goes to the courier waiting longest; the nearest
+takes it once a pick can order by distance.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
@@ -2002,8 +2090,24 @@ no expiry, and a collection with none reads as it did (`make
 ttl-bench`). `create index ... @ttl(d)` gives a timestamp field one, and
 `alter collection c alter field f @ttl(d) | @sorted` sets or takes it
 off (field change 4, the index kept). `_idempotency`'s `at` is the first
-user: its purge on the write path went. The two features cost the browser
-module 16.4 KB, 5.7 KB brotli -- 18.7 KB more while a ttl printed back
+user: its purge on the write path went. A subscriber hears a row reach its
+time at that time (`sse::Expiry`): told at the sweep, a minute and its
+grace later, a courier whose phone went quiet stayed on a dispatcher's map
+73 s after it had gone from every read. A stream of a collection with
+`@ttl` works out when its next row expires (`wakes_at` with no filter, a
+step of the index, 1.3 us over 100 000 rows, again only after a change to
+the collection or a look), sleeps until then if no write comes first --
+`Hub::wait`'s timeout, writing no keep-alive for it -- and reads the rows
+that reached their time since it last looked: `expired()` and the field's
+window, the shape ANDed in, every row of the collection for an unscoped
+shape that holds nothing (`FenecHttp.live`'s, told of any write to it),
+sent as deletions at the change the stream stands at -- a scoped stream's
+held to the ids it was sent, a quiet one's emptied -- and a resumed stream
+tells every row past its time not yet swept. The sweep's delete comes
+after, a deletion of what is gone. About 10 ms after the row's time in the
+test, which holds the row still in the file as `expired()` once heard, and
+a scoped stream silent at another user's row's time. The two features cost
+the browser module 16.4 KB, 5.7 KB brotli -- 18.7 KB more while a ttl printed back
 through a float, which brought the standard library's float formatting.
 `expired()` cost it 561 bytes, 98 brotli.
 
@@ -3805,7 +3909,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 68 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 71 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,
@@ -3856,8 +3960,11 @@ app was never told. A 507 whose body names a `quota` is a refusal now
 (`Sync::on_answer`, `#pump`): put back, `refused` and `onRefused` told
 with the quota, the queue going on; one naming none -- `--max-memory`'s,
 which a handover or an idle tenant's close brings back under, or a
-proxy's -- is waited out as a 5xx. A retried answer's `retry_after` is
-waited where it is longer than the backoff, never cut to the backoff's 15
+proxy's -- is waited out as a 5xx. A retried answer's `retry_after_ms`,
+the wait itself where the body says it, or its `retry_after` otherwise, is
+waited where it is longer than the backoff (a scenario holds both runners
+to a 2 ms wait waited as the backoff's 250 and a 900 ms one as itself; every
+SDK's error reads the milliseconds first, Go's and .NET's as a duration), never cut to the backoff's 15
 s and an hour at most (`RETRY_AFTER_MAX_MS`: a browser's `setTimeout`
 fires at once past 2^31 ms), the 30% jitter on top, since a bucket tells
 every client it refused in one moment the same wait. A stream a 429 of
