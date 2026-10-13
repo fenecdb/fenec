@@ -18,7 +18,8 @@
 #
 # First a --verify pass over Redis, A to F at 1 and 16 clients, its three
 # modes, into verify.tsv as run `rv`; the measurement starts only if it
-# found no mismatch. Then the measurement, runs `rd1`-`rd3`, into
+# found no mismatch. Then the measurement, runs `rd1`-`rd3` (`RUN=rx`
+# names them `rx1`-`rx3`, for runs that replace those), into
 # results.tsv. Its cells of fenec-server, fenec-server in Docker,
 # PostgreSQL and MongoDB join the medians of those cells' earlier runs:
 # commit them with the pages `CI=1 python3 site/build.py` then flags, or
@@ -30,6 +31,7 @@ cd "$(dirname "$0")/../../.."
 results=crates/fenec-bench/ycsb/results.tsv
 verify=crates/fenec-bench/ycsb/verify.tsv
 probe=${PROBE_BASE:+--probe-base $PROBE_BASE}
+run=${RUN:-rd}
 
 # Kept awake: the Mac sleeping in the middle of a run cuts it short.
 awake=""
@@ -70,5 +72,5 @@ fi
 echo "$(date '+%F %H:%M') measurement"
 # shellcheck disable=SC2086
 $awake make ycsb YCSB_ARGS="--systems server,server-docker,pg,mongo,redis \
-    --modes durable,buffered,snapshot --runs 3 --run-id rd --out $results $probe"
+    --modes durable,buffered,snapshot --runs 3 --run-id $run --out $results $probe"
 echo "$(date '+%F %H:%M') done: ./target/release/ycsb report $results"

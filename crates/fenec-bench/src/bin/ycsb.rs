@@ -497,6 +497,16 @@ trait System {
     fn size(&self) -> Option<u64> {
         None
     }
+    /// [`size`](System::size) while a cell runs, every 100 ms: only where
+    /// reading it takes nothing from the system measured, and `None`
+    /// otherwise, its size then read once the cell's clients have stopped.
+    /// Read through a container started for each look -- fenec-server's
+    /// image holds no `du` -- two a second ran in the VM beside the server
+    /// and took C at one client from 3.14-3.17 k a second to 2.33-2.38 k
+    /// (100 000 records, in turns), its p99 1.3 -> 1.9 ms.
+    fn size_beside(&self) -> Option<u64> {
+        self.size()
+    }
     /// The memory its container holds of its own (`container_memory`),
     /// for a system in one.
     fn memory(&self) -> Option<u64> {
@@ -1123,6 +1133,10 @@ impl System for Server {
                 .map(|m| m.len()),
         }
     }
+    fn size_beside(&self) -> Option<u64> {
+        // A `docker run` a look, in the server's VM.
+        (!self.docker).then(|| self.size()).flatten()
+    }
     fn memory(&self) -> Option<u64> {
         // The mapped file's pages are the page cache's, not the server's.
         self.docker
@@ -1382,6 +1396,10 @@ impl System for Pg {
             .ok()?
             .get(0);
         Some(n as u64)
+    }
+    fn size_beside(&self) -> Option<u64> {
+        // A connection a look: a backend forked and a SCRAM exchange.
+        None
     }
     fn memory(&self) -> Option<u64> {
         container_memory(&self.container.as_ref()?.0)
@@ -1823,6 +1841,10 @@ impl System for Redis {
             .parse()
             .ok()
     }
+    fn size_beside(&self) -> Option<u64> {
+        // A `docker exec` a look, and a wait for Redis's child.
+        None
+    }
     fn memory(&self) -> Option<u64> {
         let name = &self.container.as_ref()?.0;
         let mut c = self.connect();
@@ -2085,9 +2107,12 @@ struct Cell {
     logs: Vec<Vec<Entry>>,
     /// The process's major faults over the measured window -- a page the
     /// kernel read from the disk, the in-process systems' -- and the
-    /// largest the system's files stood, sampled every 100 ms.
+    /// largest the system's files stood, sampled every 100 ms -- or, for
+    /// a system whose size is not read during a cell (`size_beside`),
+    /// what they stood at once its clients stopped (`sampled` false).
     majflt: u64,
     largest: u64,
+    sampled: bool,
 }
 
 /// The process's major faults so far (`getrusage`), `rusage`'s layout on
@@ -2136,6 +2161,7 @@ fn run_cell(
         logs: Vec::new(),
         majflt: 0,
         largest: 0,
+        sampled: false,
     };
     let t0 = Instant::now();
     std::thread::scope(|s| {
@@ -2275,7 +2301,10 @@ fn run_cell(
         let ends = Instant::now() + cfg.run;
         while Instant::now() < ends {
             std::thread::sleep(Duration::from_millis(100).min(ends - Instant::now().min(ends)));
-            cell.largest = cell.largest.max(sys.size().unwrap_or(0));
+            if let Some(bytes) = sys.size_beside() {
+                cell.largest = cell.largest.max(bytes);
+                cell.sampled = true;
+            }
         }
         cell.majflt = major_faults() - faults;
         measuring.store(false, Ordering::Relaxed);
@@ -2287,6 +2316,9 @@ fn run_cell(
                 cell.hist.entry(op).or_insert_with(Hist::new).merge(&h);
             }
             cell.logs.push(log);
+        }
+        if !cell.sampled {
+            cell.largest = sys.size().unwrap_or(0);
         }
     });
     let inserted = keys.next.load(Ordering::Acquire) - (records_now + 1);
@@ -2970,12 +3002,13 @@ fn write_cell(
     }
     append(&cfg.out, &line);
     eprintln!(
-        "run {run} {name} {} {} x{threads}: {:.0} ops/s{summary} (probe {ratio:.2}), {} major faults, the file {} MB at the most",
+        "run {run} {name} {} {} x{threads}: {:.0} ops/s{summary} (probe {ratio:.2}), {} major faults, the file {} MB {}",
         mode.name(),
         w.name,
         cell.ops as f64 / secs,
         cell.majflt,
-        cell.largest >> 20
+        cell.largest >> 20,
+        if cell.sampled { "at the most" } else { "after it" }
     );
 }
 

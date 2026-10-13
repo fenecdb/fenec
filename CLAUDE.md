@@ -1505,7 +1505,12 @@ afresh for each load, which ends with a `BGSAVE` and a `BGREWRITEAOF`
 run out, so no fork the load made due falls in a cell. After each phase
 a container's memory -- `anon` and `shmem` of its cgroup, read through a
 container sharing its processes, fenec-server's image having no `cat` --
-is a `memory-<phase>` line beside the size. benchmarks.html's Redis part
+is a `memory-<phase>` line beside the size. A size read through a
+container or a connection of its own -- fenec-server's in Docker, Redis's,
+PostgreSQL's -- is read once a cell's clients stop, not every 100 ms
+beside them (`System::size_beside`): two `docker run`s a second in the VM
+took fenec-server's C at one client from 3.14-3.17 k to 2.33-2.38 k.
+benchmarks.html's Redis part
 sits between `ycsb redis` markers that `site/build.py` takes out until
 the results hold a Redis cell, its figures written in from the medians
 (`ycsb_redis`); `ycsb/run-redis.sh` is its run, a `--verify` pass first.
