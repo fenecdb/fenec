@@ -329,9 +329,10 @@ impl Tenants {
     /// under its slot, so nothing opens it meanwhile, and kept as a close
     /// keeps it. `None` when it is open or has no file. Opened to be
     /// written, a tenant's file is fsynced first (a replica must be sent
-    /// only what is on disk), `F_FULLFSYNC` on macOS: 6.3 ms a tenant, where
-    /// this is 0.5. It sends nothing, so the fsync is the open's to make,
-    /// once an image is to go out. A sync log not yet applied (Linux, after
+    /// only what is on disk), `F_FULLFSYNC` on macOS: a stream's first look
+    /// at 40 closed tenants took 251 ms that way, 6.3 ms a tenant, and at
+    /// 1 000 read so 45 ms (`make node-archive-bench`). It sends nothing,
+    /// so the fsync is the open's to make, once an image is to go out. A sync log not yet applied (Linux, after
     /// the machine went down) leaves it reading short of the file, which
     /// then reads as behind and is opened.
     pub(crate) fn peek(&self, name: &str) -> std::result::Result<Option<(u64, History)>, Refused> {

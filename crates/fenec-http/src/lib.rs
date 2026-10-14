@@ -733,20 +733,10 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // stream is, which takes the connection over.
         if let Backend::Tenants(tenants) = backend {
             if req.path.starts_with("/_replication") {
-                let _ = out.set_read_timeout(None);
-                let Some(resp) = node_stream::handle(&mut out, tenants, &req) else {
-                    return;
-                };
-                audit::http(&req, resp.status, peer);
-                if cors(resp, cfg)
-                    .write(&mut out, keep_alive, head_only)
-                    .is_err()
-                    || !keep_alive
-                {
-                    return;
+                if node_stream(&mut out, tenants, cfg, &req, peer) {
+                    continue;
                 }
-                let _ = out.set_read_timeout(cfg.idle_timeout);
-                continue;
+                return;
             }
         }
 
@@ -1200,6 +1190,35 @@ fn operation(req: &Request, shape: &str) -> &'static str {
         (Method::Delete, _) => "del",
         _ => "other",
     }
+}
+
+/// `/_replication/...` on a node of tenants: the stream of every tenant,
+/// which takes the connection over, or the refusal. Whether the connection
+/// goes on to its next request. Out of line and cold: inlined, the stream's
+/// whole session landed in the loop every request runs.
+#[cold]
+#[inline(never)]
+fn node_stream(
+    out: &mut TcpStream,
+    tenants: &Tenants,
+    cfg: &Config,
+    req: &Request,
+    peer: Option<std::net::SocketAddr>,
+) -> bool {
+    let _ = out.set_read_timeout(None);
+    let Some(resp) = node_stream::handle(out, tenants, req) else {
+        return false;
+    };
+    audit::http(req, resp.status, peer);
+    if cors(resp, cfg)
+        .write(out, req.keep_alive, req.method == Method::Head)
+        .is_err()
+        || !req.keep_alive
+    {
+        return false;
+    }
+    let _ = out.set_read_timeout(cfg.idle_timeout);
+    true
 }
 
 /// Resolves `/t/<tenant>/rest` and strips the prefix, so everything below

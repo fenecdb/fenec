@@ -335,6 +335,131 @@ between two images, where a restore to the end passes but a restore to a
 moment inside cannot — and exits 1 when no restore can be made.</p>
 </details>
 
+<h2 id="node-archive">Archiving every tenant of a node</h2>
+
+<p>A node of tenants (<a href="/docs/sharding"><code>fenec-server --dir</code></a>)
+is archived by one process over one connection: an archive a tenant under a
+root, each the archive above, which <code>fenec restore</code>,
+<code>verify</code> and <code>prune</code> read as they read any.</p>
+
+<pre data-lang="bash"># every tenant of the node into /backups/n1/&lt;tenant&gt;/, until interrupted
+fenec archive --tenants http://n1:8081 /backups/n1 --token "$REPL" --image-every 1h --keep 7d
+
+# every tenant's archive read as a restore would; exits 1 if any cannot
+fenec verify --tenants /backups/n1
+
+# the node's directory as it stood at a moment: &lt;tenant&gt;.fenec for each tenant it held then
+fenec restore --tenants /backups/n1 /data/n1 --to 2026-09-22T10:14:59Z
+fenec-server --dir /data/n1 --replication-token "$REPL" ...
+</pre>
+
+<ul>
+  <li><b>One connection and one thread on the node</b>, however many
+    tenants it holds, and no tenant held open: an idle tenant stays
+    closed.</li>
+  <li><b>A tenant made on the node is archived from its first image</b>;
+    one deleted or moved to another node is no longer followed, and its
+    archive is kept, marked <code>gone</code>.</li>
+  <li><b>A tenant restored to an earlier moment, or made again under its
+    name,</b> begins a new archive; the one before is kept beside it.</li>
+  <li><b><code>--key-file</code>, <code>--image-every</code> and
+    <code>--keep</code></b> apply to each tenant's archive.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A tenant's own stream (<code>/t/&lt;tenant&gt;/_replication</code>) is a
+connection and a thread on the node for as long as it runs, one of
+<code>--max-connections</code>, and it holds its tenant open the while.
+Archived that way, a node of a thousand tenants holds a thousand of each and
+every tenant open for good — and at the default of 100 connections it
+cannot be archived at all. <code>fenec archive --tenants</code> asks the node
+for <code>POST /_replication/tenants</code> instead, with the replication
+token: every tenant's writes over one stream, each message led by its
+tenant's name. Its body says where each archive under the root stands; the
+node says hello to every tenant it holds — where the archive goes on from,
+or an image where its place does not lead to the tenant's writes — and that
+every tenant the archive lists and the node does not hold is gone.</p>
+
+<p>The stream sends a tenant's writes from its feed while it is open, and
+nothing while it is closed, whose file does not change. It is a sender on
+each open tenant's feed as a replica's stream is, so under <code>--sync
+always</code> a write waits for it as for a replica, and a tenant closes only
+once the stream has sent what its disk holds: closed with writes unsent, its
+feed would go with it and they would come again as an image. A tenant opened
+again starts a new feed where the old one ended, and the stream goes on from
+it. Which tenants have writes is told, not polled: a tenant's feed tells the
+stream as its writes reach the disk, and a tenant made, installed, deleted,
+promoted or made to follow tells it too. Where a closed tenant stands is
+known where it closed in the node's process, and read from its file
+otherwise — the first stream after the node starts: 1 000 tenants in
+45 ms, where an open, which fsyncs the file first, was 6.3 ms a
+tenant.</p>
+
+<p>A tenant's archive is <code>&lt;root&gt;/&lt;tenant&gt;/</code>, written
+as <code>fenec archive</code> writes one; its segment file is open only while
+the tenant writes, so the archiver holds a descriptor a writing tenant, not a
+tenant. When the node says a tenant is gone — deleted, or moved to another
+node, whose own archiver takes it up from its image on the same history —
+the archive is kept as it stands and <code>&lt;root&gt;/&lt;tenant&gt;/gone</code>
+holds the time; a tenant that comes back is followed again, the time it was
+away a gap. A tenant whose copy on the node no longer leads from its
+archive's place, at or before it — restored there to an earlier moment, or
+another tenant made under the name — would land its writes among changes of
+the same numbers: the archive so far is moved aside to
+<code>&lt;root&gt;/&lt;tenant&gt;.&lt;history&gt;/</code> and a new one begins.
+(<code>fenec archive</code> of one database refuses such a primary instead,
+and leaves its archive as it was.) A promotion's new history reaches the
+archive before the writes after it, so a promoted tenant's archive goes on
+without an image. <code>&lt;root&gt;/archiving.lock</code> keeps a second
+archiver off a root.</p>
+
+<p><code>fenec restore --tenants &lt;root&gt; &lt;dir&gt;</code> writes
+<code>&lt;dir&gt;/&lt;tenant&gt;.fenec</code> for each tenant the node held at
+<code>--to</code>, or at each archive's end: a tenant the node said was gone
+by then is passed over, so a deleted tenant does not come back, and so is
+one whose archive begins after it. <code>--to-change</code> names one
+database's change, and is refused. <code>fenec verify --tenants</code> and
+<code>fenec prune --tenants</code> run on each tenant's archive.</p>
+
+<p>Measured with <code>make node-archive-bench</code>: a node of 1 000
+tenants of ten rows each, closed when idle, ten of them written ten times a
+second for 20 s under <code>--sync always</code>, archived a stream each
+and over the node's one stream, on this M1:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">no archiver</th><th class="n">a stream each</th><th class="n">the node's stream</th></tr></thead>
+<tbody>
+<tr><td>node: memory</td><td class="n">10.7 MB</td><td class="n">100.5 MB</td><td class="n">12.8 MB</td></tr>
+<tr><td>node: threads</td><td class="n">15</td><td class="n">1 015</td><td class="n">16</td></tr>
+<tr><td>node: descriptors</td><td class="n">27</td><td class="n">4 007</td><td class="n">29</td></tr>
+<tr><td>node: tenants open</td><td class="n">10</td><td class="n">1 000</td><td class="n">10</td></tr>
+<tr><td>node: CPU, of a core</td><td class="n">5.4%</td><td class="n">9.7%</td><td class="n">5.9%</td></tr>
+<tr><td>archiver: memory</td><td class="n">—</td><td class="n">+40.6 MB</td><td class="n">+1.2 MB</td></tr>
+<tr><td>archiver: threads</td><td class="n">—</td><td class="n">+1 000</td><td class="n">+1</td></tr>
+<tr><td>archiver: descriptors</td><td class="n">—</td><td class="n">2 019</td><td class="n">21</td></tr>
+<tr><td>archiver: CPU, of a core</td><td class="n">1.4%</td><td class="n">4.9%</td><td class="n">2.8%</td></tr>
+<tr><td>writes, p50 / p99</td><td class="n">11.7 / 25.2 ms</td><td class="n">12.8 / 30.9 ms</td><td class="n">12.3 / 25.8 ms</td></tr>
+<tr><td>first images of the 1 000</td><td class="n">—</td><td class="n">5.9 s</td><td class="n">12.9 s</td></tr>
+<tr><td>node restarted: memory, tenants open</td><td class="n">—</td><td class="n">94.7 MB, 1 000</td><td class="n">4.2 MB, 0</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The archiver's process runs the bench's writers as well, 1.4% of a core
+alone. A write's time under <code>--sync always</code> is the Mac's
+<code>F_FULLFSYNC</code>; a write waits for the node's stream as for a
+replica, and the stream sends within the fsync's noise. Under <code>--sync
+250</code> the writes took 0.34 ms at the median, the node held 13.9 MB in
+16 threads and spent 3.7% of a core. The node's stream takes a new archive's
+first images one tenant at a time, each tenant opened — an fsync — and its
+image written: 12.9 s for the thousand, once, where a thousand streams at
+once took 5.9 s. After the node restarted, the archiver connecting again,
+the stream said hello to all 1 000 tenants in 45 ms, each read from its file
+rather than opened; a thousand streams opened every tenant again and held
+it.</p>
+</details>
+
 <h2 id="object-storage">In object storage</h2>
 
 <p>To keep an archive in S3, R2 or GCS, run a sync tool beside the archiver;
