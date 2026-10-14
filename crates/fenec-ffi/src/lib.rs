@@ -59,7 +59,7 @@
 
 use fenec_abi::lock::FileLock;
 use fenec_abi::Refused;
-use fenec_core::engine::{CompactPolicy, Compactor};
+use fenec_core::engine::{CompactPolicy, Compactor, Prepared};
 use fenec_core::json;
 use fenec_core::prelude::*;
 use std::ffi::{c_char, CString};
@@ -655,10 +655,40 @@ fn run(
             return Ok(r);
         }
     }
+    // A text writing many documents -- an import, a page of rows from the
+    // app's server -- has them built and encoded under the read lock,
+    // beside the app's reads, as a server's `/batch` has them
+    // (`Database::prepare`): under the write lock every read waited while
+    // they were built. The lists a json field keeps as written are read
+    // first, since the documents are built from them; the write lock reads
+    // them again only where a write landed meanwhile -- one that changed a
+    // schema can change what they need -- and has the documents built again
+    // under it where that read anything anew. Built against a schema that
+    // moved, a `put` builds its own (`Arc::ptr_eq`, as `/batch`'s).
+    // Let go of after the write lock, with the documents the text wrote.
+    let mut ready = Prepared::default();
+    let mut stale = Prepared::default();
+    let mut seen = None;
+    if with_pairs(p, Prepared::worth) {
+        let db = n.read()?;
+        fenec_abi::exact(&db, p, sql, params, vectors)?;
+        ready = with_pairs(p, |pairs| db.prepare(pairs));
+        seen = Some(db.change_seq());
+    }
     let mut db = n.write()?;
-    fenec_abi::exact(&db, p, sql, params, vectors)?;
+    if seen != Some(db.change_seq()) {
+        let mut anew = false;
+        fenec_abi::exact_noting(&db, p, sql, params, vectors, &mut anew)?;
+        if anew {
+            stale = std::mem::take(&mut ready);
+        }
+    }
     let before = db.change_seq();
-    let r = fenec_abi::execute(&mut db, p);
+    // A text of a few documents runs as it always did.
+    let r = match seen {
+        Some(_) => fenec_abi::execute_ready(&mut db, p, &mut ready),
+        None => fenec_abi::execute(&mut db, p),
+    };
     // A text holding a compact runs a statement at a time, so one that fails
     // may follow some that wrote: whatever moved the counter is synced.
     let durability = match n.durable && db.change_seq() != before {
@@ -666,8 +696,19 @@ fn run(
         false => None,
     };
     drop(db);
+    drop((ready, stale));
     n.durable(durability)?;
     Ok(r?)
+}
+
+/// `f` over the text's statements, each with the parameters, as
+/// `Prepared::worth` and `Database::prepare` take them: a text of one
+/// statement, which an app's every call is, with nothing allocated.
+fn with_pairs<R>(p: &fenec_abi::Prepared, f: impl FnOnce(&[(&Statement, &[Value])]) -> R) -> R {
+    match p.stmts.as_slice() {
+        [s] => f(&[(s, &p.params[..])]),
+        all => f(&all.iter().map(|s| (s, &p.params[..])).collect::<Vec<_>>()),
+    }
 }
 
 /// [`fenec_abi::query`] over a pin: `None` where a statement reached for an

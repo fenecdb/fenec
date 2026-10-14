@@ -103,6 +103,23 @@ pub fn exact(
     params_src: &str,
     vectors: &[u8],
 ) -> std::result::Result<(), Refused> {
+    exact_noting(db, p, sql, params_src, vectors, &mut false)
+}
+
+/// [`exact`], noting in `anew` whether it read the text or the parameters
+/// again: documents built from them before are not these
+/// (`execute_ready`). Told in the answer, a `bool` beside the error, the
+/// browser module's `fenec_query` grew 48 bytes for an answer it drops; a
+/// store it never reads goes.
+#[inline(always)]
+pub fn exact_noting(
+    db: &Database,
+    p: &mut Prepared,
+    sql: &str,
+    params_src: &str,
+    vectors: &[u8],
+    anew: &mut bool,
+) -> std::result::Result<(), Refused> {
     let vectored = p.stmts.iter().any(|s| s.reads_vectors())
         || p.params.iter().any(fenec_core::query::holds_vector);
     if !vectored {
@@ -132,6 +149,7 @@ pub fn exact(
     if exact {
         p.params = json::parse_params_exact(params_src).and_then(|p| with_vectors(p, vectors))?;
     }
+    *anew = text || exact;
     Ok(())
 }
 
@@ -147,6 +165,33 @@ pub fn exact(
 /// each ended by a statement that always fails, to find which.
 #[inline(always)]
 pub fn execute(db: &mut Database, p: &Prepared) -> std::result::Result<Response, Refused> {
+    run_text(db, p, |db, s, params, _| db.execute_with(s, params))
+}
+
+/// [`execute`] with the documents of its `put`s as [`Database::prepare`]
+/// built them beside the readers, under the read lock: the native library's
+/// write of many documents, which held the write lock while they were
+/// built. `ready` holds, after, what the text wrote, for the caller to let
+/// go of once the lock is. Native only: the browser module has one thread,
+/// and no reader to let in.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn execute_ready(
+    db: &mut Database,
+    p: &Prepared,
+    ready: &mut fenec_core::engine::Prepared,
+) -> std::result::Result<Response, Refused> {
+    run_text(db, p, |db, s, params, i| {
+        db.execute_ready(s, params, ready, i)
+    })
+}
+
+/// [`execute`]'s run, each statement through `run` with its place.
+#[inline(always)]
+fn run_text(
+    db: &mut Database,
+    p: &Prepared,
+    mut run: impl FnMut(&mut Database, &Statement, &[Value], usize) -> Result<Response>,
+) -> std::result::Result<Response, Refused> {
     let block = p.stmts.len() > 1 && p.stmts.iter().all(|s| s.fits_block());
     if block {
         db.begin()?;
@@ -155,7 +200,7 @@ pub fn execute(db: &mut Database, p: &Prepared) -> std::result::Result<Response,
     let mut last = Response::Ok(String::from("empty"));
     for (ran, s) in p.stmts.iter().enumerate() {
         let at = several.then_some(ran);
-        match db.execute_with(s, &p.params) {
+        match run(db, s, &p.params, ran) {
             Ok(r) => last = r,
             Err(e) if block => {
                 db.rollback();

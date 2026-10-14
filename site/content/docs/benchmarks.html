@@ -1065,7 +1065,13 @@ written — and a block's rows are now built and encoded under the shared
 lock, beside the readers, the write lock held only to land them, about
 0.15 ms; whatever the database decides, the ids, a value already held, the
 indexes, is decided under the lock as before, and the file is the same byte
-for byte. The rest of the longest waits were the disk: on macOS a write that
+for byte. A REST insert of 1 000 rows read its body under the write lock as
+well: a read beside them waited 0.4 ms at the median for rows of a text and
+an int, 3.3 ms with a 128-dim vector each, where the body is now read with
+no lock held and its rows built beside the readers, 0.08 and 0.2 ms. The
+native library builds an app's write of many rows the same way, and a read
+beside writes of 1 000 128-dim rows waits 0.3 ms rather than 0.9. The rest
+of the longest waits were the disk: on macOS a write that
 takes a file's dirty pages past each 8 MB waits for it, 1.5 to 11 ms, and the
 buffer was written under the lock as it filled. It is written once the lock
 is let go now, and the handover — the documents written since the open

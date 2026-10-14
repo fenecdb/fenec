@@ -372,7 +372,39 @@ than they take off. The lock is held 0.14-0.15 ms p50 for the block,
 0.31-0.35, 0.59-0.73 and 4.6-50 built under it with the rest of the change; a writer
 alone lands 1.6% fewer blocks prepared than built under the lock (the read
 lock, the buffers, the documents cold again), and a fifth more than on
-main. Rejected: a pin
+main. A REST insert prepares too (`early_put`): its body is read with no
+lock held, against its collection's schema `Arc` taken under the read
+lock, its documents built under a second where that `Arc` is still the
+collection's, and the write lock takes both where the collection holds
+that very schema (`Early::holds`), routing the body again under it
+otherwise -- a field added, the collection made again, a vector field
+made json are read and built again (fenec-http's
+`a_rest_insert_whose_schema_moved_before_the_lock_is_read_again`, which
+fails with the check taken out). Under the write lock a body of 1 000
+rows was read, checked and built: a reader by id beside such inserts back
+to back waited out holds of 0.40-0.47 ms p50 and 0.62-0.78 at p99 for rows
+of a text and an int, 0.07-0.08 and 0.30-0.34 now, and of 3.25-3.73 and
+4.35-5.49 ms for rows with a 128-dim vector, 0.18-0.21 and 1.26-1.74 now,
+the writer as fast (`make concurrency-bench ARGS=rest`, in turns), and
+`make load-bench`'s REST arrays went in at 212-221k rows a second against
+216-217k, for 5.3 KB of `fenec-server`'s code. A body under `EARLY_AT`
+(1 KB) with fewer `{` than 16 is read under the lock as before: read
+first, a read lock, the schema's count and a look-up more took a row 1.11
+-> 1.14-1.16 us in process. A token whose
+rules read another collection is bound under the write lock, so its
+insert routes there. The native library prepares a text's `put`s as well
+(`fenec_abi::execute_ready`): the lists a json field keeps are read first
+(`exact_noting`, which notes whether it read anything anew -- returned
+beside the error, the `bool` grew the browser module's `fenec_query` 48
+bytes), again under the write lock only where a write landed meanwhile,
+and the preparation is let go of where that read anything anew. An app's
+read by id beside texts of 1 000 128-dim rows waited 0.24-0.40 ms p50
+against 0.81-1.07, read 209-275k times a second against 108-143k (`make
+ffi-bench`'s `beside`), the p99 3.2-7.0 ms either way: the native library
+writes its buffer under the lock as it fills. A lone buffered put is what
+it was (1.96 us p50 against 1.94, the mean 2.25 either way, `ffi_bench put`
+in turns), and the library's code 6.5 KB more. The shell has nothing
+reading beside it and builds under its lock. Rejected: a pin
 taken as each block starts, for the readers to read the database as it
 stood -- it copies the id index, 12 bytes a row, 0.25-0.37 ms over a
 million rows, as long as the block and growing with the collection, and a
