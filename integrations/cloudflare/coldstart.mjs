@@ -7,8 +7,9 @@
 // instantiated, the database restored from its storage, the query run --
 // against the ones after it -- as the writes left the storage, an image and
 // the writes kept after it, and after a checkpoint wrote a new image with
-// the graph. Median of five restarts a size. Needs
-// web/fenec.wasm (make wasm) and `npm ci` here.
+// the graph. Median of five restarts a size. The example's alarm is off
+// (`QUIET` 0), so the first column is the writes as they left the storage.
+// Needs web/fenec.wasm (make wasm) and `npm ci` here.
 
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -33,7 +34,7 @@ async function serve(state) {
   const p = await port();
   const child = spawn(
     join(here, 'node_modules/.bin/wrangler'),
-    ['dev', '--config', 'wrangler.jsonc', '--port', String(p), '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false'],
+    ['dev', '--config', 'wrangler.jsonc', '--port', String(p), '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false', '--var', 'QUIET:0'],
     { cwd: join(here, 'example'), stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } },
   );
   let log = '';

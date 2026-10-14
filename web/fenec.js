@@ -583,9 +583,21 @@ export class Fenec {
    * `restore` fetches it and loads the image again.
    */
   load(bytes) {
-    if (kept.has(this)) throw new FenecError('the database is kept in a file (openFile): a load would leave the file behind');
-    const ptr = this.#wasm.fenec_alloc(bytes.length);
+    const ptr = this.#room(bytes.length);
     new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+    return this.#take(ptr, bytes.length);
+  }
+
+  /** Room in the module for an image of `len`: never 0, which is the module's own data. */
+  #room(len) {
+    if (kept.has(this)) throw new FenecError('the database is kept in a file (openFile): a load would leave the file behind');
+    const ptr = this.#wasm.fenec_alloc(len);
+    if (!ptr) throw new FenecError(`no room for an image of ${len} bytes`);
+    return ptr;
+  }
+
+  /** Loads the image at `ptr`, an allocation of `len` the module takes. */
+  #take(ptr, len) {
     // The module keeps the bytes it is handed and reads the documents out
     // of them, rather than copy each into memory of its own: 10 000 rows of
     // 768 dimensions restored held 97 MB, and hold 66. One from before
@@ -593,9 +605,9 @@ export class Fenec {
     const owned = this.#wasm.fenec_load_owned;
     let r;
     try {
-      r = (owned ?? this.#wasm.fenec_load)(this.#handle, ptr, bytes.length);
+      r = (owned ?? this.#wasm.fenec_load)(this.#handle, ptr, len);
     } finally {
-      if (!owned) this.#wasm.fenec_free(ptr, bytes.length);
+      if (!owned) this.#wasm.fenec_free(ptr, len);
     }
     if (r & 2) {
       const { chunks } = this.#collationState();
@@ -621,6 +633,46 @@ export class Fenec {
         if (!e.collation || !(await this.#fetched(e.collation))) throw e;
       }
     }
+  }
+
+  /**
+   * `loadAsync` over an image in parts, `length` bytes in all: `parts()`
+   * gives them in order (`Uint8Array`s or `ArrayBuffer`s, iterable or async
+   * iterable), each copied where it goes in the module's memory. Joined
+   * first, a Durable Object's image stood in its 128 MB two and three
+   * times over. Called again for collation data: a refused load lets the
+   * bytes go.
+   */
+  async loadParts(length, parts) {
+    for (;;) {
+      try {
+        return await this.#loadParts(length, parts());
+      } catch (e) {
+        if (!e.collation || !(await this.#fetched(e.collation))) throw e;
+      }
+    }
+  }
+
+  async #loadParts(length, parts) {
+    const ptr = this.#room(length);
+    let at = 0;
+    const put = (p) => {
+      const bytes = p instanceof ArrayBuffer ? new Uint8Array(p) : p;
+      if (at + bytes.length > length) throw new FenecError(`the parts hold more than the ${length} bytes said`);
+      // A view each part: an await may let in a write that grows the memory.
+      new Uint8Array(this.#wasm.memory.buffer, ptr + at, bytes.length).set(bytes);
+      at += bytes.length;
+    };
+    try {
+      // A plain iterable with no await: nothing runs between its parts.
+      if (parts[Symbol.asyncIterator]) for await (const p of parts) put(p);
+      else for (const p of parts) put(p);
+      if (at !== length) throw new FenecError(`the parts hold ${at} bytes, not the ${length} said`);
+    } catch (e) {
+      this.#wasm.fenec_free(ptr, length);
+      throw e;
+    }
+    return this.#take(ptr, length);
   }
 
   close() {

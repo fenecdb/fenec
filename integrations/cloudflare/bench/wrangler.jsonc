@@ -1,0 +1,11 @@
+{
+  // The example Worker with its storage counted (worker.js), for rows.mjs.
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "fenecdb-rows",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "durable_objects": {
+    "bindings": [{ "name": "TENANT", "class_name": "Tenant" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Tenant"] }]
+}

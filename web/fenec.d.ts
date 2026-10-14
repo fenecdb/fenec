@@ -1340,6 +1340,16 @@ export declare class Fenec<S extends AnySchema<S> = Schema, Rel extends Relation
   load(bytes: Uint8Array): number;
   /** `load`, fetching the collation data the image needs. */
   loadAsync(bytes: Uint8Array): Promise<number>;
+  /**
+   * `loadAsync` over an image kept in parts, `length` bytes in all: each
+   * part `parts()` hands over is copied where it goes in the module's
+   * memory and let go of, the image never whole outside it. `parts` is
+   * called again when the image needs collation data.
+   */
+  loadParts(
+    length: number,
+    parts: () => Iterable<Uint8Array | ArrayBuffer> | AsyncIterable<Uint8Array | ArrayBuffer>,
+  ): Promise<number>;
   close(): void;
 
   /**
