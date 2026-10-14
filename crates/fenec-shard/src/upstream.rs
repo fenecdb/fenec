@@ -81,6 +81,23 @@ enum Stage {
 
 struct Failure(Stage, io::Error);
 
+/// How a request to one of several routers failed (`Pool::send_tried`):
+/// whether the one asked cannot have run it, so that the next may be
+/// asked, or may have, so that it is not -- run twice, a `put` made a row
+/// twice.
+pub enum Tried {
+    Unrun(io::Error),
+    MayHaveRun(io::Error),
+}
+
+impl Tried {
+    pub fn into_error(self) -> io::Error {
+        match self {
+            Tried::Unrun(e) | Tried::MayHaveRun(e) => e,
+        }
+    }
+}
+
 impl Pool {
     /// `timeout` bounds connecting and every read of an ordinary answer.
     pub fn new(timeout: Duration) -> Pool {
@@ -154,6 +171,28 @@ impl Pool {
         self.send_timed(addr, method, target, headers, body, times, replay)
     }
 
+    /// [`Pool::send_held`], its failure told by whether `addr` may have run
+    /// the request ([`Tried`]): what a relay to a region's routers asks
+    /// before it asks the next.
+    pub fn send_tried(
+        &self,
+        addr: &str,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        held: Duration,
+    ) -> Result<Answer, Tried> {
+        let replay = replayable(method, headers);
+        let times = (self.timeout + held, self.timeout);
+        match self.send_staged(addr, method, target, headers, body, times, replay) {
+            Ok(a) => Ok(a),
+            Err(Failure(Stage::Unsent, e)) => Err(Tried::Unrun(e)),
+            Err(Failure(Stage::Unanswered, e)) if replay => Err(Tried::Unrun(e)),
+            Err(Failure(_, e)) => Err(Tried::MayHaveRun(e)),
+        }
+    }
+
     /// [`Pool::send`] of a read that must be answered by `deadline`: the
     /// connect and the head's reads are bounded by what is left of it
     /// (and by the pool's timeout), and [`Answer::read_body_by`] reads the
@@ -186,6 +225,22 @@ impl Pool {
         times: (Duration, Duration),
         replay: bool,
     ) -> io::Result<Answer> {
+        self.send_staged(addr, method, target, headers, body, times, replay)
+            .map_err(|Failure(_, e)| e)
+    }
+
+    /// [`Self::send_timed`], its failure with how far it got.
+    #[allow(clippy::too_many_arguments)]
+    fn send_staged(
+        &self,
+        addr: &str,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        times: (Duration, Duration),
+        replay: bool,
+    ) -> Result<Answer, Failure> {
         let (read_timeout, connect_within) = times;
         let mut req = String::with_capacity(256);
         for part in [method, " ", target, " HTTP/1.1\r\nHost: ", addr, "\r\n"] {
@@ -239,12 +294,13 @@ impl Pool {
                 Ok(a) => return Ok(a),
                 Err(Failure(Stage::Unsent, _)) => break,
                 Err(Failure(Stage::Unanswered, _)) if replay => break,
-                Err(Failure(_, e)) => return Err(e),
+                Err(f) => return Err(f),
             }
         }
-        let s = self.connect(addr, connect_within)?;
+        let s = self
+            .connect(addr, connect_within)
+            .map_err(|e| Failure(Stage::Unsent, e))?;
         self.exchange(addr, s, None, head, body, read_timeout)
-            .map_err(|Failure(_, e)| e)
     }
 
     /// One request and the head of its answer over `s`, whose read timeout
@@ -346,8 +402,22 @@ impl Pool {
         token: &str,
         body: &[u8],
     ) -> io::Result<(u16, Vec<u8>)> {
+        self.call_with(addr, method, target, token, &[], body)
+    }
+
+    /// [`Pool::call`] with headers of its own besides the token.
+    pub fn call_with(
+        &self,
+        addr: &str,
+        method: &str,
+        target: &str,
+        token: &str,
+        extra: &[(&str, &str)],
+        body: &[u8],
+    ) -> io::Result<(u16, Vec<u8>)> {
         let bearer = format!("Bearer {token}");
-        let headers = [("Authorization", bearer.as_str())];
+        let mut headers = vec![("Authorization", bearer.as_str())];
+        headers.extend_from_slice(extra);
         let a = self.send(addr, method, target, &headers, body)?;
         let status = a.status;
         let body = a.read_body(self, method == "HEAD")?;

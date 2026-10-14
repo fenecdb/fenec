@@ -100,6 +100,24 @@ usage: fenec-shard [options]
                             with --replica-of or this
       --replication-buffer <MiB>  directory writes kept for standbys that fall
                             behind  default: 8
+      --region <name>       keep this region's own directory in --directory:
+                            its nodes and tenants, leased and failed over by
+                            this router with no word from another region, so
+                            a region cut off from the rest goes on taking
+                            writes. Needs --global and --replication-token;
+                            the global router records it with PUT
+                            /_shard/regions/<name> {\"routers\": [..]}. With
+                            --replica-of, a standby of the region's router,
+                            promoted as any standby router is
+      --global <url>        the global router, http://host:port, repeatable or
+                            comma-separated, the one keeping the global
+                            directory first: a region's router follows its
+                            directory from it -- where every other tenant
+                            lives -- and sends it the changes it takes: a
+                            create, a delete, a move across regions
+      --global-directory <path>  the region's router's copy of the global
+                            directory  default: the --directory file with
+                            .global before .fenec
 
 The token is also read from the FENEC_SHARD_TOKEN environment variable.
 ";
@@ -119,6 +137,7 @@ fn main() {
     let mut replica_of: Option<String> = None;
     let mut promote = false;
     let mut replication_buffer = 8 << 20;
+    let mut global_path: Option<String> = None;
     let mut tracing = fenec_http::trace::Options::default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -225,6 +244,25 @@ fn main() {
                 replica_of = Some(url)
             }
             "--promote" => promote = true,
+            "--region" => {
+                let r = next(&mut i, "--region");
+                if fenec_http::tenants::check_name(&r).is_err() {
+                    fail(&format!(
+                        "--region `{r}`: a region is named [a-z0-9_-], 1 to {} characters",
+                        fenec_http::tenants::MAX_NAME
+                    ));
+                }
+                cfg.region = Some(r);
+            }
+            "--global" => {
+                for url in next(&mut i, "--global").split(',').map(str::trim) {
+                    if let Err(e) = fenec_http::replication::Upstream::check_node(url) {
+                        fail(&e);
+                    }
+                    cfg.global.push(url.to_string());
+                }
+            }
+            "--global-directory" => global_path = Some(next(&mut i, "--global-directory")),
             "--replication-buffer" => {
                 let mib = number(next(&mut i, "--replication-buffer"), "--replication-buffer");
                 replication_buffer = (mib as usize) << 20;
@@ -257,6 +295,18 @@ fn main() {
     if replica_of.is_some() && promote {
         fail("--replica-of follows a primary and --promote stops following: pick one");
     }
+    if cfg.region.is_some() && (cfg.global.is_empty() || !replicating) {
+        fail(
+            "--region needs --global, the global router, and --replication-token: a region's \
+             router follows the global directory, where every other tenant lives",
+        );
+    }
+    if cfg.region.is_none() && (!cfg.global.is_empty() || global_path.is_some()) {
+        fail(
+            "--global names the global router to a region's router (--region); a router of the \
+             global directory follows its primary with --replica-of",
+        );
+    }
 
     // The directory goes through the feed a standby reads it from; without
     // a token it is an ordinary file.
@@ -283,10 +333,58 @@ fn main() {
         fail(&e);
     }
     let db = Arc::new(RwLock::new(db));
-    let dir = match Directory::load(Arc::clone(&db)) {
+    let mut dir = match Directory::load(Arc::clone(&db)) {
         Ok(d) => d,
         Err(e) => fail(&format!("could not read the directory {path}: {e}")),
     };
+    if cfg.region.is_none() {
+        if let Err(e) = dir.settle_scope(None) {
+            fail(&format!("{path}: {e}"));
+        }
+    }
+
+    // A region's router's copy of the global directory, followed from the
+    // global router: where every tenant outside the region lives.
+    let global = cfg.region.as_ref().map(|_| {
+        let gpath = global_path
+            .clone()
+            .unwrap_or_else(|| match path.strip_suffix(".fenec") {
+                Some(stem) => format!("{stem}.global.fenec"),
+                None => format!("{path}.global"),
+            });
+        let (mut gdb, gfeed) = match replication::open(&gpath, replication_buffer) {
+            Ok(opened) => opened,
+            Err(e) => fail(&format!(
+                "could not open the global directory's copy {gpath}: {e}"
+            )),
+        };
+        let lineage = gdb.history().lineage.clone();
+        if let Err(e) = gdb.follow(lineage) {
+            fail(&format!("could not settle {gpath}'s history: {e}"));
+        }
+        let gdb = Arc::new(RwLock::new(gdb));
+        let gdir = match Directory::load(Arc::clone(&gdb)) {
+            Ok(d) => d,
+            Err(e) => fail(&format!(
+                "could not read the global directory's copy {gpath}: {e}"
+            )),
+        };
+        let f = Follower::new(
+            &cfg.global[0],
+            replication_token.clone().unwrap_or_default(),
+            gdb,
+            Some(gfeed),
+            true,
+        )
+        .unwrap_or_else(|e| fail(&e));
+        f.start("fenec-global".into()).unwrap_or_else(|e| {
+            fail(&format!(
+                "could not start the global directory's thread: {e}"
+            ))
+        });
+        fenec_http::log!("following the global directory: {}", cfg.global[0]);
+        gdir
+    });
 
     // The follower applies the primary's directory writes; this router's own
     // feed passes them on to standbys of its own.
@@ -304,9 +402,14 @@ fn main() {
         fenec_http::log!("following: {url}");
         f
     });
-    let router = match replication_token.filter(|_| replicating) {
-        Some(token) => Router::replicated(dir, cfg, Replication::new(Some(token), feed, follower)),
-        None => Router::new(dir, cfg),
+    let repl = replication_token
+        .filter(|_| replicating)
+        .map(|token| Replication::new(Some(token), feed, follower));
+    let router = match (global, repl) {
+        (Some(global), repl) => Router::regional(dir, cfg, repl, global)
+            .unwrap_or_else(|e| fail(&format!("{path}: {e}"))),
+        (None, Some(repl)) => Router::replicated(dir, cfg, repl),
+        (None, None) => Router::new(dir, cfg),
     };
     let listener = match router.bind() {
         Ok(l) => l,

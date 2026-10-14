@@ -19,6 +19,17 @@
 //! lapsed would make two primaries. A standby keeps forgetting every lease
 //! for as long as it follows, so the moment is its promotion, not its
 //! start.
+//!
+//! A grant names its holder (`fenec_http::lease::Holder`): the directory
+//! the router leases from -- the global one, or a region's own -- and its
+//! term, how many times that directory's history forked. A promotion forks
+//! it, so the router promoted grants at a term the one before cannot reach,
+//! and every node that hears from the new one refuses the old one from
+//! then on ([`Answer::Superseded`]): a router promoted while the one before
+//! still runs -- cut off, or paused -- cannot leave the two leasing a node
+//! they both reach. A node only the old one reaches is beyond that, which
+//! is why a router is promoted once the one before it is gone, as before
+//! terms.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -70,6 +81,14 @@ pub enum Answer {
     NeedsList,
     /// It takes no lease (`fenec-server` without `--lease`).
     Refuses,
+    /// A lease from a newer term, or from another directory, holds it: this
+    /// router was superseded there, and fails it over never -- the router
+    /// holding it does.
+    Superseded,
+    /// It took the grant without its term: a node from before terms, which
+    /// a router superseded could go on leasing. A region's router fails it
+    /// over never, rather than count on a fence it does not have.
+    Unfenced,
     /// No answer, or an error.
     Silent,
 }
@@ -166,12 +185,22 @@ impl Leases {
                 h.epoch = None;
                 false
             }
-            Answer::Refuses => {
+            Answer::Refuses | Answer::Superseded | Answer::Unfenced => {
                 if !h.refuses {
-                    fenec_http::log!(
-                        "node `{node}` takes no lease: it is not failed over on its own \
-                         (start it with --lease)"
-                    );
+                    match answer {
+                        Answer::Superseded => fenec_http::log!(
+                            "node `{node}` is leased by a newer term or another directory: this \
+                             router was superseded there, and fails it over never"
+                        ),
+                        Answer::Unfenced => fenec_http::log!(
+                            "node `{node}` took its lease without the term: a node from before \
+                             terms is not failed over on its own by a region's router (upgrade it)"
+                        ),
+                        _ => fenec_http::log!(
+                            "node `{node}` takes no lease: it is not failed over on its own \
+                             (start it with --lease)"
+                        ),
+                    }
                 }
                 h.refuses = true;
                 false

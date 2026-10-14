@@ -67,7 +67,7 @@ make small         # smallest `fenec` binary: --profile cli --no-default-feature
 make server TOKEN=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
-make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part; ARGS=standby a standby router's request against the primary's)
+make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part; ARGS=standby a standby router's request against the primary's; ARGS=regions a region's own failover cut off from the global router, leases of 1 and 5 s)
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
 make policy-bench        # a scoped set under a plain rule, a field list, a transition, answering its row and a rule reading another collection, and a read by id, against the server's token, in process and over HTTP (ARGS=streams|beats: writes beside scoped streams)
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
@@ -747,9 +747,10 @@ ARGS=standby`, the two asked in turns, five runs: 23.0-23.8 and 23.1-23.9);
 a move now deletes its source once every standby keeping up has been sent
 the flip (`standbys_sent`, `SENT_WAIT` at most), where one in another region
 forwarded the tenant's next request to a node that held it no more, 404.
-Leases still come from the primary router alone: a region cut off from it
-stops writing as its leases lapse and cannot be failed over until it is
-reached again. Against main in ABBA turns the router's added p50 stayed
+With one directory leases come from the primary router alone: a region cut
+off from it stops writing as its leases lapse and cannot be failed over
+until it is reached again -- a region keeping its own directory (below) is
+leased by its own router. Against main in ABBA turns the router's added p50 stayed
 23.65 us (23.3-23.9, 16 runs) against 23.50 (23.0-24.0), and the failovers
 as they were, medians of eight runs a side, ABBA and BAAB: a pair's 20
 tenants 79 ms against 75.5 (58-111 and 63-81), one node's 10 over their
@@ -757,6 +758,83 @@ replicas 49 against 50.5, the repair after it 172 against 173.5, a lease's
 tenants writing again 1.29-1.32 s after the cut against 1.26-1.30; a round
 on a machine whose load rose to 12 was left out. The gauges by node carry
 `region` where the node names one.
+
+**A region may keep its own directory, and leases and fails over inside
+itself** (`fenec-shard/src/region.rs`, `--region`, `--global`, `PUT
+/_shard/regions/<r>`; `site/content/docs/sharding.html#region-directories`).
+With one directory every lease came from the primary router, so every
+region's writes hung on the primary's region. A region's router (`--region us --global
+<url>`) keeps the region's nodes and tenants in a directory of its own -- the
+same collections, its region in `scope` (`settle_scope`: a router opened
+over another's, or over the global one, refuses it) -- and alone leases
+them: a lease, a failover, a repair, a move between its nodes, a quota and a
+node added write that directory alone and go on through a partition. The
+global directory keeps every tenant's name, a home for each of such a
+region's (`@<region>` as its node, a name no node can have, kept apart in
+`Directory::homes` so nothing reading placements meets it) and the regions'
+routers (`regions`, the one keeping the directory first). A create takes the
+name there and asks the region's router to make it -- given back where it
+refuses or is not reached, kept where it says the tenant exists, which takes
+in a create whose answer was lost -- a delete asks first and gives the name
+back after, and a move across regions (`move_across`) freezes and exports
+in one directory, installs and records in the other, releases in the first
+-- whose directory then places the tenant nowhere, so no lease names it,
+and a source restarted takes no write before a grant from there -- and only
+then flips the home, one statement; each step undone where the next fails,
+so a region not reached refuses it 503 with `Retry-After` and nothing
+changed. A router relays a change it does not keep once (`regional_admin`),
+a region's to the global router, the global router's to the region's under
+`Fenec-Global`, which is carried out and never relayed on; a deployment
+whose regions keep none returns before reading a body (`route_global`), as
+before. Forwarding relays to the region's routers rather than keep a copy of
+every region's directory in every router -- rejected: a follower a region in
+each router, re-pointed as authorities move, and a copy that lags a failover
+by the partition's length, sending writes to the node failed over away from
+-- so the routers holding the placement answer, and after a partition every
+router reaches the new one with its first request, for a hop inside the
+tenant's region a client of that region never takes; a relayed request is
+never relayed again (503). The relaying router names its client in
+`Fenec-Router` under an HMAC of the shared `--token` (`relay_mark`, believed
+through `audit::request`, `Fenec-Verified` passed back), and moves to the
+next router of a region only where the one asked cannot have run the
+request (`Pool::send_tried`'s `Tried::Unrun`), passing over one answering
+that it follows another. A lease names its holder (`fenec_http::lease::Holder`:
+the directory's region, its term -- its history's forks, one more at each
+promotion -- and its history): a node takes a grant from the directory it
+holds at a term no lower and none from another while that lease runs,
+refuses a superseded router's (409 `held_by`, which a router from before
+reads as a node taking no lease and so fails over never) and its promotions
+and follows (`Fenec-Lease-Holder`, `Lease::admits`). So a router promoted
+over one still running fences it at every node it reaches; a node only the
+old one reaches is beyond that, and a router is promoted once the one before
+is gone, as before. A region's router fails over no node that took a grant
+without echoing its term (`Answer::Unfenced`, a node from before terms); the
+global directory leases one as before, and its nodes, once they hold a term,
+refuse a router from before terms put back in front of them until they
+restart, which forgets it. A router from before regional directories reads
+a home as a node it does not know: 404 for the tenant, every change of it
+refused, none of the region's nodes leased. A query across tenants asks the
+router's own directory's and names each of another's as failed.
+`tests/region_leases.rs` cuts a region off from the global router through
+proxies and holds it writing past every lease granted before the cut, its
+node fenced before the region's router promotes the replica, the move and
+the create across refused and nothing changed, then every router -- the
+global one, its standby, the region's -- writing on the new placement once
+healed, and a promoted region's router fencing the one before at the node,
+grant and promotion alike. Cut off
+from the global router, a region's node cut off from its router stopped
+writing 0.67-0.93 s after the cut and its 10 tenants wrote again on their
+replicas 1.30-1.56 s after at a lease of 1 s, ten runs (one at a load of 7,
+2.0-2.1), as the global router's own failover beside it (1.25-1.45), and
+3.9-4.5 and 5.9-6.5 s at 5 s (`make shard-bench ARGS=regions`); a relayed
+request paid 32-42 us p50 over one to the region's router, a router's 24 and
+the loopback proxy standing for the link. Against main in ABBA turns the
+router's added p50 stayed 23.6 us (15.5-24.0, twelve runs at a load of 2-3)
+against 23.75 (16.3-24.3), and the failovers as they were, medians of four
+a side: a pair's 20 tenants 64 ms against 67, one node's 10 over their
+replicas 43.5 against 45.5, the repair after it 157.5 against 196, a lease's
+tenants writing again 1.36 s after the cut against 1.37. Nothing below
+`fenec-http`'s lease and admin changed.
 
 **A scoped token is held to its rules at every level, twice for writes**
 (`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement

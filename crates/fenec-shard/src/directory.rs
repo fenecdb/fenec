@@ -14,13 +14,30 @@
 //! node's region: kept on the node alone, so a move or a failover changes a
 //! tenant's region with its node, and there is no second record to drift
 //! from it.
+//!
+//! **A region may keep its own directory** (`fenec-shard --region`). Its
+//! router holds the region's nodes and tenants in a file of its own, the
+//! same collections, and leases and fails them over with no word from any
+//! other region. The global directory then holds a home for each of its
+//! tenants -- a row of `tenants` whose node is `@<region>`, a name no node
+//! can have -- and the region's routers (`regions`). So the global
+//! directory still holds every tenant's name, which a create anywhere is
+//! checked against, and a router from before regional directories reading
+//! it refuses whatever it is asked of such a tenant -- no node `@us` -- and
+//! leases none of the region's nodes, which it does not know, rather than
+//! route by a placement it cannot see. A regional directory names its
+//! region in `scope`, so a router opened over the wrong file refuses it.
 
 use fenec_core::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-const SCHEMA: [&str; 5] = [
+/// What a tenant's node is in the global directory when the tenant lives
+/// in a region keeping its own: `@` and the region.
+pub const HOME: char = '@';
+
+const SCHEMA: [&str; 7] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
@@ -37,6 +54,13 @@ const SCHEMA: [&str; 5] = [
     // is placed on -- its primary, its standby, its replica, the node it
     // moves or fails over to -- is sent it from one place.
     "create collection if not exists quotas (tenant text @hash, quota text)",
+    // The regions keeping their own directory, and their routers' URLs,
+    // comma-separated, the one keeping the directory first: the global
+    // directory's alone.
+    "create collection if not exists regions (name text @hash, routers text)",
+    // The region a regional directory holds: one row, none in the global
+    // directory.
+    "create collection if not exists scope (region text)",
 ];
 
 /// The fields `nodes` took after directories were first written, added to
@@ -110,10 +134,18 @@ pub struct Directory {
     adopted: u64,
     nodes: BTreeMap<String, Node>,
     tenants: HashMap<String, Placement>,
+    /// The tenants living in a region that keeps its own directory, and
+    /// the region: the `@<region>` rows of `tenants`, kept apart so that
+    /// nothing reading placements meets a node no directory has.
+    homes: HashMap<String, String>,
     pairs: Pairs,
     replicas: Replicas,
     /// Each tenant's quota, where one is set: the JSON a node is sent.
     quotas: HashMap<String, String>,
+    /// The regions keeping their own directory, and their routers.
+    regions: BTreeMap<String, Vec<String>>,
+    /// The region this directory holds, where it is a region's own.
+    scope: Option<String>,
     /// Whether the maps exist: a standby's arrive with the primary's first
     /// writes, and until then it knows of no tenant rather than that there
     /// is none.
@@ -126,7 +158,7 @@ pub struct Directory {
 }
 
 /// Document id -> key, one map a collection: nodes, tenants, pairs,
-/// replicas.
+/// replicas, quotas, regions, scope.
 #[derive(Default)]
 struct Ids {
     nodes: HashMap<DocId, String>,
@@ -134,6 +166,8 @@ struct Ids {
     pairs: HashMap<DocId, String>,
     replicas: HashMap<DocId, String>,
     quotas: HashMap<DocId, String>,
+    regions: HashMap<DocId, String>,
+    scope: HashMap<DocId, String>,
     kept: bool,
 }
 
@@ -173,9 +207,12 @@ impl Directory {
             adopted: 0,
             nodes: BTreeMap::new(),
             tenants: HashMap::new(),
+            homes: HashMap::new(),
             pairs: Pairs::new(),
             replicas: Replicas::new(),
             quotas: HashMap::new(),
+            regions: BTreeMap::new(),
+            scope: None,
             arrived: false,
             ids: Ids::default(),
         };
@@ -223,10 +260,10 @@ impl Directory {
             ids.nodes.insert(id, text(&row[0]));
             nodes.insert(text(&row[0]), node_of(&row));
         }
-        let mut tenants = HashMap::new();
+        let (mut tenants, mut homes) = (HashMap::new(), HashMap::new());
         for (id, row) in rows(&g, "get tenants select name, node, state")? {
             ids.tenants.insert(id, text(&row[0]));
-            tenants.insert(text(&row[0]), placement_of(&row));
+            put_tenant(&mut tenants, &mut homes, text(&row[0]), &row);
         }
         let mut pairs = Pairs::new();
         for (id, row) in rows(&g, "get pairs select node, standby")? {
@@ -243,13 +280,26 @@ impl Directory {
             ids.quotas.insert(id, text(&row[0]));
             quotas.insert(text(&row[0]), text(&row[1]));
         }
+        let mut regions = BTreeMap::new();
+        for (id, row) in rows(&g, "get regions select name, routers")? {
+            ids.regions.insert(id, text(&row[0]));
+            regions.insert(text(&row[0]), routers_of(&row[1]));
+        }
+        let mut scope = None;
+        for (id, row) in rows(&g, "get scope select region")? {
+            ids.scope.insert(id, text(&row[0]));
+            scope = Some(text(&row[0]));
+        }
         self.seq = g.change_seq();
         self.adopted = g.adoptions();
         self.nodes = nodes;
         self.tenants = tenants;
+        self.homes = homes;
         self.pairs = pairs;
         self.replicas = replicas;
         self.quotas = quotas;
+        self.regions = regions;
+        self.scope = scope;
         self.ids = ids;
         self.arrived = g.collection("tenants").is_ok();
         Ok(())
@@ -277,13 +327,33 @@ impl Directory {
                 Err(e) => Err(e),
             }
         };
-        let (Some(nodes), Some(tenants), Some(pairs), Some(replicas), Some(quotas)) = (
+        // Collections a directory from before them lacks -- a standby's,
+        // following a primary from before them -- have no changes; one
+        // that is there and cannot say has the maps read again.
+        let optional = |coll: &str, fields: &[&str]| -> Result<Option<Option<ChangeBatch>>> {
+            if g.collection(coll).is_err() {
+                return Ok(Some(None));
+            }
+            Ok(changes(coll, fields)?.map(Some))
+        };
+        let (
+            Some(nodes),
+            Some(tenants),
+            Some(pairs),
+            Some(replicas),
+            Some(quotas),
+            Some(regions),
+            Some(scope),
+        ) = (
             changes("nodes", &node_fields(&g))?,
             changes("tenants", &["name", "node", "state"])?,
             changes("pairs", &["node", "standby"])?,
             changes("replicas", &["tenant", "node"])?,
             changes("quotas", &["tenant", "quota"])?,
-        ) else {
+            optional("regions", &["name", "routers"])?,
+            optional("scope", &["region"])?,
+        )
+        else {
             return Ok(false);
         };
         let ids = &mut self.ids;
@@ -292,9 +362,24 @@ impl Directory {
             None => drop(self.nodes.remove(k)),
         });
         apply(&mut ids.tenants, tenants, |k, v| match v {
-            Some(v) => drop(self.tenants.insert(k.into(), placement_of(v))),
-            None => drop(self.tenants.remove(k)),
+            Some(v) => put_tenant(&mut self.tenants, &mut self.homes, k.into(), v),
+            None => {
+                self.tenants.remove(k);
+                self.homes.remove(k);
+            }
         });
+        if let Some(regions) = regions {
+            apply(&mut ids.regions, regions, |k, v| match v {
+                Some(v) => drop(self.regions.insert(k.into(), routers_of(&v[1]))),
+                None => drop(self.regions.remove(k)),
+            });
+        }
+        if let Some(scope) = scope {
+            apply(&mut ids.scope, scope, |k, v| match v {
+                Some(_) => self.scope = Some(k.into()),
+                None => self.scope = None,
+            });
+        }
         apply(&mut ids.pairs, pairs, |k, v| match v {
             Some(v) => drop(self.pairs.insert(k.into(), text(&v[1]))),
             None => drop(self.pairs.remove(k)),
@@ -453,9 +538,103 @@ impl Directory {
         self.nodes.get(name).map_or("", |n| n.region.as_str())
     }
 
-    /// The region a tenant lives in: its node's.
+    /// The region a tenant lives in: its node's, or the region keeping its
+    /// own directory it is at home in.
     pub fn tenant_region(&self, tenant: &str) -> Option<&str> {
-        self.tenants.get(tenant).map(|p| self.region_of(&p.node))
+        match self.tenants.get(tenant) {
+            Some(p) => Some(self.region_of(&p.node)),
+            None => self.home(tenant),
+        }
+    }
+
+    /// The region a tenant lives in where that region keeps its own
+    /// directory: the global directory's home for it.
+    pub fn home(&self, tenant: &str) -> Option<&str> {
+        self.homes.get(tenant).map(String::as_str)
+    }
+
+    /// Whether the directory holds `tenant` at all: placed, or at home in a
+    /// region keeping its own directory.
+    pub fn exists(&self, tenant: &str) -> bool {
+        self.tenants.contains_key(tenant) || self.homes.contains_key(tenant)
+    }
+
+    /// `(tenant, region)` for each tenant at home in a region keeping its
+    /// own directory, sorted by name.
+    pub fn homes(&self) -> Vec<(String, String)> {
+        let mut out: Vec<_> = self
+            .homes
+            .iter()
+            .map(|(t, r)| (t.clone(), r.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The regions keeping their own directory, and their routers' URLs.
+    pub fn regions(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.regions
+    }
+
+    /// The routers of `region`, where it keeps its own directory: the one
+    /// keeping it first.
+    pub fn routers(&self, region: &str) -> Option<&[String]> {
+        self.regions.get(region).map(Vec::as_slice)
+    }
+
+    /// Records (or clears) a region keeping its own directory.
+    pub fn set_region(&mut self, region: &str, routers: Option<&[String]>) -> Result<()> {
+        match routers {
+            None => {
+                self.run("del regions where name = $1", &[Value::Text(region.into())])?;
+                self.regions.remove(region);
+            }
+            Some(urls) => {
+                let params = [Value::Text(region.into()), Value::Text(urls.join(","))];
+                if self.regions.contains_key(region) {
+                    self.run("set regions {routers: $2} where name = $1", &params)?;
+                } else {
+                    self.run("put regions {name: $1, routers: $2}", &params)?;
+                }
+                self.regions.insert(region.into(), urls.to_vec());
+            }
+        }
+        Ok(())
+    }
+
+    /// The region this directory holds, where it is a region's own.
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
+    }
+
+    /// Checks that this directory is the one a router keeping `region`'s --
+    /// or, `None`, the global one -- opens, and marks a new one as
+    /// `region`'s. A directory that follows another is not checked here:
+    /// its rows arrive later, the scope among them.
+    pub fn settle_scope(&mut self, region: Option<&str>) -> std::result::Result<(), String> {
+        if self.following() {
+            return Ok(());
+        }
+        match (region, self.scope.clone()) {
+            (None, None) => Ok(()),
+            (Some(r), Some(s)) if r == s => Ok(()),
+            (None, Some(s)) => Err(format!(
+                "this directory is region `{s}`'s own: start the router with --region {s}"
+            )),
+            (Some(r), Some(s)) => Err(format!("this directory is region `{s}`'s own, not `{r}`'s")),
+            (Some(r), None)
+                if self.nodes.is_empty() && self.tenants.is_empty() && self.homes.is_empty() =>
+            {
+                self.run("put scope {region: $1}", &[Value::Text(r.into())])
+                    .map_err(|e| e.to_string())?;
+                self.scope = Some(r.into());
+                Ok(())
+            }
+            (Some(r), None) => Err(format!(
+                "this directory holds nodes or tenants and names no region: it is a global \
+                 directory, which --region {r} does not open; give the region a file of its own"
+            )),
+        }
     }
 
     /// Whether the nodes `a` and `b` are known to be in one zone: both
@@ -607,31 +786,34 @@ impl Directory {
         Ok(())
     }
 
-    /// Records where a tenant lives, and in what state.
+    /// Records where a tenant lives, and in what state: on a node, or with
+    /// `node` [`HOME`] and a region, at home in a region keeping its own
+    /// directory. One statement either way, so a tenant leaving for such a
+    /// region, or coming back, is never in neither.
     pub fn place(&mut self, tenant: &str, node: &str, state: State) -> Result<()> {
         let params = [
             Value::Text(tenant.into()),
             Value::Text(node.into()),
             Value::Text(state.as_str().into()),
         ];
-        if self.tenants.contains_key(tenant) {
+        if self.exists(tenant) {
             self.run("set tenants {node: $2, state: $3} where name = $1", &params)?;
         } else {
             self.run("put tenants {name: $1, node: $2, state: $3}", &params)?;
         }
-        self.tenants.insert(
-            tenant.into(),
-            Placement {
-                node: node.into(),
-                state,
-            },
-        );
+        put_tenant(&mut self.tenants, &mut self.homes, tenant.into(), &params);
         Ok(())
+    }
+
+    /// Records `tenant` at home in `region`, which keeps its own directory.
+    pub fn place_home(&mut self, tenant: &str, region: &str) -> Result<()> {
+        self.place(tenant, &format!("{HOME}{region}"), State::Active)
     }
 
     pub fn remove_tenant(&mut self, tenant: &str) -> Result<()> {
         self.run("del tenants where name = $1", &[Value::Text(tenant.into())])?;
         self.tenants.remove(tenant);
+        self.homes.remove(tenant);
         self.set_quota(tenant, None)?;
         self.set_replica(tenant, None)
     }
@@ -713,6 +895,38 @@ fn placement_of(row: &[Value]) -> Placement {
         node: text(&row[1]),
         state: State::parse(&text(&row[2])),
     }
+}
+
+/// A row of `tenants` (`name, node, state`) into the map it belongs in: a
+/// placement, or a home in a region keeping its own directory -- and out
+/// of the other, where it was there before.
+fn put_tenant(
+    tenants: &mut HashMap<String, Placement>,
+    homes: &mut HashMap<String, String>,
+    name: String,
+    row: &[Value],
+) {
+    let p = placement_of(row);
+    match p.node.strip_prefix(HOME) {
+        Some(region) => {
+            tenants.remove(&name);
+            homes.insert(name, region.to_string());
+        }
+        None => {
+            homes.remove(&name);
+            tenants.insert(name, p);
+        }
+    }
+}
+
+/// A region's routers as `regions` keeps them, comma-separated.
+fn routers_of(v: &Value) -> Vec<String> {
+    text(v)
+        .split(',')
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn rows(db: &Database, sql: &str) -> Result<Vec<(DocId, Vec<Value>)>> {
@@ -812,14 +1026,21 @@ mod tests {
         g.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
     }
 
-    /// The four maps, in an order that does not depend on hashing.
+    /// The maps, in an order that does not depend on hashing.
     fn maps(d: &Directory) -> String {
         let mut pairs: Vec<String> = d.pairs.iter().map(|(k, v)| format!("{k}>{v}")).collect();
         pairs.sort();
         let mut replicas: Vec<String> =
             d.replicas.iter().map(|(k, v)| format!("{k}@{v}")).collect();
         replicas.sort();
-        format!("{:?} {:?} {pairs:?} {replicas:?}", d.nodes(), d.tenants())
+        format!(
+            "{:?} {:?} {pairs:?} {replicas:?} {:?} {:?} {:?}",
+            d.nodes(),
+            d.tenants(),
+            d.homes(),
+            d.regions(),
+            d.scope()
+        )
     }
 
     /// Catching up from the change ring leaves the maps a read of them
@@ -853,6 +1074,17 @@ mod tests {
             r#"set nodes {region: "eu", zone: "eu-a"} where name = "n1""#,
             r#"put nodes {name: "n4", addr: "a4", token: "t", region: "us"}"#,
             r#"set nodes {zone: null} where name = "n1""#,
+            // A tenant leaving for a region keeping its own directory, one
+            // made there, and one coming back.
+            r#"put regions {name: "us", routers: "http://a:1,http://b:2"}"#,
+            r#"set tenants {node: "@us"} where name = "acme""#,
+            r#"put tenants {name: "zeta", node: "@us", state: "active"}"#,
+            r#"set regions {routers: "http://b:2"} where name = "us""#,
+            r#"set tenants {node: "n1"} where name = "zeta""#,
+            r#"del tenants where name = "acme""#,
+            r#"put scope {region: "us"}"#,
+            r#"del scope where region = "us""#,
+            r#"del regions where name = "us""#,
         ] {
             underneath(&d, sql);
             assert!(d.stale());
@@ -963,6 +1195,37 @@ mod tests {
         }
         d.set_node("e5", node("e5")).unwrap();
         assert!(!d.holds("e5"));
+    }
+
+    /// A region's own directory names its region, and opens for that
+    /// region's router alone; the global directory, holding nodes and
+    /// naming none, for no region's router.
+    #[test]
+    fn a_directory_opens_for_the_router_of_what_it_holds() {
+        let mut fresh = Directory::in_memory();
+        fresh.settle_scope(Some("us")).unwrap();
+        assert_eq!(fresh.scope(), Some("us"));
+        fresh.settle_scope(Some("us")).unwrap();
+        let other = fresh.settle_scope(Some("eu")).unwrap_err();
+        assert!(other.contains("region `us`'s own"), "{other}");
+        let global = fresh.settle_scope(None).unwrap_err();
+        assert!(global.contains("--region us"), "{global}");
+
+        let mut global = Directory::in_memory();
+        global.settle_scope(None).unwrap();
+        global.set_node("n1", node("a")).unwrap();
+        let refused = global.settle_scope(Some("us")).unwrap_err();
+        assert!(refused.contains("global directory"), "{refused}");
+        assert_eq!(global.scope(), None);
+
+        // A home is a tenant of the directory, and no placement.
+        global.place_home("acme", "us").unwrap();
+        assert!(global.exists("acme") && global.placement("acme").is_none());
+        assert_eq!(global.tenant_region("acme"), Some("us"));
+        assert!(global.primaries()["n1"].is_empty());
+        global.place("acme", "n1", State::Active).unwrap();
+        assert_eq!(global.home("acme"), None);
+        assert_eq!(global.primaries()["n1"], ["acme"]);
     }
 
     #[test]
