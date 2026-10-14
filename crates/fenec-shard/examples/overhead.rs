@@ -226,9 +226,10 @@ fn latencies(c: &mut Client, target: &str) -> Vec<f64> {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // A word first runs one part: `latency` the forwarded request alone,
-    // `fanout` the query across tenants alone.
+    // `fanout` the query across tenants alone, `standby` a request through
+    // a standby router against the primary.
     let only = match args.first().map(String::as_str) {
-        Some(w @ ("latency" | "fanout")) => Some(w.to_string()),
+        Some(w @ ("latency" | "fanout" | "standby")) => Some(w.to_string()),
         _ => None,
     };
     if only.is_some() {
@@ -236,6 +237,10 @@ fn main() {
     }
     if only.as_deref() == Some("fanout") {
         fanout();
+        return;
+    }
+    if only.as_deref() == Some("standby") {
+        standby();
         return;
     }
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(20_000);
@@ -844,6 +849,142 @@ fn spread() {
     for (_, dir) in &nodes {
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// A router whose directory is replicated, at `path`: the primary, or with
+/// `follows` a standby following the primary at that address.
+fn replicated_router(path: &std::path::Path, follows: Option<&str>) -> String {
+    use fenec_http::replication::{fresh_id, Follower, Replication};
+    const TOKEN: &str = "directory";
+    let (mut db, feed) = fenec_http::replication::open(path.to_str().unwrap(), 8 << 20).unwrap();
+    match follows {
+        Some(_) => {
+            let lineage = db.history().lineage.clone();
+            db.follow(lineage).unwrap();
+        }
+        None => {
+            db.fork(fresh_id()).unwrap();
+            db.sync().unwrap();
+        }
+    }
+    let db = Arc::new(std::sync::RwLock::new(db));
+    let dir = Directory::load(Arc::clone(&db)).unwrap();
+    let follower = follows.map(|addr| {
+        let f = Follower::new(
+            &format!("http://{addr}"),
+            TOKEN.into(),
+            Arc::clone(&db),
+            Some(Arc::clone(&feed)),
+            true,
+        )
+        .unwrap();
+        f.start("fenec-standby".into()).unwrap();
+        f
+    });
+    let router = Router::replicated(
+        dir,
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(600),
+            ..Config::default()
+        },
+        Replication::new(Some(TOKEN.into()), Some(feed), follower),
+    );
+    let listener = router.bind().unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    addr
+}
+
+/// What a standby router costs a request against the primary: one per
+/// region forwards from the directory it follows, so a request through it
+/// should cost what one through the primary does. The same request straight
+/// to the node, through the primary and through the standby, in turns on
+/// three keep-alive connections, so a drift of the machine's lands on all
+/// three alike.
+fn standby() {
+    let (node_addr, node_dir) = node("sb");
+    let files = std::env::temp_dir().join(format!("fenec-overhead-sb-dirs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&files);
+    std::fs::create_dir_all(&files).unwrap();
+    let primary = replicated_router(&files.join("primary.fenec"), None);
+    let mut p = Client::new(&primary);
+    let body = format!(r#"{{"addr":"{node_addr}","token":"adm","region":"eu","zone":"eu-a"}}"#);
+    assert_eq!(
+        p.send("PUT", "/_shard/nodes/n1", None, body.as_bytes()).0,
+        201
+    );
+    let schema = r#"{"region":"eu","schema":"create collection docs (title text)"}"#;
+    assert_eq!(
+        p.send("PUT", "/_shard/tenants/acme", None, schema.as_bytes())
+            .0,
+        201
+    );
+    let put = r#"{"query":"put docs {title: \"probe\"}"}"#;
+    assert_eq!(p.send("POST", "/t/acme/query", None, put.as_bytes()).0, 200);
+    let standby = replicated_router(&files.join("standby.fenec"), Some(&primary));
+    let mut s = Client::new(&standby);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while s
+        .send("GET", "/_shard/tenants", None, b"")
+        .1
+        .windows(4)
+        .all(|w| w != b"acme")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the standby's directory never arrived"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let target = "/t/acme/docs?limit=1&select=title";
+    let mut d = Client::new(&node_addr);
+    let mut clients = [&mut d, &mut p, &mut s];
+    for c in clients.iter_mut() {
+        for _ in 0..500 {
+            let (status, _) = c.send("GET", target, None, b"");
+            assert_eq!(status, 200);
+        }
+    }
+    let mut times: [Vec<f64>; 3] = Default::default();
+    for round in 0..ROUNDS {
+        // The routers swap places every other round: asked always last, the
+        // standby came out half a microsecond slower than the primary.
+        let order = if round % 2 == 0 { [0, 1, 2] } else { [0, 2, 1] };
+        for i in order {
+            let at = Instant::now();
+            let (status, _) = clients[i].send("GET", target, None, b"");
+            times[i].push(at.elapsed().as_secs_f64() * 1e6);
+            assert_eq!(status, 200);
+        }
+    }
+    println!(
+        "a standby router's forwarding, {ROUNDS} x GET {target} in turns over three \
+         keep-alive connections"
+    );
+    println!("              p50       p95       p99");
+    for t in times.iter_mut() {
+        t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    }
+    for (label, v) in ["direct", "primary", "standby"].iter().zip(&times) {
+        println!(
+            "  {label:<8} {:>6.1} us {:>6.1} us {:>6.1} us",
+            pct(v, 0.5),
+            pct(v, 0.95),
+            pct(v, 0.99)
+        );
+    }
+    for (label, v) in [("primary", &times[1]), ("standby", &times[2])] {
+        println!(
+            "  added by the {label}: {:.1} us p50, {:.1} us p99",
+            pct(v, 0.5) - pct(&times[0], 0.5),
+            pct(v, 0.99) - pct(&times[0], 0.99)
+        );
+    }
+    let _ = std::fs::remove_dir_all(node_dir);
+    let _ = std::fs::remove_dir_all(files);
 }
 
 /// A deterministic pseudo-random vector as FenecQL list text.

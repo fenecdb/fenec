@@ -493,6 +493,7 @@ fn an_unreachable_node_is_a_502_not_a_hang() {
         fenec_shard::directory::Node {
             addr,
             token: "x".into(),
+            ..Default::default()
         },
     )
     .unwrap();

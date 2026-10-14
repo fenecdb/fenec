@@ -58,10 +58,15 @@ usage: fenec-shard [options]
       --fanout-concurrency <n>  calls to the nodes it has out at once, the
                             tenants taken node by node in turn  default: 16
       --replicas            give each tenant created on a node in no pair a
-                            replica on another node -- the one holding the
+                            replica on another node of its region -- one in
+                            another zone first, then the one holding the
                             fewest -- so a node's tenants fail over across
                             the others rather than onto one idle standby.
                             The nodes need --replication-token, the same one
+      --default-region <name>  the region a tenant created naming neither a
+                            region nor a node is placed in. Without it, such
+                            a tenant goes to the node with the fewest bytes
+                            whatever its region, and lives in that node's
       --auto-failover <s>   lease each node the tenants it holds for this long,
                             renewed every third of it, and fail a node over on
                             its own once it has gone a tenth past it unrenewed.
@@ -149,6 +154,16 @@ fn main() {
                 fenec_http::audit::set_delay(number(next(&mut i, "--auth-delay"), "--auth-delay"))
             }
             "--replicas" => cfg.replicas = true,
+            "--default-region" => {
+                let r = next(&mut i, "--default-region");
+                if fenec_http::tenants::check_name(&r).is_err() {
+                    fail(&format!(
+                        "--default-region `{r}`: a region is named [a-z0-9_-], 1 to {} characters",
+                        fenec_http::tenants::MAX_NAME
+                    ));
+                }
+                cfg.default_region = Some(r);
+            }
             "--otlp-endpoint" => tracing.endpoint = Some(next(&mut i, "--otlp-endpoint")),
             "--otlp-header" => {
                 let kv = next(&mut i, "--otlp-header");

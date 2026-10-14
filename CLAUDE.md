@@ -67,7 +67,7 @@ make small         # smallest `fenec` binary: --profile cli --no-default-feature
 make server TOKEN=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
-make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part)
+make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part; ARGS=standby a standby router's request against the primary's)
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
 make policy-bench        # a scoped set under a plain rule, a field list, a transition, answering its row and a rule reading another collection, and a read by id, against the server's token, in process and over HTTP (ARGS=streams|beats: writes beside scoped streams)
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
@@ -712,6 +712,51 @@ tenant on its own replica, `POST /_shard/replicas` gives replicas back -- on
 a node holding a copy first, so a returning node's old primaries follow --
 and a move re-points the replica or, onto its node, places another. Three
 nodes, 10 tenants each: one node's failover took 57 ms, 5 onto each other.
+
+**A node is in a region and a zone, and a tenant in its node's region**
+(`directory::Node`, `Router::replica_node`, `relocate`;
+`site/content/docs/sharding.html#regions`). A global service runs nodes in
+several regions, each in two datacenters or more, and a tenant has one home:
+`PUT /_shard/nodes/<n> {region, zone}` records them -- fields of `nodes`,
+added by an `alter` to a directory from before them, whose nodes read the
+unnamed region, one region like any other, so a directory naming none places
+and fails over as it did; a router from before them reads `name, addr,
+token`, ignores the rest and places without regard to regions -- and a
+tenant's region is its node's, kept nowhere else, so a move or a failover
+changes it with the node and no second record drifts. `PUT
+/_shard/tenants/<t> {region}` places on the fewest bytes there, 409 where
+no node is and nothing created (`--default-region` where a create names
+neither region nor node, otherwise any node as before); a node's region is
+fixed while it holds a tenant, a replica or a place in a pair (`holds`).
+A replica (`--replicas`) goes to a node of its primary's region only, one of
+another zone ranked first -- before a node holding a copy and before the
+fewest replicas, since a datacenter lost takes a replica in its primary's
+zone with it -- a zone not named between; one placed in its primary's zone
+where nothing else was free is logged, answered `"same_zone": true` and
+counted (`fenec_router_same_zone_copies{region}`), and a pair's standby must
+share its node's region. So a failover, by hand or on a lease, promotes
+within the region by construction: nothing placed a copy anywhere else. A
+move leaves the region only where the request names the region it goes to
+(`{to, region}`, or `{region}` for the fewest bytes there), and the replica
+is placed again where it no longer fits (`replica_node(to, [r]) != r`):
+kept, a failover would carry the tenant back. The global entry is one router
+a region: a standby router already forwarded from its replicated maps and
+refused `/_shard/` changes with 409 (not 503: asked again it refuses again),
+and added 23.7 us p50 to a request as the primary did (`make shard-bench
+ARGS=standby`, the two asked in turns, five runs: 23.0-23.8 and 23.1-23.9);
+a move now deletes its source once every standby keeping up has been sent
+the flip (`standbys_sent`, `SENT_WAIT` at most), where one in another region
+forwarded the tenant's next request to a node that held it no more, 404.
+Leases still come from the primary router alone: a region cut off from it
+stops writing as its leases lapse and cannot be failed over until it is
+reached again. Against main in ABBA turns the router's added p50 stayed
+23.65 us (23.3-23.9, 16 runs) against 23.50 (23.0-24.0), and the failovers
+as they were, medians of eight runs a side, ABBA and BAAB: a pair's 20
+tenants 79 ms against 75.5 (58-111 and 63-81), one node's 10 over their
+replicas 49 against 50.5, the repair after it 172 against 173.5, a lease's
+tenants writing again 1.29-1.32 s after the cut against 1.26-1.30; a round
+on a machine whose load rose to 12 was left out. The gauges by node carry
+`region` where the node names one.
 
 **A scoped token is held to its rules at every level, twice for writes**
 (`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement

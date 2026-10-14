@@ -83,6 +83,11 @@ pub struct Config {
     /// long it may take and how many calls it has out at once
     /// (`--fanout-*`).
     pub fanout: fanout::Limits,
+    /// The region a tenant created without a `region` or a `node` is placed
+    /// in (`--default-region`). `None`: on the node with the fewest bytes
+    /// whatever its region, as before regions, and the tenant is in that
+    /// node's region.
+    pub default_region: Option<String>,
 }
 
 impl Default for Config {
@@ -100,6 +105,7 @@ impl Default for Config {
             studio: None,
             cors: None,
             fanout: fanout::Limits::default(),
+            default_region: None,
         }
     }
 }
@@ -772,21 +778,28 @@ impl Router {
     // ------------------------------------------------------------------ admin
 
     /// ```text
-    /// GET    /_shard/nodes                     [{name, addr}]
-    /// PUT    /_shard/nodes/<n>   {addr, token} add or change a node
+    /// GET    /_shard/nodes                     [{name, addr, region, zone}]
+    /// PUT    /_shard/nodes/<n>   {addr, token, region, zone}  add or change
+    ///                                       a node; its region is fixed while
+    ///                                       it holds a tenant or a copy
     /// DELETE /_shard/nodes/<n>                 refused while it holds tenants
-    /// GET    /_shard/tenants                   [{name, node, state}]; with
-    ///                                       ?bytes, each one's bytes on its node
-    /// PUT    /_shard/tenants/<t> [{node, schema, quota}]  place and create;
-    ///                                       least disk wins; `schema`, FenecQL
-    ///                                       text, applied there and `quota` set
+    /// GET    /_shard/tenants                   [{name, node, state, region}];
+    ///                                       with ?bytes, each one's bytes on
+    ///                                       its node; ?region=<r>, that region's
+    /// GET    /_shard/tenants/<t>               {name, node, state, region, ..}
+    /// PUT    /_shard/tenants/<t> [{region, node, schema, quota}]  place and
+    ///                                       create; least disk in the region
+    ///                                       wins; `schema`, FenecQL text,
+    ///                                       applied there and `quota` set
     ///                                       there before the tenant is answered
     /// PUT    /_shard/tenants/<t>/quota {bytes, rows, ...}  the tenant's quota
     ///                                       over its node's, kept here and sent
     ///                                       to every node holding a copy
     /// GET    /_shard/tenants/<t>/quota         the node's report: set, quota, usage
     /// DELETE /_shard/tenants/<t>               delete on the node, then forget
-    /// POST   /_shard/tenants/<t>/move {to}     move to another node
+    /// POST   /_shard/tenants/<t>/move {to, region}  move to another node: in
+    ///                                       its region, or across to the one
+    ///                                       the body names
     /// PUT    /_shard/nodes/<n> {addr, token, standby}  standby: the node
     ///                                       whose --replica-of follows this
     ///                                       one, where its tenants are copied
@@ -827,6 +840,7 @@ impl Router {
             (req.method, &segs[1..]),
             (Method::Get, ["nodes"])
                 | (Method::Get, ["tenants"])
+                | (Method::Get, ["tenants", _])
                 | (Method::Get, ["tenants", _, "quota"])
         );
         if writes && self.read_dir().following() {
@@ -843,17 +857,30 @@ impl Router {
             (Method::Post, ["nodes", n, "failover"]) => self.failover(n),
             (Method::Post, ["replicas"]) => Ok(self.repair()),
             (Method::Get, ["tenants"]) => Ok(self.list_tenants(req)),
+            (Method::Get, ["tenants", t]) => self.show_tenant(t),
             (Method::Put, ["tenants", t]) => match quota_member(&body) {
-                Ok(quota) => self.create(t, field(&body, "node"), field(&body, "schema"), quota),
+                Ok(quota) => place_field(&body, "region").and_then(|region| {
+                    let at = At {
+                        node: field(&body, "node"),
+                        region,
+                    };
+                    self.create(t, at, field(&body, "schema"), quota)
+                }),
                 Err(e) => Err(Fail(400, e)),
             },
             (Method::Put, ["tenants", t, "quota"]) => self.set_quota(t, &req.body),
             (Method::Get, ["tenants", t, "quota"]) => self.quota_report(t),
             (Method::Delete, ["tenants", t]) => self.delete(t),
-            (Method::Post, ["tenants", t, "move"]) => match field(&body, "to") {
-                Some(to) => self.relocate(t, to),
-                None => Err(Fail(400, "the body needs {\"to\": \"<node>\"}".into())),
-            },
+            (Method::Post, ["tenants", t, "move"]) => {
+                place_field(&body, "region").and_then(|region| match field(&body, "to") {
+                    None if region.is_none() => Err(Fail(
+                        400,
+                        "the body needs {\"to\": \"<node>\"}, {\"region\": \"<region>\"} or both"
+                            .into(),
+                    )),
+                    to => self.relocate(t, At { node: to, region }),
+                })
+            }
             _ => Err(Fail(404, "no such endpoint under /_shard/".into())),
         };
         result.unwrap_or_else(|Fail(status, msg)| Response::error(status, &msg))
@@ -897,7 +924,7 @@ impl Router {
                 "Tenants placed on each node.",
             );
             for (node, n) in &by_node {
-                out.sample("fenec_router_tenants", &[("node", node)], n);
+                node_sample(&mut out, "fenec_router_tenants", &dir, node, n);
             }
             out.family(
                 "fenec_router_replicas",
@@ -905,7 +932,18 @@ impl Router {
                 "Tenants' replicas of their own each node holds.",
             );
             for (node, n) in dir.replicas_by_node() {
-                out.sample("fenec_router_replicas", &[("node", node)], n);
+                node_sample(&mut out, "fenec_router_replicas", &dir, node, n);
+            }
+            out.family(
+                "fenec_router_same_zone_copies",
+                "gauge",
+                "Tenants whose replica or standby copy is in their primary's zone, by region: a datacenter lost takes both. Placed there only where the region had no node free in another zone.",
+            );
+            for (region, n) in dir.same_zone_copies() {
+                match region {
+                    "" => out.sample("fenec_router_same_zone_copies", &[], n),
+                    r => out.sample("fenec_router_same_zone_copies", &[("region", r)], n),
+                }
             }
             out.family(
                 "fenec_router_tenants_moving",
@@ -920,7 +958,7 @@ impl Router {
                     "Seconds since each node last took its lease: past the lease and a tenth, it is failed over.",
                 );
                 for (node, age, _) in leases.ages() {
-                    out.sample("fenec_router_lease_age_seconds", &[("node", &node)], age);
+                    node_sample(&mut out, "fenec_router_lease_age_seconds", &dir, &node, age);
                 }
                 out.family(
                     "fenec_router_node_failed_over",
@@ -928,9 +966,11 @@ impl Router {
                     "1 for a node failed over on its own and not answering again since.",
                 );
                 for (node, _, lost) in leases.ages() {
-                    out.sample(
+                    node_sample(
+                        &mut out,
                         "fenec_router_node_failed_over",
-                        &[("node", &node)],
+                        &dir,
+                        &node,
                         lost as u8,
                     );
                 }
@@ -962,17 +1002,60 @@ impl Router {
         let items: Vec<String> = dir
             .nodes()
             .iter()
-            .map(|(name, n)| match dir.standby(name) {
-                None => format!("{{\"name\":{},\"addr\":{}}}", quote(name), quote(&n.addr)),
-                Some(s) => format!(
-                    "{{\"name\":{},\"addr\":{},\"standby\":{}}}",
-                    quote(name),
-                    quote(&n.addr),
-                    quote(s)
-                ),
+            .map(|(name, n)| {
+                let mut item = format!("{{\"name\":{},\"addr\":{}", quote(name), quote(&n.addr));
+                for (key, value) in [
+                    ("region", n.region.as_str()),
+                    ("zone", n.zone.as_str()),
+                    ("standby", dir.standby(name).unwrap_or("")),
+                ] {
+                    if !value.is_empty() {
+                        item.push_str(&format!(",\"{key}\":{}", quote(value)));
+                    }
+                }
+                item.push('}');
+                item
             })
             .collect();
         Response::json(200, format!("[{}]", items.join(",")))
+    }
+
+    /// `GET /_shard/tenants/<t>`: where the tenant lives -- its node, state
+    /// and region, and the node holding its copy, a replica of its own or
+    /// its node's standby.
+    fn show_tenant(&self, tenant: &str) -> Outcome<Response> {
+        let dir = self.read_dir();
+        let p = dir
+            .placement(tenant)
+            .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
+        let mut item = format!(
+            "{{\"name\":{},\"node\":{},\"state\":\"{}\"",
+            quote(tenant),
+            quote(&p.node),
+            if p.state == State::Moving {
+                "moving"
+            } else {
+                "active"
+            }
+        );
+        let zone = dir.node(&p.node).map_or("", |n| n.zone.as_str());
+        for (key, value) in [
+            ("region", dir.region_of(&p.node)),
+            ("zone", zone),
+            ("replica", dir.replica(tenant).unwrap_or("")),
+            ("standby", dir.standby(&p.node).unwrap_or("")),
+        ] {
+            if !value.is_empty() {
+                item.push_str(&format!(",\"{key}\":{}", quote(value)));
+            }
+        }
+        if let Some(c) = dir.copy_of(tenant) {
+            if dir.same_zone(&p.node, c) {
+                item.push_str(",\"same_zone\":true");
+            }
+        }
+        item.push('}');
+        Ok(Response::json(200, item))
     }
 
     /// The directory's tenants; with `?bytes`, each with the bytes it holds
@@ -982,17 +1065,26 @@ impl Router {
     fn list_tenants(&self, req: &Request) -> Response {
         let sized = req.query.iter().any(|(k, _)| k == "bytes");
         let quotas = req.query.iter().any(|(k, _)| k == "quota");
+        // `?region=<r>`: that region's tenants alone; `?region=` the unnamed
+        // region's.
+        let region = req
+            .query
+            .iter()
+            .find(|(k, _)| k == "region")
+            .map(|(_, v)| v.as_str());
         let (tenants, nodes) = {
             let dir = self.read_dir();
-            let tenants: Vec<(String, String, bool, Option<String>)> = dir
+            let tenants: Vec<(String, String, bool, Option<String>, String)> = dir
                 .tenants()
                 .iter()
+                .filter(|(_, p)| region.is_none_or(|r| dir.region_of(&p.node) == r))
                 .map(|(name, p)| {
                     (
                         name.clone(),
                         p.node.clone(),
                         p.state == State::Moving,
                         dir.replica(name).map(str::to_string),
+                        dir.region_of(&p.node).to_string(),
                     )
                 })
                 .collect();
@@ -1054,7 +1146,11 @@ impl Router {
         }
         let items: Vec<String> = tenants
             .iter()
-            .map(|(name, node, moving, replica)| {
+            .map(|(name, node, moving, replica, region)| {
+                let region = match region.as_str() {
+                    "" => String::new(),
+                    r => format!(",\"region\":{}", quote(r)),
+                };
                 let replica = match replica {
                     Some(r) => format!(",\"replica\":{}", quote(r)),
                     None => String::new(),
@@ -1070,7 +1166,7 @@ impl Router {
                     .map(|(_, _, q)| q.as_str())
                     .unwrap_or_default();
                 format!(
-                    "{{\"name\":{},\"node\":{},\"state\":\"{}\"{replica}{bytes}{quota}}}",
+                    "{{\"name\":{},\"node\":{},\"state\":\"{}\"{region}{replica}{bytes}{quota}}}",
                     quote(name),
                     quote(node),
                     if *moving { "moving" } else { "active" }
@@ -1088,9 +1184,11 @@ impl Router {
                 "the body needs {\"addr\": .., \"token\": ..}".into(),
             ));
         };
-        let node = Node {
+        let (region, zone) = (place_field(body, "region")?, place_field(body, "zone")?);
+        let mut node = Node {
             addr: addr.into(),
             token: token.into(),
+            ..Node::default()
         };
         let standby = field(body, "standby").map(str::to_string);
         if let Some(s) = &standby {
@@ -1114,9 +1212,55 @@ impl Router {
             ));
         }
         let mut dir = self.write_dir();
+        // A region or a zone left out is the one recorded: a node given a
+        // new token keeps where it is.
+        let was = dir.node(name).cloned();
+        node.region = region.map_or_else(
+            || was.as_ref().map(|w| w.region.clone()).unwrap_or_default(),
+            str::to_string,
+        );
+        node.zone = zone.map_or_else(
+            || was.as_ref().map(|w| w.zone.clone()).unwrap_or_default(),
+            str::to_string,
+        );
+        if let Some(w) = was.as_ref().filter(|w| w.region != node.region) {
+            if dir.holds(name) {
+                return Err(Fail(
+                    409,
+                    format!(
+                        "node `{name}` holds tenants or their copies in {}: its region \
+                         changes once they are moved off it and it is in no pair",
+                        region_name(&w.region)
+                    ),
+                ));
+            }
+        }
+        if let Some(s) = &standby {
+            // A failover promotes a node's tenants on its standby: in
+            // another region, it would carry them out of theirs.
+            let theirs = dir.region_of(s);
+            if theirs != node.region {
+                return Err(Fail(
+                    409,
+                    format!(
+                        "`{s}` is in {}, `{name}` in {}: a standby is kept in its node's \
+                         region",
+                        region_name(theirs),
+                        region_name(&node.region)
+                    ),
+                ));
+            }
+        }
         dir.set_node(name, node).map_err(internal)?;
         if let Some(s) = &standby {
             dir.set_standby(name, Some(s)).map_err(internal)?;
+            if dir.same_zone(name, s) {
+                fenec_http::log!(
+                    "node `{name}`'s standby `{s}` is in its zone `{}`: a datacenter lost \
+                     takes both",
+                    dir.node(name).map_or("", |n| n.zone.as_str())
+                );
+            }
         }
         let placed: Vec<String> = dir
             .tenants()
@@ -1193,26 +1337,46 @@ impl Router {
     /// node put all its tenants there. Among `holding`, the nodes with a
     /// copy of the tenant already, first: its old primary after a failover
     /// follows from where it is, and nothing is left behind there.
+    ///
+    /// Only a node of `primary`'s region: a failover promotes the replica,
+    /// and one in another region would carry the tenant out of its own. And
+    /// a node of another zone before all of that, where the region has one
+    /// free: a datacenter lost would take a replica in the primary's zone
+    /// with it, which is worth more than a copy already there or an even
+    /// spread. A zone not named is ranked between, neither known to be
+    /// another nor the same.
     fn replica_node(&self, primary: &str, holding: &[String]) -> Option<String> {
         let dir = self.read_dir();
         let (tenants, _) = dir.load_by_node();
         let replicas = dir.replicas_by_node();
         let from = dir.replicas_from(primary);
+        let region = dir.region_of(primary);
+        let zone = dir.node(primary).map_or("", |n| n.zone.as_str());
         let held = |n: &str| tenants.get(n).unwrap_or(&0) + replicas.get(n).unwrap_or(&0);
-        let free =
-            |n: &&String| n.as_str() != primary && dir.standby(n).is_none() && !dir.is_standby(n);
-        let least = |it: &mut dyn Iterator<Item = &String>| {
-            it.min_by_key(|n| (*from.get(n.as_str()).unwrap_or(&0), held(n), n.to_string()))
-                .cloned()
+        let free = |n: &&String| {
+            n.as_str() != primary
+                && dir.region_of(n) == region
+                && dir.standby(n).is_none()
+                && !dir.is_standby(n)
         };
-        least(
-            &mut dir
-                .nodes()
-                .keys()
-                .filter(free)
-                .filter(|n| holding.contains(n)),
-        )
-        .or_else(|| least(&mut dir.nodes().keys().filter(free)))
+        let apart = |n: &str| match (zone, dir.node(n).map_or("", |n| n.zone.as_str())) {
+            ("", _) | (_, "") => 1,
+            (a, b) if a != b => 0,
+            _ => 2,
+        };
+        dir.nodes()
+            .keys()
+            .filter(free)
+            .min_by_key(|n| {
+                (
+                    apart(n),
+                    !holding.contains(n),
+                    *from.get(n.as_str()).unwrap_or(&0),
+                    held(n),
+                    n.to_string(),
+                )
+            })
+            .cloned()
     }
 
     /// Gives `tenant`, on `primary`, a replica on `on`: the tenant created
@@ -1250,9 +1414,20 @@ impl Router {
         if let Some(w) = self.send_quota(tenant, on) {
             return Err(w);
         }
-        self.write_dir()
-            .set_replica(tenant, Some(on))
-            .map_err(|e| message(&e))
+        let mut dir = self.write_dir();
+        dir.set_replica(tenant, Some(on)).map_err(|e| message(&e))?;
+        // Placed in its primary's zone only where the region had no node
+        // free in another (`replica_node`): said here, and counted by
+        // `fenec_router_same_zone_copies` for as long as it stays.
+        if dir.same_zone(primary, on) {
+            fenec_http::log!(
+                "tenant `{tenant}`'s replica on `{on}` is in its primary's zone `{}`: {} has \
+                 no node free in another, and a datacenter lost takes both",
+                dir.node(on).map_or("", |n| n.zone.as_str()),
+                region_name(dir.region_of(on))
+            );
+        }
+        Ok(())
     }
 
     /// Takes a tenant's replica off its node and out of the directory. A
@@ -1294,10 +1469,24 @@ impl Router {
         if !self.cfg.replicas || self.read_dir().standby(primary).is_some() {
             return None;
         }
-        Some(match self.replica_node(primary, &[]) {
-            None => Err("there is no other node to keep it".into()),
+        Some(self.place_replica(tenant, primary, &[]))
+    }
+
+    /// Gives `tenant` a replica on the node [`Self::replica_node`] picks:
+    /// the node it went on, or why none did.
+    fn place_replica(
+        &self,
+        tenant: &str,
+        primary: &str,
+        holding: &[String],
+    ) -> std::result::Result<String, String> {
+        match self.replica_node(primary, holding) {
+            None => Err(match self.read_dir().region_of(primary) {
+                "" => "there is no other node to keep it".into(),
+                r => format!("there is no other node in {} to keep it", region_name(r)),
+            }),
             Some(on) => self.attach(tenant, primary, &on).map(|_| on),
-        })
+        }
     }
 
     /// `POST /_shard/replicas`: every tenant in no pair, not moving, without
@@ -1346,11 +1535,7 @@ impl Router {
                 .filter(|(_, names)| names.contains(&tenant))
                 .map(|(node, _)| node.clone())
                 .collect();
-            let placed = match self.replica_node(&primary, &copies) {
-                None => Err("there is no other node to keep it".to_string()),
-                Some(on) => self.attach(&tenant, &primary, &on).map(|_| on),
-            };
-            match placed {
+            match self.place_replica(&tenant, &primary, &copies) {
                 Ok(on) => done.push(format!(
                     "{{\"tenant\":{},\"replica\":{}}}",
                     quote(&tenant),
@@ -1677,6 +1862,16 @@ impl Router {
         Ok(Response::empty(204))
     }
 
+    /// Waits until every standby router keeping up has been sent the
+    /// directory as it stands, a second at most ([`replication::SENT_WAIT`]):
+    /// nothing where none follows. Sent, not applied -- the bytes are on
+    /// their way, which the standby applies as they land.
+    fn standbys_sent(&self) {
+        if let Some(feed) = self.repl.as_ref().and_then(|r| r.feed()) {
+            feed.wait_sent(feed.seq(), replication::SENT_WAIT);
+        }
+    }
+
     /// Marks a tenant busy for the length of an operation.
     fn claim(&self, tenant: &str) -> Outcome<Claim<'_>> {
         let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
@@ -1692,26 +1887,47 @@ impl Router {
         })
     }
 
-    /// The node with the fewest bytes on disk among those that answer.
-    /// Disk rather than memory: memory counts only the open tenants, and
-    /// which ones are open is a matter of who asked last.
-    fn least_loaded(&self) -> Outcome<String> {
+    /// The node with the fewest bytes on disk among those that answer, in
+    /// `region` where one is asked for, `besides` left out (a move's
+    /// source). Disk rather than memory: memory counts only the open
+    /// tenants, and which ones are open is a matter of who asked last.
+    fn least_loaded(&self, region: Option<&str>, besides: Option<&str>) -> Outcome<String> {
         // A standby holds its primary's tenants as replicas: one created
         // there would follow a tenant its primary does not have, and refuse
         // every write. With no disk of its own yet it looked the least
         // loaded, and took every tenant nobody placed.
         let nodes: Vec<(String, Node)> = {
             let dir = self.read_dir();
-            dir.nodes()
+            let mut there = dir
+                .nodes()
                 .iter()
-                .filter(|(k, _)| !dir.is_standby(k))
+                .filter(|(_, n)| region.is_none_or(|r| n.region == r))
+                .peekable();
+            if let (Some(r), None) = (region, there.peek()) {
+                return Err(Fail(
+                    409,
+                    format!(
+                        "no node in {}: add one with PUT /_shard/nodes/<name> \
+                         {{\"addr\": .., \"token\": .., \"region\": \"{r}\"}}",
+                        region_name(r)
+                    ),
+                ));
+            }
+            there
+                .filter(|(k, _)| !dir.is_standby(k) && Some(k.as_str()) != besides)
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         };
         if nodes.is_empty() {
             return Err(Fail(
                 409,
-                "no nodes: add one with PUT /_shard/nodes/<name>".into(),
+                match region {
+                    None => "no nodes: add one with PUT /_shard/nodes/<name>".into(),
+                    Some(r) => format!(
+                        "no other node in {} takes tenants: a standby takes none",
+                        region_name(r)
+                    ),
+                },
             ));
         }
         let mut best: Option<(u64, String)> = None;
@@ -1746,10 +1962,13 @@ impl Router {
             .ok_or_else(|| Fail(404, format!("no node `{name}`")))
     }
 
+    /// Places and creates a tenant: on the node `at` names, or on the one
+    /// with the fewest bytes in the region it names -- `--default-region`
+    /// where it names neither, and any region without one.
     fn create(
         &self,
         tenant: &str,
-        node: Option<&str>,
+        at: At<'_>,
         schema: Option<&str>,
         quota: Option<fenec_http::quota::Set>,
     ) -> Outcome<Response> {
@@ -1764,11 +1983,25 @@ impl Router {
         if self.read_dir().placement(tenant).is_some() {
             return Err(Fail(409, format!("tenant `{tenant}` already exists")));
         }
-        let name = match node {
+        let region = match at.node {
+            None => at.region.or(self.cfg.default_region.as_deref()),
+            Some(_) => at.region,
+        };
+        let name = match at.node {
             Some(n) => n.to_string(),
-            None => self.least_loaded()?,
+            None => self.least_loaded(region, None)?,
         };
         let n = self.node(&name)?;
+        if let Some(r) = region.filter(|r| *r != n.region) {
+            return Err(Fail(
+                409,
+                format!(
+                    "node `{name}` is in {}, not {}",
+                    region_name(&n.region),
+                    region_name(r)
+                ),
+            ));
+        }
         let target = format!("/_admin/tenants/{tenant}");
         expect(
             self.pool.call(&n.addr, "PUT", &target, &n.token, b""),
@@ -1866,9 +2099,10 @@ impl Router {
         Ok(Response::json(
             201,
             format!(
-                "{{\"tenant\":{},\"node\":{}{}{}{}}}",
+                "{{\"tenant\":{},\"node\":{}{}{}{}{}}}",
                 quote(tenant),
                 quote(&name),
+                region_field(&n.region),
                 match &applied {
                     None => String::new(),
                     Some(o) => format!(",\"schema\":{o}"),
@@ -1938,7 +2172,12 @@ impl Router {
     /// still points there until the flip -- and writes get 503 with
     /// `Retry-After` from the frozen source. Nothing is refused by the
     /// router itself, so there is no window where the tenant is nowhere.
-    fn relocate(&self, tenant: &str, to: &str) -> Outcome<Response> {
+    ///
+    /// The target is the node `at` names, or the one with the fewest bytes
+    /// in the region it names. A tenant leaves its region only when the
+    /// request names the region it goes to: its residency is a promise, and
+    /// a node's name alone does not say it breaks one.
+    fn relocate(&self, tenant: &str, at: At<'_>) -> Outcome<Response> {
         let _claim = self.claim(tenant)?;
         let started = Instant::now();
         let from = self
@@ -1946,6 +2185,41 @@ impl Router {
             .placement(tenant)
             .map(|p| p.node.clone())
             .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
+        let to = match at.node {
+            Some(n) => n.to_string(),
+            None => self.least_loaded(at.region, Some(&from))?,
+        };
+        let to = to.as_str();
+        {
+            let dir = self.read_dir();
+            let (here, there) = (dir.region_of(&from), dir.region_of(to));
+            match at.region {
+                _ if dir.node(to).is_none() => {}
+                Some(r) if r != there => {
+                    return Err(Fail(
+                        409,
+                        format!(
+                            "`{to}` is in {}, not {}",
+                            region_name(there),
+                            region_name(r)
+                        ),
+                    ))
+                }
+                None if here != there => {
+                    return Err(Fail(
+                        409,
+                        format!(
+                            "`{to}` is in {}, `{tenant}` in {}: a move across regions names \
+                             the region it goes to, {{\"to\": \"{to}\", \"region\": \
+                             \"{there}\"}}",
+                            region_name(there),
+                            region_name(here)
+                        ),
+                    ))
+                }
+                _ => {}
+            }
+        }
         if from == to {
             return Err(Fail(409, format!("tenant `{tenant}` is already on `{to}`")));
         }
@@ -2046,8 +2320,23 @@ impl Router {
 
         // Its replica follows it there: the image carried the history, so
         // the copy goes on from where it stood. One that will not is taken
-        // off, and the tenant given another.
+        // off, and the tenant given another -- and so is one that no longer
+        // fits: in the region the tenant left, or in its new node's zone
+        // where the region has a node free in another. Kept there, a
+        // failover would promote the tenant back out of its region, or a
+        // datacenter lost would take both copies.
+        let fits = |r: &String| self.replica_node(to, std::slice::from_ref(r)).as_ref() == Some(r);
         let own = match replica {
+            Some(r) if !fits(&r) => {
+                fenec_http::log!(
+                    "tenant `{tenant}`'s replica on `{r}` does not fit its node `{to}`: \
+                     placed again"
+                );
+                if let Some(w) = self.detach(tenant) {
+                    fenec_http::log!("tenant `{tenant}`'s copy on `{r}` stayed: {w}");
+                }
+                self.replicate(tenant, to)
+            }
             Some(r) => match self.attach(tenant, to, &r) {
                 Ok(()) => Some(Ok(r)),
                 Err(w) => {
@@ -2060,7 +2349,12 @@ impl Router {
         };
 
         // From here the tenant is on `to`. The source copy ends its streams
-        // as it goes, and the clients reconnect through the router.
+        // as it goes, and the clients reconnect through the router -- a
+        // standby router too, which routes from the flip once it has it: the
+        // copy goes once every standby keeping up has been sent it, or one
+        // in another region forwarded to a node that held the tenant no
+        // more, and its client was told 404.
+        self.standbys_sent();
         let cleanup = self.pool.call(&src.addr, "DELETE", &base, &src.token, b"");
         let left = !matches!(cleanup, Ok((204, _)) | Ok((404, _)));
         metrics::moved(true, started.elapsed());
@@ -2073,10 +2367,11 @@ impl Router {
         Ok(Response::json(
             200,
             format!(
-                "{{\"tenant\":{},\"from\":{},\"to\":{},\"bytes\":{},\"ms\":{},\"source_removed\":{}{}}}",
+                "{{\"tenant\":{},\"from\":{},\"to\":{}{},\"bytes\":{},\"ms\":{},\"source_removed\":{}{}}}",
                 quote(tenant),
                 quote(&from),
                 quote(to),
+                region_field(&dst.region),
                 image.len(),
                 started.elapsed().as_millis(),
                 !left,
@@ -2187,6 +2482,68 @@ fn quota_member(
             fenec_http::quota::Set::from_members(members.clone()).map(Some)
         }
         Some(_) => Err("`quota` is an object: {\"bytes\": .., \"rows\": .., ...}".into()),
+    }
+}
+
+/// Where a create or a move asks a tenant to go: a node, a region, or both.
+#[derive(Clone, Copy, Default)]
+struct At<'a> {
+    node: Option<&'a str>,
+    region: Option<&'a str>,
+}
+
+/// A region's or a zone's name in a body, where it has one: a tenant's
+/// name's rule, so it goes into a message, a label and a log as it is.
+/// `""` is the unnamed region (or zone), which the nodes of a directory
+/// that names none are in.
+fn place_field<'a>(body: &'a [(String, Value)], key: &str) -> Outcome<Option<&'a str>> {
+    match body.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Text(s)) if s.is_empty() => Ok(Some("")),
+        Some(Value::Text(s)) => match fenec_http::tenants::check_name(s) {
+            Ok(()) => Ok(Some(s)),
+            Err(_) => Err(Fail(
+                400,
+                format!(
+                    "invalid {key} `{s}`: [a-z0-9_-], 1 to {} characters",
+                    fenec_http::tenants::MAX_NAME
+                ),
+            )),
+        },
+        Some(_) => Err(Fail(400, format!("`{key}` is a name, a text"))),
+    }
+}
+
+/// A region as a message names it.
+fn region_name(region: &str) -> String {
+    match region {
+        "" => "the unnamed region".into(),
+        r => format!("region `{r}`"),
+    }
+}
+
+/// A tenant's region as an answer carries it: left out where unnamed, as
+/// it was before regions.
+fn region_field(region: &str) -> String {
+    match region {
+        "" => String::new(),
+        r => format!(",\"region\":{}", quote(r)),
+    }
+}
+
+/// A per-node sample, the node's region beside its name where it names
+/// one: an empty label is a label absent to Prometheus, so a directory
+/// that names no region scrapes as it did.
+fn node_sample(
+    out: &mut fenec_http::metrics::Text,
+    name: &str,
+    dir: &Directory,
+    node: &str,
+    value: impl std::fmt::Display,
+) {
+    match dir.region_of(node) {
+        "" => out.sample(name, &[("node", node)], value),
+        r => out.sample(name, &[("node", node), ("region", r)], value),
     }
 }
 

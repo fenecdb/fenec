@@ -183,7 +183,12 @@ fn setup(tag: &str, idle_timeout: Option<Duration>, reset: bool) -> Setup {
     let relay = Relay::start(&node, reset);
     let mut d = Directory::in_memory();
     let (addr, token) = (relay.addr.clone(), "adm".to_string());
-    d.set_node("n1", Node { addr, token }).unwrap();
+    let placed = Node {
+        addr,
+        token,
+        ..Node::default()
+    };
+    d.set_node("n1", placed).unwrap();
     d.place("acme", "n1", State::Active).unwrap();
     let router = Router::new(
         d,

@@ -230,6 +230,99 @@ fn a_standby_forwards_from_the_primarys_directory_and_takes_over_when_promoted()
     drop(files);
 }
 
+/// One router a region: the primary in eu, a standby in us following its
+/// directory. The standby forwards a tenant's reads and writes to its node
+/// wherever it is -- in its own region or across -- answers the directory's
+/// reads, regions and all, and refuses its changes, which are the
+/// primary's; a tenant the primary moves across regions it forwards to
+/// where it went.
+#[test]
+fn a_standby_router_in_another_region_forwards_every_tenant_and_changes_none() {
+    let eu = node("eu");
+    let us = node("us");
+    let files = Files(dir_file("regions", "x").parent().unwrap().to_path_buf());
+    let primary = router(&dir_file("regions", "primary.fenec"), None);
+    for (name, n, region) in [("eu1", &eu, "eu"), ("us1", &us, "us")] {
+        let body = format!(
+            r#"{{"addr":"{}","token":"adm","region":"{region}","zone":"{region}-a"}}"#,
+            n.addr
+        );
+        let (status, body) = call(
+            primary,
+            "PUT",
+            &format!("/_shard/nodes/{name}"),
+            &body,
+            None,
+        );
+        assert_eq!(status, 201, "{body}");
+    }
+    for (t, region) in [("acme", "eu"), ("beta", "us")] {
+        let body =
+            format!(r#"{{"region":"{region}","schema":"create collection notes (title text)"}}"#);
+        let (status, body) = call(primary, "PUT", &format!("/_shard/tenants/{t}"), &body, None);
+        assert_eq!(status, 201, "{body}");
+    }
+    let standby = router(
+        &dir_file("regions", "standby.fenec"),
+        Some(&format!("http://127.0.0.1:{primary}")),
+    );
+    until(standby, "/_shard/tenants", "beta");
+
+    // Both tenants' writes and reads, through the standby.
+    for t in ["acme", "beta"] {
+        let path = format!("/t/{t}/query");
+        let put = r#"{"query":"put notes {title: \"via us\"}"}"#;
+        let (status, body) = call(standby, "POST", &path, put, None);
+        assert_eq!(status, 200, "{body}");
+        let get = r#"{"query":"get notes select title"}"#;
+        let (status, body) = call(standby, "POST", &path, get, None);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("via us"), "{body}");
+    }
+    // The directory's reads, each tenant's region with it.
+    let (status, body) = call(standby, "GET", "/_shard/tenants/acme", "", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""region":"eu""#), "{body}");
+    let (_, body) = call(standby, "GET", "/_shard/tenants?region=us", "", None);
+    assert!(body.contains("beta") && !body.contains("acme"), "{body}");
+    // None of its changes.
+    let node_body = format!(r#"{{"addr":"{}","token":"adm","zone":"us-b"}}"#, us.addr);
+    for (method, target, body) in [
+        ("PUT", "/_shard/tenants/gamma", r#"{"region":"us"}"#),
+        (
+            "POST",
+            "/_shard/tenants/acme/move",
+            r#"{"to":"us1","region":"us"}"#,
+        ),
+        ("PUT", "/_shard/nodes/us1", node_body.as_str()),
+    ] {
+        let (status, answer) = call(standby, method, target, body, None);
+        assert_eq!(status, 409, "{method} {target}: {answer}");
+        assert!(answer.contains("primary"), "{answer}");
+    }
+
+    // The primary moves acme to us: the standby forwards it there.
+    let (status, body) = call(
+        primary,
+        "POST",
+        "/_shard/tenants/acme/move",
+        r#"{"to":"us1","region":"us"}"#,
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    until(standby, "/_shard/tenants/acme", r#""node":"us1""#);
+    let (status, body) = call(
+        standby,
+        "POST",
+        "/t/acme/query",
+        r#"{"query":"get notes select title"}"#,
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("via us"), "{body}");
+    drop(files);
+}
+
 #[test]
 fn a_standbys_directory_file_does_not_open_as_a_primary() {
     let files = Files(dir_file("alone", "x").parent().unwrap().to_path_buf());
@@ -253,6 +346,7 @@ fn a_standbys_directory_file_does_not_open_as_a_primary() {
             fenec_shard::directory::Node {
                 addr: "127.0.0.1:1".into(),
                 token: "t".into(),
+                ..Default::default()
             }
         )
         .is_err());

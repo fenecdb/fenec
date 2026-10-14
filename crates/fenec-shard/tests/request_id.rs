@@ -60,7 +60,15 @@ fn a_request_through_the_router_has_one_id_in_both_logs() {
     });
     let mut d = Directory::in_memory();
     let (addr, token) = (node.clone(), "adm".into());
-    d.set_node("n1", Node { addr, token }).unwrap();
+    d.set_node(
+        "n1",
+        Node {
+            addr,
+            token,
+            ..Node::default()
+        },
+    )
+    .unwrap();
     d.place("acme", "n1", State::Active).unwrap();
     let router = Router::new(
         d,
