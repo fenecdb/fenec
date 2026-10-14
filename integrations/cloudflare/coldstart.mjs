@@ -15,36 +15,27 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:net';
 
 const here = new URL('.', import.meta.url).pathname;
 const DIM = 128;
 const SIZES = (process.env.SIZES ?? '1000,10000,50000').split(',').map(Number);
 const RESTARTS = 5;
 
-const port = () =>
-  new Promise((res) => {
-    const s = createServer().listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => res(port));
-    });
-  });
-
 async function serve(state) {
-  const p = await port();
   const child = spawn(
     join(here, 'node_modules/.bin/wrangler'),
-    ['dev', '--config', 'wrangler.jsonc', '--port', String(p), '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false', '--var', 'QUIET:0'],
+    ['dev', '--config', 'wrangler.jsonc', '--port', '0', '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false', '--var', 'QUIET:0'],
     { cwd: join(here, 'example'), stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } },
   );
   let log = '';
   child.stdout.on('data', (d) => (log += d));
   child.stderr.on('data', (d) => (log += d));
-  while (!log.includes('Ready on')) {
+  while (!/Ready on http:\/\/[^\s]+\s/.test(log)) {
     if (child.exitCode !== null) throw new Error(log);
     await new Promise((r) => setTimeout(r, 50));
   }
-  const url = `http://127.0.0.1:${p}`;
+  // Port 0, and the port wrangler took read off the line saying it is ready.
+  const url = /Ready on (http:\/\/[^\s]+)\s/.exec(log)[1];
   const stopped = new Promise((r) => child.once('exit', r));
   return {
     async query(tenant, sql, params = []) {

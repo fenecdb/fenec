@@ -9,7 +9,6 @@ import { spawn } from 'node:child_process';
 import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:net';
 
 const here = new URL('.', import.meta.url).pathname;
 const ready = await Promise.all([
@@ -17,15 +16,6 @@ const ready = await Promise.all([
   access(new URL('node_modules/.bin/wrangler', import.meta.url)),
 ]).then(() => true, () => false);
 const skip = ready ? false : 'needs web/fenec.wasm (make wasm) and wrangler (npm ci)';
-
-function freePort() {
-  return new Promise((res) => {
-    const s = createServer().listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => res(port));
-    });
-  });
-}
 
 /** Every `wrangler dev` started, for a failed test to end them all. */
 const running = new Set();
@@ -37,11 +27,12 @@ const running = new Set();
  * environment.
  */
 async function serve(state, { dir = 'example', vars = {} } = {}) {
-  const port = await freePort();
   const child = spawn(
     join(here, 'node_modules/.bin/wrangler'),
     [
-      'dev', '--config', 'wrangler.jsonc', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false',
+      // Port 0, and the port read off the line saying it is ready: one
+      // found free and handed over is free only until another suite takes it.
+      'dev', '--config', 'wrangler.jsonc', '--port', '0', '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false',
       ...Object.entries(vars).flatMap(([k, v]) => ['--var', `${k}:${v}`]),
     ],
     // A group of its own: wrangler starts workerd beside it, and killing
@@ -52,18 +43,16 @@ async function serve(state, { dir = 'example', vars = {} } = {}) {
   running.add(child);
   child.once('exit', () => running.delete(child));
   let log = '';
-  child.stdout.on('data', (d) => (log += d));
-  child.stderr.on('data', (d) => (log += d));
-  const url = `http://127.0.0.1:${port}`;
-  for (let i = 0; ; i++) {
-    try {
-      await fetch(url);
-      break;
-    } catch {
-      if (i > 600 || child.exitCode !== null) throw new Error(`wrangler dev did not start:\n${log}`);
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
+  const url = await new Promise((ready, failed) => {
+    const read = (d) => {
+      log += d;
+      const m = /Ready on (http:\/\/[^\s]+)\s/.exec(log);
+      if (m) ready(m[1]);
+    };
+    child.stdout.on('data', read);
+    child.stderr.on('data', read);
+    child.once('exit', () => failed(new Error(`wrangler dev did not start:\n${log}`)));
+  });
   const stopped = new Promise((r) => child.once('exit', r));
   return {
     async query(tenant, sql, params = []) {
@@ -191,9 +180,10 @@ test('maintenance runs from alarms set only when it is due', { skip, timeout: 18
     assert.deepEqual([k.tables, k.alarm, k.alarms], [first, null, 0]);
     // The write that brings the image due sets the alarm and writes the
     // one row it would have anyway: while no alarm has rung, the
-    // generation is the one before.
+    // generation is the one before. Written until the alarm is set, or has
+    // rung already, its image written and none set after it.
     let pages = 3;
-    for (; !(k = await w.kept('grow')).alarm; pages++) {
+    for (; !(k = await w.kept('grow')).alarm && k.rang === 0; pages++) {
       assert.ok(pages < 40, 'no image came due');
       ok(await w.query('grow', 'put docs $1', [page(10_000 + 100 * pages, 100)]));
     }

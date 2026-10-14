@@ -48,7 +48,7 @@ it.</p>
 
 <pre data-lang="ts">import { DurableObject } from 'cloudflare:workers';
 import { Fenec } from '@fenecdb/web';
-import { maintain, persist, restore, schedule } from '@fenecdb/cloudflare';
+import { maintain, persist, release, restore, schedule } from '@fenecdb/cloudflare';
 import wasm from '@fenecdb/web/fenec.wasm';
 
 interface Env {
@@ -81,15 +81,23 @@ export class Tenant extends DurableObject&lt;Env&gt; {
         throw e;
       }
       // The alarm, once something is due: a row that will expire, an image
-      // owed. Nothing else sets it -- an alarm is a row written too.
-      if (wrote &gt; 0) await schedule(db, this.ctx.storage);
+      // owed. Nothing else sets it -- an alarm is a row written too. The
+      // write is stored either way, and the next one sets an alarm not set.
+      if (wrote &gt; 0) await schedule(db, this.ctx.storage).catch((e) =&gt; console.error(e));
     }
   }
 
   async alarm() {
+    const opened = this.#open();
+    const db = await opened;
     // Expired rows deleted, an image if one is worth it, the alarm set
     // again for what comes due next, or none.
-    await maintain(await this.#open(), this.ctx.storage);
+    const done = await maintain(db, this.ctx.storage).catch(async (e) =&gt; {
+      await release(db);                             // nothing more of it is stored
+      if (this.#db === opened) this.#db = null;     // the retry restores
+      throw e;
+    });
+    if (done.error) throw done.error;               // stored, the alarm not set: tried again
   }
 }
 
@@ -111,7 +119,13 @@ restore an engine of their own and append to the storage as if alone.
 failed may follow ones in the same text that wrote. A <code>persist</code>
 that fails leaves the database in memory holding writes its storage never
 took, so the object lets it go and the next request restores what storage
-holds, rather than answer from writes nobody kept.
+holds, rather than answer from writes nobody kept. Its refusal, and a
+failed <code>maintain</code>'s once <code>release</code> has let the
+database go, come only once nothing of that database is on its way to
+storage, and nothing more of it will be: the database restored next reads
+all the first stored and is the only one writing. An error setting the
+alarm fails neither a write, which is stored, nor <code>maintain</code>,
+which answers it as <code>error</code> for the alarm to be tried again.
 <code>integrations/cloudflare/example</code> is this Worker with a tenant
 from the path, <code>POST /t/&lt;tenant&gt;/query</code>, and its test runs
 it under <code>wrangler dev</code> — workerd, as Cloudflare runs it — then
@@ -292,8 +306,13 @@ brought an 11 MB image, 8 rows, every 6.</p>
 written since it was opened. Once the dead versions reach half of what it
 holds — at least 4 MiB, at most 16 — <code>maintain</code> makes sure
 storage holds an image without them and answers <code>reload</code>: the
-example lets the database go once no request uses it, and the next one
-restores a new module. In Node, 50 000 rows of 128 dimensions with three
+example lets the database go and restores a new module, as it does on any
+failure — calls arriving wait while the ones holding it finish, a write on
+its way to storage among them, then it is released and closed and another
+restored. Let go of at once, a database an alarm dropped while a request's
+write waited behind another's stored it after the next request had
+restored a second database and written, under the same id: an answered
+write lost. In Node, 50 000 rows of 128 dimensions with three
 in five past their time held 42.7 MB of module through two sweeps of
 10 000; the third left half of storage dead, its image took the module to
 51.6 MB, and the module restored from it held 19.2. A

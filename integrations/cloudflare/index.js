@@ -5,7 +5,7 @@
 //
 //   import { DurableObject } from 'cloudflare:workers';
 //   import { Fenec } from '@fenecdb/web';
-//   import { maintain, persist, restore, schedule } from '@fenecdb/cloudflare';
+//   import { maintain, persist, release, restore, schedule } from '@fenecdb/cloudflare';
 //   import wasm from '@fenecdb/web/fenec.wasm';
 //
 //   export class Tenant extends DurableObject {
@@ -20,17 +20,27 @@
 //     async query(sql, params) {
 //       const db = await this.db();
 //       const out = db.run(sql, params);
-//       if (await persist(db, this.ctx.storage)) await schedule(db, this.ctx.storage);
+//       if (await persist(db, this.ctx.storage)) {
+//         // Stored either way: the next write sets an alarm not set.
+//         await schedule(db, this.ctx.storage).catch(() => {});
+//       }
 //       return out;
 //     }
 //     async alarm() {
 //       // Rows past their time deleted, an image when one is worth it, the
-//       // alarm set again for what comes due -- or none. Asked for a
-//       // reload, example/worker.js lets the database go once no call uses
-//       // it, and the next call restores a new module.
-//       await maintain(await this.db(), this.ctx.storage);
+//       // alarm set again for what comes due -- or none.
+//       const db = await this.db();
+//       const done = await maintain(db, this.ctx.storage).catch(async (e) => {
+//         await release(db); // nothing more of it stored: the retry restores
+//         this.fenec = null;
+//         throw e;
+//       });
+//       if (done.error) throw done.error; // stored, the alarm not set: tried again
 //     }
 //   }
+//
+// README.md lets a database whose writes were not stored go too, and
+// example/worker.js opens it again when `maintain` asks for a reload.
 //
 // One object is one database, as a tenant is one file on a fenec-server node:
 // the object's single thread is the single writer. Nothing here imports the
@@ -107,7 +117,7 @@ const kept = new WeakMap();
  */
 export function persist(fenec, storage, options = {}) {
   const [s, fresh] = stateOf(fenec, storage, options);
-  if (s.failed) return Promise.reject(failure(s));
+  if (s.failed) return refused(s);
   if (take(fenec, s) || fresh) {
     const { done } = s.next;
     kick(s);
@@ -126,7 +136,7 @@ export function persist(fenec, storage, options = {}) {
 export function checkpoint(fenec, storage, options = {}) {
   const { min = FLOOR } = options;
   const [s, fresh] = stateOf(fenec, storage, options);
-  if (s.failed) return Promise.reject(failure(s));
+  if (s.failed) return refused(s);
   take(fenec, s);
   const log = s.log + (s.next?.logBytes ?? 0);
   // Nothing since the image, or too little to pay for writing it again.
@@ -157,6 +167,25 @@ export async function restore(fenec, storage, { key = 'fenec' } = {}) {
   Object.assign(s, found.at, { torn: taken < found.length });
   kept.set(fenec, s);
   return true;
+}
+
+/**
+ * Lets the database go: nothing it holds goes to storage after this, and
+ * every `persist`, `checkpoint` and `maintain` on it rejects. Resolves once
+ * a flush under way has settled, so a database restored after it reads
+ * all this one stored and is the only one writing. An object calls it
+ * before it opens the database again -- a reload, a failure -- since two
+ * databases appending to one storage lose writes: the second, restored
+ * while the first still held a flush waiting, was answered for a write
+ * whose id the first then stored again over it, its own write lost on the
+ * next restore.
+ */
+export async function release(fenec) {
+  const s = kept.get(fenec);
+  if (!s) return;
+  s.released = true;
+  s.failed ??= new Error('released');
+  await quiet(s);
 }
 
 // ------------------------------------------------------------- maintenance
@@ -292,10 +321,12 @@ export async function schedule(fenec, storage, options = {}) {
  * reach half of it and `min` (64 KiB), or half of what storage holds is
  * dead and a mebibyte; and sets the alarm again for what comes due next.
  * Stores what it did, then resolves to `{swept, more, image, reload,
- * next}`: the rows deleted, whether more are past their time, the image's
- * bytes (0 when none was written), whether the module holds enough dead
- * records to be worth opening again, and the alarm set (null when none
- * is).
+ * next, error}`: the rows deleted, whether more are past their time, the
+ * image's bytes (0 when none was written), whether the module holds enough
+ * dead records to be worth opening again, the alarm set (null when none
+ * is), and what kept it from being set. That is no failure of the
+ * database: what was done is stored, and an alarm's handler can throw it
+ * for Cloudflare to try the alarm again, keeping the database.
  *
  * With `reload`, storage holds an image without the dead records, and a
  * new `Fenec` restored from it gives back what the module holds: let this
@@ -308,7 +339,7 @@ export async function schedule(fenec, storage, options = {}) {
 export async function maintain(fenec, storage, options = {}) {
   const { min = FLOOR, every = EVERY } = options;
   const [s] = stateOf(fenec, storage, options);
-  if (s.failed) throw failure(s);
+  if (s.failed) await refused(s);
   const now = clock(fenec);
   const swept = sweep(fenec, now, options);
   if (swept.expiring) s.sweptAt = now;
@@ -323,20 +354,35 @@ export async function maintain(fenec, storage, options = {}) {
   } else await settled(s);
   if (reload) s.reloadAsked = true;
   const next = swept.more ? now : sweepAt(fenec, s, now, options);
-  return {
-    swept: swept.rows,
-    more: swept.more,
-    image: image ? wrote : 0,
-    reload,
-    // Asked even with nothing next: the alarm that rang is forgotten, or
-    // `schedule` took it for one still set, and set none again.
-    next: await arm(storage, next === null ? null : Math.max(next, now), every, true, now),
-  };
+  const done = { swept: swept.rows, more: swept.more, image: image ? wrote : 0, reload, next: null, error: null };
+  // Asked even with nothing next: the alarm that rang is forgotten, or
+  // `schedule` took it for one still set, and set none again. Its failure
+  // -- `getAlarm`, read on every alarm that wakes an evicted object, or
+  // `setAlarm` -- is answered, not thrown: thrown, the database was let go
+  // of by a handler that took it for storage failing, while requests held
+  // it with their writes on their way.
+  try {
+    done.next = await arm(storage, next === null ? null : Math.max(next, now), every, true, now);
+  } catch (e) {
+    done.error = e;
+  }
+  return done;
 }
 
 const clock = (fenec) => fenec.now?.() ?? Date.now();
 
 const iso = (ms) => new Date(ms).toISOString();
+
+/**
+ * A timestamp as the module writes it, in milliseconds. A year past 9999
+ * is written in five digits or more, `10000-01-01T00:00:00Z`, which
+ * `Date.parse` reads as `NaN`; ECMAScript's own form of it is six digits
+ * and a sign.
+ */
+function time(text) {
+  const wide = /^(\d{5,6})-/.exec(text);
+  return Date.parse(wide ? `+${wide[1].padStart(6, '0')}${text.slice(wide[0].length - 1)}` : text);
+}
 
 /** The record bytes the module holds, and those of versions no read reaches. */
 function held(fenec) {
@@ -370,8 +416,13 @@ function owed(s, mem, min) {
   return { image, reload: reload && !s.reloadAsked };
 }
 
-/** A name FenecQL writes: the sweep's statements name collections and fields as text. */
-const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/**
+ * A name FenecQL reads, as its lexer does (`is_alphabetic` or `_`, then
+ * `is_alphanumeric` or `_`): the sweep's statements name collections and
+ * fields as text. ASCII alone, a collection `müşteri` or a field `zamanı`
+ * was never swept nor its rows' times asked, kept for good.
+ */
+const NAME = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
 
 const UNIT = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
 
@@ -428,7 +479,10 @@ function sweepAt(fenec, s, now, { grace = GRACE, every = EVERY } = {}) {
     const [row] = fenec.rows(`get ${name} select ${field} where expired() order ${field} limit 1`);
     const first = row ?? fenec.rows(`get ${name} select ${field} where ${field} > $1 order ${field} limit 1`, [iso(now - ttl)])[0];
     if (!first) continue;
-    const at = Date.parse(first[field]) + ttl + grace;
+    const at = time(first[field]) + ttl + grace;
+    // A time JavaScript has no date for: once `NaN`, every collection's
+    // next time after it compared false, and the alarm was set at `NaN`.
+    if (!Number.isFinite(at)) continue;
     if (next === null || at < next) next = at;
   }
   if (next === null) return null;
@@ -457,7 +511,7 @@ function arm(storage, at, slack, ringing, now) {
     if (!storage.setAlarm) return null;
     if (ringing && a.at != null && a.at <= now) a.at = null;
     if (a.at === undefined || (a.at !== null && a.at < now)) a.at = (await storage.getAlarm?.()) ?? null;
-    if (at === null) return null;
+    if (at === null || !Number.isFinite(at)) return null;
     if (a.at !== null && a.at <= at + slack) return a.at;
     await storage.setAlarm(at);
     a.at = at;
@@ -474,6 +528,8 @@ function state(fenec, storage, key) {
     fenec, storage, key, sql: !!storage.sql, piece: 0,
     gen: null, image: 0, log: 0, pieces: [0, 0], torn: false,
     next: null, flushing: null, failed: null,
+    // Let go of (`release`): it refuses everything, as a failed one does.
+    released: false,
     // For `maintain`: the dead record bytes the module held when the
     // stored image was taken, which the image left out (`deadAtImage`);
     // when it last swept; whether it has asked for a reload; whether the
@@ -486,7 +542,9 @@ function state(fenec, storage, key) {
 /** The database's state, made -- its journal started, an image due -- when new to `key`. */
 function stateOf(fenec, storage, { key = 'fenec', piece } = {}) {
   let s = kept.get(fenec);
-  const fresh = s?.key !== key;
+  // A database let go of stays so, under any key: a state made afresh
+  // would have written an image.
+  const fresh = s?.key !== key && !s?.released;
   if (fresh) {
     fenec.journal();
     s = state(fenec, storage, key);
@@ -498,8 +556,28 @@ function stateOf(fenec, storage, { key = 'fenec', piece } = {}) {
 }
 
 const failure = (s) =>
-  new Error(`fenecdb: ${s.key} was not stored, and the database holds writes its storage does not: open it again and restore`, {
-    cause: s.failed,
+  s.released
+    ? new Error(`fenecdb: ${s.key} was let go of (release): open it again and restore`)
+    : new Error(`fenecdb: ${s.key} was not stored, and the database holds writes its storage does not: open it again and restore`, {
+        cause: s.failed,
+      });
+
+/** Resolves once no flush of `s` is under way; a refused one is let go of at once. */
+async function quiet(s) {
+  while (s.flushing) await s.flushing;
+}
+
+/**
+ * The rejection of a call on a failed or released database, once the
+ * flush under way has settled: a caller that lets the database go on it
+ * and opens another reads all the first one stored, and no write of the
+ * first lands after the second's. Refused at once, the call answered while
+ * a KV flush still put its pieces, which would have landed after the
+ * restore its caller went on to.
+ */
+const refused = (s) =>
+  quiet(s).then(() => {
+    throw failure(s);
   });
 
 /** The flush the writes drained now go out with, made when none waits. */

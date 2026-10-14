@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { checkpoint, due, maintain, persist, restore, schedule, PIECE, ROW } from './index.js';
+import { checkpoint, due, maintain, persist, release, restore, schedule, PIECE, ROW } from './index.js';
 import { Rows, Values } from './fakes.js';
 
 const wasm = await readFile(new URL('../../web/fenec.wasm', import.meta.url)).catch(() => null);
@@ -495,4 +495,115 @@ each('storage that fails part way through maintenance keeps the last whole datab
   // The deletes' row and its commit, or their piece and the record; the
   // image's table, row, drop and commit, or its four pieces and the record.
   assert.ok(failed >= 7, `only ${failed} maintenances were cut short`);
+});
+
+/** Whether `promise` has settled yet, asked after the turns pending now have run. */
+async function settledYet(promise) {
+  let done = false;
+  promise.then(() => (done = true), () => (done = true));
+  await new Promise(setImmediate);
+  return done;
+}
+
+each('a database let go of stores nothing more, once its flush under way has settled', async (make) => {
+  const storage = make();
+  const db = await open();
+  db.run('create collection t (n int)');
+  db.run('put t {n: 1}');
+  await persist(db, storage);
+  await new Promise(setImmediate);
+  // A write on its way to being durable, and one waiting behind it.
+  const open1 = storage.holdSync();
+  db.run('put t {n: 2}');
+  const c = persist(db, storage);
+  db.run('put t {n: 3}');
+  const d = persist(db, storage).then(() => 'stored', (e) => e.message);
+  const released = release(db);
+  const after = persist(db, storage).then(() => 'stored', (e) => e.message);
+  // Neither the release nor a call refused by it answers while the flush
+  // is under way: whoever opens the database again on either must find
+  // all the first one stored, and nothing of it landing after.
+  assert.equal(await settledYet(released), false, 'released with a flush under way');
+  assert.equal(await settledYet(after), false, 'refused with a flush under way');
+  open1();
+  await released;
+  assert.ok((await c) > 0, 'the write under way is stored');
+  assert.match(await d, /let go of/, 'the write waiting behind it is refused');
+  assert.match(await after, /let go of/);
+  await assert.rejects(maintain(db, storage), /let go of/);
+  await assert.rejects(checkpoint(db, storage), /let go of/);
+  await assert.rejects(persist(db, storage, { key: 'another' }), /let go of/, 'under any key');
+  // The database restored after it is the only one writing.
+  const again = await back(storage);
+  assert.deepEqual(again.rows('get t select n order n'), [{ n: 1 }, { n: 2 }]);
+  again.run('put t {n: 4}');
+  await persist(again, storage);
+  assert.deepEqual((await back(storage)).rows('get t select n order n'), [{ n: 1 }, { n: 2 }, { n: 4 }]);
+});
+
+each('an alarm that cannot be set fails no maintenance', async (make) => {
+  const storage = make();
+  const clock = { now: T0 };
+  const db = await at(clock);
+  db.run('create collection s (n int, at timestamp @ttl(1h))');
+  db.run('put s $1', [Array.from({ length: 50 }, (_, n) => ({ n, at: iso(T0 + n * 1000) }))]);
+  await persist(db, storage);
+  clock.now = T0 + HOUR + GRACE + 10_000;
+  // `getAlarm`, read on the first alarm of an object woken from eviction.
+  storage.getAlarm = () => Promise.reject(new Error('getAlarm went away'));
+  let r = await maintain(db, storage);
+  assert.deepEqual([r.swept, r.next, r.error?.message], [11, null, 'getAlarm went away']);
+  // Its deletes were stored: past their time, the 39 inside the grace.
+  assert.equal(expired(await backAt(storage, clock)), 39);
+  // And `setAlarm`.
+  storage.getAlarm = async () => null;
+  storage.setAlarm = () => Promise.reject(new Error('setAlarm went away'));
+  clock.now += 20_000;
+  r = await maintain(db, storage);
+  assert.deepEqual([r.swept, r.next, r.error?.message], [20, null, 'setAlarm went away']);
+  // The database goes on.
+  db.run('put s {n: 99, at: $1}', [iso(clock.now)]);
+  assert.ok((await persist(db, storage)) > 0);
+  const again = await backAt(storage, clock);
+  assert.equal(expired(again), 19);
+  assert.deepEqual(again.rows('get s count'), [{ count: 1 }]);
+});
+
+each('rows of a collection or field named past ASCII are swept and scheduled', async (make) => {
+  const storage = make();
+  const clock = { now: T0 };
+  const db = await at(clock);
+  db.run('create collection müşteri (n int, zamanı timestamp @ttl(1h))');
+  db.run('put müşteri $1', [Array.from({ length: 30 }, (_, n) => ({ n, zamanı: iso(T0) }))]);
+  await persist(db, storage);
+  assert.equal(due(db, storage), T0 + HOUR + GRACE);
+  assert.equal(await schedule(db, storage), T0 + HOUR + GRACE);
+  clock.now = T0 + HOUR + GRACE;
+  assert.equal((await maintain(db, storage)).swept, 30);
+  assert.deepEqual((await backAt(storage, clock)).rows('get müşteri where expired() count'), [{ count: 0 }]);
+});
+
+each('a time past year 9999, or past any date, sets no alarm at NaN', async (make) => {
+  const storage = make();
+  const clock = { now: T0 };
+  const db = await at(clock);
+  // Past any date JavaScript has, made first so its time is asked first.
+  db.run('create collection farther (n int, at timestamp @ttl(1h))');
+  db.run('put farther {n: 1, at: $1}', ['300000-01-01T00:00:00Z']);
+  // Written `10000-01-01T00:00:00Z`, which `Date.parse` cannot read.
+  db.run('create collection far (n int, at timestamp @ttl(1h))');
+  db.run('put far {n: 1, at: $1}', ['10000-01-01T00:00:00Z']);
+  db.run('create collection s (n int, at timestamp @ttl(1h))');
+  db.run('put s {n: 1, at: $1}', [iso(T0)]);
+  await persist(db, storage);
+  // The row due first is asked for, whatever the other collection holds.
+  assert.equal(due(db, storage), T0 + HOUR + GRACE);
+  assert.equal(await schedule(db, storage), T0 + HOUR + GRACE);
+  clock.now = T0 + HOUR + GRACE;
+  const r = await maintain(db, storage);
+  assert.equal(r.swept, 1);
+  // Then the row of year 10000 alone, at its time.
+  const year10000 = Date.UTC(10000, 0, 1);
+  assert.equal(r.next, year10000 + HOUR + GRACE);
+  assert.equal(storage.alarm, year10000 + HOUR + GRACE);
 });

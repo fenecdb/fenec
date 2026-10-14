@@ -4618,7 +4618,15 @@ sweep stores its deletes, one row, and no image -- under a mebibyte an
 image of a churning 70 KB was three rows a sweep where the deletes were
 one; and sets the alarm for the next row's time and grace, no sooner than
 `every` after the sweep, or none, the alarm that rang forgotten either way
-(kept, `schedule` took it for one still set and set none again). Taken at
+(kept, `schedule` took it for one still set and set none again). A failure
+to set it -- `getAlarm`, read on every alarm that wakes an evicted object,
+or `setAlarm` -- is `maintain`'s `error`, its work stored, never a
+rejection: thrown, the example's handler let the database go as for a
+storage failure (below). The names its statements write are the lexer's
+(`\p{Alphabetic}`, then `\p{N}` too): ASCII alone, a `müşteri` was never
+swept. A year past 9999 is written `10000-01-01T00:00:00Z`, which
+`Date.parse` reads as `NaN`, and the alarm was set at `NaN`: such a time is
+read in ECMAScript's six-digit form, and one past any date skipped. Taken at
 a quarter of the image, rewrites of 1 000 128-dim rows a request, a row
 each, brought an 11 MB image, 8 rows, every 6; at half, where `persist` folds, the
 images are as many as before, and a request folds only past the whole image
@@ -4631,12 +4639,28 @@ module never gives memory back and holds every record version written
 since its open (20 000 x 128 restored held 18 MB, 74 after its titles were
 set thrice and its vectors once): once its dead record bytes reach half
 of what it holds, between 4 and 16 MiB, `maintain` makes sure storage holds
-an image without them and answers `reload`, once a database; the example
-lets that database go when no call holds it (`#use`, `#drop`: let go under
-a request still writing, two databases appended to one storage) and the
-next restores a new module -- 50 000 x 128, three in five expired, held
+an image without them and answers `reload`, once a database, and the
+example restores a new module -- 50 000 x 128, three in five expired, held
 42.7 MB through two sweeps, 51.6 at the image the third owed and 19.2
-restored (memory.mjs, in Node). A `compact` in the module rebuilds every
+restored (memory.mjs, in Node). Every database the example lets go -- a
+reload, writes not stored, a `maintain` that failed -- goes one way
+(`#retire`): calls arriving wait while those holding it finish, a write
+on its way to storage among them, then it is `release`d -- nothing of it
+stored after, resolved once its flush under way has settled -- closed, and
+another restored. Let go of at once, as the alarm's handler first did when
+`maintain` threw with storage sound, it lost answered writes: a request's
+flush waited to be durable and another's waited behind it, the next
+request restored a second database and wrote id 3, the first then stored
+the waiting write as id 3 too, and the next restore read the first's. And
+a refused `persist`, `checkpoint` or `maintain` on a failed or released
+database answers only once no flush of it is under way, so a caller that
+drops it and restores -- the README's alarm, a request's write not stored
+-- reads all it stored and is alone: refused at once, it answered while a KV
+flush still put its pieces, which would land after that restore. `example.test.js` drives the
+example's class in Node over the storage stand-in (`module.registerHooks`
+giving it `cloudflare:workers` and the compiled `.wasm`), holding a flush
+at `sync` to put the alarm between two requests' writes; it fails on the
+code before, and with the wait for the holders taken out. A `compact` in the module rebuilds every
 graph holding tombstones and builds its image whole, and gives nothing back.
 A restore reads its generation's sums to their end: left at the first row,
 the statement held the table and a new image's `DROP TABLE` was refused
@@ -4644,9 +4668,10 @@ under node:sqlite. The first `near` after a restart, a lone write's p50
 (2.00-2.07 ms against 1.96-2.35) and a restore's memory moved by noise
 alone. `make cloudflare-test` holds the rules to the fakes -- storage
 failing after every operation of a sweep's flush and of its image included
--- and the example under `wrangler dev`: an idle object setting no alarm,
-350 rows swept over four alarms and kept across a restart, an image by the
-rule and none without it, a reload.
+-- and the example under `wrangler dev`, on the port it says it bound
+(`--port 0`, `Ready on`): an idle object setting no alarm, 350 rows swept
+over four alarms and kept across a restart, an image by the rule and none
+without it, a reload.
 
 **The browser module grows nothing by doubling past a mebibyte.** Its
 memory is never given back, so a peak stays for good. An index's vectors

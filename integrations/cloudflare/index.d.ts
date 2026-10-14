@@ -67,6 +67,16 @@ export function checkpoint(fenec: Fenec<any>, storage: Storage, options?: Option
  */
 export function restore(fenec: Fenec<any>, storage: Storage, options?: Pick<Options, 'key'>): Promise<boolean>;
 
+/**
+ * Lets the database go: nothing it holds is stored after this, and every
+ * `persist`, `checkpoint` and `maintain` on it rejects. Resolves once a
+ * flush under way has settled, so a database restored after it reads all
+ * this one stored and is the only one writing: call it before opening the
+ * database again. A rejection of those calls on a failed or released
+ * database likewise comes once no flush of it is under way.
+ */
+export function release(fenec: Fenec<any>): Promise<void>;
+
 export interface MaintenanceOptions extends Options {
   /** How long past its time (`@ttl`) a row stays for a reader of `expired()` before it is deleted: 60 000 ms. */
   grace?: number;
@@ -91,8 +101,14 @@ export interface Maintained {
    * restored from it gives them back. Asked once a database.
    */
   reload: boolean;
-  /** The alarm set for what comes due next, or null when nothing will. */
+  /** The alarm set for what comes due next, or null when nothing will, or it could not be set. */
   next: number | null;
+  /**
+   * What kept the alarm from being set again, or null. No failure of the
+   * database: what was done is stored, and a handler can throw it for
+   * Cloudflare to try the alarm again, keeping the database.
+   */
+  error: unknown;
 }
 
 /**
@@ -119,6 +135,7 @@ export function schedule(fenec: Fenec<any>, storage: Storage, options?: Maintena
  * it (and `min`), or half of what storage holds is dead (and 1 MiB);
  * stores both; and sets the alarm again for what comes due next. Rejects
  * as `persist` does when storage fails, and the database must then be
- * opened again.
+ * opened again (`release`); an alarm it could not set is `error`, not a
+ * rejection.
  */
 export function maintain(fenec: Fenec<any>, storage: Storage, options?: MaintenanceOptions): Promise<Maintained>;

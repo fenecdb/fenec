@@ -8,7 +8,7 @@ with its database.
 ```js
 import { DurableObject } from 'cloudflare:workers';
 import { Fenec } from '@fenecdb/web';
-import { maintain, persist, restore, schedule } from '@fenecdb/cloudflare';
+import { maintain, persist, release, restore, schedule } from '@fenecdb/cloudflare';
 import wasm from '@fenecdb/web/fenec.wasm';
 
 export class Tenant extends DurableObject {
@@ -32,20 +32,35 @@ export class Tenant extends DurableObject {
       // Kept before the answer goes -- a statement that failed may follow
       // ones in the same text that wrote -- or let go of: not stored, the
       // database is ahead of its storage, and the next request restores.
+      // Refused once nothing of it is on its way to storage, so the next
+      // database reads all this one stored.
       const wrote = await persist(db, this.ctx.storage).catch((e) => {
         if (this.#db === opened) this.#db = null;
         throw e;
       });
       // The alarm, once something is due: a row that will expire, an
-      // image owed. Nothing else sets it: `setAlarm` is a row written.
-      if (wrote > 0) await schedule(db, this.ctx.storage);
+      // image owed. Nothing else sets it: `setAlarm` is a row written. The
+      // write is stored either way, and the next write sets an alarm not
+      // set: an error here would have the client send it again.
+      if (wrote > 0) await schedule(db, this.ctx.storage).catch((e) => console.error(e));
     }
   }
 
   async alarm() {
+    const opened = this.db();
+    const db = await opened;
     // Rows past their time deleted, an image when one is worth it, the
     // alarm set again for what comes due next -- or none.
-    await maintain(await this.db(), this.ctx.storage);
+    const done = await maintain(db, this.ctx.storage).catch(async (e) => {
+      // Storage failed under it, or its sweep did: let go of, for the try
+      // Cloudflare makes next to restore another -- once nothing of this
+      // one is on its way to storage, and nothing more will be.
+      await release(db);
+      if (this.#db === opened) this.#db = null;
+      throw e;
+    });
+    // Stored, but the alarm not set again: thrown, it is tried again.
+    if (done.error) throw done.error;
   }
 }
 ```
@@ -64,6 +79,11 @@ the object's single thread is the single writer.
   storage, { grace, every, sweep, min })` is the alarm's work
   ([Maintenance](#maintenance)). `due(fenec, storage)` says when it next
   has any, for an object that sets its alarm itself.
+- `release(fenec)` lets a database go before the object opens it again:
+  nothing it holds is stored after, and it resolves once a flush under way
+  has settled. A refused `persist`, `checkpoint` or `maintain` likewise
+  answers once none is, so the database restored next reads all the first
+  stored and is the only one writing.
 - `checkpoint(fenec, storage, { key, min })` writes a new image now, the
   graphs in it, when the writes since the last one reach `min` bytes (64
   KiB by default). A start then restores the graph rather than link every
@@ -167,10 +187,16 @@ The module's memory never shrinks, and holds every version of a record
 written since it was opened: what only a new instance gives back. Once the
 dead versions reach half of what the module holds (between 4 and 16 MiB),
 `maintain` writes an image without them if storage has none and answers
-`reload: true`: let the database go once no call uses it, and the next
-restores a new one. The example does (`#use`, `#drop`): let go of while a
-request still wrote to it, two databases would have appended to one
-storage. In Node (memory.mjs), 50 000 rows of 128 dimensions with three
+`reload: true`: let the database go, and restore a new one. The example
+does, as it lets one go on any failure (`#retire`): calls arriving wait
+while those holding it finish -- a write on its way to storage among them
+-- then it is released and closed and a new one restored. Let go of at once,
+an alarm whose `getAlarm` failed dropped a database while one request's
+write waited to be durable and another's waited behind it: the next
+request restored a second database and wrote, the first then stored the
+waiting write under the same id, and the second's answered write was gone
+on the next restore. An alarm that cannot be set is `maintain`'s `error`,
+no failure: what it did is stored. In Node (memory.mjs), 50 000 rows of 128 dimensions with three
 in five past their time held 42.7 MB of module, as each of two sweeps of
 10 000 left it, the JavaScript 0.1 MB above; the third left half of
 storage dead, and its image took the module to 51.6 MB -- making one costs
