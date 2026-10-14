@@ -97,12 +97,12 @@ impl Quant {
 /// `ef_search` for a `quant=bit` index that names none. A bit code bounds
 /// nothing, so the whole beam is read, and it estimates less closely than
 /// an int8 code: over a million clustered 768-dimension vectors a beam of
-/// 100 held 97.9% of the true ten and one of 200 99.8%, where int8 codes
+/// 100 held 97.9% of the true ten and one of 200 99.7%, where int8 codes
 /// held 97.1% at 100 and full vectors 97.4%; spread in every dimension, 100
-/// held 89.5% and 200 97.6%, full vectors 97.8% at 100 (`make
+/// held 89.7% and 200 97.5%, full vectors 97.8% at 100 (`make
 /// quant-bench`). It was 400 while the codes were the vectors' own signs,
 /// which a beam of 400 held 98.4% of the million's ten with, in 2.16 ms
-/// where 200 takes 1.21 now.
+/// where 200 takes 0.66 now, the query cut to bit planes (`QUERY_BITS`).
 pub const BIT_EF_SEARCH: usize = 200;
 
 /// `ef_search` for every other index that names none. recall@10 measured at

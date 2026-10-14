@@ -1534,7 +1534,7 @@ server, the client alone in its bundle.</p>
 <tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">493 KB</td><td class="n">172 KB</td><td class="n">205 KB</td></tr>
 <tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">433 KB</td><td class="n">149 KB</td><td class="n">177 KB</td></tr>
 <tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">185 KB</td><td class="n">48 KB</td><td class="n">57 KB</td></tr>
-<tr><td><code>@fenecdb/web/client</code> in an app's bundle, esbuild, minified</td><td class="n">16 KB</td><td class="n">6 KB</td><td class="n">6 KB</td></tr>
+<tr><td><code>@fenecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">28 KB</td><td class="n">9 KB</td><td class="n">10 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
@@ -1578,25 +1578,25 @@ every pull request's CI run shows the same against the branch it goes into.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>Code, 602.1 KB of the 675.1</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
+<thead><tr><th>Code, 635.0 KB of the 711.0</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
 <tbody>
-<tr><td><b>fenecdb's own</b></td><td class="n"><b>476.7</b></td><td class="n"><b>79.2%</b></td></tr>
-<tr><td>the engine, <code>fenec_core::engine</code></td><td class="n">193.8</td><td class="n">32.2%</td></tr>
-<tr><td>FenecQL's parser and lexer</td><td class="n">48.8</td><td class="n">8.1%</td></tr>
-<tr><td>the vector index</td><td class="n">42.2</td><td class="n">7.0%</td></tr>
-<tr><td><code>@sorted</code></td><td class="n">20.6</td><td class="n">3.4%</td></tr>
-<tr><td>the rest</td><td class="n">171.3</td><td class="n">28.5%</td></tr>
-<tr><td><b>the standard library's</b></td><td class="n"><b>125.4</b></td><td class="n"><b>20.8%</b></td></tr>
-<tr><td><code>Vec</code>, <code>String</code>, <code>Box</code></td><td class="n">43.7</td><td class="n">7.3%</td></tr>
-<tr><td>the sort</td><td class="n">23.0</td><td class="n">3.8%</td></tr>
-<tr><td><code>HashMap</code></td><td class="n">15.0</td><td class="n">2.5%</td></tr>
-<tr><td><code>core::fmt</code></td><td class="n">4.6</td><td class="n">0.8%</td></tr>
-<tr><td>the rest</td><td class="n">39.1</td><td class="n">6.5%</td></tr>
+<tr><td><b>fenecdb's own</b></td><td class="n"><b>505.8</b></td><td class="n"><b>79.7%</b></td></tr>
+<tr><td>the engine, <code>fenec_core::engine</code></td><td class="n">202.1</td><td class="n">31.8%</td></tr>
+<tr><td>FenecQL's parser and lexer</td><td class="n">49.7</td><td class="n">7.8%</td></tr>
+<tr><td>the vector index</td><td class="n">42.2</td><td class="n">6.6%</td></tr>
+<tr><td><code>@sorted</code></td><td class="n">20.6</td><td class="n">3.2%</td></tr>
+<tr><td>the rest</td><td class="n">191.2</td><td class="n">30.1%</td></tr>
+<tr><td><b>the standard library's</b></td><td class="n"><b>129.2</b></td><td class="n"><b>20.3%</b></td></tr>
+<tr><td><code>Vec</code>, <code>String</code>, <code>Box</code></td><td class="n">45.9</td><td class="n">7.2%</td></tr>
+<tr><td>the sort</td><td class="n">23.0</td><td class="n">3.6%</td></tr>
+<tr><td><code>HashMap</code></td><td class="n">15.1</td><td class="n">2.4%</td></tr>
+<tr><td><code>core::fmt</code></td><td class="n">4.6</td><td class="n">0.7%</td></tr>
+<tr><td>the rest</td><td class="n">40.6</td><td class="n">6.4%</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>The data section is another 64.5 KB. Most of the standard library's share
+<p>The data section is another 67.0 KB. Most of the standard library's share
 is generic code compiled once for each type it is used with, so the module
 sorts few types and keeps few maps: ids as <code>u64</code>s, scored ids
 through one comparator that the text index's terms share, rows through one
@@ -1630,8 +1630,8 @@ WHY=&lt;pattern&gt;</code> names what pulls a part in.</p>
 
 <p>A page that does not search text, needs no graph behind its vector
 search, or asks no facets, can load a smaller module built without what it
-does not use. With every feature the module is 228.8 KB brotli; with none,
-144.9 KB, 37% less, and a <code>near</code> still answers, every vector
+does not use. With every feature the module is 241.9 KB brotli; with none,
+149.0 KB, 38% less, and a <code>near</code> still answers, every vector
 measured. The release ships the module with every feature; any other set
 is a build option.</p>
 
@@ -1639,17 +1639,17 @@ is a build option.</p>
 <table>
 <thead><tr><th>Feature</th><th class="n">Added to none, brotli KB</th><th class="n">Left out of every one, brotli KB</th><th class="n">On disk, KB saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector</code>, the HNSW graph</td><td class="n">20.7</td><td class="n">18.7</td><td class="n">61.6</td></tr>
-<tr><td><code>text</code>, <code>match</code></td><td class="n">5.7</td><td class="n">7.3</td><td class="n">24.3</td></tr>
-<tr><td><code>sparse</code>, <code>@inverted</code></td><td class="n">2.7</td><td class="n">0.9</td><td class="n">3.9</td></tr>
-<tr><td><code>sorted</code>, <code>@sorted</code>, and <code>composite</code> with it</td><td class="n">8.8</td><td class="n">23.4</td><td class="n">76.2</td></tr>
-<tr><td><code>composite</code>, an index over several fields, beside <code>sorted</code></td><td class="n">11.5</td><td class="n">10.5</td><td class="n">32.3</td></tr>
-<tr><td><code>geo</code>, points, and <code>@geo</code> where <code>sorted</code> is</td><td class="n">2.8</td><td class="n">5.9</td><td class="n">16.8</td></tr>
-<tr><td><code>nocase</code></td><td class="n">3.1</td><td class="n">2.6</td><td class="n">7.1</td></tr>
-<tr><td><code>collate</code>, ICU's order</td><td class="n">9.0</td><td class="n">8.3</td><td class="n">19.4</td></tr>
-<tr><td><code>facets</code></td><td class="n">3.5</td><td class="n">4.1</td><td class="n">11.8</td></tr>
-<tr><td><code>highlight</code>, beside <code>text</code></td><td class="n">3.5</td><td class="n">3.1</td><td class="n">9.3</td></tr>
-<tr><td><code>analytics</code></td><td class="n">2.7</td><td class="n">2.1</td><td class="n">6.2</td></tr>
+<tr><td><code>vector</code>, the HNSW graph</td><td class="n">20.4</td><td class="n">19.0</td><td class="n">61.4</td></tr>
+<tr><td><code>text</code>, <code>match</code> with <code>fuzzy</code> and <code>prefix</code></td><td class="n">10.9</td><td class="n">13.0</td><td class="n">40.4</td></tr>
+<tr><td><code>sparse</code>, <code>@inverted</code></td><td class="n">2.4</td><td class="n">1.4</td><td class="n">3.9</td></tr>
+<tr><td><code>sorted</code>, <code>@sorted</code>, and <code>composite</code> with it</td><td class="n">8.7</td><td class="n">23.5</td><td class="n">76.4</td></tr>
+<tr><td><code>composite</code>, an index over several fields, beside <code>sorted</code></td><td class="n">11.6</td><td class="n">10.9</td><td class="n">32.8</td></tr>
+<tr><td><code>geo</code>, points, and <code>@geo</code> where <code>sorted</code> is</td><td class="n">2.5</td><td class="n">6.0</td><td class="n">16.8</td></tr>
+<tr><td><code>nocase</code></td><td class="n">2.8</td><td class="n">2.6</td><td class="n">7.1</td></tr>
+<tr><td><code>collate</code>, ICU's order</td><td class="n">8.9</td><td class="n">8.4</td><td class="n">19.2</td></tr>
+<tr><td><code>facets</code></td><td class="n">3.6</td><td class="n">4.5</td><td class="n">12.5</td></tr>
+<tr><td><code>highlight</code>, beside <code>text</code></td><td class="n">3.8</td><td class="n">3.6</td><td class="n">10.0</td></tr>
+<tr><td><code>analytics</code></td><td class="n">5.5</td><td class="n">5.1</td><td class="n">14.3</td></tr>
 <tr><td>the schema check, <code>SCHEMA=0</code> without</td><td class="n">9.5</td><td class="n">9.5</td><td class="n">28.2</td></tr>
 </tbody>
 </table>
@@ -1660,7 +1660,7 @@ is a build option.</p>
 href="javascript.html#features">A smaller module</a>): <code>make wasm
 FEATURES="text sorted"</code>, <code>FEATURES=indexes</code> or
 <code>language</code> for a group. <code>make wasm-sizes</code> builds the
-module with every feature (675.1 KB on disk), with none (421.3 KB), with
+module with every feature (711.0 KB on disk), with none (432.5 KB), with
 each added to none and with every one but each, and measures each under
 gzip -9 and brotli -q 11. The two columns differ where features share
 code: the sort and the map the sparse index ranks through are the other

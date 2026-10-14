@@ -1832,11 +1832,12 @@ impl Parser {
     // term    := operand ( ("*" | "/") operand )*
     // operand := "-"* primary
     //
-    // One frame for both levels, by precedence climbing over a pending sum,
-    // rather than a function a level: depth is stack depth (see
-    // `MAX_EXPR_DEPTH`), and each frame more a level of parentheses was
-    // more stack for the same 512 levels. Every operator counts as a level,
-    // as `or` does, since evaluation recurses down the tree it makes.
+    // One function for both levels (`arith_level`), a sum's frame calling a
+    // product's, so a level of parentheses is two frames on its way to
+    // `primary`: depth is stack depth (see `MAX_EXPR_DEPTH`), and a frame
+    // more a level would be more stack for the same 512 levels. Every
+    // operator counts as a level, as `or` does, since evaluation recurses
+    // down the tree it makes.
 
     /// `n + 1`, `price * (1 - $1)`: the operands a comparison takes, or a
     /// value in a `set`. Without an operator, the operand alone.

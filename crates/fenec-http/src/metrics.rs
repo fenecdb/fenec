@@ -403,7 +403,7 @@ fn render(source: Source) -> String {
     out.family(
         "fenec_held_looks_total",
         "counter",
-        "Looks under the read lock by the first of each group of held writes, at a write or a row's time.",
+        "Looks for a group of held writes, all made by the one held request looking for every group, at a write or a row's time.",
     );
     out.sample("fenec_held_looks_total", &[], held.looks);
     out.family(

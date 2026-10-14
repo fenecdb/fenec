@@ -2929,13 +2929,14 @@ which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (432.6 KB, 149.1 brotli, against 711.1 and 241.7 with
+module with none (432.5 KB, 149.0 brotli, against 711.0 and 241.9 with
 every one) and left out of the full one, brotli added and saved:
-`vector` 20.7 and 18.7, `sorted` 8.8 and 23.4 with `composite`,
-`composite` beside it 11.5 and 10.5, `collate` 9.0 and 8.3, `text` 10.8
-and 12.8 with `fuzzy` and `prefix` (5.7 and 7.3 before), `facets` 3.5 and 4.1, `highlight` beside `text` 3.5 and 3.1,
-`nocase` 3.1 and 2.6, `geo` 2.8 and 5.9 (its index with it), `analytics`
-2.7 and 2.1, `sparse` 2.7 and 0.9, the schema check 9.5 and 9.5. The module with every feature is the code
+`vector` 20.4 and 19.0, `sorted` 8.7 and 23.5 with `composite`,
+`composite` beside it 11.6 and 10.9, `collate` 8.9 and 8.4, `text` 10.9
+and 13.0 with `fuzzy` and `prefix` (5.7 and 7.3 before), `facets` 3.6 and
+4.5, `highlight` beside `text` 3.8 and 3.6, `nocase` 2.8 and 2.6, `geo`
+2.5 and 6.0 (its index with it), `analytics` 5.5 and 5.1, `sparse` 2.4
+and 1.4, the schema check 9.5 and 9.5. The module with every feature is the code
 it was (`make size-report BASE=main`: 14 bytes less of it, functions moved
 and closures renumbered, brotli within noise), each check for a missing
 one behind `crate::FULL`, a `cfg!` of them all as `EVERY_INDEX` is: a
@@ -2986,8 +2987,8 @@ schema check, search -- `match`, `highlight` and `snippet`, facets,
 `near` with its graph, `fuse` -- and the standard query features. A
 plugin is an extra one kind of app needs: geo, sparse vectors, a
 language's collation, `bucket` and the HLL sketches. Held to that rule
-the core is about 224 KB brotli and the extras about 17 together (`geo`
-5.9, `collate` 8.3, `sparse` 0.9, `bucket` and the sketches 2.1), 7% of
+the core is about 221 KB brotli and the extras about 21 together (`geo`
+6.0, `collate` 8.4, `sparse` 1.4, `bucket` and the sketches 5.1), 9% of
 the full module's 242: too little to pay for modules built ahead
 for sets of features and a choice of one per page, let alone a module a
 plugin loaded beside the engine, which would carry its own copy of the
@@ -3000,7 +3001,7 @@ and `first`/`last` are standard, and are in the core.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 241.7 KB brotli) and `@fenecdb/web/client`, so a user has two
+check, 241.9 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
 module. `fenec-lite.wasm` (no index, no schema check, 172 KB brotli; `make
