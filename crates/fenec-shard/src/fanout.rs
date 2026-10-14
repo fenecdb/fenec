@@ -32,13 +32,19 @@
 //! * `{"order": ["created desc", "id"], "limit": 20}`: a k-way merge of
 //!   rows each tenant gives in that order -- checked, a tenant whose rows
 //!   are not is a failure, never merged wrong -- its own `order ... limit
-//!   20` the top 20 of all of them. Ties go in tenant order;
+//!   20` the top 20 of all of them. Ties go in tenant order. A key the
+//!   tenants order as text in a collation or by a `nocase` field's fold
+//!   says so, `{"column": "name", "collate": "tr", "nocase": true, "desc":
+//!   true}`, and is compared by the engine's own rule ([`TextOrder`]);
 //! * `{"sum": ["n"], "min": [..], "max": [..], "group": ["day"]}`: the
 //!   aggregates that add across tenants, folded by the group columns. A
 //!   count is a sum of counts; an average is not a merge of averages, so
 //!   there is none (fold its sum and its count). Every column of a row is
 //!   a group column or folded, or its tenant fails: a column the merge
-//!   would drop is an answer cut.
+//!   would drop is an answer cut. A `min`, `max` or `group` column may
+//!   name its text order as an order's key does: a tenant's `min` over a
+//!   collated field is the collation's least, and a `nocase` group is one
+//!   for every text folding to it.
 //!
 //! **Never cut.** A tenant that failed, timed out or could not be read is
 //! named, with its node, status and why; by default the whole query fails
@@ -63,6 +69,8 @@
 
 use crate::metrics::{self, Fanned};
 use crate::{quote, Router};
+use fenec_core::case::CaseFold;
+use fenec_core::collate::TextOrder;
 use fenec_core::prelude::*;
 use fenec_http::http::{Request, Response};
 use fenec_http::trace;
@@ -130,12 +138,20 @@ enum Pick {
 
 enum Merge {
     Concat,
-    /// Columns and whether each is descending, and how many rows.
+    /// The keys, and how many rows.
     Order {
-        keys: Vec<(String, bool)>,
+        keys: Vec<Key>,
         limit: Option<usize>,
     },
     Fold(Fold),
+}
+
+/// A key of an order: its column, whether it descends, and how its text
+/// compares.
+struct Key {
+    column: String,
+    desc: bool,
+    text: TextOrder,
 }
 
 struct Fold {
@@ -143,6 +159,9 @@ struct Fold {
     sum: Vec<String>,
     min: Vec<String>,
     max: Vec<String>,
+    /// The columns among them that name a text order other than the
+    /// bytes', with it.
+    texts: Vec<(String, TextOrder)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -171,6 +190,15 @@ impl Fold {
             .chain(&self.sum)
             .chain(&self.min)
             .chain(&self.max)
+    }
+
+    /// How `column`'s text compares: as the merge names it, its bytes'
+    /// otherwise.
+    fn text(&self, column: &str) -> TextOrder {
+        self.texts
+            .iter()
+            .find(|(c, _)| c == column)
+            .map_or(TextOrder::BYTES, |(_, t)| *t)
     }
 }
 
@@ -208,8 +236,8 @@ enum Took {
     Concat(Vec<bool>),
     Order(Keyed),
     /// The columns the rows hold, in the order the first row holds them,
-    /// and each row's values by them.
-    Fold(Vec<(String, Role)>, Vec<Folding>),
+    /// with how each one's text compares, and each row's values by them.
+    Fold(Vec<Column>, Vec<Folding>),
 }
 
 struct Failure {
@@ -863,25 +891,34 @@ fn read_merge(v: Value) -> std::result::Result<Merge, String> {
         sum: Vec::new(),
         min: Vec::new(),
         max: Vec::new(),
+        texts: Vec::new(),
+    };
+    // A `min`, `max` or `group` list: names, or columns naming their text
+    // order.
+    let texted = |key: &str, v: Value, texts: &mut Vec<(String, TextOrder)>| {
+        let Value::List(items) = v else {
+            return Err(format!("`{key}` is a list of column names"));
+        };
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let k = column_of(key, item, false)?;
+            if !k.text.is_bytes() {
+                texts.push((k.column.clone(), k.text));
+            }
+            out.push(k.column);
+        }
+        Ok::<_, String>(out)
     };
     for (key, v) in members {
         match key.as_str() {
             "order" => {
-                let keys = names("order", v)?
+                let Value::List(items) = v else {
+                    return Err("`order` is a list of column names".into());
+                };
+                let keys = items
                     .into_iter()
-                    .map(|k| {
-                        let k = k.trim();
-                        match k.rsplit_once(char::is_whitespace) {
-                            Some((c, d)) if d.eq_ignore_ascii_case("desc") => {
-                                (c.trim().to_string(), true)
-                            }
-                            Some((c, d)) if d.eq_ignore_ascii_case("asc") => {
-                                (c.trim().to_string(), false)
-                            }
-                            _ => (k.to_string(), false),
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|k| column_of("order", k, true))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 if keys.is_empty() {
                     return Err("`order` names a column at least".into());
                 }
@@ -891,10 +928,10 @@ fn read_merge(v: Value) -> std::result::Result<Merge, String> {
                 Value::Int(n) if n >= 0 => limit = Some(n as usize),
                 _ => return Err("`limit` is a whole number".into()),
             },
-            "group" => fold.group = names("group", v)?,
+            "group" => fold.group = texted("group", v, &mut fold.texts)?,
             "sum" => fold.sum = names("sum", v)?,
-            "min" => fold.min = names("min", v)?,
-            "max" => fold.max = names("max", v)?,
+            "min" => fold.min = texted("min", v, &mut fold.texts)?,
+            "max" => fold.max = texted("max", v, &mut fold.texts)?,
             other => {
                 return Err(format!(
                     "no merge `{other}`: order and limit, or sum, min, max and group"
@@ -922,6 +959,81 @@ fn read_merge(v: Value) -> std::result::Result<Merge, String> {
         }
         None => Ok(Merge::Concat),
     }
+}
+
+/// A column of a merge's `list`: a name -- an order's with `asc` or `desc`
+/// after it -- or `{"column": .., "collate": .., "nocase": .., "desc": ..}`
+/// for text the tenants compare otherwise than by its bytes. The router
+/// reads no schema: what a field declares, or what the statement's
+/// `collate` names, is said again here, as the statement's `order` is.
+fn column_of(list: &str, v: Value, order: bool) -> std::result::Result<Key, String> {
+    let members = match v {
+        Value::Text(k) if !k.trim().is_empty() => {
+            let k = k.trim();
+            let (column, desc) = match k.rsplit_once(char::is_whitespace) {
+                Some((c, d)) if order && d.eq_ignore_ascii_case("desc") => (c.trim(), true),
+                Some((c, d)) if order && d.eq_ignore_ascii_case("asc") => (c.trim(), false),
+                _ => (k, false),
+            };
+            return Ok(Key {
+                column: column.to_string(),
+                desc,
+                text: TextOrder::BYTES,
+            });
+        }
+        Value::Object(members) => members,
+        _ => return Err(format!("`{list}` is a list of column names")),
+    };
+    let (mut column, mut desc, mut coll, mut nocase) = (None, false, None, None);
+    for (key, v) in members {
+        match (key.as_str(), v) {
+            ("column", Value::Text(c)) if !c.trim().is_empty() => column = Some(c),
+            ("desc", Value::Bool(d)) if order => desc = d,
+            ("collate", Value::Text(c)) => coll = Some(collation(&c)?),
+            ("nocase", Value::Bool(n)) => nocase = n.then_some(None),
+            // The fold of a field in that collation, where the statement's
+            // `collate` names another than the field's: a `nocase` field
+            // folds by Turkish's rule only when it is `collate tr` itself.
+            ("nocase", Value::Text(c)) => nocase = Some(Some(collation(&c)?)),
+            ("column" | "desc" | "collate" | "nocase", _) => {
+                return Err(format!(
+                    "`{key}` of a column of `{list}` is {}",
+                    match key.as_str() {
+                        "column" => "the column's name",
+                        "desc" => "true or false",
+                        "collate" => "a collation: tr or und",
+                        _ => "true or false, or the collation whose fold: tr or und",
+                    }
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "no member `{key}` in a column of `{list}`: column, {}collate, nocase",
+                    if order { "desc, " } else { "" }
+                ))
+            }
+        }
+    }
+    let Some(column) = column else {
+        return Err(format!("a column of `{list}` names its `column`"));
+    };
+    // As `Field::case_fold` has it: Turkish's fold in `collate tr`, Unicode's
+    // in any other or none.
+    let fold = nocase.map(|of: Option<Collation>| match of.or(coll) {
+        Some(Collation::Turkish) => CaseFold::Turkish,
+        _ => CaseFold::Unicode,
+    });
+    Ok(Key {
+        column: column.trim().to_string(),
+        desc,
+        text: TextOrder { coll, fold },
+    })
+}
+
+/// The collation `name` names, as `collate <name>` reads it, or a refusal
+/// naming it.
+fn collation(name: &str) -> std::result::Result<Collation, String> {
+    Collation::named(name).ok_or_else(|| format!("no collation `{name}`: tr or und"))
 }
 
 // --------------------------------------------------------------- merging
@@ -1101,11 +1213,51 @@ fn value_of(raw: &str) -> std::result::Result<Value, String> {
     }
 }
 
-/// Two values in the order the engine puts them, text by its bytes: a
-/// collated or `nocase` order is the engine's alone, and a tenant whose
-/// rows come in one is found out of order and named, never merged wrong.
+/// Two values in the order the engine puts them, text by its bytes. A
+/// collated or `nocase` order is one the request names ([`cmp_in`]); not
+/// named, a tenant whose rows come in one is found out of order and named,
+/// never merged wrong.
 fn cmp(a: &Value, b: &Value) -> Order {
     a.cmp_value(b)
+}
+
+/// A value of a column whose text compares in `text`, read to be compared:
+/// [`value_of`]'s for the bytes' order. In another, a text is text whatever
+/// it looks like -- read as the time its form names, it would be ordered as
+/// no tenant ordered it -- and is folded here, once, as the engine folds an
+/// order's `nocase` keys before it sorts (`folded_keys`): folded at every
+/// comparison, the merge would fold each text again for each other one it
+/// meets.
+fn value_in(raw: &str, text: TextOrder) -> std::result::Result<Value, String> {
+    if text.is_bytes() {
+        return value_of(raw);
+    }
+    let b = raw.as_bytes();
+    let v = match b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' && !raw.contains('\\') {
+        true => Value::Text(raw[1..raw.len() - 1].to_string()),
+        false => fenec_core::json::parse_json(raw).map_err(|e| crate::message(&e))?,
+    };
+    Ok(match (text.fold, v) {
+        (Some(f), Value::Text(t)) => Value::Text(fenec_core::case::fold(&t, f).into_owned()),
+        (_, v) => v,
+    })
+}
+
+/// Two values [`value_in`] read for `text`, in its order: its fold made as
+/// they were read, its collation's -- `TextOrder::compare_values`, the
+/// engine's `order` -- or [`cmp`]'s. A `nocase` order ties the texts that
+/// fold to one, as the engine's does, rather than tell them apart by their
+/// bytes: a tenant holds them in id order, which no other rule keeps.
+#[inline]
+fn cmp_in(text: TextOrder, a: &Value, b: &Value) -> Order {
+    match text.coll {
+        Some(c) => TextOrder {
+            coll: Some(c),
+            fold: None,
+        }
+        .compare_values(a, b),
+        None => cmp(a, b),
+    }
 }
 
 /// The milliseconds a text names when it is a timestamp as
@@ -1167,14 +1319,36 @@ fn iso_ms(s: &str) -> Option<i64> {
 /// whether it holds no member at all.
 type Keyed = Vec<(Vec<Value>, bool)>;
 
-fn cmp_keys(a: &[Value], b: &[Value], keys: &[(String, bool)]) -> Order {
-    for (i, (_, desc)) in keys.iter().enumerate() {
-        let o = cmp(&a[i], &b[i]);
+fn cmp_keys(a: &[Value], b: &[Value], keys: &[Key]) -> Order {
+    for (i, k) in keys.iter().enumerate() {
+        let o = cmp_in(k.text, &a[i], &b[i]);
         if o != Order::Equal {
-            return if *desc { o.reverse() } else { o };
+            return if k.desc { o.reverse() } else { o };
         }
     }
     Order::Equal
+}
+
+/// A key in words: `name collate tr nocase desc`, the fold named where it
+/// is not the collation's own (`nocase "und"`).
+fn key_words(k: &Key) -> String {
+    let mut out = k.column.clone();
+    if let Some(c) = k.text.coll {
+        out.push_str(" collate ");
+        out.push_str(c.name());
+    }
+    if let Some(f) = k.text.fold {
+        let own = (k.text.coll == Some(Collation::Turkish)) == (f == CaseFold::Turkish);
+        out.push_str(match (own, f) {
+            (true, _) => " nocase",
+            (false, CaseFold::Turkish) => " nocase \"tr\"",
+            (false, CaseFold::Unicode) => " nocase \"und\"",
+        });
+    }
+    if k.desc {
+        out.push_str(" desc");
+    }
+    out
 }
 
 /// A tenant's rows, each with the values of the order's keys: checked to
@@ -1182,7 +1356,7 @@ fn cmp_keys(a: &[Value], b: &[Value], keys: &[(String, bool)]) -> Order {
 /// together the first rows of all of them.
 fn keyed(
     column: &str,
-    keys: &[(String, bool)],
+    keys: &[Key],
     text: &str,
     rows: &[Range<usize>],
 ) -> std::result::Result<Keyed, String> {
@@ -1194,8 +1368,8 @@ fn keyed(
         scan::each(text, r.clone(), &mut |k, v| {
             empty = false;
             clash |= scan::key_is(text, &k, column);
-            for (slot, (name, _)) in found.iter_mut().zip(keys) {
-                if slot.is_none() && scan::key_is(text, &k, name) {
+            for (slot, key) in found.iter_mut().zip(keys) {
+                if slot.is_none() && scan::key_is(text, &k, &key.column) {
                     *slot = Some(v.clone());
                 }
             }
@@ -1205,21 +1379,22 @@ fn keyed(
             return Err(clashing(column));
         }
         let mut values = Vec::with_capacity(keys.len());
-        for (slot, (k, _)) in found.iter().zip(keys) {
+        for (slot, k) in found.iter().zip(keys) {
             let Some(at) = slot else {
-                return Err(format!("its rows have no `{k}` column to order by"));
+                return Err(format!(
+                    "its rows have no `{}` column to order by",
+                    k.column
+                ));
             };
-            values.push(value_of(&text[at.clone()])?);
+            values.push(value_in(&text[at.clone()], k.text)?);
         }
         if let Some((before, _)) = out.last() {
             if cmp_keys(before, &values, keys) == Order::Greater {
                 return Err(format!(
                     "its rows are not in the merge's order ({}): its statement orders them \
-                     otherwise, or by a collation the router does not compare by",
-                    keys.iter()
-                        .map(|(k, d)| format!("{k}{}", if *d { " desc" } else { "" }))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                     otherwise, or as text in a collation or by a `nocase` field's fold, \
+                     which the merge's key names (\"collate\", \"nocase\")",
+                    keys.iter().map(key_words).collect::<Vec<_>>().join(", ")
                 ));
             }
         }
@@ -1231,12 +1406,7 @@ fn keyed(
 /// The k-way merge: each tenant's next row in a heap, the least on top --
 /// by the keys, then by the tenant's place in name order -- taken until
 /// `limit` rows are.
-fn ordered(
-    column: &str,
-    keys: &[(String, bool)],
-    limit: Option<usize>,
-    reads: &[(&str, Read)],
-) -> String {
+fn ordered(column: &str, keys: &[Key], limit: Option<usize>, reads: &[(&str, Read)]) -> String {
     let lists: Vec<(usize, &Keyed)> = reads
         .iter()
         .enumerate()
@@ -1327,9 +1497,12 @@ enum Slot {
 /// value and text, in the row's order.
 type Folding = Vec<(usize, Value, Range<usize>)>;
 
+/// A column of a fold: its name, its role, and how its text compares.
+type Column = (String, Role, TextOrder);
+
 fn folded(fold: &Fold, reads: &[(&str, Read)]) -> std::result::Result<String, Refusal> {
     // The output's columns, in the order the first row holds them.
-    let mut columns: Vec<(String, Role)> = Vec::new();
+    let mut columns: Vec<Column> = Vec::new();
     let mut groups: Vec<(Vec<Value>, Vec<Slot>)> = Vec::new();
     let mut by_key: HashMap<String, usize> = HashMap::new();
     for (_, read) in reads {
@@ -1342,10 +1515,10 @@ fn folded(fold: &Fold, reads: &[(&str, Read)]) -> std::result::Result<String, Re
         let at: Vec<usize> = local
             .iter()
             .map(
-                |(name, role)| match columns.iter().position(|(c, _)| c == name) {
+                |(name, role, t)| match columns.iter().position(|(c, _, _)| c == name) {
                     Some(c) => c,
                     None => {
-                        columns.push((name.clone(), *role));
+                        columns.push((name.clone(), *role, *t));
                         columns.len() - 1
                     }
                 },
@@ -1360,6 +1533,8 @@ fn folded(fold: &Fold, reads: &[(&str, Read)]) -> std::result::Result<String, Re
                     .iter()
                     .find(|(c, _, _)| columns[at[*c]].0 == *g)
                     .expect("a row holds every column the merge names");
+                // A `nocase` column's value is its fold: the texts folding
+                // to one are one group, under the first row's text.
                 fenec_core::json::value_into(&mut key, v);
                 key.push('\0');
                 values.push(v.clone());
@@ -1369,7 +1544,7 @@ fn folded(fold: &Fold, reads: &[(&str, Read)]) -> std::result::Result<String, Re
                 None => {
                     let slots = columns
                         .iter()
-                        .map(|(_, role)| match role {
+                        .map(|(_, role, _)| match role {
                             Role::Group => Slot::Key(String::new()),
                             Role::Sum => Slot::Sum {
                                 ints: 0,
@@ -1422,17 +1597,21 @@ fn folded(fold: &Fold, reads: &[(&str, Read)]) -> std::result::Result<String, Re
                         _ => {}
                     },
                     Slot::Least(best) => {
+                        let t = columns[c].2;
                         if !matches!(v, Value::Null)
-                            && best.as_ref().is_none_or(|(b, _)| cmp(v, b) == Order::Less)
+                            && best
+                                .as_ref()
+                                .is_none_or(|(b, _)| cmp_in(t, v, b) == Order::Less)
                         {
                             *best = Some((v.clone(), raw.to_string()));
                         }
                     }
                     Slot::Most(best) => {
+                        let t = columns[c].2;
                         if !matches!(v, Value::Null)
                             && best
                                 .as_ref()
-                                .is_none_or(|(b, _)| cmp(v, b) == Order::Greater)
+                                .is_none_or(|(b, _)| cmp_in(t, v, b) == Order::Greater)
                         {
                             *best = Some((v.clone(), raw.to_string()));
                         }
@@ -1461,10 +1640,12 @@ fn folded(fold: &Fold, reads: &[(&str, Read)]) -> std::result::Result<String, Re
         out.push_str("}]");
         return Ok(out);
     }
+    let texts: Vec<TextOrder> = fold.group.iter().map(|g| fold.text(g)).collect();
     groups.sort_by(|a, b| {
         a.0.iter()
             .zip(&b.0)
-            .map(|(x, y)| cmp(x, y))
+            .zip(&texts)
+            .map(|((x, y), t)| cmp_in(*t, x, y))
             .find(|o| *o != Order::Equal)
             .unwrap_or(Order::Equal)
     });
@@ -1474,7 +1655,7 @@ fn folded(fold: &Fold, reads: &[(&str, Read)]) -> std::result::Result<String, Re
             out.push(',');
         }
         out.push('{');
-        for (j, ((name, _), slot)) in columns.iter().zip(slots).enumerate() {
+        for (j, ((name, _, _), slot)) in columns.iter().zip(slots).enumerate() {
             if j > 0 {
                 out.push(',');
             }
@@ -1506,13 +1687,16 @@ fn fold_row(
     fold: &Fold,
     text: &str,
     row: Range<usize>,
-    columns: &mut Vec<(String, Role)>,
+    columns: &mut Vec<Column>,
 ) -> std::result::Result<Folding, String> {
     let mut out = Vec::with_capacity(columns.len());
     scan::each(text, row, &mut |k, r| {
         // A column met before is known by its key where it lies; only a
         // new one's name is decoded, and held to the merge.
-        let c = match columns.iter().position(|(c, _)| scan::key_is(text, &k, c)) {
+        let c = match columns
+            .iter()
+            .position(|(c, _, _)| scan::key_is(text, &k, c))
+        {
             Some(c) => c,
             None => {
                 let name = scan::key_text(text, &k)?;
@@ -1522,11 +1706,12 @@ fn fold_row(
                          folds: a column it would drop is an answer cut"
                     ));
                 };
-                columns.push((name, role));
+                let t = fold.text(&name);
+                columns.push((name, role, t));
                 columns.len() - 1
             }
         };
-        let v = value_of(&text[r.clone()])?;
+        let v = value_in(&text[r.clone()], columns[c].2)?;
         if columns[c].1 == Role::Sum && !matches!(v, Value::Int(_) | Value::Float(_) | Value::Null)
         {
             return Err(format!(
@@ -1981,6 +2166,144 @@ mod tests {
         assert_eq!(folded(sum, &[]).ok().unwrap(), r#"[{"n":null}]"#);
         let (_, f) = read(&just, &[("a", r#"[{"n":"seven"}]"#)]);
         assert!(f[0].why.contains("no number"), "{}", f[0].why);
+    }
+
+    /// A key naming its text order compares as the engine's `order` does:
+    /// over words of letters that fold and collate apart from their bytes --
+    /// `I ı İ i`, `ß SS ẞ`, `Ç ç`, a timestamp's form -- each way a text can
+    /// be ordered, a field's collation, its fold, both, and a statement's
+    /// `collate` over a field folding by another rule, the engine's rows
+    /// pass the merge's check either way round, and the merge ties exactly
+    /// the rows the engine ties: those it leaves in id order both ways.
+    #[test]
+    fn a_text_order_named_compares_as_the_engine_orders() {
+        let mut db = Database::new();
+        let run = |db: &mut Database, q: &str| {
+            db.execute(&fenec_ql::parse_one(q).unwrap()).unwrap();
+        };
+        run(
+            &mut db,
+            "create collection t (plain text, tr text collate tr, und text collate und, \
+             nc text nocase, trnc text collate tr nocase, undnc text collate und nocase)",
+        );
+        let mut letters: Vec<&str> = "a A ı I i İ ç Ç c s S ß ẞ ss ö O e é -"
+            .split(' ')
+            .collect();
+        letters.extend(["2026-10-12T09:30:00Z", "2026-10-12T09:30:00.500Z"]);
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..240 {
+            let w: String = (0..1 + next(3))
+                .map(|_| letters[next(letters.len())])
+                .collect();
+            let mut q = String::from("put t {plain: ");
+            fenec_core::json::escape_into(&mut q, &w);
+            for f in ["tr", "und", "nc", "trnc", "undnc"] {
+                q.push_str(&format!(", {f}: "));
+                fenec_core::json::escape_into(&mut q, &w);
+            }
+            q.push('}');
+            run(&mut db, &q);
+        }
+        let answer = |q: &str| {
+            let mut out = String::new();
+            let n = db.query_json(&fenec_ql::parse_one(q).unwrap(), &[], &mut out);
+            assert!(n.unwrap().is_some(), "{q}");
+            out
+        };
+        let id_of = |text: &str, row: &Range<usize>| {
+            let (_, at) = scan::members(text, row.clone())
+                .unwrap()
+                .into_iter()
+                .find(|(k, _)| k == "id")
+                .unwrap();
+            text[at].parse::<i64>().unwrap()
+        };
+        let cases = [
+            ("tr", "", r#"{"column":"tr","collate":"tr"}"#),
+            ("und", "", r#"{"column":"und","collate":"und"}"#),
+            ("nc", "", r#"{"column":"nc","nocase":true}"#),
+            (
+                "trnc",
+                "",
+                r#"{"column":"trnc","collate":"tr","nocase":true}"#,
+            ),
+            (
+                "undnc",
+                "",
+                r#"{"column":"undnc","collate":"und","nocase":true}"#,
+            ),
+            (
+                "plain",
+                " collate tr",
+                r#"{"column":"plain","collate":"tr"}"#,
+            ),
+            // The field's fold, and the statement's collation over it.
+            (
+                "nc",
+                " collate tr",
+                r#"{"column":"nc","collate":"tr","nocase":"und"}"#,
+            ),
+            (
+                "trnc",
+                " collate und",
+                r#"{"column":"trnc","collate":"und","nocase":"tr"}"#,
+            ),
+        ];
+        for (field, collate, spec) in cases {
+            let key = |desc: bool| {
+                let v = fenec_core::json::parse_json(spec).unwrap();
+                let mut k = column_of("order", v, true).unwrap();
+                k.desc = desc;
+                k
+            };
+            let read = |desc: bool| {
+                let way = if desc { " desc" } else { "" };
+                let text = answer(&format!(
+                    "get t select id, {field} order {field}{collate}{way}"
+                ));
+                let rows = scan::elements(&text).unwrap();
+                let keyed = keyed("tenant", &[key(desc)], &text, &rows)
+                    .unwrap_or_else(|e| panic!("{field}{collate}{way}: {e}"));
+                let ids: Vec<i64> = rows.iter().map(|r| id_of(&text, r)).collect();
+                (ids, keyed)
+            };
+            let (asc, values) = read(false);
+            let (desc, _) = read(true);
+            let place: HashMap<i64, usize> =
+                desc.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+            let text = key(false).text;
+            let mut ties = 0;
+            for i in 0..asc.len() {
+                for j in i + 1..asc.len() {
+                    let o = cmp_in(text, &values[i].0[0], &values[j].0[0]);
+                    let tied = place[&asc[i]] < place[&asc[j]];
+                    assert_eq!(
+                        o == Order::Equal,
+                        tied,
+                        "{field}{collate}: rows {} and {}",
+                        asc[i],
+                        asc[j]
+                    );
+                    assert_ne!(o, Order::Greater, "{field}{collate}");
+                    ties += tied as usize;
+                }
+            }
+            assert!(ties > 0, "{field}{collate}: no two rows tied");
+        }
+        // The fold is the field's: a `nocase` field outside `collate tr`
+        // folds `I` to `i`, so the merge told `collate tr` alone would fold
+        // it to `ı` and part what the engine ties.
+        let v = fenec_core::json::parse_json(r#"{"column":"nc","collate":"tr","nocase":true}"#);
+        let wrong = column_of("order", v.unwrap(), true).unwrap();
+        let text = answer("get t select id, nc order nc collate tr");
+        let rows = scan::elements(&text).unwrap();
+        assert!(keyed("tenant", &[wrong], &text, &rows).is_err());
     }
 
     #[test]

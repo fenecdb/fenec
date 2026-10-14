@@ -408,8 +408,9 @@ fn main() {
 /// A query across tenants (`POST /_shard/query`) over 100 tenants on three
 /// nodes, against a client asking each tenant itself through the router:
 /// one after another on a kept-alive connection, and sixteen at once on
-/// sixteen, as many as the router has out. A count added up, and the
-/// twenty newest rows of all of them, each tenant's twenty merged.
+/// sixteen, as many as the router has out. A count added up, the twenty
+/// newest rows of all of them, each tenant's twenty merged, and the twenty
+/// first names in Turkish's order over their folds, merged in it.
 fn fanout() {
     const TENANTS: usize = 100;
     const ROWS: usize = 200;
@@ -456,8 +457,43 @@ fn fanout() {
         let (status, b) = r.send("POST", &format!("/t/t{t:03}/query"), None, q.as_bytes());
         assert_eq!(status, 200, "{}", String::from_utf8_lossy(&b));
     }
+    // Names in Turkish's order over their folds, a collection of their own,
+    // made once the cases before it are timed: those read the tenants they
+    // read before it, and measure against a build without it.
+    let people = |r: &mut Client| {
+        const FIRST: [&str; 22] = [
+            "Ali", "Ayşe", "Çağla", "Deniz", "Emre", "Ezgi", "Gökhan", "Hülya", "Irmak", "İpek",
+            "Kemal", "Leyla", "Mert", "Nazlı", "Ömer", "Özge", "Selin", "Şule", "Tolga", "Ümit",
+            "Yağız", "Zeynep",
+        ];
+        const LAST: [&str; 12] = [
+            "YILMAZ", "Kaya", "Demir", "Çelik", "ŞAHİN", "Yıldız", "Öztürk", "aydın", "Özdemir",
+            "Arslan", "Doğan", "Kılıç",
+        ];
+        for t in 0..TENANTS {
+            let people: Vec<String> = (0..ROWS)
+                .map(|k| {
+                    let (f, l) = (FIRST[(k * 7 + t) % 22], LAST[(k * 5 + t * 3) % 12]);
+                    format!("{{name: \"{f} {l}\"}}")
+                })
+                .collect();
+            let make = "create collection people (name text collate tr nocase @sorted)";
+            for q in [
+                make.to_string(),
+                format!("put people [{}]", people.join(",")),
+            ] {
+                let mut body = String::from("{\"query\":");
+                fenec_core::json::escape_into(&mut body, &q);
+                body.push('}');
+                let target = format!("/t/t{t:03}/query");
+                let (status, b) = r.send("POST", &target, None, body.as_bytes());
+                assert_eq!(status, 200, "{}", String::from_utf8_lossy(&b));
+            }
+        }
+    };
     let count = "get users select count() as n";
     let top = "get users select email, created order created desc limit 20";
+    let names = "get people select name order name limit 20";
     let body = |q: &str, merge: &str| {
         let mut b = String::from("{\"query\":");
         fenec_core::json::escape_into(&mut b, q);
@@ -471,6 +507,11 @@ fn fanout() {
             top,
             r#"{"order":["created desc"],"limit":20}"#,
         ),
+        (
+            "the 20 first names, collate tr nocase, merged",
+            names,
+            r#"{"order":[{"column":"name","collate":"tr","nocase":true}],"limit":20}"#,
+        ),
     ];
     let tenants: Vec<String> = (0..TENANTS).map(|t| format!("t{t:03}")).collect();
     println!(
@@ -478,6 +519,9 @@ fn fanout() {
     );
     println!("                                    p50        p95        p99");
     for (label, q, merge) in cases {
+        if q == names {
+            people(&mut r);
+        }
         let fan = body(q, merge);
         // The answer is what a client asking each tenant would merge.
         let (status, b) = r.send("POST", "/_shard/query", None, fan.as_bytes());

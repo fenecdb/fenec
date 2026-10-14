@@ -511,6 +511,12 @@ curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
 curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
      -d '{"query":"get orders select bucket(at, 1d) as day, count() as n group day",
           "merge":{"sum":["n"],"group":["day"]},"prefix":"eu-"}'
+
+# the first twenty names of all of them in Turkish's order, a field
+# declared `name text collate tr nocase`
+curl -X POST localhost:8090/_shard/query -H 'Authorization: Bearer root' \
+     -d '{"query":"get people select name order name limit 20",
+          "merge":{"order":[{"column":"name","collate":"tr","nocase":true}],"limit":20}}'
 </pre>
 
 <ul>
@@ -567,11 +573,12 @@ request, never read out of the query:</p>
     order. With each tenant's own <code>order ... limit 20</code>, the first
     twenty of the merge are the first twenty of all of them. The router
     checks each tenant's rows come in the order, and a tenant whose do not
-    — its statement orders otherwise, or by a collation, which is the
-    engine's alone — fails, never merged wrong. Values compare as the engine
-    compares them, text by its bytes; a timestamp travels as ISO text, which
-    leaves its milliseconds out where they are 0, so a text that is one
-    compares as its time. Ties go in tenant name order.</li>
+    — its statement orders otherwise — fails, never merged wrong. Values
+    compare as the engine compares them, text by its bytes; a timestamp
+    travels as ISO text, which leaves its milliseconds out where they are
+    0, so a text that is one compares as its time. Ties go in tenant name
+    order. A key whose text is not ordered by its bytes says how it is
+    (below).</li>
   <li><b>A fold</b>: <code>sum</code>, <code>min</code> and
     <code>max</code> of the named columns, by the <code>group</code>
     columns, groups in order. These are the aggregates that combine across
@@ -579,8 +586,33 @@ request, never read out of the query:</p>
     average, so there is none: sum its sum and its count. Every column of a
     row must be grouped by or folded, or the tenant fails: a column the
     merge would drop is an answer cut. A sum of whole numbers past 64 bits
-    is refused, as the engine refuses one.</li>
+    is refused, as the engine refuses one. A <code>min</code>,
+    <code>max</code> or <code>group</code> column may be an object naming
+    its text order as an order's key is: a tenant's <code>min</code> over a
+    collated field is the collation's least, so the least of those is too,
+    and a <code>nocase</code> group is one for every text folding to it,
+    under the first tenant's text.</li>
 </ul>
+
+<p>A column whose text the tenants compare otherwise than by its bytes is
+an object in place of its name: <code>{"column": "name", "collate": "tr",
+"nocase": true, "desc": true}</code> where <code>"name desc"</code> would
+be. The router reads no schema, so what the field declares —
+<code>collate tr</code> or <code>und</code>, <code>nocase</code> — or what
+the statement's <code>order name collate tr</code> names is said again
+here, and the column compares by the engine's own rule: the collation over
+the case folds, the texts that fold to one tied, and a text read as text
+even where it looks like a timestamp. <code>"nocase": true</code> folds as
+a field in the column's collation does, Turkish's under <code>tr</code>
+(<code>I</code> the capital of <code>ı</code>) and Unicode's otherwise;
+where the statement's <code>collate</code> names another than the field's
+own, <code>"nocase"</code> names the field's, as <code>"nocase":
+"und"</code> for a plain <code>nocase</code> field ordered <code>collate
+tr</code>. A collation other than <code>tr</code> or <code>und</code> is
+refused (400), named, and <code>desc</code> is an order's alone. Not told,
+the router compares bytes: the tenants whose rows come in another order
+fail, and a <code>min</code> or <code>max</code> is the bytes' least or
+greatest of the tenants' own.</p>
 
 <p>A tenant that fails — its node unreachable, its call past the timeout,
 an answer that does not fit the merge, or one the node refused — is named
@@ -621,17 +653,19 @@ as a read is not.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>&nbsp;</th><th class="n">a count, summed</th><th class="n">the 20 newest, merged</th></tr></thead>
+<thead><tr><th>&nbsp;</th><th class="n">a count, summed</th><th class="n">the 20 newest, merged</th><th class="n">the 20 first names, <code>collate tr nocase</code></th></tr></thead>
 <tbody>
-<tr><td><code>POST /_shard/query</code></td><td class="n">1.15–1.23 ms</td><td class="n">1.35–1.39 ms</td></tr>
-<tr><td>each tenant through the router, in turn</td><td class="n">4.28–5.16 ms</td><td class="n">5.11–5.45 ms</td></tr>
-<tr><td>each tenant through the router, 16 at once</td><td class="n">1.92–1.98 ms</td><td class="n">1.86–2.17 ms</td></tr>
+<tr><td><code>POST /_shard/query</code></td><td class="n">1.15–1.23 ms</td><td class="n">1.35–1.39 ms</td><td class="n">1.33–1.48 ms</td></tr>
+<tr><td>each tenant through the router, in turn</td><td class="n">4.28–5.16 ms</td><td class="n">5.11–5.45 ms</td><td class="n">4.34–5.62 ms</td></tr>
+<tr><td>each tenant through the router, 16 at once</td><td class="n">1.92–1.98 ms</td><td class="n">1.86–2.17 ms</td><td class="n">1.90–2.21 ms</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>p50 over 300 rounds in three runs; the client asking 16 at once merges
-nothing. A request forwarded to one tenant costs what it did.</p>
+<p>p50 over 300 rounds in three runs, the names' in six beside other
+work on the machine; the client asking 16 at once merges nothing. A merge
+in a collation over case folds costs what one by a timestamp does. A
+request forwarded to one tenant costs what it did.</p>
 </details>
 
 <h2>What it costs</h2>
