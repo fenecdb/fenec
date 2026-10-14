@@ -178,8 +178,10 @@ pub fn parse(text: &str) -> Result<i64> {
 /// Current time (epoch ms).
 ///
 /// There is no clock on `wasm32-unknown-unknown` -- `SystemTime::now()` panics.
-/// On that target `now()` returns an error; in the browser the caller passes
-/// the time in (as a parameter, via `Date.now()`).
+/// On that target `now()` returns an error: the browser module reads the time
+/// it is handed with each statement (`fenec_query`'s last argument,
+/// `Date.now()` in `fenec.js`, through `Database::set_clock`), and only a
+/// statement handed none reaches this.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn now_ms() -> Result<i64> {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -192,7 +194,7 @@ pub fn now_ms() -> Result<i64> {
 #[cfg(target_arch = "wasm32")]
 pub fn now_ms() -> Result<i64> {
     Err(Error::Query(
-        "now() is unavailable on this target: pass the time in as a parameter (Date.now())".into(),
+        "now() is unavailable on this target: the statement was handed no time".into(),
     ))
 }
 

@@ -403,7 +403,7 @@ def prev_next(active, base):
 NOISE_KB = 0.3
 COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all",
               "kb_lite_gz", "kb_lite_br", "kb_min_gz", "kb_min_br",
-              "kb_app_br", "kb_app_client_br", "kb_studio_gz"}
+              "kb_app_br", "kb_app_gz", "kb_app_client_br", "kb_app_client_gz", "kb_studio_gz"}
 # The browser client's modules, each after those it imports: what
 # `@fenecdb/web` ships of JavaScript. client.js is `@fenecdb/web/client`,
 # builder.js and http.js without the engine.
@@ -468,6 +468,7 @@ CLAIMS = [
      "kb_app_client_br", 0),
     ("site/content/docs/javascript.html",
      r"<code>sync\(\)</code> loads it too</td><td class=\"n\">(\d+) KB</td>", "kb_br", 0),
+    ("site/content/docs/javascript.html", r"make wasm +# every feature: (\d+) KB brotli", "kb_br", 0),
     ("site/content/docs/javascript.html",
      r"make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: (\d+) KB", "kb_lite_br", 0),
     ("site/content/docs/javascript.html",
@@ -488,6 +489,13 @@ CLAIMS = [
      "kb_client_gz", 0),
     ("site/content/docs/benchmarks.html",
      r"in an app's bundle, <code>@fenecdb/web/client</code></td><td class=\"n\">(\d+) KB</td>", "kb_app_client_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r"<code>@fenecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class=\"n\">(\d+) KB</td>", "kb_app_client", 0),
+    ("site/content/docs/benchmarks.html",
+     r"<code>@fenecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class=\"n\">\d+ KB</td><td class=\"n\">(\d+) KB</td>", "kb_app_client_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r"<code>@fenecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class=\"n\">\d+ KB</td><td class=\"n\">\d+ KB</td><td class=\"n\">(\d+) KB</td>",
+     "kb_app_client_gz", 0),
     ("site/content/docs/benchmarks.html",
      r'<code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">(\d+) KB</td>', "kb_lite", 0),
     ("site/content/docs/benchmarks.html",
@@ -895,9 +903,12 @@ def check_claims():
             other[f"kb_{key}_gz"] = kb(gz)
             other[f"kb_{key}_br"] = kb(br)
     apps = {}
-    for key, entry in (("kb_app_br", "fenec.js"), ("kb_app_client_br", "client.js")):
+    for key, entry in (("kb_app", "fenec.js"), ("kb_app_client", "client.js")):
         bundle = app_bundle(entry)
-        apps[key] = None if bundle is None else kb(compressed_bytes(bundle)[1])
+        gz, br = (None, None) if bundle is None else compressed_bytes(bundle)
+        apps[key] = None if bundle is None else kb(len(bundle))
+        apps[f"{key}_gz"] = kb(gz)
+        apps[f"{key}_br"] = kb(br)
     truth = {
         "bytes": size,
         "kb": kb(size),

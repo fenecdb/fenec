@@ -347,7 +347,7 @@ macro_rules! strip8 {
 /// Σ x², summed flat, one element after another: the 8-strip `norm` rounds
 /// differently, which would change the normalised vectors and with them
 /// the graph. One add waits on the one before, 120 ns at 128 dimensions
-/// and 720 at 768 on an M1 -- see [`flat_sqs`] for several at once.
+/// and 720 at 768 on an M1 -- see [`flat_sqs8`] for several at once.
 #[inline]
 fn flat_sq(v: &[f32]) -> f32 {
     let mut acc = 0.0f32;
@@ -2389,15 +2389,17 @@ impl Rng {
 ///
 /// 7 and 8 are 3 to 6 laid out flat -- the image's and the tail's -- with
 /// the quantization and a node's waiting flag always there: arrays of the
-/// nodes' documents, flags, levels and level-0 lengths, then every link a
-/// `u32`, where the others took a varint delta a link. Decoding them one at
-/// a time was a quarter of opening a 100 000 x 128 graph; laid out flat they
-/// are copied. A binary before 7 does not know it, and rebuilds.
+/// nodes' documents, flags, levels and level-0 lengths, then every list
+/// sorted, its first link in as many bytes as the node count needs and its
+/// steps in as many as its widest ([`put_links`]), where the others took a
+/// varint delta a link. Decoding them one at a time was a quarter of
+/// opening a 100 000 x 128 graph; laid out flat they are read a width at a
+/// time. A binary before 7 does not know it, and rebuilds.
 ///
 /// 9 and 10 are 7 and 8 with the documents that hold another's vector
 /// after the tombstones (`VectorIndex::aliases`): their number, then each
-/// one's node and document -- and, written natively, the nodes' hash
-/// halves after those ([`HALVES`]).
+/// one's node and document -- and the nodes' hash halves after those
+/// ([`HALVES`]), which every target writes and reads.
 const GRAPH_VERSION: u8 = 3;
 const GRAPH_VERSION_QUANT: u8 = 4;
 const GRAPH_VERSION_UNLINKED: u8 = 5;

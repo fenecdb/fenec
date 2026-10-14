@@ -657,10 +657,9 @@ struct Block {
 /// The nodes a block's `put`s leave waiting before they are linked, a
 /// field at a time: a batch as wide as the widest the graph links at once
 /// (`MAX_BATCH`), whose candidates are found on every core. Linked as each
-/// statement wrote them, a row at a time as a driver's `executemany` and a
-/// `/batch` of single puts send them, 100 000 128-dim rows went in at
-/// 5.4k rows/s with the graph kept over the pg wire as it was and 5.3k over
-/// HTTP; linked together, at 16.9k and 16.0k (`make load-bench`).
+/// statement wrote them, a row at a time as a `/batch` of single puts
+/// sends them, 100 000 128-dim rows went in over HTTP at 5.3k rows/s with
+/// the graph kept; linked together, at 16.0k (`make load-bench`).
 const LINK_AT: usize = 512;
 
 /// Whether a block's `put`s leave their vectors waiting: natively. The
@@ -12016,8 +12015,6 @@ fn nearest_of(
     Ok(out)
 }
 
-/// A ranking as the rows carry it. One conversion for `match`, `near` and
-/// `fuse`: a closure each was a copy each in the browser module.
 /// Each value a range facet's field holds over `ids` -- every row when
 /// `all` -- handed with the row's place: a scalar's value, a list's one by
 /// one, none for a row without the field.
@@ -12066,6 +12063,8 @@ fn member_bits(ids: &[DocId]) -> Vec<u64> {
     bits
 }
 
+/// A ranking as the rows carry it. One conversion for `match`, `near` and
+/// `fuse`: a closure each was a copy each in the browser module.
 fn with_scores(hits: Vec<(DocId, f32)>) -> Vec<(DocId, Option<f32>)> {
     hits.into_iter().map(|(id, s)| (id, Some(s))).collect()
 }
