@@ -5,7 +5,7 @@
 //
 //   import { DurableObject } from 'cloudflare:workers';
 //   import { Fenec } from '@fenecdb/web';
-//   import { persist, restore } from '@fenecdb/cloudflare';
+//   import { maintain, persist, release, restore, schedule } from '@fenecdb/cloudflare';
 //   import wasm from '@fenecdb/web/fenec.wasm';
 //
 //   export class Tenant extends DurableObject {
@@ -20,10 +20,27 @@
 //     async query(sql, params) {
 //       const db = await this.db();
 //       const out = db.run(sql, params);
-//       await persist(db, this.ctx.storage);
+//       if (await persist(db, this.ctx.storage)) {
+//         // Stored either way: the next write sets an alarm not set.
+//         await schedule(db, this.ctx.storage).catch(() => {});
+//       }
 //       return out;
 //     }
+//     async alarm() {
+//       // Rows past their time deleted, an image when one is worth it, the
+//       // alarm set again for what comes due -- or none.
+//       const db = await this.db();
+//       const done = await maintain(db, this.ctx.storage).catch(async (e) => {
+//         await release(db); // nothing more of it stored: the retry restores
+//         this.fenec = null;
+//         throw e;
+//       });
+//       if (done.error) throw done.error; // stored, the alarm not set: tried again
+//     }
 //   }
+//
+// README.md lets a database whose writes were not stored go too, and
+// example/worker.js opens it again when `maintain` asks for a reload.
 //
 // One object is one database, as a tenant is one file on a fenec-server node:
 // the object's single thread is the single writer. Nothing here imports the
@@ -57,6 +74,15 @@ export const ROW = 2_000_000 - 1024;
 const FOLD = 0.5;
 
 /**
+ * And this share, in a request, once the object keeps its database from
+ * an alarm (`schedule`): there `maintain` writes the image at `FOLD`, and
+ * the request folds only should the writes get this far before the alarm
+ * rings. Folded in the request, a 27.6 MB image is 16 rows written before
+ * the answer goes.
+ */
+const BACKSTOP = 1;
+
+/**
  * Nor before the writes since reach this, and a checkpoint not before
  * either: a small database folded every few writes otherwise, each fold
  * its image's rows again, and a checkpoint of a 30 MB image for one
@@ -71,6 +97,14 @@ const FLOOR = 64 * 1024;
  * way, `failed` what stopped one.
  */
 const kept = new WeakMap();
+
+/**
+ * The databases let go of (`release`), whatever state they had: one never
+ * kept, or restored from empty storage, had none to mark, and a `persist`
+ * after made one afresh and wrote an image over the generation stored; a
+ * `restore` into one made a state anew, and stored again.
+ */
+const released = new WeakSet();
 
 /**
  * Writes the database into `storage` -- a Durable Object's `ctx.storage`
@@ -91,7 +125,7 @@ const kept = new WeakMap();
  */
 export function persist(fenec, storage, options = {}) {
   const [s, fresh] = stateOf(fenec, storage, options);
-  if (s.failed) return Promise.reject(failure(s));
+  if (s.failed) return refused(s);
   if (take(fenec, s) || fresh) {
     const { done } = s.next;
     kick(s);
@@ -110,7 +144,7 @@ export function persist(fenec, storage, options = {}) {
 export function checkpoint(fenec, storage, options = {}) {
   const { min = FLOOR } = options;
   const [s, fresh] = stateOf(fenec, storage, options);
-  if (s.failed) return Promise.reject(failure(s));
+  if (s.failed) return refused(s);
   take(fenec, s);
   const log = s.log + (s.next?.logBytes ?? 0);
   // Nothing since the image, or too little to pay for writing it again.
@@ -131,6 +165,7 @@ export function checkpoint(fenec, storage, options = {}) {
  * let go of (`loadParts`), never joined into one array first.
  */
 export async function restore(fenec, storage, { key = 'fenec' } = {}) {
+  if (released.has(fenec)) throw failure({ key, released: true });
   const found = storage.sql ? keptRows(storage.sql, key) : await keptValues(storage, key);
   if (!found) return false;
   const taken = await load(fenec, found.length, found.parts);
@@ -143,6 +178,369 @@ export async function restore(fenec, storage, { key = 'fenec' } = {}) {
   return true;
 }
 
+/**
+ * Lets the database go: nothing it holds goes to storage after this, and
+ * every `persist`, `checkpoint`, `maintain` and `restore` on it rejects,
+ * under any key, whether or not it was ever kept. Resolves once
+ * a flush under way has settled, so a database restored after it reads
+ * all this one stored and is the only one writing. An object calls it
+ * before it opens the database again -- a reload, a failure -- since two
+ * databases appending to one storage lose writes: the second, restored
+ * while the first still held a flush waiting, was answered for a write
+ * whose id the first then stored again over it, its own write lost on the
+ * next restore.
+ */
+export async function release(fenec) {
+  released.add(fenec);
+  const s = kept.get(fenec);
+  if (!s) return;
+  s.released = true;
+  s.failed ??= new Error('released');
+  await quiet(s);
+}
+
+// ------------------------------------------------------------- maintenance
+//
+// A server keeps its files on threads: the `@ttl` sweep, the compact once
+// half a file is dead, the graphs saved into its tail. An object has no
+// thread but its alarm, and a single one, which costs a row written each
+// time it is set and a wake-up each time it rings -- an evicted object
+// opened again, its database restored. So `maintain` does all of it in one
+// call an alarm makes, and sets the alarm again only for what will be due:
+// the next row's time, or more of a sweep cut short. `schedule`, after a
+// write, sets it once something comes due. An object with nothing due sets
+// none and costs nothing.
+
+/**
+ * How long past its time a row stays before `maintain` deletes it: a
+ * server's sweep period (`fenec_http::sweep::GRACE`), so a reaper reading
+ * `expired()` as often finds every row past its time before it goes -- a
+ * hold's money, a reservation's stock -- and gives it back.
+ */
+const GRACE = 60_000;
+
+/**
+ * The least time between two sweeps' alarms. Each costs two rows -- the
+ * deletes and the alarm set again -- and wakes the object, restored if it
+ * was evicted, so rows expiring a few a second cost two rows a minute
+ * rather than two a row: the server's period too.
+ */
+const EVERY = 60_000;
+
+/**
+ * Rows a call deletes at most. The object answers nothing while its alarm
+ * runs, and 1 000 rows of a collection of 100 000, half past their time,
+ * took 0.46 ms to delete in the module (1.02 at most), so 10 000 hold a
+ * request about 5 ms: far inside an alarm's 30 s of CPU and 15 minutes.
+ * The rest goes on at once, in the next alarm.
+ */
+const SWEEP = 10_000;
+
+/** Rows a statement of the sweep deletes: the server's batch. */
+const BATCH = 1_000;
+
+/**
+ * The share of the image the writes kept after it reach before `maintain`
+ * writes a new one: the share `persist` folds them at (`FOLD`), so the
+ * images are as many as they were, written by the alarm rather than in
+ * the request that crossed it (`BACKSTOP`). Relative, where the alarm
+ * checkpointed past 64 KiB: a 27.6 MB image was 16 rows for writes that
+ * were one or two. At a quarter, rewrites of 1 000 rows of 128 dimensions
+ * a request, a row each, brought an 11 MB image -- 8 rows -- every 6.
+ */
+const LOG_SHARE = FOLD;
+
+/**
+ * Or once this share of what storage holds is dead -- the versions
+ * updates and deletes left, the rows a sweep took -- which the log's size
+ * alone does not see: deletes write little. A server's auto-compact ratio,
+ * and like its floor, one of its own: below a mebibyte, the dead bytes cost
+ * a restore nothing to speak of, and an image is three rows where the
+ * deletes are one -- 2 000 sessions expiring a second, each sweep wrote an
+ * image of the 70 KB left.
+ */
+const DEAD_SHARE = 0.5;
+const DEAD_MIN = 1 << 20;
+
+/**
+ * The module never gives memory back, and holds every version of a
+ * record written since it was opened: 20 000 rows of 128 dimensions
+ * restored held 18 MB, and 74 after their titles were set three times and
+ * their vectors once, 42 MB of it dead. Only a new instance gives that
+ * back, opened and restored from an image that left them out: 18 MB again.
+ * So `maintain` asks for one once the dead record bytes reach half of
+ * what the module holds, and at most 16 MiB -- an eighth of an isolate's
+ * 128 MB -- but not under 4 MiB, a restore being worth more than that.
+ */
+const RELOAD_SHARE = 0.5;
+const RELOAD_MIN = 4 << 20;
+const RELOAD_MAX = 16 << 20;
+
+/**
+ * When `maintain` next has work for the database kept under `key`, in
+ * milliseconds since the epoch, or null when it has none: now when an
+ * image or a reload is owed, else the time the first row past its time
+ * would be swept -- `grace` after it, and no sooner than `every` after the
+ * last sweep. Synchronous, and cheap enough to ask after every write: the
+ * module's statistics and, for each collection whose rows expire, a step
+ * of its index.
+ */
+export function due(fenec, storage, options = {}) {
+  const { key = 'fenec', min = FLOOR } = options;
+  const s = kept.get(fenec);
+  const ours = s?.key === key;
+  if (ours && s.failed) return null;
+  const now = clock(fenec);
+  if (ours) {
+    const { image, reload } = owed(s, held(fenec), min);
+    if (image || (reload && !s.reloadAsked)) return now;
+  }
+  return sweepAt(fenec, ours ? s : null, now, options);
+}
+
+/**
+ * Sets the object's alarm once `maintain` comes due (`due`), `quiet` after
+ * now at the soonest (5 s by default: writes in a burst are not each
+ * followed by a sweep or an image), unless an alarm is already set no
+ * later than `every` after that. Resolves to the alarm set, or null when
+ * nothing is due. Every `setAlarm` is a row written, so one set is moved
+ * only when what is due cannot wait for it.
+ *
+ * Called, it tells `persist` the object maintains its database from an
+ * alarm: a request then folds the writes into an image only once they
+ * outgrow the whole image, where it did at half, which `maintain` takes.
+ */
+export async function schedule(fenec, storage, options = {}) {
+  const { key = 'fenec', quiet = 5_000, every = EVERY } = options;
+  const s = kept.get(fenec);
+  if (s?.key === key) s.alarmed = true;
+  const now = clock(fenec);
+  // An alarm that rings no later than this could set covers whatever is
+  // due, and `due` need not be asked: 8 us a write in the module, 29 with
+  // a collection of 100 000 rows that expire, against a put's 5.
+  const set = alarms.get(storage)?.at;
+  if (set != null && set >= now && set <= now + quiet + every) return set;
+  const at = due(fenec, storage, options);
+  if (at === null) return null;
+  return arm(storage, Math.max(at, now + quiet), every, false, now);
+}
+
+/**
+ * Keeps the database kept under `key`, from an alarm: deletes the rows past
+ * their time by `grace` (60 s), `sweep` (10 000) at most, in statements of
+ * ordinary deletes; writes a new image when the writes since the last one
+ * reach half of it and `min` (64 KiB), or half of what storage holds is
+ * dead and a mebibyte; and sets the alarm again for what comes due next.
+ * Stores what it did, then resolves to `{swept, more, image, reload,
+ * next, error}`: the rows deleted, whether more are past their time, the
+ * image's bytes (0 when none was written), whether the module holds enough
+ * dead records to be worth opening again, the alarm set (null when none
+ * is), and what kept it from being set. That is no failure of the
+ * database: what was done is stored, and an alarm's handler can throw it
+ * for Cloudflare to try the alarm again, keeping the database.
+ *
+ * With `reload`, storage holds an image without the dead records, and a
+ * new `Fenec` restored from it gives back what the module holds: let this
+ * one go once no call uses it, and the next restores (`restore`). The
+ * module's memory never shrinks, and a restore into it would not either.
+ *
+ * Fails as `persist` does: storage that stops part way leaves the last
+ * whole database, and this one has to be opened again and restored.
+ */
+export async function maintain(fenec, storage, options = {}) {
+  const { min = FLOOR, every = EVERY } = options;
+  const [s] = stateOf(fenec, storage, options);
+  if (s.failed) await refused(s);
+  const now = clock(fenec);
+  const swept = sweep(fenec, now, options);
+  if (swept.expiring) s.sweptAt = now;
+  take(fenec, s);
+  const { image, reload } = owed(s, held(fenec), min);
+  if (image) whole(batch(s));
+  let wrote = 0;
+  if (s.next) {
+    const b = s.next;
+    kick(s);
+    wrote = await b.done;
+  } else await settled(s);
+  if (reload) s.reloadAsked = true;
+  const next = swept.more ? now : sweepAt(fenec, s, now, options);
+  const done = { swept: swept.rows, more: swept.more, image: image ? wrote : 0, reload, next: null, error: null };
+  // Asked even with nothing next: the alarm that rang is forgotten, or
+  // `schedule` took it for one still set, and set none again. Its failure
+  // -- `getAlarm`, read on every alarm that wakes an evicted object, or
+  // `setAlarm` -- is answered, not thrown: thrown, the database was let go
+  // of by a handler that took it for storage failing, while requests held
+  // it with their writes on their way.
+  try {
+    done.next = await arm(storage, next === null ? null : Math.max(next, now), every, true, now);
+  } catch (e) {
+    done.error = e;
+  }
+  return done;
+}
+
+const clock = (fenec) => fenec.now?.() ?? Date.now();
+
+const iso = (ms) => new Date(ms).toISOString();
+
+/**
+ * A timestamp as the module writes it, in milliseconds; `NaN` past the
+ * dates JavaScript has. A year past 9999 is written in five digits or
+ * more, `10000-01-01T00:00:00Z`, and one before year 0 with a sign, four
+ * wide with it -- `-001-01-01T00:00:00Z`, `-1199-...` -- which `Date.parse`
+ * reads as `NaN`; ECMAScript's own form of either is six digits and a sign.
+ */
+function time(text) {
+  const wide = /^([+-]?)(\d+)-/.exec(text);
+  if (!wide || (wide[1] === '' && wide[2].length === 4)) return Date.parse(text);
+  // `-000000` is no year to ECMAScript: year 0 is `+000000`.
+  const sign = wide[1] === '-' && Number(wide[2]) !== 0 ? '-' : '+';
+  return Date.parse(`${sign}${wide[2].padStart(6, '0')}${text.slice(wide[0].length - 1)}`);
+}
+
+/** The record bytes the module holds, and those of versions no read reaches. */
+function held(fenec) {
+  let bytes = 0;
+  let dead = 0;
+  for (const c of fenec.stats?.() ?? []) {
+    bytes += c.bytes;
+    dead += c.dead_bytes;
+  }
+  return { bytes, dead };
+}
+
+/**
+ * Whether an image is owed, and a reload, for the module's record bytes
+ * `mem`. What storage holds dead is the module's dead less what the stored
+ * image left out: an image holds the live records alone, and every write
+ * after it lands in the module and in storage alike.
+ */
+function owed(s, mem, min) {
+  const log = s.log + (s.next?.logBytes ?? 0);
+  const dead = Math.max(0, mem.dead - s.deadAtImage);
+  const reload = mem.dead >= Math.min(Math.max(mem.bytes * RELOAD_SHARE, RELOAD_MIN), RELOAD_MAX);
+  const image =
+    !!s.next?.image ||
+    s.torn ||
+    log >= Math.max(min, s.image * LOG_SHARE) ||
+    dead >= Math.max(DEAD_MIN, (s.image + log) * DEAD_SHARE) ||
+    // Restored from an image and the writes after it, a module holds
+    // those writes' dead versions again: the reload needs a new image.
+    (reload && !s.reloadAsked && log > 0);
+  return { image, reload: reload && !s.reloadAsked };
+}
+
+/**
+ * A name FenecQL reads, as its lexer does (`is_alphabetic` or `_`, then
+ * `is_alphanumeric` or `_`): the sweep's statements name collections and
+ * fields as text. ASCII alone, a collection `müşteri` or a field `zamanı`
+ * was never swept nor its rows' times asked, kept for good.
+ */
+const NAME = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
+
+const UNIT = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+
+/** The collections whose rows expire: their field and its `@ttl`, from the schemas the module answers. */
+function expiring(fenec) {
+  const out = [];
+  for (const c of fenec.schemas()) {
+    if (!NAME.test(c.name)) continue;
+    for (const f of c.fields) {
+      const m = /^ttl\(([0-9]+)(ms|s|m|h|d)\)$/.exec(f.index);
+      if (m && NAME.test(f.name)) out.push({ name: c.name, field: f.name, ttl: Number(m[1]) * UNIT[m[2]] });
+    }
+  }
+  return out;
+}
+
+/**
+ * Deletes the rows past their time by `grace`, `sweep` at most, a batch a
+ * statement: `expired()` reads the rows a `del` otherwise leaves out, and
+ * `order` on the field walks its index to the batch and stops, where the
+ * range alone gathered every row past its time again for each batch. No
+ * new export of the module: the server's `Database::expired` and `sweep`
+ * are native, and FenecQL says the same in the module as it is.
+ */
+function sweep(fenec, now, { grace = GRACE, sweep: most = SWEEP } = {}) {
+  const collections = expiring(fenec);
+  let rows = 0;
+  let more = false;
+  for (const { name, field, ttl } of collections) {
+    const cut = [iso(now - ttl - grace)];
+    for (;;) {
+      const n = Math.min(BATCH, most - rows);
+      if (n <= 0) {
+        more ||= fenec.rows(`get ${name} select id where expired() and ${field} <= $1 limit 1`, cut).length > 0;
+        break;
+      }
+      const { count } = fenec.run(`del ${name} where expired() and ${field} <= $1 order ${field} limit $2`, [...cut, n]);
+      rows += count;
+      if (count < n) break;
+    }
+  }
+  return { rows, more, expiring: collections.length > 0 };
+}
+
+/**
+ * When the first row not yet deleted would be swept, `every` after the
+ * last sweep at the soonest; null when no row will be. The rows past their
+ * time come first in their field's order, the living after them: a step of
+ * the index each, the nulls -- which never expire -- left out by `>`.
+ */
+function sweepAt(fenec, s, now, { grace = GRACE, every = EVERY } = {}) {
+  let next = null;
+  for (const { name, field, ttl } of expiring(fenec)) {
+    const [row] = fenec.rows(`get ${name} select ${field} where expired() order ${field} limit 1`);
+    const first = row ?? fenec.rows(`get ${name} select ${field} where ${field} > $1 order ${field} limit 1`, [iso(now - ttl)])[0];
+    if (!first) continue;
+    let at = time(first[field]) + ttl + grace;
+    // A time JavaScript has no date for: once `NaN`, every collection's
+    // next time after it compared false, and the alarm was set at `NaN`.
+    // Past its time, such a row is due now: passed over, the rows past
+    // their time after it were never swept. A living one is millennia off.
+    if (!Number.isFinite(at)) {
+      if (!row) continue;
+      at = now;
+    }
+    if (next === null || at < next) next = at;
+  }
+  if (next === null) return null;
+  return Math.max(next, (s?.sweptAt ?? -Infinity) + every);
+}
+
+/**
+ * The alarm each storage has set, as far as this module knows: read once
+ * (`getAlarm`, a read, not a row written), then kept, and set one call at
+ * a time, so requests that come due together set it once.
+ */
+const alarms = new WeakMap();
+
+/**
+ * Sets the alarm at `at` unless one is set no later than `slack` after it;
+ * resolves to the alarm set, null with `at` null. From `maintain`
+ * (`ringing`), one set at or before `now` is the one that rang: an alarm's
+ * handler reads none (`getAlarm` answers null while it runs, until one is
+ * set again). Elsewhere one past is read again: it may be about to ring,
+ * or gone, its handler having failed every retry.
+ */
+function arm(storage, at, slack, ringing, now) {
+  let a = alarms.get(storage);
+  if (!a) alarms.set(storage, (a = { at: undefined, turn: Promise.resolve() }));
+  const run = a.turn.then(async () => {
+    if (!storage.setAlarm) return null;
+    if (ringing && a.at != null && a.at <= now) a.at = null;
+    if (a.at === undefined || (a.at !== null && a.at < now)) a.at = (await storage.getAlarm?.()) ?? null;
+    if (at === null || !Number.isFinite(at)) return null;
+    if (a.at !== null && a.at <= at + slack) return a.at;
+    await storage.setAlarm(at);
+    a.at = at;
+    return at;
+  });
+  a.turn = run.catch(() => {});
+  return run;
+}
+
 // ------------------------------------------------------------- the flushes
 
 function state(fenec, storage, key) {
@@ -150,12 +548,26 @@ function state(fenec, storage, key) {
     fenec, storage, key, sql: !!storage.sql, piece: 0,
     gen: null, image: 0, log: 0, pieces: [0, 0], torn: false,
     next: null, flushing: null, failed: null,
+    // Let go of (`release`): it refuses everything, as a failed one does.
+    released: false,
+    // For `maintain`: the dead record bytes the module held when the
+    // stored image was taken, which the image left out (`deadAtImage`);
+    // when it last swept; whether it has asked for a reload; whether the
+    // object sets an alarm for it (`schedule`), which moves the fold out
+    // of requests.
+    deadAtImage: 0, sweptAt: -Infinity, reloadAsked: false, alarmed: false,
   };
 }
 
 /** The database's state, made -- its journal started, an image due -- when new to `key`. */
 function stateOf(fenec, storage, { key = 'fenec', piece } = {}) {
   let s = kept.get(fenec);
+  // A database let go of stays so, under any key and if it had no state:
+  // a state made afresh would have written an image.
+  if (released.has(fenec)) {
+    s ??= Object.assign(state(fenec, storage, key), { released: true, failed: new Error('released') });
+    return [s, false];
+  }
   const fresh = s?.key !== key;
   if (fresh) {
     fenec.journal();
@@ -168,8 +580,28 @@ function stateOf(fenec, storage, { key = 'fenec', piece } = {}) {
 }
 
 const failure = (s) =>
-  new Error(`fenecdb: ${s.key} was not stored, and the database holds writes its storage does not: open it again and restore`, {
-    cause: s.failed,
+  s.released
+    ? new Error(`fenecdb: ${s.key} was let go of (release): open it again and restore`)
+    : new Error(`fenecdb: ${s.key} was not stored, and the database holds writes its storage does not: open it again and restore`, {
+        cause: s.failed,
+      });
+
+/** Resolves once no flush of `s` is under way; a refused one is let go of at once. */
+async function quiet(s) {
+  while (s.flushing) await s.flushing;
+}
+
+/**
+ * The rejection of a call on a failed or released database, once the
+ * flush under way has settled: a caller that lets the database go on it
+ * and opens another reads all the first one stored, and no write of the
+ * first lands after the second's. Refused at once, the call answered while
+ * a KV flush still put its pieces, which would have landed after the
+ * restore its caller went on to.
+ */
+const refused = (s) =>
+  quiet(s).then(() => {
+    throw failure(s);
   });
 
 /** The flush the writes drained now go out with, made when none waits. */
@@ -232,7 +664,8 @@ function kick(s) {
   const run = (async () => {
     if (s.failed) throw failure(s);
     absorb(s.fenec, () => b);
-    if (s.torn || (b.image === null && s.log + b.logBytes > Math.max(s.image * FOLD, FLOOR))) whole(b);
+    const fold = s.alarmed ? BACKSTOP : FOLD;
+    if (s.torn || (b.image === null && s.log + b.logBytes > Math.max(s.image * fold, FLOOR))) whole(b);
     const n = s.sql ? flushRows(s, b) : await flushValues(s, b);
     await s.storage.sync?.();
     return n;
@@ -263,6 +696,20 @@ function snapshot(fenec) {
     yield first.value;
     yield* it;
   })();
+}
+
+/**
+ * The image a flush writes, and the dead record bytes the module holds that
+ * it leaves out. An image taken now holds the live records alone, so every
+ * dead byte the module holds is one storage no longer does; a `compact`'s
+ * has its collections' dead taken out of the module too, and leaves the
+ * rest in the image, so storage holds what the module does.
+ */
+function imageOf(s, b) {
+  if (b.image !== true) return [[b.image], 0];
+  // Read before the snapshot, which takes the database as it stands.
+  const { dead } = held(s.fenec);
+  return [snapshot(s.fenec), dead];
 }
 
 /**
@@ -341,10 +788,11 @@ function flushRows(s, b) {
     const gen = (before.at(-1) ?? 0) + 1;
     const t = table(key, gen);
     sql.exec(`CREATE TABLE ${t} (id INTEGER PRIMARY KEY, image INTEGER NOT NULL, data BLOB NOT NULL)`);
-    const image = insert(sql, t, 1, b.image === true ? snapshot(s.fenec) : [b.image], s.piece);
+    const [parts, deadAtImage] = imageOf(s, b);
+    const image = insert(sql, t, 1, parts, s.piece);
     const log = insert(sql, t, 0, b.log, s.piece, b.logBytes);
     for (const g of before) sql.exec(`DROP TABLE ${table(key, g)}`);
-    return { gen, image, log };
+    return { gen, image, log, deadAtImage };
   });
   Object.assign(s, at, { torn: false });
   return at.image + at.log;
@@ -355,10 +803,12 @@ function keptRows(sql, key) {
   const gen = generations(sql, key).at(-1);
   if (gen === undefined) return null;
   const t = table(key, gen);
-  const [length, image] = sql
+  // Read to its end, not its first row: a statement left part way holds
+  // the table, and a new image's `DROP TABLE` of it was refused ("database
+  // table is locked") under node:sqlite once a restore came before it.
+  const [[length, image]] = [...sql
     .exec(`SELECT coalesce(sum(length(data)), 0), coalesce(sum(CASE WHEN image THEN length(data) END), 0) FROM ${t}`)
-    .raw()
-    .next().value;
+    .raw()];
   if (length === 0) return null;
   // Read a row at a time, each copied into the module as it comes.
   const parts = function* () {
@@ -414,11 +864,12 @@ async function flushValues(s, b) {
     return log[1];
   }
   const gen = s.gen + 1;
-  const image = await putAll(storage, key, gen, 'i', 0, b.image === true ? snapshot(s.fenec) : [b.image], s.piece);
+  const [parts, deadAtImage] = imageOf(s, b);
+  const image = await putAll(storage, key, gen, 'i', 0, parts, s.piece);
   const log = await putAll(storage, key, gen, 'l', 0, b.log, s.piece, b.logBytes);
   await storage.put(meta(key), { v: 1, gen, image, log });
   const before = s.gen;
-  Object.assign(s, { gen, image: image[1], log: log[1], pieces: [image[0], log[0]], torn: false });
+  Object.assign(s, { gen, image: image[1], log: log[1], pieces: [image[0], log[0]], torn: false, deadAtImage });
   // What the generation before held is nothing now: let it go.
   if (before > 0) await drop(storage, key, before);
   return image[1] + log[1];

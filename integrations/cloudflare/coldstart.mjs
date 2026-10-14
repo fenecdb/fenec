@@ -11,55 +11,28 @@
 // (`QUIET` 0), so the first column is the writes as they left the storage.
 // Needs web/fenec.wasm (make wasm) and `npm ci` here.
 
-import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:net';
+import { serve as dev } from './dev.mjs';
 
-const here = new URL('.', import.meta.url).pathname;
 const DIM = 128;
 const SIZES = (process.env.SIZES ?? '1000,10000,50000').split(',').map(Number);
 const RESTARTS = 5;
 
-const port = () =>
-  new Promise((res) => {
-    const s = createServer().listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => res(port));
-    });
-  });
-
 async function serve(state) {
-  const p = await port();
-  const child = spawn(
-    join(here, 'node_modules/.bin/wrangler'),
-    ['dev', '--config', 'wrangler.jsonc', '--port', String(p), '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false', '--var', 'QUIET:0'],
-    { cwd: join(here, 'example'), stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } },
-  );
-  let log = '';
-  child.stdout.on('data', (d) => (log += d));
-  child.stderr.on('data', (d) => (log += d));
-  while (!log.includes('Ready on')) {
-    if (child.exitCode !== null) throw new Error(log);
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  const url = `http://127.0.0.1:${p}`;
-  const stopped = new Promise((r) => child.once('exit', r));
+  const w = await dev('example', state, { QUIET: 0 });
   return {
     async query(tenant, sql, params = []) {
-      const res = await fetch(`${url}/t/${tenant}/query`, { method: 'POST', body: JSON.stringify({ sql, params }) });
+      const res = await fetch(`${w.url}/t/${tenant}/query`, { method: 'POST', body: JSON.stringify({ sql, params }) });
       const out = await res.json();
       if (out.error) throw new Error(out.error);
       return out;
     },
     async checkpoint(tenant) {
-      await fetch(`${url}/t/${tenant}/checkpoint`, { method: 'POST' });
+      await fetch(`${w.url}/t/${tenant}/checkpoint`, { method: 'POST' });
     },
-    async stop() {
-      process.kill(-child.pid, 'SIGINT');
-      await stopped;
-    },
+    stop: w.stop,
   };
 }
 

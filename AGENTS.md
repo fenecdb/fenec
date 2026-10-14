@@ -4565,9 +4565,8 @@ and kept the write in memory for the next image to store. The example
 opens and restores inside `blockConcurrencyWhile` (a cold object sent
 requests at once could open an engine each, appending under the same
 indices; `wrangler dev` never showed it in a burst of 128),
-sets an alarm only after a write and when none is set, and `checkpoint`
-writes nothing until the writes since reach `{min}` (64 KiB). `checkpoint`
-writes a new image now: a restore takes the graphs in it, where the
+and keeps its database from its alarm (below); `checkpoint` writes nothing
+until the writes since reach `{min}` (64 KiB), and then a new image: a restore takes the graphs in it, where the
 vectors written after the last image are linked one after another in the
 browser module's one thread -- which no longer costs a start much: the
 first `near` over 10 000 x 128 after a restart 39 ms as written, 47 after
@@ -4594,6 +4593,101 @@ as it stood when begun): 83 MB, and a checkpoint of 10 000 x 768 holds no
 more than the rows, for 0.6 KB brotli; puts and the image as fast. About
 60 000 rows of 128 dimensions or 12 000 of 768 fit, 97 and 102 MB at the
 most; `wrangler dev` does not hold a Worker to it.
+
+**An object's alarm keeps its database** (`maintain`, `schedule`, `due`
+in `integrations/cloudflare`). A server sweeps `@ttl`, compacts and keeps
+its graphs on threads; an object has one alarm, a row written each time
+it is set and a wake-up -- a restore, if it was evicted -- each time it
+rings. The example set one after every first write and checkpointed past
+64 KiB of writes, and nothing deleted a row past its time: read past, kept
+for good. `schedule`, after a write, sets the alarm only once something is
+due -- a row that will expire, an image owed -- `quiet` (5 s) after the
+write at the soonest, leaving one set no later than `every` (60 s) after
+that, and asks nothing where one rings that soon (`due` is 8 us a write in
+the module, 29 beside 100 000 rows that expire, a put 5); a write that
+brings nothing due and every read set none, so an idle object costs
+nothing. `maintain` deletes the rows `grace` (60 s, the server's `GRACE`,
+so a reaper reading `expired()` as often sees each) past their time,
+10 000 a call in statements of 1 000 -- `del c where expired() and f <= $1
+order f limit $2`, which walks the `@ttl` index to the batch, so the module
+took no export and not a byte (`Database::expired` and `sweep` are native
+only): 0.46 ms a batch over 100 000 rows, an alarm's 10 000 holding the
+object about 5 ms -- and sets the alarm again at once past the bound;
+writes a new image once the writes since reach half the image and 64 KiB,
+or half of what storage holds is dead and a mebibyte, which the writes'
+size alone does not see (the module's dead record bytes less those it held
+as the stored image was taken, `deadAtImage`: an image holds the live
+records alone, and every write after lands in both), so an alarm woken to
+sweep stores its deletes, one row, and no image -- under a mebibyte an
+image of a churning 70 KB was three rows a sweep where the deletes were
+one; and sets the alarm for the next row's time and grace, no sooner than
+`every` after the sweep, or none, the alarm that rang forgotten either way
+(kept, `schedule` took it for one still set and set none again). A failure
+to set it -- `getAlarm`, read on every alarm that wakes an evicted object,
+or `setAlarm` -- is `maintain`'s `error`, its work stored, never a
+rejection: thrown, the example's handler let the database go as for a
+storage failure (below). The names its statements write are the lexer's
+(`\p{Alphabetic}`, then `\p{N}` too): ASCII alone, a `müşteri` was never
+swept. A year past 9999 is written `10000-01-01T00:00:00Z` and one
+before year 0 `-001-01-01T00:00:00Z`, four wide with its sign, which
+`Date.parse` reads as `NaN`: the alarm was set at `NaN`, and a row of year
+-1 past its time passed its whole collection over. Both are read in
+ECMAScript's six-digit form; a time past any date JavaScript has is taken
+as due now for a row past its time and passed over for a living one. Taken at
+a quarter of the image, rewrites of 1 000 128-dim rows a request, a row
+each, brought an 11 MB image, 8 rows, every 6; at half, where `persist` folds, the
+images are as many as before, and a request folds only past the whole image
+once `schedule` ran (`BACKSTOP`), so the alarm takes them and no request
+waits. Under `wrangler dev` (rows.mjs, every storage call counted, in ABBA
+turns against main): 30 bursts of 20 single-row writes over 10 000 x 128,
+a second apart, 600 rows against 651-652; 12 bursts of 500 rows 19 against
+100; 20 000 rows past their time deleted in two alarms, a row each. The
+module never gives memory back and holds every record version written
+since its open (20 000 x 128 restored held 18 MB, 74 after its titles were
+set thrice and its vectors once): once its dead record bytes reach half
+of what it holds, between 4 and 16 MiB, `maintain` makes sure storage holds
+an image without them and answers `reload`, once a database, and the
+example restores a new module -- 50 000 x 128, three in five expired, held
+42.7 MB through two sweeps, 51.6 at the image the third owed and 19.2
+restored (memory.mjs, in Node). Every database the example lets go -- a
+reload, writes not stored, a `maintain` that failed -- goes one way
+(`#retire`): calls arriving wait while those holding it finish, a write
+on its way to storage among them, then it is `release`d -- nothing of it
+stored after, resolved once its flush under way has settled -- closed, and
+another restored. `release` remembers the database (a `WeakSet`), not only
+its state: one never kept, or restored from empty storage, had none to
+mark, and a `persist` after made one afresh and wrote an image over the
+generation stored; `restore` into a released one is refused, where it
+made a state anew. Let go of at once, as the alarm's handler first did when
+`maintain` threw with storage sound, it lost answered writes: a request's
+flush waited to be durable and another's waited behind it, the next
+request restored a second database and wrote id 3, the first then stored
+the waiting write as id 3 too, and the next restore read the first's. And
+a refused `persist`, `checkpoint` or `maintain` on a failed or released
+database answers only once no flush of it is under way, so a caller that
+drops it and restores -- the README's alarm, a request's write not stored
+-- reads all it stored and is alone: refused at once, it answered while a KV
+flush still put its pieces, which would land after that restore. `example.test.js` drives the
+example's class in Node over the storage stand-in (`module.registerHooks`
+giving it `cloudflare:workers` and the compiled `.wasm`), holding a flush
+at `sync` to put the alarm between two requests' writes; it fails on the
+code before, and with the wait for the holders taken out. A `compact` in the module rebuilds every
+graph holding tombstones and builds its image whole, and gives nothing back.
+A restore reads its generation's sums to their end: left at the first row,
+the statement held the table and a new image's `DROP TABLE` was refused
+under node:sqlite. The first `near` after a restart, a lone write's p50
+(2.00-2.07 ms against 1.96-2.35) and a restore's memory moved by noise
+alone. `make cloudflare-test` holds the rules to the fakes -- storage
+failing after every operation of a sweep's flush and of its image included
+-- and the example under `wrangler dev`, on the port it says it bound
+(`--port 0`, `Ready on`; dev.mjs, which rows.mjs and coldstart.mjs start
+it through too): an idle object setting no alarm, 350 rows swept over four
+alarms and kept across a restart, an image by the rule and none without
+it, a reload. wrangler is started with no colour and its line read past
+the escapes besides -- under FORCE_COLOR the address sat between them,
+and the harness waited for good -- a start that ends before the line
+fails, and an `after` hook ends any wrangler a test cut short by its
+timeout left, which held the test process open.
 
 **The browser module grows nothing by doubling past a mebibyte.** Its
 memory is never given back, so a peak stays for good. An index's vectors

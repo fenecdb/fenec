@@ -1,7 +1,10 @@
 // Stand-ins for a Durable Object's storage, for test.js and memory.mjs: each
 // holds to the limits of the kind it stands for, counts the rows it writes
 // as Cloudflare bills them, and can be made to stop after a number of
-// operations, as storage that goes away part way would.
+// operations, as storage that goes away part way would. Both keep an alarm
+// as an object does, `setAlarm` billed as a row written and counted apart in
+// `alarms`, and a `sync` a test can hold, as a flush waits to be durable
+// (`Durable`).
 
 import assert from 'node:assert/strict';
 
@@ -10,7 +13,39 @@ import assert from 'node:assert/strict';
  * most, 128 keys a call, values cloned on the way in and out. Each key put
  * or deleted is a row written. `failAfter` puts, it throws.
  */
-export class Values {
+/**
+ * What both kinds share: the object's one alarm -- `getAlarm` a read,
+ * `setAlarm` a row written, counted in `alarms` -- and `sync`, which
+ * `holdSync` holds until the function it returns is called.
+ */
+class Durable {
+  alarm = null;
+  alarms = 0;
+  #held = null;
+  async sync() {
+    await this.#held;
+  }
+  holdSync() {
+    let open;
+    this.#held = new Promise((r) => (open = r));
+    return () => {
+      this.#held = null;
+      open();
+    };
+  }
+  async getAlarm() {
+    return this.alarm;
+  }
+  async setAlarm(at) {
+    this.alarms++;
+    this.alarm = typeof at === 'number' ? at : at.getTime();
+  }
+  async deleteAlarm() {
+    this.alarm = null;
+  }
+}
+
+export class Values extends Durable {
   map = new Map();
   puts = 0;
   rows = 0;
@@ -25,8 +60,6 @@ export class Values {
     this.map.set(key, v);
     this.rows++;
   }
-  /** Resolves once what was written is durable: at once, in memory. */
-  async sync() {}
   async delete(keys) {
     assert.ok(keys.length <= 128);
     for (const k of keys) this.rows += this.map.delete(k) ? 1 : 0;
@@ -46,13 +79,14 @@ export class Values {
  * them it throws; a transaction it stops is rolled back, and every `exec`
  * outside one is its own, as SQLite's autocommit has it.
  */
-export class Rows {
+export class Rows extends Durable {
   ops = 0;
   rows = 0;
   failAfter = Infinity;
   #tx = false;
 
   constructor(DatabaseSync, file = ':memory:') {
+    super();
     this.db = new DatabaseSync(file);
     const fake = this;
     this.sql = {
@@ -68,8 +102,6 @@ export class Rows {
       },
     };
   }
-
-  async sync() {}
 
   #op() {
     if (++this.ops > this.failAfter) throw new Error('storage went away');
