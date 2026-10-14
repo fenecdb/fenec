@@ -245,11 +245,16 @@ impl NodeArchive {
                     lineage,
                     image,
                 } if !broken.contains(&name) => {
-                    let w = self.hello(&mut writers, &name, seq, lineage, image.as_deref(), report);
-                    if let Err(e) = w {
-                        report(&format!("tenant `{name}`: {e}; left as it is"));
-                        writers.remove(&name);
-                        broken.insert(name);
+                    // An archive that does not read is left for an operator;
+                    // a disk that refused a write is tried again, as a
+                    // write's failure is, from where the archives stand.
+                    match self.hello(&mut writers, &name, seq, lineage, image.as_deref(), report) {
+                        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                            report(&format!("tenant `{name}`: {e}; left as it is"));
+                            writers.remove(&name);
+                            broken.insert(name);
+                        }
+                        r => r?,
                     }
                 }
                 NodeMessage::Writes {

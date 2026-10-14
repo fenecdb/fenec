@@ -113,6 +113,9 @@ curl -X POST 127.0.0.1:8081/t/acme/query -d '{"query": "get notes limit 5"}'
   <li><b>A user's token is bound to its tenant.</b> A JSON Web Token reaches
     <code>/t/acme/</code> only when its <code>tenant</code> claim names
     <code>acme</code> (<a href="#tokens">Tokens</a>).</li>
+  <li><b>Archived as a whole</b> by <code>fenec archive --tenants</code>,
+    one connection for every tenant (<a href="#archive">Archiving a
+    node</a>).</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -494,6 +497,32 @@ source and marked <code>moving</code>; moving it again replaces whatever copy th
 interrupted attempt left on the target, which is stale by definition, since the
 directory never pointed at it.</p>
 </details>
+
+<h2 id="archive">Archiving a node</h2>
+
+<p>Every tenant of a node is archived by one process over one connection to
+the node — not a connection, a thread and an open tenant each — an archive
+a tenant under a root, which restores a tenant or the whole node to a
+moment.</p>
+
+<pre data-lang="bash">fenec archive --tenants http://n1:8081 /backups/n1 --token "$REPL" --image-every 1h --keep 7d
+fenec verify  --tenants /backups/n1
+fenec restore --tenants /backups/n1 /data/n1 --to 2026-09-22T10:14:59Z</pre>
+
+<ul>
+  <li><b>Moved or deleted:</b> a tenant that leaves the node is no longer
+    followed and its archive is kept, marked <code>gone</code>; the target
+    node's archiver takes it up from its image. A restore of the node to a
+    later moment leaves it out.</li>
+  <li><b>Replicas and standbys</b> can be archived the same way: their
+    tenants' writes are the primary's, numbered alike, and a promotion goes
+    on in the same archive.</li>
+</ul>
+
+<p>The node needs <code>--replication-token</code>. What it costs and how
+the archive follows tenants made, closed, moved, restored and promoted:
+<a href="/docs/replication#node-archive">Archiving every tenant of a
+node</a>.</p>
 
 <h2 id="across-tenants">A query across tenants</h2>
 

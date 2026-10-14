@@ -630,3 +630,26 @@ fn each_tenant_takes_its_own_images() {
     drop(arch);
     let _held = NodeArchive::new(&root, None).unwrap();
 }
+
+/// One tenant's archive that does not read -- a segment of something else,
+/// here -- is left as it is, for an operator, and every other tenant is
+/// archived as before.
+#[test]
+fn an_archive_that_does_not_read_is_left_alone_and_the_others_go_on() {
+    let d = scratch("broken");
+    let n = node(&d.join("node"), None);
+    let bad = made(&n, "bad", 2);
+    let good = made(&n, "good", 2);
+    let root = d.join("root");
+    std::fs::create_dir_all(root.join("bad")).unwrap();
+    let junk = root.join("bad").join("writes-00000000000000000001.log");
+    std::fs::write(&junk, b"not an archive segment").unwrap();
+    let a = archiver(&root, &n.url);
+    exec(&good, "put notes {title: \"more\", n: 3}");
+    exec(&bad, "put notes {title: \"more\", n: 3}");
+    archived(&root.join("good"), seq(&good));
+    drop((bad, good));
+    a.finish();
+    assert_eq!(std::fs::read(&junk).unwrap(), b"not an archive segment");
+    assert_eq!(images(&root.join("bad")), 0);
+}
