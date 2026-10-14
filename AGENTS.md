@@ -1565,6 +1565,13 @@ servers and PostgreSQL in turns under the same ids, run 1 again on a quiet
 machine after its idle probe was taken at a load of five; C stays 3.19 k
 against 3.66 k, with each server's part of a read under 0.02 of 0.29 ms
 and PostgreSQL's own B at 2.65 k beside its C: the rest moves with the VM.
+Then every server cell, 1, 4 and 16 clients, was measured in one night,
+2026-10-13 (`rx1`-`rx3`: fenec-server natively and in Docker, PostgreSQL,
+MongoDB and Redis in turns), superseding the servers' `c`, PostgreSQL's
+and MongoDB's `r` runs and the `rd` attempt sized beside the cells: the
+server in Docker leads the other three in every cell but buffered C and
+F at one client, 3.07 k against PostgreSQL's 3.14 k and 2.07 k against
+2.09 k, and Redis in every one.
 
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a `/batch`, a keyed write -- is natively its
