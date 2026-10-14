@@ -341,6 +341,15 @@ impl Tenants {
             if !matches!(held, Held::Closed) || !self.on_disk(name) {
                 return Ok(None);
             }
+            // A sync log beside it (Linux) holds durable writes the file
+            // lacks until it is opened to be written, which applies the
+            // log: read short of them, a client standing at the short file's
+            // change was sent none of them. Where it stands is not known
+            // then, and the tenant is opened.
+            let log = fenec_core::fs::beside(&self.path(name), "sync");
+            if std::fs::metadata(&log).is_ok_and(|m| m.len() > 0) {
+                return Ok(None);
+            }
             let db = fenec_core::fs::open_read_only(self.path(name))
                 .map_err(|e| Refused(500, format!("could not read tenant `{name}`: {e}")))?;
             let place = (db.change_seq(), db.history().clone());
@@ -1339,12 +1348,15 @@ impl Tenants {
 }
 
 /// Pushes a tenant's writes to disk as the syncer does: the flush under its
-/// write lock, the fsync once it is let go.
+/// write lock, the fsync once it is let go, and no wait for the streams to
+/// send them (`replication::unwaited`): no client's answer waits on the
+/// syncer or a close, and the wait held each tenant of a pass, and a close
+/// under its slot's lock, a `SENT_WAIT` for a stream busy elsewhere.
 fn sync_now(t: &Tenant) {
     let flushed = t.write().flush();
     match flushed {
         Ok(Some(durability)) => {
-            if let Err(e) = durability() {
+            if let Err(e) = crate::replication::unwaited(durability) {
                 crate::log!("sync error ({}): {e}", t.name);
                 t.write().fail(&e);
             }
@@ -1592,6 +1604,30 @@ mod tests {
             panic!("count")
         };
         assert_eq!(rs.rows[0].values[0], Value::Int(800));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_closed_tenant_with_a_sync_log_has_no_place_read() {
+        let dir = scratch("peek");
+        let reg = Tenants::new(&dir).unwrap().with_replication(Replicated {
+            token: "r".into(),
+            buffer: 1 << 20,
+            upstream: None,
+            sync_on_write: true,
+        });
+        run(&reg.create("t").unwrap(), "create collection n (i int)");
+        assert_eq!(reg.close_idle(Duration::ZERO), 1);
+        let (seq, _) = reg.peek("t").unwrap().expect("a closed tenant read");
+        assert_eq!(seq, 1);
+        // A log a power loss left beside it: its durable writes are in the
+        // log, not yet in the file, so the file's change says nothing.
+        std::fs::write(
+            fenec_core::fs::beside(&dir.join("t.fenec"), "sync"),
+            b"FENECSYN durable writes the file lacks",
+        )
+        .unwrap();
+        assert!(reg.peek("t").unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

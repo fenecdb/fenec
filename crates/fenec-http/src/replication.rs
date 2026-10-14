@@ -57,6 +57,7 @@
 use crate::constant_eq;
 use crate::http::{Request, Response};
 use fenec_core::prelude::*;
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
@@ -133,9 +134,10 @@ pub struct Feed {
     sent_cv: Condvar,
     /// Told whenever the writes on disk move on, the feed starts over or
     /// closes: a tenant's, by the node's stream of every tenant
-    /// ([`crate::node_stream`]). Unset everywhere else, where it costs a
-    /// sync a load.
-    told: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// ([`crate::node_stream`]), under the tenant's name. Unset everywhere
+    /// else, where it costs a sync a load; set, two -- the streams' count is
+    /// read before anything is told, and no stream connected tells nothing.
+    told: OnceLock<(Arc<crate::node_stream::NodeStreams>, String)>,
 }
 
 /// A stream as a durable write waits for it: the last write it put into its
@@ -144,6 +146,47 @@ struct Sender {
     key: u64,
     sent: u64,
     lagging: bool,
+    /// Set while the stream is held up elsewhere -- the node's stream of
+    /// every tenant, busy with another tenant's image, an open or a full
+    /// socket -- when no write waits for it: one stream for every tenant,
+    /// it held each tenant's durable writes for its `SENT_WAIT` whenever it
+    /// was busy with any one.
+    held: Option<Arc<AtomicBool>>,
+}
+
+impl Sender {
+    fn waited_for(&self, upto: u64) -> bool {
+        !self.lagging
+            && self.sent < upto
+            && !self
+                .held
+                .as_ref()
+                .is_some_and(|h| h.load(Ordering::Relaxed))
+    }
+}
+
+thread_local! {
+    /// Set while a durability runs that no answer waits on: see
+    /// [`unwaited`].
+    static UNWAITED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `durable` -- a [`Durability`] -- without waiting for the streams to
+/// send what it made durable: the syncer's and a closing tenant's, which no
+/// client's answer waits on. The wait is what a durable write's answer is
+/// held for; held in the syncer, a stream busy elsewhere kept every tenant
+/// of a pass waiting a `SENT_WAIT` each, 5.06 s over five, the writes of a
+/// pass unsynced meanwhile, and a close under its slot's lock.
+pub fn unwaited<R>(durable: impl FnOnce() -> R) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            UNWAITED.with(|u| u.set(false));
+        }
+    }
+    UNWAITED.with(|u| u.set(true));
+    let _reset = Reset;
+    durable()
 }
 
 struct Ring {
@@ -232,15 +275,19 @@ impl Feed {
         })
     }
 
-    /// Has `tell` called whenever the writes on disk move on, the feed
-    /// starts over or it closes. Once: a feed belongs to one tenant.
-    pub(crate) fn tell_with(&self, tell: impl Fn() + Send + Sync + 'static) {
-        let _ = self.told.set(Box::new(tell));
+    /// Has `streams` told of `name` whenever the writes on disk move on,
+    /// the feed starts over or it closes. Once: a feed belongs to one
+    /// tenant. Held strongly: a weak hold's upgrade was a compare-and-swap
+    /// on one count every tenant's sync shared; the cycle it makes, feed to
+    /// streams to a stream's feeds, is broken as the stream lets go of its
+    /// feeds.
+    pub(crate) fn tell_with(&self, streams: &Arc<crate::node_stream::NodeStreams>, name: &str) {
+        let _ = self.told.set((Arc::clone(streams), name.to_string()));
     }
 
     fn tell(&self) {
-        if let Some(tell) = self.told.get() {
-            tell();
+        if let Some((streams, name)) = self.told.get() {
+            streams.touch(name);
         }
     }
 
@@ -250,18 +297,40 @@ impl Feed {
     /// second entry of one key, never moved on, would have kept a durable
     /// write waiting and the tenant from closing.
     pub(crate) fn sending(&self, key: u64, at: u64) {
+        self.sending_as(key, at, None, false);
+    }
+
+    /// [`Self::sending`], for a stream that `held` says is held up
+    /// elsewhere, and `behind` where it starts behind -- to send an image
+    /// first, or as it connects with every tenant to look at: no write
+    /// waits for it until it has caught up.
+    pub(crate) fn sending_as(
+        &self,
+        key: u64,
+        at: u64,
+        held: Option<&Arc<AtomicBool>>,
+        behind: bool,
+    ) {
         let mut s = lock(&self.senders);
         match s.iter_mut().find(|x| x.key == key) {
             Some(x) => {
                 x.sent = at;
-                x.lagging = false;
+                x.lagging = behind;
             }
             None => s.push(Sender {
                 key,
                 sent: at,
-                lagging: false,
+                lagging: behind,
+                held: held.cloned(),
             }),
         }
+    }
+
+    /// A stream sending from it is held up elsewhere now: a write waiting
+    /// for it looks again, and waits no more.
+    pub(crate) fn wake_waits(&self) {
+        let _held = lock(&self.senders);
+        self.sent_cv.notify_all();
     }
 
     /// Whether a stream sending from it has not yet sent a write its disk
@@ -314,12 +383,12 @@ impl Feed {
         let deadline = Instant::now() + timeout;
         let mut s = lock(&self.senders);
         loop {
-            if s.iter().all(|x| x.lagging || x.sent >= upto) {
+            if !s.iter().any(|x| x.waited_for(upto)) {
                 return;
             }
             let now = Instant::now();
             if now >= deadline {
-                for x in s.iter_mut().filter(|x| x.sent < upto) {
+                for x in s.iter_mut().filter(|x| x.waited_for(upto)) {
                     x.lagging = true;
                 }
                 return;
@@ -372,6 +441,11 @@ impl Feed {
 
     pub(crate) fn epoch(&self) -> u64 {
         lock(&self.ring).epoch
+    }
+
+    /// Whether it holds no more streams: its database is going.
+    pub(crate) fn is_closed(&self) -> bool {
+        lock(&self.ring).closed
     }
 
     /// A record numbered `seq`, as its last write: it holds as many as
@@ -695,9 +769,11 @@ impl Sink for Tee {
                     durable()?;
                     drop(syncing);
                     feed.mark_durable(upto);
-                    let sending = crate::trace::span("replication.wait_sent");
-                    feed.wait_sent(upto, SENT_WAIT);
-                    drop(sending);
+                    if !UNWAITED.with(|u| u.get()) {
+                        let sending = crate::trace::span("replication.wait_sent");
+                        feed.wait_sent(upto, SENT_WAIT);
+                        drop(sending);
+                    }
                     Ok(())
                 })))
             }
@@ -1798,6 +1874,39 @@ mod tests {
         // A mark past what was appended counts only what was.
         feed.mark_durable(99);
         assert_eq!(feed.durable(), 15);
+    }
+
+    #[test]
+    fn the_syncers_durability_waits_for_no_stream() {
+        let dir = std::env::temp_dir().join(format!(
+            "fenec-unwaited-{}-{:?}",
+            std::process::id(),
+            Instant::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.fenec");
+        let (mut db, feed) = open(path.to_str().unwrap(), 1 << 20).unwrap();
+        db.execute(&fenec_ql::parse_one("create collection c (x int)").unwrap())
+            .unwrap();
+        if let Some(d) = db.flush().unwrap() {
+            d().unwrap();
+        }
+        // A stream that sends nothing: a durable write's answer waits for
+        // it, the syncer's durability does not.
+        feed.sending(7, db.change_seq());
+        let write = |db: &mut Database| {
+            db.execute(&fenec_ql::parse_one("put c {x: 1}").unwrap())
+                .unwrap();
+            db.flush().unwrap().expect("a durability to run")
+        };
+        let t0 = Instant::now();
+        unwaited(write(&mut db)).unwrap();
+        assert!(t0.elapsed() < SENT_WAIT / 2, "{:?}", t0.elapsed());
+        let t0 = Instant::now();
+        write(&mut db)().unwrap();
+        assert!(t0.elapsed() >= SENT_WAIT);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

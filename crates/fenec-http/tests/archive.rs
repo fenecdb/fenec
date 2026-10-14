@@ -884,3 +884,29 @@ fn a_primary_restored_to_an_earlier_moment_is_refused_not_mixed_in() {
     assert_eq!(rows(&db, "get c").len(), 10);
     assert_eq!(Archive::new(&arch).unwrap().verify().unwrap().images, 1);
 }
+
+/// An archiver behind the primary's feed is sent an image; with no write
+/// after it, no segment follows the gap it leaves, and verify names that
+/// gap all the same -- counted only before a segment, it said none.
+#[test]
+fn verify_names_a_gap_an_image_alone_ends() {
+    let d = dir("trailing");
+    let p = primary(&d.join("p.fenec"), 512);
+    p.exec("create collection c (x int)");
+    let arch = d.join("archive");
+    let a = archiver(&arch, &p.url);
+    for i in 0..5 {
+        p.exec(&format!("put c {{x: {i}}}"));
+    }
+    archived(&arch, p.seq());
+    a.finish();
+    let stopped = p.seq();
+    for i in 5..200 {
+        p.exec(&format!("put c {{x: {i}}}"));
+    }
+    let a = archiver(&arch, &p.url);
+    archived(&arch, p.seq());
+    a.finish();
+    let v = Archive::new(&arch).unwrap().verify().unwrap();
+    assert_eq!(v.gaps, vec![(stopped + 1, p.seq())], "{v:?}");
+}

@@ -398,7 +398,7 @@ fn a_deleted_tenant_is_no_longer_followed_and_its_archive_is_kept() {
         "{done:?}"
     );
     assert!(
-        matches!(done[1], (ref t, Restoring::Restored(_)) if t == "keep"),
+        matches!(done[1], (ref t, Restoring::Restored(..)) if t == "keep"),
         "{done:?}"
     );
     assert!(!out.join("doomed.fenec").exists());
@@ -409,7 +409,7 @@ fn a_deleted_tenant_is_no_longer_followed_and_its_archive_is_kept() {
     let done = node_archive::restore_all(&root, &out, Target::Time(before), None).unwrap();
     assert!(
         done.iter()
-            .all(|(_, r)| matches!(r, Restoring::Restored(_))),
+            .all(|(_, r)| matches!(r, Restoring::Restored(..))),
         "{done:?}"
     );
 }
@@ -502,8 +502,8 @@ fn a_tenant_moved_between_nodes_goes_on_in_each_nodes_archive() {
     drop(t);
 
     r#move(&nb, &na);
-    // Taken back -- its image, and the `gone` file let go of after it --
-    // before it is written: a write landing first is in that image, and the
+    // Taken back -- its image, and noted back after it -- before it is
+    // written: a write landing first is in that image, and the
     // archive then has no segment after the gap to show it (macOS CI).
     until("node a's archive still says the tenant is gone", || {
         node_archive::gone_at(&root_a.join("m")).is_none()
@@ -513,6 +513,9 @@ fn a_tenant_moved_between_nodes_goes_on_in_each_nodes_archive() {
     archived(&root_a.join("m"), seq(&t));
     let end = rows(&t.db.read().unwrap(), "get notes");
     drop(t);
+    until("node b's archive was not told the tenant left", || {
+        node_archive::gone_at(&root_b.join("m")).is_some()
+    });
     aa.finish();
     ab.finish();
 
@@ -525,7 +528,6 @@ fn a_tenant_moved_between_nodes_goes_on_in_each_nodes_archive() {
     );
     let v = Archive::new(root_a.join("m")).unwrap().verify().unwrap();
     assert_eq!((v.images, v.gaps.len()), (2, 1), "{v:?}");
-    assert!(node_archive::gone_at(&root_b.join("m")).is_some());
 }
 
 /// A standby's tenant archived as it follows, then promoted: the stream
@@ -655,4 +657,440 @@ fn an_archive_that_does_not_read_is_left_alone_and_the_others_go_on() {
     a.finish();
     assert_eq!(std::fs::read(&junk).unwrap(), b"not an archive segment");
     assert_eq!(images(&root.join("bad")), 0);
+}
+
+/// A gate in a node's tenant setup: the first open after it is armed is
+/// held there until it is released -- the node's stream's, of a tenant it
+/// opens to look at.
+#[derive(Default)]
+struct GateState {
+    armed: bool,
+    entered: bool,
+    released: bool,
+}
+
+type Gate = Arc<(std::sync::Mutex<GateState>, std::sync::Condvar)>;
+
+fn gated(dir: &Path, sync_on_write: bool) -> (Node, Gate) {
+    let gate: Gate = Arc::default();
+    let g = Arc::clone(&gate);
+    fenec_http::audit::set_delay(0);
+    let tenants = Arc::new(
+        Tenants::new(dir)
+            .unwrap()
+            .with_replication(Replicated {
+                token: REPL.into(),
+                buffer: 8 << 20,
+                upstream: None,
+                sync_on_write,
+            })
+            .with_setup(move |_| {
+                let (m, cv) = &*g;
+                let mut s = m.lock().unwrap();
+                if s.armed {
+                    s.armed = false;
+                    s.entered = true;
+                    cv.notify_all();
+                    while !s.released {
+                        s = cv.wait(s).unwrap();
+                    }
+                }
+                Ok(())
+            }),
+    );
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        sync_on_write,
+        ..Config::default()
+    };
+    let server = Server::with_tenants(Arc::clone(&tenants), cfg);
+    let listener = server.bind().unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    (Node { url, tenants }, gate)
+}
+
+fn arm(gate: &Gate) {
+    gate.0.lock().unwrap().armed = true;
+}
+
+fn entered(gate: &Gate) {
+    let (m, cv) = &**gate;
+    let (_s, waited) = cv
+        .wait_timeout_while(m.lock().unwrap(), Duration::from_secs(20), |s| !s.entered)
+        .unwrap();
+    assert!(
+        !waited.timed_out(),
+        "the stream never opened the gated tenant"
+    );
+}
+
+fn release(gate: &Gate) {
+    let (m, cv) = &**gate;
+    m.lock().unwrap().released = true;
+    cv.notify_all();
+}
+
+/// Half the wait a durable write gives a stream: a write that waited for a
+/// stream held up elsewhere took all of it, 1.008 s.
+const HALF_A_WAIT: Duration = Duration::from_millis(500);
+
+/// The node's one stream held up on one tenant -- inside the open it makes
+/// to take that tenant's image -- holds up no other tenant's durable write:
+/// each tenant's own stream stalled that tenant alone, and one for all of
+/// them held every tenant's next write for its `SENT_WAIT`.
+#[test]
+fn a_stream_held_up_on_one_tenant_holds_up_no_others_writes() {
+    let d = scratch("hol");
+    let (n, gate) = gated(&d.join("node"), true);
+    let big = made(&n, "big", 20);
+    let y = made(&n, "y", 2);
+    let z = made(&n, "z", 2);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    for (name, t) in [("big", &big), ("y", &y), ("z", &z)] {
+        archived(&root.join(name), seq(t));
+    }
+    a.finish();
+    exec(&big, "put notes {title: \"unarchived\", n: 77}");
+    drop((big, y, z));
+    close_all(&n.tenants, 3);
+    arm(&gate);
+    let a = archiver(&root, &n.url);
+    entered(&gate);
+    // Opened while the stream is held up: it stands where they do, and is
+    // put on their feeds.
+    for name in ["y", "z"] {
+        let t = n.tenants.get(name).unwrap();
+        let t0 = Instant::now();
+        exec(&t, "put notes {title: \"while held up\", n: 2}");
+        let took = t0.elapsed();
+        assert!(took < HALF_A_WAIT, "a write to `{name}` waited {took:?}");
+    }
+    release(&gate);
+    for name in ["y", "z"] {
+        let t = n.tenants.get(name).unwrap();
+        archived(&root.join(name), seq(&t));
+        assert_eq!(images(&root.join(name)), 1);
+    }
+    a.finish();
+}
+
+/// Nor do the syncer and a close wait for it: under `--sync <ms>` a pass
+/// over five dirty tenants took 5.06 s with the stream held up, and a
+/// close held its tenant's slot, and a request for it, a second.
+#[test]
+fn the_syncer_and_a_close_wait_for_no_stream() {
+    let d = scratch("syncer");
+    let (n, gate) = gated(&d.join("node"), false);
+    let names = ["t1", "t2", "t3", "t4", "t5"];
+    let held: Vec<Arc<Tenant>> = names.iter().map(|x| made(&n, x, 2)).collect();
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    for (x, t) in names.iter().zip(&held) {
+        archived(&root.join(x), seq(t));
+    }
+    // The stream held up in a tenant installed closed, which it opens.
+    let image = n.tenants.export("t1").unwrap();
+    arm(&gate);
+    n.tenants.import("imp", &image).unwrap();
+    entered(&gate);
+    for t in &held {
+        let mut g = t.db.write().unwrap();
+        g.execute(&fenec_ql::parse_one("put notes {title: \"buffered\", n: 9}").unwrap())
+            .unwrap();
+    }
+    let mut held = held;
+    drop(held.pop());
+    let asking = {
+        let tenants = Arc::clone(&n.tenants);
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            tenants.get("t5").map(|_| ()).unwrap();
+            t0.elapsed()
+        })
+    };
+    let t0 = Instant::now();
+    n.tenants.close_idle(Duration::ZERO);
+    let close = t0.elapsed();
+    let asked = asking.join().unwrap();
+    let t0 = Instant::now();
+    n.tenants.sync_dirty();
+    let pass = t0.elapsed();
+    release(&gate);
+    assert!(close < HALF_A_WAIT, "a close took {close:?}");
+    assert!(asked < HALF_A_WAIT, "a request waited {asked:?} on a close");
+    assert!(pass < HALF_A_WAIT, "a syncer's pass took {pass:?}");
+    for (x, t) in names.iter().zip(&held) {
+        archived(&root.join(x), seq(t));
+    }
+    drop(held);
+    a.finish();
+}
+
+/// An image waits for its tenant's disk without holding up the stream:
+/// waited for there, up to 30 s, every other tenant waited with it.
+#[test]
+fn an_image_waiting_for_its_disk_holds_up_no_other_tenant() {
+    let d = scratch("pending");
+    // No syncer: a write stays off the disk until flushed here.
+    let (n, _gate) = gated(&d.join("node"), false);
+    let early = made(&n, "a-early", 2);
+    exec_unsynced(&early, "put notes {title: \"not on disk\", n: 3}");
+    let later = made(&n, "b-later", 2);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    exec(&later, "put notes {title: \"on disk\", n: 4}");
+    archived(&root.join("b-later"), seq(&later));
+    // On disk, the image goes.
+    sync(&early);
+    archived(&root.join("a-early"), seq(&early));
+    drop((early, later));
+    a.finish();
+}
+
+fn exec_unsynced(t: &Tenant, sql: &str) {
+    t.db.write()
+        .unwrap()
+        .execute(&fenec_ql::parse_one(sql).unwrap())
+        .unwrap();
+}
+
+fn sync(t: &Tenant) {
+    let durable = t.db.write().unwrap().flush().unwrap();
+    if let Some(d) = durable {
+        d().unwrap();
+    }
+}
+
+/// A tenant deleted and made again under its name while the stream is busy
+/// elsewhere -- its notices come and go meanwhile, and the new tenant
+/// writes nothing to give another -- is still noticed: the old archive is
+/// moved aside, and a restore brings back the new tenant, not the deleted
+/// one.
+#[test]
+fn a_tenant_made_again_while_the_stream_is_busy_is_noticed() {
+    let d = scratch("again-busy");
+    let (n, gate) = gated(&d.join("node"), true);
+    let big = made(&n, "big", 5);
+    let e = made(&n, "e", 10);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    archived(&root.join("big"), seq(&big));
+    archived(&root.join("e"), seq(&e));
+    let image = n.tenants.export("big").unwrap();
+    drop(big);
+    arm(&gate);
+    n.tenants.import("imp", &image).unwrap();
+    entered(&gate);
+    drop(e);
+    n.tenants.delete("e").unwrap();
+    drop(n.tenants.create("e").unwrap());
+    release(&gate);
+    until("the old archive was not moved aside", || {
+        std::fs::read_dir(&root)
+            .unwrap()
+            .any(|x| x.unwrap().file_name().to_string_lossy().starts_with("e."))
+    });
+    archived(&root.join("e"), 0);
+    a.finish();
+    let out = d.join("out");
+    node_archive::restore_all(&root, &out, Target::End, None).unwrap();
+    let db = fenec_core::fs::open(out.join("e.fenec")).unwrap();
+    assert!(
+        db.collection_names().is_empty(),
+        "the deleted tenant came back"
+    );
+}
+
+/// A closed tenant written after it closed -- by a holder of its database,
+/// as the `@ttl` sweeper is -- then opened, written and closed again while
+/// the stream was busy, is read again when the stream comes to it rather
+/// than taken where it closed: the archive reaches it.
+#[test]
+fn a_closed_tenant_written_past_its_close_reaches_its_archive() {
+    let d = scratch("unfed");
+    let (n, gate) = gated(&d.join("node"), true);
+    let x = made(&n, "x", 3);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    archived(&root.join("x"), seq(&x));
+    let db = Arc::clone(&x.db);
+    let image = n.tenants.export("x").unwrap();
+    drop(x);
+    close_all(&n.tenants, 1);
+    // Busy first, so the write past the close is told of while it cannot
+    // look, and the tenant opens again ahead of the archive.
+    arm(&gate);
+    n.tenants.import("imp", &image).unwrap();
+    entered(&gate);
+    {
+        let durable = {
+            let mut g = db.write().unwrap();
+            g.execute(&fenec_ql::parse_one("del notes where n = 0").unwrap())
+                .unwrap();
+            g.flush().unwrap()
+        };
+        if let Some(d) = durable {
+            d().unwrap();
+        }
+    }
+    drop(db);
+    let x = n.tenants.get("x").unwrap();
+    exec(&x, "put notes {title: \"acknowledged\", n: 42}");
+    let want = seq(&x);
+    drop(x);
+    close_all(&n.tenants, 1);
+    release(&gate);
+    archived(&root.join("x"), want);
+    a.finish();
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// A moment between two readings of the clock, each a few milliseconds
+/// apart from it: what was done before it is before it.
+fn a_moment() -> u64 {
+    std::thread::sleep(Duration::from_millis(20));
+    let t = now_ms();
+    std::thread::sleep(Duration::from_millis(20));
+    t
+}
+
+fn restored_rows(root: &Path, out: &Path, to: Target, name: &str) -> (Restoring, Option<Rows>) {
+    let done = node_archive::restore_all(root, out, to, None).unwrap();
+    let (_, r) = done
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .expect("the tenant listed");
+    let rows = matches!(r, Restoring::Restored(..)).then(|| {
+        rows(
+            &fenec_core::fs::open(out.join(format!("{name}.fenec"))).unwrap(),
+            "get notes",
+        )
+    });
+    (r, rows)
+}
+
+/// A tenant made again under its name begins a line of its own, and the
+/// old one, moved aside, answers for the time before the new one began: a
+/// restore to a moment then took the new line, which began after it, and
+/// passed the tenant over as never archived.
+#[test]
+fn a_restore_to_a_moment_takes_the_line_that_began_by_then() {
+    let d = scratch("lines");
+    let n = node(&d.join("node"), None);
+    let old = made(&n, "e", 10);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    archived(&root.join("e"), seq(&old));
+    let old_rows = rows(&old.db.read().unwrap(), "get notes");
+    drop(old);
+    let before = a_moment();
+    n.tenants.delete("e").unwrap();
+    let new = made(&n, "e", 2);
+    archived(&root.join("e"), seq(&new));
+    let new_rows = rows(&new.db.read().unwrap(), "get notes");
+    drop(new);
+    a.finish();
+    let lines: Vec<String> = node_archive::lines(&root)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.label)
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let (r, got) = restored_rows(&root, &d.join("then"), Target::Time(before), "e");
+    assert!(
+        matches!(&r, Restoring::Restored(_, from) if from.starts_with("e.")),
+        "{r:?}"
+    );
+    assert_eq!(got.unwrap(), old_rows);
+    let (r, got) = restored_rows(&root, &d.join("now"), Target::End, "e");
+    assert!(
+        matches!(&r, Restoring::Restored(_, from) if from == "e"),
+        "{r:?}"
+    );
+    assert_eq!(got.unwrap(), new_rows);
+}
+
+/// Moved to another node and back, a tenant was not this node's in
+/// between: a restore of this node's root to that time leaves it out, where
+/// the copy it gave was the one from before it left, beside the other
+/// node's.
+#[test]
+fn a_tenant_away_on_another_node_is_left_out_of_its_time_away() {
+    let d = scratch("away");
+    let (na, nb) = (node(&d.join("a"), None), node(&d.join("b"), None));
+    let (root_a, root_b) = (d.join("root-a"), d.join("root-b"));
+    let (aa, ab) = (archiver(&root_a, &na.url), archiver(&root_b, &nb.url));
+    let t = made(&na, "m", 5);
+    archived(&root_a.join("m"), seq(&t));
+    drop(t);
+    let r#move = |from: &Node, to: &Node| {
+        from.tenants.freeze("m").unwrap();
+        let image = from.tenants.export("m").unwrap();
+        to.tenants.import("m", &image).unwrap();
+        from.tenants.delete("m").unwrap();
+    };
+    r#move(&na, &nb);
+    until("node a's archive was not told the tenant left", || {
+        node_archive::gone_at(&root_a.join("m")).is_some()
+    });
+    let t = nb.tenants.get("m").unwrap();
+    exec(&t, "put notes {title: \"on b\", n: 200}");
+    archived(&root_b.join("m"), seq(&t));
+    drop(t);
+    let away = a_moment();
+    r#move(&nb, &na);
+    until("node a's archive did not take the tenant back", || {
+        node_archive::gone_at(&root_a.join("m")).is_none()
+    });
+    until("node b's archive was not told the tenant left", || {
+        node_archive::gone_at(&root_b.join("m")).is_some()
+    });
+    aa.finish();
+    ab.finish();
+    let (r, _) = restored_rows(&root_a, &d.join("out-a"), Target::Time(away), "m");
+    assert!(matches!(r, Restoring::Gone(_)), "{r:?}");
+    let (r, _) = restored_rows(&root_b, &d.join("out-b"), Target::Time(away), "m");
+    assert!(matches!(r, Restoring::Restored(..)), "{r:?}");
+    // And back: this node's again.
+    let (r, _) = restored_rows(&root_a, &d.join("end-a"), Target::End, "m");
+    assert!(matches!(r, Restoring::Restored(..)), "{r:?}");
+}
+
+/// A moment the archive held and let go of (`--keep`) is refused, not
+/// passed over as one before the tenant was archived: a node restored to
+/// it would have come back without every tenant older than the window,
+/// and said so with exit 0.
+#[test]
+fn a_moment_let_go_of_is_refused() {
+    let d = scratch("let-go");
+    let n = node(&d.join("node"), None);
+    let t = made(&n, "x", 2);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    archived(&root.join("x"), seq(&t));
+    let early = a_moment();
+    exec(&t, "put notes {title: \"later\", n: 3}");
+    archived(&root.join("x"), seq(&t));
+    drop(t);
+    a.finish();
+    let arch = Archive::new(root.join("x")).unwrap();
+    assert!(arch.consolidate().unwrap().is_some());
+    std::thread::sleep(Duration::from_millis(5));
+    // Nothing kept but the newest image.
+    assert_eq!(arch.prune(0, now_ms()).unwrap().0, 1);
+    let (r, _) = restored_rows(&root, &d.join("then"), Target::Time(early), "x");
+    assert!(matches!(r, Restoring::LetGo(_)), "{r:?}");
+    // Before the archive began, the tenant was not archived: passed over.
+    let (r, _) = restored_rows(&root, &d.join("before"), Target::Time(1), "x");
+    assert!(matches!(r, Restoring::NotYet), "{r:?}");
 }

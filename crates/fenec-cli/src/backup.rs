@@ -384,14 +384,17 @@ fn every_tenant(
             };
             let keep = (command == "prune")
                 .then(|| keep.unwrap_or_else(|| fail("`fenec prune` needs --keep <duration>")));
-            let dirs = node_archive::tenant_dirs(Path::new(root))
+            // Every line, those moved aside too: each is an archive a restore
+            // to a moment may take.
+            let lines = node_archive::lines(Path::new(root))
                 .unwrap_or_else(|e| fail(&format!("{root}: {e}")));
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
             let iso = |t: u64| fenec_core::time::format_iso(t as i64);
             let mut failed = 0;
-            for (name, dir) in &dirs {
+            for line in &lines {
+                let (name, dir) = (&line.label, &line.dir);
                 let arch = Archive::with_key(dir, key.cloned());
                 let gone = node_archive::gone_at(dir).map_or(String::new(), |t| {
                     format!(", gone from the node {}", iso(t))
@@ -425,7 +428,13 @@ fn every_tenant(
                     },
                 }
             }
-            println!("{root}: {} tenants, {failed} failed", dirs.len());
+            let tenants: std::collections::BTreeSet<&str> =
+                lines.iter().map(|l| l.tenant.as_str()).collect();
+            println!(
+                "{root}: {} tenants in {} archives, {failed} failed",
+                tenants.len(),
+                lines.len()
+            );
             (failed > 0) as i32
         }
         "restore" => {
@@ -441,8 +450,12 @@ fn every_tenant(
             let (mut restored, mut passed, mut failed) = (0, 0, 0);
             for (name, outcome) in &done {
                 match outcome {
-                    node_archive::Restoring::Restored(seq) => {
+                    node_archive::Restoring::Restored(seq, from) if from == name => {
                         println!("{name}: change {seq}");
+                        restored += 1;
+                    }
+                    node_archive::Restoring::Restored(seq, from) => {
+                        println!("{name}: change {seq}, from {from}");
                         restored += 1;
                     }
                     node_archive::Restoring::Gone(t) => {
@@ -452,6 +465,14 @@ fn every_tenant(
                     node_archive::Restoring::NotYet => {
                         println!("{name}: archived only from after then, passed over");
                         passed += 1;
+                    }
+                    node_archive::Restoring::LetGo(first) => {
+                        eprintln!(
+                            "{name}: that moment was let go of (--keep): its archive holds \
+                             nothing from before {}",
+                            iso(*first)
+                        );
+                        failed += 1;
                     }
                     node_archive::Restoring::Failed(e) => {
                         eprintln!("{name}: {e}");

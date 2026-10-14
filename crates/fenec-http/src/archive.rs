@@ -430,10 +430,32 @@ impl Archive {
         Ok(self.images()?.first().map(|i| i.1))
     }
 
+    /// When the archive took its first image, ms since the epoch -- kept in
+    /// `began` beside the images, which `prune` lets go of, so a moment
+    /// before its oldest image kept is told from one before it began. An
+    /// archive from before the file says its oldest image's time.
+    pub fn began(&self) -> io::Result<Option<u64>> {
+        match fs::read_to_string(self.dir.join("began")) {
+            Ok(t) => Ok(t.trim().parse().ok()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.first_image_time(),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Adds a base image of the database at change `seq`. Taking one now and
     /// then keeps a restore from replaying every write since the first.
     pub fn add_image(&self, seq: u64, image: &[u8]) -> io::Result<()> {
-        self.put(&self.image_path(seq, now_ms()), image)
+        let now = now_ms();
+        let began = self.dir.join("began");
+        if !began.exists() && self.images()?.is_empty() {
+            // Plain, sealed or not: a time, which the images' names say.
+            let tmp = began.with_extension("tmp");
+            let mut f = File::create(&tmp)?;
+            f.write_all(format!("{now}\n").as_bytes())?;
+            f.sync_all()?;
+            fs::rename(&tmp, &began)?;
+        }
+        self.put(&self.image_path(seq, now), image)
     }
 
     /// The last change the archive holds, the history it is on, and the
@@ -980,6 +1002,16 @@ impl Archive {
             if writes > 0 {
                 covered = covered.max(start + writes - 1);
                 to = list.last().map(|e| e.0);
+            }
+        }
+        // An image past the segments' end, with no segment after it -- an
+        // archive given an image and no write since, which the node's
+        // archiver makes of a tenant come back -- leaves the changes before
+        // it in no segment as well; counted only before a segment, it went
+        // unsaid.
+        if let Some(&(image, _)) = images.last() {
+            if image > covered {
+                gaps.push((covered + 1, image));
             }
         }
         let last = covered.max(images.last().map_or(0, |i| i.0));

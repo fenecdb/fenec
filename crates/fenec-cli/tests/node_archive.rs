@@ -208,7 +208,7 @@ fn a_node_restored_from_its_archive_holds_every_archived_write() {
 
     let (ok, said) = fenec(&["verify", "--tenants", root.to_str().unwrap()]);
     assert!(ok, "{said}");
-    assert!(said.contains("8 tenants, 0 failed"), "{said}");
+    assert!(said.contains("8 tenants in 8 archives, 0 failed"), "{said}");
     let out = d.join("restored");
     let (ok, said) = fenec(&[
         "restore",
