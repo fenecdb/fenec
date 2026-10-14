@@ -69,16 +69,20 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
             --replication-token), each an archive of its own under
             <root-dir>/<tenant>/, over one connection to the node however
             many tenants it holds: a tenant made there is archived from its
-            first image, one deleted or moved to another node is no longer
-            followed and its archive kept, marked `gone`. A tenant whose
-            copy no longer leads from its archive -- restored to an earlier
-            moment, or made again under its name -- has its archive so far
-            moved aside to <root-dir>/<tenant>.<history> and a new one
-            begun. --image-every and --keep apply to each. Each tenant's
-            directory is an archive that restore, verify and prune read
-            alone; with --tenants they read every one: restore writes
-            <out-dir>/<tenant>.fenec for each tenant the node held at that
-            moment -- a directory a node serves (fenec-server --dir)
+            first image; one deleted or moved to another node is no longer
+            followed, its archive kept and noted gone, and noted back where
+            it comes back. A tenant whose copy no longer leads from its
+            archive -- restored to an earlier moment, or made again under
+            its name -- has its line so far moved aside to
+            <root-dir>/<tenant>.<history> and a new one begun.
+            --image-every and --keep apply to each line. Each directory is
+            an archive that restore, verify and prune read alone; with
+            --tenants they read every one, the lines moved aside too.
+            restore writes <out-dir>/<tenant>.fenec for each tenant the node
+            held at that moment, from the line that began last by then -- a
+            directory a node serves (fenec-server --dir) -- passes over a
+            tenant gone then or archived only after, and fails on one whose
+            moment --keep let go of
 
   key       writes a new key into <key-file>, 64 hexadecimal digits,
             readable by its owner alone. With it an archive's images,

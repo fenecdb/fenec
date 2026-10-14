@@ -1,11 +1,16 @@
 //! What archiving every tenant of a node costs, each way:
-//! `cargo run --release -p fenec-http --example node_archive -- [TENANTS] [ACTIVE] [SECONDS] [SYNC]`
-//! (`make node-archive-bench`; it runs `target/release/fenec-server`).
+//! `cargo run --release -p fenec-http --example node_archive -- [TENANTS] [ACTIVE] [SECONDS] [SYNC] [WAY] [BIG_MB]`
+//! (`make node-archive-bench`; it runs `target/release/fenec-server`, or
+//! the one `FENEC_SERVER` names -- another build's, to compare).
 //!
 //! A `fenec-server --dir` node of TENANTS tenants (1 000), each a
-//! collection of ten rows, closed once idle for two seconds, in a process
-//! of its own; ACTIVE of them (10) written ten times a second each for
-//! SECONDS (20) under `--sync SYNC` (always). Three ways, a fresh node each:
+//! collection of ten rows, and one of BIG_MB (64) whose image is the
+//! largest the archiver takes, all closed once idle for two seconds, in a
+//! process of its own; ACTIVE of them (10) written ten times a second each
+//! from before the archiver connects -- the writes' round trips counted
+//! apart while it takes its first images, the large one among them, and
+//! after -- then SECONDS (20) more under `--sync SYNC` (always). Three ways,
+//! a fresh node each:
 //!
 //!   none     no archiver: what the writes cost on their own
 //!   streams  a tenant's own stream each (`/t/<tenant>/_replication`), all
@@ -48,6 +53,9 @@ struct Node {
 }
 
 fn server() -> PathBuf {
+    if let Ok(path) = std::env::var("FENEC_SERVER") {
+        return PathBuf::from(path);
+    }
     let exe = std::env::current_exe().unwrap();
     let release = exe.parent().unwrap().parent().unwrap();
     let path = release.join("fenec-server");
@@ -317,20 +325,35 @@ fn main() {
         Some("node") => vec![Way::Node],
         _ => vec![Way::None, Way::Streams, Way::Node],
     };
+    let big_mb: usize = args.get(5).map_or(64, |v| v.parse().unwrap());
     println!(
-        "{tenants} tenants, {active} written 10 times a second each for {seconds} s, --sync {sync}\n"
+        "{tenants} tenants and one of {big_mb} MB, {active} written 10 times a second each, \
+         --sync {sync}, {}\n",
+        server().display()
     );
     for way in ways {
-        run(way, tenants, active, seconds, &sync);
+        run(way, tenants, active, seconds, &sync, big_mb);
     }
 }
 
-fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
+fn stats(lat: &[f64]) -> String {
+    let mut lat = lat.to_vec();
+    lat.sort_by(f64::total_cmp);
+    format!(
+        "{} at p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+        lat.len(),
+        pct(&lat, 0.5),
+        pct(&lat, 0.99),
+        lat.last().copied().unwrap_or(0.0)
+    )
+}
+
+fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str, big_mb: usize) {
     let d = std::env::temp_dir().join(format!("fenec-node-archive-bench-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     let node = Node::start(&d.join("node"), sync);
-    let names: Vec<String> = (0..tenants).map(|i| format!("t{i:05}")).collect();
+    let mut names: Vec<String> = (0..tenants).map(|i| format!("t{i:05}")).collect();
     for name in &names {
         let (s, _) = call(
             &node.addr,
@@ -353,6 +376,27 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
             200
         );
     }
+    // The large one, first in the stream's pass: a thousand rows of a KB a
+    // statement.
+    let (s, _) = call(&node.addr, "PUT", "/_admin/tenants/big", "", Some(ADMIN));
+    assert_eq!(s, 201);
+    let mut c = Client::new(&node.addr);
+    assert_eq!(
+        c.query("big", "create collection notes (title text, n int @hash)"),
+        200
+    );
+    let text = "x".repeat(1000);
+    for k in 0..big_mb {
+        let docs: Vec<String> = (0..1000)
+            .map(|i| format!("{{title: \"{text}\", n: {}}}", k * 1000 + i))
+            .collect();
+        assert_eq!(
+            c.query("big", &format!("put notes [{}]", docs.join(","))),
+            200
+        );
+    }
+    drop(c);
+    names.push("big".into());
     // Every tenant idle and closed, as most of a node's are.
     let t = Instant::now();
     while node.open_tenants() > 0 {
@@ -367,7 +411,44 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
     let (node_rss0, node_threads0, _) = ps(pid);
     let (me_rss0, me_threads0, _) = ps(me);
 
+    // The writers, from before the archiver connects: each round trip
+    // with the phase it fell in.
+    let phase = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let lat: Arc<Mutex<Vec<(u8, f64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let writers: Vec<_> = names[..active]
+        .iter()
+        .map(|name| {
+            let (name, addr, stop, lat, phase) = (
+                name.clone(),
+                node.addr.clone(),
+                Arc::clone(&stop),
+                Arc::clone(&lat),
+                Arc::clone(&phase),
+            );
+            std::thread::spawn(move || {
+                let mut c = Client::new(&addr);
+                let mut i = 0;
+                let mut next = Instant::now();
+                while !stop.load(Ordering::SeqCst) {
+                    let p = phase.load(Ordering::SeqCst);
+                    let t = Instant::now();
+                    let s = c.query(&name, &format!("put notes {{title: \"w {i}\", n: {i}}}"));
+                    assert_eq!(s, 200);
+                    lat.lock()
+                        .unwrap()
+                        .push((p, t.elapsed().as_secs_f64() * 1e3));
+                    i += 1;
+                    next += Duration::from_millis(100);
+                    std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                }
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_secs(2));
+
     // The archiver connects: until every tenant's archive has its image.
+    phase.store(1, Ordering::SeqCst);
     let root = d.join("root");
     let t0 = Instant::now();
     let arch = Archiver::start(way, &node.url(), &root, &names);
@@ -381,42 +462,19 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
+    } else {
+        std::thread::sleep(Duration::from_secs(5));
     }
     let first_images = t0.elapsed();
     // Settled: the node's idle close has had its turn.
+    phase.store(2, Ordering::SeqCst);
     std::thread::sleep(Duration::from_secs(3));
     let settled_open = node.open_tenants();
 
-    // The writes.
+    // The steady writes.
     let (_, _, node_cpu0) = ps(pid);
     let (_, _, me_cpu0) = ps(me);
-    let stop = Arc::new(AtomicBool::new(false));
-    let lat = Arc::new(Mutex::new(Vec::new()));
-    let writers: Vec<_> = names[..active]
-        .iter()
-        .map(|name| {
-            let (name, addr, stop, lat) = (
-                name.clone(),
-                node.addr.clone(),
-                Arc::clone(&stop),
-                Arc::clone(&lat),
-            );
-            std::thread::spawn(move || {
-                let mut c = Client::new(&addr);
-                let mut i = 0;
-                let mut next = Instant::now();
-                while !stop.load(Ordering::SeqCst) {
-                    let t = Instant::now();
-                    let s = c.query(&name, &format!("put notes {{title: \"w {i}\", n: {i}}}"));
-                    assert_eq!(s, 200);
-                    lat.lock().unwrap().push(t.elapsed().as_secs_f64() * 1e3);
-                    i += 1;
-                    next += Duration::from_millis(100);
-                    std::thread::sleep(next.saturating_duration_since(Instant::now()));
-                }
-            })
-        })
-        .collect();
+    phase.store(3, Ordering::SeqCst);
     let t = Instant::now();
     let (mut node_rss, mut node_threads, mut open) = (0f64, 0usize, 0usize);
     while t.elapsed() < Duration::from_secs(seconds) {
@@ -426,26 +484,32 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
         node_threads = node_threads.max(threads);
         open = open.max(node.open_tenants());
     }
+    let wall = t.elapsed().as_secs_f64();
+    let (_, _, node_cpu1) = ps(pid);
+    let (me_rss, me_threads, me_cpu1) = ps(me);
     stop.store(true, Ordering::SeqCst);
     for w in writers {
         w.join().unwrap();
     }
-    let wall = t.elapsed().as_secs_f64();
-    let (_, _, node_cpu1) = ps(pid);
-    let (me_rss, me_threads, me_cpu1) = ps(me);
     let fds = descriptors(me);
     let node_fds = descriptors(pid);
-    let mut lat = lat.lock().unwrap().clone();
-    lat.sort_by(f64::total_cmp);
+    let lat = lat.lock().unwrap().clone();
+    let of = |p: u8| -> Vec<f64> { lat.iter().filter(|x| x.0 == p).map(|x| x.1).collect() };
 
     println!("== {way:?}");
     println!("  node before:  {node_rss0:.1} MB, {node_threads0} threads, 0 tenants open");
-    if way != Way::None {
-        println!(
-            "  first images of all {tenants}: {:.2} s; {settled_open} tenants open 3 s after",
-            first_images.as_secs_f64()
-        );
+    match way {
+        Way::None => println!("  writes, the same 5 s: {}", stats(&of(1))),
+        _ => {
+            println!(
+                "  first images of all {}: {:.2} s; {settled_open} tenants open 3 s after",
+                names.len(),
+                first_images.as_secs_f64()
+            );
+            println!("  writes as they were taken: {}", stats(&of(1)));
+        }
     }
+    println!("  writes before the archiver: {}", stats(&of(0)));
     println!(
         "  node writing: {node_rss:.1} MB, {node_threads} threads, {node_fds} descriptors, {open} tenants open at most, CPU {:.1}% of a core",
         (node_cpu1 - node_cpu0) / wall * 100.0
@@ -456,13 +520,7 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
         me_threads.saturating_sub(me_threads0),
         (me_cpu1 - me_cpu0) / wall * 100.0
     );
-    println!(
-        "  writes:       {} at p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
-        lat.len(),
-        pct(&lat, 0.5),
-        pct(&lat, 0.99),
-        lat.last().copied().unwrap_or(0.0)
-    );
+    println!("  writes, steady: {}", stats(&of(3)));
 
     // The node restarted, the archiver connecting again.
     arch.finish();
@@ -507,7 +565,6 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
                 );
             }
         }
-        let _ = t0;
         arch.finish();
     }
     node.stop();

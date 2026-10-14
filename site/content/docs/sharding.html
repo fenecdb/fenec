@@ -511,9 +511,10 @@ fenec restore --tenants /backups/n1 /data/n1 --to 2026-09-22T10:14:59Z</pre>
 
 <ul>
   <li><b>Moved or deleted:</b> a tenant that leaves the node is no longer
-    followed and its archive is kept, marked <code>gone</code>; the target
-    node's archiver takes it up from its image. A restore of the node to a
-    later moment leaves it out.</li>
+    followed and its archive is kept, noted gone, and noted back if it
+    returns; the target node's archiver takes it up from its image. A
+    restore of the node to a moment it was away leaves it out, as it does a
+    tenant deleted before.</li>
   <li><b>Replicas and standbys</b> can be archived the same way: their
     tenants' writes are the primary's, numbered alike, and a promotion goes
     on in the same archive.</li>

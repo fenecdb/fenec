@@ -285,13 +285,18 @@ replica-bench:
 	$(CARGO) run --release -p fenec-server --example failover -- 10
 
 ## Every tenant of a node archived: a node of 1 000 tenants, 10 of them
-## written, with no archiver, a tenant's own stream each and the node's one
-## stream of every tenant -- the node's and the archiver's memory, threads,
-## descriptors and CPU, the writes' round trips, and a node restarted
-## (ARGS="tenants active seconds sync way"; crates/fenec-http/examples/node_archive.rs)
+## written and one of 64 MB, with no archiver, a tenant's own stream each
+## and the node's one stream of every tenant -- the node's and the
+## archiver's memory, threads, descriptors and CPU, the writes' round trips
+## as the first images are taken and after, and a node restarted
+## (ARGS="tenants active seconds sync way big_mb";
+## crates/fenec-http/examples/node_archive.rs); then the syncer's passes and
+## a tenant's close under --sync 250 beside each way of archiving
+## (PASSES="way seconds big_mb"; examples/node_archive_passes.rs)
 node-archive-bench:
-	$(CARGO) build --release -p fenec-server
+	$(CARGO) build --release -p fenec-server -p fenec-cli
 	$(CARGO) run --release -p fenec-http --example node_archive -- $(or $(ARGS),1000 10 20 always)
+	$(CARGO) run --release -p fenec-http --example node_archive_passes -- $(or $(PASSES),node 20 32)
 
 ## Writers and readers at once, fenecdb against SQLite in one process:
 ## durable and buffered writes from 1, 4 and 16 threads, and reads alone,

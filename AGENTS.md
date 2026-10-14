@@ -71,7 +71,7 @@ make shard-bench         # router overhead per request, tenant move time, failov
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
 make policy-bench        # a scoped set under a plain rule, a field list, a transition, answering its row and a rule reading another collection, and a read by id, against the server's token, in process and over HTTP (ARGS=streams|beats: writes beside scoped streams)
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
-make node-archive-bench  # every tenant of a node archived: 1 000 tenants, a stream each against the node's one stream (ARGS="tenants active seconds sync way")
+make node-archive-bench  # every tenant of a node archived: 1 000 tenants and one of 64 MB, a stream each against the node's one stream (ARGS="tenants active seconds sync way big_mb"); the syncer's passes and a close beside it (PASSES="way seconds big_mb")
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes (ARGS=blocks those alone, NOPREP=1 a block built under the lock; ARGS=long writers beside long reads)
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
 make mcp-bench           # an MCP tool call against the /query it runs: in process, and over HTTP
@@ -646,70 +646,116 @@ fenecdb speaks no TLS, and S3 and R2 are reached with `rclone sync`.
 --tenants`, `fenec_http::node_stream` on the node, `node_archive` the
 archiver). A tenant's own stream is a connection and a thread on the node
 for as long as it runs, one of `--max-connections`, and holds its tenant
-open: archived so, a node of 1 000 idle tenants held 1 015 threads, 4 007
-descriptors and 100.5 MB, every tenant open for good, against 15, 27 and
-10.7 with no archiver -- and at the default 100 connections could not be
-archived at all. `POST /_replication/tenants`, with the replication token,
-is one connection and one node thread for every tenant: its body is where
-each archive under the root stands (`<tenant> <since> <history> <image>` a
-line), the node says hello to each tenant it holds (an image where the place
-does not lead to its writes) and `G` to each listed one it does not, and
-every message is the tenant stream's led by its name. It sends a tenant's
-writes from its feed while it is open, and nothing while it is closed, whose
-file does not change. It is a sender on each open tenant's feed as a
-replica's stream is -- put there as the tenant opens where its client stands
-where the file does (`NodeStreams::attach`), and on the tenants open as it
-connects -- so a `--sync always` write waits for it, and `Tenants::close`
-refuses while a sender has a write left (`Feed::unsent`), syncing a dirty
-tenant first: closed, its feed went with it and the writes came again as an
-image. `tests/node_archive.rs` holds the stream inside another tenant's open
-and fails with either the close's check or the registration at connect taken
-out. Which tenants have news is told: a feed tells as its writes reach the
-disk, it starts over or closes (`Feed::tell_with`), and a tenant made,
-installed, deleted, promoted or made to follow touches the stream; the
-directory is read again every 10 s for a file put there by hand. With no
-stream connected a sync pays a load. A closed tenant's place is where it
-closed in this process (`Tenants::closed`), or read from its file
-(`Tenants::peek`, `open_read_only`): 1 000 in 45 ms after a node restarted,
-where opened to look they took 6.3 ms a tenant, the open fsyncing the file
--- and only one the archive is behind is opened, for its image. The feed
-keeps the lineage the database last wrote, read off the history records
-`Tee::append` passes, and the stream sends it (`L`) before the writes after
-a promotion: a promoted standby's archive goes on with no image, where its
-stale `history` file had it take one. The archiver keeps `<root>/<tenant>/`
-as `fenec archive` keeps one, through the same `archive::Writer` the single
-archiver now writes with; a segment file is open only while its tenant
-writes (a thousand would pass a macOS shell's 256 descriptors), the
-`history` file is written only when it moved (a thousand fsyncs a reconnect
-otherwise), and `archiving.lock` keeps a second archiver off the root. A
-tenant the node says is gone -- deleted, or moved to a node whose archiver
-takes it up from its image on the same history -- keeps its archive and a
-`gone` file of the time, which `restore --tenants` reads so a deleted tenant
-does not come back; one that comes back is followed again, a gap for its
-time away. An image at or before the archive's end on a history that does
-not lead from it (`archive::Took::Diverged`: restored to an earlier moment,
-or another tenant of the name) would have landed among changes of the same
-numbers -- `File::create` of a segment of the same name wrote one over -- so
-the single archiver refuses it and the node's moves the archive aside to
-`<tenant>.<history>` and begins a new one. One tenant's archive that does
-not read is left for an operator and the rest go on. Measured with `make
-node-archive-bench` (1 000 tenants of ten rows closed when idle, ten written
-ten times a second for 20 s under `--sync always`): the node held 12.8 MB,
-16 threads, 29 descriptors and the 10 tenants written open, 5.9% of a core
-against 5.4 with no archiver and 9.7 a stream each; the archiver +1.2 MB and
-a thread against +40.6 MB, 1 000 threads and 2 019 descriptors; the writes
-12.3 ms p50 against 11.7 and 12.8 (`F_FULLFSYNC`); a new archive's first
-images, a tenant at a time, 12.9 s against 5.9 for a thousand streams; after
-a restart 4.2 MB and no tenant open against 94.7 MB and every one. Under
-`--sync 250` the writes took 0.34 ms p50, the node 3.7% of a core. Against
-main in ABBA turns a node's request path (`make shard-bench ARGS=latency`, a
-tenant's read straight to the node) stayed 21.5 us p50 against 21.6, eight
-turns a side, with the stream's handler out of line and cold (inlined into
-the connection loop, four turns a side read 21.5-22.0 against 15.7-21.5:
-main ran in a 15-16 us mode three times in twelve, the branch never), and
-`make replica-bench` as it was: `--sync always` lag 0.15-0.18 ms p50 against
-0.15-0.17, catch-up 15.1k writes/s against 15.3k, a restore to the end 6.75
-s against 6.78. Nothing below `fenec-http` changed.
+open: archived so, a node of 1 000 tenants of ten rows and one of 64 MB held
+1 016 threads, 4 011 descriptors and every tenant open for good, against 15,
+27 and the 10 written with no archiver -- and at the default 100 connections
+could not be archived at all. `POST /_replication/tenants`, with the
+replication token, is one connection and one node thread for every tenant:
+its body is where each archive under the root stands (`<tenant> <since>
+<history> <image>` a line), the node says hello to each tenant it holds (an
+image where the place does not lead to its writes) and `G` to each listed
+one it does not, and every message is the tenant stream's led by its name.
+It sends a tenant's writes from its feed while it is open, and nothing while
+it is closed, whose file does not change. It is a sender on each open
+tenant's feed as a replica's stream is -- put there as the tenant opens
+where its client stands where the file does (`NodeStreams::attach`), and on
+the tenants open as it connects, before it reads which tenants there are
+(`begin`: read first, a tenant made between was in neither) -- so a `--sync
+always` write waits for it, and `Tenants::close` refuses while a sender has
+a write left (`Feed::unsent`), syncing a dirty tenant first: closed, its
+feed went with it and the writes came again as an image. One stream for
+every tenant holds no tenant up for another: its sender carries a flag
+(`Sender::held`, `Listener::hold`) set while the stream does what can block
+-- a closed tenant read or opened to be looked at, an image's snapshot and
+its sending, a socket the archiver reads slower than it fills (written
+non-blocking, `Out`, the flag set before a write that would block) -- and a
+durable write waits for no sender held so (`Sender::waited_for`); a stream
+that starts behind, at an image or on the tenants open as it connects, is
+lagging until it catches up, and an image waits for its tenant's disk among
+the stream's other work (`Pending`, looked at again every 50 ms) rather than
+in `DURABLE_WAIT`'s 30 s. Held up the replica's way, every tenant's next
+durable write waited out `SENT_WAIT`, 1.008 s, while the stream opened
+another tenant. The syncer of `--sync <ms>` and a close sync waiting for no
+stream (`replication::unwaited`), since no client's answer waits on them:
+waiting, a pass took 5.06 s over five tenants beside a stream busy
+elsewhere, the writes of the pass unsynced meanwhile, and a close held its
+slot's lock 1.01 s. `tests/node_archive.rs` holds a tenant's open, an
+image's disk and a full socket each beside another tenant's writes, and
+fails with the flag, the pending image or the unwaited sync taken out. Which
+tenants have news is told: a feed tells as its writes reach the disk, it
+starts over or closes (`Feed::tell_with`, held strongly: a `Weak`'s upgrade
+was a compare-and-swap on one count every tenant's sync shared, 139-141 ns a
+tell from 16 threads against 0.20-0.24), and a tenant made, installed,
+deleted, promoted or made to follow touches the stream; one released while
+the stream is busy with it (`Next::Gone`) is looked at again until it is
+gone or back -- a tenant made again under the name, writing nothing, gave no
+notice more -- and the directory is read again every 10 s for a file put
+there by hand. With no stream connected a sync pays two loads, 13 ns a
+durable advance either way. A closed tenant's place is where it closed in
+this process (`Tenants::closed`) or read from its file (`Tenants::peek`,
+`open_read_only`), where opening to look took 6.3 ms a tenant, the open
+fsyncing the file; a closed tenant the stream is told of is read again,
+since a holder of its database may have written it after the close, and one
+with a non-empty sync log beside it (Linux, after the machine went down) is
+opened, the log holding durable writes the file lacks. The feed keeps the
+lineage the database last wrote, read off the history records `Tee::append`
+passes, and the stream sends it (`L`) before the writes after a promotion: a
+promoted standby's archive goes on with no image. The archiver keeps
+`<root>/<tenant>/` as `fenec archive` keeps one, through the same
+`archive::Writer` the single archiver now writes with; a segment file is
+open only while its tenant writes (a thousand would pass a macOS shell's 256
+descriptors), the `history` file is written only when it moved (a thousand
+fsyncs a reconnect otherwise), and `archiving.lock` keeps a second archiver
+off the root. A tenant the node says is gone -- deleted, or moved to a node
+whose archiver takes it up from its image on the same history -- keeps its
+archive, and `presence` notes `gone <ms>`, then `back <ms>` if it returns: a
+restore to a moment it was away leaves it out, as one deleted, where
+forgetting the time away gave the copy from before it left. An image at or
+before the archive's end on a history that does not lead from it
+(`archive::Took::Diverged`: restored to an earlier moment, or another tenant
+of the name) would have landed among changes of the same numbers --
+`File::create` of a segment of the same name wrote one over -- so the single
+archiver refuses it and the node's moves the line aside to
+`<tenant>.<history>` and begins a new one. `restore --tenants` to a time
+takes, of a tenant's lines, the one that began last by then
+(`node_archive::lines`; `Archive::began`, its oldest image's time, which a
+`prune` letting that image go writes into `began` first -- written with the
+first image it was an fsync more a tenant of the stream's first pass), and
+refuses a moment `--keep` let go of (`Restoring::LetGo`, exit 1) rather than
+pass the tenant over as never archived; `verify` and `prune` run on every
+line, and `Archive::verify` names a gap an image alone ends. One tenant's
+archive that does not read is left for an operator and the rest go on.
+Measured with `make node-archive-bench` (1 000 tenants of ten rows and one
+of 64 MB, closed when idle, ten written ten times a second from before the
+archiver connected and for 20 s after, under `--sync always`, in turns): the
+node held 16 threads, 29 descriptors and the 10 written open, 3.9-6.0% of a
+core against 4.7-5.1 with no archiver and 7.0-8.0 a stream each; the
+archiver a thread and 21 descriptors against 1 001 threads and 2 021; the
+writes while the first images were taken, the 64 MB one among them,
+14.5-14.7 ms p50, 32-35 p99 and 43-116 at most, where a stream each held
+them 176-600 p99 and up to 1.1 s, main's build alike (86-351, up to 994 ms);
+after them 12.4-13.8 p50 against 11.8-12.1 with none (`F_FULLFSYNC`); a new
+archive's first images, a tenant at a time, 14.8-15.2 s against 11.2-15.5
+for a thousand streams; after a restart 2.2-4.6 MB and no tenant open
+against 121-157 MB and every one, all 1 001 said hello to in 0.29-0.33 s.
+Under `--sync 250` (`node_archive_passes`: eight tenants written every 5 ms,
+eight opened, written and closed in turn, one of 32 MB closed) the syncer's
+pass took 52 ms p50 beside the node's stream, 91-168 at most -- the
+archiver's fsyncs on the same disk -- against 31-33 with none and 65-86 a
+stream each, and a close 4.0 ms p50, 15-33 at most, against 3.8-4.0 and
+12-25 with none. With no archiver and with a stream each, every figure
+stayed main's in ABBA turns (the pass 31.0-31.4 and 67-73 ms p50 on main, a
+close 3.6-3.9). `make replica-bench`, four turns a side at a load of 10-15
+from other work: `--sync always` lag 0.10-0.15 ms p50 against 0.10-0.11,
+catch-up 11 128-13 614 writes/s against 11 384-13 857, a restore to the end
+7.87-9.09 s against 8.51-9.05, each pair inside its turns' spread -- a
+replicated write meets a byte compared in `Tee::append`, a thread-local in
+its flush and a flag in `wait_sent`. A node's request path (`make
+shard-bench ARGS=latency`, a tenant's read straight to the node) stayed 21.5
+us p50 against main's 21.6, eight turns a side, with the stream's handler
+out of line and cold (inlined into the connection loop, four turns a side
+read 21.5-22.0 against 15.7-21.5: main ran in a 15-16 us mode three times in
+twelve, this build never). Nothing below `fenec-http` changed.
 
 **Scaling out is by tenant, one file each** (`fenec-server --dir`, `fenec-shard`,
 whose directory replicates to a standby router like any other file, the

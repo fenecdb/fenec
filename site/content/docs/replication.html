@@ -356,12 +356,14 @@ fenec-server --dir /data/n1 --replication-token "$REPL" ...
 <ul>
   <li><b>One connection and one thread on the node</b>, however many
     tenants it holds, and no tenant held open: an idle tenant stays
-    closed.</li>
+    closed. One tenant's image or a slow archiver holds up no other
+    tenant's writes.</li>
   <li><b>A tenant made on the node is archived from its first image</b>;
     one deleted or moved to another node is no longer followed, and its
-    archive is kept, marked <code>gone</code>.</li>
+    archive is kept, noted gone.</li>
   <li><b>A tenant restored to an earlier moment, or made again under its
-    name,</b> begins a new archive; the one before is kept beside it.</li>
+    name,</b> begins a new archive; the one before is kept beside it, and
+    answers for the time before.</li>
   <li><b><code>--key-file</code>, <code>--image-every</code> and
     <code>--keep</code></b> apply to each tenant's archive.</li>
 </ul>
@@ -381,31 +383,45 @@ or an image where its place does not lead to the tenant's writes — and that
 every tenant the archive lists and the node does not hold is gone.</p>
 
 <p>The stream sends a tenant's writes from its feed while it is open, and
-nothing while it is closed, whose file does not change. It is a sender on
-each open tenant's feed as a replica's stream is, so under <code>--sync
-always</code> a write waits for it as for a replica, and a tenant closes only
-once the stream has sent what its disk holds: closed with writes unsent, its
-feed would go with it and they would come again as an image. A tenant opened
-again starts a new feed where the old one ended, and the stream goes on from
-it. Which tenants have writes is told, not polled: a tenant's feed tells the
-stream as its writes reach the disk, and a tenant made, installed, deleted,
-promoted or made to follow tells it too. Where a closed tenant stands is
-known where it closed in the node's process, and read from its file
-otherwise — the first stream after the node starts: 1 000 tenants in
-45 ms, where an open, which fsyncs the file first, was 6.3 ms a
-tenant.</p>
+nothing while it is closed, whose file does not change. A tenant closes only
+once the stream has sent what its disk holds — closed with writes unsent,
+its feed would go with it and they would come again as an image — and is
+looked at again at the next pass, never waited for. Under <code>--sync
+always</code> a write waits for the stream as for a replica while the stream
+keeps up; whatever can keep it busy — reading or opening a closed tenant,
+an image's snapshot and its sending, an archiver reading slower than the
+stream writes — it does held up, and no write waits for it then. One stream
+for every tenant held each tenant's next write for a second while it opened
+another one; each tenant's own stream holds up its own tenant alone. An
+image waits for its tenant's disk without holding up the stream, and the
+node's syncer and a closing tenant wait for no stream at all, since no
+client's answer waits on them.</p>
+
+<p>Which tenants have writes is told, not polled: a tenant's feed tells the
+stream as its writes reach the disk — with no stream connected a sync pays
+two loads, the same 13 ns a durable advance either way — and a tenant made,
+installed, deleted, promoted or made to follow tells it too; one released
+from under the stream is looked at again until it is gone or back. Where a
+closed tenant stands is known where it closed in the node's process, and
+read from its file otherwise — the first stream after the node starts: 1 001
+tenants in 0.29–0.33 s, where an open, which fsyncs the file first, was
+6.3 ms a tenant. A closed tenant the stream is told of is read again rather than
+taken where it closed, since a holder of its database — the
+<code>@ttl</code> sweeper — may have written it since; one with a sync log
+beside it, after the machine went down, is opened.</p>
 
 <p>A tenant's archive is <code>&lt;root&gt;/&lt;tenant&gt;/</code>, written
 as <code>fenec archive</code> writes one; its segment file is open only while
 the tenant writes, so the archiver holds a descriptor a writing tenant, not a
 tenant. When the node says a tenant is gone — deleted, or moved to another
 node, whose own archiver takes it up from its image on the same history —
-the archive is kept as it stands and <code>&lt;root&gt;/&lt;tenant&gt;/gone</code>
-holds the time; a tenant that comes back is followed again, the time it was
-away a gap. A tenant whose copy on the node no longer leads from its
-archive's place, at or before it — restored there to an earlier moment, or
-another tenant made under the name — would land its writes among changes of
-the same numbers: the archive so far is moved aside to
+the archive is kept as it stands and
+<code>&lt;root&gt;/&lt;tenant&gt;/presence</code> notes the time; a tenant
+that comes back is followed again and noted back, the time it was away a
+gap. A tenant whose copy on the node no longer leads from its archive's
+place, at or before it — restored there to an earlier moment, or another
+tenant made under the name — would land its writes among changes of the same
+numbers: the line so far is moved aside to
 <code>&lt;root&gt;/&lt;tenant&gt;.&lt;history&gt;/</code> and a new one begins.
 (<code>fenec archive</code> of one database refuses such a primary instead,
 and leaves its archive as it was.) A promotion's new history reaches the
@@ -415,49 +431,70 @@ archiver off a root.</p>
 
 <p><code>fenec restore --tenants &lt;root&gt; &lt;dir&gt;</code> writes
 <code>&lt;dir&gt;/&lt;tenant&gt;.fenec</code> for each tenant the node held at
-<code>--to</code>, or at each archive's end: a tenant the node said was gone
-by then is passed over, so a deleted tenant does not come back, and so is
-one whose archive begins after it. <code>--to-change</code> names one
-database's change, and is refused. <code>fenec verify --tenants</code> and
-<code>fenec prune --tenants</code> run on each tenant's archive.</p>
+<code>--to</code> — from the line of its history that began last by then, so
+a line moved aside answers for the time before the next began — or at each
+archive's end. A tenant the node said was gone then, deleted or living on
+another node, is passed over, and so is one archived only after it; one
+whose moment <code>--keep</code> let go of is refused, and the restore exits
+1 — each line knows when it began, which the prune that lets its first
+image go writes down first (<code>began</code>). <code>--to-change</code> names one database's change, and is
+refused. <code>fenec verify --tenants</code> and <code>fenec prune
+--tenants</code> run on every line, those moved aside too, and verify names a
+gap an image alone ends.</p>
 
 <p>Measured with <code>make node-archive-bench</code>: a node of 1 000
-tenants of ten rows each, closed when idle, ten of them written ten times a
-second for 20 s under <code>--sync always</code>, archived a stream each
-and over the node's one stream, on this M1:</p>
+tenants of ten rows each and one of 64 MB, closed when idle, ten of them
+written ten times a second from before the archiver connected and for 20 s
+after, under <code>--sync always</code>, in turns, on this M1:</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">no archiver</th><th class="n">a stream each</th><th class="n">the node's stream</th></tr></thead>
 <tbody>
-<tr><td>node: memory</td><td class="n">10.7 MB</td><td class="n">100.5 MB</td><td class="n">12.8 MB</td></tr>
-<tr><td>node: threads</td><td class="n">15</td><td class="n">1 015</td><td class="n">16</td></tr>
-<tr><td>node: descriptors</td><td class="n">27</td><td class="n">4 007</td><td class="n">29</td></tr>
-<tr><td>node: tenants open</td><td class="n">10</td><td class="n">1 000</td><td class="n">10</td></tr>
-<tr><td>node: CPU, of a core</td><td class="n">5.4%</td><td class="n">9.7%</td><td class="n">5.9%</td></tr>
-<tr><td>archiver: memory</td><td class="n">—</td><td class="n">+40.6 MB</td><td class="n">+1.2 MB</td></tr>
-<tr><td>archiver: threads</td><td class="n">—</td><td class="n">+1 000</td><td class="n">+1</td></tr>
-<tr><td>archiver: descriptors</td><td class="n">—</td><td class="n">2 019</td><td class="n">21</td></tr>
-<tr><td>archiver: CPU, of a core</td><td class="n">1.4%</td><td class="n">4.9%</td><td class="n">2.8%</td></tr>
-<tr><td>writes, p50 / p99</td><td class="n">11.7 / 25.2 ms</td><td class="n">12.8 / 30.9 ms</td><td class="n">12.3 / 25.8 ms</td></tr>
-<tr><td>first images of the 1 000</td><td class="n">—</td><td class="n">5.9 s</td><td class="n">12.9 s</td></tr>
-<tr><td>node restarted: memory, tenants open</td><td class="n">—</td><td class="n">94.7 MB, 1 000</td><td class="n">4.2 MB, 0</td></tr>
+<tr><td>node: threads</td><td class="n">15</td><td class="n">1 016</td><td class="n">16</td></tr>
+<tr><td>node: descriptors</td><td class="n">27</td><td class="n">4 011</td><td class="n">29</td></tr>
+<tr><td>node: tenants open</td><td class="n">10</td><td class="n">1 001</td><td class="n">10</td></tr>
+<tr><td>node: CPU, of a core</td><td class="n">4.7–5.1%</td><td class="n">7.0–8.0%</td><td class="n">3.9–6.0%</td></tr>
+<tr><td>archiver: threads</td><td class="n">—</td><td class="n">+1 001</td><td class="n">+1</td></tr>
+<tr><td>archiver: descriptors</td><td class="n">—</td><td class="n">2 021</td><td class="n">21</td></tr>
+<tr><td>archiver: CPU, of a core, the writers' 1.2–1.3% in it</td><td class="n">—</td><td class="n">3.4–4.2%</td><td class="n">2.1–2.9%</td></tr>
+<tr><td>first images of the 1 001</td><td class="n">—</td><td class="n">11.2–15.5 s</td><td class="n">14.8–15.2 s</td></tr>
+<tr><td>writes as they were taken, p50 / p99 / max</td><td class="n">—</td><td class="n">28–33 / 176–600 / 436–1 113 ms</td><td class="n">14.5–14.7 / 32–35 / 43–116 ms</td></tr>
+<tr><td>writes after, p50 / p99</td><td class="n">11.8–12.1 / 22.7–26.4 ms</td><td class="n">13.0–14.2 / 28.7–55.4 ms</td><td class="n">12.4–13.8 / 25.6–33.8 ms</td></tr>
+<tr><td>node restarted: memory, tenants open</td><td class="n">—</td><td class="n">121–157 MB, 1 001</td><td class="n">2.2–4.6 MB, 0</td></tr>
+<tr><td><code>--sync 250</code>: the syncer's pass, p50 / max</td><td class="n">30.7–32.6 / 45–63 ms</td><td class="n">65–86 / 84–353 ms</td><td class="n">52.3–52.7 / 91–168 ms</td></tr>
+<tr><td><code>--sync 250</code>: a tenant's close, p50 / max</td><td class="n">3.8–4.0 / 12–25 ms</td><td class="n">— (none closes)</td><td class="n">4.0 / 15–33 ms</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>The archiver's process runs the bench's writers as well, 1.4% of a core
-alone. A write's time under <code>--sync always</code> is the Mac's
-<code>F_FULLFSYNC</code>; a write waits for the node's stream as for a
-replica, and the stream sends within the fsync's noise. Under <code>--sync
-250</code> the writes took 0.34 ms at the median, the node held 13.9 MB in
-16 threads and spent 3.7% of a core. The node's stream takes a new archive's
-first images one tenant at a time, each tenant opened — an fsync — and its
-image written: 12.9 s for the thousand, once, where a thousand streams at
-once took 5.9 s. After the node restarted, the archiver connecting again,
-the stream said hello to all 1 000 tenants in 45 ms, each read from its file
-rather than opened; a thousand streams opened every tenant again and held
-it.</p>
+<p>The archiver's process runs the bench's writers as well. A write's time
+under <code>--sync always</code> is the Mac's <code>F_FULLFSYNC</code>; a
+write waits for the node's stream as for a replica, and the stream sends
+within the fsync's noise. While the first images were taken no write
+waited for the node's stream; held up as a replica's stream is, it held
+every written tenant's next write for a second whenever it opened another
+tenant. A stream each held the writes up as images went out over a thousand
+sockets at once, the build before alike (p99 86–351 ms, at most 110–994).
+The node's stream
+takes a new archive's first images one tenant at a time, each tenant opened
+— an fsync — and its image written: about 15 s for the thousand and one,
+once, the 64 MB one among them. After the node restarted, the archiver
+connecting again, the stream said hello to all 1 001 tenants in 0.29–0.33 s,
+each read from its file rather than opened; a thousand streams opened every
+tenant again and held it.</p>
+
+<p>Under <code>--sync 250</code> (<code>node_archive_passes</code>: eight
+tenants written every 5 ms, eight more opened, written and closed in turn,
+one of 32 MB closed) the syncer's pass took 52 ms at the median beside the
+node's stream against 31–33 with none: the archiver writes the same disk,
+and the passes are its fsyncs and the node's together. Before the syncer
+and a close stopped waiting for streams, a stream busy with one tenant held
+a pass for a second a tenant, 5.06 s over five, and a close under its
+lock for 1.01 s. Against the build before, in turns: with no archiver the
+syncer's pass took 31.0–31.4 ms at the median and a close 3.6–3.9 ms, and
+with a stream each the pass 67–73 ms, as here; the writes with no archiver
+or a stream each as in the table.</p>
 </details>
 
 <h2 id="object-storage">In object storage</h2>

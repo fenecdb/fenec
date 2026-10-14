@@ -430,10 +430,10 @@ impl Archive {
         Ok(self.images()?.first().map(|i| i.1))
     }
 
-    /// When the archive took its first image, ms since the epoch -- kept in
-    /// `began` beside the images, which `prune` lets go of, so a moment
-    /// before its oldest image kept is told from one before it began. An
-    /// archive from before the file says its oldest image's time.
+    /// When the archive took its first image, ms since the epoch: its oldest
+    /// image's time, or once `prune` has let that go, what it wrote in
+    /// `began` before it did -- so a moment before the oldest image kept is
+    /// told from one before the archive began.
     pub fn began(&self) -> io::Result<Option<u64>> {
         match fs::read_to_string(self.dir.join("began")) {
             Ok(t) => Ok(t.trim().parse().ok()),
@@ -442,20 +442,28 @@ impl Archive {
         }
     }
 
+    /// Writes `began` from the oldest image, unless it is there: before
+    /// that image goes. Written with the first image instead, it was an
+    /// fsync more for each tenant a node's first archive takes up, which
+    /// one stream takes in turn: 1 001 tenants' first images took
+    /// 21.3-21.4 s against 14.8-15.2 (`make node-archive-bench`, in turns).
+    fn keep_began(&self, first: u64) -> io::Result<()> {
+        let began = self.dir.join("began");
+        if began.exists() {
+            return Ok(());
+        }
+        // Plain, sealed or not: a time, which the images' names say.
+        let tmp = began.with_extension("tmp");
+        let mut f = File::create(&tmp)?;
+        f.write_all(format!("{first}\n").as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, &began)
+    }
+
     /// Adds a base image of the database at change `seq`. Taking one now and
     /// then keeps a restore from replaying every write since the first.
     pub fn add_image(&self, seq: u64, image: &[u8]) -> io::Result<()> {
-        let now = now_ms();
-        let began = self.dir.join("began");
-        if !began.exists() && self.images()?.is_empty() {
-            // Plain, sealed or not: a time, which the images' names say.
-            let tmp = began.with_extension("tmp");
-            let mut f = File::create(&tmp)?;
-            f.write_all(format!("{now}\n").as_bytes())?;
-            f.sync_all()?;
-            fs::rename(&tmp, &began)?;
-        }
-        self.put(&self.image_path(seq, now), image)
+        self.put(&self.image_path(seq, now_ms()), image)
     }
 
     /// The last change the archive holds, the history it is on, and the
@@ -878,6 +886,9 @@ impl Archive {
         };
         let oldest = images[base].0;
         let mut removed = (0, 0);
+        if base > 0 {
+            self.keep_began(images[0].1)?;
+        }
         for &(seq, time) in &images[..base] {
             fs::remove_file(self.image_path(seq, time))?;
             removed.0 += 1;
