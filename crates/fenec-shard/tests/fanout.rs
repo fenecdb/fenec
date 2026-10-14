@@ -668,3 +668,222 @@ fn a_tenant_moved_or_deleted_under_the_query_is_answered_or_named() {
         }
     }
 }
+
+/// A text column the tenants order by a collation or by a `nocase` field's
+/// fold comes in an order that is not its bytes': told that order, the
+/// merge puts the rows of all of them as one tenant holding them would --
+/// the collation over the folds, texts folding to one tied and so in
+/// tenant order -- and not told, it fails the tenants rather than merge
+/// them wrong.
+#[test]
+fn a_collated_or_nocase_order_merges_as_one_tenant_would_order() {
+    let c = cluster("collate", Setup::default());
+    let schema = "create collection people (name text collate tr, email text nocase, \
+                  tag text collate tr nocase, plain text)";
+    for (t, people) in [
+        (
+            "acme",
+            &[
+                ("Ali", "ada@x", "ılık", "Ömer"),
+                ("Çiğdem", "Ada@x", "İnce", "Ali"),
+                ("Ömer", "bob@x", "ISTANBUL", "Zeynep"),
+                ("Zeynep", "Carol@x", "zeytin", "Çiğdem"),
+            ][..],
+        ),
+        (
+            "beta",
+            &[
+                ("Can", "ALAN@x", "IRMAK", "Can"),
+                ("Ilgaz", "Bea@x", "inci", "Şule"),
+                ("İpek", "cem@x", "Ilık", "Ilgaz"),
+                ("Şule", "dora@x", "ufuk", "İpek"),
+            ][..],
+        ),
+        (
+            "gamma",
+            &[
+                ("Deniz", "ADA@x", "çay", "Deniz"),
+                ("Ufuk", "aysel@x", "İNCE", "Ufuk"),
+                ("Ümit", "BOB@x", "Ünal", "Ümit"),
+            ][..],
+        ),
+    ] {
+        let r = c.call("POST", &format!("/t/{t}/query"), &query(schema), None);
+        assert_eq!(r.0, 200, "{}", r.1);
+        for (name, email, tag, plain) in people {
+            let q = format!(
+                r#"put people {{name: "{name}", email: "{email}", tag: "{tag}", plain: "{plain}"}}"#
+            );
+            let r = c.call("POST", &format!("/t/{t}/query"), &query(&q), None);
+            assert_eq!(r.0, 200, "{}", r.1);
+        }
+    }
+    let fan = |q: &str, merge: &str| {
+        let mut body = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut body, q);
+        body.push_str(&format!(",\"merge\":{merge}}}"));
+        c.fan(&body, None)
+    };
+    // Each merged row's tenant and its `name` column, as `tenant:value`.
+    let column = |a: &str, name: &str| -> Vec<String> {
+        let rows = rows(a);
+        let key = format!("\"{name}\":\"");
+        rows.match_indices(&key)
+            .map(|(at, _)| {
+                let rest = &rows[at + key.len()..];
+                let tenant = rows[..at].rsplit("\"tenant\":\"").next().unwrap();
+                let tenant = &tenant[..tenant.find('"').unwrap()];
+                format!("{tenant}:{}", &rest[..rest.find('"').unwrap()])
+            })
+            .collect()
+    };
+
+    // A field declared `collate tr`: Turkish's order, `Ç` after `C`, `I`
+    // (dotless) before `İ`, `Ö` after `O`, where the bytes put every one
+    // of them after `Z`.
+    let q = "get people select name order name limit 6";
+    let (status, a) = fan(
+        q,
+        r#"{"order":[{"column":"name","collate":"tr"}],"limit":6}"#,
+    );
+    assert_eq!(status, 200, "{a}");
+    assert_eq!(
+        column(&a, "name"),
+        [
+            "acme:Ali",
+            "beta:Can",
+            "acme:Çiğdem",
+            "gamma:Deniz",
+            "beta:Ilgaz",
+            "beta:İpek"
+        ]
+    );
+    let q = "get people select name order name desc limit 4";
+    let (status, a) = fan(
+        q,
+        r#"{"order":[{"column":"name","collate":"TR","desc":true}],"limit":4}"#,
+    );
+    assert_eq!(status, 200, "{a}");
+    assert_eq!(
+        column(&a, "name"),
+        ["acme:Zeynep", "gamma:Ümit", "gamma:Ufuk", "beta:Şule"]
+    );
+    // A collation the query names over a plain field.
+    let q = "get people select plain order plain collate tr limit 5";
+    let (status, a) = fan(
+        q,
+        r#"{"order":[{"column":"plain","collate":"tr"}],"limit":5}"#,
+    );
+    assert_eq!(status, 200, "{a}");
+    assert_eq!(
+        column(&a, "plain"),
+        [
+            "acme:Ali",
+            "beta:Can",
+            "acme:Çiğdem",
+            "gamma:Deniz",
+            "beta:Ilgaz"
+        ]
+    );
+
+    // A `nocase` field: by its fold, texts folding to one tied -- in id
+    // order within a tenant, in tenant order across them. Tied by their
+    // bytes, acme's `ada@x` before its `Ada@x` would have failed it.
+    let q = "get people select email order email limit 5";
+    let (status, a) = fan(
+        q,
+        r#"{"order":[{"column":"email","nocase":true}],"limit":5}"#,
+    );
+    assert_eq!(status, 200, "{a}");
+    assert_eq!(
+        column(&a, "email"),
+        [
+            "acme:ada@x",
+            "acme:Ada@x",
+            "gamma:ADA@x",
+            "beta:ALAN@x",
+            "gamma:aysel@x"
+        ]
+    );
+
+    // `collate tr nocase`: the collation over Turkish's folds, `I` the
+    // capital of `ı` and `İ` of `i`; a key after it as plain as ever.
+    let q = "get people select id, tag order tag, id limit 7";
+    let (status, a) = fan(
+        q,
+        r#"{"order":[{"column":"tag","collate":"tr","nocase":true},"id"],"limit":7}"#,
+    );
+    assert_eq!(status, 200, "{a}");
+    assert_eq!(
+        column(&a, "tag"),
+        [
+            "gamma:çay",
+            "acme:ılık",
+            "beta:Ilık",
+            "beta:IRMAK",
+            "acme:ISTANBUL",
+            "acme:İnce",
+            "gamma:İNCE"
+        ]
+    );
+
+    // A fold the same way: each tenant's least and greatest in the
+    // collation over the folds, and the least and greatest of those -- by
+    // the bytes, `Ilık` and `Ünal`; and a `nocase` group one for every
+    // text folding to it, under the first tenant's text.
+    let q = "get people select min(tag) as first, max(tag) as last";
+    let (status, a) = fan(
+        q,
+        r#"{"min":[{"column":"first","collate":"tr","nocase":true}],
+            "max":[{"column":"last","collate":"tr","nocase":true}]}"#,
+    );
+    assert_eq!(status, 200, "{a}");
+    assert_eq!(rows(&a), r#"[{"first":"çay","last":"zeytin"}]"#);
+    let q = "get people select email, count() as n group email";
+    let (status, a) = fan(
+        q,
+        r#"{"sum":["n"],"group":[{"column":"email","nocase":true}]}"#,
+    );
+    assert_eq!(status, 200, "{a}");
+    assert_eq!(
+        rows(&a),
+        r#"[{"email":"ada@x","n":3},{"email":"ALAN@x","n":1},{"email":"aysel@x","n":1},{"email":"Bea@x","n":1},{"email":"bob@x","n":2},{"email":"Carol@x","n":1},{"email":"cem@x","n":1},{"email":"dora@x","n":1}]"#
+    );
+    // `desc` is an order's alone.
+    let (status, a) = fan(
+        q,
+        r#"{"sum":["n"],"group":[{"column":"email","desc":true}]}"#,
+    );
+    assert_eq!(status, 400, "{a}");
+
+    // Not told, the router compares bytes: the tenants whose rows are not
+    // in that order fail, named, and nothing is merged wrong.
+    for (q, key) in [
+        ("get people select name order name limit 6", "name"),
+        ("get people select email order email limit 6", "email"),
+    ] {
+        let (status, a) = fan(q, &format!(r#"{{"order":["{key}"],"limit":6}}"#));
+        assert_eq!(status, 400, "{a}");
+        assert!(a.contains("not in the merge's order"), "{a}");
+        assert!(!a.contains("\"rows\""), "{a}");
+    }
+
+    // A collation the router does not know is refused, named, nothing
+    // asked; so is a key it cannot read.
+    let (status, a) = fan(
+        "get people select name order name",
+        r#"{"order":[{"column":"name","collate":"de"}]}"#,
+    );
+    assert_eq!(status, 400, "{a}");
+    assert!(a.contains("`de`"), "{a}");
+    for bad in [
+        r#"{"order":[{"collate":"tr"}]}"#,
+        r#"{"order":[{"column":"name","nocase":"de"}]}"#,
+        r#"{"order":[{"column":"name","desc":"yes"}]}"#,
+        r#"{"order":[{"column":"name","colate":"tr"}]}"#,
+    ] {
+        let (status, a) = fan("get people select name order name", bad);
+        assert_eq!(status, 400, "{bad}: {a}");
+        assert!(!a.contains("\"rows\""), "{bad}: {a}");
+    }
+}

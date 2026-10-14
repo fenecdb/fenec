@@ -4620,7 +4620,29 @@ a `tenant` column spliced in), `order` with `limit` (a k-way merge of rows
 each tenant gives in that order, checked, a tenant out of it failed rather
 than merged wrong) and a fold (`sum`, `min`, `max` by `group`; every
 column grouped or folded or the tenant fails, since a column dropped is an
-answer cut; no `avg`). Rows are passed on as the nodes wrote them
+answer cut; no `avg`). A text column the tenants compare otherwise than by
+its bytes -- a field's `collate tr` or `und`, a statement's `order ...
+collate`, a `nocase` field's fold -- is said again, since the router reads
+no schema: an object in place of its name (`{"column", "collate",
+"nocase", "desc"}`, `column_of`), an `order` key or a `min`, `max` or
+`group` column alike, `"nocase": true` the fold a field in that collation
+has (Turkish's under `tr`) and `"tr"` or `"und"` the field's own where the
+statement's `collate` names another. It compares by fenec-core's
+`TextOrder` as the engine's `order` does (`value_in`, `cmp_in`): read as
+text, never as the time an ISO form names; folded once as it is read, as
+`folded_keys` folds; the collation over the folds; and the texts folding
+to one tied -- tied by their bytes, a tenant's `ada@x` before its `Ada@x`
+in id order failed it -- so a `nocase` group is one for every text folding
+to it. Not named, an order key fails such a tenant as before, while a
+collated `min` was, and is, the bytes' least of each tenant's least,
+unrefused; a collation other than `tr` or `und` is 400, named.
+`a_text_order_named_compares_as_the_engine_orders` holds the check and the
+ties to the engine's own `order`, both ways, over 240 words of `I ı İ i`,
+`ß ẞ`, `Ç` and ISO forms in eight ways a text orders, failing with an ISO
+form read as a time or ties broken by bytes, and a tenant told the other
+fold fails. The router linked every collation chunk already, through its
+directory's engine: its code grew 8.0 KB (`__text`, aarch64-apple-darwin),
+its file not by a byte (3 117 168). Rows are passed on as the nodes wrote them
 (`scan`: extents found, only the merge's values decoded, no key allocated
 a member), and a timestamp, which travels as ISO text with its
 milliseconds left out where they are 0 so its bytes do not order as its
@@ -4643,8 +4665,11 @@ families with no tenant label, one audit line at the router (the nodes'
 reads are not admin changes, `audit::http`). Over 100 tenants on three
 nodes a summed count took 1.15-1.23 ms and a merged top 20 1.35-1.39,
 against 4.3-5.5 asking each in turn through the router and 1.9-2.2
-sixteen at once with no merge (`make shard-bench ARGS=fanout`); a
-forwarded request's added p50 23.0 us against main's 23.8 in ABBA turns.
+sixteen at once with no merge (`make shard-bench ARGS=fanout`), a top 20
+of `collate tr nocase` names 1.33-1.48 -- in twelve ABBA turns beside other
+agents' work (load 3.5-6.4), the plain top 20 1.34-1.46 against main's
+1.34-1.49, medians 1.40 and 1.395; a forwarded request's added p50 23.0
+us against main's 23.8 in ABBA turns.
 The SDKs have no `/_shard/` call, so none for this; the studio does not ask it.
 
 **A schema declared in code is checked at every open, in the engine.**
