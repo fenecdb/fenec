@@ -502,14 +502,17 @@ fn a_tenant_moved_between_nodes_goes_on_in_each_nodes_archive() {
     drop(t);
 
     r#move(&nb, &na);
+    // Taken back -- its image, and the `gone` file let go of after it --
+    // before it is written: a write landing first is in that image, and the
+    // archive then has no segment after the gap to show it (macOS CI).
+    until("node a's archive still says the tenant is gone", || {
+        node_archive::gone_at(&root_a.join("m")).is_none()
+    });
     let t = na.tenants.get("m").unwrap();
     exec(&t, "put notes {title: \"back on a\", n: 300}");
     archived(&root_a.join("m"), seq(&t));
     let end = rows(&t.db.read().unwrap(), "get notes");
     drop(t);
-    until("node a's archive still says the tenant is gone", || {
-        node_archive::gone_at(&root_a.join("m")).is_none()
-    });
     aa.finish();
     ab.finish();
 
