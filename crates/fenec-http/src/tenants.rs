@@ -23,9 +23,11 @@
 //! opens the file again.
 
 use crate::lease::Lease;
+use crate::node_stream::NodeStreams;
 use crate::quota::{self, Held as QuotaHeld, Kind, Quota, Set};
 use crate::replication::{fresh_id, Follower, Replication};
 use crate::sse::Hub;
+use fenec_core::history::History;
 use fenec_core::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -174,6 +176,26 @@ pub struct Tenants {
     /// Every tenant's quota but what its `<tenant>.quota` sets
     /// (`--tenant-max-bytes` and the rest).
     quota: Quota,
+    /// The node's streams of every tenant, on a node that replicates its
+    /// tenants ([`crate::node_stream`]).
+    streams: Option<Arc<NodeStreams>>,
+    /// Where each tenant that closed in this process stood: its change and
+    /// its history, by which the node's stream judges a closed tenant
+    /// without opening it. Only this process writes a tenant's file, and
+    /// only while it is open, so it stands there until it opens again.
+    closed: Mutex<HashMap<String, (u64, History)>>,
+}
+
+/// A tenant as the node's stream finds it, without opening it.
+pub(crate) enum Seen {
+    /// No file.
+    Missing,
+    /// Being opened or closed now.
+    Busy,
+    Open(Arc<Tenant>),
+    /// Closed: where it stood when it closed, where it closed in this
+    /// process.
+    Closed(Option<(u64, History)>),
 }
 
 /// One tenant's open/closed state. Opening and closing a tenant both happen
@@ -209,6 +231,8 @@ impl Tenants {
             checked: AtomicBool::new(false),
             warm: None,
             quota: Quota::default(),
+            streams: None,
+            closed: Mutex::new(HashMap::new()),
         })
     }
 
@@ -254,7 +278,96 @@ impl Tenants {
     /// and follows another node's tenants when `upstream` is set.
     pub fn with_replication(mut self, repl: Replicated) -> Tenants {
         self.repl = Some(repl);
+        self.streams = Some(NodeStreams::new());
         self
+    }
+
+    /// The node's streams of every tenant, when it replicates its tenants.
+    pub fn node_streams(&self) -> Option<&Arc<NodeStreams>> {
+        self.streams.as_ref()
+    }
+
+    /// Tells the node's streams that `name` has news.
+    fn touch(&self, name: &str) {
+        if let Some(s) = &self.streams {
+            s.touch(name);
+        }
+    }
+
+    /// The tenants open now.
+    pub(crate) fn open_now(&self) -> Vec<Arc<Tenant>> {
+        self.open_tenants()
+    }
+
+    /// Whether `name` has a file on this node.
+    pub(crate) fn on_disk(&self, name: &str) -> bool {
+        self.path(name).exists()
+    }
+
+    /// A tenant as it is now, opened by nobody for it.
+    pub(crate) fn seen(&self, name: &str) -> Seen {
+        let slot = self.registry().get(name).cloned();
+        if let Some(slot) = slot {
+            match slot.held.try_lock() {
+                Ok(held) => {
+                    if let Held::Open(t) = &*held {
+                        return Seen::Open(Arc::clone(t));
+                    }
+                }
+                Err(_) => return Seen::Busy,
+            }
+        }
+        if !self.on_disk(name) {
+            return Seen::Missing;
+        }
+        let closed = self.closed.lock().unwrap_or_else(|e| e.into_inner());
+        Seen::Closed(closed.get(name).cloned())
+    }
+
+    /// Where a closed tenant stands -- its change and history -- read from
+    /// its file as a tool that only looks reads one (`fs::open_read_only`):
+    /// under its slot, so nothing opens it meanwhile, and kept as a close
+    /// keeps it. `None` when it is open or has no file. Opened to be
+    /// written, a tenant's file is fsynced first (a replica must be sent
+    /// only what is on disk), `F_FULLFSYNC` on macOS: 6.3 ms a tenant, where
+    /// this is 0.5. It sends nothing, so the fsync is the open's to make,
+    /// once an image is to go out. A sync log not yet applied (Linux, after
+    /// the machine went down) leaves it reading short of the file, which
+    /// then reads as behind and is opened.
+    pub(crate) fn peek(&self, name: &str) -> std::result::Result<Option<(u64, History)>, Refused> {
+        check_name(name)?;
+        self.with_slot(name, |held| {
+            if !matches!(held, Held::Closed) || !self.on_disk(name) {
+                return Ok(None);
+            }
+            let db = fenec_core::fs::open_read_only(self.path(name))
+                .map_err(|e| Refused(500, format!("could not read tenant `{name}`: {e}")))?;
+            let place = (db.change_seq(), db.history().clone());
+            self.closed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(name.to_string(), place.clone());
+            Ok(Some(place))
+        })
+    }
+
+    /// Runs `f` on the tenant, opened for it when it is not open and closed
+    /// again after -- with no checkpoint, as nothing was written -- where
+    /// nothing else took it meanwhile: the node's stream looking at a
+    /// tenant it cannot tell the place of, after the node started, holds
+    /// one open at a time rather than every one until it idles out.
+    pub(crate) fn look<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&Arc<Tenant>) -> R,
+    ) -> std::result::Result<R, Refused> {
+        let (t, opened) = self.get_noting(name)?;
+        let r = f(&t);
+        drop(t);
+        if opened {
+            self.with_slot(name, |held| self.close_with(held, false));
+        }
+        Ok(r)
     }
 
     /// Writes a tenant only while the router's lease names it and has not
@@ -457,6 +570,11 @@ impl Tenants {
     /// is no such file: a tenant comes into being through `create`, never
     /// by a request naming it, or a typo would make an empty database.
     pub fn get(&self, name: &str) -> std::result::Result<Arc<Tenant>, Refused> {
+        self.get_noting(name).map(|(t, _)| t)
+    }
+
+    /// [`Self::get`], and whether this call opened it.
+    fn get_noting(&self, name: &str) -> std::result::Result<(Arc<Tenant>, bool), Refused> {
         check_name(name)?;
         let t = self.with_slot(name, |held| {
             if let Held::Open(t) = held {
@@ -476,7 +594,7 @@ impl Tenants {
         if opened {
             self.make_room(name);
         }
-        Ok(t)
+        Ok((t, opened))
     }
 
     /// Takes this tenant's writes on a replica node: its history forks
@@ -484,6 +602,14 @@ impl Tenants {
     /// because a node's tenants are separate databases -- there is nothing
     /// to make atomic between them.
     pub fn promote(&self, name: &str) -> std::result::Result<(u64, u64), Refused> {
+        let promoted = self.promote_held(name);
+        // The fork's history reached the feed as its record was appended;
+        // the node's stream sends it on before the writes after it.
+        self.touch(name);
+        promoted
+    }
+
+    fn promote_held(&self, name: &str) -> std::result::Result<(u64, u64), Refused> {
         let t = self.get(name)?;
         // Promoted, it follows nobody: the record would have the next open
         // make it follow its old primary again.
@@ -549,7 +675,7 @@ impl Tenants {
             _ => {}
         }
         let wanted = from.map(str::to_string).or_else(|| repl.upstream.clone());
-        self.with_slot(name, |held| {
+        let followed = self.with_slot(name, |held| {
             self.refuse_if_shutting_down()?;
             let path = self.path(name);
             if let Held::Open(t) = &*held {
@@ -579,7 +705,9 @@ impl Tenants {
             let t = self.open_as(name, &path, true)?;
             *held = Held::Open(t);
             Ok(())
-        })
+        });
+        self.touch(name);
+        followed
     }
 
     /// Creates an empty tenant. 409 when it exists.
@@ -596,6 +724,7 @@ impl Tenants {
             Ok(t)
         })?;
         self.make_room(name);
+        self.touch(name);
         Ok(t)
     }
 
@@ -676,6 +805,12 @@ impl Tenants {
         let hub = Hub::new();
         db.set_watcher(Arc::clone(&hub) as Arc<dyn Watcher>);
         db.set_change_capacity(self.change_capacity);
+        // Before anything can write it -- its follower starts below: the
+        // node's streams that stand where the file does send from its
+        // feed, and its writes wait for them.
+        if let (Some(streams), Some(feed)) = (&self.streams, &feed) {
+            streams.attach(name, feed, db.change_seq(), db.history());
+        }
         let db = Arc::new(RwLock::new(db));
         crate::link::beside(&format!("tenant `{name}`"), &db);
         let bytes = Arc::clone(&held);
@@ -693,21 +828,32 @@ impl Tenants {
         // therefore keeps a tenant with a running follower open.
         let mut follower = None;
         if let (Some(r), Some(url), true) = (&self.repl, &upstream, following) {
-            let f = Follower::new(
+            let started = Follower::new(
                 &format!("{}/t/{name}", url.trim_end_matches('/')),
                 r.token.clone(),
                 Arc::clone(&db),
                 feed.clone(),
                 r.sync_on_write,
             )
-            .map_err(|e| Refused(500, format!("tenant `{name}` cannot follow {url}: {e}")))?;
-            f.start(format!("fenec-replica-{name}")).map_err(|e| {
-                Refused(
-                    500,
-                    format!("tenant `{name}` could not start following: {e}"),
-                )
-            })?;
-            follower = Some(f);
+            .map_err(|e| Refused(500, format!("tenant `{name}` cannot follow {url}: {e}")))
+            .and_then(|f| {
+                f.start(format!("fenec-replica-{name}")).map_err(|e| {
+                    Refused(
+                        500,
+                        format!("tenant `{name}` could not start following: {e}"),
+                    )
+                })?;
+                Ok(f)
+            });
+            match started {
+                Ok(f) => follower = Some(f),
+                Err(e) => {
+                    if let (Some(streams), Some(feed)) = (&self.streams, &feed) {
+                        streams.detach(name, feed);
+                    }
+                    return Err(e);
+                }
+            }
         }
         let repl = self
             .repl
@@ -830,6 +976,12 @@ impl Tenants {
     /// not frozen: checkpoint when there is a graph to keep, then the last
     /// `Arc` goes and `Drop` does the final sync -- all under the slot lock.
     fn close(&self, held: &mut Held) -> bool {
+        self.close_with(held, self.checkpoint)
+    }
+
+    /// [`Self::close`], with a checkpoint where `checkpoint` and the tenant
+    /// has a graph to keep.
+    fn close_with(&self, held: &mut Held, checkpoint: bool) -> bool {
         let Held::Open(t) = &*held else {
             return false;
         };
@@ -847,13 +999,42 @@ impl Tenants {
         {
             return false;
         }
-        if self.checkpoint {
+        // The node's stream holds a tenant open until it has sent what the
+        // disk holds: the feed goes with the tenant, and writes it had not
+        // sent would have come again as an image, a gap in the archive.
+        // Writes not on the disk yet would reach it at the close's last
+        // sync, after the stream let go of the feed: synced first, they are
+        // waited for like the rest.
+        let feed = t.repl.as_ref().and_then(|r| r.feed());
+        if let Some(feed) = feed {
+            let pending = {
+                let g = t.read();
+                g.is_dirty() && g.failure().is_none()
+            };
+            if pending {
+                sync_now(t);
+            }
+            if feed.unsent() {
+                return false;
+            }
+        }
+        if checkpoint {
             let mut g = t.write();
             if g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
                 if let Err(e) = g.checkpoint() {
                     crate::log!("could not write the checkpoint ({}): {e}", t.name);
                 }
             }
+        }
+        if let (Some(streams), Some(feed)) = (&self.streams, feed) {
+            let g = t.read();
+            let place = (g.change_seq(), g.history().clone());
+            drop(g);
+            self.closed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(t.name.clone(), place);
+            streams.detach(&t.name, feed);
         }
         *held = Held::Closed;
         true
@@ -929,17 +1110,7 @@ impl Tenants {
             if !pending {
                 continue;
             }
-            let flushed = t.write().flush();
-            match flushed {
-                Ok(Some(durability)) => {
-                    if let Err(e) = durability() {
-                        crate::log!("sync error ({}): {e}", t.name);
-                        t.write().fail(&e);
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => crate::log!("sync error ({}): {e}", t.name),
-            }
+            sync_now(&t);
         }
     }
 
@@ -1029,8 +1200,19 @@ impl Tenants {
                     format!("could not write tenant `{name}`: {e}"),
                 ));
             }
+            self.forget_place(name);
             Ok(())
-        })
+        })?;
+        self.touch(name);
+        Ok(())
+    }
+
+    /// Where a tenant whose file goes or is replaced stood is no more.
+    fn forget_place(&self, name: &str) {
+        self.closed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
     }
 
     /// Closes the tenant and removes its file. The streams on it are told to
@@ -1060,8 +1242,11 @@ impl Tenants {
             // A tenant made again under the name starts at the node's quota;
             // a router that keeps one sends it with the tenant.
             let _ = std::fs::remove_file(self.quota_path(name));
+            self.forget_place(name);
             Ok(())
-        })
+        })?;
+        self.touch(name);
+        Ok(())
     }
 
     /// Every tenant on disk, sorted.
@@ -1148,6 +1333,22 @@ impl Tenants {
             std::mem::forget(held);
         }
         count
+    }
+}
+
+/// Pushes a tenant's writes to disk as the syncer does: the flush under its
+/// write lock, the fsync once it is let go.
+fn sync_now(t: &Tenant) {
+    let flushed = t.write().flush();
+    match flushed {
+        Ok(Some(durability)) => {
+            if let Err(e) = durability() {
+                crate::log!("sync error ({}): {e}", t.name);
+                t.write().fail(&e);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => crate::log!("sync error ({}): {e}", t.name),
     }
 }
 

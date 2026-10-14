@@ -53,6 +53,8 @@ pub mod lease;
 pub mod link;
 pub mod mcp;
 pub mod metrics;
+pub mod node_archive;
+pub mod node_stream;
 pub mod quota;
 pub mod replication;
 pub mod request_id;
@@ -724,6 +726,28 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 return;
             }
             continue;
+        }
+
+        // The node's stream of every tenant (`node_stream.rs`), with the
+        // node's replication token: a body with no end, as a replica's
+        // stream is, which takes the connection over.
+        if let Backend::Tenants(tenants) = backend {
+            if req.path.starts_with("/_replication") {
+                let _ = out.set_read_timeout(None);
+                let Some(resp) = node_stream::handle(&mut out, tenants, &req) else {
+                    return;
+                };
+                audit::http(&req, resp.status, peer);
+                if cors(resp, cfg)
+                    .write(&mut out, keep_alive, head_only)
+                    .is_err()
+                    || !keep_alive
+                {
+                    return;
+                }
+                let _ = out.set_read_timeout(cfg.idle_timeout);
+                continue;
+            }
         }
 
         // A request from here on is traced: what is above it -- a health

@@ -5,6 +5,7 @@
 
 use crate::stop::{on_signals, STOP};
 use fenec_http::archive::{self, Archive, Target};
+use fenec_http::node_archive::{self, NodeArchive};
 use fenec_http::replication::Upstream;
 use fenec_http::seal::Key;
 use std::path::Path;
@@ -28,9 +29,11 @@ pub const USAGE: &str = r#"
 usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
        fenec archive <primary> <archive-dir>                [--token <t>]
                      [--image-every <1h>] [--keep <7d>]
+       fenec archive --tenants <node> <root-dir>            [the same]
        fenec restore <archive-dir | sealed-file> <out.fenec> [--to <time> | --to-change <n>]
-       fenec prune   <archive-dir> --keep <7d>
-       fenec verify  <archive-dir>
+       fenec restore --tenants <root-dir> <out-dir>         [--to <time>]
+       fenec prune   [--tenants] <archive-dir | root-dir> --keep <7d>
+       fenec verify  [--tenants] <archive-dir | root-dir>
        fenec key     <key-file>
   each but `key` takes --key-file <path> (or FENEC_KEY_FILE): the archive's
   files, or the backup file, sealed with it
@@ -52,6 +55,21 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
   prune     what `archive --keep` lets go of, done once: the images before the
             newest one taken by the start of the window and the segments
             before the oldest image kept -- as on a copy synced elsewhere
+
+  --tenants every tenant of a --dir node (fenec-server --dir
+            --replication-token), each an archive of its own under
+            <root-dir>/<tenant>/, over one connection to the node however
+            many tenants it holds: a tenant made there is archived from its
+            first image, one deleted or moved to another node is no longer
+            followed and its archive kept, marked `gone`. A tenant whose
+            copy no longer leads from its archive -- restored to an earlier
+            moment, or made again under its name -- has its archive so far
+            moved aside to <root-dir>/<tenant>.<history> and a new one
+            begun. --image-every and --keep apply to each. Each tenant's
+            directory is an archive that restore, verify and prune read
+            alone; with --tenants they read every one: restore writes
+            <out-dir>/<tenant>.fenec for each tenant the node held at that
+            moment -- a directory a node serves (fenec-server --dir)
 
   verify    reads the archive as a restore would: every image opens at its
             change, the segments run on with none missing, a restore to the
@@ -97,6 +115,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
     let mut every = Duration::from_secs(3600);
     let mut keep: Option<Duration> = None;
     let mut key_file = std::env::var("FENEC_KEY_FILE").ok();
+    let mut tenants = false;
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
         *i += 1;
@@ -108,6 +127,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
     while i < args.len() {
         match args[i].as_str() {
             "--token" => token = Some(next(&mut i, "--token")),
+            "--tenants" => tenants = true,
             "--key-file" => key_file = Some(next(&mut i, "--key-file")),
             "--to" => {
                 let v = next(&mut i, "--to");
@@ -177,6 +197,15 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         Key::from_file(Path::new(p)).unwrap_or_else(|e| fail(&format!("--key-file {p}: {e}")))
     });
     let archive = |dir: &str| Archive::with_key(dir, key.clone());
+    if tenants {
+        return every_tenant(
+            command,
+            &positional,
+            key.as_ref(),
+            (target, every, keep),
+            token,
+        );
+    }
     if command == "verify" {
         let [dir] = positional.as_slice() else {
             fail(&format!(
@@ -294,5 +323,141 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             eprintln!("fenec {command}: {e}");
             1
         }
+    }
+}
+
+/// `fenec archive|verify|restore|prune --tenants`: every tenant of a node,
+/// an archive each under a root.
+fn every_tenant(
+    command: &str,
+    positional: &[String],
+    key: Option<&Key>,
+    (target, every, keep): (Target, Duration, Option<Duration>),
+    token: Option<String>,
+) -> i32 {
+    match command {
+        "archive" => {
+            let [node, root] = positional else {
+                fail(&format!(
+                    "`fenec archive --tenants` takes the node and the root directory\n{USAGE}"
+                ));
+            };
+            let token =
+                token.unwrap_or_else(|| fail("the node asks for its replication token: --token"));
+            let upstream = node_archive::node_upstream(node, token).unwrap_or_else(|e| fail(&e));
+            on_signals();
+            let result = NodeArchive::new(root, key.cloned()).and_then(|arch| {
+                eprintln!(
+                    "archiving every tenant of {} into {root} ({} archived so far); \
+                     interrupt to stop",
+                    upstream.url(),
+                    arch.tenants().len()
+                );
+                // Each tenant's images and pruning on a thread of their own,
+                // as for one database: the stream goes on meanwhile.
+                std::thread::scope(|s| {
+                    let beside =
+                        s.spawn(|| arch.keep_up(every, keep, &STOP, &|line| eprintln!("{line}")));
+                    let followed = arch.follow(&upstream, &STOP, &|line| eprintln!("{line}"));
+                    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let kept = beside.join().unwrap_or(Ok(()));
+                    followed.and(kept)
+                })
+            });
+            match result {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("fenec archive: {e}");
+                    1
+                }
+            }
+        }
+        "verify" | "prune" => {
+            let [root] = positional else {
+                fail(&format!(
+                    "`fenec {command} --tenants` takes the root directory\n{USAGE}"
+                ));
+            };
+            let keep = (command == "prune")
+                .then(|| keep.unwrap_or_else(|| fail("`fenec prune` needs --keep <duration>")));
+            let dirs = node_archive::tenant_dirs(Path::new(root))
+                .unwrap_or_else(|e| fail(&format!("{root}: {e}")));
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            let iso = |t: u64| fenec_core::time::format_iso(t as i64);
+            let mut failed = 0;
+            for (name, dir) in &dirs {
+                let arch = Archive::with_key(dir, key.cloned());
+                let gone = node_archive::gone_at(dir).map_or(String::new(), |t| {
+                    format!(", gone from the node {}", iso(t))
+                });
+                match keep {
+                    None => match arch.and_then(|a| a.verify()) {
+                        Ok(v) => println!(
+                            "{name}: changes {} to {}, from {} to {}{}{gone}",
+                            v.first,
+                            v.last,
+                            iso(v.from),
+                            v.to.map_or("its last image".into(), iso),
+                            match v.gaps.len() {
+                                0 => String::new(),
+                                n => format!(", {n} gaps"),
+                            }
+                        ),
+                        Err(e) => {
+                            eprintln!("{name}: {e}");
+                            failed += 1;
+                        }
+                    },
+                    Some(keep) => match arch.and_then(|a| a.prune(keep.as_millis() as u64, now)) {
+                        Ok((images, segments)) => {
+                            println!("{name}: let go of {images} images and {segments} segments")
+                        }
+                        Err(e) => {
+                            eprintln!("{name}: {e}");
+                            failed += 1;
+                        }
+                    },
+                }
+            }
+            println!("{root}: {} tenants, {failed} failed", dirs.len());
+            (failed > 0) as i32
+        }
+        "restore" => {
+            let [root, out] = positional else {
+                fail(&format!(
+                    "`fenec restore --tenants` takes the root directory and the directory \
+                     to restore into\n{USAGE}"
+                ));
+            };
+            let iso = |t: u64| fenec_core::time::format_iso(t as i64);
+            let done = node_archive::restore_all(Path::new(root), Path::new(out), target, key)
+                .unwrap_or_else(|e| fail(&format!("fenec restore --tenants: {e}")));
+            let (mut restored, mut passed, mut failed) = (0, 0, 0);
+            for (name, outcome) in &done {
+                match outcome {
+                    node_archive::Restoring::Restored(seq) => {
+                        println!("{name}: change {seq}");
+                        restored += 1;
+                    }
+                    node_archive::Restoring::Gone(t) => {
+                        println!("{name}: gone from the node {}, passed over", iso(*t));
+                        passed += 1;
+                    }
+                    node_archive::Restoring::NotYet => {
+                        println!("{name}: archived only from after then, passed over");
+                        passed += 1;
+                    }
+                    node_archive::Restoring::Failed(e) => {
+                        eprintln!("{name}: {e}");
+                        failed += 1;
+                    }
+                }
+            }
+            println!("{out}: {restored} tenants restored, {passed} passed over, {failed} failed");
+            (failed > 0) as i32
+        }
+        _ => fail(&format!("`fenec {command}` takes no --tenants\n{USAGE}")),
     }
 }

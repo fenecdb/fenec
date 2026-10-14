@@ -102,6 +102,10 @@ pub struct Archive {
     /// their own, which `prune` can let go of whole -- in the segment going
     /// on, they stayed until it reached its 64 MB.
     roll: AtomicBool,
+    /// Set as writes are taken, and let go of as an image of the end is
+    /// taken ([`Self::consolidate`]): an archiver of many tenants looks
+    /// only at those written since.
+    fresh: AtomicBool,
 }
 
 fn now_ms() -> u64 {
@@ -167,7 +171,12 @@ fn entries(data: &[u8]) -> io::Result<(Entries, usize)> {
 
 /// The segment being written.
 struct Segment {
-    file: File,
+    path: PathBuf,
+    /// Open while it is written, and closed once synced with nothing more
+    /// to write ([`Writer::park`]): an archiver of a node's tenants holds
+    /// a file open for each tenant writing, not for each it archives --
+    /// a thousand would pass a shell's 256 descriptors on macOS.
+    file: Option<File>,
     /// The number the next write gets, and the bytes so far.
     next: u64,
     len: usize,
@@ -179,6 +188,13 @@ struct Segment {
 }
 
 impl Segment {
+    fn file(&mut self) -> io::Result<&mut File> {
+        if self.file.is_none() {
+            self.file = Some(OpenOptions::new().append(true).open(&self.path)?);
+        }
+        Ok(self.file.as_mut().expect("opened above"))
+    }
+
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.len += bytes.len();
         self.dirty = true;
@@ -187,31 +203,106 @@ impl Segment {
                 pending.extend_from_slice(bytes);
                 Ok(())
             }
-            None => self.file.write_all(bytes),
+            None => self.file()?.write_all(bytes),
         }
     }
 
     /// Seals what waits as a frame, and writes it.
     fn flush(&mut self) -> io::Result<()> {
-        if let Some((key, index, pending)) = &mut self.sealed {
-            if !pending.is_empty() {
-                let mut frame = Vec::with_capacity(pending.len() + 32);
-                seal::seal_frame(key, *index, false, pending, &mut frame);
-                self.file.write_all(&frame)?;
-                *index += 1;
-                pending.clear();
-            }
+        let Some((key, index, pending)) = &mut self.sealed else {
+            return Ok(());
+        };
+        if pending.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let mut frame = Vec::with_capacity(pending.len() + 32);
+        seal::seal_frame(key, *index, false, pending, &mut frame);
+        *index += 1;
+        pending.clear();
+        self.file()?.write_all(&frame)
     }
 
     fn sync(&mut self) -> io::Result<()> {
         self.flush()?;
         if self.dirty {
-            self.file.sync_data()?;
+            self.file()?.sync_data()?;
             self.dirty = false;
         }
         self.synced = Instant::now();
+        Ok(())
+    }
+
+    fn park(&mut self) -> io::Result<()> {
+        self.sync()?;
+        self.file = None;
+        Ok(())
+    }
+}
+
+/// An archive being written from a stream: where it stands, the history it
+/// is on, and the segment its writes go on in.
+pub(crate) struct Writer {
+    at: u64,
+    history: History,
+    images: bool,
+    segment: Option<Segment>,
+    /// Writes taken since [`Self::taken`] was last asked.
+    taken: u64,
+}
+
+/// What a stream's hello did to an archive.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Took {
+    /// It goes on from where the hello says, from an image or not.
+    Went,
+    /// The image is of a history that does not lead from the archive's
+    /// place, and at or before it: a database restored to an earlier
+    /// moment, or another of the same name. Taken here, its writes would
+    /// land among changes of the same numbers the archive holds -- a
+    /// segment of the same name written over -- so it is not taken.
+    Diverged,
+}
+
+impl Writer {
+    /// The last change the archive holds, and the history it is on.
+    pub(crate) fn place(&self) -> (u64, u64) {
+        (self.at, self.history.current())
+    }
+
+    /// Whether it holds no image to start from.
+    pub(crate) fn wants_image(&self) -> bool {
+        !self.images
+    }
+
+    /// Writes taken since last asked.
+    pub(crate) fn taken(&mut self) -> u64 {
+        std::mem::take(&mut self.taken)
+    }
+
+    /// Its writes on disk.
+    pub(crate) fn sync(&mut self) -> io::Result<()> {
+        match &mut self.segment {
+            Some(s) => s.sync(),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether its file is open and its last sync [`SYNC_EVERY`] ago: what
+    /// it took since is synced and the file closed, where the next batch
+    /// would otherwise be what synced it -- a tenant that wrote once would
+    /// keep its file open as long as the stream ran.
+    pub(crate) fn due(&self) -> bool {
+        self.segment
+            .as_ref()
+            .is_some_and(|s| s.file.is_some() && s.synced.elapsed() >= SYNC_EVERY)
+    }
+
+    /// Synced, and its file closed until the next write.
+    pub(crate) fn park(&mut self) -> io::Result<()> {
+        if let Some(s) = &mut self.segment {
+            s.sync()?;
+            s.file = None;
+        }
         Ok(())
     }
 }
@@ -237,6 +328,7 @@ impl Archive {
             dir: dir.as_ref().to_path_buf(),
             key,
             roll: AtomicBool::new(false),
+            fresh: AtomicBool::new(true),
         })
     }
 
@@ -332,6 +424,12 @@ impl Archive {
         fs::rename(&tmp, path)
     }
 
+    /// When its oldest image was taken, ms since the epoch: nothing before
+    /// it can be restored. `None` when it holds none.
+    pub fn first_image_time(&self) -> io::Result<Option<u64>> {
+        Ok(self.images()?.first().map(|i| i.1))
+    }
+
     /// Adds a base image of the database at change `seq`. Taking one now and
     /// then keeps a restore from replaying every write since the first.
     pub fn add_image(&self, seq: u64, image: &[u8]) -> io::Result<()> {
@@ -372,7 +470,8 @@ impl Archive {
                 file.set_len(cut as u64)?;
                 file.seek(io::SeekFrom::End(0))?;
                 open = Some(Segment {
-                    file,
+                    path,
+                    file: Some(file),
                     next: last + 1,
                     len: end,
                     dirty: false,
@@ -421,11 +520,11 @@ impl Archive {
         stop: &AtomicBool,
         report: &dyn Fn(&str),
     ) -> io::Result<()> {
-        let (mut at, history, mut segment) = self.position()?;
+        let mut w = self.writer()?;
+        let (at, history) = w.place();
         // A restore starts from an image, so an archive without one asks for
         // one, even where the primary could have sent every write instead.
-        let first = self.images()?.is_empty();
-        let mut rx = upstream.open(at, history.current(), first)?;
+        let mut rx = upstream.open(at, history, w.wants_image())?;
         let Message::Hello {
             image,
             seq,
@@ -435,116 +534,192 @@ impl Archive {
         else {
             return Err(io::Error::other("the primary did not say hello"));
         };
-        if image {
-            let Message::Image(bytes) = rx.receive()? else {
-                return Err(io::Error::other("the primary promised an image"));
-            };
-            self.add_image(seq, &bytes)?;
+        let bytes = match image {
+            true => match rx.receive()? {
+                Message::Image(bytes) => Some(bytes),
+                _ => return Err(io::Error::other("the primary promised an image")),
+            },
+            false => None,
+        };
+        if self.hello(&mut w, bytes.as_deref(), seq, lineage)? == Took::Diverged {
+            return Err(corrupt(format!(
+                "the primary is at change {seq} on a history that does not lead from \
+                 this archive's change {at}: it was restored to an earlier moment, or \
+                 is another database. Its writes would land among those the archive \
+                 holds; archive it into a directory of its own"
+            )));
+        }
+        if let Some(bytes) = &bytes {
             report(&format!(
                 "image at change {seq} ({:.1} MB)",
                 bytes.len() as f64 / 1e6
             ));
-            at = seq;
-            segment = None;
-        } else if seq != at {
-            return Err(io::Error::other("the primary started somewhere else"));
         }
-        let history = History {
-            lineage,
-            following: true,
-        };
-        self.put(&self.dir.join("history"), &history.encode())?;
 
-        let mut written = 0u64;
         let mut told = Instant::now();
         loop {
             if stop.load(Ordering::SeqCst) {
-                if let Some(s) = &mut segment {
-                    s.sync()?;
-                }
-                return Ok(());
+                return w.sync();
             }
             match rx.receive()? {
                 Message::Writes {
                     first,
                     times,
                     records,
-                } => {
-                    if first != at + 1 {
-                        return Err(io::Error::other(format!(
-                            "the primary sent write {first}, the archive is at {at}"
-                        )));
-                    }
-                    let mut pos = 0;
-                    for time in times {
-                        let len = record_len(&records[pos..])
-                            .ok_or_else(|| io::Error::other("a write record cut short"))?;
-                        // Numbered by its first write here, as a segment's
-                        // name is: a block's writes are one record.
-                        let n = writes(&records[pos..pos + len]);
-                        let seq = at + 1;
-                        let rolled = self.roll.swap(false, Ordering::SeqCst);
-                        let s = match &mut segment {
-                            Some(s) if s.next == seq && s.len < SEGMENT && !rolled => s,
-                            _ => {
-                                if let Some(s) = &mut segment {
-                                    s.sync()?;
-                                }
-                                let mut file = File::create(self.segment_path(seq))?;
-                                // Sealed, the magic is a frame of its own, so a
-                                // segment the archiver made and died in reads
-                                // as an empty one.
-                                let sealed = match &self.key {
-                                    Some(key) => {
-                                        let mut head = seal::MAGIC.to_vec();
-                                        seal::seal_frame(key, 0, false, LOG_MAGIC, &mut head);
-                                        file.write_all(&head)?;
-                                        Some((key.clone(), 1, Vec::new()))
-                                    }
-                                    None => {
-                                        file.write_all(LOG_MAGIC)?;
-                                        None
-                                    }
-                                };
-                                segment.insert(Segment {
-                                    file,
-                                    next: seq,
-                                    len: LOG_MAGIC.len(),
-                                    dirty: true,
-                                    synced: Instant::now(),
-                                    sealed,
-                                })
-                            }
-                        };
-                        s.write(&time.to_le_bytes())?;
-                        s.write(&records[pos..pos + len])?;
-                        s.next += n;
-                        pos += len;
-                        at = seq + n - 1;
-                        written += n;
-                    }
-                    if let Some(s) = &mut segment {
-                        // The batch's writes a frame, whole records in it.
-                        s.flush()?;
-                        if s.synced.elapsed() >= SYNC_EVERY {
-                            s.sync()?;
-                        }
-                    }
-                }
-                Message::Alive { .. } => {
-                    if let Some(s) = &mut segment {
-                        s.sync()?;
-                    }
-                }
+                } => self.take(&mut w, first, &times, &records)?,
+                Message::Alive { .. } => w.sync()?,
                 Message::End(why) => return Err(io::Error::other(why)),
                 _ => return Err(io::Error::other("the primary sent a message it should not")),
             }
-            if told.elapsed() >= Duration::from_secs(10) && written > 0 {
-                report(&format!("{written} writes archived, at change {at}"));
-                written = 0;
+            if told.elapsed() >= Duration::from_secs(10) {
+                let n = w.taken();
+                if n > 0 {
+                    report(&format!("{n} writes archived, at change {}", w.at));
+                }
                 told = Instant::now();
             }
         }
+    }
+
+    /// Where the archive stands, opened to be written on from a stream: its
+    /// last segment's torn tail, if a crash left one, cut off.
+    pub(crate) fn writer(&self) -> io::Result<Writer> {
+        let (at, history, segment) = self.position()?;
+        Ok(Writer {
+            at,
+            history,
+            images: !self.images()?.is_empty(),
+            segment,
+            taken: 0,
+        })
+    }
+
+    /// A stream's hello: the image it sends, which the archive takes and
+    /// goes on from, or the place it goes on from without one, and the
+    /// history its writes are on. An image on a history that does not lead
+    /// from the archive's place, and at or before it, is not taken
+    /// ([`Took::Diverged`]).
+    pub(crate) fn hello(
+        &self,
+        w: &mut Writer,
+        image: Option<&[u8]>,
+        seq: u64,
+        lineage: Vec<(u64, u64)>,
+    ) -> io::Result<Took> {
+        let theirs = History {
+            lineage,
+            following: true,
+        };
+        match image {
+            Some(_)
+                if w.images && seq <= w.at && !theirs.continues(w.history.current(), w.at, seq) =>
+            {
+                return Ok(Took::Diverged)
+            }
+            Some(bytes) => {
+                self.add_image(seq, bytes)?;
+                if let Some(s) = &mut w.segment {
+                    s.sync()?;
+                }
+                w.segment = None;
+                w.at = seq;
+                w.images = true;
+            }
+            None if seq != w.at => {
+                return Err(io::Error::other("the primary started somewhere else"))
+            }
+            None => {}
+        }
+        self.put(&self.dir.join("history"), &theirs.encode())?;
+        w.history = theirs;
+        Ok(Took::Went)
+    }
+
+    /// The history the writes are on moved -- a promotion -- before the
+    /// writes after it.
+    pub(crate) fn lineage(&self, w: &mut Writer, lineage: Vec<(u64, u64)>) -> io::Result<()> {
+        let h = History {
+            lineage,
+            following: true,
+        };
+        self.put(&self.dir.join("history"), &h.encode())?;
+        w.history = h;
+        Ok(())
+    }
+
+    /// Writes a stream sent, numbered on from `first`, each record with the
+    /// time it was appended.
+    pub(crate) fn take(
+        &self,
+        w: &mut Writer,
+        first: u64,
+        times: &[u64],
+        records: &[u8],
+    ) -> io::Result<()> {
+        if first != w.at + 1 {
+            return Err(io::Error::other(format!(
+                "the primary sent write {first}, the archive is at {}",
+                w.at
+            )));
+        }
+        let mut pos = 0;
+        for &time in times {
+            let len = record_len(&records[pos..])
+                .ok_or_else(|| io::Error::other("a write record cut short"))?;
+            // Numbered by its first write here, as a segment's name is: a
+            // block's writes are one record.
+            let n = writes(&records[pos..pos + len]);
+            let seq = w.at + 1;
+            let rolled = self.roll.swap(false, Ordering::SeqCst);
+            let s = match &mut w.segment {
+                Some(s) if s.next == seq && s.len < SEGMENT && !rolled => s,
+                _ => {
+                    if let Some(s) = &mut w.segment {
+                        s.park()?;
+                    }
+                    let path = self.segment_path(seq);
+                    let mut file = File::create(&path)?;
+                    // Sealed, the magic is a frame of its own, so a segment
+                    // the archiver made and died in reads as an empty one.
+                    let sealed = match &self.key {
+                        Some(key) => {
+                            let mut head = seal::MAGIC.to_vec();
+                            seal::seal_frame(key, 0, false, LOG_MAGIC, &mut head);
+                            file.write_all(&head)?;
+                            Some((key.clone(), 1, Vec::new()))
+                        }
+                        None => {
+                            file.write_all(LOG_MAGIC)?;
+                            None
+                        }
+                    };
+                    w.segment.insert(Segment {
+                        path,
+                        file: Some(file),
+                        next: seq,
+                        len: LOG_MAGIC.len(),
+                        dirty: true,
+                        synced: Instant::now(),
+                        sealed,
+                    })
+                }
+            };
+            s.write(&time.to_le_bytes())?;
+            s.write(&records[pos..pos + len])?;
+            s.next += n;
+            pos += len;
+            w.at = seq + n - 1;
+            w.taken += n;
+        }
+        self.fresh.store(true, Ordering::SeqCst);
+        if let Some(s) = &mut w.segment {
+            // The batch's writes a frame, whole records in it.
+            s.flush()?;
+            if s.synced.elapsed() >= SYNC_EVERY {
+                s.sync()?;
+            }
+        }
+        Ok(())
     }
 
     /// Writes the database as it stood at `to` into `out`, a new file.
@@ -594,6 +769,18 @@ impl Archive {
     ///
     /// Without it an archive kept its first image for good: a restore
     /// replayed every write since, and nothing could be let go.
+    /// Whether writes were taken since this was last asked, which it then
+    /// lets go of: a new archive's first ask is yes, so an archiver looks
+    /// at each once after it starts.
+    pub(crate) fn take_fresh(&self) -> bool {
+        self.fresh.swap(false, Ordering::SeqCst)
+    }
+
+    /// Asks [`Self::take_fresh`] to say yes again: an image that failed.
+    pub(crate) fn mark_fresh(&self) {
+        self.fresh.store(true, Ordering::SeqCst);
+    }
+
     pub fn consolidate(&self) -> io::Result<Option<u64>> {
         let Some(&(last_image, _)) = self.images()?.last() else {
             return Ok(None);

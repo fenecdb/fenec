@@ -61,7 +61,7 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Default size of a primary's feed. A replica that falls further behind is
@@ -75,21 +75,21 @@ const CHUNK: usize = 1 << 20;
 
 /// The records one `W` message carries, at most; a larger record goes alone.
 /// It is also what a replica applies under one hold of its write lock.
-const MESSAGE: usize = 1 << 20;
+pub(crate) const MESSAGE: usize = 1 << 20;
 
 /// A stream with nothing to send says so this often: the replica learns the
 /// primary is there, and how far it has got.
-const ALIVE: Duration = Duration::from_secs(2);
+pub(crate) const ALIVE: Duration = Duration::from_secs(2);
 
 /// A replica that hears nothing for this long takes the primary for gone and
 /// connects again.
-const SILENCE: Duration = Duration::from_secs(10);
+pub(crate) const SILENCE: Duration = Duration::from_secs(10);
 
 /// An image is sent once the primary's disk holds it; a primary whose disk
 /// does not get there in this long is not sending it.
-const DURABLE_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const DURABLE_WAIT: Duration = Duration::from_secs(30);
 
-const VERSION: u8 = 1;
+pub(crate) const VERSION: u8 = 1;
 
 /// How long a durable write waits for the streams to send it. A stream
 /// sends within microseconds of the fsync; one that has not in this long is
@@ -131,6 +131,11 @@ pub struct Feed {
     /// The streams sending from it, and how far each has sent.
     senders: Mutex<Vec<Sender>>,
     sent_cv: Condvar,
+    /// Told whenever the writes on disk move on, the feed starts over or
+    /// closes: a tenant's, by the node's stream of every tenant
+    /// ([`crate::node_stream`]). Unset everywhere else, where it costs a
+    /// sync a load.
+    told: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// A stream as a durable write waits for it: the last write it put into its
@@ -155,6 +160,11 @@ struct Ring {
     /// The database is going: every stream ends rather than holding it open
     /// (a tenant being deleted or moved).
     closed: bool,
+    /// The history the writes are on, as the database last wrote it: the
+    /// node's stream sends it on when it moves (a promotion), before the
+    /// writes after it. Taken from the history records the database
+    /// appends ([`Tee`]), which no write's record carries.
+    lineage: Vec<(u64, u64)>,
 }
 
 /// Consecutive records, the first write in them numbered `first`.
@@ -188,7 +198,7 @@ pub(crate) enum Tail {
     Gone,
 }
 
-enum Next {
+pub(crate) enum Next {
     /// The first write's number, the last's, the records' times, the
     /// records.
     Records(u64, u64, Vec<u64>, Vec<u8>),
@@ -213,20 +223,70 @@ impl Feed {
                 durable: 0,
                 epoch: 0,
                 closed: false,
+                lineage: Vec::new(),
             }),
             cv: Condvar::new(),
             senders: Mutex::new(Vec::new()),
             sent_cv: Condvar::new(),
+            told: OnceLock::new(),
         })
     }
 
-    /// A stream begins sending after write `at`.
+    /// Has `tell` called whenever the writes on disk move on, the feed
+    /// starts over or it closes. Once: a feed belongs to one tenant.
+    pub(crate) fn tell_with(&self, tell: impl Fn() + Send + Sync + 'static) {
+        let _ = self.told.set(Box::new(tell));
+    }
+
+    fn tell(&self) {
+        if let Some(tell) = self.told.get() {
+            tell();
+        }
+    }
+
+    /// A stream begins sending after write `at`. A stream already sending
+    /// from it starts there again: the node's stream is put on a tenant's
+    /// feed as it opens and again as it judges where it stands, and a
+    /// second entry of one key, never moved on, would have kept a durable
+    /// write waiting and the tenant from closing.
     pub(crate) fn sending(&self, key: u64, at: u64) {
-        lock(&self.senders).push(Sender {
-            key,
-            sent: at,
-            lagging: false,
-        });
+        let mut s = lock(&self.senders);
+        match s.iter_mut().find(|x| x.key == key) {
+            Some(x) => {
+                x.sent = at;
+                x.lagging = false;
+            }
+            None => s.push(Sender {
+                key,
+                sent: at,
+                lagging: false,
+            }),
+        }
+    }
+
+    /// Whether a stream sending from it has not yet sent a write its disk
+    /// holds: the node's stream, which a tenant waits for before it closes
+    /// -- closed, its feed goes with it, and what the stream had not sent
+    /// would have come again as an image. A replica's stream holds its
+    /// tenant open anyway. Lagging or not: a stream that stopped reading is
+    /// cut at its socket's timeout, and is no sender after that.
+    pub(crate) fn unsent(&self) -> bool {
+        let durable = lock(&self.ring).durable;
+        lock(&self.senders).iter().any(|x| x.sent < durable)
+    }
+
+    /// The history the writes are on, as the database last wrote it.
+    pub(crate) fn lineage(&self) -> Vec<(u64, u64)> {
+        lock(&self.ring).lineage.clone()
+    }
+
+    /// Takes the history the database is on: as it opens or takes an
+    /// image, and from each history record it appends.
+    pub fn set_lineage(&self, lineage: &[(u64, u64)]) {
+        let mut r = lock(&self.ring);
+        if r.lineage != lineage {
+            r.lineage = lineage.to_vec();
+        }
     }
 
     /// The stream `key` has written everything up to `sent` into its
@@ -283,6 +343,7 @@ impl Feed {
         r.epoch += 1;
         drop(r);
         self.cv.notify_all();
+        self.tell();
     }
 
     /// Ends every stream reading from this feed. A tenant being deleted or
@@ -291,6 +352,7 @@ impl Feed {
     pub fn close(&self) {
         lock(&self.ring).closed = true;
         self.cv.notify_all();
+        self.tell();
     }
 
     /// Takes streams again after a [`Self::close`] whose reason fell through.
@@ -353,6 +415,13 @@ impl Feed {
         }
     }
 
+    /// A record appended and synced, as a [`Tee`] makes one: for tests.
+    #[cfg(test)]
+    pub(crate) fn push_durable(&self, seq: u64, bytes: &[u8]) {
+        self.push(seq, bytes);
+        self.mark_durable(seq);
+    }
+
     fn mark_durable(&self, upto: u64) {
         let mut r = lock(&self.ring);
         let upto = upto.min(r.seq);
@@ -360,17 +429,18 @@ impl Feed {
             r.durable = upto;
             drop(r);
             self.cv.notify_all();
+            self.tell();
         }
     }
 
     /// Whether every write after `cursor` is still kept.
-    fn serves(&self, cursor: u64) -> bool {
+    pub(crate) fn serves(&self, cursor: u64) -> bool {
         let r = lock(&self.ring);
         cursor == r.seq || cursor < r.seq && r.chunks.front().is_some_and(|c| c.first <= cursor + 1)
     }
 
     /// The durable records after `cursor`, up to about `max` bytes.
-    fn next(&self, cursor: u64, epoch: u64, max: usize) -> Next {
+    pub(crate) fn next(&self, cursor: u64, epoch: u64, max: usize) -> Next {
         let r = lock(&self.ring);
         if r.closed {
             return Next::Gone;
@@ -510,8 +580,14 @@ pub struct Tee {
 }
 
 impl Sink for Tee {
+    /// Passed on; a history record -- a fork, a replica following -- also
+    /// moves the feed's lineage, which no write's record carries.
     fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
-        self.file.append(bytes)
+        self.file.append(bytes)?;
+        if let Some(h) = history_in(bytes) {
+            self.feed.set_lineage(&h.lineage);
+        }
+        Ok(())
     }
     fn append_deferred(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.file.append_deferred(bytes)
@@ -629,6 +705,18 @@ impl Sink for Tee {
     }
 }
 
+/// The history a history record holds, `[8][0][length][history]`; `None`
+/// for any other record.
+fn history_in(record: &[u8]) -> Option<History> {
+    if record.first() != Some(&fenec_core::history::RECORD) {
+        return None;
+    }
+    let mut pos = 1;
+    fenec_core::codec::get_uvarint(record, &mut pos).ok()?;
+    let len = fenec_core::codec::get_uvarint(record, &mut pos).ok()? as usize;
+    History::decode(record.get(pos..pos.checked_add(len)?)?).ok()
+}
+
 /// Opens a file for a server that has replicas, or is one, with its writes
 /// going through a [`Tee`] to a feed of `buffer` bytes.
 ///
@@ -677,6 +765,7 @@ fn open_as(
         true => fenec_core::fs::open_serving(path, mapped, wrap)?,
         false => fenec_core::fs::open_with(path, mapped, wrap)?,
     };
+    feed.set_lineage(&db.history().lineage);
     feed.start(db.change_seq());
     Ok((db, feed))
 }
@@ -962,7 +1051,7 @@ fn status(db: &Arc<RwLock<Database>>, repl: &Replication) -> Response {
     Response::json(200, out)
 }
 
-fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
+pub(crate) fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
     let len: usize = parts.iter().map(|p| p.len()).sum();
     let mut head = [0u8; 9];
     head[0] = tag;
@@ -974,7 +1063,7 @@ fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
     Ok(())
 }
 
-fn u64s(values: &[u64]) -> Vec<u8> {
+pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
@@ -1146,11 +1235,11 @@ impl Drop for Unlist<'_> {
 #[derive(Clone)]
 pub struct Upstream {
     url: String,
-    addr: String,
+    pub(crate) addr: String,
     /// What the stream hangs off: nothing for a file, `/t/<tenant>` for one
     /// tenant of a node that replicates its tenants.
-    base: String,
-    token: String,
+    pub(crate) base: String,
+    pub(crate) token: String,
 }
 
 /// A message of the stream, decoded.
@@ -1429,6 +1518,9 @@ impl Follower {
             g.adopt(fresh, &bytes).map_err(io::Error::other)?;
             g.follow(lineage).map_err(io::Error::other)?;
             if let Some(feed) = &self.feed {
+                // The image's history, which `follow` appends no record
+                // for where it is the one the image held.
+                feed.set_lineage(&g.history().lineage);
                 feed.start(g.change_seq());
             }
             debug_assert_eq!(g.change_seq(), seq);
@@ -1563,7 +1655,7 @@ impl Follower {
     }
 }
 
-fn connect(addr: &str) -> io::Result<TcpStream> {
+pub(crate) fn connect(addr: &str) -> io::Result<TcpStream> {
     let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
     for a in addr.to_socket_addrs()? {
         match TcpStream::connect_timeout(&a, Duration::from_secs(5)) {
@@ -1578,7 +1670,7 @@ fn connect(addr: &str) -> io::Result<TcpStream> {
 }
 
 /// The status line and the length of the body, when it has one.
-fn read_head(r: &mut impl BufRead) -> io::Result<(u16, Option<usize>)> {
+pub(crate) fn read_head(r: &mut impl BufRead) -> io::Result<(u16, Option<usize>)> {
     let mut line = String::new();
     r.read_line(&mut line)?;
     let status = line
@@ -1607,7 +1699,7 @@ fn read_head(r: &mut impl BufRead) -> io::Result<(u16, Option<usize>)> {
     }
 }
 
-fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+pub(crate) fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     let mut head = [0u8; 9];
     r.read_exact(&mut head)?;
     let len = u64::from_le_bytes(head[1..].try_into().unwrap());
@@ -1622,7 +1714,7 @@ fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     Ok((head[0], body))
 }
 
-fn u64_at(b: &[u8], at: usize) -> u64 {
+pub(crate) fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
 }
 
