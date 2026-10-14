@@ -185,16 +185,23 @@ pub struct Dictionary {
 impl Dictionary {
     /// The dictionary of `words`, in any order, each once.
     pub fn of<'a>(words: impl Iterator<Item = &'a str>) -> Dictionary {
-        let mut all: Vec<&[u8]> = Vec::new();
-        for w in words {
-            if !w.starts_with('^') {
-                all.push(w.as_bytes());
-            }
-        }
+        let words = words.filter(|w| !w.starts_with('^'));
+        Dictionary::of_bytes(words.map(str::as_bytes).collect())
+    }
+
+    /// [`Dictionary::of`] over each word's bytes, as a text index holds
+    /// them, none of them a prefix's: read back as text, each was checked
+    /// for UTF-8 again, and the first loose `match` over 60 000 words
+    /// sorted them in 7.6 ms against 6.5.
+    pub(crate) fn of_bytes(all: Vec<&[u8]>) -> Dictionary {
         // The standard sort natively: over FiQA's 135 500 words, 10.9 ms
         // against the merge's 24.9.
         #[cfg(not(target_arch = "wasm32"))]
-        all.sort_unstable();
+        let all = {
+            let mut all = all;
+            all.sort_unstable();
+            all
+        };
         #[cfg(target_arch = "wasm32")]
         let all = sorted(all);
         let mut d = Dictionary::default();
