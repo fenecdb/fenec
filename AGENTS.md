@@ -3943,15 +3943,20 @@ masked word (`Key`): through `memcmp` a length's branch mispredicted at
 each. Past 98 304 words natively the table, arrays and arena are 256 shards
 by the hash's top byte, as `maps::Sharded` splits a map: `make growth-bench
 GROWTH=text`'s put p50 1.21-1.25 -> 0.83-0.88 us, p99 2.9-7.1 -> 1.6-2.0,
-the split's 5.2-5.5 ms -> 3.4-4.5, the index built after an open 1.8-2.6 s
+the split's 5.2-6.3 ms -> 3.4-4.7, the index built after an open 1.8-2.6 s
 -> 0.46-0.58. In ABBA turns against main, load 2-5: search-bench's build
 140-146 -> 139-142 ms and `match` 0.054 either way, SciFact's build 90-91
 -> 87 ms (one run of six 94) and FiQA's 559-565 -> 535-539, `match` over
 them 4-6% quicker, 400 000 words each in one document 113-178 -> 38-47 ms,
 BEIR's nDCG@10 the same to the fourth digit and its loose `match`es as
-quick or quicker, an update of a FiQA document 1% slower (306-309 ->
-310-312 us: the instructions +0.26%, the lists' `memmove` the same) and of
-a SciFact one the same; the browser module's build of SciFact 151-154 ->
+quick or quicker, an update of a FiQA document 1% slower on macOS (306-309
+-> 310-312 us, though its own instructions only +0.23%: the same binary
+search, out of line in both, 5-8% apart in samples, and `#[inline(never)]`
+on main's own `drop_doc` moved main's up to 0.8%, its removals 0.4-1.2%; a
+list's record a cache line, its word's head in it, or its drop out of line,
+no nearer) and the same on Linux in Docker's VM, in turns (musl 1 505-1 521
+against 1 509-1 514 us, glibc 2 100-2 160 against 2 105-2 161), and of a
+SciFact one the same; the browser module's build of SciFact 151-154 ->
 145-146 ms (one run of six 155) and of 20 000 notes of made-up words 75-77
 -> 32, `match` 3-7% quicker, `make wasm-speed` as it was, for 2.2 KB brotli
 of the module, 3.1 KB raw (hashbrown's copy for the map, 3.0 KB raw, gone).
