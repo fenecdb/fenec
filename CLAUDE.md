@@ -1297,8 +1297,12 @@ which main's 82 s run had and its 535 s one did not, and a file kept small
 is not given it: steadier, never the best case. A file that fits moves
 nothing: 250 000 records (29-31 s, the median 100 ms 174-181k, through a
 compact 153-156k), YCSB A, B and F in process (with the memory free A at
-16 threads 82-92k -> 133k, the rest within the runs' spread; beside the
-ballast B 23.5k -> 63.5k, F at 16 23.6k -> 48.5k, A at 1 29.7k -> 24.1k),
+16 threads 82-92k -> 133k, the rest within the runs' spread; beside a 1
+GB ballast on a quiet machine, against the same build with `memory` off,
+two ABBA quartets, A at 1 thread 50-99k -> 101-148k and at 16 47-60k ->
+72-127k, B at 16 197-460k -> 475-576k, F at 1 78-90k -> 111-202k and at
+16 71-83k -> 102-115k, B at 1 313-476k against 412-477k -- one pair
+beside other agents' builds had A at 1 at 29.7k -> 24.1k),
 `make concurrency-bench` and `make requests-bench` in ABBA turns as on
 main, the browser module byte for byte (`cache.rs` is `std-fs`'s). Rejected: `MADV_RANDOM` (Linux reads 128 KB
 around a fault, the neighbours the next reads want: 806-811 s, 561-608
