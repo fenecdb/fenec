@@ -76,6 +76,22 @@ jobs:
           CLOUDFLARE_AI_TOKEN: ${{ secrets.CLOUDFLARE_AI_TOKEN }}
         run: make site
 
+      # The cache as the build left it, the sections it embedded beside the
+      # ones it was handed, for someone to commit: until it is, a pull
+      # request's CI, which cannot embed, tests the search by meaning over
+      # the committed vectors and this deploy over the fresh ones, and a
+      # ranking one passed the other can fail (docs/mobile 3rd for a
+      # Turkish question in CI, 4th here once 217 sections were embedded).
+      # Kept whether the build passed or not, since a failed one is when it
+      # is needed.
+      - name: Keep the vectors this build embedded
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: search-embeddings
+          path: site/search-embeddings.json
+          retention-days: 14
+
       # Every internal link and anchor in the built pages has to resolve: a
       # page renamed or a heading's id changed leaves links that land
       # nowhere, and nothing else would say so before a reader found one.
