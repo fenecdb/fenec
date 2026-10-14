@@ -666,28 +666,45 @@ a write left (`Feed::unsent`), syncing a dirty tenant first: closed, its
 feed went with it and the writes came again as an image. One stream for
 every tenant holds no tenant up for another: its sender carries a flag
 (`Sender::held`, `Listener::hold`) set while the stream does what can block
--- a closed tenant read or opened to be looked at, an image's snapshot and
-its sending, a socket the archiver reads slower than it fills (written
-non-blocking, `Out`, the flag set before a write that would block) -- and a
-durable write waits for no sender held so (`Sender::waited_for`); a stream
-that starts behind, at an image or on the tenants open as it connects, is
-lagging until it catches up, and an image waits for its tenant's disk among
-the stream's other work (`Pending`, looked at again every 50 ms) rather than
-in `DURABLE_WAIT`'s 30 s. Held up the replica's way, every tenant's next
-durable write waited out `SENT_WAIT`, 1.008 s, while the stream opened
-another tenant. The syncer of `--sync <ms>` and a close sync waiting for no
-stream (`replication::unwaited`), since no client's answer waits on them:
-waiting, a pass took 5.06 s over five tenants beside a stream busy
-elsewhere, the writes of the pass unsynced meanwhile, and a close held its
-slot's lock 1.01 s. `tests/node_archive.rs` holds a tenant's open, an
-image's disk and a full socket each beside another tenant's writes, and
-fails with the flag, a blocked write's hold, the pending image or the
-unwaited sync taken out (a write beside an archiver that stopped reading
-waited 1.014 s). Which tenants have news is told: a feed tells as its writes
-reach the disk, it starts over or closes (`Feed::tell_with`, held strongly:
-a `Weak`'s upgrade was a compare-and-swap on one count every tenant's sync
-shared, 139-141 ns a tell from 16 threads against 0.20-0.24), and a tenant
-made, installed, deleted, promoted or made to follow touches the stream; one
+-- a closed tenant read or opened to be looked at, a tenant's lock waited
+for (`Listener::read`: waited for unheld, a tenant write-locked as the
+stream came to judge it held another's next durable write 1.014 s), an
+image's snapshot and its sending, a socket the archiver reads slower than it
+fills (written non-blocking, `Out`, the flag set before a write that would
+block) -- and a durable write waits for no sender held so
+(`Sender::waited_for`); a stream that starts behind, at an image or on the
+tenants open as it connects, is lagging until it catches up, and an image
+waits for its tenant's disk among the stream's other work (`Pending`, looked
+at again every 50 ms) rather than in `DURABLE_WAIT`'s 30 s. Its feed is
+among the stream's while it waits, where a close takes it off
+(`NodeStreams::detach`) and an open puts another in its place, `attach`
+dropping a feed of an earlier opening, and `send_pending` sends only while
+it is still there, taking the tenant again otherwise: an image pending
+across a close and an open put the dead feed back once sent, the stream read
+nothing from it again and the archive stood still -- the node at 8, it at 5
+-- until the archiver connected again. Held up the replica's way, every
+tenant's next durable write waited out `SENT_WAIT`, 1.008 s, while the
+stream opened another tenant. The syncer of `--sync <ms>` and a close sync
+waiting for no stream (`replication::unwaited`), since no client's answer
+waits on them: waiting, a pass took 5.06 s over five tenants beside a stream
+busy elsewhere, the writes of the pass unsynced meanwhile, and a close held
+its slot's lock 1.01 s. So an archive of a node is synchronous only while
+the stream keeps up, and under load it is not: a write answered while the
+stream is held up or behind is on the node's disk and not yet in the
+archive, sent once the stream comes back to its tenant -- at worst inside an
+image -- and missing from it if that disk is lost first; a replica's own
+stream keeps a write's answer waiting up to a second instead.
+`tests/node_archive.rs` holds a tenant's open, a tenant's lock, an image's
+disk and a full socket each beside another tenant's writes, and fails with
+the flag, the held lock wait, a blocked write's hold, the pending image or
+the unwaited sync taken out (a write beside an archiver that stopped reading
+waited 1.014 s); it asks `Feed::waited_out`, the durable writes that waited
+out a stream, rather than a clock, which a runner slowed by its neighbours
+fails. Which tenants have news is told: a feed tells as its writes reach the
+disk, it starts over or closes (`Feed::tell_with`, held strongly: a `Weak`'s
+upgrade was a compare-and-swap on one count every tenant's sync shared,
+139-141 ns a tell from 16 threads against 0.20-0.24), and a tenant made,
+installed, deleted, promoted or made to follow touches the stream; one
 released while the stream is busy with it (`Next::Gone`) is looked at again
 until it is gone or back -- a tenant made again under the name, writing
 nothing, gave no notice more -- and the directory is read again every 10 s
@@ -711,14 +728,23 @@ archiver off the root. A tenant the node says is gone -- deleted, or moved
 to a node whose archiver takes it up from its image on the same history --
 keeps its archive, and `presence` notes `gone <ms>`, then `back <ms>` if it
 returns: a restore to a moment it was away leaves it out, as one deleted,
-where forgetting the time away gave the copy from before it left. An image
-at or before the archive's end on a history that does not lead from it
-(`archive::Took::Diverged`: restored to an earlier moment, or another tenant
-of the name) would have landed among changes of the same numbers --
-`File::create` of a segment of the same name wrote one over -- so the single
-archiver refuses it and the node's moves the line aside to
-`<tenant>.<history>` and begins a new one. `restore --tenants` to a time
-takes, of a tenant's lines, the one that began last by then
+where forgetting the time away gave the copy from before it left. The times
+are the node's clock, as its writes' are: `G` carries when this process
+deleted the tenant (`Tenants::departed`, the last 65 536) or else when the
+stream saw it go, and `back` is the node's hello -- stamped as the archiver
+heard, a moment after a delete still restored the tenant while the stream
+was busy or the archiver away. A tenant deleted and made again while the
+stream was busy is told gone at the delete before the new copy's hello
+(`Session::left`), and a line moved aside for a copy heard of alone, the
+archiver away meanwhile, is noted gone by that hello at the latest;
+`away_at` reads the last line noted by a moment, a clock set back leaving
+the times out of order. An image at or before the archive's end on a history
+that does not lead from it (`archive::Took::Diverged`: restored to an
+earlier moment, or another tenant of the name) would have landed among
+changes of the same numbers -- `File::create` of a segment of the same name
+wrote one over -- so the single archiver refuses it and the node's moves the
+line aside to `<tenant>.<history>` and begins a new one. `restore --tenants`
+to a time takes, of a tenant's lines, the one that began last by then
 (`node_archive::lines`; `Archive::began`, its oldest image's time, which a
 `prune` letting that image go writes into `began` first -- written with the
 first image it was an fsync more a tenant of the stream's first pass), and

@@ -7,6 +7,7 @@
 use fenec_core::prelude::*;
 use fenec_http::archive::{Archive, Target};
 use fenec_http::node_archive::{self, NodeArchive, Restoring};
+use fenec_http::replication::Feed;
 use fenec_http::tenants::{Replicated, Tenant, Tenants};
 use fenec_http::{Config, Server};
 use std::path::{Path, PathBuf};
@@ -733,9 +734,18 @@ fn release(gate: &Gate) {
     cv.notify_all();
 }
 
-/// Half the wait a durable write gives a stream: a write that waited for a
-/// stream held up elsewhere took all of it, 1.008 s.
-const HALF_A_WAIT: Duration = Duration::from_millis(500);
+/// The feed `t`'s writes are sent from.
+fn feed_of(t: &Tenant) -> Arc<Feed> {
+    Arc::clone(t.repl.as_ref().and_then(|r| r.feed()).expect("a feed"))
+}
+
+/// How many durable writes to `t` waited out their whole wait for a
+/// stream: a write that waited for a stream held up elsewhere took all of
+/// it, 1.008 s. Asked rather than timed, which a machine slowed by its
+/// neighbours would fail.
+fn waited_out(t: &Tenant) -> u64 {
+    feed_of(t).waited_out()
+}
 
 /// The node's one stream held up on one tenant -- inside the open it makes
 /// to take that tenant's image -- holds up no other tenant's durable write:
@@ -764,10 +774,12 @@ fn a_stream_held_up_on_one_tenant_holds_up_no_others_writes() {
     // put on their feeds.
     for name in ["y", "z"] {
         let t = n.tenants.get(name).unwrap();
-        let t0 = Instant::now();
         exec(&t, "put notes {title: \"while held up\", n: 2}");
-        let took = t0.elapsed();
-        assert!(took < HALF_A_WAIT, "a write to `{name}` waited {took:?}");
+        assert_eq!(
+            waited_out(&t),
+            0,
+            "a write to `{name}` waited for the stream"
+        );
     }
     release(&gate);
     for name in ["y", "z"] {
@@ -786,7 +798,9 @@ struct RawStream {
 }
 
 impl RawStream {
-    fn open(url: &str) -> RawStream {
+    /// The stream of every tenant, the client standing where `places`
+    /// says (`<tenant> <since> <history hex> <image>` a line).
+    fn open(url: &str, places: &str) -> RawStream {
         use std::io::{BufRead, Write};
         let addr = url.trim_start_matches("http://");
         let s = std::net::TcpStream::connect(addr).unwrap();
@@ -794,7 +808,8 @@ impl RawStream {
         write!(
             &s,
             "POST /_replication/tenants HTTP/1.1\r\nHost: {addr}\r\n\
-             Authorization: Bearer {REPL}\r\nContent-Length: 0\r\n\r\n"
+             Authorization: Bearer {REPL}\r\nContent-Length: {}\r\n\r\n{places}",
+            places.len()
         )
         .unwrap();
         let mut r = std::io::BufReader::new(s);
@@ -840,7 +855,7 @@ fn an_archiver_that_stops_reading_holds_up_no_write() {
     let n = node(&d.join("node"), None);
     let a = made(&n, "a", 2);
     let b = made(&n, "b", 2);
-    let mut raw = RawStream::open(&n.url);
+    let mut raw = RawStream::open(&n.url, "");
     let mut imaged = std::collections::BTreeSet::new();
     while imaged.len() < 2 {
         if let (b'I', name) = raw.next() {
@@ -857,11 +872,163 @@ fn an_archiver_that_stops_reading_holds_up_no_write() {
     for i in 0..64 {
         exec(&a, &format!("put notes {{title: \"{title}\", n: {i}}}"));
     }
-    let t0 = Instant::now();
+    let before = waited_out(&b);
     exec(&b, "put notes {title: \"beside a full socket\", n: 4}");
-    let took = t0.elapsed();
-    assert!(took < HALF_A_WAIT, "a write to `b` waited {took:?}");
+    assert_eq!(
+        waited_out(&b),
+        before,
+        "a write to `b` waited for the stream"
+    );
     drop(raw);
+}
+
+/// Where a client stands in `t`: at its last change, on its history.
+fn place_of(t: &Tenant) -> String {
+    let g = t.db.read().unwrap();
+    format!(
+        "{} {} {:016x} 0\n",
+        t.name(),
+        g.change_seq(),
+        g.history().current()
+    )
+}
+
+/// Nor does a tenant whose write lock is held -- a long `/batch`, a compact
+/// under the lock -- as the stream comes to judge it: waited for unheld, its
+/// lock held the stream, and the next durable write of a tenant it had just
+/// said hello to waited out its whole wait, 1.014 s.
+#[test]
+fn a_tenant_write_locked_as_the_stream_judges_it_holds_up_no_other() {
+    let d = scratch("judge-lock");
+    let n = node(&d.join("node"), None);
+    let y = made(&n, "a-y", 2);
+    let slow = made(&n, "slow", 2);
+    let (locked, free) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let holder = {
+        let db = Arc::clone(&slow.db);
+        std::thread::spawn(move || {
+            let _g = db.write().unwrap();
+            locked.0.send(()).unwrap();
+            let _ = free.1.recv();
+        })
+    };
+    locked.1.recv().unwrap();
+    // The client stands where `a-y` does and holds nothing of `slow`: the
+    // stream says hello to `a-y` -- caught up, a write of it waits for the
+    // stream -- and comes to judge `slow` next, in name order. `a-y`'s
+    // writes go out in the round after, so once its hello is here the
+    // stream has its write to send behind `slow`'s lock whatever the timing.
+    let mut raw = RawStream::open(&n.url, &place_of(&y));
+    raw.until(b'H', "a-y");
+    exec(&y, "put notes {title: \"beside a locked tenant\", n: 3}");
+    assert_eq!(waited_out(&y), 0, "a write to `a-y` waited for the stream");
+    free.0.send(()).unwrap();
+    holder.join().unwrap();
+    raw.until(b'W', "a-y");
+    drop((raw, y, slow));
+}
+
+/// An image waiting for its tenant's disk while the tenant closes and opens
+/// again goes out from the tenant as it is then: sent as taken, it put the
+/// closed tenant's feed back among the stream's, which read nothing from it
+/// again -- the archive stood still, the node at 8 and it at 5, until the
+/// archiver connected again.
+#[test]
+fn an_image_pending_across_a_close_and_an_open_goes_on_from_the_open() {
+    let d = scratch("pending-reopen");
+    let (n, gate) = gated(&d.join("node"), false);
+    let a = made(&n, "a", 2);
+    let z = made(&n, "zbig", 5);
+    let root = d.join("root");
+    let arch = archiver(&root, &n.url);
+    archived(&root.join("a"), seq(&a));
+    archived(&root.join("zbig"), seq(&z));
+    arch.finish();
+    // Both a write past the archive and closed.
+    exec(&z, "put notes {title: \"behind\", n: 70}");
+    exec(&a, "put notes {title: \"behind\", n: 71}");
+    drop((a, z));
+    close_all(&n.tenants, 2);
+    // `a` opened again -- its feed starts there, short of the archive's
+    // place -- and written past its disk: its image waits for the disk.
+    let a = n.tenants.get("a").unwrap();
+    exec_unsynced(&a, "put notes {title: \"not on disk\", n: 72}");
+    arm(&gate);
+    let arch = archiver(&root, &n.url);
+    // Held in `zbig`'s open, after `a`'s image, in name order.
+    entered(&gate);
+    drop(a);
+    close_all(&n.tenants, 1);
+    let a = n.tenants.get("a").unwrap();
+    exec(&a, "put notes {title: \"after the open\", n: 73}");
+    release(&gate);
+    archived(&root.join("a"), seq(&a));
+    // And on from there, across another close and open.
+    exec(&a, "put notes {title: \"later\", n: 74}");
+    drop(a);
+    close_all(&n.tenants, 1);
+    let a = n.tenants.get("a").unwrap();
+    exec(&a, "put notes {title: \"later still\", n: 75}");
+    archived(&root.join("a"), seq(&a));
+    drop(a);
+    arch.finish();
+}
+
+/// A tenant deleted while the stream is busy elsewhere is gone from the
+/// node's time of the delete, not from when the stream came to it: told
+/// late, a moment between restored a tenant the node no longer held.
+#[test]
+fn a_tenant_deleted_while_the_stream_is_busy_is_gone_from_the_delete() {
+    let d = scratch("gone-when");
+    let (n, gate) = gated(&d.join("node"), true);
+    let big = made(&n, "big", 5);
+    let e = made(&n, "e", 3);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    archived(&root.join("big"), seq(&big));
+    archived(&root.join("e"), seq(&e));
+    let image = n.tenants.export("big").unwrap();
+    drop((big, e));
+    arm(&gate);
+    n.tenants.import("imp", &image).unwrap();
+    entered(&gate);
+    n.tenants.delete("e").unwrap();
+    let after = a_moment();
+    release(&gate);
+    until("the archive was not told `e` went", || {
+        node_archive::gone_at(&root.join("e")).is_some()
+    });
+    a.finish();
+    let (r, _) = restored_rows(&root, &d.join("out"), Target::Time(after), "e");
+    assert!(matches!(r, Restoring::Gone(_)), "{r:?}");
+}
+
+/// A tenant deleted and made again while the archiver was away is heard of
+/// as the new tenant alone: the line it moves aside is noted gone, by the
+/// time the node said hello to the new one at the latest.
+#[test]
+fn a_line_moved_aside_while_the_archiver_was_away_is_noted_gone() {
+    let d = scratch("aside-gone");
+    let n = node(&d.join("node"), None);
+    let e = made(&n, "e", 3);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    archived(&root.join("e"), seq(&e));
+    a.finish();
+    drop(e);
+    n.tenants.delete("e").unwrap();
+    drop(n.tenants.create("e").unwrap());
+    let a = archiver(&root, &n.url);
+    let aside = || {
+        node_archive::lines(&root)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.tenant == "e" && !l.current)
+    };
+    until("the old line was not moved aside", || aside().is_some());
+    archived(&root.join("e"), 0);
+    a.finish();
+    assert!(node_archive::gone_at(&aside().unwrap().dir).is_some());
 }
 
 /// Nor do the syncer and a close wait for it: under `--sync <ms>` a pass
@@ -888,27 +1055,17 @@ fn the_syncer_and_a_close_wait_for_no_stream() {
         g.execute(&fenec_ql::parse_one("put notes {title: \"buffered\", n: 9}").unwrap())
             .unwrap();
     }
+    let feeds: Vec<Arc<Feed>> = held.iter().map(|t| feed_of(t)).collect();
     let mut held = held;
     drop(held.pop());
-    let asking = {
-        let tenants = Arc::clone(&n.tenants);
-        std::thread::spawn(move || {
-            let t0 = Instant::now();
-            tenants.get("t5").map(|_| ()).unwrap();
-            t0.elapsed()
-        })
-    };
-    let t0 = Instant::now();
+    // Both done while the stream is still held up: neither waited for it.
+    // The close syncs `t5` and leaves it open, its write unsent.
     n.tenants.close_idle(Duration::ZERO);
-    let close = t0.elapsed();
-    let asked = asking.join().unwrap();
-    let t0 = Instant::now();
     n.tenants.sync_dirty();
-    let pass = t0.elapsed();
+    for (x, f) in names.iter().zip(&feeds) {
+        assert_eq!(f.waited_out(), 0, "`{x}`'s sync waited for the stream");
+    }
     release(&gate);
-    assert!(close < HALF_A_WAIT, "a close took {close:?}");
-    assert!(asked < HALF_A_WAIT, "a request waited {asked:?} on a close");
-    assert!(pass < HALF_A_WAIT, "a syncer's pass took {pass:?}");
     for (x, t) in names.iter().zip(&held) {
         archived(&root.join(x), seq(t));
     }
@@ -974,6 +1131,7 @@ fn a_tenant_made_again_while_the_stream_is_busy_is_noticed() {
     drop(e);
     n.tenants.delete("e").unwrap();
     drop(n.tenants.create("e").unwrap());
+    let between = a_moment();
     release(&gate);
     until("the old archive was not moved aside", || {
         std::fs::read_dir(&root)
@@ -988,6 +1146,13 @@ fn a_tenant_made_again_while_the_stream_is_busy_is_noticed() {
     assert!(
         db.collection_names().is_empty(),
         "the deleted tenant came back"
+    );
+    // Gone from the delete, though the stream heard of it only as the new
+    // tenant: the old line told nothing, and answered for the moment.
+    let (r, _) = restored_rows(&root, &d.join("between"), Target::Time(between), "e");
+    assert!(
+        !matches!(&r, Restoring::Restored(_, from) if from.starts_with("e.")),
+        "{r:?}"
     );
 }
 

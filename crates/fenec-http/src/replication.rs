@@ -61,7 +61,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -138,6 +138,10 @@ pub struct Feed {
     /// else, where it costs a sync a load; set, two -- the streams' count is
     /// read before anything is told, and no stream connected tells nothing.
     told: OnceLock<(Arc<crate::node_stream::NodeStreams>, String)>,
+    /// Durable writes that waited out their whole wait for a stream, which
+    /// was then let lag: what a stream that holds writes up costs, counted
+    /// so a test asks the count rather than a clock.
+    waited_out: AtomicU64,
 }
 
 /// A stream as a durable write waits for it: the last write it put into its
@@ -272,7 +276,13 @@ impl Feed {
             senders: Mutex::new(Vec::new()),
             sent_cv: Condvar::new(),
             told: OnceLock::new(),
+            waited_out: AtomicU64::new(0),
         })
+    }
+
+    /// How many durable writes waited out their whole wait for a stream.
+    pub fn waited_out(&self) -> u64 {
+        self.waited_out.load(Ordering::Relaxed)
     }
 
     /// Has `streams` told of `name` whenever the writes on disk move on,
@@ -391,6 +401,7 @@ impl Feed {
                 for x in s.iter_mut().filter(|x| x.waited_for(upto)) {
                     x.lagging = true;
                 }
+                self.waited_out.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             s = self
@@ -1899,12 +1910,12 @@ mod tests {
                 .unwrap();
             db.flush().unwrap().expect("a durability to run")
         };
-        let t0 = Instant::now();
         unwaited(write(&mut db)).unwrap();
-        assert!(t0.elapsed() < SENT_WAIT / 2, "{:?}", t0.elapsed());
+        assert_eq!(feed.waited_out(), 0);
         let t0 = Instant::now();
         write(&mut db)().unwrap();
         assert!(t0.elapsed() >= SENT_WAIT);
+        assert_eq!(feed.waited_out(), 1);
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -366,6 +366,15 @@ fenec-server --dir /data/n1 --replication-token "$REPL" ...
     answers for the time before.</li>
   <li><b><code>--key-file</code>, <code>--image-every</code> and
     <code>--keep</code></b> apply to each tenant's archive.</li>
+  <li><b>Under load the archive trails the node.</b> Under <code>--sync
+    always</code> a write is answered once the stream has sent it, as a
+    replica's stream would, but only while the stream keeps up: while it is
+    busy — a tenant's image, a closed tenant opened, a tenant's lock waited
+    for, an archiver reading slower than the node writes — writes are
+    answered without it. Lose the node's disk then and the archive lacks
+    them; where the node survives they reach the archive later, at worst
+    inside an image. Under <code>--sync 250</code> it trails anyway, as a
+    replica does.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -389,13 +398,25 @@ its feed would go with it and they would come again as an image — and is
 looked at again at the next pass, never waited for. Under <code>--sync
 always</code> a write waits for the stream as for a replica while the stream
 keeps up; whatever can keep it busy — reading or opening a closed tenant,
-an image's snapshot and its sending, an archiver reading slower than the
-stream writes — it does held up, and no write waits for it then. One stream
-for every tenant held each tenant's next write for a second while it opened
-another one; each tenant's own stream holds up its own tenant alone. An
-image waits for its tenant's disk without holding up the stream, and the
+waiting for a tenant's lock, which its longest write holds (a
+<code>/batch</code>, a compact under the lock), an image's snapshot and its
+sending, an archiver reading slower than the stream writes — it does held
+up, and no write waits for it then. One stream for every tenant held each
+tenant's next write for a second while it opened another one; each tenant's
+own stream holds up its own tenant alone. An image waits for its tenant's
+disk without holding up the stream — and is taken again, from the tenant as
+it is then, where the tenant closed and opened again meanwhile — and the
 node's syncer and a closing tenant wait for no stream at all, since no
 client's answer waits on them.</p>
+
+<p>So the archive of a node is synchronous only while its stream keeps up,
+and under load it is not: a write answered while the stream was held up, or
+behind after an image, is on the node's disk and not yet in the archive. It
+is sent once the stream comes back to its tenant, or, where the stream fell
+behind the tenant's feed, as part of an image; if the node's disk is lost
+before that, the archive does not have it. A replica's own stream
+(<code>/t/&lt;tenant&gt;/_replication</code>) keeps a write's answer waiting
+for it, up to a second.</p>
 
 <p>Which tenants have writes is told, not polled: a tenant's feed tells the
 stream as its writes reach the disk — with no stream connected a sync pays
@@ -418,7 +439,15 @@ node, whose own archiver takes it up from its image on the same history —
 the archive is kept as it stands and
 <code>&lt;root&gt;/&lt;tenant&gt;/presence</code> notes the time; a tenant
 that comes back is followed again and noted back, the time it was away a
-gap. A tenant whose copy on the node no longer leads from its archive's
+gap. The times are the node's clock, as its writes' are: gone is when the
+node deleted the tenant, though the stream was busy or the archiver away
+when it did — or, where the node does not know (it restarted since), when
+the stream saw it go — and back is when the node said hello to it again. A
+tenant deleted and made again while the stream was busy is noted gone at the
+delete before the new copy's hello; one deleted and made again while the
+archiver was away is heard of as the new copy alone, and the line it moves
+aside (below) is noted gone by that hello at the latest, so a moment between
+the delete and then restores the old copy. A tenant whose copy on the node no longer leads from its archive's
 place, at or before it — restored there to an earlier moment, or another
 tenant made under the name — would land its writes among changes of the same
 numbers: the line so far is moved aside to

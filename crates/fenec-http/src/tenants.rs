@@ -184,6 +184,36 @@ pub struct Tenants {
     /// without opening it. Only this process writes a tenant's file, and
     /// only while it is open, so it stands there until it opens again.
     closed: Mutex<HashMap<String, (u64, History)>>,
+    /// When each tenant deleted in this process went, by the node's clock:
+    /// the time the node's stream tells an archive it is gone, as a write's
+    /// is the time the node appended it -- told when the stream came to
+    /// it, a moment between the two, the stream busy or the archiver away,
+    /// restored a tenant the node no longer held.
+    departed: Mutex<Departed>,
+}
+
+/// The tenants that left, the last [`DEPARTED_KEPT`] of them: what an
+/// archiver told late needs, not every name a node ever held.
+#[derive(Default)]
+struct Departed {
+    at: HashMap<String, u64>,
+    order: std::collections::VecDeque<(String, u64)>,
+}
+
+const DEPARTED_KEPT: usize = 65_536;
+
+impl Departed {
+    fn note(&mut self, name: &str, at: u64) {
+        self.at.insert(name.into(), at);
+        self.order.push_back((name.into(), at));
+        while self.order.len() > DEPARTED_KEPT {
+            if let Some((old, when)) = self.order.pop_front() {
+                if self.at.get(&old) == Some(&when) {
+                    self.at.remove(&old);
+                }
+            }
+        }
+    }
 }
 
 /// A tenant as the node's stream finds it, without opening it.
@@ -233,7 +263,19 @@ impl Tenants {
             quota: Quota::default(),
             streams: None,
             closed: Mutex::new(HashMap::new()),
+            departed: Mutex::new(Departed::default()),
         })
+    }
+
+    /// When `name` was last deleted in this process, ms since the epoch by
+    /// the node's clock.
+    pub(crate) fn departed(&self, name: &str) -> Option<u64> {
+        self.departed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .at
+            .get(name)
+            .copied()
     }
 
     /// Holds every tenant to `q`, but what a tenant's own quota sets
@@ -330,11 +372,12 @@ impl Tenants {
     /// keeps it. `None` when it is open or has no file. Opened to be
     /// written, a tenant's file is fsynced first (a replica must be sent
     /// only what is on disk), `F_FULLFSYNC` on macOS: a stream's first look
-    /// at 40 closed tenants took 251 ms that way, 6.3 ms a tenant, and at
-    /// 1 000 read so 45 ms (`make node-archive-bench`). It sends nothing,
-    /// so the fsync is the open's to make, once an image is to go out. A sync log not yet applied (Linux, after
-    /// the machine went down) leaves it reading short of the file, which
-    /// then reads as behind and is opened.
+    /// at 40 closed tenants took 251 ms that way, 6.3 ms a tenant, where a
+    /// first pass reading 1 001, one of 64 MB, took 0.29-0.33 s whole
+    /// (`make node-archive-bench`). It sends nothing, so the fsync is the
+    /// open's to make, once an image is to go out. A sync log not yet
+    /// applied (Linux, after the machine went down) would leave it reading
+    /// short of the file: it reads nothing then, and the tenant is opened.
     pub(crate) fn peek(&self, name: &str) -> std::result::Result<Option<(u64, History)>, Refused> {
         check_name(name)?;
         self.with_slot(name, |held| {
@@ -1231,6 +1274,16 @@ impl Tenants {
     pub fn delete(&self, name: &str) -> std::result::Result<(), Refused> {
         check_name(name)?;
         self.with_slot(name, |held| {
+            // Before the release, which the node's stream hears of at once.
+            if self.on_disk(name) {
+                let at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64);
+                self.departed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .note(name, at);
+            }
             if let Held::Open(t) = &*held {
                 release(t, name)?;
                 // The last `Arc`: dropping it syncs, and the file is closed

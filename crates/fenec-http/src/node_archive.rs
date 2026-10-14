@@ -30,7 +30,7 @@
 //! <root>/archiving.lock          held while an archiver writes the root
 //! <root>/<tenant>/               a tenant's archive, as `fenec archive` writes one
 //! <root>/<tenant>/began          when its first image was taken: prune keeps it
-//! <root>/<tenant>/presence       `gone <ms>` and `back <ms>`, as the node said
+//! <root>/<tenant>/presence       `gone <ms>` and `back <ms>`, by the node's clock
 //! <root>/<tenant>.<hex>/         a line moved aside, its history's id
 //! ```
 
@@ -126,25 +126,30 @@ pub fn gone_at(dir: &Path) -> Option<u64> {
 }
 
 /// Whether the node held the tenant archived in `dir` at `at`: `None` where
-/// it did, the time it was gone from where it did not.
+/// it did, the time it was gone from where it did not -- by the last line
+/// noted by then. The lines are in the order the node said them; their
+/// times are its clock's, which a clock set back leaves out of order, so a
+/// line later than `at` stops nothing: read up to the first, a tenant gone,
+/// back, gone and back again across a clock set back read as gone.
 pub fn away_at(dir: &Path, at: u64) -> Option<u64> {
     presence(dir)
         .into_iter()
-        .take_while(|e| e.1 <= at)
-        .last()
+        .rfind(|e| e.1 <= at)
         .filter(|e| e.0)
         .map(|e| e.1)
 }
 
-/// Notes the node said the tenant archived in `dir` is gone, or back.
-fn note(dir: &Path, gone: bool) -> io::Result<()> {
+/// Notes the node said the tenant archived in `dir` was gone, or back, at
+/// `at` -- the node's time, as its writes' are.
+fn note(dir: &Path, gone: bool, at: u64) -> io::Result<()> {
     let mut text = fs::read_to_string(dir.join("presence")).unwrap_or_default();
-    text.push_str(&format!(
-        "{} {}\n",
-        if gone { "gone" } else { "back" },
-        now_ms()
-    ));
-    put(&dir.join("presence"), text.as_bytes())
+    text.push_str(&format!("{} {at}\n", if gone { "gone" } else { "back" }));
+    put(&dir.join("presence"), text.as_bytes())?;
+    // The rename durable too: lost in a crash, a deleted tenant came back
+    // at a restore.
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 /// A tenant's archive, and the lock the images taken beside the stream hold
@@ -172,6 +177,8 @@ enum NodeMessage {
     Hello {
         name: String,
         seq: u64,
+        /// The node's time as it said hello.
+        at: u64,
         lineage: Vec<(u64, u64)>,
         image: Option<Vec<u8>>,
     },
@@ -185,7 +192,9 @@ enum NodeMessage {
         name: String,
         lineage: Vec<(u64, u64)>,
     },
-    Gone(String),
+    /// The tenant, and when it went by the node's clock; a node from
+    /// before the time sends none.
+    Gone(String, Option<u64>),
     Alive,
     End(String),
 }
@@ -310,13 +319,15 @@ impl NodeArchive {
                 NodeMessage::Hello {
                     name,
                     seq,
+                    at,
                     lineage,
                     image,
                 } if !broken.contains(&name) => {
                     // An archive that does not read is left for an operator;
                     // a disk that refused a write is tried again, as a
                     // write's failure is, from where the archives stand.
-                    match self.hello(&mut writers, &name, seq, lineage, image.as_deref(), report) {
+                    let given = (seq, at, lineage);
+                    match self.hello(&mut writers, &name, given, image.as_deref(), report) {
                         Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                             report(&format!("tenant `{name}`: {e}; left as it is"));
                             writers.remove(&name);
@@ -345,14 +356,14 @@ impl NodeArchive {
                         self.kept(&name)?.archive.lineage(w, lineage)?;
                     }
                 }
-                NodeMessage::Gone(name) => {
+                NodeMessage::Gone(name, at) => {
                     if let Some(mut w) = writers.remove(&name) {
                         w.park()?;
                     }
                     dirty.remove(&name);
                     let dir = self.root.join(&name);
                     if dir.is_dir() && gone_at(&dir).is_none() {
-                        note(&dir, true)?;
+                        note(&dir, true, at.unwrap_or_else(now_ms))?;
                         report(&format!(
                             "tenant `{name}` is no longer on the node: its archive is kept, \
                              and no longer followed"
@@ -401,8 +412,7 @@ impl NodeArchive {
         &self,
         writers: &mut HashMap<String, Writer>,
         name: &str,
-        seq: u64,
-        lineage: Vec<(u64, u64)>,
+        (seq, said, lineage): (u64, u64, Vec<(u64, u64)>),
         image: Option<&[u8]>,
         report: &dyn Fn(&str),
     ) -> io::Result<()> {
@@ -417,6 +427,14 @@ impl NodeArchive {
             Took::Diverged => {
                 let (at, history) = w.place();
                 let aside = self.move_aside(name, &kept, history)?;
+                // The copy it held is gone, if the node did not say so --
+                // an archiver away as the tenant was deleted and made again
+                // hears of the new one alone: by the time the node said
+                // hello to it at the latest, so a restore to a moment after
+                // leaves the old one out.
+                if gone_at(&aside).is_none() {
+                    note(&aside, true, said)?;
+                }
                 report(&format!(
                     "tenant `{name}`: the node's copy is at change {seq} on a history that \
                      does not lead from the archive's change {at} -- restored to an earlier \
@@ -437,7 +455,7 @@ impl NodeArchive {
         // away kept, so a restore to a moment in it leaves the tenant out.
         let dir = self.root.join(name);
         if gone_at(&dir).is_some() {
-            note(&dir, false)?;
+            note(&dir, false, said)?;
         }
         if let Some(image) = image {
             report(&format!(
@@ -627,6 +645,7 @@ impl Receiver {
                     .map_err(|e| io::Error::other(e.to_string()))?
                     .lineage;
                 let seq = u64_at(h, 2);
+                let at = u64_at(h, 18);
                 let image = match h[1] {
                     1 => {
                         let (tag, body) = read_message(&mut self.r)?;
@@ -643,6 +662,7 @@ impl Receiver {
                 NodeMessage::Hello {
                     name,
                     seq,
+                    at,
                     lineage,
                     image,
                 }
@@ -673,7 +693,11 @@ impl Receiver {
                     .lineage;
                 NodeMessage::Lineage { name, lineage }
             }
-            b'G' => NodeMessage::Gone(named(&body)?.0),
+            b'G' => {
+                let (name, at) = named(&body)?;
+                let when = body.get(at..at + 8).map(|_| u64_at(&body, at));
+                NodeMessage::Gone(name, when)
+            }
             b'K' => NodeMessage::Alive,
             b'E' => NodeMessage::End(String::from_utf8_lossy(&body).into_owned()),
             _ => return Err(bad()),
@@ -794,5 +818,33 @@ fn restore_line(
     match Archive::with_key(&line.dir, key.cloned()).and_then(|a| a.restore(file, to)) {
         Ok(r) => Restoring::Restored(r.seq, line.label.clone()),
         Err(e) => Restoring::Failed(format!("{}: {e}", line.label)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tenant gone and back twice, the node's clock set back between: the
+    /// times out of order, the last line noted by a moment decides.
+    #[test]
+    fn presence_is_read_past_a_clock_set_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "fenec-presence-{}-{:?}",
+            std::process::id(),
+            Instant::now()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        for (gone, at) in [(true, 100), (false, 300), (true, 250), (false, 260)] {
+            note(&dir, gone, at).unwrap();
+        }
+        assert_eq!(away_at(&dir, 50), None);
+        assert_eq!(away_at(&dir, 150), Some(100));
+        assert_eq!(away_at(&dir, 255), Some(250));
+        // Back by then: read up to the first line past it, gone.
+        assert_eq!(away_at(&dir, 270), None);
+        assert_eq!(away_at(&dir, 400), None);
+        assert_eq!(gone_at(&dir), None);
+        let _ = fs::remove_dir_all(dir);
     }
 }

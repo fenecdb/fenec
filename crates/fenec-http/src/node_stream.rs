@@ -22,8 +22,9 @@
 //! **One stream holds up no tenant for another.** Under `--sync always` a
 //! durable write waits for the stream as for a replica -- while the stream
 //! keeps up. Whatever can keep it busy -- reading a closed tenant's file,
-//! opening one, an image's snapshot and its sending, a socket the client
-//! reads slower than it is written -- it does held up (`Listener::hold`),
+//! opening one, waiting for a tenant's lock (`Listener::read`), an image's
+//! snapshot and its sending, a socket the client reads slower than it is
+//! written -- it does held up (`Listener::hold`),
 //! and a write waits for no stream held up: each tenant's stream stalled its
 //! own tenant alone, and one stream for all of them held every tenant's
 //! next durable write for its `SENT_WAIT`, 1.008 s, while it opened another
@@ -31,7 +32,10 @@
 //! once the disk holds it, the stream going on meanwhile (`Pending`) --
 //! waited for there, up to 30 s, every other tenant waited with it. The
 //! syncer and a close wait for no stream at all (`replication::unwaited`):
-//! no client's answer waits on them.
+//! no client's answer waits on them. So an archive of a node is synchronous
+//! only while the stream keeps up: a write answered while it is held up or
+//! behind is on the node's disk and not yet in the archive, sent later --
+//! at worst inside an image -- and lacking from it if that disk is lost.
 //!
 //! **Which tenants have news is told, not polled.** A tenant's feed tells
 //! the node's streams as its writes reach the disk, it starts over or it
@@ -44,8 +48,8 @@
 //!
 //! **Where a closed tenant stands is known without opening it**: where it
 //! closed in this process, or -- the first stream after the node starts --
-//! read from its file (`Tenants::peek`): 1 000 tenants in 45 ms, where an
-//! open, which fsyncs the file, was 6.3 ms a tenant. A closed tenant the
+//! read from its file (`Tenants::peek`): 1 001 tenants in 0.29-0.33 s, where
+//! an open, which fsyncs the file, was 6.3 ms a tenant. A closed tenant the
 //! stream is told of is read again rather than taken at its close: a holder
 //! of its database -- the `@ttl` sweeper -- may have written it since. Only a
 //! tenant the client is behind in is opened, for its image, and closed
@@ -67,7 +71,9 @@
 //! W  writes   [name][the tenant stream's writes]
 //! L  lineage  [name][history]: the history the tenant's writes are on
 //!             moved -- a promotion -- and the writes after it come after it
-//! G  gone     [name]: no longer on this node, deleted or moved to another
+//! G  gone     [name][time_ms u64]: no longer on this node, deleted or
+//!             moved to another -- when, by the node's clock: when this
+//!             process deleted it, or when the stream saw it go
 //! K  alive    [time_ms u64]
 //! E  end      why, in UTF-8
 //! ```
@@ -82,11 +88,12 @@ use crate::http::{Method, Request, Response};
 use crate::replication::{message, u64s, Feed, Next, ALIVE, MESSAGE, SILENCE, VERSION};
 use crate::tenants::{check_name, Refused, Seen, Tenant, Tenants};
 use fenec_core::history::History;
+use fenec_core::prelude::Database;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How often a stream reads the directory again, for a tenant's file that
@@ -225,6 +232,19 @@ impl NodeStreams {
         }
         for l in lock(&self.listeners).iter() {
             let mut st = lock(&l.state);
+            // A feed the stream holds of an earlier opening is dead: kept,
+            // the stream read nothing from it again and sent this one's
+            // writes never -- an image pending across a close and an open
+            // put the old feed back once it went out.
+            if st
+                .feeds
+                .get(name)
+                .is_some_and(|(old, _)| !Arc::ptr_eq(old, feed))
+            {
+                if let Some((old, _)) = st.feeds.remove(name) {
+                    old.stopped(l.key);
+                }
+            }
             if stands_at(st.following.get(name).copied(), seq, history) {
                 feed.sending_as(l.key, seq, Some(&l.held), false);
                 if let Some((old, _)) = st
@@ -284,6 +304,22 @@ impl Listener {
             }
         }
         Hold { l: self, was }
+    }
+
+    /// `db`'s read lock, the stream held up while it waits for it: a
+    /// tenant's write lock is held as long as its longest write -- a
+    /// `/batch`, a compact under the lock -- and waited for unheld, every
+    /// other tenant's next durable write waited out `SENT_WAIT` behind it,
+    /// 1.014 s.
+    fn read<'d>(&self, db: &'d RwLock<Database>) -> RwLockReadGuard<'d, Database> {
+        match db.try_read() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                let _held = self.hold();
+                crate::held::read(db)
+            }
+        }
     }
 
     fn mark(&self, name: &str) {
@@ -477,7 +513,7 @@ fn begin(
         else {
             continue;
         };
-        let g = crate::held::read(&t.db);
+        let g = l.read(&t.db);
         if !f.image
             && g.history().continues(f.history, f.cursor, g.change_seq())
             && feed.serves(f.cursor)
@@ -526,6 +562,7 @@ fn serve(
         w: BufWriter::with_capacity(MESSAGE + 64, Out { s: &*out, l: &l }),
         greeted: HashSet::new(),
         lineages: HashMap::new(),
+        hello_at: HashMap::new(),
         retry: BTreeSet::new(),
         pending: HashMap::new(),
         quiet: Instant::now(),
@@ -588,6 +625,9 @@ struct Session<'a> {
     greeted: HashSet<String>,
     /// The history last sent each.
     lineages: HashMap<String, Vec<(u64, u64)>>,
+    /// When each was last said hello to, by the node's clock: a delete
+    /// after it is the client's copy gone, though the tenant is back.
+    hello_at: HashMap<String, u64>,
     /// Tenants to look at again: busy opening or closing, released from
     /// under the stream, or an image waiting for its disk.
     retry: BTreeSet<String>,
@@ -744,6 +784,7 @@ impl Session<'_> {
     /// it closed, or opened where the client did not stand, which is judged
     /// again.
     fn unfed(&mut self, name: &str) -> io::Result<()> {
+        self.left(name)?;
         let followed = self.l.followed(name);
         match self.tenants.seen(name) {
             Seen::Open(t) => self.judge(name, &t, followed),
@@ -758,6 +799,7 @@ impl Session<'_> {
 
     /// Says hello to `name`: where the client goes on from, or an image.
     fn resolve(&mut self, name: &str) -> io::Result<()> {
+        self.left(name)?;
         let followed = self.l.followed(name);
         match self.tenants.seen(name) {
             Seen::Missing => self.gone(name),
@@ -829,7 +871,7 @@ impl Session<'_> {
         };
         let l = self.l;
         let image = {
-            let g = crate::held::read(&t.db);
+            let g = l.read(&t.db);
             let now = g.change_seq();
             let epoch = feed.epoch();
             match followed {
@@ -874,6 +916,10 @@ impl Session<'_> {
             }
         };
         self.greeted.remove(name);
+        // Among the stream's feeds while it waits, where a close takes it
+        // off (`NodeStreams::detach`) and an open puts another in its place
+        // (`attach`): which `send_pending` asks before it sends.
+        l.feed(name, &feed, image.epoch);
         if let Some(old) = self.pending.insert(name.into(), image) {
             if !Arc::ptr_eq(&old.feed, &feed) {
                 old.feed.stopped(l.key);
@@ -890,10 +936,20 @@ impl Session<'_> {
         let Some(p) = self.pending.get(name) else {
             return Ok(());
         };
-        if p.feed.epoch() != p.epoch || p.feed.is_closed() {
-            // The feed started over or is going: taken again from the
-            // tenant as it is now.
+        let live = l
+            .state()
+            .feeds
+            .get(name)
+            .is_some_and(|(f, _)| Arc::ptr_eq(f, &p.feed));
+        if !live || p.feed.epoch() != p.epoch || p.feed.is_closed() {
+            // The tenant closed -- its feed went with it, and an open since
+            // has one of its own -- or the feed started over or is going:
+            // taken again from the tenant as it is now. Sent, the image put
+            // the dead feed back among the stream's, which read nothing
+            // from it again: the archive stood still until the archiver
+            // connected again.
             let p = self.pending.remove(name).expect("looked at above");
+            l.unfeed(name, &p.feed);
             p.feed.stopped(l.key);
             return self.resolve(name);
         }
@@ -907,7 +963,8 @@ impl Session<'_> {
             self.hello(name, Some(&p.image), p.seq, p.feed.durable(), &p.history)?;
         }
         self.images += 1;
-        l.feed(name, &p.feed, p.epoch);
+        // Its feed is among the stream's already, or a close took it off
+        // as the image went: put back, it would be dead.
         l.follow(name, p.seq, p.history.current());
         self.greeted.insert(name.into());
         self.lineages.insert(name.into(), p.history.lineage);
@@ -923,10 +980,12 @@ impl Session<'_> {
         durable: u64,
         history: &History,
     ) -> io::Result<()> {
+        let now = now_ms();
         let mut hello = vec![VERSION, image.is_some() as u8];
-        hello.extend_from_slice(&u64s(&[seq, durable, now_ms()]));
+        hello.extend_from_slice(&u64s(&[seq, durable, now]));
         hello.extend_from_slice(&history.encode());
         self.send(b'H', name, &[&hello])?;
+        self.hello_at.insert(name.into(), now);
         if let Some(image) = image {
             self.send(b'I', name, &[image])?;
         }
@@ -950,19 +1009,43 @@ impl Session<'_> {
         Ok(())
     }
 
-    /// `name` is not on the node: the client is told, where it followed it.
+    /// `name` is not on the node: the client is told, where it followed it,
+    /// with when it went -- the node's time it was deleted, where this
+    /// process deleted it, or now.
     fn gone(&mut self, name: &str) -> io::Result<()> {
+        let at = self.tenants.departed(name).unwrap_or_else(now_ms);
+        self.gone_at(name, at)
+    }
+
+    fn gone_at(&mut self, name: &str, at: u64) -> io::Result<()> {
         if let Some(p) = self.pending.remove(name) {
+            self.l.unfeed(name, &p.feed);
             p.feed.stopped(self.l.key);
         }
         let followed = self.l.unfollow(name);
         let greeted = self.greeted.remove(name);
         self.lineages.remove(name);
+        self.hello_at.remove(name);
         if followed || greeted {
-            self.send(b'G', name, &[])?;
+            self.send(b'G', name, &[&at.to_le_bytes()])?;
             self.w.flush()?;
         }
         Ok(())
+    }
+
+    /// The client's copy of `name` is gone where the node deleted the
+    /// tenant -- or moved it off -- after it said hello to it, though a
+    /// tenant of the name is there now: made again, or moved back, while
+    /// the stream was busy, and noticed only as a new copy, which left the
+    /// old line no word that it went.
+    fn left(&mut self, name: &str) -> io::Result<()> {
+        let Some(&greeted_at) = self.hello_at.get(name) else {
+            return Ok(());
+        };
+        match self.tenants.departed(name) {
+            Some(at) if at >= greeted_at => self.gone_at(name, at),
+            _ => Ok(()),
+        }
     }
 }
 
