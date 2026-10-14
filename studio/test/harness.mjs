@@ -8,7 +8,8 @@
 
 import { spawn } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { open, readdir } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -134,11 +135,62 @@ export function chromePath() {
   return null;
 }
 
+/**
+ * Chrome's own files read once a process, before it first starts. Started
+ * cold, Chrome faults its binary (298 MB in Chrome 155) and resources in a
+ * page and its readahead at a time, and a fresh GitHub runner's disk
+ * answers each slowly: there its first launch of a job sat in
+ * `folio_wait_bit_common` for 5 to 20 s, 1 300 major faults for 136 MB,
+ * of the 30 s puppeteer gives it to say where it listens -- and once past
+ * them, every test of e2e.test.mjs failed in its hook, the launches after
+ * it taking 0.2 s. Read here a mebibyte at a time, all 457 MB of
+ * /opt/google/chrome took 2.5 to 13 s and the launch after it 0.2 to 1.6:
+ * the disk's time is no longer the launch's, and the 30 s bound only what
+ * they are for. In a container of three cores beside busy loops, its reads
+ * held to 80 a second and its page cache dropped, the launch timed out 4
+ * times in 4 without this and took 12 s with it, the libraries Chrome
+ * links from outside its directory still cold. Once cached the read costs
+ * 0.1 s. `pipe: true` waits for no endpoint, but its first command waits
+ * on the same faults under a 180 s protocol timeout: a longer timeout, not
+ * a disk read sooner. A directory that is not Chrome's own -- a wrapper
+ * script's, as Debian's /usr/bin/chromium -- holds no `.pak`, and is
+ * passed over; an `.app` is read whole, its resources being in its
+ * framework, not beside its executable.
+ */
+async function warm(executable) {
+  const real = realpathSync(executable);
+  const app = /^(.*?\.app)\//.exec(real);
+  const root = app ? app[1] : dirname(real);
+  if (!app && !readdirSync(root).some((n) => n.endsWith('.pak'))) return;
+  const buf = Buffer.allocUnsafe(1 << 20);
+  const walk = async (dir) => {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) await walk(path);
+      if (!e.isFile()) continue;
+      let f;
+      try {
+        f = await open(path);
+      } catch {
+        continue; // not ours to read, and so not Chrome's either
+      }
+      try {
+        while ((await f.read(buf, 0, buf.length, null)).bytesRead > 0);
+      } finally {
+        await f.close();
+      }
+    }
+  };
+  await walk(root);
+}
+let warmed;
+
 /** A headless browser, puppeteer's way. */
 export async function browser() {
   const { default: puppeteer } = await import('puppeteer-core');
   const executablePath = chromePath();
   if (!executablePath) throw new Error('no Chrome: set CHROME_PATH');
+  await (warmed ??= warm(executablePath));
   return puppeteer.launch({
     executablePath,
     headless: executablePath.includes('headless-shell') ? 'shell' : true,

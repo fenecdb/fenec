@@ -1252,11 +1252,15 @@ and CSS gzipped beside the module's 200 KB brotli, its first answer
 dependency) against a debug server, a tenant node and a router; on macOS
 Chrome 148's new headless mode never answered puppeteer's clicks, so the
 harness prefers the headless shell, and it builds the site and drives the
-playground as well (`local.test.mjs`). The router run's one timeout did not
-come back in twelve runs at a load of 27 (busy loops on every core, three
-suites at once); a run filtered by name charges its first test with the
-`before` hook's 100 000-row seed, about 10 s, which is the hook's and not
-the router's.
+playground as well (`local.test.mjs`). Before a process's first launch the
+harness reads Chrome's own files through (`warm`): on a fresh GitHub runner
+a cold launch faulted its binary in for 5 to 20 s of the 30 puppeteer waits
+for its endpoint, and once past them every e2e test failed in its hook;
+read first, 457 MB in 2.5 to 13 s, the launch took 0.2 to 1.6. The router
+run's one timeout did not come back in twelve runs at a load of 27 (busy
+loops on every core, three suites at once); a run filtered by name charges
+its first test with the `before` hook's 100 000-row seed, about 10 s, which
+is the hook's and not the router's.
 
 **An agent's MCP tool is a statement, held to the token as `/query` is**
 (`fenec_http::mcp`, `fenec-server --mcp`, `fenec mcp`). One `answer`
