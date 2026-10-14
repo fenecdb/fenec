@@ -52,8 +52,8 @@ make docs-types   # every data-lang="ts" example on the site under tsc --strict 
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make langchain-test   # the LangChain.js vector store over a database in the page and over fenec-server (needs `make wasm`)
 make ai-sdk-test   # integrations/ai-sdk/rag.js against the Vercel AI SDK's own mock models (needs `make wasm`)
-make cloudflare-test  # a database in a Durable Object's storage: persist, restore, storage failing part way, the example Worker under wrangler dev
-make cloudflare-bench # a Durable Object's first near after an eviction, under wrangler dev, against the ones after (SIZES=1000,10000 to choose)
+make cloudflare-test  # a database in a Durable Object's storage, SQL rows and values: persist, restore, storage failing part way, the example Worker under wrangler dev
+make cloudflare-bench # a Durable Object's first near after an eviction, under wrangler dev, against the ones after (SIZES=1000,10000 to choose); rows a write and a checkpoint cost; a restore's peak memory
 make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP and stdio, both eras, the docs' configs
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js and build.py's rules
@@ -169,7 +169,7 @@ case, as the standard library's, without its code), `time` (calendar arithmetic)
 cache's room, and `synclog`, the sync log), `off` (what stands in for an
 index a build is made without).
 
-The browser client is `web/fenec.js` — WASM glue (~545 lines), persistence and
+The browser client is `web/fenec.js` — WASM glue (~605 lines), persistence and
 the sync layer -- with the query builder (`web/builder.js`) and the HTTP client
 (`web/http.js`) in dependency-free ES modules of their own, which it imports
 and re-exports, and `web/client.js` the two alone (`@fenecdb/web/client`).
@@ -4348,17 +4348,53 @@ load-bench`'s pages read back 165.8k -> 212.0k rows a second.
 takes the module so -- it read `.instance.exports` off what `instantiate`
 gives a module, and the engine could not start in a Worker at all.
 `persist` writes an image into `ctx.storage` and then only the writes since
-(`journal`/`drain`), until they outgrow half the image; each cut into
-pieces under a key-value backed object's 128 KiB, each image under a
-generation of its own and the record naming the whole one written last, so
-storage that stops part way -- held to after every number of puts -- holds
-the last whole database. `checkpoint` writes a new image now: a restore
-takes the graphs in it, where the vectors written after the last image are
-linked one after another in the browser module's one thread -- the first
-`near` over 10 000 x 128 after a restart 792 ms, after a checkpoint 36
-(`make cloudflare-bench`, under `wrangler dev`, which runs from the example
-Worker's own `--config`: below the repository it took the site's
-`wrangler.jsonc`). A Worker's isolate has 128 MB with the module's memory,
+(`journal`/`drain`), until they outgrow half the image and 64 KiB. An object
+is billed by the row written ($1 a million), and a SQLite-backed one -- the
+only kind a new account makes -- has `storage.sql`: there a generation is a
+table, `<key>:<gen>` (`id INTEGER PRIMARY KEY, image, data`: an index is a
+row written more), the image's rows under the 2 MB a row takes (`ROW`),
+then a row a flush of the writes, and nothing beside them says where the
+database stands, so a write is one row. A new image is written and the
+tables before dropped in one `transactionSync`: workerd counts a table made
+as two rows, one dropped as none and a `DELETE` a row each. The key-value
+layout -- values under 128 KiB, a record naming the whole generation
+written last -- is kept for an object without `sql`, and read through
+it alone: a database an earlier version kept in values on a SQLite-backed
+object is moved by restoring through the key-value methods and persisting
+(README), not by code. Before, a single-row write was a value, the record
+and the example's `setAlarm` (a row too), 3.4 rows; a checkpoint of
+10 000 x 128 (5.7 MB) 101 rows and of 50 000 x 128 (27.6 MB) 479, its
+128 KiB values and a delete each of the generation before. Now one row, 5
+and 16 (`make cloudflare-bench`'s rows.mjs, every storage call counted
+under `wrangler dev`). A flush goes out at once unless the one before is
+not yet durable (`storage.sync()`); the writes that land meanwhile -- a
+Durable Object takes the next request in while one waits -- go out after
+it as one: 0.52 rows a write from 8 writers at once, 0.15 from 32, every
+`persist` resolving once its own flush is durable and a read's once what
+it may have read is. Waited out with a timer, a turn of the event loop for
+requests to land, it cost a lone write 3.2 ms p50 against 1.4; this way
+2.0-2.3 against the 2.4-3.1 before. A flush that fails leaves the storage
+as it was and every `persist` on that database rejecting after: the
+example lets it go and the next request restores, where it answered 400
+and kept the write in memory for the next image to store. The example
+opens and restores inside `blockConcurrencyWhile` (a cold object sent
+requests at once could open an engine each, appending under the same
+indices; `wrangler dev` never showed it in a burst of 128),
+sets an alarm only after a write and when none is set, and `checkpoint`
+writes nothing until the writes since reach `{min}` (64 KiB). `checkpoint`
+writes a new image now: a restore takes the graphs in it, where the
+vectors written after the last image are linked one after another in the
+browser module's one thread -- which no longer costs a start much: the
+first `near` over 10 000 x 128 after a restart 39 ms as written, 47 after
+a checkpoint, 50 000 175 and 157, where it was 792 and 1 455 against 36
+and 84 when first measured (`make cloudflare-bench`, under `wrangler dev`,
+which runs from the example Worker's own `--config`: below the repository
+it took the site's `wrangler.jsonc`). A restore copies each row or value
+into the allocation the module keeps the image in as it reads it
+(`Fenec.loadParts`, JS only): read whole into a `Map`, joined, and copied
+in, a 27.6 MB image held 60 MB of JavaScript beside the module's 42 at
+the peak, now 4 (memory.mjs, in Node), and the start of 50 000 rows went
+186-196 -> 175 ms. A Worker's isolate has 128 MB with the module's memory,
 which grows and never gives back. A checkpoint writes the image a mebibyte
 at a time (`fenec_snapshot_chunks`, `snapshotChunks`), each into storage
 before the next is made: built into one `Vec` the image doubled as it grew,

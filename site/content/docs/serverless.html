@@ -54,26 +54,41 @@ interface Env {
 }
 
 export class Tenant extends DurableObject&lt;Env&gt; {
-  #fenec?: Fenec;
+  #db: Promise&lt;Fenec&gt; | null = null;
+  #alarm = false;
 
-  async #db(): Promise&lt;Fenec&gt; {
-    if (!this.#fenec) {
-      this.#fenec = await Fenec.open(wasm);       // the module as the Worker imports it
-      await restore(this.#fenec, this.ctx.storage);
-    }
-    return this.#fenec;
+  #open(): Promise&lt;Fenec&gt; {
+    // Once, with every other event held back while it restores.
+    return (this.#db ??= this.ctx.blockConcurrencyWhile(async () =&gt; {
+      const db = await Fenec.open(wasm);         // the module as the Worker imports it
+      await restore(db, this.ctx.storage);
+      return db;
+    }));
   }
 
   async query(sql: string, params: unknown[]): Promise&lt;unknown&gt; {
-    const db = await this.#db();
-    const out = db.run(sql, params);
-    await persist(db, this.ctx.storage);          // kept before the answer goes
-    await this.ctx.storage.setAlarm(Date.now() + 10_000);
-    return out;
+    const opened = this.#open();
+    const db = await opened;
+    try {
+      return db.run(sql, params);
+    } finally {
+      let wrote = 0;
+      try {
+        wrote = await persist(db, this.ctx.storage); // durable before the answer goes
+      } catch (e) {
+        if (this.#db === opened) this.#db = null;   // the next request restores
+        throw e;
+      }
+      if (wrote &gt; 0 &amp;&amp; !this.#alarm) {
+        this.#alarm = true;                          // an alarm is a row written too
+        await this.ctx.storage.setAlarm(Date.now() + 5_000);
+      }
+    }
   }
 
   async alarm() {
-    await checkpoint(await this.#db(), this.ctx.storage);
+    this.#alarm = false;
+    await checkpoint(await this.#open(), this.ctx.storage);
   }
 }
 
@@ -87,48 +102,108 @@ export default {
 
 <details class="deep"><summary>Details</summary>
 <p>A Worker imports a <code>.wasm</code> file compiled, and cannot compile
-bytes at run time; <code>Fenec.open</code> takes the module so.
+bytes at run time; <code>Fenec.open</code> takes the module so. The open
+and the restore run inside <code>blockConcurrencyWhile</code>, once: opened
+by whichever request found the object cold, two requests could each
+restore an engine of their own and append to the storage as if alone.
+<code>persist</code> runs in a <code>finally</code>, since a statement that
+failed may follow ones in the same text that wrote. A <code>persist</code>
+that fails leaves the database in memory holding writes its storage never
+took, so the object lets it go and the next request restores what storage
+holds, rather than answer from writes nobody kept.
 <code>integrations/cloudflare/example</code> is this Worker with a tenant
 from the path, <code>POST /t/&lt;tenant&gt;/query</code>, and its test runs
 it under <code>wrangler dev</code> — workerd, as Cloudflare runs it — then
 stops and starts it over the same storage and reads the rows, a
-<code>near</code>'s answer and each tenant's own database back.</p>
+<code>near</code>'s answer and each tenant's own database back, and sends
+a cold object 32 writes at once.</p>
 </details>
 
 <h2 id="storage">What the storage holds</h2>
 
-<p><code>persist</code> saves a full image once, then only the new writes. If
-storage stops part way through, the last whole database is still there.</p>
+<p><code>persist</code> saves a full image once, then only the new writes:
+one row each in a SQLite-backed object's storage, which bills by the row
+written. If storage stops part way through, the last whole database is
+still there.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">rows written before</th><th class="n">now</th></tr></thead>
+<tbody>
+<tr><td>a single-row write, 1 writer</td><td class="n">3.4</td><td class="n"><b>1</b></td></tr>
+<tr><td>a single-row write, 8 writers at once</td><td class="n">3.4</td><td class="n"><b>0.52</b></td></tr>
+<tr><td>a single-row write, 32 writers at once</td><td class="n">3.4</td><td class="n"><b>0.15</b></td></tr>
+<tr><td>a checkpoint, 10 000 × 128 (a 5.7 MB image)</td><td class="n">101</td><td class="n"><b>5</b></td></tr>
+<tr><td>a checkpoint, 50 000 × 128 (a 27.6 MB image)</td><td class="n">479</td><td class="n"><b>16</b></td></tr>
+</tbody>
+</table>
+</div>
 
 <details class="deep"><summary>Details</summary>
 <p><code>persist</code> keeps what a file would hold: an image the first
 time, then only the writes since the last call — the engine's journal, as
 <code>persist</code> in the browser takes it for IndexedDB — until they
-outgrow half the image and a new image replaces them. Each is cut into
-pieces under a key-value backed object's 128 KiB a value; a SQLite-backed
-object takes 2 MB with the key, and <code>{piece}</code> can be set larger
-there. Every image goes under a generation of its own, and the record
-naming the whole one is written last, the generation before let go after
-it: storage that stops part way holds the last whole database. A Durable
-Object combines a call's puts into one atomic write besides; this does not
-lean on it, and a test stops the storage after every number of puts, an
-image's and an append's, and restores the last whole database each
-time.</p>
+outgrow half the image and 64 KiB, and a new image replaces them.</p>
+
+<p>A SQLite-backed object — the only kind a new account makes — has
+<code>ctx.storage.sql</code>, and the database is a table a generation,
+<code>fenec:1</code>, <code>fenec:2</code> and on (the key, then the
+generation): the image's rows, cut under the 2 MB a row takes, then a row
+each time writes are stored. Nothing names where the database stands
+beside the rows: the table there is says it, so a write is the one row.
+A new image is written, and the table before it dropped, in one
+<code>transactionSync</code>: workerd counts a table made as two rows
+written and a table dropped as none, where a <code>DELETE</code> of the
+rows before counts each, and storage that stops part way holds the
+generation before, whole. The rows are an <code>INTEGER PRIMARY KEY</code>
+table with no other index, since an index is a row written more.</p>
+
+<p>A write goes out at once, unless the one before it is still on its way
+to being durable (<code>storage.sync()</code>): then it waits for that, and
+every request whose writes land meanwhile — a Durable Object takes the
+next request in while one waits — goes out with it, in one row. Each
+<code>persist</code> resolves only once its own writes are durable, and a
+read that may have seen writes on their way waits for them, so no answer
+leaves before what it shows is kept, and a lone write answers as soon as
+before: 2.0 to 2.3 ms p50 against 2.4 to 3.1. Waiting a turn of the event
+loop instead, for requests to land, cost a lone write 1.7 to 2.4 ms more.
+The figures above are <code>make cloudflare-bench</code>'s, under
+<code>wrangler dev</code> with every storage call counted: a write before
+was a value, a record naming it and an alarm set again, and a checkpoint a
+value each 128 KiB of the image and a delete each of the values
+before.</p>
+
+<p>A key-value backed object, made before SQLite with
+<code>new_classes</code>, has no <code>sql</code>; there the image and the
+writes are cut into values under its 128 KiB, every image goes under a
+generation of its own, and the record naming the whole one is written
+last. A test stops either kind of storage after every number of
+operations, an image's, an append's and a compact's, and restores the
+last whole database each time; and a write that fails fails every write
+that went out with it.</p>
+
+<p>A database kept by an earlier version on a SQLite-backed object is in
+values, which <code>restore</code> no longer reads there. To move one,
+restore it through the key-value methods alone — an object holding
+<code>get</code>, <code>put</code>, <code>delete</code> and
+<code>list</code> of <code>ctx.storage</code> and no <code>sql</code> —
+and <code>persist</code> through <code>ctx.storage</code>.</p>
 </details>
 
 <h2 id="cold-start">A cold start</h2>
 
 <p>After an eviction or a deploy, the first request has to load the database
-again. Run a <code>checkpoint</code> from an alarm once writes stop, and that
-first query stays fast.</p>
+again: tens of milliseconds for 10 000 rows, under 200 for 50 000. A
+<code>checkpoint</code> from an alarm after the writes folds them into a
+new image, for fewer rows to read and no vectors to link.</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th class="n">rows</th><th class="n">first <code>near</code>, as written</th><th class="n">after a checkpoint</th><th class="n">every <code>near</code> after</th></tr></thead>
 <tbody>
-<tr><td class="n">1 000</td><td class="n">22 ms</td><td class="n">23 ms</td><td class="n">2.5 ms</td></tr>
-<tr><td class="n">10 000</td><td class="n">792 ms</td><td class="n"><b>36 ms</b></td><td class="n">2.5 ms</td></tr>
-<tr><td class="n">50 000</td><td class="n">1 455 ms</td><td class="n"><b>84 ms</b></td><td class="n">2.4 ms</td></tr>
+<tr><td class="n">1 000</td><td class="n">20 ms</td><td class="n">21 ms</td><td class="n">2.1 ms</td></tr>
+<tr><td class="n">10 000</td><td class="n">39 ms</td><td class="n">47 ms</td><td class="n">2.1 ms</td></tr>
+<tr><td class="n">50 000</td><td class="n">175 ms</td><td class="n">157 ms</td><td class="n">2.1 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -139,16 +214,30 @@ database in memory: the module instantiated, the image and the writes
 after it read out of storage and loaded. The graphs the image holds are
 restored as they were; the writes after it are applied as the write path
 would, their vectors linked into the graph one after another — the browser
-module has one thread. So a <code>checkpoint</code> — a new image now, the
-writes since folded into it — once the writes stop, from an alarm, is what
-keeps a start short. The first <code>near</code> after a restart, against
+module has one thread. The first <code>near</code> after a restart, against
 the ones after it, under <code>wrangler dev</code> on an M1 (<code>make
 cloudflare-bench</code>, median of five restarts; rows of a text, an int and
-a 128-dim vector, 1 000 a request, each kept before it was answered) are in the table above.</p>
+a 128-dim vector, 1 000 a request, each kept before it was answered, no
+alarm) are in the table above; a second run was within 2 ms of each.</p>
 
-<p>A request's round trip through <code>wrangler dev</code> is in every
-figure. The rows went in at 3 000 to 5 700 a second, a request of
-1 000 at a time with its vectors linked and kept before the answer.</p>
+<p>Linking the writes after the image is no longer what a start waits
+for: when this page was first written it took the first <code>near</code>
+over 10 000 rows to 792 ms and over 50 000 to 1 455, and the same
+measurement on today's module gives 39 and 175, so a checkpoint takes
+50 000 rows from 175 ms to 157, 10 000 none quicker, and is mostly worth
+the rows it folds. The
+rows are read into the module a row at a time rather than joined first:
+50 000 rows as written started in 175 ms against 186 to 196, after a
+checkpoint 157 against 168 to 171. A request's round trip through
+<code>wrangler dev</code> is in every figure. The rows went in at 5 200
+to 15 000 a second, a request of 1 000 at a time with its vectors linked
+and kept before the answer.</p>
+
+<p>The alarm is set once a write lands and none is set, not again by each
+write: <code>setAlarm</code> is a row written too, which made every write
+before this change cost three. It checkpoints only once the writes since
+the image reach 64 KiB (<code>{min}</code>): written again for a few
+writes, a 27.6 MB image was 16 rows for one.</p>
 </details>
 
 <h2 id="limits">Limits</h2>
@@ -198,7 +287,11 @@ record that seals it: grown by doubling, old and new side by side, 5 000
 rows of 768 written 1 000 a request held 100 MB, 58 now, and 10 000 of
 them 150, 84 now. A restore keeps the image it reads and the documents in
 it, rather than copy each out: 10 000 rows of 768 restored held 97 MB, 66
-now. A checkpoint takes the image a mebibyte at a time
+now; and it copies the rows into that image as it reads them, one at a
+time (<code>loadParts</code>): read whole, joined, then copied in, a
+27.6 MB image — 50 000 rows of 128 — held 60 MB of JavaScript beside the
+module's 42 at its peak, and holds 4, the process 105 MB more resident
+against 49 to 55 (<code>make cloudflare-bench</code>, in Node). A checkpoint takes the image a mebibyte at a time
 (<code>snapshotChunks</code>), each chunk made as it is taken out of the
 documents the stores hold, not a copy of them, and let go once it is in
 storage: made all at once, the image stood beside the rows, and 50 000

@@ -516,16 +516,19 @@ ai-sdk-test:
 	cd integrations/ai-sdk && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## A database kept in a Durable Object's storage: persist, restore, and
-## storage that fails part way, against a stand-in; then the example Worker
-## under `wrangler dev`, stopped and started again (needs `make wasm`)
+## storage that fails part way, against stand-ins for a SQLite-backed and a
+## key-value backed object; then the example Worker under `wrangler dev`,
+## stopped and started again (needs `make wasm`)
 cloudflare-test:
 	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## A Durable Object's first answer after an eviction: the example Worker
 ## under `wrangler dev`, loaded, restarted, and its first `near` timed
-## against the ones after it (needs `make wasm`; SIZES=1000,10000 to choose)
+## against the ones after it (needs `make wasm`; SIZES=1000,10000 to choose);
+## then the rows a write and a checkpoint cost (rows.mjs) and what a
+## restore holds at its peak (memory.mjs; ROWS=50000)
 cloudflare-bench:
-	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && node coldstart.mjs
+	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && node coldstart.mjs && node rows.mjs && node memory.mjs
 
 ## What `order ... collate tr` costs over a million Turkish names, in fenecdb
 ## and (after `make pgvector-up`) in PostgreSQL under ICU's tr-x-icu

@@ -2303,6 +2303,43 @@ test('an image taken a chunk at a time is the database as it stood when begun', 
   assert.equal(db.rows('get c where n = 5')[0].t, 'changed');
 });
 
+// An image kept in parts -- a Durable Object's rows -- goes into the module a
+// part at a time, each where it belongs in the allocation the module keeps:
+// plain and async iterables, `Uint8Array`s and `ArrayBuffer`s, the memory
+// grown between two parts by another database's writes, and a length the
+// parts do not hold refused before anything is loaded.
+test('an image loaded in parts is the image loaded whole', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection c (n int, t text, e vector<8> @hnsw(cosine))');
+  db.run('put c $1', [Array.from({ length: 3000 }, (_, n) => ({ n, t: `row ${n} ${'x'.repeat(50)}`, e: [n, 1, 2, 3, 4, 5, 6, 7] }))]);
+  const image = db.snapshot();
+  const cut = (size) => Array.from({ length: Math.ceil(image.length / size) }, (_, i) => image.slice(i * size, (i + 1) * size));
+  const answers = (d) => d.rows('get c select n, t near e [9, 1, 2, 3, 4, 5, 6, 7] limit 5');
+  const into = await Fenec.open(wasm);
+  const grow = async function* () {
+    for (const [i, p] of cut(65536).entries()) {
+      // The module's memory grown under the allocation the parts go into:
+      // a view of it made before reads nothing now.
+      if (i === 1) into.run('create collection big (s text)');
+      if (i === 1) into.run('put big $1', [Array.from({ length: 2000 }, () => ({ s: 'y'.repeat(2000) }))]);
+      await null;
+      yield p;
+    }
+  };
+  for (const [what, parts] of [['plain', () => cut(1000)], ['buffers', () => cut(7777).map((p) => p.buffer)], ['grown', grow]]) {
+    const d = what === 'grown' ? into : await Fenec.open(wasm);
+    assert.equal(await d.loadParts(image.length, parts), image.length, what);
+    assert.deepEqual(answers(d), answers(db), what);
+  }
+  const short = await Fenec.open(wasm);
+  await assert.rejects(short.loadParts(image.length + 1, () => cut(4096)), /hold \d+ bytes, not the/);
+  await assert.rejects(short.loadParts(image.length - 1, () => cut(4096)), /more than the/);
+  assert.equal(short.schemas().length, 0, 'nothing loaded');
+  assert.equal(await short.loadParts(image.length, () => cut(4096)), image.length);
+  assert.deepEqual(answers(short), answers(db));
+});
+
 // The brief at /llms.txt is what a coding agent copies from, so every example
 // in it has to run as written. They live in site/build.py, which renders it.
 test('every example in the llms brief runs', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

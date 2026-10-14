@@ -106,14 +106,16 @@ if (typeof useLiveQuery !== 'function' || typeof FenecProvider !== 'function') {
 }
 console.log('@fenecdb/react imports');
 
-// A Durable Object's storage kept in a Map: the database there and back.
+// A key-value backed Durable Object's storage kept in a Map: the database
+// there and back.
 const { persist, restore } = await import('@fenecdb/cloudflare');
 const map = new Map();
 const storage = {
   get: async (k) => map.get(k),
   put: async (k, v) => void map.set(k, v),
   delete: async (ks) => ks.forEach((k) => map.delete(k)),
-  list: async ({ prefix }) => new Map([...map].filter(([k]) => k.startsWith(prefix)).sort()),
+  list: async ({ prefix, start = '', limit = Infinity }) =>
+    new Map([...map].filter(([k]) => k.startsWith(prefix) && k >= start).sort().slice(0, limit)),
 };
 const kept = await Fenec.open(await file('fenec.wasm'));
 kept.run('create collection t (n int)');

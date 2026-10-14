@@ -98,8 +98,20 @@ test('a tenant database lives in a Durable Object and comes back', { skip, timeo
     w = await serve(state);
     assert.deepEqual(await w.query('acme', 'get docs count'), count);
     assert.deepEqual(await w.query('acme', 'get docs select n near e $1 limit 3', [[0, 1, 0, 0, 0, 0, 0, 4]]), near);
-    assert.deepEqual((await w.query('globex', 'get docs count')).rows, [{ count: 0 }]);
     assert.match((await w.query('initech', 'get docs count')).error, /not found/);
+    // A cold object sent many writes at once: each lands, and comes back.
+    // Opened by whichever request found it cold, two requests could each
+    // restore a database of their own and append as if alone.
+    const burst = await Promise.all(
+      Array.from({ length: 32 }, (_, i) => w.query('globex', 'put docs {n: $1}', [i])),
+    );
+    assert.ok(burst.every((r) => r.kind === 'affected' && r.count === 1), JSON.stringify(burst));
+    assert.deepEqual((await w.query('globex', 'get docs count')).rows, [{ count: 32 }]);
+    await w.stop();
+
+    w = await serve(state);
+    assert.deepEqual((await w.query('globex', 'get docs count')).rows, [{ count: 32 }]);
+    assert.deepEqual(await w.query('acme', 'get docs count'), count);
     await w.stop();
   } finally {
     // A failed assertion leaves a server running, which holds the test

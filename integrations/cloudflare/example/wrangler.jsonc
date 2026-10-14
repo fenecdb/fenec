@@ -9,7 +9,7 @@
   "durable_objects": {
     "bindings": [{ "name": "TENANT", "class_name": "Tenant" }]
   },
-  // SQLite-backed: a value takes up to 2 MB there, and the pieces could be
-  // larger; the default holds on either kind.
+  // SQLite-backed, as every class a new account makes: `persist` keeps the
+  // database in its SQL storage, a table a generation, a row a write.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Tenant"] }]
 }
