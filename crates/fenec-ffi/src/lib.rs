@@ -30,7 +30,9 @@
 //!   and writes going on, and the caller waits for the build.
 //! - A write on a handle opened to sync (the default) waits for its fsync
 //!   too -- outside the lock, so others read and write meanwhile, and
-//!   writes arriving together share one fsync, as a server's do.
+//!   writes arriving together share one fsync, as a server's do. One opened
+//!   with `FENEC_OPEN_NO_SYNC` writes the buffer into the file once it
+//!   holds 64 KB, outside the lock as well (`Database::write_behind`).
 //! - `fenec_sync` waits for an fsync, `fenec_flush` for a `write`, and
 //!   `fenec_checkpoint` writes the whole file under the write lock.
 //! - `fenec_open` reads the file's index and links the vectors written since
@@ -104,8 +106,9 @@ pub const FENEC_QUOTA: i32 = 15;
 /// returns and the file is mapped.
 ///
 /// No fsync a write: the writes wait in a buffer until `fenec_sync`,
-/// `fenec_flush`, `fenec_close` or a mebibyte of them -- for a burst of
-/// writes, which then costs a fsync rather than one each.
+/// `fenec_flush`, `fenec_close` or 64 KB of them, which the call that took
+/// it past that writes into the file once it has let go of the lock -- for
+/// a burst of writes, which then costs a fsync rather than one each.
 pub const FENEC_OPEN_NO_SYNC: u32 = 1;
 /// Read the file into memory rather than map it: for a file whose pages
 /// may become unreadable while it is open -- iOS's `complete` protection
@@ -259,16 +262,46 @@ impl Native {
         }
     }
 
-    /// Runs what `Database::flush` handed back, with no lock held: readers
-    /// and writers go on while the disk works, and a write arriving
-    /// meanwhile finds its bytes covered by this fsync or the next. A
-    /// failure is reported to the engine, which then refuses every later
-    /// write as after one it saw itself.
-    fn durable(&self, durability: Option<Durability>) -> Result<(), Error> {
-        let Some(durable) = durability else {
+    /// What the writes made under `db` leave for once it is let go, as a
+    /// server's `flush_for` hands it out: on a handle that syncs, their
+    /// fsync where they moved the counter (`wrote`); on one that does not,
+    /// the buffer's write ([`Self::behind`]).
+    fn after(&self, db: &mut Database, wrote: bool) -> Result<Option<Durability>, Error> {
+        match self.durable {
+            true if wrote => db.flush(),
+            true => Ok(None),
+            false => Ok(self.behind(db)),
+        }
+    }
+
+    /// What writes the buffer into the file with no fsync, once it holds
+    /// enough to be worth a write (`Database::write_behind`): for writes no
+    /// fsync follows, a handle's opened with `FENEC_OPEN_NO_SYNC` and, on
+    /// either kind, what a sync applies from the server. Left to the
+    /// appends, the buffer was written under the write lock as it outgrew a
+    /// mebibyte, and on macOS a `write` that takes a file's dirty pages past
+    /// each 8 MB waits for the disk: a read by id beside texts of 1 000
+    /// 128-dim rows waited 2.3-6.6 ms at p99 and up to 61, behind it 1.1-1.4
+    /// and 2.4 (`ffi_bench beside`).
+    fn behind(&self, db: &mut Database) -> Option<Durability> {
+        match self.file {
+            true => db.write_behind(),
+            false => None,
+        }
+    }
+
+    /// Runs what [`Self::after`] or [`Self::behind`] handed back, with no
+    /// lock held: readers and writers go on while the disk works, and a
+    /// write arriving meanwhile finds its bytes covered by this fsync or
+    /// the next -- or, written behind, passes over a disk another write
+    /// holds, which leaves its bytes to the next. A failure is reported to
+    /// the engine, which then refuses every later write as after one it saw
+    /// itself.
+    fn after_lock(&self, then: Option<Durability>) -> Result<(), Error> {
+        let Some(then) = then else {
             return Ok(());
         };
-        durable().inspect_err(|e| {
+        then().inspect_err(|e| {
             self.db.write().unwrap_or_else(|p| p.into_inner()).fail(e);
         })
     }
@@ -378,19 +411,31 @@ pub unsafe extern "C" fn fenec_open(
         if path.is_empty() || handle.is_null() {
             return Err(misuse("fenec_open needs a path and a handle to write"));
         }
-        let lock = lock_file(path)?;
-        let mapped = flags & FENEC_OPEN_IN_MEMORY == 0;
-        let db = fenec_core::fs::open_with(path, mapped, Box::new(Ok)).map_err(|e| failed(&e))?;
-        let h = keep(db, flags & FENEC_OPEN_NO_SYNC == 0, Some(lock));
-        if flags & FENEC_OPEN_NO_AUTO_COMPACT == 0 {
-            let n = native(h)?;
-            let (policy, every) = *AUTO_COMPACT.lock().unwrap_or_else(|e| e.into_inner());
-            let started = Compactor::start_every(&n.db, policy, every);
-            *n.compactor.lock().unwrap_or_else(|e| e.into_inner()) = started.ok();
-        }
-        *handle = h;
+        *handle = open_wrapped(path, flags, Box::new(Ok))?;
         Ok(None)
     })
+}
+
+/// [`fenec_open`] as Rust, the file's sink wrapped before the database
+/// takes it (`fs::open_with`): how a test holds or fails the library's
+/// writes where the disk would.
+#[doc(hidden)]
+pub fn open_wrapped(
+    path: &str,
+    flags: u32,
+    wrap: Box<fenec_core::fs::Wrap<'_>>,
+) -> Result<u64, (i32, String)> {
+    let lock = lock_file(path)?;
+    let mapped = flags & FENEC_OPEN_IN_MEMORY == 0;
+    let db = fenec_core::fs::open_with(path, mapped, wrap).map_err(|e| failed(&e))?;
+    let h = keep(db, flags & FENEC_OPEN_NO_SYNC == 0, Some(lock));
+    if flags & FENEC_OPEN_NO_AUTO_COMPACT == 0 {
+        let n = native(h)?;
+        let (policy, every) = *AUTO_COMPACT.lock().unwrap_or_else(|e| e.into_inner());
+        let started = Compactor::start_every(&n.db, policy, every);
+        *n.compactor.lock().unwrap_or_else(|e| e.into_inner()) = started.ok();
+    }
+    Ok(h)
 }
 
 /// Opens a database held in memory alone, and writes its handle.
@@ -628,12 +673,9 @@ fn run(
                 let mut db = n.write()?;
                 fenec_abi::exact(&db, p, sql, params, vectors)?;
                 let r = sync.write(&mut db, p, sql)?;
-                let durability = match n.durable {
-                    true => db.flush()?,
-                    false => None,
-                };
+                let then = n.after(&mut db, true)?;
                 drop(db);
-                n.durable(durability)?;
+                n.after_lock(then)?;
                 return Ok(r);
             }
         }
@@ -647,11 +689,13 @@ fn run(
         }
         if let Some(built) = Database::maintain(&n.db, stmt) {
             let r = built?;
+            // Buffered, the few bytes it appended are the next write's to
+            // write behind, not worth taking the write lock again for.
             let durability = match n.durable {
                 true => n.write()?.flush()?,
                 false => None,
             };
-            n.durable(durability)?;
+            n.after_lock(durability)?;
             return Ok(r);
         }
     }
@@ -691,13 +735,11 @@ fn run(
     };
     // A text holding a compact runs a statement at a time, so one that fails
     // may follow some that wrote: whatever moved the counter is synced.
-    let durability = match n.durable && db.change_seq() != before {
-        true => db.flush()?,
-        false => None,
-    };
+    let wrote = db.change_seq() != before;
+    let then = n.after(&mut db, wrote)?;
     drop(db);
     drop((ready, stale));
-    n.durable(durability)?;
+    n.after_lock(then)?;
     Ok(r?)
 }
 
@@ -792,12 +834,10 @@ pub unsafe extern "C" fn fenec_schema(
                 let mut db = n.write()?;
                 let before = db.change_seq();
                 let r = fenec_abi::schema(&mut db, request, mode == FENEC_SCHEMA_APPLY, Some(now));
-                let durability = match n.durable && db.change_seq() != before {
-                    true => db.flush().map_err(|e| failed(&e))?,
-                    false => None,
-                };
+                let wrote = db.change_seq() != before;
+                let then = n.after(&mut db, wrote).map_err(|e| failed(&e))?;
                 drop(db);
-                n.durable(durability).map_err(|e| failed(&e))?;
+                n.after_lock(then).map_err(|e| failed(&e))?;
                 r
             }
             _ => return Err(misuse(&format!("no schema mode {mode}"))),
@@ -823,7 +863,7 @@ pub unsafe extern "C" fn fenec_sync(
     call(out, out_len, || {
         let n = native(handle)?;
         let durability = n.write()?.flush().map_err(|e| failed(&e))?;
-        n.durable(durability).map_err(|e| failed(&e))?;
+        n.after_lock(durability).map_err(|e| failed(&e))?;
         Ok(None)
     })
 }
@@ -982,6 +1022,7 @@ pub unsafe extern "C" fn fenec_sync_feed(
         };
         let utf8 = || String::from_utf8_lossy(body);
         let status = status.clamp(0, u16::MAX as i32) as u16;
+        let mut behind = None;
         if kind != FENEC_SYNC_POLL {
             let mut db = n.write()?;
             match kind {
@@ -993,8 +1034,18 @@ pub unsafe extern "C" fn fenec_sync_feed(
                 FENEC_SYNC_SIGNAL => sync.signal(&mut db, &utf8()).map_err(|e| failed(&e))?,
                 _ => return Err(misuse(&format!("no sync event of kind {kind}"))),
             }
+            // What the server sent -- a seed of thousands of rows among it --
+            // is fsynced by nothing on either kind of handle, so its buffer
+            // is written behind the lock as a buffered write's is.
+            behind = n.behind(&mut db);
         }
-        Ok(Some(sync.actions()))
+        let actions = sync.actions();
+        drop(slot);
+        // A failure is the engine's from then on: the next write is refused,
+        // and the sync says so as it meets it. The actions go back all the
+        // same, or a binding would never perform them.
+        let _ = n.after_lock(behind);
+        Ok(Some(actions))
     })
 }
 

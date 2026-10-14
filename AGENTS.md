@@ -401,7 +401,8 @@ and the preparation is let go of where that read anything anew. An app's
 read by id beside texts of 1 000 128-dim rows waited 0.24-0.40 ms p50
 against 0.81-1.07, read 209-275k times a second against 108-143k (`make
 ffi-bench`'s `beside`), the p99 3.2-7.0 ms either way: the native library
-writes its buffer under the lock as it fills. A lone buffered put is what
+wrote its buffer under the lock as it filled, and writes it behind the lock
+now (below). A lone buffered put is what
 it was (1.96 us p50 against 1.94, the mean 2.25 either way, `ffi_bench put`
 in turns), and the library's code 6.5 KB more. The shell has nothing
 reading beside it and builds under its lock. Rejected: a pin
@@ -557,8 +558,8 @@ only past `WRITE_HELD`, should the writes behind fall back. A handover writes wh
 it is put off to the next block's start (`hand_over_before`), where the
 write behind -- every byte, once a handover is due -- left nothing pending,
 and runs at the end of a block only past twice its bounds: written there,
-its bytes met the same stall under the lock. A replica, the shell and the
-native library write as before.
+its bytes met the same stall under the lock. A replica and the shell write
+as before; the native library writes behind as a server does (below).
 
 **A durable write syncs a log beside the file, not the file**
 (`synclog.rs`, Linux and Android). The file only grows, and on ext4 an
@@ -4444,7 +4445,30 @@ in 3 000, and once in CI's `swift test`, whose servers start beside the
 other tests. Every write is fsynced unless
 `FENEC_OPEN_NO_SYNC`; `fenec_flush` is `Database::write_out`, the buffer
 written with no fsync; `fenec_close` saves a graph once the file grew three
-times its record since its last save, and syncs. The Kotlin binding's JNI
+times its record since its last save, and syncs. A handle opened so writes
+its buffer behind the lock as a server does (`Native::after`, `behind`):
+`Database::write_behind` is asked after every write no fsync follows --
+what a sync applies from its server, on either kind of handle, among them
+(a fsynced handle so asked then hands over at a block's start, as a server
+written behind does) -- and what it hands back runs once the lock is let
+go, a failure the call's error and `Database::fail`'s, so the writes stop. Written under the
+lock as it outgrew a mebibyte, a read by id beside texts of 1 000 128-dim
+rows waited 0.24-0.25 ms p50, 2.30-4.44 at p99 and 12.9-61.3 at most, read
+267-296k times a second beside a writer's 640-705k rows; behind it,
+0.14-0.19, 1.15-1.28 and 1.33-1.86, 341-354k reads and 678-717k rows
+(`ffi_bench beside`, twelve runs a side in ABBA turns at loads of 1.8-2.5).
+A fsynced handle's bytes were the durability's already, written with no
+lock held: beside fsynced texts a read waited 0.13-0.15 ms, 1.19-1.36 and
+1.22-1.68 either way (`beside durable`). What either still writes under the
+lock is a record of a mebibyte or more, where it lies (a server's too), and
+on a fsynced handle the record a handover lands with. A lone buffered put
+is 2.71 us p50 either way over sixteen runs a side, the mean 3.17 against
+3.21 inside the runs' 2.27-3.27 and 2.63-3.73 (`ffi_bench put`), and `make
+ffi-bench`'s put beside a graph 4.4 us p50 either way over ten, `near` and
+the open as they were: written behind, the buffer goes out in writes of 64
+KB rather than of a mebibyte. `open_wrapped` takes a wrap for the file's
+sink, at which `tests/behind.rs` holds the write behind or fails it, and
+the library's code grew 512 bytes. The Kotlin binding's JNI
 functions are the library's (feature `jni`), four entries of the JNI table
 by hand, a call one `byte[]` -- its code, its JSON -- and text as UTF-8
 bytes, since JNI's modified UTF-8 splits an emoji. Each binding runs its

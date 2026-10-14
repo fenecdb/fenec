@@ -15,8 +15,9 @@
 //! of 128 dimensions a text, back to back, buffered: what the reads wait,
 //! and how long the reads that waited out a write took -- each a hold of
 //! the write lock, the reader asking again within microseconds of its last
-//! answer. `ffi_bench beside` runs that part alone, three times, and
-//! `ffi_bench put` a buffered put of one row alone, 20 000 of them.
+//! answer. `ffi_bench beside` runs that part alone, three times (`beside
+//! durable` with every text fsynced), and `ffi_bench put` a buffered put of
+//! one row alone, 20 000 of them.
 
 use fenec_core::prelude::*;
 use fenec_ffi::*;
@@ -29,8 +30,9 @@ fn main() {
     let dir = std::env::temp_dir().join(format!("fenec-ffi-bench-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     if std::env::args().nth(1).as_deref() == Some("beside") {
+        let durable = std::env::args().nth(2).as_deref() == Some("durable");
         for _ in 0..3 {
-            beside(&dir);
+            beside(&dir, durable);
         }
         let _ = std::fs::remove_dir_all(&dir);
         return;
@@ -189,20 +191,23 @@ fn main() {
             println!("near      limit 10  library {a:.1} us   server {b:.1} us   (p50 of 1000)");
         }
     }
-    beside(&dir);
+    beside(&dir, false);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// One thread reading a row by id in a loop, beside another writing 1 000
 /// rows of a text, an int and a 128-dim vector a text -- the vectors handed
 /// over as `f32`s, as the bindings hand them -- back to back for two
-/// seconds, buffered.
-fn beside(dir: &std::path::Path) {
+/// seconds, buffered or each text fsynced.
+fn beside(dir: &std::path::Path, durable: bool) {
     const DIM: usize = 128;
     const SEEDED: u64 = 10_000;
     let path = dir.join("beside.fenec");
     let _ = std::fs::remove_file(&path);
-    let h = open(path.to_str().unwrap(), FENEC_OPEN_NO_SYNC);
+    let h = open(
+        path.to_str().unwrap(),
+        if durable { 0 } else { FENEC_OPEN_NO_SYNC },
+    );
     ok(
         h,
         &format!("create collection r (k text, n int, e vector<{DIM}>)"),
@@ -273,8 +278,9 @@ fn beside(dir: &std::path::Path) {
         false => v[((v.len() - 1) as f64 * p) as usize],
     };
     println!(
-        "beside    reads {:.0}k/s {:.1}/{:.1} us p50/p99, {:.2} ms at most   \
+        "beside    {} reads {:.0}k/s {:.1}/{:.1} us p50/p99, {:.2} ms at most   \
          {} waited out a write: {:.2}/{:.2}/{:.2} ms p50/p99/max   writer {:.0} rows/s",
+        if durable { "durable" } else { "buffered" },
         reads.len() as f64 / run.as_secs_f64() / 1e3,
         at(&reads, 0.5),
         at(&reads, 0.99),

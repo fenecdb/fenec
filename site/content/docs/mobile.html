@@ -583,6 +583,11 @@ as it goes there -- <code>scenePhase</code> turning to
 <code>.background</code>, <code>onStop</code>, <code>AppLifecycleState.paused</code>.</p>
 
 <details class="deep"><summary>Details</summary>
+<p>With <code>noSync</code> the buffer goes into the file once it holds
+64 KB, written by the call that filled it after it has let go of the
+database, as a server's buffered writes are: a read beside texts of 1 000
+rows of 128 dimensions waits 1.1 to 1.4 ms at p99, where written under the
+lock, the disk's waits and all, it waited 2.2 to 6.6 ms and up to 61.</p>
 <p>A write the disk refuses stops the database's writes, as on a server:
 every later write and sync is refused with <code>io</code> until the file
 is opened again, and reads go on. The vectors a database holds are linked
