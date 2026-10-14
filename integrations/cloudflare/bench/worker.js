@@ -1,14 +1,18 @@
-// The example Worker with its storage counted, for rows.mjs: every row a
-// statement writes as workerd counts it (`rowsWritten`, what Cloudflare
-// bills), every key put or deleted through the key-value methods -- a row
-// each in the hidden table they keep -- and every `setAlarm`, billed as a
-// row. `GET /t/<tenant>/rows` answers the counts, `?reset` zeroes them.
+// The example Worker with its storage counted, for rows.mjs and
+// worker.test.js: every row a statement writes as workerd counts it
+// (`rowsWritten`, what Cloudflare bills), every key put or deleted through
+// the key-value methods -- a row each in the hidden table they keep -- and
+// every `setAlarm`, billed as a row, every alarm that rang, and every time
+// the database was opened and restored (`opens`).
+// `GET /t/<tenant>/rows` answers the counts, with the alarm set and the
+// generations kept (`tables`); `?reset` zeroes the counts.
 
 import { Tenant as Example } from '../example/worker.js';
 import example from '../example/worker.js';
 
 export class Tenant extends Example {
-  counts = { sql: 0, kv: 0, alarms: 0 };
+  counts = { sql: 0, kv: 0, alarms: 0, rang: 0, opens: 0 };
+  #opened = null;
 
   constructor(ctx, env) {
     super(ctx, env);
@@ -44,9 +48,27 @@ export class Tenant extends Example {
     Object.defineProperty(this, 'ctx', { value: counted, writable: true, configurable: true });
   }
 
-  rows(reset) {
-    const out = { ...this.counts };
-    if (reset) Object.assign(this.counts, { sql: 0, kv: 0, alarms: 0 });
+  async alarm() {
+    this.counts.rang++;
+    return super.alarm();
+  }
+
+  db() {
+    const opened = super.db();
+    if (opened !== this.#opened) {
+      this.#opened = opened;
+      this.counts.opens++;
+    }
+    return opened;
+  }
+
+  async rows(reset) {
+    const s = this.ctx.storage;
+    const tables = s.sql
+      ? [...s.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'fenec:%' ORDER BY name").raw()].map(([n]) => n)
+      : [];
+    const out = { ...this.counts, alarm: await s.getAlarm(), tables };
+    if (reset) Object.assign(this.counts, { sql: 0, kv: 0, alarms: 0, rang: 0, opens: 0 });
     return out;
   }
 }

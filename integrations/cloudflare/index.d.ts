@@ -21,6 +21,9 @@ export interface Storage {
   put(key: string, value: unknown): Promise<void>;
   delete(keys: string[]): Promise<unknown>;
   list(options: { prefix: string; start?: string; limit?: number }): Promise<Map<string, unknown>>;
+  /** The object's alarm: read once by `schedule` and `maintain`, set when maintenance comes due. */
+  getAlarm?(): Promise<number | null>;
+  setAlarm?(at: number): Promise<void>;
 }
 
 export interface Options {
@@ -63,3 +66,59 @@ export function checkpoint(fenec: Fenec<any>, storage: Storage, options?: Option
  * time into the module's memory. Resolves to false when there is none.
  */
 export function restore(fenec: Fenec<any>, storage: Storage, options?: Pick<Options, 'key'>): Promise<boolean>;
+
+export interface MaintenanceOptions extends Options {
+  /** How long past its time (`@ttl`) a row stays for a reader of `expired()` before it is deleted: 60 000 ms. */
+  grace?: number;
+  /** The least time between two sweeps' alarms, each two rows written: 60 000 ms. */
+  every?: number;
+  /** Rows a `maintain` deletes at most, the rest left to the next alarm: 10 000. */
+  sweep?: number;
+  /** Bytes the writes since the image reach before an image is worth writing: 64 KiB, as `checkpoint`'s. */
+  min?: number;
+}
+
+export interface Maintained {
+  /** Rows deleted, past their time by `grace`. */
+  swept: number;
+  /** Whether more are past their time than `sweep` let go: the alarm is set again for now. */
+  more: boolean;
+  /** The bytes of the image written, 0 when none was. */
+  image: number;
+  /**
+   * Whether the module holds enough dead records to be worth opening
+   * again: storage holds an image without them, and a new `Fenec`
+   * restored from it gives them back. Asked once a database.
+   */
+  reload: boolean;
+  /** The alarm set for what comes due next, or null when nothing will. */
+  next: number | null;
+}
+
+/**
+ * When `maintain` next has work, in milliseconds since the epoch: now when
+ * an image or a reload is owed, else when the first row past its time is
+ * `grace` past it (no sooner than `every` after the last sweep); null when
+ * nothing will be.
+ */
+export function due(fenec: Fenec<any>, storage: Storage, options?: MaintenanceOptions): number | null;
+
+/**
+ * Sets the object's alarm once `maintain` comes due, `quiet` after now at
+ * the soonest (5 000 ms), unless one is set no later than `every` after
+ * that: `setAlarm` is a row written. Resolves to the alarm set, or null
+ * when nothing is due. Call it after a write. Called, a request folds the
+ * writes into an image only once they outgrow the whole image, where it
+ * did at half: `maintain` writes that image.
+ */
+export function schedule(fenec: Fenec<any>, storage: Storage, options?: MaintenanceOptions & { quiet?: number }): Promise<number | null>;
+
+/**
+ * An alarm's work: deletes the rows past their time by `grace`, `sweep` at
+ * most; writes a new image once the writes since the last reach half of
+ * it (and `min`), or half of what storage holds is dead (and 1 MiB);
+ * stores both; and sets the alarm again for what comes due next. Rejects
+ * as `persist` does when storage fails, and the database must then be
+ * opened again.
+ */
+export function maintain(fenec: Fenec<any>, storage: Storage, options?: MaintenanceOptions): Promise<Maintained>;

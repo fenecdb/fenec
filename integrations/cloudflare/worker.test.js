@@ -30,16 +30,24 @@ function freePort() {
 /** Every `wrangler dev` started, for a failed test to end them all. */
 const running = new Set();
 
-/** `wrangler dev` over `state`, until it answers; `stop()` ends it. */
-async function serve(state) {
+/**
+ * `wrangler dev` over `state`, until it answers; `stop()` ends it. `dir`
+ * is the Worker's: `bench` is the example with its storage counted, which
+ * answers the alarm set and the generations kept too. `vars` its
+ * environment.
+ */
+async function serve(state, { dir = 'example', vars = {} } = {}) {
   const port = await freePort();
   const child = spawn(
     join(here, 'node_modules/.bin/wrangler'),
-    ['dev', '--config', 'wrangler.jsonc', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false'],
+    [
+      'dev', '--config', 'wrangler.jsonc', '--port', String(port), '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false',
+      ...Object.entries(vars).flatMap(([k, v]) => ['--var', `${k}:${v}`]),
+    ],
     // A group of its own: wrangler starts workerd beside it, and killing
     // wrangler alone left those holding its output open, and the test
     // process with them.
-    { cwd: join(here, 'example'), stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } },
+    { cwd: join(here, dir), stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } },
   );
   running.add(child);
   child.once('exit', () => running.delete(child));
@@ -64,6 +72,10 @@ async function serve(state) {
         body: JSON.stringify({ sql, params }),
       });
       return res.json();
+    },
+    /** The bench Worker's counts: rows written, alarms set and rung, the alarm set and the generations. */
+    async kept(tenant) {
+      return (await fetch(`${url}/t/${tenant}/rows`)).json();
     },
     async stop() {
       process.kill(-child.pid, 'SIGINT');
@@ -116,6 +128,110 @@ test('a tenant database lives in a Durable Object and comes back', { skip, timeo
   } finally {
     // A failed assertion leaves a server running, which holds the test
     // process open: it waited out every timeout.
+    for (const child of running) process.kill(-child.pid, 'SIGKILL');
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
+/** Waits for `ok()` to hold, asking every 100 ms; fails with `what` past `ms`. */
+async function until(ok, what, ms = 30_000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const got = await ok();
+    if (got) return got;
+    if (Date.now() > end) throw new Error(`waited ${ms} ms for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+test('maintenance runs from alarms set only when it is due', { skip, timeout: 180_000 }, async () => {
+  const state = await mkdtemp(join(tmpdir(), 'fenecdb-alarms-'));
+  // The alarm a second after the write that brings it due, a row swept as
+  // soon as it is past its time, 100 rows an alarm.
+  const vars = { QUIET: 1000, GRACE: 0, EVERY: 0, SWEEP: 100 };
+  try {
+    let w = await serve(state, { dir: 'bench', vars });
+    const ok = (r) => assert.ok(!r.error, r.error);
+
+    // An idle object: written, nothing due, no alarm.
+    ok(await w.query('idle', 'create collection docs (n int, title text)'));
+    for (let i = 0; i < 10; i++) ok(await w.query('idle', 'put docs {n: $1, title: "t"}', [i]));
+    let k = await w.kept('idle');
+    assert.deepEqual([k.alarms, k.alarm, k.rang], [0, null, 0]);
+
+    // Rows that expire: one alarm set by the writes, and 350 rows swept
+    // over four of them, 100 an alarm.
+    ok(await w.query('ttl', 'create collection s (n int, at timestamp @ttl(1s))'));
+    ok(await w.query('ttl', 'create collection keep (n int)'));
+    ok(await w.query('ttl', 'put keep {n: 1}'));
+    const now = Date.now();
+    ok(await w.query('ttl', 'put s $1', [Array.from({ length: 350 }, (_, n) => ({ n, at: new Date(now).toISOString() }))]));
+    k = await w.kept('ttl');
+    // Set once, past the rows' time -- unless it rang already.
+    if (k.rang === 0) {
+      assert.equal(k.alarms, 1);
+      assert.ok(k.alarm >= now + 1000, `the alarm at ${k.alarm - now} ms`);
+    }
+    k = await until(async () => {
+      const r = await w.kept('ttl');
+      return r.rang >= 4 && r.alarm === null && r;
+    }, 'the sweep');
+    assert.equal(k.rang, 4);
+    assert.deepEqual((await w.query('ttl', 'get s where expired() count')).rows, [{ count: 0 }]);
+    assert.deepEqual((await w.query('ttl', 'get keep count')).rows, [{ count: 1 }]);
+
+    // A database written past half its image: an image by the alarm, not
+    // by the request. Under it: none, and no alarm.
+    ok(await w.query('grow', 'create collection docs (n int, title text)'));
+    const page = (from, n) => Array.from({ length: n }, (_, i) => ({ n: from + i, title: `${from + i} ${'x'.repeat(300)}` }));
+    ok(await w.query('grow', 'put docs $1', [page(0, 3000)]));
+    const first = (await w.kept('grow')).tables;
+    for (let i = 0; i < 3; i++) ok(await w.query('grow', 'put docs $1', [page(10_000 + 100 * i, 100)]));
+    k = await w.kept('grow');
+    assert.deepEqual([k.tables, k.alarm, k.alarms], [first, null, 0]);
+    // The write that brings the image due sets the alarm and writes the
+    // one row it would have anyway: while no alarm has rung, the
+    // generation is the one before.
+    let pages = 3;
+    for (; !(k = await w.kept('grow')).alarm; pages++) {
+      assert.ok(pages < 40, 'no image came due');
+      ok(await w.query('grow', 'put docs $1', [page(10_000 + 100 * pages, 100)]));
+    }
+    if (k.rang === 0) assert.deepEqual(k.tables, first, 'a request folded the writes');
+    k = await until(async () => {
+      const r = await w.kept('grow');
+      return r.rang >= 1 && r.alarm === null && r;
+    }, 'the image');
+    assert.notDeepEqual(k.tables, first);
+    assert.equal(k.tables.length, 1);
+
+    // Every row written over until the module holds more dead records
+    // than live: the alarm writes an image without them, and the database
+    // is opened again from it, its module's memory given back.
+    ok(await w.query('churn', 'create collection docs (n int, title text)'));
+    ok(await w.query('churn', 'put docs $1', [page(0, 4000)]));
+    for (const c of 'abcd') ok(await w.query('churn', 'set docs {title: $1}', [c.repeat(400)]));
+    // Read until a read finds the database opened again: the alarm lets it
+    // go once no call holds it, and the next call restores.
+    k = await until(async () => {
+      const r = await w.query('churn', 'get docs select title where n = 7');
+      assert.deepEqual(r.rows, [{ title: 'd'.repeat(400) }]);
+      const c = await w.kept('churn');
+      return c.opens >= 2 && c;
+    }, 'the reload');
+    assert.ok(k.rang >= 1);
+    await w.stop();
+
+    // Started again: the deletes and the image were kept.
+    w = await serve(state, { dir: 'bench', vars });
+    assert.deepEqual((await w.query('ttl', 'get s where expired() count')).rows, [{ count: 0 }]);
+    assert.deepEqual((await w.query('grow', 'get docs count')).rows, [{ count: 3000 + 100 * pages }]);
+    assert.deepEqual((await w.query('idle', 'get docs count')).rows, [{ count: 10 }]);
+    assert.deepEqual((await w.query('churn', 'get docs where title = $1 count', ['d'.repeat(400)])).rows, [{ count: 4000 }]);
+    k = await w.kept('idle');
+    assert.deepEqual([k.alarms, k.alarm], [0, null]);
+    await w.stop();
+  } finally {
     for (const child of running) process.kill(-child.pid, 'SIGKILL');
     await rm(state, { recursive: true, force: true });
   }

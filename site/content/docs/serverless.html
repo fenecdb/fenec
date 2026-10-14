@@ -42,11 +42,13 @@ the first.</p>
 <h2 id="worker">A database a Durable Object</h2>
 
 <p>The object opens the engine on its first request, restores its database
-from storage, and saves after every write, before it answers.</p>
+from storage, and saves after every write, before it answers. Its alarm
+keeps it: rows past their time deleted, a new image when one is worth
+it.</p>
 
 <pre data-lang="ts">import { DurableObject } from 'cloudflare:workers';
 import { Fenec } from '@fenecdb/web';
-import { checkpoint, persist, restore } from '@fenecdb/cloudflare';
+import { maintain, persist, restore, schedule } from '@fenecdb/cloudflare';
 import wasm from '@fenecdb/web/fenec.wasm';
 
 interface Env {
@@ -55,7 +57,6 @@ interface Env {
 
 export class Tenant extends DurableObject&lt;Env&gt; {
   #db: Promise&lt;Fenec&gt; | null = null;
-  #alarm = false;
 
   #open(): Promise&lt;Fenec&gt; {
     // Once, with every other event held back while it restores.
@@ -79,16 +80,16 @@ export class Tenant extends DurableObject&lt;Env&gt; {
         if (this.#db === opened) this.#db = null;   // the next request restores
         throw e;
       }
-      if (wrote &gt; 0 &amp;&amp; !this.#alarm) {
-        this.#alarm = true;                          // an alarm is a row written too
-        await this.ctx.storage.setAlarm(Date.now() + 5_000);
-      }
+      // The alarm, once something is due: a row that will expire, an image
+      // owed. Nothing else sets it -- an alarm is a row written too.
+      if (wrote &gt; 0) await schedule(db, this.ctx.storage);
     }
   }
 
   async alarm() {
-    this.#alarm = false;
-    await checkpoint(await this.#open(), this.ctx.storage);
+    // Expired rows deleted, an image if one is worth it, the alarm set
+    // again for what comes due next, or none.
+    await maintain(await this.#open(), this.ctx.storage);
   }
 }
 
@@ -193,9 +194,10 @@ and <code>persist</code> through <code>ctx.storage</code>.</p>
 <h2 id="cold-start">A cold start</h2>
 
 <p>After an eviction or a deploy, the first request has to load the database
-again: tens of milliseconds for 10 000 rows, under 200 for 50 000. A
-<code>checkpoint</code> from an alarm after the writes folds them into a
-new image, for fewer rows to read and no vectors to link.</p>
+again: tens of milliseconds for 10 000 rows, under 200 for 50 000. The
+alarm's <code>maintain</code> folds the writes into a new image once they
+reach half of the last one, for fewer rows to read and no vectors to
+link.</p>
 
 <div class="tbl">
 <table>
@@ -233,11 +235,70 @@ checkpoint 157 against 168 to 171. A request's round trip through
 to 15 000 a second, a request of 1 000 at a time with its vectors linked
 and kept before the answer.</p>
 
-<p>The alarm is set once a write lands and none is set, not again by each
-write: <code>setAlarm</code> is a row written too, which made every write
-before this change cost three. It checkpoints only once the writes since
-the image reach 64 KiB (<code>{min}</code>): written again for a few
-writes, a 27.6 MB image was 16 rows for one.</p>
+<p>The figures under &ldquo;after a checkpoint&rdquo; are a new image
+taken by hand (<code>checkpoint</code>); an object that keeps its
+database from its alarm takes one by the rule below.</p>
+</details>
+
+<h2 id="maintenance">Maintenance</h2>
+
+<p>A server deletes rows past their <code>@ttl</code>, compacts its file
+and keeps its graphs on threads of its own. An object has one alarm, which
+is a row written each time it is set and wakes the object each time it
+rings: <code>schedule</code> sets it after a write only once something is
+due, and <code>maintain</code>, its work, sets it again only for what comes
+next. An idle object sets none.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>rows written, 10 000 × 128</th><th class="n">an alarm after every write, a checkpoint past 64 KiB</th><th class="n">maintenance</th></tr></thead>
+<tbody>
+<tr><td>30 bursts of 20 single-row writes, a second's quiet after each</td><td class="n">651 to 652</td><td class="n"><b>600</b></td></tr>
+<tr><td>12 bursts of 500 rows</td><td class="n">100</td><td class="n"><b>19</b></td></tr>
+<tr><td>20 000 rows past their time, deleted</td><td class="n">never</td><td class="n"><b>2</b> and 2 alarms</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p><code>maintain</code> deletes the rows a minute (<code>grace</code>)
+past their time, as a server's sweep does, so a reader of
+<code>expired()</code> as frequent sees each before it goes; 10 000 a call
+(<code>sweep</code>) in statements of 1 000 ordinary deletes, stored as any
+write is, the alarm set again at once past the bound. The object answers
+nothing while it runs: 1 000 rows of 100 000 took 0.46 ms to delete in the
+module, so 10 000 hold it about 5 ms, far inside an alarm's 30 s of CPU and
+15 minutes. Then it sets the alarm for the next row's time and the grace,
+no sooner than a minute (<code>every</code>) after this sweep, or sets
+none; each sweep is two rows at most, its deletes and the alarm, so rows
+expiring a few a second cost two rows a minute rather than two a row. No
+export of the module was added for it: a <code>del</code> naming
+<code>expired()</code> and walking the field's index in order says what
+the server's sweep does natively.</p>
+
+<p>It writes a new image when the writes since the last reach half of it
+and 64 KiB (<code>min</code>), where <code>persist</code> folds them in a
+request, or when half of what storage holds is dead and a mebibyte —
+what a sweep or deletes left, which the writes' size alone does not show.
+Woken to sweep and nothing more, it stores the deletes as one row and
+writes no image. Once <code>schedule</code> is called, a request folds the
+writes only past the whole image: the alarm takes the image at half, and
+no request waits for it. A threshold of 64 KiB, as the alarm used, wrote a
+27.6 MB image as 16 rows for writes that were one or two; at a quarter of
+the image, rewrites of 1 000 rows of 128 dimensions a request, a row each,
+brought an 11 MB image, 8 rows, every 6.</p>
+
+<p>The module never gives memory back, and holds every version of a record
+written since it was opened. Once the dead versions reach half of what it
+holds — at least 4 MiB, at most 16 — <code>maintain</code> makes sure
+storage holds an image without them and answers <code>reload</code>: the
+example lets the database go once no request uses it, and the next one
+restores a new module. In Node, 50 000 rows of 128 dimensions with three
+in five past their time held 42.7 MB of module through two sweeps of
+10 000; the third left half of storage dead, its image took the module to
+51.6 MB, and the module restored from it held 19.2. A
+<code>compact</code> in the module would have rebuilt every graph holding
+tombstones and built its image whole, and given nothing back.</p>
 </details>
 
 <h2 id="limits">Limits</h2>

@@ -1,7 +1,9 @@
 // Stand-ins for a Durable Object's storage, for test.js and memory.mjs: each
 // holds to the limits of the kind it stands for, counts the rows it writes
 // as Cloudflare bills them, and can be made to stop after a number of
-// operations, as storage that goes away part way would.
+// operations, as storage that goes away part way would. Both keep an alarm
+// as an object does (`Alarm`): `setAlarm` is billed as a row written, and
+// counted apart in `alarms`.
 
 import assert from 'node:assert/strict';
 
@@ -10,7 +12,23 @@ import assert from 'node:assert/strict';
  * most, 128 keys a call, values cloned on the way in and out. Each key put
  * or deleted is a row written. `failAfter` puts, it throws.
  */
-export class Values {
+/** An object's one alarm: `getAlarm` a read, `setAlarm` a row written, counted in `alarms`. */
+class Alarm {
+  alarm = null;
+  alarms = 0;
+  async getAlarm() {
+    return this.alarm;
+  }
+  async setAlarm(at) {
+    this.alarms++;
+    this.alarm = typeof at === 'number' ? at : at.getTime();
+  }
+  async deleteAlarm() {
+    this.alarm = null;
+  }
+}
+
+export class Values extends Alarm {
   map = new Map();
   puts = 0;
   rows = 0;
@@ -46,13 +64,14 @@ export class Values {
  * them it throws; a transaction it stops is rolled back, and every `exec`
  * outside one is its own, as SQLite's autocommit has it.
  */
-export class Rows {
+export class Rows extends Alarm {
   ops = 0;
   rows = 0;
   failAfter = Infinity;
   #tx = false;
 
   constructor(DatabaseSync, file = ':memory:') {
+    super();
     this.db = new DatabaseSync(file);
     const fake = this;
     this.sql = {
