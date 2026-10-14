@@ -80,8 +80,9 @@ the object's single thread is the single writer.
   ([Maintenance](#maintenance)). `due(fenec, storage)` says when it next
   has any, for an object that sets its alarm itself.
 - `release(fenec)` lets a database go before the object opens it again:
-  nothing it holds is stored after, and it resolves once a flush under way
-  has settled. A refused `persist`, `checkpoint` or `maintain` likewise
+  nothing it holds is stored after -- one never kept, too, and a `restore`
+  into it is refused -- and it resolves once a flush under way has
+  settled. A refused `persist`, `checkpoint` or `maintain` likewise
   answers once none is, so the database restored next reads all the first
   stored and is the only one writing.
 - `checkpoint(fenec, storage, { key, min })` writes a new image now, the

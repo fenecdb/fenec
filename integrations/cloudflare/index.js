@@ -99,6 +99,14 @@ const FLOOR = 64 * 1024;
 const kept = new WeakMap();
 
 /**
+ * The databases let go of (`release`), whatever state they had: one never
+ * kept, or restored from empty storage, had none to mark, and a `persist`
+ * after made one afresh and wrote an image over the generation stored; a
+ * `restore` into one made a state anew, and stored again.
+ */
+const released = new WeakSet();
+
+/**
  * Writes the database into `storage` -- a Durable Object's `ctx.storage`
  * -- under `key`: the image the first time, then only the writes since.
  * Resolves once they are durable (`storage.sync()`), to the bytes the
@@ -157,6 +165,7 @@ export function checkpoint(fenec, storage, options = {}) {
  * let go of (`loadParts`), never joined into one array first.
  */
 export async function restore(fenec, storage, { key = 'fenec' } = {}) {
+  if (released.has(fenec)) throw failure({ key, released: true });
   const found = storage.sql ? keptRows(storage.sql, key) : await keptValues(storage, key);
   if (!found) return false;
   const taken = await load(fenec, found.length, found.parts);
@@ -171,7 +180,8 @@ export async function restore(fenec, storage, { key = 'fenec' } = {}) {
 
 /**
  * Lets the database go: nothing it holds goes to storage after this, and
- * every `persist`, `checkpoint` and `maintain` on it rejects. Resolves once
+ * every `persist`, `checkpoint`, `maintain` and `restore` on it rejects,
+ * under any key, whether or not it was ever kept. Resolves once
  * a flush under way has settled, so a database restored after it reads
  * all this one stored and is the only one writing. An object calls it
  * before it opens the database again -- a reload, a failure -- since two
@@ -181,6 +191,7 @@ export async function restore(fenec, storage, { key = 'fenec' } = {}) {
  * next restore.
  */
 export async function release(fenec) {
+  released.add(fenec);
   const s = kept.get(fenec);
   if (!s) return;
   s.released = true;
@@ -374,14 +385,18 @@ const clock = (fenec) => fenec.now?.() ?? Date.now();
 const iso = (ms) => new Date(ms).toISOString();
 
 /**
- * A timestamp as the module writes it, in milliseconds. A year past 9999
- * is written in five digits or more, `10000-01-01T00:00:00Z`, which
- * `Date.parse` reads as `NaN`; ECMAScript's own form of it is six digits
- * and a sign.
+ * A timestamp as the module writes it, in milliseconds; `NaN` past the
+ * dates JavaScript has. A year past 9999 is written in five digits or
+ * more, `10000-01-01T00:00:00Z`, and one before year 0 with a sign, four
+ * wide with it -- `-001-01-01T00:00:00Z`, `-1199-...` -- which `Date.parse`
+ * reads as `NaN`; ECMAScript's own form of either is six digits and a sign.
  */
 function time(text) {
-  const wide = /^(\d{5,6})-/.exec(text);
-  return Date.parse(wide ? `+${wide[1].padStart(6, '0')}${text.slice(wide[0].length - 1)}` : text);
+  const wide = /^([+-]?)(\d+)-/.exec(text);
+  if (!wide || (wide[1] === '' && wide[2].length === 4)) return Date.parse(text);
+  // `-000000` is no year to ECMAScript: year 0 is `+000000`.
+  const sign = wide[1] === '-' && Number(wide[2]) !== 0 ? '-' : '+';
+  return Date.parse(`${sign}${wide[2].padStart(6, '0')}${text.slice(wide[0].length - 1)}`);
 }
 
 /** The record bytes the module holds, and those of versions no read reaches. */
@@ -479,10 +494,15 @@ function sweepAt(fenec, s, now, { grace = GRACE, every = EVERY } = {}) {
     const [row] = fenec.rows(`get ${name} select ${field} where expired() order ${field} limit 1`);
     const first = row ?? fenec.rows(`get ${name} select ${field} where ${field} > $1 order ${field} limit 1`, [iso(now - ttl)])[0];
     if (!first) continue;
-    const at = time(first[field]) + ttl + grace;
+    let at = time(first[field]) + ttl + grace;
     // A time JavaScript has no date for: once `NaN`, every collection's
     // next time after it compared false, and the alarm was set at `NaN`.
-    if (!Number.isFinite(at)) continue;
+    // Past its time, such a row is due now: passed over, the rows past
+    // their time after it were never swept. A living one is millennia off.
+    if (!Number.isFinite(at)) {
+      if (!row) continue;
+      at = now;
+    }
     if (next === null || at < next) next = at;
   }
   if (next === null) return null;
@@ -542,9 +562,13 @@ function state(fenec, storage, key) {
 /** The database's state, made -- its journal started, an image due -- when new to `key`. */
 function stateOf(fenec, storage, { key = 'fenec', piece } = {}) {
   let s = kept.get(fenec);
-  // A database let go of stays so, under any key: a state made afresh
-  // would have written an image.
-  const fresh = s?.key !== key && !s?.released;
+  // A database let go of stays so, under any key and if it had no state:
+  // a state made afresh would have written an image.
+  if (released.has(fenec)) {
+    s ??= Object.assign(state(fenec, storage, key), { released: true, failed: new Error('released') });
+    return [s, false];
+  }
+  const fresh = s?.key !== key;
   if (fresh) {
     fenec.journal();
     s = state(fenec, storage, key);

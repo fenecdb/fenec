@@ -607,3 +607,66 @@ each('a time past year 9999, or past any date, sets no alarm at NaN', async (mak
   assert.equal(r.next, year10000 + HOUR + GRACE);
   assert.equal(storage.alarm, year10000 + HOUR + GRACE);
 });
+
+/** What storage holds, whatever its kind: what a write that slipped through would change. */
+const holding = (storage, kind) => (kind === 'sql' ? JSON.stringify(storage.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()) + storage.rows : JSON.stringify([...storage.map.keys()]));
+
+each('a database let go of before it was kept, or restored into after, stores nothing', async (make, kind) => {
+  const storage = make();
+  // A database stored under the key every call below names by default.
+  const stored = await open();
+  stored.run('create collection t (n int)');
+  stored.run('put t {n: 1}');
+  await persist(stored, storage);
+  const before = holding(storage, kind);
+  // One that had kept nothing -- its restore under another key found none.
+  const none = await open();
+  assert.equal(await restore(none, storage, { key: 'other' }), false);
+  await release(none);
+  none.run('create collection t (n int)');
+  none.run('put t {n: 2}');
+  await assert.rejects(persist(none, storage), /let go of/, 'a persist made a state of its own, and an image over the stored one');
+  await assert.rejects(checkpoint(none, storage), /let go of/);
+  await assert.rejects(maintain(none, storage), /let go of/);
+  // One let go of, then restored into: refused, not made anew.
+  await release(stored);
+  await assert.rejects(restore(stored, storage), /let go of/);
+  stored.run('put t {n: 3}');
+  await assert.rejects(persist(stored, storage), /let go of/);
+  assert.equal(holding(storage, kind), before, 'nothing written');
+  assert.deepEqual((await back(storage)).rows('get t select n'), [{ n: 1 }]);
+});
+
+each('a row past its time at a date JavaScript cannot read leaves its collection due', async (make) => {
+  const storage = make();
+  const clock = { now: T0 };
+  const db = await at(clock);
+  // Written `-001-01-01T00:00:00Z`, which `Date.parse` reads as `NaN`.
+  db.run('create collection s (n int, at timestamp @ttl(1h))');
+  db.run('put s {n: 0, at: $1}', [Date.UTC(-1, 0, 1)]);
+  db.run('put s $1', [Array.from({ length: 5 }, (_, i) => ({ n: i + 1, at: iso(T0) }))]);
+  // And `-299074-12-26T07:06:40Z`, before any date JavaScript has.
+  db.run('create collection z (n int, at timestamp @ttl(1h))');
+  db.run('put z {n: 0, at: $1}', [-9.5e15]);
+  db.run('put z $1', [Array.from({ length: 5 }, (_, i) => ({ n: i + 1, at: iso(T0) }))]);
+  await persist(db, storage);
+  // Due long since, the year before year 0 read, and the alarm set for
+  // now: neither collection passed over.
+  assert.equal(due(db, storage), Date.UTC(-1, 0, 1) + HOUR + GRACE);
+  assert.equal(await schedule(db, storage), T0 + 5_000);
+  // Each on its own, the first at its own time.
+  const one = await at(clock);
+  one.run('create collection s (n int, at timestamp @ttl(1h))');
+  one.run('put s {n: 0, at: $1}', [Date.UTC(-1, 0, 1)]);
+  assert.equal(due(one, storage, { key: 'one' }), Date.UTC(-1, 0, 1) + HOUR + GRACE);
+  const far = await at(clock);
+  far.run('create collection z (n int, at timestamp @ttl(1h))');
+  far.run('put z {n: 0, at: $1}', [-9.5e15]);
+  assert.equal(due(far, storage, { key: 'far' }), T0);
+  // Swept, all of them, once the rest are past their time too.
+  clock.now = T0 + HOUR + GRACE;
+  assert.equal((await maintain(db, storage)).swept, 12);
+  const again = await backAt(storage, clock);
+  assert.deepEqual(again.rows('get s where expired() count'), [{ count: 0 }]);
+  assert.deepEqual(again.rows('get z where expired() count'), [{ count: 0 }]);
+});

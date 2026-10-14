@@ -12,10 +12,10 @@
 // commit's example -- to count its rows the same way. Needs web/fenec.wasm
 // (make wasm) and `npm ci` here.
 
-import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { serve as dev } from './dev.mjs';
 
 const here = new URL('.', import.meta.url).pathname;
 const config = process.env.ROWS_CONFIG ?? join(here, 'bench');
@@ -23,41 +23,21 @@ const WRITES = 256;
 const DIM = 128;
 
 async function serve(state, vars = {}) {
-  const child = spawn(
-    join(here, 'node_modules/.bin/wrangler'),
-    [
-      'dev', '--config', 'wrangler.jsonc', '--port', '0', '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false',
-      ...Object.entries(vars).flatMap(([k, v]) => ['--var', `${k}:${v}`]),
-    ],
-    { cwd: config, stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } },
-  );
-  let log = '';
-  child.stdout.on('data', (d) => (log += d));
-  child.stderr.on('data', (d) => (log += d));
-  while (!/Ready on http:\/\/[^\s]+\s/.test(log)) {
-    if (child.exitCode !== null) throw new Error(log);
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  // Port 0, and the port wrangler took read off the line saying it is ready.
-  const url = /Ready on (http:\/\/[^\s]+)\s/.exec(log)[1];
-  const stopped = new Promise((r) => child.once('exit', r));
+  const w = await dev(config, state, vars);
   return {
     async query(tenant, sql, params = []) {
-      const res = await fetch(`${url}/t/${tenant}/query`, { method: 'POST', body: JSON.stringify({ sql, params }) });
+      const res = await fetch(`${w.url}/t/${tenant}/query`, { method: 'POST', body: JSON.stringify({ sql, params }) });
       const out = await res.json();
       if (out.error) throw new Error(out.error);
       return out;
     },
     async checkpoint(tenant) {
-      return (await (await fetch(`${url}/t/${tenant}/checkpoint`, { method: 'POST' })).json()).bytes;
+      return (await (await fetch(`${w.url}/t/${tenant}/checkpoint`, { method: 'POST' })).json()).bytes;
     },
     async rows(tenant, reset = false) {
-      return (await fetch(`${url}/t/${tenant}/rows${reset ? '?reset' : ''}`)).json();
+      return (await fetch(`${w.url}/t/${tenant}/rows${reset ? '?reset' : ''}`)).json();
     },
-    async stop() {
-      process.kill(-child.pid, 'SIGINT');
-      await stopped;
-    },
+    stop: w.stop,
   };
 }
 

@@ -69,7 +69,8 @@ export function restore(fenec: Fenec<any>, storage: Storage, options?: Pick<Opti
 
 /**
  * Lets the database go: nothing it holds is stored after this, and every
- * `persist`, `checkpoint` and `maintain` on it rejects. Resolves once a
+ * `persist`, `checkpoint`, `maintain` and `restore` on it rejects, under
+ * any key, whether or not it was ever kept. Resolves once a
  * flush under way has settled, so a database restored after it reads all
  * this one stored and is the only one writing: call it before opening the
  * database again. A rejection of those calls on a failed or released

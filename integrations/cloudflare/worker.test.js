@@ -3,60 +3,36 @@
 // after the server is stopped and started again over the same storage.
 // Needs web/fenec.wasm (make wasm) and `npm ci` here, which brings wrangler.
 
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readyUrl, running, serve as dev } from './dev.mjs';
 
-const here = new URL('.', import.meta.url).pathname;
 const ready = await Promise.all([
   access(new URL('../../web/fenec.wasm', import.meta.url)),
   access(new URL('node_modules/.bin/wrangler', import.meta.url)),
 ]).then(() => true, () => false);
 const skip = ready ? false : 'needs web/fenec.wasm (make wasm) and wrangler (npm ci)';
 
-/** Every `wrangler dev` started, for a failed test to end them all. */
-const running = new Set();
+// A test cut short by its timeout runs no `finally`, and the wrangler it
+// started held the test process open for good.
+after(() => {
+  for (const child of running) process.kill(-child.pid, 'SIGKILL');
+});
 
 /**
- * `wrangler dev` over `state`, until it answers; `stop()` ends it. `dir`
- * is the Worker's: `bench` is the example with its storage counted, which
- * answers the alarm set and the generations kept too. `vars` its
- * environment.
+ * `wrangler dev` over `state` (dev.mjs), until it says it is ready; `stop()`
+ * ends it. `dir` is the Worker's: `bench` is the example with its storage
+ * counted, which answers the alarm set and the generations kept too. `vars`
+ * its environment.
  */
 async function serve(state, { dir = 'example', vars = {} } = {}) {
-  const child = spawn(
-    join(here, 'node_modules/.bin/wrangler'),
-    [
-      // Port 0, and the port read off the line saying it is ready: one
-      // found free and handed over is free only until another suite takes it.
-      'dev', '--config', 'wrangler.jsonc', '--port', '0', '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false',
-      ...Object.entries(vars).flatMap(([k, v]) => ['--var', `${k}:${v}`]),
-    ],
-    // A group of its own: wrangler starts workerd beside it, and killing
-    // wrangler alone left those holding its output open, and the test
-    // process with them.
-    { cwd: join(here, dir), stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' } },
-  );
-  running.add(child);
-  child.once('exit', () => running.delete(child));
-  let log = '';
-  const url = await new Promise((ready, failed) => {
-    const read = (d) => {
-      log += d;
-      const m = /Ready on (http:\/\/[^\s]+)\s/.exec(log);
-      if (m) ready(m[1]);
-    };
-    child.stdout.on('data', read);
-    child.stderr.on('data', read);
-    child.once('exit', () => failed(new Error(`wrangler dev did not start:\n${log}`)));
-  });
-  const stopped = new Promise((r) => child.once('exit', r));
+  const w = await dev(dir, state, vars);
   return {
     async query(tenant, sql, params = []) {
-      const res = await fetch(`${url}/t/${tenant}/query`, {
+      const res = await fetch(`${w.url}/t/${tenant}/query`, {
         method: 'POST',
         body: JSON.stringify({ sql, params }),
       });
@@ -64,14 +40,41 @@ async function serve(state, { dir = 'example', vars = {} } = {}) {
     },
     /** The bench Worker's counts: rows written, alarms set and rung, the alarm set and the generations. */
     async kept(tenant) {
-      return (await fetch(`${url}/t/${tenant}/rows`)).json();
+      return (await fetch(`${w.url}/t/${tenant}/rows`)).json();
     },
-    async stop() {
-      process.kill(-child.pid, 'SIGINT');
-      await stopped;
-    },
+    stop: w.stop,
   };
 }
+
+test('the ready line is read through the colours wrangler may write it in', () => {
+  assert.equal(readyUrl('[wrangler:info] Ready on http://127.0.0.1:57886\n'), 'http://127.0.0.1:57886');
+  assert.equal(readyUrl('[wrangler:info] Ready on \x1b[32mhttp://127.0.0.1:57886\x1b[39m\n'), 'http://127.0.0.1:57886');
+  // Not before the line is whole: a port cut short is another port.
+  assert.equal(readyUrl('[wrangler:info] Ready on http://127.0.0.1:57'), null);
+});
+
+test('wrangler dev that ends before it is ready fails the start, and one asked for colours starts', { skip, timeout: 120_000 }, async () => {
+  const state = await mkdtemp(join(tmpdir(), 'fenecdb-dev-'));
+  try {
+    // A directory with no Worker in it: wrangler gives up, and so does the start.
+    await assert.rejects(dev(state, state), /ended before it was ready/);
+    const colour = process.env.FORCE_COLOR;
+    process.env.FORCE_COLOR = '1';
+    let w;
+    try {
+      w = await dev('example', state);
+    } finally {
+      if (colour === undefined) delete process.env.FORCE_COLOR;
+      else process.env.FORCE_COLOR = colour;
+    }
+    const res = await fetch(`${w.url}/t/a/query`, { method: 'POST', body: JSON.stringify({ sql: 'create collection d (n int)' }) });
+    assert.equal(res.status, 200);
+    await w.stop();
+  } finally {
+    for (const child of running) process.kill(-child.pid, 'SIGKILL');
+    await rm(state, { recursive: true, force: true });
+  }
+});
 
 test('a tenant database lives in a Durable Object and comes back', { skip, timeout: 180_000 }, async () => {
   const state = await mkdtemp(join(tmpdir(), 'fenecdb-worker-'));

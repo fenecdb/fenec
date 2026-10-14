@@ -4624,9 +4624,12 @@ or `setAlarm` -- is `maintain`'s `error`, its work stored, never a
 rejection: thrown, the example's handler let the database go as for a
 storage failure (below). The names its statements write are the lexer's
 (`\p{Alphabetic}`, then `\p{N}` too): ASCII alone, a `müşteri` was never
-swept. A year past 9999 is written `10000-01-01T00:00:00Z`, which
-`Date.parse` reads as `NaN`, and the alarm was set at `NaN`: such a time is
-read in ECMAScript's six-digit form, and one past any date skipped. Taken at
+swept. A year past 9999 is written `10000-01-01T00:00:00Z` and one
+before year 0 `-001-01-01T00:00:00Z`, four wide with its sign, which
+`Date.parse` reads as `NaN`: the alarm was set at `NaN`, and a row of year
+-1 past its time passed its whole collection over. Both are read in
+ECMAScript's six-digit form; a time past any date JavaScript has is taken
+as due now for a row past its time and passed over for a living one. Taken at
 a quarter of the image, rewrites of 1 000 128-dim rows a request, a row
 each, brought an 11 MB image, 8 rows, every 6; at half, where `persist` folds, the
 images are as many as before, and a request folds only past the whole image
@@ -4647,7 +4650,11 @@ reload, writes not stored, a `maintain` that failed -- goes one way
 (`#retire`): calls arriving wait while those holding it finish, a write
 on its way to storage among them, then it is `release`d -- nothing of it
 stored after, resolved once its flush under way has settled -- closed, and
-another restored. Let go of at once, as the alarm's handler first did when
+another restored. `release` remembers the database (a `WeakSet`), not only
+its state: one never kept, or restored from empty storage, had none to
+mark, and a `persist` after made one afresh and wrote an image over the
+generation stored; `restore` into a released one is refused, where it
+made a state anew. Let go of at once, as the alarm's handler first did when
 `maintain` threw with storage sound, it lost answered writes: a request's
 flush waited to be durable and another's waited behind it, the next
 request restored a second database and wrote id 3, the first then stored
@@ -4669,9 +4676,14 @@ under node:sqlite. The first `near` after a restart, a lone write's p50
 alone. `make cloudflare-test` holds the rules to the fakes -- storage
 failing after every operation of a sweep's flush and of its image included
 -- and the example under `wrangler dev`, on the port it says it bound
-(`--port 0`, `Ready on`): an idle object setting no alarm, 350 rows swept
-over four alarms and kept across a restart, an image by the rule and none
-without it, a reload.
+(`--port 0`, `Ready on`; dev.mjs, which rows.mjs and coldstart.mjs start
+it through too): an idle object setting no alarm, 350 rows swept over four
+alarms and kept across a restart, an image by the rule and none without
+it, a reload. wrangler is started with no colour and its line read past
+the escapes besides -- under FORCE_COLOR the address sat between them,
+and the harness waited for good -- a start that ends before the line
+fails, and an `after` hook ends any wrangler a test cut short by its
+timeout left, which held the test process open.
 
 **The browser module grows nothing by doubling past a mebibyte.** Its
 memory is never given back, so a peak stays for good. An index's vectors
