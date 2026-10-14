@@ -434,6 +434,7 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
     let (_, _, node_cpu1) = ps(pid);
     let (me_rss, me_threads, me_cpu1) = ps(me);
     let fds = descriptors(me);
+    let node_fds = descriptors(pid);
     let mut lat = lat.lock().unwrap().clone();
     lat.sort_by(f64::total_cmp);
 
@@ -446,7 +447,7 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
         );
     }
     println!(
-        "  node writing: {node_rss:.1} MB, {node_threads} threads, {open} tenants open at most, CPU {:.1}% of a core",
+        "  node writing: {node_rss:.1} MB, {node_threads} threads, {node_fds} descriptors, {open} tenants open at most, CPU {:.1}% of a core",
         (node_cpu1 - node_cpu0) / wall * 100.0
     );
     println!(
