@@ -10,22 +10,64 @@
 //! library handed the vector as `f32`s as the bindings hand it and as JSON
 //! as a page's JSON would, the server a `POST /query` body; each durable
 //! (an fsync a write, the library's default and `--sync always`) and not.
+//!
+//! Then an app reading by id on one thread while another writes 1 000 rows
+//! of 128 dimensions a text, back to back, buffered: what the reads wait,
+//! and how long the reads that waited out a write took -- each a hold of
+//! the write lock, the reader asking again within microseconds of its last
+//! answer. `ffi_bench beside` runs that part alone, three times, and
+//! `ffi_bench put` a buffered put of one row alone, 20 000 of them.
 
 use fenec_core::prelude::*;
 use fenec_ffi::*;
 use std::ffi::c_char;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn main() {
+    let dir = std::env::temp_dir().join(format!("fenec-ffi-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    if std::env::args().nth(1).as_deref() == Some("beside") {
+        for _ in 0..3 {
+            beside(&dir);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    // `put`: a buffered put of a row of 128 dimensions alone, 20 000 of
+    // them, the vector as `f32`s: what a write of a few documents pays for
+    // being asked whether it is worth building beside the readers.
+    if std::env::args().nth(1).as_deref() == Some("put") {
+        let path = dir.join("put.fenec");
+        let h = open(path.to_str().unwrap(), FENEC_OPEN_NO_SYNC);
+        ok(h, "create collection t (n int, e vector<128>)", "[]", &[]);
+        let v: Vec<f32> = (0..128).map(|i| i as f32 / 128.0).collect();
+        let bytes = apart(0, &v);
+        let mut us: Vec<f64> = (0..20_000)
+            .map(|_| {
+                let t = Instant::now();
+                ok(h, "put t {n: 0, e: $1}", "[null]", &bytes);
+                t.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        call(fenec_close, h);
+        let mean = us.iter().sum::<f64>() / us.len() as f64;
+        us.sort_by(f64::total_cmp);
+        println!(
+            "put alone buffered library {:.2} us p50, {:.2} mean (of 20 000)",
+            us[us.len() / 2],
+            mean
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
     let args: Vec<usize> = std::env::args()
         .skip(1)
         .filter_map(|a| a.parse().ok())
         .collect();
     let rows = args.first().copied().unwrap_or(20_000);
     let dim = args.get(1).copied().unwrap_or(128);
-    let dir = std::env::temp_dir().join(format!("fenec-ffi-bench-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("bench.fenec");
     let p = path.to_str().unwrap();
     let mut rng = 0x2545_f491_4f6c_dd1du64;
@@ -147,7 +189,102 @@ fn main() {
             println!("near      limit 10  library {a:.1} us   server {b:.1} us   (p50 of 1000)");
         }
     }
+    beside(&dir);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One thread reading a row by id in a loop, beside another writing 1 000
+/// rows of a text, an int and a 128-dim vector a text -- the vectors handed
+/// over as `f32`s, as the bindings hand them -- back to back for two
+/// seconds, buffered.
+fn beside(dir: &std::path::Path) {
+    const DIM: usize = 128;
+    const SEEDED: u64 = 10_000;
+    let path = dir.join("beside.fenec");
+    let _ = std::fs::remove_file(&path);
+    let h = open(path.to_str().unwrap(), FENEC_OPEN_NO_SYNC);
+    ok(
+        h,
+        &format!("create collection r (k text, n int, e vector<{DIM}>)"),
+        "[]",
+        &[],
+    );
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let mut vector = move || -> Vec<f32> {
+        (0..DIM)
+            .map(|_| {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+            })
+            .collect()
+    };
+    // The texts made before the run, so the writer is the library alone.
+    let texts: Vec<(String, String, Vec<u8>)> = (0..40)
+        .map(|t| {
+            let (mut text, mut bytes) = (String::from("put r ["), Vec::new());
+            for i in 0..1000 {
+                if i > 0 {
+                    text.push_str(", ");
+                }
+                text.push_str(&format!("{{k: \"w\", n: {}, e: ${}}}", t * 1000 + i, i + 1));
+                bytes.extend(apart(i as u32, &vector()));
+            }
+            text.push(']');
+            (text, format!("[{}]", vec!["null"; 1000].join(",")), bytes)
+        })
+        .collect();
+    for (text, params, bytes) in &texts[..(SEEDED / 1000) as usize] {
+        ok(h, text, params, bytes);
+    }
+    let (stop, written) = (AtomicBool::new(false), AtomicU64::new(0));
+    let run = Duration::from_secs(2);
+    let mut reads = std::thread::scope(|s| {
+        let reader = s.spawn(|| {
+            let (mut id, mut us) = (0u64, Vec::new());
+            while !stop.load(Ordering::Relaxed) {
+                id = (id * 7919 + 13) % SEEDED + 1;
+                let params = format!("[{id}]");
+                let t = Instant::now();
+                ok(h, "get r select k, n where id = $1", &params, &[]);
+                us.push(t.elapsed().as_secs_f64() * 1e6);
+            }
+            us
+        });
+        let end = Instant::now() + run;
+        let mut i = 0;
+        while Instant::now() < end {
+            let (text, params, bytes) = &texts[i % texts.len()];
+            ok(h, text, params, bytes);
+            written.fetch_add(1000, Ordering::Relaxed);
+            i += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap()
+    });
+    call(fenec_close, h);
+    // A read that waited out a write: past 50 us, ten times a read alone.
+    let mut waits: Vec<f64> = reads.iter().copied().filter(|&u| u > 50.0).collect();
+    reads.sort_by(f64::total_cmp);
+    waits.sort_by(f64::total_cmp);
+    let at = |v: &[f64], p: f64| match v.is_empty() {
+        true => 0.0,
+        false => v[((v.len() - 1) as f64 * p) as usize],
+    };
+    println!(
+        "beside    reads {:.0}k/s {:.1}/{:.1} us p50/p99, {:.2} ms at most   \
+         {} waited out a write: {:.2}/{:.2}/{:.2} ms p50/p99/max   writer {:.0} rows/s",
+        reads.len() as f64 / run.as_secs_f64() / 1e3,
+        at(&reads, 0.5),
+        at(&reads, 0.99),
+        at(&reads, 1.0) / 1e3,
+        waits.len(),
+        at(&waits, 0.5) / 1e3,
+        at(&waits, 0.99) / 1e3,
+        at(&waits, 1.0) / 1e3,
+        written.load(Ordering::Relaxed) as f64 / run.as_secs_f64()
+    );
 }
 
 fn open(p: &str, flags: u32) -> u64 {

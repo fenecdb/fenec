@@ -94,29 +94,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                 shape: Shape::Rows,
             })
         }
-        (Method::Post, [name]) => {
-            let schema = &db.collection(name)?.schema;
-            let mut statement = put_from_body(schema, req)?;
-            // `?returning=id` or `?returning=*`: the documents made, ids and
-            // all, rather than their count -- what `insert ... returning`
-            // answers.
-            let returning = req.query.iter().find(|(k, _)| k == "returning");
-            let shape = match (returning, &mut statement) {
-                (Some((_, v)), Statement::Put { pick, .. }) => {
-                    let list = match v.trim() {
-                        "*" => None,
-                        v => Some(projection(schema, v)?),
-                    };
-                    *pick = Some(Box::new(Pick {
-                        returning: Some(list),
-                        ..Pick::default()
-                    }));
-                    Shape::Written(201)
-                }
-                _ => Shape::Affected("inserted", 201),
-            };
-            Ok(Routed { statement, shape })
-        }
+        (Method::Post, [name]) => route_put(&db.collection(name)?.schema, req),
         (Method::Patch | Method::Put, [name]) | (Method::Patch | Method::Put, [name, "all"]) => {
             let schema = &db.collection(name)?.schema;
             let all = seg.len() == 2;
@@ -152,6 +130,32 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
         }
         _ => Err(Error::NotFound(format!("path `{}`", req.path))),
     }
+}
+
+/// `POST /<name>`: the body's documents as the `insert` that makes them,
+/// read against `schema` alone -- the collection's, which a server asks
+/// for under the read lock and reads the body against with no lock held.
+pub fn route_put(schema: &Schema, req: &Request) -> Result<Routed> {
+    let mut statement = put_from_body(schema, req)?;
+    // `?returning=id` or `?returning=*`: the documents made, ids and
+    // all, rather than their count -- what `insert ... returning`
+    // answers.
+    let returning = req.query.iter().find(|(k, _)| k == "returning");
+    let shape = match (returning, &mut statement) {
+        (Some((_, v)), Statement::Put { pick, .. }) => {
+            let list = match v.trim() {
+                "*" => None,
+                v => Some(projection(schema, v)?),
+            };
+            *pick = Some(Box::new(Pick {
+                returning: Some(list),
+                ..Pick::default()
+            }));
+            Shape::Written(201)
+        }
+        _ => Shape::Affected("inserted", 201),
+    };
+    Ok(Routed { statement, shape })
 }
 
 /// An unfiltered `PATCH`/`DELETE` covers the whole collection. It is very

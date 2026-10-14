@@ -1394,6 +1394,8 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // The write path does its routing under the write lock too: if the lock
     // is released between the schema lookup and execution, a `drop
     // collection` arriving in between leaves the two stages inconsistent.
+    // A `POST` of documents is read before it, against the schema it then
+    // finds still in place ([`early_put`]).
     if wants_write(req) {
         metrics::wrote();
         // A tenant's write rates (`quota::within`), asked before the lock.
@@ -1404,69 +1406,10 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(k) => k,
             Err(refusal) => return refusal,
         };
-        let mut guard = held::write(db);
-        let ttl = cfg.idempotency_ttl.as_millis() as i64;
-        if let Some(sent) = key
-            .as_ref()
-            .and_then(|k| idempotent::answered(&guard, k, ttl))
-        {
-            return sent;
-        }
-        let routed = match api::route(&guard, req) {
-            Ok(r) => r,
-            Err(e) => return error_response(&e),
-        };
-        let mut mask = None;
-        let (stmt, bound) = match scoped_under(&who, &guard, routed.statement, &[], &mut mask) {
-            Ok(s) => s,
-            Err(e) => return error_response(&e),
-        };
-        if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
-            return refused(why);
-        }
-        if key.is_some() {
-            if let Err(e) = guard.begin() {
-                return error_response(&e);
-            }
-        }
-        let running = trace::span("execute");
-        let shows = bound.as_ref().unwrap_or(&who);
-        let result = access::within(shows, || guard.execute_with(&stmt, &[]))
-            .map(|r| shown(shows, mask.as_ref(), &guard, r));
-        drop(running);
-        let answer =
-            |result: &fenec_core::error::Result<fenec_core::prelude::Response>| match result {
-                Ok(resp) => {
-                    statements::rows(counted(resp));
-                    api::render(resp, &routed.shape, fenec_core::VERSION)
-                }
-                Err(e) => error_response(e),
-            };
-        // A key keeps the answer, so it is made under the lock; without
-        // one, after it, as before.
-        let kept = match &key {
-            Some(k) => {
-                let resp = answer(&result);
-                if let Err(e) = keyed(&mut guard, k, &resp, result.is_ok(), ttl) {
-                    return error_response(&e);
-                }
-                Some(resp)
-            }
-            None => None,
-        };
-        let seq = result.is_ok().then(|| guard.change_seq());
-        let durability = match result {
-            Ok(_) => match flush_for(cfg, &mut guard) {
-                Ok(d) => d,
-                Err(e) => return error_response(&e),
-            },
-            Err(_) => None,
-        };
-        drop(guard);
-        if let Err(e) = await_durable(db, durability) {
-            return error_response(&e);
-        }
-        with_seq(kept.unwrap_or_else(|| answer(&result)), seq)
+        // Let go of after the write lock, with the documents the put wrote.
+        let mut ready = fenec_core::engine::Prepared::default();
+        let early = early_put(db, req, &who, &mut ready);
+        rest_write(db, cfg, req, &who, key, early.as_ref(), &mut ready)
     } else {
         let guard = held::read(db);
         let routed = match api::route(&guard, req) {
@@ -1491,6 +1434,227 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Err(e) => error_response(&e),
         }
     }
+}
+
+/// A REST write under the write lock, routed there unless [`early_put`]
+/// read it before against the schema the collection still holds. `ready`
+/// is the caller's, let go of after the lock with the documents the put
+/// wrote; the statement is borrowed where it was read, not moved: a
+/// `Statement` is a kilobyte, and a copy is a `memcpy` of it.
+fn rest_write(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    req: &Request,
+    who: &Who,
+    key: Option<idempotent::Key>,
+    early: Option<&Early>,
+    ready: &mut fenec_core::engine::Prepared,
+) -> Response {
+    let guard = held::write(db);
+    let ttl = cfg.idempotency_ttl.as_millis() as i64;
+    if let Some(sent) = key
+        .as_ref()
+        .and_then(|k| idempotent::answered(&guard, k, ttl))
+    {
+        return sent;
+    }
+    if let Some(e) = early.filter(|e| e.holds(&guard)) {
+        let run = Run {
+            shape: &e.shape,
+            stmt: &e.stmt,
+            bound: None,
+            mask: e.mask.as_ref(),
+        };
+        return rest_run(db, cfg, who, key, guard, run, ready);
+    }
+    let routed = match api::route(&guard, req) {
+        Ok(r) => r,
+        Err(e) => return error_response(&e),
+    };
+    let mut mask = None;
+    let (stmt, bound) = match scoped_under(who, &guard, routed.statement, &[], &mut mask) {
+        Ok(s) => s,
+        Err(e) => return error_response(&e),
+    };
+    let run = Run {
+        shape: &routed.shape,
+        stmt: &stmt,
+        bound,
+        mask: mask.as_ref(),
+    };
+    rest_run(db, cfg, who, key, guard, run, ready)
+}
+
+/// A REST write's statement as [`rest_write`] found it: read before the
+/// write lock or under it, borrowed where it lies -- a `Statement` is a
+/// kilobyte, and gathering the two ways into one value moved it again.
+struct Run<'a> {
+    shape: &'a api::Shape,
+    stmt: &'a Statement,
+    /// The token the write is checked and its rows shown as, where its
+    /// rules were bound under the lock ([`scoped_under`]).
+    bound: Option<Who>,
+    mask: Option<&'a access::Mask>,
+}
+
+/// [`rest_write`]'s statement run under the write lock `guard`, answered,
+/// and made durable once the lock is let go.
+fn rest_run(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    who: &Who,
+    key: Option<idempotent::Key>,
+    mut guard: std::sync::RwLockWriteGuard<'_, Database>,
+    run: Run<'_>,
+    ready: &mut fenec_core::engine::Prepared,
+) -> Response {
+    let ttl = cfg.idempotency_ttl.as_millis() as i64;
+    let Run {
+        shape,
+        stmt,
+        bound,
+        mask,
+    } = run;
+    if let Some(why) = over_ceiling(cfg.max_memory, &guard, stmt) {
+        return refused(why);
+    }
+    if key.is_some() {
+        if let Err(e) = guard.begin() {
+            return error_response(&e);
+        }
+    }
+    let running = trace::span("execute");
+    let shows = bound.as_ref().unwrap_or(who);
+    // An insert of a few documents runs as it always did.
+    let result = access::within(shows, || match ready.built() {
+        0 => guard.execute_with(stmt, &[]),
+        _ => guard.execute_ready(stmt, &[], ready, 0),
+    })
+    .map(|r| shown(shows, mask, &guard, r));
+    drop(running);
+    let answer = |result: &fenec_core::error::Result<fenec_core::prelude::Response>| match result {
+        Ok(resp) => {
+            statements::rows(counted(resp));
+            api::render(resp, shape, fenec_core::VERSION)
+        }
+        Err(e) => error_response(e),
+    };
+    // A key keeps the answer, so it is made under the lock; without
+    // one, after it, as before.
+    let kept = match &key {
+        Some(k) => {
+            let resp = answer(&result);
+            if let Err(e) = keyed(&mut guard, k, &resp, result.is_ok(), ttl) {
+                return error_response(&e);
+            }
+            Some(resp)
+        }
+        None => None,
+    };
+    let seq = result.is_ok().then(|| guard.change_seq());
+    let durability = match result {
+        Ok(_) => match flush_for(cfg, &mut guard) {
+            Ok(d) => d,
+            Err(e) => return error_response(&e),
+        },
+        Err(_) => None,
+    };
+    drop(guard);
+    if let Err(e) = await_durable(db, durability) {
+        return error_response(&e);
+    }
+    with_seq(kept.unwrap_or_else(|| answer(&result)), seq)
+}
+
+/// A `POST /<name>` read before the write lock: its body's documents as
+/// the statement the write runs, read against the collection's schema as
+/// it stood a moment before, and that schema, held. The write lock takes it
+/// where the collection still holds that very schema ([`Early::holds`]):
+/// [`api::route_put`] reads nothing else, so routed there it would be this
+/// statement.
+struct Early {
+    schema: fenec_core::schema::SchemaCell,
+    shape: api::Shape,
+    stmt: Statement,
+    mask: Option<access::Mask>,
+}
+
+impl Early {
+    /// Whether `db` holds the schema the documents were read against: a
+    /// change to a collection's schema copies it, so the same `Arc` is the
+    /// same schema, and while this one is held its allocation is no other's.
+    fn holds(&self, db: &Database) -> bool {
+        db.collection(&self.schema.name)
+            .is_ok_and(|c| Arc::ptr_eq(&c.schema, &self.schema))
+    }
+}
+
+/// The bytes a `POST /<name>`'s body is read before the write lock from
+/// ([`early_put`]) where it holds too few documents to build there: under
+/// them its read under the lock is about a microsecond, and reading it
+/// before -- a read lock more, the schema's count taken and let go, the
+/// collection looked up again under the write lock -- took a row of a text
+/// and an int 1.11 -> 1.14-1.16 us in process (the mean of 20 000), and
+/// the same with this bound 1.20 -> 1.21. A row with a 128-dim vector,
+/// read before, took what it did: 4.17 and 4.12 us at the median.
+const EARLY_AT: usize = 1024;
+
+/// A `POST /<name>`'s body read with no lock held, and its documents built
+/// and encoded under the read lock where it writes [`PREPARE_AT`] or more
+/// ([`Database::prepare`]), for the write lock to take as `/query`'s and
+/// `/batch`'s puts are taken: under the write lock, every reader waiting,
+/// a body of 1 000 rows was read, checked and built. Nothing for any other
+/// write, for a token whose rules read other collections -- its statement
+/// is bound under the write lock ([`scoped_under`]), so documents built
+/// before it would be another statement's -- and for a body the read
+/// refuses, which the write lock routes again for its answer. The
+/// documents are built only against the schema the body was read against,
+/// asked again under the read lock that builds them: built against one
+/// that moved meanwhile, a write lock that found it still in place would
+/// take documents read for the one before.
+///
+/// Nothing either for a body under [`EARLY_AT`] bytes that cannot hold
+/// [`PREPARE_AT`] documents -- fewer `{` than that -- which is read under
+/// the write lock as before.
+///
+/// [`PREPARE_AT`]: fenec_core::engine::PREPARE_AT
+fn early_put(
+    db: &RwLock<Database>,
+    req: &Request,
+    who: &Who,
+    ready: &mut fenec_core::engine::Prepared,
+) -> Option<Early> {
+    if req.method != Method::Post || who.reaches_out() {
+        return None;
+    }
+    let braces = || req.body.iter().filter(|&&b| b == b'{').count();
+    if req.body.len() < EARLY_AT && braces() < fenec_core::engine::PREPARE_AT {
+        return None;
+    }
+    // `/<name>`, as `req.segments()` would find it, with no `Vec` made.
+    let name = req.path.trim_matches('/');
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let schema = held::read(db).collection(name).ok()?.schema.clone();
+    let routed = api::route_put(&schema, req).ok()?;
+    let mut mask = None;
+    let stmt = scoped(who, routed.statement, &[], &mut mask).ok()?;
+    let stmts = [(&stmt, &[][..])];
+    if fenec_core::engine::Prepared::worth(&stmts) {
+        let g = held::read(db);
+        if g.collection(name)
+            .is_ok_and(|c| Arc::ptr_eq(&c.schema, &schema))
+        {
+            *ready = g.prepare(&stmts);
+        }
+    }
+    Some(Early {
+        schema,
+        shape: routed.shape,
+        stmt,
+        mask,
+    })
 }
 
 /// `/_schema`: a schema declared in code -- the description every SDK's
@@ -2726,6 +2890,140 @@ mod tests {
         assert!(body.ends_with(r#""retry_after":1}"#), "{body}");
         assert!(late.extra.iter().any(|(k, _)| k == "Retry-After"));
         drop(t);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn rest_post(target: &str, body: String) -> Request {
+        Request {
+            method: Method::Post,
+            target: target.into(),
+            path: target.into(),
+            query: Vec::new(),
+            headers: Vec::new(),
+            body: body.into_bytes(),
+            keep_alive: false,
+        }
+    }
+
+    fn rest_docs(n: usize) -> String {
+        let docs: Vec<String> = (0..n)
+            .map(|i| format!(r#"{{"k":"k{}","n":{i},"v":[0.1,{i}.3]}}"#, i % 3))
+            .collect();
+        format!("[{}]", docs.join(","))
+    }
+
+    fn rest_early(
+        db: &RwLock<Database>,
+        req: &Request,
+    ) -> (Option<Early>, fenec_core::engine::Prepared) {
+        let mut ready = fenec_core::engine::Prepared::default();
+        let early = early_put(db, req, &Who::Full, &mut ready);
+        (early, ready)
+    }
+
+    fn rest_run(db: &mut Database, sql: &str) {
+        for s in fenec_ql::parse(sql).unwrap() {
+            db.execute(&s).unwrap();
+        }
+    }
+
+    /// What is read and built before the write lock: a `POST /<name>`'s
+    /// body where it may hold [`PREPARE_AT`] documents or is [`EARLY_AT`]
+    /// bytes, and its documents where they are [`PREPARE_AT`] or more --
+    /// nothing for a small body of a few, another write, a body the read
+    /// refuses or a collection not there, which the write lock routes for
+    /// their answers.
+    ///
+    /// [`PREPARE_AT`]: fenec_core::engine::PREPARE_AT
+    #[test]
+    fn a_rest_insert_is_read_and_built_before_the_write_lock() {
+        let mut db = Database::new();
+        rest_run(&mut db, "create collection ev (k text, n int, v vector<2>)");
+        let db = Arc::new(RwLock::new(db));
+        let (early, ready) = rest_early(&db, &rest_post("/ev", rest_docs(16)));
+        assert!(early.is_some_and(|e| e.holds(&db.read().unwrap())));
+        assert_eq!(ready.built(), 1);
+        let small = rest_post("/ev", rest_docs(15));
+        assert!(small.body.len() < EARLY_AT);
+        let (early, ready) = rest_early(&db, &small);
+        assert!(early.is_none());
+        assert_eq!(ready.built(), 0);
+        let long = format!(r#"[{{"k":"{}"}}, {{"k":"x"}}]"#, "x".repeat(EARLY_AT));
+        let (early, ready) = rest_early(&db, &rest_post("/ev", long));
+        assert!(early.is_some());
+        assert_eq!(ready.built(), 0);
+        let mut nope = rest_docs(20);
+        nope.insert_str(1, r#"{"k":"x","nope":1},"#);
+        let refused = [
+            rest_post("/ev", nope),
+            rest_post("/ev", format!("[{}", "{".repeat(20))),
+            rest_post("/nosuch", rest_docs(20)),
+            Request {
+                method: Method::Patch,
+                ..rest_post("/ev", r#"{"n":1}"#.into())
+            },
+        ];
+        for req in &refused {
+            let (early, ready) = rest_early(&db, req);
+            assert!(early.is_none(), "{}", req.target);
+            assert_eq!(ready.built(), 0);
+        }
+    }
+
+    /// A body read and its documents built before the write lock against a
+    /// schema that moves before the lock is had -- a field added, an index
+    /// made, the collection made again with its fields in another order or
+    /// its vector a json field -- is read and built again under it: the
+    /// file is the one the insert routed and built under the lock writes,
+    /// byte for byte. Taken as they were built, the documents would lack the
+    /// field added or hold their values in the order the collection had
+    /// before; taken as it was read, the statement would hand the json field
+    /// the vector's `f32`s, which it refuses for the numbers as written.
+    #[test]
+    fn a_rest_insert_whose_schema_moved_before_the_lock_is_read_again() {
+        let changes = [
+            "alter collection ev add field extra text",
+            "create index on ev (k) @hash",
+            "drop collection ev; create collection ev (n int, k text, v vector<2>)",
+            "drop collection ev; create collection ev (k text, n int, v json)",
+        ];
+        let dir = std::env::temp_dir().join(format!("fenec-rest-moved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (c, change) in changes.iter().enumerate() {
+            let a_path = dir.join(format!("{c}-a.fenec"));
+            let b_path = dir.join(format!("{c}-b.fenec"));
+            let _ = std::fs::remove_file(&a_path);
+            let _ = std::fs::remove_file(&b_path);
+            let mut a = fenec_core::fs::open_mapped(&a_path).unwrap();
+            let mut b = fenec_core::fs::open_mapped(&b_path).unwrap();
+            rest_run(&mut a, "create collection ev (k text, n int, v vector<2>)");
+            rest_run(&mut b, "create collection ev (k text, n int, v vector<2>)");
+            let b = Arc::new(RwLock::new(b));
+            let req = rest_post("/ev", rest_docs(40));
+            let (early, mut ready) = rest_early(&b, &req);
+            assert_eq!(ready.built(), 1);
+            rest_run(&mut a, change);
+            rest_run(&mut b.write().unwrap(), change);
+            assert!(
+                !early.as_ref().unwrap().holds(&b.read().unwrap()),
+                "{change}"
+            );
+            let cfg = Config::default();
+            let resp = rest_write(&b, &cfg, &req, &Who::Full, None, early.as_ref(), &mut ready);
+            let body = String::from_utf8_lossy(&resp.body);
+            assert_eq!(resp.status, 201, "{change}: {body}");
+            let routed = api::route(&a, &req).unwrap();
+            a.execute_with(&routed.statement, &[]).unwrap();
+            let b = Arc::into_inner(b).unwrap().into_inner().unwrap();
+            let all = fenec_ql::parse_one("get ev order id").unwrap();
+            assert_eq!(a.query(&all, &[]).unwrap(), b.query(&all, &[]).unwrap());
+            drop((a, b));
+            let (x, y) = (
+                std::fs::read(&a_path).unwrap(),
+                std::fs::read(&b_path).unwrap(),
+            );
+            assert!(x == y, "{change}: {} and {} bytes differ", x.len(), y.len());
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 }

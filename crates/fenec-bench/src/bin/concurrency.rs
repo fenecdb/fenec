@@ -23,6 +23,12 @@
 //!     readers read the last commit (WAL) beside its transaction. p50, p99
 //!     and the longest. `blocks` runs this alone, three times, and with
 //!     `NOPREP` set the block builds its documents under the write lock.
+//!   * `rest` alone: a read by id beside REST inserts of 1 000 rows landing
+//!     back to back through the server's handler in process -- rows of a
+//!     text and an int, and those with a 128-dim vector -- and what each
+//!     hold of the write lock lasted, as a thread reading in a loop waits it
+//!     out; then a REST insert of one row alone, and of one with a 128-dim
+//!     vector, beside the engine's own put of it (`rest one` those alone).
 //!
 //! SQLite threads each hold a connection with a 30 s busy timeout, the
 //! usual answer to `SQLITE_BUSY`; fenecdb's share one database behind a
@@ -290,6 +296,193 @@ fn beside_blocks(db: &Arc<RwLock<Database>>, spath: &Path) {
         "  beside blocks of 1 000 writes",
         reads(&mut f),
         reads(&mut s),
+    );
+}
+
+// ------------------------------------------------ beside REST inserts
+
+/// A `POST /<name>` body of [`BLOCK`] rows numbered from `n`: a text and an
+/// int, and a 128-dim vector beside them where `dim` is 128.
+fn rest_body(n: i64, dim: usize) -> Vec<u8> {
+    let mut seed = n as u64;
+    let mut body = String::with_capacity(BLOCK as usize * (32 + dim * 12));
+    body.push('[');
+    for i in n..n + BLOCK {
+        if i > n {
+            body.push(',');
+        }
+        body.push_str(&format!("{{\"k\":\"rest\",\"n\":{i}"));
+        if dim > 0 {
+            body.push_str(",\"e\":[");
+            for d in 0..dim {
+                if d > 0 {
+                    body.push(',');
+                }
+                let x = (next(&mut seed) >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+                body.push_str(&format!("{x}"));
+            }
+            body.push(']');
+        }
+        body.push('}');
+    }
+    body.push(']');
+    body.into_bytes()
+}
+
+fn rest_post(path: &str, body: Vec<u8>) -> fenec_http::http::Request {
+    fenec_http::http::Request {
+        method: fenec_http::http::Method::Post,
+        target: path.into(),
+        path: path.into(),
+        query: Vec::new(),
+        headers: Vec::new(),
+        body,
+        keep_alive: true,
+    }
+}
+
+/// A thread reading a row by id in a loop beside a writer posting REST
+/// inserts of [`BLOCK`] rows back to back through the server's handler in
+/// process (`fenec_http::handle`): what the reads wait, and how long the
+/// reads that waited out a write took -- past 20 us, twenty times a read
+/// alone, each one of the writer's holds of the write lock, the reader
+/// asking again within a microsecond of its last answer. One reader, not
+/// four: four reading flat out took the cores the writer's body was read
+/// on once that ran beside them, and timed the machine.
+fn beside_rest(path: &Path, dim: usize) {
+    let db = fenec_open(path);
+    let collection = match dim {
+        0 => "rest_plain",
+        _ => "rest_vectors",
+    };
+    let vector = match dim {
+        0 => String::new(),
+        d => format!(", e vector<{d}>"),
+    };
+    db.write()
+        .unwrap()
+        .execute(&stmt(&format!(
+            "create collection {collection} (k text, n int{vector})"
+        )))
+        .unwrap();
+    let target = format!("/{collection}");
+    // The bodies made before the run, so the writer is the handler alone.
+    let bodies: Vec<Vec<u8>> = (0..60).map(|b| rest_body(b * BLOCK, dim)).collect();
+    let cfg = fenec_http::Config::default();
+    let stop = AtomicBool::new(false);
+    let written = AtomicU64::new(0);
+    let mut times = std::thread::scope(|s| {
+        let reader = s.spawn(|| {
+            let get = stmt("get t where id = $1");
+            let (mut seed, mut times) = (1u64, Vec::new());
+            while !stop.load(Ordering::Relaxed) {
+                let id = (next(&mut seed) % ROWS as u64) as i64 + 1;
+                let t = Instant::now();
+                let out = db.read().unwrap().query(&get, &[Value::Int(id)]);
+                times.push(t.elapsed().as_secs_f64() * 1e3);
+                out.unwrap();
+            }
+            times
+        });
+        let end = Instant::now() + RUN;
+        let mut b = 0;
+        while Instant::now() < end {
+            let req = rest_post(&target, bodies[b % bodies.len()].clone());
+            let resp = fenec_http::handle(&db, &cfg, &req);
+            assert_eq!(resp.status, 201, "{}", String::from_utf8_lossy(&resp.body));
+            written.fetch_add(BLOCK as u64, Ordering::Relaxed);
+            b += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap()
+    });
+    let mut holds: Vec<f64> = times.iter().copied().filter(|&ms| ms > 0.02).collect();
+    let rows = written.load(Ordering::Relaxed) as f64 / RUN.as_secs_f64();
+    let (p50, p99, max) = (
+        pct(&mut holds, 0.5),
+        pct(&mut holds, 0.99),
+        pct(&mut holds, 1.0),
+    );
+    println!(
+        "  {:<34}{:>28}   holds {} {:.2}/{:.2}/{:.2} ms   {:.0} rows/s",
+        format!("REST inserts of 1 000, dim {dim}"),
+        reads(&mut times),
+        holds.len(),
+        p50,
+        p99,
+        max,
+        rows
+    );
+}
+
+/// A REST insert of one row through the server's handler in process, alone:
+/// its p50 and mean over 20 000, in microseconds -- what reading a body
+/// before the write lock adds where nothing is built there.
+fn rest_one(path: &Path) {
+    let db = fenec_open(path);
+    db.write()
+        .unwrap()
+        .execute(&stmt("create collection one (k text, n int)"))
+        .unwrap();
+    let cfg = fenec_http::Config::default();
+    let mut us = Vec::with_capacity(20_000);
+    for i in 0..20_000 {
+        let body = format!("{{\"k\":\"one\",\"n\":{i}}}").into_bytes();
+        let req = rest_post("/one", body);
+        let t = Instant::now();
+        let resp = fenec_http::handle(&db, &cfg, &req);
+        us.push(t.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(resp.status, 201);
+    }
+    let mean = us.iter().sum::<f64>() / us.len() as f64;
+    println!(
+        "  {:<34}{:>28}",
+        "REST insert of one row, alone",
+        format!("{:.2} us p50, {:.2} mean", pct(&mut us, 0.5), mean)
+    );
+    // A row with a 128-dim vector, a body of a kilobyte and more: read
+    // before the write lock.
+    db.write()
+        .unwrap()
+        .execute(&stmt(
+            "create collection wide (k text, n int, e vector<128>)",
+        ))
+        .unwrap();
+    let mut us = Vec::with_capacity(20_000);
+    let mut seed = 3u64;
+    for i in 0..20_000 {
+        let e: Vec<String> = (0..128)
+            .map(|_| format!("{}", (next(&mut seed) >> 40) as f32 / (1u64 << 24) as f32))
+            .collect();
+        let body = format!("{{\"k\":\"one\",\"n\":{i},\"e\":[{}]}}", e.join(","));
+        let req = rest_post("/wide", body.into_bytes());
+        let t = Instant::now();
+        let resp = fenec_http::handle(&db, &cfg, &req);
+        us.push(t.elapsed().as_secs_f64() * 1e6);
+        assert_eq!(resp.status, 201);
+    }
+    let mean = us.iter().sum::<f64>() / us.len() as f64;
+    println!(
+        "  {:<34}{:>28}",
+        "REST insert of a 128-dim row",
+        format!("{:.2} us p50, {:.2} mean", pct(&mut us, 0.5), mean)
+    );
+    // The same row put on the database itself, which the handler's
+    // reading of a body does not reach: what the machine gave this run,
+    // to hold two builds' runs to each other by.
+    let put = stmt("put one {k: $1, n: $2}");
+    let mut us = Vec::with_capacity(20_000);
+    for i in 0..20_000 {
+        let args = [Value::Text("one".into()), Value::Int(i)];
+        let t = Instant::now();
+        db.write().unwrap().execute_with(&put, &args).unwrap();
+        us.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    let mean = us.iter().sum::<f64>() / us.len() as f64;
+    println!(
+        "  {:<34}{:>28}",
+        "the engine's put of it (control)",
+        format!("{:.2} us p50, {:.2} mean", pct(&mut us, 0.5), mean)
     );
 }
 
@@ -564,6 +757,24 @@ fn main() {
         return;
     }
     let (fpath, spath) = (dir.join("bench.fenec"), dir.join("bench.sqlite"));
+    // `rest`: the reads beside REST inserts, three times over each shape,
+    // and an insert of one row alone.
+    // `rest one`: the insert of one row alone.
+    if std::env::args().nth(1).as_deref() == Some("rest") {
+        if std::env::args().nth(2).as_deref() != Some("one") {
+            println!(
+                "  {:<34}{:>28}   holds of the write lock: count p50/p99/max",
+                "", "reads/s p50/p99 max"
+            );
+            for _ in 0..3 {
+                beside_rest(&fpath, 0);
+                beside_rest(&fpath, 128);
+            }
+        }
+        rest_one(&fpath);
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
     // `blocks`: the reads beside blocks alone, three times over.
     if std::env::args().nth(1).as_deref() == Some("blocks") {
         row("", "fenecdb".into(), "SQLite".into());
