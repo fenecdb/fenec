@@ -171,7 +171,8 @@ replication, the graph keeper and the mirror are threads of it. A second
 the writes on the primary's disk, serves reads, refuses writes with 403, and
 is promoted by hand; `fenec backup`, `fenec archive` and `fenec restore --to
 <time>` take a running database whole, keep its writes, and rebuild it as it
-stood at a moment. With `--follow postgres://...` it mirrors a PostgreSQL
+stood at a moment -- with `--tenants`, every tenant of a `--dir` node over
+one connection. With `--follow postgres://...` it mirrors a PostgreSQL
 table into its file as the table commits, and serves the mirror while it
 follows. [Server](https://fenecdb.com/docs/server) ·
 [HTTP endpoint](https://fenecdb.com/docs/http) ·

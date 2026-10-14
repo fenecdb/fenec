@@ -401,16 +401,20 @@ encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
 
 <h2>Endpoints</h2>
 
-<p>Three endpoints, all on the HTTP listener and all wanting the replication
+<p>Three endpoints — a <code>--dir</code> node's tenants each have them
+under <code>/t/&lt;tenant&gt;/</code>, and the node one more, the stream of
+every tenant — all on the HTTP listener and all wanting the replication
 token, not the <code>--http-token</code>.</p>
 
 <pre data-lang="http">GET  /_replication?since=&lt;change&gt;&amp;history=&lt;id&gt;   the stream a replica is fed
 GET  /_replication/status                          role, position, replicas, lag
 POST /_replication/promote                         a replica's promotion
+POST /_replication/tenants                         on a --dir node: every tenant's writes
+                                                   over one stream (fenec archive --tenants)
 </pre>
 
 <details class="deep"><summary>Details</summary>
-<p>All three want <code>Authorization: Bearer &lt;replication token&gt;</code>,
+<p>All of them want <code>Authorization: Bearer &lt;replication token&gt;</code>,
 not the <code>--http-token</code>: the token is for replicas and for whoever
 promotes them. The status of a replica names its primary and says whether it
 is connected, how many writes it is <code>behind</code> the primary's disk,

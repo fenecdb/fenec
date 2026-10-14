@@ -38,8 +38,8 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
   each but `key` takes --key-file <path> (or FENEC_KEY_FILE): the archive's
   files, or the backup file, sealed with it
 
-  <primary> is its HTTP address, http://host:port, and <t> its
-  --replication-token (also read from FENEC_REPLICATION_TOKEN).
+  <primary> is its HTTP address, http://host:port, <node> a --dir node's,
+  and <t> its --replication-token (also read from FENEC_REPLICATION_TOKEN).
 
   backup    the database as it stands, taken while the server runs: into a
             file that opens as a database of its own, or into an archive as
@@ -48,13 +48,22 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
             was made, until interrupted; starts with a base image, and takes
             one of its own end every --image-every (1h unless given) without
             asking the primary, so a restore replays at most that much;
-            with --keep, lets go of what no restore within it needs
+            with --keep, lets go of what no restore within it needs. A
+            primary on a history that does not lead from the archive's
+            end, at or before it -- restored to an earlier moment, or
+            another database -- is refused: its writes would land among
+            the archive's; archive it into a directory of its own
   restore   the database as it stood at <time> (2026-09-22T10:15:00Z) or
             after change <n>, or at the archive's end: the latest image at
             or before that point and the writes after it
   prune     what `archive --keep` lets go of, done once: the images before the
             newest one taken by the start of the window and the segments
             before the oldest image kept -- as on a copy synced elsewhere
+
+  verify    reads the archive as a restore would: every image opens at its
+            change, the segments run on with none missing, a restore to the
+            end opens; says from when to when it can restore, and exits 1
+            when it cannot
 
   --tenants every tenant of a --dir node (fenec-server --dir
             --replication-token), each an archive of its own under
@@ -70,11 +79,6 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
             alone; with --tenants they read every one: restore writes
             <out-dir>/<tenant>.fenec for each tenant the node held at that
             moment -- a directory a node serves (fenec-server --dir)
-
-  verify    reads the archive as a restore would: every image opens at its
-            change, the segments run on with none missing, a restore to the
-            end opens; says from when to when it can restore, and exits 1
-            when it cannot
 
   key       writes a new key into <key-file>, 64 hexadecimal digits,
             readable by its owner alone. With it an archive's images,
