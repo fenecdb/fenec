@@ -4,15 +4,20 @@
   //   make site            build into site/dist
   //   make site-deploy     build, then wrangler deploy
   //
-  // Assets-only: there is no `main`, so every request is answered from
-  // site/dist by the static-asset router. Caching and security headers come
+  // Every request but /api/* is answered from site/dist by the static-asset
+  // router, without running the Worker; caching and security headers come
   // from site/dist/_headers, which site/build.py writes on every build.
+  // /api/embed is site/worker.js: a search query's embedding, for the
+  // search by meaning the page runs (site/README.md, "Search").
   "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
   "name": "fenecdb-site",
   "compatibility_date": "2026-09-01",
+  "main": "./site/worker.js",
 
   "assets": {
     "directory": "./site/dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"],
     // Default. `/docs/` serves docs/index.html; `/docs/fenecql.html` serves
     // itself. Both spellings appear in the generated links.
     "html_handling": "auto-trailing-slash",
@@ -32,6 +37,28 @@
   //
   // To declare them here instead, grant the token Zone > Workers Routes > Edit
   // on the fenecdb.com zone.
+
+  // The embedding endpoint. Off until the AI Gateway below exists: it
+  // answers 404 and the search stays with the words. The owner's steps to
+  // turn it on are in site/README.md ("Search by meaning").
+  "vars": {
+    "SEMANTIC": "off",
+    // The gateway every embedding goes through, for its cache, its rate
+    // limit and its logs.
+    "AI_GATEWAY": "fenecdb-site",
+    // The day's cap, in Workers AI neurons: half the 10 000 a day an
+    // account has free. Past it the endpoint answers 429 until midnight UTC.
+    "DAILY_NEURONS": "5000"
+  },
+  "ai": { "binding": "AI" },
+  // Per address, on top of the gateway's limit over every address.
+  "ratelimits": [
+    { "name": "PER_IP", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "BUDGET", "class_name": "Budget" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Budget"] }],
 
   "observability": { "enabled": true }
 }
