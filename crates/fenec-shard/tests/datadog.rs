@@ -203,7 +203,15 @@ fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
     let mut dir = Directory::in_memory();
     let token = "adm".into();
     let addr = node.clone();
-    dir.set_node("n1", Node { addr, token }).unwrap();
+    dir.set_node(
+        "n1",
+        Node {
+            addr,
+            token,
+            ..Node::default()
+        },
+    )
+    .unwrap();
     dir.place("acme", "n1", State::Active).unwrap();
     let router = Router::new(
         dir,

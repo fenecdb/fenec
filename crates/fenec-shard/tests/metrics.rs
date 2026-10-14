@@ -77,7 +77,15 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         ("dead", dead, "x"),
     ] {
         let token = token.into();
-        dir.set_node(name, Node { addr, token }).unwrap();
+        dir.set_node(
+            name,
+            Node {
+                addr,
+                token,
+                ..Node::default()
+            },
+        )
+        .unwrap();
     }
     dir.place("lost", "dead", State::Active).unwrap();
     let cfg = Config {

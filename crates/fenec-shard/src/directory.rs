@@ -9,6 +9,11 @@
 //! A placement moves in one statement (`node` and `state` together), so
 //! there is no moment on disk where a tenant belongs to both nodes or to
 //! neither.
+//!
+//! A node is in a region and a zone (a datacenter), and a tenant is in its
+//! node's region: kept on the node alone, so a move or a failover changes a
+//! tenant's region with its node, and there is no second record to drift
+//! from it.
 
 use fenec_core::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -16,11 +21,12 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 const SCHEMA: [&str; 5] = [
-    "create collection if not exists nodes (name text @hash, addr text, token text)",
+    "create collection if not exists nodes \
+     (name text @hash, addr text, token text, region text, zone text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
     // Which node replicates which. A collection of its own rather than a
     // field on `nodes`: a directory written before this existed opens as it
-    // is, and the engine has no schema migration to add one.
+    // is, and the engine had no `alter` to add one then.
     "create collection if not exists pairs (node text @hash, standby text)",
     // Which node holds a tenant's replica, where it has one of its own
     // rather than its node's standby -- a collection of its own for the
@@ -33,11 +39,25 @@ const SCHEMA: [&str; 5] = [
     "create collection if not exists quotas (tenant text @hash, quota text)",
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The fields `nodes` took after directories were first written, added to
+/// one written before them as the engine adds a field: its nodes read them
+/// as null, the unnamed region and zone. A binary from before them reads
+/// `name, addr, token` as it always did -- it forwards every tenant where
+/// it is, and places without regard to regions.
+const NODE_FIELDS: [&str; 2] = ["region", "zone"];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Node {
     pub addr: String,
     /// The node's `--admin-token`. Never leaves the router.
     pub token: String,
+    /// Where the node runs: a tenant lives in one region, and its replica
+    /// is kept in the same one. Empty: the unnamed region, one region like
+    /// any other, which every node of a directory that names none is in.
+    pub region: String,
+    /// The datacenter inside the region: a replica goes to another zone
+    /// than its primary's where the region has one. Empty: not known.
+    pub zone: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +159,12 @@ impl Directory {
                 for sql in SCHEMA {
                     g.execute(&fenec_ql::parse_one(sql)?)?;
                 }
+                for f in NODE_FIELDS {
+                    if g.collection("nodes")?.schema.field_pos(f).is_none() {
+                        let sql = format!("alter collection nodes add field {f} text");
+                        g.execute(&fenec_ql::parse_one(&sql)?)?;
+                    }
+                }
             }
         }
         let mut d = Directory {
@@ -192,7 +218,8 @@ impl Directory {
             ..Ids::default()
         };
         let mut nodes = BTreeMap::new();
-        for (id, row) in rows(&g, "get nodes select name, addr, token")? {
+        let select = format!("get nodes select {}", node_fields(&g).join(", "));
+        for (id, row) in rows(&g, &select)? {
             ids.nodes.insert(id, text(&row[0]));
             nodes.insert(text(&row[0]), node_of(&row));
         }
@@ -251,7 +278,7 @@ impl Directory {
             }
         };
         let (Some(nodes), Some(tenants), Some(pairs), Some(replicas), Some(quotas)) = (
-            changes("nodes", &["name", "addr", "token"])?,
+            changes("nodes", &node_fields(&g))?,
             changes("tenants", &["name", "node", "state"])?,
             changes("pairs", &["node", "standby"])?,
             changes("replicas", &["tenant", "node"])?,
@@ -420,6 +447,63 @@ impl Directory {
         self.nodes.get(name)
     }
 
+    /// The region of the node `name`; the unnamed one for a node it does
+    /// not know.
+    pub fn region_of(&self, name: &str) -> &str {
+        self.nodes.get(name).map_or("", |n| n.region.as_str())
+    }
+
+    /// The region a tenant lives in: its node's.
+    pub fn tenant_region(&self, tenant: &str) -> Option<&str> {
+        self.tenants.get(tenant).map(|p| self.region_of(&p.node))
+    }
+
+    /// Whether the nodes `a` and `b` are known to be in one zone: both
+    /// zones named, and the same. A zone not named is not known to be any.
+    pub fn same_zone(&self, a: &str, b: &str) -> bool {
+        match (self.nodes.get(a), self.nodes.get(b)) {
+            (Some(a), Some(b)) => !a.zone.is_empty() && a.zone == b.zone,
+            _ => false,
+        }
+    }
+
+    /// Whether the node `name` holds what a region is promised to: a
+    /// tenant, a tenant's replica, or a place in a pair. Its region is fixed
+    /// while it does -- a tenant's residency would change under it, and a
+    /// copy would sit in another region than its primary.
+    pub fn holds(&self, name: &str) -> bool {
+        self.tenants.values().any(|p| p.node == name)
+            || self.replicas.values().any(|n| n == name)
+            || self.pairs.contains_key(name)
+            || self.is_standby(name)
+    }
+
+    /// The node holding the copy a failover of `tenant` promotes -- its
+    /// replica of its own, or its node's standby -- if it has one.
+    pub fn copy_of(&self, tenant: &str) -> Option<&str> {
+        self.replica(tenant).or_else(|| {
+            let p = self.tenants.get(tenant)?;
+            self.standby(&p.node)
+        })
+    }
+
+    /// Per region, the tenants whose copy is known to be in their primary's
+    /// zone -- a datacenter lost takes both -- every region a node names:
+    /// what a scrape reports, counted in one pass.
+    pub fn same_zone_copies(&self) -> BTreeMap<&str, usize> {
+        let mut by: BTreeMap<&str, usize> = self
+            .nodes
+            .values()
+            .map(|n| (n.region.as_str(), 0))
+            .collect();
+        for (t, p) in &self.tenants {
+            if self.copy_of(t).is_some_and(|c| self.same_zone(&p.node, c)) {
+                *by.entry(self.region_of(&p.node)).or_default() += 1;
+            }
+        }
+        by
+    }
+
     pub fn placement(&self, tenant: &str) -> Option<&Placement> {
         self.tenants.get(tenant)
     }
@@ -465,17 +549,31 @@ impl Directory {
         out
     }
 
-    /// Adds a node or changes its address and token.
+    /// Adds a node or changes its address, token, region and zone.
     pub fn set_node(&mut self, name: &str, node: Node) -> Result<()> {
+        // The unnamed region and zone are null, as a node written before
+        // the fields reads them.
+        let named = |s: &str| match s {
+            "" => Value::Null,
+            s => Value::Text(s.into()),
+        };
         let params = [
             Value::Text(name.into()),
             Value::Text(node.addr.clone()),
             Value::Text(node.token.clone()),
+            named(&node.region),
+            named(&node.zone),
         ];
         if self.nodes.contains_key(name) {
-            self.run("set nodes {addr: $2, token: $3} where name = $1", &params)?;
+            self.run(
+                "set nodes {addr: $2, token: $3, region: $4, zone: $5} where name = $1",
+                &params,
+            )?;
         } else {
-            self.run("put nodes {name: $1, addr: $2, token: $3}", &params)?;
+            self.run(
+                "put nodes {name: $1, addr: $2, token: $3, region: $4, zone: $5}",
+                &params,
+            )?;
         }
         self.nodes.insert(name.into(), node);
         Ok(())
@@ -587,10 +685,26 @@ fn apply(
     }
 }
 
+/// The fields a node is read by: its region and zone where the collection
+/// has them -- a standby's, following a primary from before them, has not.
+fn node_fields(db: &Database) -> Vec<&'static str> {
+    let mut fields = vec!["name", "addr", "token"];
+    if let Ok(c) = db.collection("nodes") {
+        fields.extend(
+            NODE_FIELDS
+                .iter()
+                .filter(|f| c.schema.field_pos(f).is_some()),
+        );
+    }
+    fields
+}
+
 fn node_of(row: &[Value]) -> Node {
     Node {
         addr: text(&row[1]),
         token: text(&row[2]),
+        region: row.get(3).map(text).unwrap_or_default(),
+        zone: row.get(4).map(text).unwrap_or_default(),
     }
 }
 
@@ -627,6 +741,7 @@ mod tests {
         Node {
             addr: addr.into(),
             token: "t".into(),
+            ..Node::default()
         }
     }
 
@@ -735,6 +850,9 @@ mod tests {
             r#"put replicas {tenant: "beta2", node: "n2"}"#,
             r#"set replicas {node: "n2"} where tenant = "acme""#,
             r#"del replicas where tenant = "beta2""#,
+            r#"set nodes {region: "eu", zone: "eu-a"} where name = "n1""#,
+            r#"put nodes {name: "n4", addr: "a4", token: "t", region: "us"}"#,
+            r#"set nodes {zone: null} where name = "n1""#,
         ] {
             underneath(&d, sql);
             assert!(d.stale());
@@ -762,6 +880,89 @@ mod tests {
         d.refresh().unwrap();
         let read = Directory::load(Arc::clone(d.db())).unwrap();
         assert_eq!(maps(&d), maps(&read));
+    }
+
+    /// A directory written before nodes had a region and a zone takes the
+    /// fields as it opens: its nodes read the unnamed region and zone, and
+    /// keep what they are given from then on.
+    #[test]
+    fn a_directory_from_before_regions_takes_them() {
+        let path = std::env::temp_dir().join(format!("fenec-dir-old-{}.fenec", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut db = fenec_core::fs::open(&path).unwrap();
+            for sql in [
+                "create collection nodes (name text @hash, addr text, token text)",
+                r#"put nodes {name: "n1", addr: "a1", token: "t"}"#,
+            ] {
+                db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+            }
+            db.sync().unwrap();
+        }
+        {
+            let mut d = Directory::open(&path).unwrap();
+            assert_eq!(d.node("n1"), Some(&node("a1")));
+            assert_eq!(d.region_of("n1"), "");
+            let mut n2 = node("a2");
+            n2.region = "eu".into();
+            n2.zone = "eu-b".into();
+            d.set_node("n2", n2.clone()).unwrap();
+            d.place("acme", "n2", State::Active).unwrap();
+            assert_eq!(d.tenant_region("acme"), Some("eu"));
+        }
+        let d = Directory::open(&path).unwrap();
+        assert_eq!(d.node("n1"), Some(&node("a1")));
+        assert_eq!(
+            d.node("n2").map(|n| (n.region.as_str(), n.zone.as_str())),
+            Some(("eu", "eu-b"))
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The copies in their primary's zone, by region: only where both zones
+    /// are named and the same.
+    #[test]
+    fn a_copy_is_in_its_primarys_zone_only_where_both_are_named() {
+        let mut d = Directory::in_memory();
+        for (name, region, zone) in [
+            ("e1", "eu", "a"),
+            ("e2", "eu", "a"),
+            ("e3", "eu", "b"),
+            ("u1", "us", ""),
+            ("u2", "us", ""),
+        ] {
+            let mut n = node(name);
+            n.region = region.into();
+            n.zone = zone.into();
+            d.set_node(name, n).unwrap();
+        }
+        d.place("t1", "e1", State::Active).unwrap();
+        d.place("t2", "e1", State::Active).unwrap();
+        d.place("t3", "u1", State::Active).unwrap();
+        d.set_replica("t1", Some("e2")).unwrap();
+        d.set_replica("t2", Some("e3")).unwrap();
+        d.set_replica("t3", Some("u2")).unwrap();
+        let by = d.same_zone_copies();
+        assert_eq!((by["eu"], by["us"]), (1, 0));
+        // A pair's standby is a copy too.
+        d.place("t4", "e3", State::Active).unwrap();
+        d.set_node("e4", {
+            let mut n = node("e4");
+            n.region = "eu".into();
+            n.zone = "b".into();
+            n
+        })
+        .unwrap();
+        d.set_standby("e3", Some("e4")).unwrap();
+        assert_eq!(d.copy_of("t4"), Some("e4"));
+        assert_eq!(d.same_zone_copies()["eu"], 2);
+        // A tenant, a replica, either side of a pair: each holds its node's
+        // region in place.
+        for held in ["e1", "e2", "e3", "e4"] {
+            assert!(d.holds(held), "{held}");
+        }
+        d.set_node("e5", node("e5")).unwrap();
+        assert!(!d.holds("e5"));
     }
 
     #[test]

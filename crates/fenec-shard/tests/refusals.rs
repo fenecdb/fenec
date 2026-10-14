@@ -60,6 +60,7 @@ fn router_with(addr: &str, node: &str, token: Option<&str>, cors: Option<&str>) 
         Node {
             addr: node.into(),
             token: "adm".into(),
+            ..Node::default()
         },
     )
     .unwrap();

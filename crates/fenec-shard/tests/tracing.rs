@@ -108,10 +108,26 @@ fn a_request_through_the_router_is_one_trace_with_the_node() {
     });
     let mut d = Directory::in_memory();
     let (addr, token) = (node.clone(), "adm".into());
-    d.set_node("n1", Node { addr, token }).unwrap();
+    d.set_node(
+        "n1",
+        Node {
+            addr,
+            token,
+            ..Node::default()
+        },
+    )
+    .unwrap();
     d.place("acme", "n1", State::Active).unwrap();
     let (addr, token) = (node2.clone(), "adm2".into());
-    d.set_node("n2", Node { addr, token }).unwrap();
+    d.set_node(
+        "n2",
+        Node {
+            addr,
+            token,
+            ..Node::default()
+        },
+    )
+    .unwrap();
     d.place("beta", "n2", State::Active).unwrap();
     let router = Router::new(
         d,

@@ -256,7 +256,8 @@ shard:
 
 ## What the router adds per request, how long a tenant move takes, and a
 ## query across 100 tenants against asking each (ARGS=latency or fanout
-## for that part alone).
+## for that part alone; ARGS=standby a standby router's request against
+## the primary's).
 shard-bench:
 	$(CARGO) run --release -p fenec-shard --example overhead -- $(or $(ARGS),100000 128)
 

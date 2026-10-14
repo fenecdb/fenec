@@ -184,8 +184,9 @@ unchanged. Its only state is a small directory of nodes and tenants, managed
 under <code>/_shard/</code>.</p>
 
 <ul>
-  <li><b>New tenants go to the node with the least data on disk</b>, unless
-    you name one.</li>
+  <li><b>New tenants go to the node with the least data on disk</b> — in the
+    region you name, if you name one (<a href="#regions">Regions</a>) —
+    unless you name the node.</li>
   <li><b>A page on another origin needs <code>--http-cors</code> on the
     router</b>, as it would on a node: <code>fenec-shard --http-cors
     https://app.example</code>.</li>
@@ -220,13 +221,14 @@ does not return them.</p>
 <table>
 <thead><tr><th>Route</th><th>Does</th></tr></thead>
 <tbody>
-<tr><td><code>GET /_shard/nodes</code></td><td>name and address of each node</td></tr>
-<tr><td><code>PUT /_shard/nodes/&lt;n&gt;</code></td><td><code>{addr, token}</code>; checked against the node before it is recorded</td></tr>
+<tr><td><code>GET /_shard/nodes</code></td><td>name, address, region and zone of each node</td></tr>
+<tr><td><code>PUT /_shard/nodes/&lt;n&gt;</code></td><td><code>{addr, token, region, zone}</code>; checked against the node before it is recorded; a region or zone left out is the one recorded</td></tr>
 <tr><td><code>DELETE /_shard/nodes/&lt;n&gt;</code></td><td>refused while the node holds a tenant</td></tr>
-<tr><td><code>GET /_shard/tenants</code></td><td>name, node and state of each tenant; with <code>?bytes</code>, its bytes on disk, asked of each node</td></tr>
-<tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{node}</code> to choose, otherwise the node with the fewest bytes on disk; <code>{schema}</code>, FenecQL <code>create collection</code> text, applied there before the tenant is answered (below)</td></tr>
+<tr><td><code>GET /_shard/tenants</code></td><td>name, node, state and region of each tenant; with <code>?bytes</code>, its bytes on disk, asked of each node; with <code>?region=&lt;r&gt;</code>, one region's</td></tr>
+<tr><td><code>GET /_shard/tenants/&lt;t&gt;</code></td><td>one tenant: its node, state, region and zone, and the node holding its copy</td></tr>
+<tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{region}</code> to place it in a region, <code>{node}</code> to choose the node, otherwise the node with the fewest bytes on disk; <code>{schema}</code>, FenecQL <code>create collection</code> text, applied there before the tenant is answered (below)</td></tr>
 <tr><td><code>DELETE /_shard/tenants/&lt;t&gt;</code></td><td>delete on the node, then forget</td></tr>
-<tr><td><code>POST /_shard/tenants/&lt;t&gt;/move</code></td><td><code>{to}</code>; see below</td></tr>
+<tr><td><code>POST /_shard/tenants/&lt;t&gt;/move</code></td><td><code>{to}</code>, <code>{region}</code> or both; see below and <a href="#regions">Regions</a></td></tr>
 <tr><td><code>POST /_shard/query</code></td><td>one read on every tenant, or those named, the answers merged as the request says (<a href="#across-tenants">A query across tenants</a>)</td></tr>
 <tr><td><code>GET /_metrics</code></td><td>what the router answered and forwarded, the nodes' time and the ones it could not reach, and its moves, in Prometheus's text format (<a href="monitoring.html#router">Monitoring</a>)</td></tr>
 </tbody>
@@ -472,7 +474,10 @@ writes are asked to retry for the moment the copy takes.</p>
     <b>503 with <code>Retry-After: 1</code></b>. Reads go on being served.</li>
   <li>The image is copied from the source and installed on the target.</li>
   <li>The directory points the tenant at the target, in one statement.</li>
-  <li>The source copy is deleted. Its open subscriptions end with an
+  <li>The source copy is deleted — once every <a href="#standby-router">standby
+    router</a> keeping up has been sent the new placement, a second at most,
+    so one that forwards from it sends the tenant's requests to the target
+    rather than to a node that no longer holds it. Its open subscriptions end with an
     <code>error</code> event, and the client reconnects through the router to
     the target. A client that had seen everything <b>resumes from its cursor
     without a reseed</b>: the change sequence travels in the image and the
@@ -926,7 +931,7 @@ and a tenth, the next round and 49 ms of promotions. With a lease of five
 seconds, a node lost costs its tenants' writes 5.5 to 7.2 s.</p>
 </details>
 
-<h2>A standby router</h2>
+<h2 id="standby-router">A standby router</h2>
 
 <p>A second router can follow the first one's directory and forward requests
 too. Only the primary router makes changes; promote the standby when the
@@ -969,6 +974,149 @@ change ring, as a subscription's rows do: the placements it put or deleted
 since the last one, 4 µs at 100 000 tenants, where reading every map again
 took 38 ms under the router's write lock. An image adopted, or more changes
 than the ring holds, and the maps are read again whole.</p>
+</details>
+
+<h2 id="regions">Regions</h2>
+
+<p>Give each node a region and a zone — a datacenter in the region. A tenant
+lives in one region, its node's, and its replica is kept in the same region in
+another zone, so a failover keeps both its latency and where its data is.</p>
+
+<pre data-lang="bash">curl -X PUT localhost:8090/_shard/nodes/eu1 \
+     -d '{"addr":"10.1.0.11:8081","token":"a1","region":"eu","zone":"fra"}'
+curl -X PUT localhost:8090/_shard/nodes/eu2 \
+     -d '{"addr":"10.1.1.11:8081","token":"a2","region":"eu","zone":"ams"}'
+
+curl -X PUT localhost:8090/_shard/tenants/acme -d '{"region":"eu"}'
+{"tenant":"acme","node":"eu1","region":"eu","replica_on":"eu2"}
+</pre>
+
+<ul>
+  <li><b>A tenant is placed in the region it names</b>, on the node with the
+    fewest bytes there. A region with no node is refused with
+    <code>409</code>, and nothing is created.</li>
+  <li><b>It leaves its region only by a move that names the region</b> it
+    goes to: <code>{"to":"us1","region":"us"}</code>.</li>
+  <li><b>Run one router a region</b>: standby routers follow the primary's
+    directory and forward every tenant to its node, wherever it lives.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><b>Nodes.</b> <code>PUT /_shard/nodes/&lt;n&gt;</code> takes
+<code>region</code> and <code>zone</code> beside <code>addr</code> and
+<code>token</code>, names of <code>[a-z0-9_-]</code> as a tenant's are. One
+left out is the one recorded, so a node given a new token stays where it is.
+A node's region is fixed while it holds a tenant, a tenant's replica, or a
+place in a pair — its tenants' residency would change under them — so it
+changes once they are moved off; its zone may change at any time. A node
+recorded without a region is in the unnamed region, which is one region like
+any other: a directory that names none places, replicates and fails over as
+it did before regions, and <code>""</code> names it in a request.</p>
+
+<p><b>Tenants.</b> A tenant's region is its node's — kept on the node alone,
+so a move or a failover changes it with the node and there is no second
+record to drift. <code>PUT /_shard/tenants/&lt;t&gt;</code> takes
+<code>region</code>, <code>node</code> or both, which must agree
+(<code>409</code> otherwise). With neither it goes to the region
+<code>fenec-shard --default-region</code> names, and without that flag to the
+node with the fewest bytes whatever its region, as before. <code>GET
+/_shard/tenants/&lt;t&gt;</code> answers its node, state, region and zone, its
+copy's node — a replica of its own or its node's standby — and
+<code>"same_zone": true</code> where that copy is in its zone; the list
+carries each tenant's region, and <code>?region=eu</code> gives one region's
+tenants.</p>
+
+<pre data-lang="bash">curl localhost:8090/_shard/tenants/acme
+{"name":"acme","node":"eu1","state":"active","region":"eu","zone":"fra","replica":"eu2"}
+</pre>
+
+<p><b>Copies.</b> With <code>--replicas</code> a tenant's replica goes to a
+node of its region only — the replica is what a failover promotes, and one in
+another region would carry the tenant out of its own. Among those, a node of
+another zone comes first, before one holding a copy already and before the
+fewest replicas: a datacenter lost would take a replica in its primary's zone
+with it. A zone not recorded is ranked between, neither known to be another
+nor the same. Where every free node of the region is in the primary's zone,
+the replica goes there all the same: the router logs it, the tenant answers
+<code>"same_zone": true</code>, and
+<code>fenec_router_same_zone_copies{region}</code> counts it for as long as it
+stays. A region with no other node gives none (<code>"unreplicated": "there is
+no other node in region `eu` to keep it"</code>) until a repair finds one. A
+pair's standby must be in its node's region (<code>409</code> otherwise), and
+one in its zone is logged. So a failover — by hand or on a lease — promotes
+a tenant within its region: its copy was never placed anywhere else.</p>
+
+<p><b>Moves.</b> <code>{"to": "eu2"}</code> moves a tenant to a node of its
+region; to a node of another, it is refused naming the region the request
+must name. <code>{"region": "us"}</code> picks the node with the fewest bytes
+there, <code>{"to": "us1", "region": "us"}</code> names both; either way the
+answer carries the region the tenant is in now. Its replica goes with it
+where it still fits — in the new region, in no worse a zone than a node free
+there — and is otherwise taken off and placed again in the new region: kept,
+a failover would take the tenant back out of the region it moved to. A move
+across regions copies the tenant's image over the network between them, the
+tenant frozen for writes meanwhile.</p>
+
+<p><b>One router a region.</b> The directory is one file with one primary
+router, which takes every change. A standby router in each other region
+follows it (<a href="#standby-router">A standby router</a>) and forwards every
+tenant, from the same placements, to its node wherever it is; its
+<code>/_shard/</code> answers reads, <code>GET /_shard/tenants/&lt;t&gt;</code>
+and <code>POST /_shard/query</code> included, and refuses changes with
+<code>409</code> naming the primary — asked again it would refuse again, so
+it is no <code>503</code>. Clients reach the router nearest them, by GeoDNS or
+an anycast address in front; a request for a tenant in another region crosses
+between regions once, router to node, as it would going there itself. A
+standby router added 23.7 µs p50 to a request over the node's own, as the
+primary did — 23.0 to 23.8 and 23.1 to 23.9 over five runs, the two asked in
+turns: following costs a request nothing (<code>make shard-bench
+ARGS=standby</code>, node and routers in one process on loopback).</p>
+
+<pre data-lang="bash"># eu: the primary router, its directory replicated to the others
+fenec-shard --listen 0.0.0.0:8090 --token $ROOT --directory shard.fenec \
+            --replication-token $DIR --replicas --default-region eu
+
+# us and tr: a standby router each, following it
+fenec-shard --listen 0.0.0.0:8090 --token $ROOT --directory standby.fenec \
+            --replication-token $DIR --replica-of http://router.eu.internal:8090
+
+# every region's nodes, two zones each, recorded through the primary
+for n in "eu1 10.1.0.11 eu fra" "eu2 10.1.1.11 eu ams" \
+         "us1 10.2.0.11 us iad" "us2 10.2.1.11 us pdx" \
+         "tr1 10.3.0.11 tr ist" "tr2 10.3.1.11 tr ank"; do
+  set -- $n
+  curl -X PUT router.eu.internal:8090/_shard/nodes/$1 -H "Authorization: Bearer $ROOT" \
+       -d "{\"addr\":\"$2:8081\",\"token\":\"$ADMIN\",\"region\":\"$3\",\"zone\":\"$4\"}"
+done
+
+curl -X PUT router.eu.internal:8090/_shard/tenants/acme -H "Authorization: Bearer $ROOT" \
+     -d '{"region":"tr"}'
+{"tenant":"acme","node":"tr1","region":"tr","replica_on":"tr2"}
+</pre>
+
+<p>A standby router is behind the primary by a directory change on its way,
+one network trip between regions; a move deletes the source copy only once
+every standby keeping up has been sent the new placement, so a standby in
+another region routes the tenant's next request to the target and not to a
+node that no longer holds it. A promotion is the same as with one standby:
+<code>POST /_replication/promote</code> on the router to take over, the others
+pointed at it with <code>--replica-of</code>.</p>
+
+<p><b>What regions do not do.</b> Under <code>--auto-failover</code> every
+lease comes from the primary router, so a region cut off from the primary's
+stops taking writes as its leases lapse, and cannot be failed over until the
+router reaches its nodes again — reads go on through its own router. Give it
+a lease longer than the blips between regions (15 to 30 s), or fail regions
+far from the primary over by hand. There is no lease authority a region, no
+replica in another region for reads near far-away clients, and no SDK that
+picks a router by region: a client is given the router nearest it.</p>
+
+<p><b>The directory's format.</b> <code>nodes</code> took
+<code>region</code> and <code>zone</code> fields, which a directory written
+before them is given as it opens (an <code>alter</code>); its nodes read the
+unnamed region. A router from before them reads the directory as it always
+did — it ignores the fields, forwards every tenant where it is, and, promoted,
+places without regard to regions.</p>
 </details>
 
 <h2 id="tokens">Tokens</h2>

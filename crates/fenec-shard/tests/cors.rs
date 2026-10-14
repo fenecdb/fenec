@@ -84,6 +84,7 @@ fn placed_at(addr: &str) -> Directory {
         Placed {
             addr: addr.into(),
             token: "adm".into(),
+            ..Placed::default()
         },
     )
     .unwrap();

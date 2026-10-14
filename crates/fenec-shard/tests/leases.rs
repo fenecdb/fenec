@@ -425,6 +425,90 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
     }
 }
 
+/// Under leases a node lost is failed over within its region: its tenants
+/// go to their replicas, which were placed in their region and in another
+/// zone, past a node of another region holding less.
+#[test]
+fn a_lapsed_lease_fails_a_node_over_within_its_region() {
+    let nodes = [1, 2, 3, 4].map(|i| node(&format!("region{i}"), true));
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        upstream_timeout: Duration::from_secs(10),
+        replicas: true,
+        auto_failover: Some(TERM),
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    router.start_leasing().unwrap();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    // eu1 and eu2 in two zones of eu, us1 and us2 in two of us.
+    for (i, (name, region, zone)) in [
+        ("eu1", "eu", "a"),
+        ("eu2", "eu", "b"),
+        ("us1", "us", "a"),
+        ("us2", "us", "b"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let body = format!(
+            r#"{{"addr":"{}","token":"adm-region{}","region":"{region}","zone":"{zone}"}}"#,
+            nodes[i].proxy.addr,
+            i + 1
+        );
+        let (status, body) = call(port, "PUT", &format!("/_shard/nodes/{name}"), &body, None);
+        assert_eq!(status, 201, "{body}");
+    }
+    // eu2 is the busiest node, so a replica placed by load alone would go
+    // to us.
+    for t in ["e1", "e2"] {
+        let (status, body) = call(
+            port,
+            "PUT",
+            &format!("/_shard/tenants/{t}"),
+            r#"{"node":"eu2"}"#,
+            None,
+        );
+        assert_eq!(status, 201, "{body}");
+    }
+    let (status, body) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme",
+        r#"{"node":"eu1","schema":"create collection notes (title text)"}"#,
+        None,
+    );
+    assert_eq!(status, 201, "{body}");
+    assert!(body.contains(r#""replica_on":"eu2""#), "{body}");
+    let path = "/t/acme/query";
+    assert_eq!(query(port, path, r#"put notes {title: "one"}"#).0, 200);
+    until(nodes[1].port, path, "get notes select title", "one");
+
+    // eu1 is cut off: once its lease has lapsed, acme takes writes again on
+    // eu2, in eu.
+    nodes[0].proxy.cut();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while query(port, path, r#"put notes {title: "after"}"#).0 != 200 {
+        assert!(Instant::now() < deadline, "acme was never failed over");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (status, body) = call(port, "GET", "/_shard/tenants/acme", "", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(r#""node":"eu2","state":"active","region":"eu""#),
+        "{body}"
+    );
+    for (i, us) in nodes.iter().enumerate().skip(2) {
+        let token = format!("adm-region{}", i + 1);
+        let (_, held) = call(us.port, "GET", "/_admin/tenants", "", Some(&token));
+        assert!(!held.contains("acme"), "{held}");
+    }
+}
+
 #[test]
 fn a_node_taking_leases_writes_nothing_before_one_and_only_what_it_names() {
     let n = node("names", true);
