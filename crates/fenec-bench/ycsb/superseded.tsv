@@ -11,3 +11,30 @@ r3	server-docker	before the file compacted on its own: runs c1-c3 replace it
 s1	server-docker	before the file compacted on its own: runs c1-c3 replace it
 s2	server-docker	before the file compacted on its own: runs c1-c3 replace it
 s3	server-docker	before the file compacted on its own: runs c1-c3 replace it
+rd1	server	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd2	server	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd3	server	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd1	server-docker	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd2	server-docker	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd3	server-docker	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd1	pg	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd2	pg	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd3	pg	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd1	mongo	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd2	mongo	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd3	mongo	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd1	redis	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd2	redis	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+rd3	redis	sized beside the cells through docker run and docker exec, which slowed the VM: runs rx1-rx3 replace it
+c1	server	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+c2	server	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+c3	server	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+c1	server-docker	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+c2	server-docker	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+c3	server-docker	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+r1	pg	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+r2	pg	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+r3	pg	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+r1	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+r2	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
+r3	mongo	measured on other days than the servers beside it: runs rx1-rx3 measure every server on one day
