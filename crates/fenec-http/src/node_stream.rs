@@ -1011,9 +1011,16 @@ impl Session<'_> {
 
     /// `name` is not on the node: the client is told, where it followed it,
     /// with when it went -- the node's time it was deleted, where this
-    /// process deleted it, or now.
+    /// process deleted it since the stream said hello to it, or now. A
+    /// delete before that hello was another copy's: one gone since by other
+    /// means -- its file taken away by hand -- given that time, read as
+    /// away from before its hello.
     fn gone(&mut self, name: &str) -> io::Result<()> {
-        let at = self.tenants.departed(name).unwrap_or_else(now_ms);
+        let at = match (self.tenants.departed(name), self.hello_at.get(name)) {
+            (Some(at), Some(&said)) if at >= said => at,
+            (Some(at), None) => at,
+            _ => now_ms(),
+        };
         self.gone_at(name, at)
     }
 

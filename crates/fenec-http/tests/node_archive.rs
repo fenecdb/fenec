@@ -1031,6 +1031,41 @@ fn a_line_moved_aside_while_the_archiver_was_away_is_noted_gone() {
     assert!(node_archive::gone_at(&aside().unwrap().dir).is_some());
 }
 
+/// A tenant made again after a delete, then gone by other means -- its file
+/// taken away by hand -- is gone from when the stream saw it go, not from
+/// the delete before it: given that time, its archive read as away from
+/// before it was made.
+#[test]
+fn a_tenant_gone_by_hand_is_not_given_an_earlier_delete() {
+    let d = scratch("by-hand");
+    let n = node(&d.join("node"), None);
+    let e = made(&n, "e", 3);
+    let root = d.join("root");
+    let a = archiver(&root, &n.url);
+    archived(&root.join("e"), seq(&e));
+    drop(e);
+    n.tenants.delete("e").unwrap();
+    let e = made(&n, "e", 2);
+    until("the old line was not moved aside", || {
+        node_archive::lines(&root).unwrap().len() == 2
+    });
+    archived(&root.join("e"), seq(&e));
+    drop(e);
+    close_all(&n.tenants, 1);
+    let before = now_ms();
+    std::fs::remove_file(d.join("node").join("e.fenec")).unwrap();
+    // Seen at the stream's next reading of the directory.
+    until("the archive was not told `e` went", || {
+        node_archive::gone_at(&root.join("e")).is_some()
+    });
+    a.finish();
+    let at = node_archive::gone_at(&root.join("e")).unwrap();
+    assert!(
+        at >= before,
+        "gone at {at}, before the file went at {before}"
+    );
+}
+
 /// Nor do the syncer and a close wait for it: under `--sync <ms>` a pass
 /// over five dirty tenants took 5.06 s with the stream held up, and a
 /// close held its tenant's slot, and a request for it, a second.

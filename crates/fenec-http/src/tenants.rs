@@ -1274,16 +1274,6 @@ impl Tenants {
     pub fn delete(&self, name: &str) -> std::result::Result<(), Refused> {
         check_name(name)?;
         self.with_slot(name, |held| {
-            // Before the release, which the node's stream hears of at once.
-            if self.on_disk(name) {
-                let at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64);
-                self.departed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .note(name, at);
-            }
             if let Held::Open(t) = &*held {
                 release(t, name)?;
                 // The last `Arc`: dropping it syncs, and the file is closed
@@ -1294,6 +1284,15 @@ impl Tenants {
             if !path.exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
             }
+            // Before the file goes, so the stream, which looks for it
+            // without the slot, finds the time with it gone.
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            self.departed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note(name, at);
             std::fs::remove_file(&path)
                 .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
             let _ = std::fs::remove_file(path.with_extension("fenec.compacting"));

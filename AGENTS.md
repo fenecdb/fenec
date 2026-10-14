@@ -772,17 +772,22 @@ archiver's fsyncs on the same disk -- against 31-33 with none and 65-86 a
 stream each, and a close 4.0 ms p50, 15-33 at most, against 3.8-4.0 and
 12-25 with none. With no archiver and with a stream each, every figure
 stayed main's in ABBA turns (the pass 31.0-31.4 and 67-73 ms p50 on main, a
-close 3.6-3.9). `make replica-bench`, four turns a side at a load of 10-15
-from other work: `--sync always` lag 0.10-0.15 ms p50 against 0.10-0.11,
-catch-up 11 128-13 614 writes/s against 11 384-13 857, a restore to the end
-7.87-9.09 s against 8.51-9.05, each pair inside its turns' spread -- a
-replicated write meets a byte compared in `Tee::append`, a thread-local in
-its flush and a flag in `wait_sent`. A node's request path (`make
-shard-bench ARGS=latency`, a tenant's read straight to the node) stayed 21.5
-us p50 against main's 21.6, eight turns a side, with the stream's handler
-out of line and cold (inlined into the connection loop, four turns a side
-read 21.5-22.0 against 15.7-21.5: main ran in a 15-16 us mode three times in
-twelve, this build never). Nothing below `fenec-http` changed.
+close 3.6-3.9). The pending feed, the lock held up and the departures moved
+nothing, four turns a side against the build before them: the writes while
+the first images were taken 13.9-15.3 ms p50 and 26.7-32.9 p99 against
+13.9-14.9 and 29.5-30.6, the first images 14.8-16.8 s against 15.1-16.8, and
+with no archiver 11.5-12.1 ms p50 against main's 12.0-12.1. `make
+replica-bench`, four turns a side at a load of 10-15 from other work:
+`--sync always` lag 0.10-0.15 ms p50 against 0.10-0.11, catch-up 11 128-13
+614 writes/s against 11 384-13 857, a restore to the end 7.87-9.09 s against
+8.51-9.05, each pair inside its turns' spread -- a replicated write meets a
+byte compared in `Tee::append`, a thread-local in its flush and a flag in
+`wait_sent`. A node's request path (`make shard-bench ARGS=latency`, a
+tenant's read straight to the node) stayed 21.5 us p50 against main's 21.6,
+eight turns a side, with the stream's handler out of line and cold (inlined
+into the connection loop, four turns a side read 21.5-22.0 against
+15.7-21.5: main ran in a 15-16 us mode three times in twelve, this build
+never). Nothing below `fenec-http` changed.
 
 **Scaling out is by tenant, one file each** (`fenec-server --dir`, `fenec-shard`,
 whose directory replicates to a standby router like any other file, the
