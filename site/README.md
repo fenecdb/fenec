@@ -165,9 +165,12 @@ words alone, which find a section named for them first.
 The sections' vectors are kept in `search-embeddings.json`, committed, by a
 hash of the model and the text embedded: a build embeds only the sections
 new or changed since, through Workers AI when it has the credentials
-(`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_AI_TOKEN` or `CLOUDFLARE_API_TOKEN`),
-and a section it cannot embed goes without a vector, found by its words,
-with the build going on. Committed rather than kept as a CI cache, so a
+(`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_AI_TOKEN` or `CLOUDFLARE_API_TOKEN`).
+A section changed where nothing can embed it keeps the vector its URL had,
+and a new section goes without one, found by its words; the build
+goes on and says how many of each, and the test holds no share of them,
+since that share is how long ago the cache was committed, not what the
+code does. Committed rather than kept as a CI cache, so a
 pull request's CI, which has no secrets, and a laptop build the same image
 as the deploy, and a change to a section shows as a change to one line.
 The tests' queries' vectors are in `search-fixture.json`, so CI asks no
@@ -224,9 +227,12 @@ it needs, all once:
    'origin: https://fenecdb.com' -H 'content-type: application/json'
    -d '{"q":"keep data on a phone"}' | head -c 80` answers
    `{"vector":[...`, and once more is a cache hit.
-7. **Once, optionally**: make the cache and the fixture again through
-   Workers AI (above), so the sections' vectors and a query's come from
-   the very same model run.
+7. **Once, best before step 6**: make the cache and the fixture again
+   through Workers AI (above), so every section has a vector and the
+   sections' vectors and a query's come from the very same model run. The
+   cache was made before the docs grew past it: the build says how many
+   sections it holds no vector for, and those are found by their words
+   alone until it is made again.
 
 ## Adding a docs page
 

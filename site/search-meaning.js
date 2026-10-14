@@ -28,13 +28,19 @@ export function asker({ endpoint = '/api/embed', fetch = globalThis.fetch, timeo
     if (!q || wordsIn(q) < MIN_WORDS || [...String(text).trim()].length > MAX_QUERY || now() < offUntil) return null;
     if (known.has(q)) return known.get(q);
     let vector = null;
+    // A timer of its own, not AbortSignal.timeout: Node 22 does not count
+    // that one's timer as work to wait for, so a request that never
+    // answered left the process nothing to wait on -- it ended with the
+    // question unanswered, and CI's search test with it.
+    const giveUp = new AbortController();
+    const timer = setTimeout(() => giveUp.abort(new DOMException('the endpoint was too slow', 'TimeoutError')), timeout);
     try {
       const r = await fetch(endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ q }),
         credentials: 'same-origin',
-        signal: AbortSignal.timeout(timeout),
+        signal: giveUp.signal,
       });
       if (r.status === 404 || r.status === 405 || r.status === 501) {
         // No endpoint here (a local server, or off): not asked again.
@@ -50,6 +56,8 @@ export function asker({ endpoint = '/api/embed', fetch = globalThis.fetch, timeo
     } catch {
       // A timeout or no network: this query goes without, the next may not.
       return null;
+    } finally {
+      clearTimeout(timer);
     }
     known.set(q, vector);
     return vector;

@@ -106,18 +106,23 @@ function standing(q, url) {
   return [at(search(db, q).hits), at(search(dbv, q, null, 10, v).hits)];
 }
 
-test('the vector image holds every section, nearly all with a vector', () => {
+test('the vector image holds every section, and the cache\'s vectors reach it', () => {
   // A section new since the cache was committed, built where nothing could
-  // embed it, has none, and is found by its words; most have one.
+  // embed it, has none, and is found by its words. How many have none is
+  // how long ago the cache was committed, not anything this code does: a
+  // pull request's CI has no credentials to embed with, so a share held
+  // here would fail every docs change once enough of them had piled up --
+  // the build prints the count instead. What is held is that the cache's
+  // vectors reach the image at all (a model or a width that no longer
+  // matches the cache's would leave none).
   const n = db.run('get docs count').rows[0].count;
   assert.equal(dbv.run('get docs count').rows[0].count, n);
-  assert.ok(dbv.run('get docs where embed is null count').rows[0].count <= n / 10);
+  assert.ok(dbv.run('get docs where embed is null count').rows[0].count < n);
 });
 
 test('a question the words miss finds its page by its meaning', () => {
   // Each: the words leave the page off the ten shown, the meaning puts it there.
   for (const [q, url, within] of [
-    ['how do I stop my file from growing', 'docs/server#compaction', 10],
     ['keep data on a phone', 'docs/mobile', 1],
     ['telefonda veri saklamak', 'docs/mobile', 3],
     ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 3],
@@ -130,6 +135,10 @@ test('a question the words miss finds its page by its meaning', () => {
 
 test('what the words found, the meaning keeps', () => {
   for (const [q, url, within] of [
+    // The words left the compaction section off the list until it told of
+    // a file compacted before it outgrows the page cache, "a growing file"
+    // among its words; they find it 7th now, and the meaning first.
+    ['how do I stop my file from growing', 'docs/server#compaction', 3],
     ['count things atomically', 'docs/redis', 5],
     ['what happens to writes when the primary dies', 'docs/replication', 3],
     ['stop a retried request from writing twice', 'docs/http#idempotency', 1],
@@ -178,11 +187,18 @@ test('the endpoint absent, refusing, slow or wrong: the words alone, and asked n
   now = 121_000;
   assert.equal(await ask('keep data on a phone'), null);
   assert.equal(calls, 2);
-  // Slow: given up at the timeout, null.
-  ask = asker({ timeout: 50, fetch: (_, init) => new Promise((_, no) => init.signal.addEventListener('abort', () => no(init.signal.reason))) });
-  const t = Date.now();
+  // Slow: given up at the timeout, null. The stand-in never answers, so
+  // only the asker's own timer ends the wait; the abort is the event held.
+  let aborted = null;
+  ask = asker({
+    timeout: 50,
+    fetch: (_, init) => new Promise((_, no) => init.signal.addEventListener('abort', () => {
+      aborted = init.signal.reason?.name;
+      no(init.signal.reason);
+    })),
+  });
   assert.equal(await ask(Q), null);
-  assert.ok(Date.now() - t < 1000);
+  assert.equal(aborted, 'TimeoutError');
   // No network, a 503, a vector of the wrong width: null.
   for (const f of [async () => { throw new TypeError('offline'); }, answer(503, {}), answer(200, { vector: [1, 2, 3] }), answer(200, { nope: 1 })]) {
     assert.equal(await asker({ fetch: f })(Q), null);
