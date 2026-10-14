@@ -156,7 +156,8 @@ below.</p>
 <tr><td>scalar filter, indexed</td><td class="n"><b>1.25 ms</b></td><td class="n">14.1 ms</td></tr>
 <tr><td>vector top-10, exact</td><td class="n"><b>2.9 ms</b></td><td class="n">30.2 ms</td></tr>
 <tr><td>vector top-10, approximate</td><td class="n"><b>0.091 ms</b></td><td class="n">not measured</td></tr>
-<tr><td>reopen</td><td class="n">9 ms</td><td class="n"><b>0.9 ms</b></td></tr>
+<tr><td>open, then a read by id</td><td class="n">6.0 ms</td><td class="n"><b>0.46 ms</b></td></tr>
+<tr><td>open, then a vector top-10</td><td class="n"><b>6.1 ms</b></td><td class="n">30.5 ms, exact</td></tr>
 </tbody>
 </table>
 </div>

@@ -87,6 +87,40 @@ fn p50(v: &mut [f64]) -> f64 {
     v[v.len() / 2]
 }
 
+/// Reopens a side times, each case: what one open costs is a few
+/// milliseconds, and a single one -- what this measured until 2026-10 --
+/// moved with whatever else the machine was doing.
+const REOPENS: usize = 31;
+
+/// What a reopened database costs before it answers: the open alone, the
+/// open and a read by id, and the open and the first vector top-10 -- an
+/// ANN query in fenecdb, SQLite's full scan, its only one. The median of
+/// [`REOPENS`] each, the cases in turns, with the file's pages in the page
+/// cache as a close leaves them. The first comparison of this page timed
+/// fenecdb's open and an ANN query against SQLite's open and an indexed
+/// count, two different first questions.
+struct Reopen {
+    open: f64,
+    get: f64,
+    vector: f64,
+}
+
+/// [`Reopen`] from `case(0..3)`, each run timing its own open and read.
+fn reopens(mut case: impl FnMut(usize, usize) -> f64) -> Reopen {
+    let mut times = [Vec::new(), Vec::new(), Vec::new()];
+    for round in 0..REOPENS {
+        for (i, t) in times.iter_mut().enumerate() {
+            t.push(case(i, round));
+        }
+    }
+    let [mut open, mut get, mut vector] = times;
+    Reopen {
+        open: p50(&mut open),
+        get: p50(&mut get),
+        vector: p50(&mut vector),
+    }
+}
+
 /// Finds the k nearest neighbours by full scan (code shared by both engines).
 fn topk_exact(qn: &[f32], vectors: impl Iterator<Item = (u64, Vec<f32>)>, k: usize) -> Vec<u64> {
     let mut best: Vec<(f32, u64)> = Vec::with_capacity(k + 1);
@@ -125,7 +159,7 @@ struct Result_ {
     scalar_p50: f64,
     exact_p50: f64,
     ann_p50: Option<f64>,
-    reopen_ms: Option<f64>,
+    reopen: Option<Reopen>,
     recall: Option<f64>,
     /// Round-trip time of an empty query on client-server engines.
     rtt: Option<f64>,
@@ -267,11 +301,37 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
     let ann_p50 = p50(&mut lat);
     drop(db);
 
-    let t = Instant::now();
-    let mut db2 = fenec_core::fs::open(path).unwrap();
-    db2.execute(&Statement::Select(mk(&queries[0], false)))
-        .unwrap();
-    let reopen_ms = ms(t.elapsed());
+    let n = rows.len() as i64;
+    let reopen = reopens(|case, round| {
+        let t = Instant::now();
+        let mut db = fenec_core::fs::open(path).unwrap();
+        match case {
+            0 => {}
+            1 => {
+                let by_id = Select {
+                    collection: "docs".into(),
+                    filter: Some(Expr::Cmp(
+                        CmpOp::Eq,
+                        Box::new(Expr::Field("id".into())),
+                        Box::new(Expr::Lit(Value::Int(1 + (round as i64 * 7919) % n))),
+                    )),
+                    ..Default::default()
+                };
+                let r = db.execute(&Statement::Select(by_id)).unwrap();
+                assert_eq!(r.rows().unwrap().rows.len(), 1);
+            }
+            _ => {
+                db.execute(&Statement::Select(mk(
+                    &queries[round % queries.len()],
+                    false,
+                )))
+                .unwrap();
+            }
+        }
+        let took = ms(t.elapsed());
+        drop(db);
+        took
+    });
 
     Result_ {
         ingest_ms,
@@ -281,7 +341,7 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
         scalar_p50,
         exact_p50,
         ann_p50: Some(ann_p50),
-        reopen_ms: Some(reopen_ms),
+        reopen: Some(reopen),
         recall: Some(hits as f64 / total as f64 * 100.0),
         rtt: None,
         breakdown: None,
@@ -374,14 +434,39 @@ fn run_sqlite(path: &str, rows: &[Row], queries: &[Vec<f32>]) -> Result_ {
     let exact_p50 = p50(&mut lat);
 
     drop(conn);
-    let t = Instant::now();
-    let conn2 = Connection::open(path).unwrap();
-    let _: i64 = conn2
-        .query_row("SELECT count(*) FROM docs WHERE category = 'a'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    let reopen_ms = ms(t.elapsed());
+    let n = rows.len() as i64;
+    let reopen = reopens(|case, round| {
+        let t = Instant::now();
+        let conn = Connection::open(path).unwrap();
+        match case {
+            0 => {}
+            1 => {
+                let id = 1 + (round as i64 * 7919) % n;
+                let row: (String, i64, Vec<u8>) = conn
+                    .query_row(
+                        "SELECT category, score, embed FROM docs WHERE id = ?1",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .unwrap();
+                assert!(!row.2.is_empty());
+            }
+            _ => {
+                let qn = normalized(&queries[round % queries.len()]);
+                let mut stmt = conn.prepare("SELECT id, embed FROM docs").unwrap();
+                let iter = stmt
+                    .query_map([], |r| {
+                        Ok((r.get::<_, i64>(0)? as u64, unblob(&r.get::<_, Vec<u8>>(1)?)))
+                    })
+                    .unwrap()
+                    .map(|x| x.unwrap());
+                assert_eq!(topk_exact(&qn, iter, 10).len(), 10);
+            }
+        }
+        let took = ms(t.elapsed());
+        drop(conn);
+        took
+    });
 
     Result_ {
         ingest_ms,
@@ -391,7 +476,7 @@ fn run_sqlite(path: &str, rows: &[Row], queries: &[Vec<f32>]) -> Result_ {
         scalar_p50,
         exact_p50,
         ann_p50: None,
-        reopen_ms: Some(reopen_ms),
+        reopen: Some(reopen),
         recall: None,
         rtt: None,
         breakdown: None,
@@ -570,7 +655,7 @@ fn run_postgres(
         scalar_p50,
         exact_p50,
         ann_p50: Some(ann_p50),
-        reopen_ms: None, // continuously running server: no equivalent
+        reopen: None, // continuously running server: no equivalent
         recall: Some(hits as f64 / total as f64 * 100.0),
         rtt: Some(rtt),
         breakdown: Some(breakdown),
@@ -632,10 +717,13 @@ fn main() {
             .unwrap_or("none".into())
     };
     let rc = |x: &Result_| x.recall.map(|a| format!("{a:.1}%")).unwrap_or("-".into());
-    let ro = |x: &Result_| {
-        x.reopen_ms
-            .map(|a| format!("{a:.1} ms"))
-            .unwrap_or("server".into())
+    let reopened = |f: fn(&Reopen) -> f64| {
+        move |x: &Result_| {
+            x.reopen
+                .as_ref()
+                .map(|r| format!("{:.2} ms", f(r)))
+                .unwrap_or("server".into())
+        }
     };
     let rt = |x: &Result_| {
         x.rtt
@@ -679,7 +767,24 @@ fn main() {
         col(&p, &an),
     );
     row("  -> recall@10", col(&v, &rc), col(&s, &rc), col(&p, &rc));
-    row("reopen", col(&v, &ro), col(&s, &ro), col(&p, &ro));
+    let (ro, rg, rv) = (
+        reopened(|r| r.open),
+        reopened(|r| r.get),
+        reopened(|r| r.vector),
+    );
+    row("open", col(&v, &ro), col(&s, &ro), col(&p, &ro));
+    row(
+        "  -> then a read by id",
+        col(&v, &rg),
+        col(&s, &rg),
+        col(&p, &rg),
+    );
+    row(
+        "  -> then a vector top-10",
+        col(&v, &rv),
+        col(&s, &rv),
+        col(&p, &rv),
+    );
     row(
         "empty-query round trip",
         col(&v, &rt),
@@ -694,23 +799,16 @@ fn main() {
         unreachable!()
     };
 
-    // The open cost is paid once, the query cost on every query.
-    // At which point do the two totals even out?
-    let fenec_open = v.reopen_ms.unwrap_or(0.0);
-    let sq_open = s.reopen_ms.unwrap_or(0.0);
-    let denom = s.exact_p50 - v.ann_p50.unwrap();
-    if denom > 0.0 {
-        let n_eq = (fenec_open - sq_open) / denom;
-        println!(
-            "\nOver open + N vector queries in total, fenecdb overtakes SQLite after\n\
-             query {:.0} (open {:.0} ms vs {:.0} ms, query {:.2} ms vs {:.2} ms).",
-            n_eq.max(0.0).ceil(),
-            fenec_open,
-            sq_open,
-            v.ann_p50.unwrap(),
-            s.exact_p50
-        );
-    }
+    // The open cost is paid once, the query cost on every query: the
+    // first vector query already holds both.
+    let (Some(fv), Some(sv)) = (&v.reopen, &s.reopen) else {
+        unreachable!()
+    };
+    println!(
+        "\nOpened and asked a first vector top-10, fenecdb answers in {:.1} ms and\n\
+         SQLite in {:.1} ms; a read by id after the open, {:.2} ms against {:.2} ms.",
+        fv.vector, sv.vector, fv.get, sv.get
+    );
     println!(
         "\nfenecdb's ANN is {:.0}x faster than its own exact scan.",
         v.exact_p50 / v.ann_p50.unwrap()

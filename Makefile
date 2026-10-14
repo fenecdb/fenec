@@ -16,7 +16,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench nocase-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
@@ -729,6 +729,19 @@ open-bench:
 	test -f $(OPEN_FILE) || ./target/release/examples/open write $(OPEN_FILE) $(OPEN_ROWS) 400 hs
 	./target/release/examples/open open $(OPEN_FILE) read
 	./target/release/examples/open open $(OPEN_FILE) mapped
+
+## What opening a checkpointed file costs, and the first read after it, each
+## the median of many opens in one process: 1 000 and 100 000 rows of 128
+## dimensions with their graph, and a million rows with none. The files are
+## written once by the build that runs it.
+opens-bench:
+	$(CARGO) build --release -p fenec-core --example opens
+	test -f target/opens-1k.fenec || ./target/release/examples/opens write target/opens-1k.fenec 1000 128
+	test -f target/opens-100k.fenec || ./target/release/examples/opens write target/opens-100k.fenec 100000 128
+	test -f target/opens-1m.fenec || ./target/release/examples/opens write target/opens-1m.fenec 1000000 0
+	./target/release/examples/opens open target/opens-1k.fenec 200
+	./target/release/examples/opens open target/opens-100k.fenec 40
+	./target/release/examples/opens open target/opens-1m.fenec 20
 
 ## What a crash costs the next open: 100 000 x 768 written and never
 ## checkpointed, so every vector is in the tail, then opened as a server did
