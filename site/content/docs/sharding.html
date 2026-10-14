@@ -920,7 +920,10 @@ The list rides with a grant only when it changed, and a create or a move
 grants the node its new one at once, so a tenant takes writes as soon as it
 is placed. A router that starts leasing — a restart, or a standby promoted —
 counts every node as granted then: its predecessor may have granted a lease
-just before it stopped. A node started without <code>--lease</code> answers
+just before it stopped. A grant names the directory's term, which a
+promotion moves on, and a node refuses grants from a lower term once it has
+taken a higher one, so a router promoted over one still running fences it at
+every node it reaches (<a href="#region-directories">Fencing</a>). A node started without <code>--lease</code> answers
 that it takes none, and is never failed over on its own.</p>
 
 <p>Measured with <code>make shard-bench</code>, three nodes and the router in
@@ -1102,12 +1105,13 @@ node that no longer holds it. A promotion is the same as with one standby:
 <code>POST /_replication/promote</code> on the router to take over, the others
 pointed at it with <code>--replica-of</code>.</p>
 
-<p><b>What regions do not do.</b> Under <code>--auto-failover</code> every
-lease comes from the primary router, so a region cut off from the primary's
-stops taking writes as its leases lapse, and cannot be failed over until the
-router reaches its nodes again — reads go on through its own router. Give it
-a lease longer than the blips between regions (15 to 30 s), or fail regions
-far from the primary over by hand. There is no lease authority a region, no
+<p><b>A region's leases.</b> Under <code>--auto-failover</code> the router
+that keeps a node's directory leases it. With one directory that is the
+primary router, so a region cut off from the primary's would stop taking
+writes as its leases lapse, and could not be failed over until the router
+reached its nodes again. A region that keeps <a
+href="#region-directories">its own directory</a> is leased and failed over
+by its own router, and goes on writing through a partition. There is no
 replica in another region for reads near far-away clients, and no SDK that
 picks a router by region: a client is given the router nearest it.</p>
 
@@ -1117,6 +1121,149 @@ before them is given as it opens (an <code>alter</code>); its nodes read the
 unnamed region. A router from before them reads the directory as it always
 did — it ignores the fields, forwards every tenant where it is, and, promoted,
 places without regard to regions.</p>
+</details>
+
+<h2 id="region-directories">A region that keeps its own directory</h2>
+
+<p>Give a region a router of its own that keeps the region's directory: its
+nodes and tenants. That router leases the region's nodes and fails them
+over, so the region goes on taking writes — and fails a node over inside
+itself — while it is cut off from every other region.</p>
+
+<pre data-lang="bash"># us: the region's router, its directory in us.fenec, the global one followed from eu
+fenec-shard --listen 0.0.0.0:8090 --token $ROOT --directory us.fenec \
+            --replication-token $DIR --replicas --auto-failover 5 \
+            --region us --global http://router.eu.internal:8090
+
+# on the global router: us keeps its own directory, kept by that router
+curl -X PUT router.eu.internal:8090/_shard/regions/us -H "Authorization: Bearer $ROOT" \
+     -d '{"routers":["http://router.us.internal:8090"]}'
+
+# us's nodes and tenants, through either router
+curl -X PUT router.eu.internal:8090/_shard/nodes/us1 -H "Authorization: Bearer $ROOT" \
+     -d '{"addr":"10.2.0.11:8081","token":"a3","region":"us","zone":"iad"}'
+curl -X PUT router.eu.internal:8090/_shard/tenants/acme -H "Authorization: Bearer $ROOT" \
+     -d '{"region":"us"}'
+{"tenant":"acme","node":"us1","region":"us","replica_on":"us2"}
+</pre>
+
+<ul>
+  <li><b>Inside the region, nothing waits for another:</b> leases, failovers,
+    repairs, moves between its nodes, quotas and its nodes are its router's.</li>
+  <li><b>What needs every region waits for them:</b> a create (the name is
+    global), a delete and a move across regions go through the global router
+    and are refused with <code>503</code> and <code>Retry-After</code> while a
+    region they touch cannot be reached — nothing is done by half.</li>
+  <li><b>Every router reaches every tenant:</b> one asked for a tenant of
+    another region relays the request to that region's router.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><b>Two levels.</b> The global directory — the router started without
+<code>--region</code>, and its standbys — holds every tenant's name, the
+regions keeping their own directory and their routers (<code>PUT
+/_shard/regions/&lt;r&gt; {"routers": [...]}</code>, the one keeping it
+first, its standbys after). For each tenant of such a region it holds a home,
+the region and no node. The region's router holds the region's nodes and
+placements in a directory of its own (<code>--region us</code>), the same
+collections, and follows the global one from <code>--global</code>. A region
+that keeps no directory of its own — the unnamed one, and every region of a
+deployment that names none — is the global directory's, so a deployment
+without <code>--region</code> places, leases and fails over exactly as
+before, and one may move its regions out one at a time.</p>
+
+<p><b>Who changes what.</b> A change touching one region's nodes or
+tenants is that region's router's: a node added, a tenant's quota, a move
+between two of its nodes, a failover by hand, a repair. A change the global
+directory takes is the global router's: a create takes the tenant's name
+there first and then asks the region's router to make it (the name given back
+if that router refuses or cannot be reached; kept where it says the tenant
+exists, which takes in a create whose answer was lost), a delete asks the
+region's router first and then gives the name back. Either router takes
+either kind: what is not its own it relays, once — a region's router to the
+global one, the global router to the region's, marked so it goes no
+further.</p>
+
+<p><b>A move across regions</b> is the global router's, step by step: the
+tenant frozen in the region it leaves and its image taken, installed and
+recorded in the region it goes to — leased and given its replica there —
+let go of in the region it left, whose directory then places it nowhere, so
+no lease there names it; and only then its home moved in the global
+directory, one statement, which routes it to its new region. Each step is
+undone where the next fails: a region not reached leaves the tenant where it
+was, taking writes again, and the move is answered <code>503</code>. A move
+between a region keeping its own directory and one the global directory
+keeps works the same way, the global router doing that region's part
+itself.</p>
+
+<p><b>Forwarding.</b> A router asked for a tenant its own directory does not
+place looks it up in the global directory — its own, or its copy — and
+sends the request to its node, or, for a tenant of a region keeping its own,
+to that region's routers, the one that answered last first. They forward it
+to the node as the region's last failover left it: nobody outside the
+region needs to have heard of the failover, and after a partition every
+router reaches the new placement with its first request. The relay costs a
+request a hop inside the tenant's region, which a client asking the router
+of its own region never pays: 32 to 42 µs p50 on loopback, a router's 24 and
+the proxy that stood for the link between the regions (<code>make
+shard-bench ARGS=regions</code>). A router relaying names the client beside it,
+marked with an HMAC of the routers' shared <code>--token</code>, so a refused
+token waits by the client's address, at the first router alone.</p>
+
+<p><b>Fencing.</b> A lease names its holder: the directory it comes from and
+that directory's term, the number of times its history forked. Promoting a
+router forks it, so a region's router promoted over the one before — a
+standby following its directory, in the region or in another — grants at a
+higher term, and every node that hears from it refuses the old one from then
+on: its grants (<code>409</code> naming who holds the node), its promotions
+and its re-pointing of replicas. A node that only the old router still
+reaches cannot be told; that is why a router is promoted once the one before
+it is gone, as with one directory. A node from before terms takes a grant
+without checking its term, so a region's router leases it but never fails it
+over on its own. List a region's standby routers after its router in
+<code>routers</code>: a relay moves to the next one where the first cannot be
+reached, and a standby forwards from its copy of the directory and refuses
+changes until it is promoted.</p>
+
+<p><b>A partition, step by step.</b> The global router in eu, us keeping its
+own directory; the link between the regions goes down.</p>
+<ul>
+  <li>Inside us, nothing changes: us's router renews its nodes' leases, and
+    its clients write as before. A request from eu for a us tenant is
+    answered <code>502</code> — a region out of reach, as a node out of reach
+    is — and a client asks again; inside eu, eu's tenants are written as
+    before.</li>
+  <li>A node of us lost or cut off stops taking writes as its lease lapses,
+    and us's router promotes its tenants on their replicas in us, a tenth of
+    a lease later. With a lease of a second, a node cut off stopped writing
+    0.67 to 0.93 s after the cut and its 10 tenants wrote again on their
+    replicas 1.30 to 1.56 s after, ten runs (one at a load of 7, 2.0 to 2.1
+    s); with five seconds, 3.9 to 4.5 s and 5.9 to 6.5 s — as the global
+    router fails over its own, 1.25 to 1.45 s at a second (<code>make
+    shard-bench ARGS=regions</code>, the region cut off from the global
+    router throughout, three nodes and both routers in one process).</li>
+  <li>A create in us, a delete of a us tenant, a move into or out of us are
+    refused with <code>503</code> and <code>Retry-After</code>, through any
+    router, and change nothing.</li>
+  <li>The link comes back: the global router's next relay reaches us's
+    router, which places the failed-over tenants where it put them; the
+    refused changes go through when asked again.</li>
+</ul>
+
+<p><b>Formats.</b> The global directory took a <code>regions</code>
+collection, and a tenant at home in such a region is a row of
+<code>tenants</code> whose node is <code>@&lt;region&gt;</code>, which no node
+can be named; a region's directory names its region in <code>scope</code>,
+and a router opened over the wrong one refuses it. A router from before
+regional directories reading the global one forwards no request of such a
+tenant (no node <code>@us</code>: <code>404</code>), refuses every change of
+it, takes no name it holds, and leases none of the region's nodes, which it
+does not know. A lease grant carries <code>authority</code>,
+<code>term</code> and <code>history</code>; a node from before reads the
+grant as it did. Not done: a query across tenants (<code>POST
+/_shard/query</code>) asks the tenants the router's own directory places, and
+names each tenant of another region's directory as failed rather than leave
+it out; ask that region's router for its own.</p>
 </details>
 
 <h2 id="tokens">Tokens</h2>

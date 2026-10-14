@@ -15,6 +15,9 @@
 //!   * the same three leased (`--auto-failover`, a lease of a second): one
 //!     cut off, when it stops taking writes, when the router fails it over
 //!     on its own and when its tenants take writes again
+//!   * the same in a region keeping its own directory (`--region`), cut off
+//!     from the global router, at a lease of 1 s and of 5 s: the failover is
+//!     its own router's (`regions` alone)
 
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::Directory;
@@ -229,7 +232,7 @@ fn main() {
     // `fanout` the query across tenants alone, `standby` a request through
     // a standby router against the primary.
     let only = match args.first().map(String::as_str) {
-        Some(w @ ("latency" | "fanout" | "standby")) => Some(w.to_string()),
+        Some(w @ ("latency" | "fanout" | "standby" | "regions")) => Some(w.to_string()),
         _ => None,
     };
     if only.is_some() {
@@ -237,6 +240,10 @@ fn main() {
     }
     if only.as_deref() == Some("fanout") {
         fanout();
+        return;
+    }
+    if only.as_deref() == Some("regions") {
+        regions();
         return;
     }
     if only.as_deref() == Some("standby") {
@@ -407,6 +414,7 @@ fn main() {
     replicas();
     spread();
     automatic();
+    regions();
     fanout();
 }
 
@@ -1098,4 +1106,226 @@ fn automatic() {
     for (_, dir) in &nodes {
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// A region keeping its own directory, cut off from the global router, and
+/// one of its three nodes cut off from its router: when the node stops
+/// taking writes, and when its tenants take them again on their replicas
+/// -- the failover its region's router makes with no word from the global
+/// one -- at a lease of 1 s and of 5 s.
+fn regions() {
+    for term in [Duration::from_secs(1), Duration::from_secs(5)] {
+        regional_failover(term);
+    }
+}
+
+fn regional_failover(term: Duration) {
+    use fenec_http::replication::{fresh_id, Follower, Replication};
+    use std::path::Path;
+    const TENANTS: usize = 30;
+    const TOKEN: &str = "routers";
+    const DIRS: &str = "directory";
+    let files = std::env::temp_dir().join(format!(
+        "fenec-overhead-regions-{}-{}",
+        term.as_secs(),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&files);
+    std::fs::create_dir_all(&files).unwrap();
+    // A directory file: its own primary's, or following `follows`.
+    let open = |path: &Path, follows: Option<String>| {
+        let (mut db, feed) =
+            fenec_http::replication::open(path.to_str().unwrap(), 8 << 20).unwrap();
+        match &follows {
+            Some(_) => {
+                let lineage = db.history().lineage.clone();
+                db.follow(lineage).unwrap();
+            }
+            None => {
+                db.fork(fresh_id()).unwrap();
+                db.sync().unwrap();
+            }
+        }
+        let db = Arc::new(std::sync::RwLock::new(db));
+        let follower = follows.map(|url| {
+            let f = Follower::new(
+                &url,
+                DIRS.into(),
+                Arc::clone(&db),
+                Some(Arc::clone(&feed)),
+                true,
+            )
+            .unwrap();
+            f.start("fenec-follower".into()).unwrap();
+            f
+        });
+        let dir = Directory::load(db).unwrap();
+        (
+            dir,
+            Replication::new(Some(DIRS.into()), Some(feed), follower),
+        )
+    };
+    let config = |region: Option<&str>, global: Vec<String>| Config {
+        addr: "127.0.0.1:0".into(),
+        token: Some(TOKEN.into()),
+        upstream_timeout: Duration::from_secs(600),
+        replicas: true,
+        auto_failover: Some(term),
+        region: region.map(str::to_string),
+        global,
+        ..Config::default()
+    };
+    let serve = |router: Arc<Router>| {
+        let listener = router.bind().unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        router.start_leasing().unwrap();
+        std::thread::spawn(move || {
+            let _ = router.serve_on(listener);
+        });
+        addr
+    };
+    // The global router, and us's, each reaching the other through a proxy
+    // that stands for the link between their regions.
+    let (dir, repl) = open(&files.join("global.fenec"), None);
+    let global = serve(Router::replicated(dir, config(None, Vec::new()), repl));
+    let to_global = Proxy::to(&global);
+    let (dir, repl) = open(&files.join("us.fenec"), None);
+    let (copy, _) = open(
+        &files.join("us.global.fenec"),
+        Some(format!("http://{}", to_global.addr)),
+    );
+    let global_url = vec![format!("http://{}", to_global.addr)];
+    let us =
+        serve(Router::regional(dir, config(Some("us"), global_url), Some(repl), copy).unwrap());
+    let to_us = Proxy::to(&us);
+    let mut g = Client::new(&global);
+    let body = format!(r#"{{"routers":["http://{}"]}}"#, to_us.addr);
+    let (status, answer) = g.send("PUT", "/_shard/regions/us", Some(TOKEN), body.as_bytes());
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&answer));
+
+    let nodes: Vec<(String, std::path::PathBuf)> = (1..=3)
+        .map(|i| leased(&format!("r{}-{i}", term.as_secs())))
+        .collect();
+    let proxies: Vec<Proxy> = nodes.iter().map(|(addr, _)| Proxy::to(addr)).collect();
+    for (i, p) in proxies.iter().enumerate() {
+        let body = format!(
+            r#"{{"addr":"{}","token":"adm","region":"us","zone":"us-{i}"}}"#,
+            p.addr
+        );
+        let target = format!("/_shard/nodes/us{}", i + 1);
+        let (status, answer) = g.send("PUT", &target, Some(TOKEN), body.as_bytes());
+        assert_eq!(status, 201, "{}", String::from_utf8_lossy(&answer));
+    }
+    let query = |c: &mut Client, tenant: &str, sql: &str| -> u16 {
+        let mut body = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut body, sql);
+        body.push('}');
+        c.send("POST", &format!("/t/{tenant}/query"), None, body.as_bytes())
+            .0
+    };
+    for i in 0..TENANTS {
+        let body = format!(
+            r#"{{"region":"us","node":"us{}","schema":"create collection notes (n int)"}}"#,
+            i % 3 + 1
+        );
+        let (status, answer) = g.send(
+            "PUT",
+            &format!("/_shard/tenants/t{i}"),
+            Some(TOKEN),
+            body.as_bytes(),
+        );
+        assert_eq!(status, 201, "{}", String::from_utf8_lossy(&answer));
+        assert_eq!(query(&mut g, &format!("t{i}"), "put notes {n: 0}"), 200);
+    }
+    // Every tenant's replica caught up before the cut.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // What the relay costs: one request straight to the node, through us's
+    // router, and through the global router, which relays it to us's, in
+    // turns on three keep-alive connections (the proxies in the way of the
+    // two routers' link and of the node, each a copy on loopback).
+    if term == Duration::from_secs(1) {
+        let target = "/t/t1/notes?limit=1";
+        let mut clients = [
+            Client::new(&nodes[1].0),
+            Client::new(&us),
+            Client::new(&global),
+        ];
+        for c in clients.iter_mut() {
+            for _ in 0..500 {
+                assert_eq!(c.send("GET", target, None, b"").0, 200);
+            }
+        }
+        let mut times: [Vec<f64>; 3] = Default::default();
+        for round in 0..ROUNDS {
+            let order = if round % 2 == 0 { [0, 1, 2] } else { [0, 2, 1] };
+            for i in order {
+                let at = Instant::now();
+                let (status, _) = clients[i].send("GET", target, None, b"");
+                times[i].push(at.elapsed().as_secs_f64() * 1e6);
+                assert_eq!(status, 200);
+            }
+        }
+        for t in times.iter_mut() {
+            t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        }
+        println!("\na request for a tenant of us, {ROUNDS} x GET {target} in turns");
+        println!("              p50       p99");
+        for (label, v) in ["node", "us router", "relayed"].iter().zip(&times) {
+            println!(
+                "  {label:<10} {:>6.1} us {:>6.1} us",
+                pct(v, 0.5),
+                pct(v, 0.99)
+            );
+        }
+        println!(
+            "  the relay through the global router added {:.1} us p50 to us's router's",
+            pct(&times[2], 0.5) - pct(&times[1], 0.5)
+        );
+    }
+
+    // us cut off from eu, then us1 from us's router.
+    to_global.cut();
+    to_us.cut();
+    let held: Vec<String> = (0..TENANTS)
+        .filter(|i| i % 3 == 0)
+        .map(|i| format!("t{i}"))
+        .collect();
+    let mut direct = Client::new(&nodes[0].0);
+    proxies[0].cut();
+    let cut = Instant::now();
+    let fenced = loop {
+        if query(&mut direct, &held[0], "put notes {n: 1}") == 503 {
+            break cut.elapsed();
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let mut back: Vec<Duration> = Vec::with_capacity(held.len());
+    for t in &held {
+        // A connection of its own each time: the router's to us1 was cut.
+        loop {
+            let mut c = Client::new(&us);
+            if query(&mut c, t, "put notes {n: 2}") == 200 {
+                back.push(cut.elapsed());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    println!(
+        "\nregion us cut off from the global router, a lease of {:.0} ms: us1 cut off from us's \
+         router stopped taking writes {:.0} ms after, and its {} tenants took them again on their \
+         replicas {:.0} to {:.0} ms after -- the lease and a tenth is {:.0} ms",
+        ms(term),
+        ms(fenced),
+        held.len(),
+        ms(*back.iter().min().unwrap()),
+        ms(*back.iter().max().unwrap()),
+        ms(term + term / 10)
+    );
+    for (_, dir) in &nodes {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let _ = std::fs::remove_dir_all(&files);
 }

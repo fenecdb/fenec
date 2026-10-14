@@ -33,6 +33,7 @@ pub mod directory;
 pub mod fanout;
 pub mod lease;
 pub mod metrics;
+pub mod region;
 pub mod upstream;
 
 use directory::{Directory, Node, State};
@@ -88,6 +89,14 @@ pub struct Config {
     /// whatever its region, as before regions, and the tenant is in that
     /// node's region.
     pub default_region: Option<String>,
+    /// The region whose own directory this router keeps (`--region`): its
+    /// nodes and tenants, leased and failed over here with no word from
+    /// another region ([`region`]). `None`: the global directory's router.
+    pub region: Option<String>,
+    /// The global directory's routers (`--global`), the one keeping it
+    /// first: where a region's router sends a change the global directory
+    /// takes -- a create, a delete, a move across regions.
+    pub global: Vec<String>,
 }
 
 impl Default for Config {
@@ -106,6 +115,8 @@ impl Default for Config {
             cors: None,
             fanout: fanout::Limits::default(),
             default_region: None,
+            region: None,
+            global: Vec::new(),
         }
     }
 }
@@ -130,6 +141,19 @@ pub struct Router {
     /// (`fenec_http::audit::router_mark`), by its admin token: an HMAC
     /// worked out once, not a request.
     marks: Mutex<std::collections::HashMap<String, Arc<str>>>,
+    /// A region's router's copy of the global directory, which says where
+    /// every other tenant lives: followed from the global router. `None` on
+    /// a router of the global directory, whose own it is.
+    global: Option<RwLock<Directory>>,
+    /// The mark a router names a relayed request's client with, and
+    /// believes on what it is relayed: an HMAC of the routers' `--token`,
+    /// which they share. `None` without one: the relaying router is then
+    /// the client.
+    relay_mark: Option<Arc<str>>,
+    /// For each region, the router of its list that answered last: asked
+    /// first, so a router gone costs its region one failed connect, not one
+    /// a request.
+    answered: Mutex<std::collections::HashMap<String, usize>>,
 }
 
 /// An operation failure, shaped as an HTTP status and message.
@@ -149,6 +173,17 @@ impl Router {
     }
 
     fn over(dir: Directory, cfg: Config, repl: Option<Arc<Replication>>) -> Arc<Router> {
+        Router::assemble(dir, cfg, repl, None)
+    }
+
+    /// The router over `dir`, and over `global` where it keeps a region's
+    /// own directory ([`region`]).
+    fn assemble(
+        dir: Directory,
+        cfg: Config,
+        repl: Option<Arc<Replication>>,
+        global: Option<RwLock<Directory>>,
+    ) -> Arc<Router> {
         Arc::new(Router {
             dir: RwLock::new(dir),
             repl,
@@ -159,6 +194,12 @@ impl Router {
             leases: cfg
                 .auto_failover
                 .map(|term| (lease::Leases::new(term), Pool::new(term / 3))),
+            global,
+            relay_mark: cfg
+                .token
+                .as_deref()
+                .map(|t| fenec_http::audit::router_mark(t).into()),
+            answered: Mutex::new(Default::default()),
             cfg,
         })
     }
@@ -263,11 +304,12 @@ impl Router {
             leases.standby();
             return;
         }
-        let (lists, reading) = self.primaries_read(leases);
+        let (lists, reading, holder) = self.primaries_read(leases);
         std::thread::scope(|s| {
             for (node, list) in &lists {
                 leases.know(node);
-                s.spawn(move || self.grant(node, list, reading));
+                let holder = &holder;
+                s.spawn(move || self.grant(node, list, reading, holder));
             }
         });
         for node in leases.lapsed(Instant::now()) {
@@ -283,10 +325,11 @@ impl Router {
             fenec_http::log!("failover of `{node}`: {status} {why}");
             // The nodes its tenants went to take their writes now, not at
             // the next round.
-            let (lists, reading) = self.primaries_read(leases);
+            let (lists, reading, holder) = self.primaries_read(leases);
             std::thread::scope(|s| {
                 for (node, list) in &lists {
-                    s.spawn(move || self.grant(node, list, reading));
+                    let holder = &holder;
+                    s.spawn(move || self.grant(node, list, reading, holder));
                 }
             });
         }
@@ -299,14 +342,38 @@ impl Router {
         self.leases.as_ref().map_or(0, |(l, _)| l.grants_waiting())
     }
 
-    /// Every node's primaries, and the number of this reading of the
-    /// directory, taken under its lock ([`lease::Leases::reading`]).
+    /// Every node's primaries, the number of this reading of the directory,
+    /// taken under its lock ([`lease::Leases::reading`]), and who the grants
+    /// over them come from: the directory and its term as they stood then.
     fn primaries_read(
         &self,
         leases: &lease::Leases,
-    ) -> (std::collections::BTreeMap<String, Vec<String>>, u64) {
+    ) -> (
+        std::collections::BTreeMap<String, Vec<String>>,
+        u64,
+        fenec_http::lease::Holder,
+    ) {
         let dir = self.read_dir();
-        (dir.primaries(), leases.reading())
+        (dir.primaries(), leases.reading(), self.holder_of(&dir))
+    }
+
+    /// Who this router leases as: the directory it keeps -- the global one,
+    /// or its region's -- and the term its history stands at, which a
+    /// promotion moves on.
+    fn holder_of(&self, dir: &Directory) -> fenec_http::lease::Holder {
+        let db = dir.db().read().unwrap_or_else(|e| e.into_inner());
+        let history = db.history();
+        fenec_http::lease::Holder {
+            authority: self.cfg.region.clone().unwrap_or_default(),
+            term: history.lineage.len() as u64,
+            history: history.current(),
+        }
+    }
+
+    /// [`Self::holder_of`] as the header a promotion or a follow names it
+    /// in ([`fenec_http::lease::HOLDER_HEADER`]).
+    fn holder_header(&self) -> String {
+        self.holder_of(&self.read_dir()).header()
     }
 
     /// Grants `node` its lease at once, over what the directory places there
@@ -316,9 +383,9 @@ impl Router {
         let Some((leases, _)) = &self.leases else {
             return;
         };
-        let (mut lists, reading) = self.primaries_read(leases);
+        let (mut lists, reading, holder) = self.primaries_read(leases);
         let list = lists.remove(node).unwrap_or_default();
-        self.grant(node, &list, reading);
+        self.grant(node, &list, reading, &holder);
     }
 
     /// Sends `node` its lease over `primaries`, read from the directory's
@@ -328,7 +395,13 @@ impl Router {
     /// the node then holds the list of ([`lease::Leases::turn`]). A node
     /// that answers after it was failed over has a repair run, which has its
     /// copies follow its tenants' new primaries.
-    fn grant(&self, node: &str, primaries: &[String], reading: u64) {
+    fn grant(
+        &self,
+        node: &str,
+        primaries: &[String],
+        reading: u64,
+        holder: &fenec_http::lease::Holder,
+    ) {
         let Some((leases, pool)) = &self.leases else {
             return;
         };
@@ -354,11 +427,29 @@ impl Router {
                 let names: Vec<String> = primaries.iter().map(|t| quote(t)).collect();
                 body.push_str(&format!(",\"primaries\":[{}]", names.join(",")));
             }
-            body.push('}');
+            body.push_str(&format!(
+                ",\"authority\":{},\"term\":{},\"history\":\"{:016x}\"}}",
+                quote(&holder.authority),
+                holder.term,
+                holder.history
+            ));
             let answer =
                 match pool.call(&n.addr, "POST", "/_admin/lease", &n.token, body.as_bytes()) {
+                    // A node from before terms answers without one. Under the
+                    // global directory it is leased as before; a region's
+                    // router, which another router may be promoted over,
+                    // does not count on a fence the node does not have.
+                    Ok((200, b))
+                        if !holder.authority.is_empty()
+                            && !b.windows(7).any(|w| w == b"\"term\":") =>
+                    {
+                        lease::Answer::Unfenced
+                    }
                     Ok((200, _)) => lease::Answer::Taken,
                     Ok((412, _)) => lease::Answer::NeedsList,
+                    Ok((409, b)) if b.windows(9).any(|w| w == b"\"held_by\"") => {
+                        lease::Answer::Superseded
+                    }
                     Ok((404 | 409, _)) => lease::Answer::Refuses,
                     _ => lease::Answer::Silent,
                 };
@@ -437,6 +528,11 @@ impl Router {
             // (`Pool::send`) and answers with.
             fenec_http::request_id::begin_request(&req);
             let arrived = Instant::now();
+            // The client another router relayed this for, believed from a
+            // router holding the same `--token` alone ([`region`]): it
+            // waited out a refusal by that client's address already, and is
+            // told when a token is verified here.
+            let relayed = fenec_http::audit::request(&req, self.relay_mark.as_deref());
             // A browser's preflight is answered here, as a node answers its
             // own: before the directory is read, so a tenant the directory
             // does not hold, a standby whose directory has not arrived or a
@@ -478,8 +574,15 @@ impl Router {
                     fenec_http::log!("could not read the directory: {e}");
                 }
             }
+            if let Some(global) = &self.global {
+                if read(global).stale() {
+                    if let Err(e) = write(global).refresh() {
+                        fenec_http::log!("could not read the global directory: {e}");
+                    }
+                }
+            }
             let keep = match req.segments().first() {
-                Some(&"t") => self.forward(&req, &mut out, arrived, peer),
+                Some(&"t") => self.forward(&req, &mut out, arrived, peer, relayed),
                 Some(&"_replication") => {
                     let Some(repl) = self.repl.clone() else {
                         let _ = self
@@ -545,12 +648,15 @@ impl Router {
 
     /// Forwards one request and copies the answer back, and counts it.
     /// Returns whether the client connection can carry another request.
+    /// `relayed` is the client another router relayed it for, where it
+    /// came so ([`region`]).
     fn forward(
         &self,
         req: &Request,
         out: &mut TcpStream,
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
+        relayed: Option<std::net::IpAddr>,
     ) -> bool {
         let head_only = req.method == Method::Head;
         // A forwarded request is traced, the rest of the router's are not:
@@ -570,36 +676,29 @@ impl Router {
         if fenec_http::trace::recording() {
             fenec_http::trace::attr("fenec.tenant", tenant.to_string());
         }
-        let addr = {
+        // The node holding the tenant, as this router's own directory has
+        // it; or, where that says nothing, the routers of the region the
+        // tenant lives in ([`region`]).
+        let placed = {
             let dir = self.read_dir();
-            let node = dir.placement(tenant).and_then(|p| {
+            dir.placement(tenant).and_then(|p| {
                 dir.node(&p.node)
                     .map(|n| (p.node.clone(), n.addr.clone(), self.mark(&n.token)))
-            });
-            match node {
-                Some(n) => n,
-                // A standby whose maps have not come from the primary yet
-                // cannot say a tenant does not exist: 404 tells a client to
-                // stop asking, this to ask again.
-                None if !dir.arrived() => {
-                    return reply(
-                        out,
-                        Response::retry_after(
-                            503,
-                            "the directory has not arrived from the primary yet",
-                            1,
-                        ),
-                    )
-                }
-                None => {
-                    return reply(
-                        out,
-                        Response::error(404, &format!("no tenant `{tenant}` in the directory")),
-                    )
-                }
-            }
+            })
         };
-        let (node, addr, mark) = addr;
+        let (node, addr, mark, routers) = match placed {
+            Some((node, addr, mark)) => (node, addr, Some(mark), None),
+            None => match self.elsewhere(tenant, relayed.is_some()) {
+                region::Target::Node(node, addr, mark) => (node, addr, Some(mark), None),
+                region::Target::Region(region, routers) => {
+                    let first = self.first_router(&region, &routers);
+                    let addr = region::host(&routers[first]).to_string();
+                    let mark = self.relay_mark.clone();
+                    (region::label(&region), addr, mark, Some((region, routers)))
+                }
+                region::Target::Answer(resp) => return reply(out, resp),
+            },
+        };
         if fenec_http::trace::recording() {
             fenec_http::trace::attr("fenec.node", node.clone());
         }
@@ -613,7 +712,10 @@ impl Router {
         // Borrowed, not cloned: a request's headers were copied into
         // `String`s here and formatted one by one into the head, which with
         // the router's own header made a request through it 1.5 us slower.
-        let named = peer.map(|p| format!("{} {mark}", p.ip()));
+        // A router relaying names the client it was relayed for, as the
+        // router before it did.
+        let client = relayed.or(peer.map(|p| p.ip()));
+        let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
         let mut headers: Vec<(&str, &str)> = req
             .headers
             .iter()
@@ -656,23 +758,36 @@ impl Router {
             .map_or(Duration::ZERO, |ms| {
                 Duration::from_millis(ms).min(fenec_http::waits::LONGEST)
             });
-        let answer = match self.pool.send_held(
-            &addr,
-            req.method.name(),
-            &req.target,
-            &headers,
-            &req.body,
-            held,
-        ) {
+        let sending = match &routers {
+            None => self.pool.send_held(
+                &addr,
+                req.method.name(),
+                &req.target,
+                &headers,
+                &req.body,
+                held,
+            ),
+            // A region's routers, in turn from the one that answered last,
+            // as far as the request cannot have run.
+            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held),
+        };
+        let answer = match sending {
             Ok(a) => a,
             Err(e) => {
                 forwarding.error(e.to_string());
                 drop(forwarding);
                 metrics::unreachable(&node);
-                return reply(
-                    out,
-                    Response::error(502, &format!("node `{node}` ({addr}) did not answer: {e}")),
-                );
+                // 502, as a node out of reach is: a client takes it to ask
+                // again, and a region cut off from this one answers its own
+                // clients all the while.
+                let why = match &routers {
+                    None => format!("node `{node}` ({addr}) did not answer: {e}"),
+                    Some((region, _)) => format!(
+                        "region `{region}`'s routers did not answer -- it may be cut off from \
+                         this one, and answers through its own: {e}"
+                    ),
+                };
+                return reply(out, Response::error(502, &why));
             }
         };
 
@@ -714,6 +829,9 @@ impl Router {
         if verified {
             fenec_http::audit::verified();
         }
+        // Relayed, it is the relaying router's to know, which keeps the
+        // client's count.
+        fenec_http::audit::push_verified(&mut head);
         fenec_http::audit::http(req, status, peer);
         fenec_http::request_id::with(|id| {
             head.push_str(fenec_http::request_id::HEADER);
@@ -811,7 +929,20 @@ impl Router {
     /// POST   /_shard/query {query, params, tenants | prefix, merge, column,
     ///                       partial, timeout_ms}  one read on every tenant,
     ///                                       the answers merged ([`fanout`])
+    /// GET    /_shard/region                    {region, following, term,
+    ///                                       history, global}: what this router
+    ///                                       keeps, and the term it leases at
+    /// GET    /_shard/regions                   [{name, routers, tenants}]: the
+    ///                                       regions keeping their own directory
+    /// PUT    /_shard/regions/<r> {routers}    region r keeps its own, kept by
+    ///                                       the first router and followed by the
+    ///                                       rest; DELETE once no tenant is there
     /// ```
+    ///
+    /// Where regions keep their own directory ([`region`]), a change is
+    /// relayed to the router keeping the directory it touches -- a region's
+    /// nodes and tenants to its router, a create, a delete and a move across
+    /// regions to the global router, which asks each region for its part.
     pub fn admin(&self, req: &Request) -> Response {
         if let Some(refused) = self.refused(req) {
             return refused;
@@ -828,10 +959,6 @@ impl Router {
                 ),
             };
         }
-        let body = match body_fields(req) {
-            Ok(b) => b,
-            Err(e) => return Response::error(400, &e),
-        };
         let segs = req.segments();
         // A standby's directory is a replica's file: it takes no write of
         // its own, so a change belongs on the primary. The reads below are
@@ -842,6 +969,8 @@ impl Router {
                 | (Method::Get, ["tenants"])
                 | (Method::Get, ["tenants", _])
                 | (Method::Get, ["tenants", _, "quota"])
+                | (Method::Get, ["region"])
+                | (Method::Get, ["regions"])
         );
         if writes && self.read_dir().following() {
             return Response::error(
@@ -850,6 +979,16 @@ impl Router {
                  or promote this one (POST /_replication/promote)",
             );
         }
+        // What regions keeping their own directory change: relayed to the
+        // router keeping the directory it touches, or carried out here
+        // across two of them ([`region`]).
+        if let Some(resp) = self.regional_admin(req) {
+            return resp;
+        }
+        let body = match body_fields(req) {
+            Ok(b) => b,
+            Err(e) => return Response::error(400, &e),
+        };
         let result = match (req.method, &segs[1..]) {
             (Method::Get, ["nodes"]) => Ok(self.list_nodes()),
             (Method::Put, ["nodes", n]) => self.set_node(n, &body),
@@ -1074,7 +1213,7 @@ impl Router {
             .map(|(_, v)| v.as_str());
         let (tenants, nodes) = {
             let dir = self.read_dir();
-            let tenants: Vec<(String, String, bool, Option<String>, String)> = dir
+            let mut tenants: Vec<(String, String, bool, Option<String>, String)> = dir
                 .tenants()
                 .iter()
                 .filter(|(_, p)| region.is_none_or(|r| dir.region_of(&p.node) == r))
@@ -1088,6 +1227,19 @@ impl Router {
                     )
                 })
                 .collect();
+            // The tenants at home in a region keeping its own directory,
+            // with no node: their region's router places them, and answers
+            // `GET /_shard/tenants/<t>` for them.
+            let homes = dir.homes();
+            if !homes.is_empty() {
+                tenants.extend(
+                    homes
+                        .into_iter()
+                        .filter(|(_, r)| region.is_none_or(|want| want == r))
+                        .map(|(name, r)| (name, String::new(), false, None, r)),
+                );
+                tenants.sort_by(|a, b| a.0.cmp(&b.0));
+            }
             let nodes: Vec<(String, Node)> = match sized || quotas {
                 true => dir
                     .nodes()
@@ -1165,6 +1317,9 @@ impl Router {
                     .find(|(n, t, _)| n == node && t == name)
                     .map(|(_, _, q)| q.as_str())
                     .unwrap_or_default();
+                if node.is_empty() {
+                    return format!("{{\"name\":{},\"state\":\"active\"{region}}}", quote(name));
+                }
                 format!(
                     "{{\"name\":{},\"node\":{},\"state\":\"{}\"{region}{replica}{bytes}{quota}}}",
                     quote(name),
@@ -1223,6 +1378,33 @@ impl Router {
             || was.as_ref().map(|w| w.zone.clone()).unwrap_or_default(),
             str::to_string,
         );
+        // A region's router keeps its own region's nodes, a node named
+        // without one among them; the global router none of a region
+        // keeping its own directory ([`region`]).
+        match &self.cfg.region {
+            Some(own) if region.is_none() && was.is_none() => node.region = own.clone(),
+            Some(own) if node.region != *own => {
+                return Err(Fail(
+                    409,
+                    format!(
+                        "this router keeps {}'s directory: a node of {} is recorded by that \
+                         region's router, or the global one",
+                        region_name(own),
+                        region_name(&node.region)
+                    ),
+                ))
+            }
+            None if dir.routers(&node.region).is_some() => {
+                return Err(Fail(
+                    409,
+                    format!(
+                        "{} keeps its own directory: its nodes are recorded by its router",
+                        region_name(&node.region)
+                    ),
+                ))
+            }
+            _ => {}
+        }
         if let Some(w) = was.as_ref().filter(|w| w.region != node.region) {
             if dir.holds(name) {
                 return Err(Fail(
@@ -1318,7 +1500,14 @@ impl Router {
                 || (method == "PUT" && status == 409)
                 || (method == "DELETE" && status == 404)
         };
-        match self.pool.call(&n.addr, method, target, &n.token, b"") {
+        // Named, so a node a newer term leases refuses to follow at the word
+        // of a router it superseded.
+        let holder = self.holder_header();
+        let named = [(fenec_http::lease::HOLDER_HEADER, holder.as_str())];
+        match self
+            .pool
+            .call_with(&n.addr, method, target, &n.token, &named, b"")
+        {
             Ok((status, _)) if done(status) => None,
             Ok((status, body)) => Some(format!(
                 "standby `{name}` answered {status}: {}",
@@ -1399,7 +1588,12 @@ impl Router {
                 &[200][..],
             ),
         ] {
-            match self.pool.call(&r.addr, method, &target, &r.token, body) {
+            let holder = self.holder_header();
+            let named = [(fenec_http::lease::HOLDER_HEADER, holder.as_str())];
+            match self
+                .pool
+                .call_with(&r.addr, method, &target, &r.token, &named, body)
+            {
                 Ok((status, _)) if ok.contains(&status) => {}
                 Ok((status, body)) => {
                     return Err(format!(
@@ -1603,6 +1797,9 @@ impl Router {
             .filter(|(_, p)| p.node == name)
             .map(|(t, _)| t)
             .collect();
+        // Named, so a node a newer term leases refuses a promotion from a
+        // router it superseded.
+        let holder = self.holder_header();
         let (mut promoted, mut failed) = (Vec::new(), Vec::new());
         for tenant in tenants {
             let Ok(_claim) = self.claim(&tenant) else {
@@ -1613,9 +1810,10 @@ impl Router {
                 continue;
             };
             let target = format!("/_admin/tenants/{tenant}/promote");
-            let answer = self
-                .pool
-                .call(&standby.addr, "POST", &target, &standby.token, b"");
+            let named = [(fenec_http::lease::HOLDER_HEADER, holder.as_str())];
+            let answer =
+                self.pool
+                    .call_with(&standby.addr, "POST", &target, &standby.token, &named, b"");
             if matches!(answer, Ok((200, _))) {
                 self.quota_after_failover(&tenant, &to);
             }
@@ -1687,6 +1885,9 @@ impl Router {
                 .collect();
             (tenants, dir.replicas_on(name))
         };
+        // Named, so a node a newer term leases refuses a promotion from a
+        // router it superseded.
+        let holder = self.holder_header();
         let (mut promoted, mut failed) = (Vec::new(), Vec::new());
         for (tenant, replica) in tenants {
             let Ok(_claim) = self.claim(&tenant) else {
@@ -1702,9 +1903,10 @@ impl Router {
                 continue;
             };
             let target = format!("/_admin/tenants/{tenant}/promote");
+            let named = [(fenec_http::lease::HOLDER_HEADER, holder.as_str())];
             match self
                 .pool
-                .call(&node.addr, "POST", &target, &node.token, b"")
+                .call_with(&node.addr, "POST", &target, &node.token, &named, b"")
             {
                 Ok((200, _)) => {
                     self.quota_after_failover(&tenant, &to);
@@ -1980,7 +2182,8 @@ impl Router {
             .transpose()
             .map_err(|e| Fail(400, e))?;
         let _claim = self.claim(tenant)?;
-        if self.read_dir().placement(tenant).is_some() {
+        // A name at home in a region keeping its own directory is taken too.
+        if self.read_dir().exists(tenant) {
             return Err(Fail(409, format!("tenant `{tenant}` already exists")));
         }
         let region = match at.node {
@@ -2579,6 +2782,14 @@ fn message(e: &Error) -> String {
 
 fn internal(e: Error) -> Fail {
     Fail(500, format!("directory: {}", message(&e)))
+}
+
+fn read(d: &RwLock<Directory>) -> std::sync::RwLockReadGuard<'_, Directory> {
+    d.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write(d: &RwLock<Directory>) -> std::sync::RwLockWriteGuard<'_, Directory> {
+    d.write().unwrap_or_else(|e| e.into_inner())
 }
 
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {

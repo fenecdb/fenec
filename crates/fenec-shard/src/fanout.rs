@@ -410,17 +410,41 @@ impl Router {
                 1,
             ));
         }
-        let placed = match pick {
-            Pick::All => dir.tenants(),
-            Pick::Prefix(p) => dir
-                .tenants()
+        // A tenant at home in a region keeping its own directory is asked
+        // nowhere from here, and named as failed: left out, the answer
+        // would be cut without a word.
+        let homes = |keep: &dyn Fn(&str) -> bool| -> Vec<(String, crate::directory::Placement)> {
+            dir.homes()
                 .into_iter()
-                .filter(|(t, _)| t.starts_with(p.as_str()))
-                .collect(),
+                .filter(|(t, _)| keep(t))
+                .map(|(t, r)| {
+                    let p = crate::directory::Placement {
+                        node: crate::region::label(&r),
+                        state: crate::directory::State::Active,
+                    };
+                    (t, p)
+                })
+                .collect()
+        };
+        let mut placed = match pick {
+            Pick::All => {
+                let mut all = dir.tenants();
+                all.extend(homes(&|_| true));
+                all
+            }
+            Pick::Prefix(p) => {
+                let mut some: Vec<_> = dir
+                    .tenants()
+                    .into_iter()
+                    .filter(|(t, _)| t.starts_with(p.as_str()))
+                    .collect();
+                some.extend(homes(&|t| t.starts_with(p.as_str())));
+                some
+            }
             Pick::Named(names) => {
                 let missing: Vec<String> = names
                     .iter()
-                    .filter(|n| dir.placement(n).is_none())
+                    .filter(|n| !dir.exists(n))
                     .map(|n| format!("`{n}`"))
                     .collect();
                 if !missing.is_empty() {
@@ -432,12 +456,17 @@ impl Router {
                 let mut names = names.clone();
                 names.sort_unstable();
                 names.dedup();
-                names
-                    .into_iter()
-                    .filter_map(|n| dir.placement(&n).cloned().map(|p| (n, p)))
-                    .collect()
+                let mut some: Vec<_> = names
+                    .iter()
+                    .filter_map(|n| dir.placement(n).cloned().map(|p| (n.clone(), p)))
+                    .collect();
+                some.extend(homes(&|t| {
+                    names.binary_search_by(|n| n.as_str().cmp(t)).is_ok()
+                }));
+                some
             }
         };
+        placed.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(placed
             .into_iter()
             .map(|(tenant, p)| Target {
@@ -563,7 +592,17 @@ impl Router {
         let (mut node, mut at) = (t.node.clone(), t.at.clone());
         for _ in 0..ASKS {
             let called = match &at {
-                None => Err((502, format!("no node `{node}` in the directory"))),
+                None => match node.strip_prefix(crate::directory::HOME) {
+                    Some(r) => Err((
+                        502,
+                        format!(
+                            "it lives in region `{r}`, which keeps its own directory: a query \
+                             across tenants asks the tenants this router places, and region \
+                             `{r}`'s router asks its own"
+                        ),
+                    )),
+                    None => Err((502, format!("no node `{node}` in the directory"))),
+                },
                 Some((addr, token)) => {
                     let headers = Headers::new(token, id, context, &node);
                     self.call(addr, &node, &target, &headers, ask, deadline, shared)
@@ -575,6 +614,15 @@ impl Router {
                     return read_answer(ask, max, shared, &t.tenant, &node, body);
                 }
                 Ok(None) => return Got::Unasked,
+                // Asked nowhere, so nothing moved under it.
+                Err((status, why)) if node.starts_with(crate::directory::HOME) => {
+                    return Got::Failed(Failure {
+                        tenant: t.tenant.clone(),
+                        node,
+                        status,
+                        why,
+                    })
+                }
                 Err(failed) => failed,
             };
             let now = {

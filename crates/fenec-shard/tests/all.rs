@@ -8,6 +8,7 @@ mod cors;
 mod fanout;
 mod leases;
 mod listen;
+mod region_leases;
 mod regions;
 mod replicas;
 mod router;
