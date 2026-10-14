@@ -81,6 +81,7 @@ make load-bench          # loading 100 000 rows each way a client can send them,
 make maintenance-bench   # reads and writes during create index / compact
 make compact-bench       # a file under updates, compacted on its own or not: its size, reads during and after each compact, its swap's lock (COMPACT_ARGS)
 make open-bench          # opening a 1 GB file, read into memory or mapped
+make opens-bench         # a checkpointed file opened, alone and with its first read: 1k and 100k x 128, a million rows of no vector
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
 make scale-bench         # fenec-server over HTTP against pgvector at scale: load, memory, recall, latency, filters (pgvector-up first)
@@ -1334,7 +1335,18 @@ after it (`Store::image_index`) -- each live document's id, payload length and
 place, 4 bytes a document -- which a mapped open takes (`adopt_index`) rather
 than walking the frames' heads, a chain of cache misses: 100 000 x 128 opened
 in 8.4 ms against 14.4, and every reader of the record reads the counter
-alone. Read into memory, a load copies each frame as it stands into the
+alone. Behind its documents the index says where each 16 384 of them end --
+the byte, the id and the place the next share counts from, 24 bytes each,
+and their number (`FRAMES_SPLIT`) -- and an open reads the shares on every
+core, each into its own stretch of the dense id array (`adopt_shares`). Read
+in turn through `get_uvarint` and `insert`, the index was 9.5 ms of a
+million rows' open; a byte read inline and the next id pushed onto the dense
+array (`push_above`), 4.8; in shares, a million rows of no vector open in
+1.3 ms against 10.3 (`make opens-bench`). Ids that would leave the array a
+quarter empty or reach the sparse map are read in turn, as `insert` places
+them, and so is an index whose shares do not read as it says. A binary that
+knows only `FRAMES_MARK` walks the record of a `FRAMES_SPLIT` image, as it
+walks one with no index. Read into memory, a load copies each frame as it stands into the
 segment `append` would put it in (`replay_noting`): framed afresh into a `Vec`
 of its own first and copied again, it was 17 of a 25 ms load, now 9.6;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
@@ -1418,6 +1430,17 @@ from them in one place (`build_restored`);
 8 to the same index, which a binary before 7 builds again. The browser
 module carries the reader -- 1.8 KB brotli -- to open a server's file
 without building its graphs again, and loads its own no faster for it.
+Natively a graph of `LISTS_SHARED` (8 192) nodes or more has its level-0
+lists decoded `LIST_SHARE` (2 048) nodes at a time on every core, once a
+walk over the lists' widths has found where each share starts, and its
+levels above beside them on a thread of their own (`lists_in_shares`), each
+share held to end where the next starts: in turn they were 2.6 ms of an
+8.6 ms open at 100 000 x 128, a stretch no other core worked in, and are 1.3
+-- the walk 0.7 of it. Below 8 192 nodes the threads cost more than they share: a
+graph of 1 000 opened in 0.197 ms that way against 0.166 in turn. Each width
+of a document id is its own loop, and the flags are checked before they are
+copied: a `memcpy` a document, the arrays were 0.7 ms, and are 0.3. The
+browser decodes in turn as it did, its module 325 bytes smaller raw.
 
 **A batch links in parallel, into the graph it would link in turn.**
 `insert_batch` finds a batch's neighbours on every core against the graph
@@ -3792,7 +3815,35 @@ what is built -- counted by building, every metrics scrape would build them
 all. With one `@hash` field, 100 000 x 128 opens in 21.9 ms against 31.0,
 and the browser module loads 20 000 x 128 with a hash, an ordered and a text
 index in 19.0 ms against 41.8; the first read of each pays its build. It
-cost the module 0.7 KB brotli, most of it a builder and a cell a kind.
+cost the module 0.7 KB brotli, most of it a builder and a cell a kind. Nor
+does an open list a collection's ids where nothing is built from its
+documents (`rebuild_indexes_with`): listed for every collection, they were
+2.1 ms of a million rows' open.
+
+**An open of a file with a graph copies its vectors, and that is most of
+it.** `make compare`'s reopen once read 9 ms against SQLite's 0.9: one open
+and an ANN query of fenecdb's against SQLite's open and a count through its
+index, two different first questions. It now times each side's open alone,
+then with a read by id, then with a vector top-10 -- SQLite's a full scan --
+the median of 31 each: 6.0, 6.0 and 6.1 ms against 0.07, 0.46 and 30.5.
+SQLite reads nothing until it is asked. Of fenecdb's 6.2 ms at 100 000 x 128
+(`examples/opens.rs`, timers in each part), 3.6 are the arena -- 51 MB of
+vectors read out of the mapped file, made unit ones and written into pages
+the open allocates, on every core -- which the pages bound: each page of the
+62 MB file touched once took 1.5 ms on eight threads, each of 62 MB newly
+allocated 4.8 (2.7 on one), and with the arena filled on one core the open
+took 17.7 ms against 10.5. Then 1.8 the graph record (`Read`), 0.3 `by_doc`
+and 0.3 the id index. Before, 8.6: the graph record 3.5, the id index 1.0,
+every collection's ids listed for nothing 0.2 (all above). A million rows of
+128 dimensions open in 60 ms against 86, a million of no vector in 1.3
+against 10.3, a thousand of 128 in 0.156 against 0.165, and the browser
+module loads as fast as it did. Rejected: the arena's pages written once each
+on a thread beside the record's read, as `MAP_POPULATE` would -- 7.63 ms
+against 7.50, the two's faults contending; a restore left to the first
+statement that needs the graph, as the derived indexes are -- an open would
+no longer validate the graph it holds, and the first `near` or write would
+pay the 6 ms; the arena kept in the file for an open to map rather than copy
+-- every 100 000 x 128 file 51 MB larger, its vectors twice.
 
 **A server warms what an open left for the first read** (`--warm`,
 `fenec_http::warm`). The first `match` after a start built its `@text`

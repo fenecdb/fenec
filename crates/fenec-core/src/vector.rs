@@ -600,13 +600,38 @@ impl<'a> Read<'a> {
             return None;
         }
         let docs = at.take(count.checked_mul(dw)?)?;
-        r.docs.extend(docs.chunks_exact(dw).map(|b| {
-            let mut w = [0u8; 8];
-            w[..dw].copy_from_slice(b);
-            u64::from_le_bytes(w)
-        }));
-        for &b in at.take(count)? {
-            r.flags.push(Read::flag(b, waits)?);
+        // Natively each width its own loop, and the flags checked before
+        // they are copied: a copy of a width known only as the record is
+        // read was a call to `memcpy` a document, and the arrays took 0.7
+        // ms of a 100 000 x 128 open's 8.6. The browser keeps the one loop.
+        match (cfg!(target_family = "wasm"), dw) {
+            (false, 4) => r.docs.extend(
+                docs.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| u32::from_le_bytes(*b) as u64),
+            ),
+            (false, _) => r.docs.extend(
+                docs.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| u64::from_le_bytes(*b)),
+            ),
+            (true, _) => r.docs.extend(docs.chunks_exact(dw).map(|b| {
+                let mut w = [0u8; 8];
+                w[..dw].copy_from_slice(b);
+                u64::from_le_bytes(w)
+            })),
+        }
+        let flags = at.take(count)?;
+        if cfg!(target_family = "wasm") {
+            for &b in flags {
+                r.flags.push(Read::flag(b, waits)?);
+            }
+        } else if flags.iter().all(|&b| Read::flag(b, waits).is_some()) {
+            r.flags.extend_from_slice(flags);
+        } else {
+            return None;
         }
         let levels = at.take(count)?;
         for b in at.take(count.checked_mul(2)?)?.as_chunks::<2>().0 {
@@ -616,22 +641,7 @@ impl<'a> Read<'a> {
             }
             r.l0_len.push(k);
         }
-        for (stride, &k) in r.l0.chunks_exact_mut(m0).zip(&r.l0_len) {
-            at.links(lw, &mut stride[..k as usize], count)?;
-        }
-        for &lv in levels {
-            let mut lists = Vec::with_capacity(lv as usize);
-            for _ in 0..lv {
-                let k = at.number(2)? as usize;
-                if k > count {
-                    return None;
-                }
-                let mut list = vec![0u32; k];
-                at.links(lw, &mut list, count)?;
-                lists.push(list);
-            }
-            r.upper.push(lists);
-        }
+        r.lists(&mut at, levels, lw, m0, count)?;
         for _ in r.flags.iter().filter(|&&f| f == DEAD) {
             r.tombs.push(at.take(stored)?);
         }
@@ -662,6 +672,130 @@ impl<'a> Read<'a> {
         Some(r)
     }
 }
+
+impl Read<'_> {
+    /// The lists of a flat record from where `at` stands: level 0's into
+    /// `l0`, a node's at its stride, then each node's `levels` above into
+    /// `upper` -- in turn, natively below [`LISTS_SHARED`] nodes
+    /// ([`Self::lists_in_shares`]).
+    fn lists(
+        &mut self,
+        at: &mut Cursor<'_>,
+        levels: &[u8],
+        lw: usize,
+        m0: usize,
+        count: usize,
+    ) -> Option<()> {
+        #[cfg(not(target_family = "wasm"))]
+        if count >= LISTS_SHARED {
+            return self.lists_in_shares(at, levels, lw, m0, count);
+        }
+        for (stride, &k) in self.l0.chunks_exact_mut(m0).zip(&self.l0_len) {
+            at.links(lw, &mut stride[..k as usize], count)?;
+        }
+        upper_lists(&mut self.upper, at, levels, lw, count)
+    }
+
+    /// [`Self::lists`] for a graph of [`LISTS_SHARED`] nodes or more:
+    /// level 0's a share of [`LIST_SHARE`] nodes at a time by whichever
+    /// thread is free, once a walk over the lists' widths has found where
+    /// each share starts -- a list is its first link and, past one, its
+    /// steps' width and the steps -- and the levels above, a list allocated
+    /// each, on a thread of their own beside them. Decoded in turn they
+    /// were 2.6 ms of a 100 000 x 128 open's 8.6, a stretch of it no core
+    /// but one worked in. Each share ends where the next starts, or the
+    /// record is not one this build wrote.
+    #[cfg(not(target_family = "wasm"))]
+    fn lists_in_shares(
+        &mut self,
+        at: &mut Cursor<'_>,
+        levels: &[u8],
+        lw: usize,
+        m0: usize,
+        count: usize,
+    ) -> Option<()> {
+        let bytes = at.bytes;
+        let mut starts = Vec::with_capacity(count.div_ceil(LIST_SHARE) + 1);
+        let mut pos = at.pos;
+        for (node, &k) in self.l0_len.iter().enumerate() {
+            if node % LIST_SHARE == 0 {
+                starts.push(pos);
+            }
+            pos += match k {
+                0 => 0,
+                1 => lw,
+                k => lw + 1 + (k as usize - 1) * *bytes.get(pos + lw)? as usize,
+            };
+        }
+        starts.push(pos);
+        let Read {
+            l0, l0_len, upper, ..
+        } = self;
+        let shares: Vec<Mutex<&mut [u32]>> =
+            l0.chunks_mut(LIST_SHARE * m0).map(Mutex::new).collect();
+        let upper = Mutex::new((upper, Cursor { bytes, pos }));
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let mut states = vec![(); threads.min(shares.len() + 1)];
+        // The levels above first: theirs is the longest task.
+        let ended = spread(shares.len() + 1, &mut states, |_, i| {
+            let Some(i) = i.checked_sub(1) else {
+                let mut up = upper.lock().unwrap_or_else(|e| e.into_inner());
+                let (lists, c) = &mut *up;
+                return upper_lists(lists, c, levels, lw, count);
+            };
+            let mut share = shares[i].lock().unwrap_or_else(|e| e.into_inner());
+            let mut c = Cursor {
+                bytes,
+                pos: starts[i],
+            };
+            for (stride, &k) in share.chunks_exact_mut(m0).zip(&l0_len[i * LIST_SHARE..]) {
+                c.links(lw, &mut stride[..k as usize], count)?;
+            }
+            (c.pos == starts[i + 1]).then_some(())
+        });
+        drop(shares);
+        if ended.len() != starts.len() || ended.contains(&None) {
+            return None;
+        }
+        at.pos = upper.into_inner().unwrap_or_else(|e| e.into_inner()).1.pos;
+        Some(())
+    }
+}
+
+/// Each node's lists above level 0, `levels[node]` of them, into `upper`
+/// from where `at` stands.
+fn upper_lists(
+    upper: &mut Vec<Vec<Vec<u32>>>,
+    at: &mut Cursor<'_>,
+    levels: &[u8],
+    lw: usize,
+    count: usize,
+) -> Option<()> {
+    for &lv in levels {
+        let mut lists = Vec::with_capacity(lv as usize);
+        for _ in 0..lv {
+            let k = at.number(2)? as usize;
+            if k > count {
+                return None;
+            }
+            let mut list = vec![0u32; k];
+            at.links(lw, &mut list, count)?;
+            lists.push(list);
+        }
+        upper.push(lists);
+    }
+    Some(())
+}
+
+/// Nodes whose level-0 lists a thread decodes at a time in a restore.
+#[cfg(not(target_family = "wasm"))]
+const LIST_SHARE: usize = 2048;
+
+/// The nodes from which a restore decodes its lists in shares: below, the
+/// threads it starts cost more than they share -- a graph of 1 000 nodes
+/// opened in 0.197 ms that way against 0.166 in turn.
+#[cfg(not(target_family = "wasm"))]
+const LISTS_SHARED: usize = 4 * LIST_SHARE;
 
 /// Where a flat graph record is being read.
 struct Cursor<'a> {
@@ -1478,7 +1612,7 @@ type Candidates = Vec<(u32, usize, Vec<(usize, Vec<u32>)>)>;
 /// their shares last while the other four waited. The results come back
 /// in no order.
 #[cfg(not(target_family = "wasm"))]
-fn spread<S: Send, T: Send>(
+pub(crate) fn spread<S: Send, T: Send>(
     n: usize,
     states: &mut [S],
     work: impl Fn(&mut S, usize) -> T + Sync,
@@ -5755,6 +5889,9 @@ mod tests {
             (Quant::None, VecPrec::F16, Metric::L2, 1500),
             (Quant::Int8, VecPrec::F32, Metric::Cosine, 1500),
             (Quant::Bit, VecPrec::F32, Metric::Cosine, 2200),
+            // Five shares of level-0 lists and a part of a sixth, which
+            // natively decode on threads of their own (`LISTS_SHARED`).
+            (Quant::None, VecPrec::F32, Metric::Cosine, 5 * 2048 + 100),
         ];
         for (quant, prec, metric, n) in cases {
             let dim = 12;
@@ -5851,13 +5988,20 @@ mod tests {
                         "{what}: a document twice"
                     );
                 }
-                let mut bad = new;
-                bad.l0[0] = bad.doc_ids.len() as u32;
-                let bad = bad.serialize(kept);
-                assert!(
-                    VectorIndex::restore_graph(&bad, dim, prec, lookup).is_none(),
-                    "{what}: bad link"
-                );
+                // In the first share of level-0 lists and in the last, which
+                // natively another thread decodes.
+                let last = (0..new.doc_ids.len()).rev().find(|&n| new.l0_len[n] > 0);
+                for node in [0, last.expect("a node with links")] {
+                    let mut bad =
+                        VectorIndex::restore_graph(&flat, dim, prec, lookup).expect(&what);
+                    let at = node * bad.m0 + bad.l0_len[node] as usize - 1;
+                    bad.l0[at] = bad.doc_ids.len() as u32;
+                    let bad = bad.serialize(kept);
+                    assert!(
+                        VectorIndex::restore_graph(&bad, dim, prec, lookup).is_none(),
+                        "{what}: bad link of node {node}"
+                    );
+                }
             }
         }
     }

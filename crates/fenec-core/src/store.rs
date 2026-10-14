@@ -18,6 +18,8 @@ use crate::error::{Error, Result};
 use crate::schema::Schema;
 use crate::value::{DocId, Document, Value};
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
 
 pub const OP_PUT: u8 = 1;
 pub const OP_DEL: u8 = 2;
@@ -87,6 +89,12 @@ fn after(end: u64, id: DocId, len: u64) -> u64 {
 /// of the record did.
 pub const FRAMES_MARK: u8 = 1;
 
+/// The first byte of an image's index that says, behind its documents,
+/// where each `INDEX_SHARE` of them starts ([`Store::image_index`]), for an
+/// open to read the shares on every core. A binary that knows only
+/// [`FRAMES_MARK`] walks the record, as one before either did.
+pub const FRAMES_SPLIT: u8 = 2;
+
 /// The bytes a store reads records from without having copied them: a file
 /// the operating system maps in on native targets (`fs::open_mapped`), and
 /// in the browser the image a load was handed (`fenec_load_owned`), kept
@@ -134,6 +142,151 @@ impl Snapshot {
         }
         Ok(())
     }
+}
+
+/// A varint of an image's index: a byte apiece for most of what one holds
+/// -- an id's step, a place where the frame before put it -- so that byte
+/// is read inline. Through `get_uvarint`, a call apiece, and an insert into
+/// the id index asking its slot first, a million documents took 9.5 ms.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn uvarint(bytes: &[u8], p: &mut usize) -> Option<u64> {
+    match bytes.get(*p) {
+        Some(&b) if b < 0x80 => {
+            *p += 1;
+            Some(b as u64)
+        }
+        _ => get_uvarint(bytes, p).ok(),
+    }
+}
+
+/// The next document of an image's index, from `p` -- its id moved on from
+/// `id` and its payload's end from `end` -- as the place and length of its
+/// payload in a record `len` bytes long; `None` where the index cannot
+/// describe such a record.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn index_entry(
+    docs: &[u8],
+    p: &mut usize,
+    id: &mut DocId,
+    end: &mut u64,
+    len: u64,
+) -> Option<(u64, u64)> {
+    let (step, n, off) = (uvarint(docs, p)?, uvarint(docs, p)?, uvarint(docs, p)?);
+    *id = id
+        .checked_add(step)
+        .filter(|_| step > 0 && n <= u32::MAX as u64)?;
+    let pos = (after(*end, *id, n) as i64)
+        .checked_add(crate::codec::unzigzag(off))
+        .filter(|&p| p > 0)? as u64;
+    *end = pos.checked_add(n).filter(|&e| e <= len)?;
+    Some((pos, n))
+}
+
+/// An image's index from `p` on, a document after another: the id index
+/// it gives the record `len` bytes at `at`, and its last id.
+#[cfg(not(target_arch = "wasm32"))]
+fn adopt_in_turn(
+    docs: &[u8],
+    mut p: usize,
+    count: u64,
+    at: u64,
+    len: u64,
+) -> Option<(IdIndex, DocId)> {
+    let mut fresh = IdIndex::default();
+    // A frame is three bytes at the least: a count past that is not this
+    // record's, and is not reserved for.
+    fresh.reserve(count.min(len / 3) as usize);
+    let (mut id, mut end) = (0, 0);
+    for _ in 0..count {
+        let (pos, n) = index_entry(docs, &mut p, &mut id, &mut end, len)?;
+        fresh.push_above(id, Loc::mapped(at + pos, n as u32));
+    }
+    (p == docs.len()).then_some((fresh, id))
+}
+
+/// Documents of an image's index an open reads at a time on a thread.
+#[cfg(not(target_arch = "wasm32"))]
+const INDEX_SHARE: usize = 16_384;
+
+/// [`adopt_in_turn`] a share of [`INDEX_SHARE`] documents at a time by
+/// whichever thread is free, each from where `ends` says the one before it
+/// ended, into its own stretch of the dense array: `None` where the shares
+/// do not read as `ends` says, or the ids would leave the dense array a
+/// quarter empty or put one in the sparse map -- read in turn then, as
+/// `insert` would place them. In turn a million documents took 4.8 ms.
+#[cfg(not(target_arch = "wasm32"))]
+fn adopt_shares(
+    docs: &[u8],
+    from: usize,
+    ends: &[u8],
+    count: u64,
+    at: u64,
+    len: u64,
+) -> Option<(IdIndex, DocId)> {
+    let mut marks = vec![[from as u64, 0, 0]];
+    for e in ends.as_chunks::<24>().0 {
+        let (w, _) = e.as_chunks::<8>();
+        marks.push([0, 1, 2].map(|i| u64::from_le_bytes(w[i])));
+    }
+    let shares = marks.len() - 1;
+    let [stop, top, _] = marks[shares];
+    if shares as u64 != count.div_ceil(INDEX_SHARE as u64)
+        || count > docs.len() as u64 / 3
+        || stop != docs.len() as u64
+        || top > count + count / 4
+        || marks
+            .windows(2)
+            .any(|w| w[1][0] <= w[0][0] || w[1][1] <= w[0][1])
+    {
+        return None;
+    }
+    let mut dense: Vec<Loc> = Vec::with_capacity(top as usize);
+    let mut parts = Vec::with_capacity(shares);
+    let mut rest = &mut dense.spare_capacity_mut()[..top as usize];
+    for w in marks.windows(2) {
+        let (part, after) = rest.split_at_mut((w[1][1] - w[0][1]) as usize);
+        parts.push(Mutex::new(part));
+        rest = after;
+    }
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut states = vec![(); threads.min(shares)];
+    let done = crate::vector::spread(shares, &mut states, |_, i| {
+        let mut part = parts[i].lock().unwrap_or_else(|e| e.into_inner());
+        let ([p, first, mut end], next) = (marks[i], marks[i + 1]);
+        let (mut p, mut id, mut filled) = (p as usize, first, 0);
+        let docs_here = (count - (i * INDEX_SHARE) as u64).min(INDEX_SHARE as u64);
+        for _ in 0..docs_here {
+            let was = id;
+            let (pos, n) = index_entry(docs, &mut p, &mut id, &mut end, len)?;
+            if id - was > MAX_DENSE_GAP {
+                return None;
+            }
+            let slot = (id - first - 1) as usize;
+            for gap in part.get_mut(filled..slot)? {
+                gap.write(Loc::EMPTY);
+            }
+            part.get_mut(slot)?.write(Loc::mapped(at + pos, n as u32));
+            filled = slot + 1;
+        }
+        let whole = filled == part.len();
+        (whole && [p as u64, id, end] == next).then_some(())
+    });
+    drop(parts);
+    if done.len() != shares || done.contains(&None) {
+        return None;
+    }
+    // SAFETY: every share wrote each of its slots -- its documents' and
+    // the gaps between them -- or said it had not, which returned above.
+    unsafe { dense.set_len(top as usize) };
+    let fresh = IdIndex {
+        dense,
+        sparse: HashMap::new(),
+        sparse_floor: 0,
+        count: count as usize,
+    };
+    Some((fresh, top))
 }
 
 /// Document id -> location mapping.
@@ -290,6 +443,20 @@ impl IdIndex {
 
     fn reserve(&mut self, n: usize) {
         self.dense.reserve(n);
+    }
+
+    /// [`Self::insert`] of an id above every one the index holds -- an
+    /// image's index read in order: the next id pushed onto the dense
+    /// array, with no slot to ask first, and any other inserted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline(always)]
+    fn push_above(&mut self, id: DocId, loc: Loc) {
+        if id == self.dense.len() as u64 + 1 && self.sparse.is_empty() {
+            self.dense.push(loc);
+            self.count += 1;
+        } else {
+            self.insert(id, loc);
+        }
     }
 
     /// Returns the ids in ascending order.
@@ -1306,6 +1473,11 @@ impl Store {
     /// rather than walking the frames' heads, each of which says where the
     /// next one is: a chain of cache misses, 5.5 of a 14.2 ms open at
     /// 100 000 x 128.
+    ///
+    /// After the documents, where each `INDEX_SHARE` of them ends -- the
+    /// byte of the index, the id and the place the next share counts from
+    /// -- eight bytes each, and how many: each a share an open reads on a
+    /// thread of its own ([`FRAMES_SPLIT`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn image_index(&self, live: bool, out: &mut Vec<u8>) {
         let (stretches, segments, len) = self.image_starts();
@@ -1313,16 +1485,23 @@ impl Store {
             true => (self.live_len() as u64, 0),
             false => (len, self.dead_bytes as u64),
         };
-        out.push(FRAMES_MARK);
+        let from = out.len();
+        out.push(FRAMES_SPLIT);
         put_uvarint(out, len);
         put_uvarint(out, dead);
         put_uvarint(out, self.index.len() as u64);
         let mut head = Vec::with_capacity(16);
         let (mut id_was, mut pos_was, mut to) = (0, 0, 0);
+        let mut ends = Vec::with_capacity(self.index.len().div_ceil(INDEX_SHARE));
+        let mut written = 0;
         for id in self.index.iter() {
             let Some(l) = self.index.get(id) else {
                 continue;
             };
+            if written > 0 && written % INDEX_SHARE == 0 {
+                ends.push([(out.len() - from) as u64, id_was, pos_was]);
+            }
+            written += 1;
             let pos = match live {
                 true => {
                     head.clear();
@@ -1342,6 +1521,11 @@ impl Store {
             put_uvarint(out, crate::codec::zigzag(pos as i64 - expected as i64));
             (id_was, pos_was) = (id, pos + l.len as u64);
         }
+        ends.push([(out.len() - from) as u64, id_was, pos_was]);
+        for v in ends.iter().flatten() {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&(ends.len() as u32).to_le_bytes());
     }
 
     /// Takes a data record's frames from its image's index
@@ -1355,43 +1539,49 @@ impl Store {
         if !self.index.is_empty() || self.base.is_some() || self.total_bytes != 0 {
             return false;
         }
+        // The documents' part, and the shares' ends behind it where the
+        // index carries them.
+        let (docs, ends) = match index.first() {
+            Some(&FRAMES_MARK) => (index, &[][..]),
+            Some(&FRAMES_SPLIT) => {
+                let Some(at) = index.len().checked_sub(4) else {
+                    return false;
+                };
+                let k =
+                    u32::from_le_bytes([index[at], index[at + 1], index[at + 2], index[at + 3]]);
+                let Some(from) = (k as usize).checked_mul(24).and_then(|t| at.checked_sub(t))
+                else {
+                    return false;
+                };
+                (&index[..from], &index[from..at])
+            }
+            _ => return false,
+        };
         let mut p = 1;
-        let mut next = || get_uvarint(index, &mut p).ok();
-        let (Some(whole), Some(dead), Some(count)) = (next(), next(), next()) else {
+        let (Some(whole), Some(dead), Some(count)) = (
+            uvarint(docs, &mut p),
+            uvarint(docs, &mut p),
+            uvarint(docs, &mut p),
+        ) else {
             return false;
         };
-        if index.first() != Some(&FRAMES_MARK) || whole != len || dead > len {
+        if whole != len || dead > len {
             return false;
         }
-        let mut fresh = IdIndex::default();
-        // A frame is three bytes at the least: a count past that is not
-        // this record's, and is not reserved for.
-        fresh.reserve(count.min(len / 3) as usize);
-        let (mut id, mut end) = (0u64, 0u64);
-        for _ in 0..count {
-            let (Some(step), Some(n), Some(off)) = (next(), next(), next()) else {
-                return false;
-            };
-            id = match id.checked_add(step) {
-                Some(i) if step > 0 && n <= u32::MAX as u64 => i,
-                _ => return false,
-            };
-            let pos = (after(end, id, n) as i64).checked_add(crate::codec::unzigzag(off));
-            end = match pos {
-                Some(p) if p > 0 && (p as u64).checked_add(n).is_some_and(|e| e <= len) => {
-                    p as u64 + n
-                }
-                _ => return false,
-            };
-            fresh.insert(id, Loc::mapped(at + end - n, n as u32));
-        }
-        if p != index.len() {
+        // Read on every core where the shares say where each starts and
+        // the ids leave no room for the sparse map, and in turn where not
+        // -- or where they say wrong, the index then judged whole as it
+        // always was.
+        let shares = (ends.len() > 1)
+            .then(|| adopt_shares(docs, p, ends, count, at, len))
+            .flatten();
+        let Some((fresh, last)) = shares.or_else(|| adopt_in_turn(docs, p, count, at, len)) else {
             return false;
-        }
+        };
         self.index = fresh;
         self.total_bytes = len as usize;
         self.dead_bytes = dead as usize;
-        self.next_id = self.next_id.max(id + 1);
+        self.next_id = self.next_id.max(last + 1);
         self.base = Some((base.clone(), vec![(at, len)]));
         true
     }
@@ -1964,6 +2154,112 @@ mod tests {
                 let mut refused = Store::new();
                 assert!(!refused.adopt_index(&base, at, what, bad), "live {live}");
                 assert_eq!(counts(&refused), (0, 0, 0, 1), "live {live}");
+            }
+        }
+    }
+
+    /// An image's index read a share at a time on every core gives the
+    /// store the walk gives -- ids past a gap, rewritten and deleted, each
+    /// at its place -- and so does one whose ids leave the dense array a
+    /// quarter empty or reach past its gap, read in turn instead, or whose
+    /// shares' ends are wrong. One whose documents are wrong is refused.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_image_index_read_in_shares_gives_the_store_its_walk_gives() {
+        let sc = schema();
+        let doc = |i: u64| Document {
+            id: 0,
+            fields: vec![
+                ("a".into(), Value::Text("v".repeat(i as usize % 9))),
+                ("b".into(), Value::Int(i as i64)),
+            ],
+        };
+        let n = 2 * INDEX_SHARE as u64 + 500;
+        // Dense, then with a gap past the dense array's, then a quarter
+        // empty: the first read in shares, the others in turn.
+        let layouts: [&dyn Fn(u64) -> u64; 3] = [
+            &|i| i + 1 + i / 1000 * 7,
+            &|i| {
+                if i < n / 2 {
+                    i + 1
+                } else {
+                    i + 1 + MAX_DENSE_GAP + 1
+                }
+            },
+            &|i| i * 2 + 1,
+        ];
+        for (k, id_of) in layouts.iter().enumerate() {
+            let mut st = Store::new();
+            for i in 0..n {
+                st.append(OP_PUT, id_of(i), &Store::encode_doc(&sc, &doc(i)));
+            }
+            for i in (0..n).step_by(13) {
+                st.append(OP_PUT, id_of(i), &Store::encode_doc(&sc, &doc(i + 1)));
+            }
+            for i in (5..n).step_by(17) {
+                st.append(OP_DEL, id_of(i), &[]);
+            }
+            for live in [false, true] {
+                let what = format!("layout {k}, live {live}");
+                let mut image = Vec::new();
+                match live {
+                    true => st.write_live(&mut image).unwrap(),
+                    false => st.write_image(&mut image).unwrap(),
+                }
+                let mut index = Vec::new();
+                st.image_index(live, &mut index);
+                let at = 4u64;
+                let mut file = vec![0u8; at as usize];
+                file.extend_from_slice(&image);
+                let base: Base = std::sync::Arc::new(file);
+                let len = image.len() as u64;
+                let mut walked = Store::new();
+                walked.replay_mapped(&base, at, len, &mut |_| {}).unwrap();
+                let shares = u32::from_le_bytes(index[index.len() - 4..].try_into().unwrap());
+                assert_eq!(
+                    shares as u64,
+                    (st.len() as u64).div_ceil(INDEX_SHARE as u64)
+                );
+                // Read in shares where the ids leave the dense array full.
+                let table = index.len() - 4 - 24 * shares as usize;
+                let (docs, ends) = (&index[..table], &index[table..index.len() - 4]);
+                let mut p = 1;
+                let count = [(); 3].map(|_| uvarint(docs, &mut p).unwrap())[2];
+                let in_shares = adopt_shares(docs, p, ends, count, at, len).is_some();
+                assert_eq!(in_shares, k == 0, "{what}");
+                // As written; its first share's end moved one byte on; the
+                // last share's first id no step on from the one before.
+                let mut moved = index.clone();
+                moved[table] ^= 1;
+                let mut gone = index.clone();
+                let start = table + 24 * (shares as usize - 2);
+                let start = u64::from_le_bytes(index[start..start + 8].try_into().unwrap());
+                gone[start as usize] = 0;
+                for (ix, takes) in [(&index, true), (&moved, true), (&gone, false)] {
+                    let mut taken = Store::new();
+                    let took = taken.adopt_index(&base, at, len, ix);
+                    assert_eq!(took, takes, "{what}");
+                    if !took {
+                        continue;
+                    }
+                    assert_eq!(taken.ids(), walked.ids(), "{what}");
+                    for id in walked.ids() {
+                        assert_eq!(
+                            taken.read_field(id, 1).unwrap(),
+                            walked.read_field(id, 1).unwrap(),
+                            "{what}"
+                        );
+                    }
+                    let counts =
+                        |s: &Store| (s.len(), s.total_bytes(), s.dead_bytes(), s.next_id());
+                    assert_eq!(counts(&taken), counts(&walked), "{what}");
+                    assert_eq!(taken.index.dense.len(), walked.index.dense.len(), "{what}");
+                    assert_eq!(
+                        taken.index.sparse.len(),
+                        walked.index.sparse.len(),
+                        "{what}"
+                    );
+                }
             }
         }
     }

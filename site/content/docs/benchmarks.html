@@ -74,7 +74,7 @@ each table, because a number without one is a claim, not a measurement.</p>
 
 <p>The same 100 000 rows in fenecdb, SQLite and PostgreSQL with pgvector,
 with the same index settings. fenecdb writes fastest, searches 10 to 330
-times faster and uses the least disk; SQLite reopens faster.</p>
+times faster and uses the least disk; SQLite opens faster.</p>
 
 <div class="tbl">
 <table>
@@ -88,7 +88,9 @@ times faster and uses the least disk; SQLite reopens faster.</p>
 <tr><td>vector top-10, <b>exact</b></td><td class="n"><b>2.9 ms</b></td><td class="n">30.2 ms</td><td class="n">15.6 ms</td></tr>
 <tr><td>vector top-10, <b>approximate</b></td><td class="n"><b>0.091 ms</b></td><td class="n">none</td><td class="n">1.04 ms</td></tr>
 <tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">—</td><td class="n"><b>100%</b></td></tr>
-<tr><td>reopen</td><td class="n">9 ms</td><td class="n"><b>0.9 ms</b></td><td class="n">server, always open</td></tr>
+<tr><td>open</td><td class="n">6.0 ms</td><td class="n"><b>0.07 ms</b></td><td class="n">server, always open</td></tr>
+<tr><td>open, then a read by id</td><td class="n">6.0 ms</td><td class="n"><b>0.46 ms</b></td><td class="n">—</td></tr>
+<tr><td>open, then a vector top-10</td><td class="n"><b>6.1 ms</b></td><td class="n">30.5 ms, exact</td><td class="n">—</td></tr>
 <tr><td>empty query round trip</td><td class="n">0, embedded</td><td class="n">0, embedded</td><td class="n">0.41 ms</td></tr>
 </tbody>
 </table>
@@ -97,8 +99,8 @@ times faster and uses the least disk; SQLite reopens faster.</p>
 <ul>
   <li><b>SQLite has no vector index.</b> Its vector search reads every row,
     so the table compares exact search with exact search first.</li>
-  <li><b>The slower reopen pays off at once.</b> fenecdb loads its vectors
-    when it opens; from the first vector query it is ahead.</li>
+  <li><b>The slower open pays off at once.</b> fenecdb loads its vectors
+    when it opens; from the first vector query after it, it is ahead.</li>
 </ul>
 
 <details class="deep"><summary>Method and details</summary>
@@ -162,12 +164,19 @@ used every core. SQLite's 0.03 s is not an ANN index but a single-column
 B-tree; that cost does not vanish, it is deferred to query time, where a
 vector search takes 30.2 ms — 330× slower than fenecdb's ANN.</p>
 
-<p><b>The clearest loss is reopen.</b> SQLite opens in 0.9 ms because it
-loads nothing, reading pages as it needs them. fenecdb pulls the vector arena
-into memory and validates the graph: 9 ms. That is not a shortcoming but the
-other side of the same coin — it is why queries are 10–330× faster. The measured
-break-even is <b>one vector query</b>: from the first, fenecdb is ahead on the
-total.</p>
+<p><b>The clearest loss is the open.</b> SQLite opens in 0.07 ms and
+reads a row by id 0.46 ms after it, because it loads nothing until it is
+asked and then reads the pages it needs. fenecdb restores its graph as it
+opens: it copies the 51 MB of vectors out of the file into memory as unit
+vectors, decodes the graph's links and validates the graph against the
+documents, 6.0 ms, more than half of it the copy. That is the other side of
+the same coin — it is why queries are 10–330× faster. Asked the same first
+question, fenecdb is ahead: a vector top-10 right after the open takes 6.1
+ms in all, where SQLite's scan takes 30.5. Each open figure is the median of
+31 opens, the file's pages in the page cache as a close leaves them. This
+page once gave 9 ms against 0.9, from one open each: fenecdb's open and a
+vector query against SQLite's open and a count through its index, two
+different first questions.</p>
 
 <p><b>fenecdb leads on disk as well</b>, 2.4× smaller than pgvector — though
 not for the reason this page used to give. Of pgvector's 145.0 MB, 83.2 MB is
@@ -1235,7 +1244,7 @@ true neighbours.</p>
 <tr><td>ANN with a filter no row near the query matches</td><td class="n">p50 <b>1.15 ms</b>, the n/4 measured on every core</td></tr>
 <tr><td>recall@10</td><td class="n"><b>100%</b> against an exact scan</td></tr>
 <tr><td>snapshot</td><td class="n">29 ms, producing 59.3 MB with the graph and the records' index, +13%</td></tr>
-<tr><td>reopen</td><td class="n"><b>10 ms</b>, read into memory, the graph validated and restored</td></tr>
+<tr><td>reopen</td><td class="n"><b>8 ms</b>, read into memory, the graph validated and restored</td></tr>
 </tbody>
 </table>
 </div>
@@ -1532,7 +1541,7 @@ server, the client alone in its bundle.</p>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1331 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>711 KB</b></td><td class="n"><b>242 KB</b></td><td class="n">292 KB</td></tr>
 <tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=language SCHEMA=0</code></td><td class="n">493 KB</td><td class="n">172 KB</td><td class="n">205 KB</td></tr>
-<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">433 KB</td><td class="n">149 KB</td><td class="n">177 KB</td></tr>
+<tr><td>wasm32, no feature at all, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">432 KB</td><td class="n">149 KB</td><td class="n">177 KB</td></tr>
 <tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">185 KB</td><td class="n">48 KB</td><td class="n">57 KB</td></tr>
 <tr><td><code>@fenecdb/web/client</code> in an app's bundle, <code>connect</code> and a query's rows, esbuild, minified</td><td class="n">28 KB</td><td class="n">9 KB</td><td class="n">10 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
