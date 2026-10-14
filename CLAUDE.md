@@ -71,6 +71,7 @@ make shard-bench         # router overhead per request, tenant move time, failov
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
 make policy-bench        # a scoped set under a plain rule, a field list, a transition, answering its row and a rule reading another collection, and a read by id, against the server's token, in process and over HTTP (ARGS=streams|beats: writes beside scoped streams)
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
+make node-archive-bench  # every tenant of a node archived: 1 000 tenants, a stream each against the node's one stream (ARGS="tenants active seconds sync way")
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes (ARGS=blocks those alone, NOPREP=1 a block built under the lock; ARGS=long writers beside long reads)
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
 make mcp-bench           # an MCP tool call against the /query it runs: in process, and over HTTP

@@ -203,6 +203,16 @@ fn every_tenant_is_archived_over_one_stream_and_none_is_held_open() {
     // One stream for them all, and it holds none of them open.
     let streams = n.tenants.node_streams().unwrap();
     assert_eq!(streams.connected(), 1);
+    let scrape = {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(n.url.trim_start_matches("http://")).unwrap();
+        s.write_all(b"GET /_metrics HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer adm\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    };
+    assert!(scrape.contains("\nfenec_node_streams 1\n"), "{scrape}");
     let ends: Vec<(String, u64, Rows)> = held
         .iter()
         .map(|(name, t)| {

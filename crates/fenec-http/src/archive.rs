@@ -630,8 +630,13 @@ impl Archive {
             }
             None => {}
         }
-        self.put(&self.dir.join("history"), &theirs.encode())?;
-        w.history = theirs;
+        // Written, and fsynced, only when it moved: an archiver of a node
+        // says hello to every tenant each time it connects, and a thousand
+        // fsyncs of the same bytes were seconds of `F_FULLFSYNC` on macOS.
+        if w.history != theirs {
+            self.put(&self.dir.join("history"), &theirs.encode())?;
+            w.history = theirs;
+        }
         Ok(Took::Went)
     }
 

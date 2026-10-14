@@ -16,7 +16,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
@@ -283,6 +283,15 @@ replica-bench:
 	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-http --example replica -- 100000 128
 	$(CARGO) run --release -p fenec-server --example failover -- 10
+
+## Every tenant of a node archived: a node of 1 000 tenants, 10 of them
+## written, with no archiver, a tenant's own stream each and the node's one
+## stream of every tenant -- the node's and the archiver's memory, threads,
+## descriptors and CPU, the writes' round trips, and a node restarted
+## (ARGS="tenants active seconds sync way"; crates/fenec-http/examples/node_archive.rs)
+node-archive-bench:
+	$(CARGO) build --release -p fenec-server
+	$(CARGO) run --release -p fenec-http --example node_archive -- $(or $(ARGS),1000 10 20 always)
 
 ## Writers and readers at once, fenecdb against SQLite in one process:
 ## durable and buffered writes from 1, 4 and 16 threads, and reads alone,

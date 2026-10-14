@@ -1299,6 +1299,7 @@ impl Tenants {
             disk,
             open,
             unlinked,
+            node_streams: self.streams.as_ref().map(|s| s.connected()),
         }
     }
 
@@ -1385,6 +1386,9 @@ pub struct Stats {
     /// The open tenants' vectors still to be linked into their graphs
     /// (`link::beside`).
     pub unlinked: usize,
+    /// The node's streams of every tenant connected now, on a node that
+    /// replicates its tenants: its archivers.
+    pub node_streams: Option<usize>,
 }
 
 /// What a tenant uses of its quota, as `quota_report` writes it.

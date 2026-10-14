@@ -472,7 +472,25 @@ fn run(way: Way, tenants: usize, active: usize, seconds: u64, sync: &str) {
     if way != Way::None {
         let t0 = Instant::now();
         let arch = Archiver::start(way, &node.url(), &root, &names);
-        std::thread::sleep(Duration::from_secs(5));
+        if way == Way::Node {
+            // From the archiver's start -- reading where each archive stands
+            // -- to the node's log saying it greeted every tenant.
+            while !node
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("said hello to in"))
+            {
+                assert!(t0.elapsed() < Duration::from_secs(300), "no first pass");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            println!(
+                "  reconnected:  every tenant greeted {:.2} s after the archiver started",
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        std::thread::sleep(Duration::from_secs(5).saturating_sub(t0.elapsed()));
         let (rss, threads, cpu) = ps(pid);
         println!(
             "  restarted:    5 s after the archiver connected again: {rss:.1} MB, {threads} threads, \
