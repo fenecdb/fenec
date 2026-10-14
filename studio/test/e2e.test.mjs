@@ -276,7 +276,15 @@ test('scrolling 100 000 rows keeps the rows in view and reads a block a step', a
   const p = await page();
   // Every /query the page sends, by the step it was sent in, and how many
   // are under way. The client keeps the fetch it found at sign-in, so the
-  // count wraps the page's own before its modules load.
+  // count wraps the page's own before its modules load. A read is under
+  // way until its body is in and the page has done with it: `fetch`
+  // settles at the head, the client reads the body after that and the
+  // grid draws the block after the body, so counted to the head a step
+  // was looked at with its block still on the way -- 21 rows pending at
+  // step 136 on a three-core runner. The body is read through a clone,
+  // which takes the same bytes the client's read does, and the count
+  // drops a task later, once the client's continuation has drawn the
+  // block and sent the next one queued.
   await p.evaluateOnNewDocument(() => {
     const original = window.fetch;
     window.__reads = [];
@@ -285,7 +293,17 @@ test('scrolling 100 000 rows keeps the rows in view and reads a block a step', a
     window.fetch = (url, init) => {
       if (String(url).endsWith('/query') && window.__step >= 0) window.__reads.push({ step: window.__step, body: JSON.parse(init.body) });
       window.__inflight++;
-      return original(url, init).finally(() => window.__inflight--);
+      const done = () => setTimeout(() => window.__inflight--);
+      return original(url, init).then(
+        (res) => {
+          res.clone().arrayBuffer().then(done, done);
+          return res;
+        },
+        (err) => {
+          done();
+          throw err;
+        },
+      );
     };
   });
   await signIn(p, TOKEN);
@@ -295,12 +313,15 @@ test('scrolling 100 000 rows keeps the rows in view and reads a block a step', a
     const canvas = document.querySelector('.grid-canvas');
     const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
     // A scroll is drawn in the frame after its event, and its reads sent
-    // there: two frames, then until none is under way.
+    // there: two frames, then until none is under way, and none sent in
+    // the frame after.
     const settle = async () => {
       await frame();
       await frame();
-      while (window.__inflight > 0) await new Promise((r) => setTimeout(r, 5));
-      await frame();
+      do {
+        while (window.__inflight > 0) await new Promise((r) => setTimeout(r, 5));
+        await frame();
+      } while (window.__inflight > 0);
     };
     const out = [];
     const at = async (step, top) => {
