@@ -681,37 +681,38 @@ waiting, a pass took 5.06 s over five tenants beside a stream busy
 elsewhere, the writes of the pass unsynced meanwhile, and a close held its
 slot's lock 1.01 s. `tests/node_archive.rs` holds a tenant's open, an
 image's disk and a full socket each beside another tenant's writes, and
-fails with the flag, the pending image or the unwaited sync taken out. Which
-tenants have news is told: a feed tells as its writes reach the disk, it
-starts over or closes (`Feed::tell_with`, held strongly: a `Weak`'s upgrade
-was a compare-and-swap on one count every tenant's sync shared, 139-141 ns a
-tell from 16 threads against 0.20-0.24), and a tenant made, installed,
-deleted, promoted or made to follow touches the stream; one released while
-the stream is busy with it (`Next::Gone`) is looked at again until it is
-gone or back -- a tenant made again under the name, writing nothing, gave no
-notice more -- and the directory is read again every 10 s for a file put
-there by hand. With no stream connected a sync pays two loads, 13 ns a
-durable advance either way. A closed tenant's place is where it closed in
-this process (`Tenants::closed`) or read from its file (`Tenants::peek`,
-`open_read_only`), where opening to look took 6.3 ms a tenant, the open
-fsyncing the file; a closed tenant the stream is told of is read again,
-since a holder of its database may have written it after the close, and one
-with a non-empty sync log beside it (Linux, after the machine went down) is
-opened, the log holding durable writes the file lacks. The feed keeps the
-lineage the database last wrote, read off the history records `Tee::append`
-passes, and the stream sends it (`L`) before the writes after a promotion: a
-promoted standby's archive goes on with no image. The archiver keeps
-`<root>/<tenant>/` as `fenec archive` keeps one, through the same
-`archive::Writer` the single archiver now writes with; a segment file is
-open only while its tenant writes (a thousand would pass a macOS shell's 256
-descriptors), the `history` file is written only when it moved (a thousand
-fsyncs a reconnect otherwise), and `archiving.lock` keeps a second archiver
-off the root. A tenant the node says is gone -- deleted, or moved to a node
-whose archiver takes it up from its image on the same history -- keeps its
-archive, and `presence` notes `gone <ms>`, then `back <ms>` if it returns: a
-restore to a moment it was away leaves it out, as one deleted, where
-forgetting the time away gave the copy from before it left. An image at or
-before the archive's end on a history that does not lead from it
+fails with the flag, a blocked write's hold, the pending image or the
+unwaited sync taken out (a write beside an archiver that stopped reading
+waited 1.014 s). Which tenants have news is told: a feed tells as its writes
+reach the disk, it starts over or closes (`Feed::tell_with`, held strongly:
+a `Weak`'s upgrade was a compare-and-swap on one count every tenant's sync
+shared, 139-141 ns a tell from 16 threads against 0.20-0.24), and a tenant
+made, installed, deleted, promoted or made to follow touches the stream; one
+released while the stream is busy with it (`Next::Gone`) is looked at again
+until it is gone or back -- a tenant made again under the name, writing
+nothing, gave no notice more -- and the directory is read again every 10 s
+for a file put there by hand. With no stream connected a sync pays two
+loads, 13 ns a durable advance either way. A closed tenant's place is where
+it closed in this process (`Tenants::closed`) or read from its file
+(`Tenants::peek`, `open_read_only`), where opening to look took 6.3 ms a
+tenant, the open fsyncing the file; a closed tenant the stream is told of is
+read again, since a holder of its database may have written it after the
+close, and one with a non-empty sync log beside it (Linux, after the machine
+went down) is opened, the log holding durable writes the file lacks. The
+feed keeps the lineage the database last wrote, read off the history records
+`Tee::append` passes, and the stream sends it (`L`) before the writes after
+a promotion: a promoted standby's archive goes on with no image. The
+archiver keeps `<root>/<tenant>/` as `fenec archive` keeps one, through the
+same `archive::Writer` the single archiver now writes with; a segment file
+is open only while its tenant writes (a thousand would pass a macOS shell's
+256 descriptors), the `history` file is written only when it moved (a
+thousand fsyncs a reconnect otherwise), and `archiving.lock` keeps a second
+archiver off the root. A tenant the node says is gone -- deleted, or moved
+to a node whose archiver takes it up from its image on the same history --
+keeps its archive, and `presence` notes `gone <ms>`, then `back <ms>` if it
+returns: a restore to a moment it was away leaves it out, as one deleted,
+where forgetting the time away gave the copy from before it left. An image
+at or before the archive's end on a history that does not lead from it
 (`archive::Took::Diverged`: restored to an earlier moment, or another tenant
 of the name) would have landed among changes of the same numbers --
 `File::create` of a segment of the same name wrote one over -- so the single

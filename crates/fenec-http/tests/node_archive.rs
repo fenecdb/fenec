@@ -778,6 +778,92 @@ fn a_stream_held_up_on_one_tenant_holds_up_no_others_writes() {
     a.finish();
 }
 
+/// The node's stream as a client that stops reading sees it: the response's
+/// head read, then each message as the node frames one -- its tag, its
+/// length, and the tenant's name leading the body.
+struct RawStream {
+    r: std::io::BufReader<std::net::TcpStream>,
+}
+
+impl RawStream {
+    fn open(url: &str) -> RawStream {
+        use std::io::{BufRead, Write};
+        let addr = url.trim_start_matches("http://");
+        let s = std::net::TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        write!(
+            &s,
+            "POST /_replication/tenants HTTP/1.1\r\nHost: {addr}\r\n\
+             Authorization: Bearer {REPL}\r\nContent-Length: 0\r\n\r\n"
+        )
+        .unwrap();
+        let mut r = std::io::BufReader::new(s);
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap();
+        assert!(line.contains(" 200 "), "{line}");
+        while line != "\r\n" {
+            line.clear();
+            r.read_line(&mut line).unwrap();
+        }
+        RawStream { r }
+    }
+
+    /// The next message's tag and tenant.
+    fn next(&mut self) -> (u8, String) {
+        use std::io::Read;
+        let mut head = [0u8; 9];
+        self.r.read_exact(&mut head).unwrap();
+        let len = u64::from_le_bytes(head[1..].try_into().unwrap()) as usize;
+        let mut body = vec![0u8; len];
+        self.r.read_exact(&mut body).unwrap();
+        let name = match head[0] {
+            b'H' | b'I' | b'W' | b'L' | b'G' => {
+                String::from_utf8(body[1..1 + body[0] as usize].to_vec()).unwrap()
+            }
+            _ => String::new(),
+        };
+        (head[0], name)
+    }
+
+    /// Reads until `tag` comes for `name`.
+    fn until(&mut self, tag: u8, name: &str) {
+        while self.next() != (tag, name.to_string()) {}
+    }
+}
+
+/// Nor does an archiver reading slower than the stream fills its socket:
+/// the stream blocked in a write to it, waited for as it kept up, held every
+/// tenant's next durable write for a second.
+#[test]
+fn an_archiver_that_stops_reading_holds_up_no_write() {
+    let d = scratch("unread");
+    let n = node(&d.join("node"), None);
+    let a = made(&n, "a", 2);
+    let b = made(&n, "b", 2);
+    let mut raw = RawStream::open(&n.url);
+    let mut imaged = std::collections::BTreeSet::new();
+    while imaged.len() < 2 {
+        if let (b'I', name) = raw.next() {
+            imaged.insert(name);
+        }
+    }
+    // Sent a write of `b` after its image: the stream keeps up with it, and
+    // a write of `b` waits for it.
+    exec(&b, "put notes {title: \"kept up\", n: 3}");
+    raw.until(b'W', "b");
+    // Read no more, and write `a` until the socket and the stream's buffer
+    // are full many times over: the stream is blocked in a write.
+    let title = "x".repeat(256 << 10);
+    for i in 0..64 {
+        exec(&a, &format!("put notes {{title: \"{title}\", n: {i}}}"));
+    }
+    let t0 = Instant::now();
+    exec(&b, "put notes {title: \"beside a full socket\", n: 4}");
+    let took = t0.elapsed();
+    assert!(took < HALF_A_WAIT, "a write to `b` waited {took:?}");
+    drop(raw);
+}
+
 /// Nor do the syncer and a close wait for it: under `--sync <ms>` a pass
 /// over five dirty tenants took 5.06 s with the stream held up, and a
 /// close held its tenant's slot, and a request for it, a second.
