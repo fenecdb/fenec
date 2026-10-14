@@ -173,6 +173,11 @@ since that share is how long ago the cache was committed, not what the
 code does. Committed rather than kept as a CI cache, so a
 pull request's CI, which has no secrets, and a laptop build the same image
 as the deploy, and a change to a section shows as a change to one line.
+The deploy keeps the cache it leaves as an artifact (`search-embeddings`,
+`.github/workflows/site.yml`), failed or not, for that commit: until it
+is made, CI tests the committed vectors and the deploy the fresh ones,
+and a ranking can pass one and fail the other -- after #231 docs/mobile
+was 3rd for a Turkish question in CI and 4th in the deploy.
 The tests' queries' vectors are in `search-fixture.json`, so CI asks no
 model. Both were first made with bge-m3 run locally (the ONNX export,
 q8); `rm site/search-embeddings.json && python3 site/build.py` and
@@ -229,10 +234,10 @@ it needs, all once:
    `{"vector":[...`, and once more is a cache hit.
 7. **Once, best before step 6**: make the cache and the fixture again
    through Workers AI (above), so every section has a vector and the
-   sections' vectors and a query's come from the very same model run. The
-   cache was made before the docs grew past it: the build says how many
-   sections it holds no vector for, and those are found by their words
-   alone until it is made again.
+   sections' vectors and a query's come from the very same model run. Of
+   the 408 sections on 2026-10-14, 191 hold the local run's vectors and
+   217 the deploy's Workers AI ones (the artifact, committed); the
+   fixture is the local run's.
 
 ## Adding a docs page
 

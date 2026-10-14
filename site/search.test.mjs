@@ -124,7 +124,11 @@ test('a question the words miss finds its page by its meaning', () => {
   // Each: the words leave the page off the ten shown, the meaning puts it there.
   for (const [q, url, within] of [
     ['keep data on a phone', 'docs/mobile', 1],
-    ['telefonda veri saklamak', 'docs/mobile', 3],
+    // 4th over the 408 sections embedded on 2026-10-14: "saklamak" is
+    // keeping, and the archive's object storage and sealing and the
+    // half-precision vectors speak of keeping data too. 3rd while 128 of
+    // them had no vector.
+    ['telefonda veri saklamak', 'docs/mobile', 4],
     ['dosyanın büyümesini durdurmak', 'docs/server#compaction', 3],
   ]) {
     const [words, meaning] = standing(q, url);
