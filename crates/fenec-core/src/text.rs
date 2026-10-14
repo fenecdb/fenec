@@ -28,13 +28,18 @@
 use crate::error::{Error, Result};
 #[cfg(feature = "text")]
 use crate::fuzzy::{typos, Dictionary};
-use crate::maps::{Map, Sharded};
+use crate::maps::Map;
 use crate::schema::TextIndexSpec;
 #[cfg(feature = "text")]
 use crate::store::DocMap;
 use crate::value::DocId;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+#[cfg(feature = "text")]
+use terms::{List, Postings, Terms};
+
+#[cfg(feature = "text")]
+mod terms;
 
 /// How loosely a `match` reads its query's words: `match body $1 fuzzy`,
 /// `fuzzy 1`, `prefix`. Plain -- no edits, no prefix -- is a `match` as it
@@ -315,71 +320,6 @@ pub(crate) fn indexed_terms(
     });
 }
 
-/// Postings for one term, held as parallel arrays.
-///
-/// A `Vec<(DocId, u32)>` is the obvious shape and the wrong one: the tuple
-/// pads to 16 bytes, a quarter of it for nothing. Split, the same postings
-/// take 12, and the merge -- which reads ids and touches a count only on a
-/// hit -- walks a contiguous run of ids instead of striding over the counts.
-#[derive(Default)]
-struct Postings {
-    docs: Vec<DocId>,
-    tfs: Vec<u32>,
-    /// The largest `tf` in this list, for the MaxScore ceiling in `search`.
-    ///
-    /// Only ever raised. A removal can leave it too high, which costs a
-    /// looser bound and never a wrong answer; a rebuild makes it exact again.
-    max_tf: u32,
-}
-
-impl Postings {
-    fn len(&self) -> usize {
-        self.docs.len()
-    }
-    fn is_empty(&self) -> bool {
-        self.docs.is_empty()
-    }
-    fn find(&self, doc: DocId) -> std::result::Result<usize, usize> {
-        self.docs.binary_search(&doc)
-    }
-    /// One more of the term in `doc`: its entry counted up, or a new one of
-    /// 1 where the order puts it. A document's terms come one at a time, so
-    /// its entry is the last, but an older document's, updated, is not.
-    fn bump(&mut self, doc: DocId) {
-        let at = match self.docs.last() {
-            Some(&last) if last == doc => self.docs.len() - 1,
-            Some(&last) if last < doc => {
-                self.docs.push(doc);
-                self.tfs.push(0);
-                self.docs.len() - 1
-            }
-            _ => match self.find(doc) {
-                Ok(at) => at,
-                Err(at) => {
-                    self.docs.insert(at, doc);
-                    self.tfs.insert(at, 0);
-                    at
-                }
-            },
-        };
-        self.tfs[at] += 1;
-        self.max_tf = self.max_tf.max(self.tfs[at]);
-    }
-    fn drop_doc(&mut self, doc: DocId) {
-        if let Ok(at) = self.find(doc) {
-            self.docs.remove(at);
-            self.tfs.remove(at);
-        }
-    }
-    fn bytes(&self) -> usize {
-        self.docs.capacity() * std::mem::size_of::<DocId>() + self.tfs.capacity() * 4 + 4
-    }
-    fn shrink(&mut self) {
-        self.docs.shrink_to_fit();
-        self.tfs.shrink_to_fit();
-    }
-}
-
 /// An inverted index with BM25 scoring.
 ///
 /// Like the HNSW graph this is derived data -- it is built from the
@@ -392,20 +332,16 @@ impl Postings {
 pub struct TextIndex {
     pub spec: TextIndexSpec,
     /// term -> postings, kept ascending by document id so `search` can merge
-    /// them without sorting. Its table grows a shard at a time
-    /// (`maps::Sharded`): a field whose rows bring terms of their own -- an
-    /// id, a code, a name -- took its doublings whole under the write lock,
-    /// 125-132 ms at 1.8 million terms and 276-324 at 3.7 million.
-    postings: Sharded<String, Postings>,
+    /// them without sorting ([`terms`]). Its table grows a shard at a time:
+    /// a field whose rows bring terms of their own -- an id, a code, a name
+    /// -- took its doublings whole under the write lock, 125-132 ms at 1.8
+    /// million terms and 276-324 at 3.7 million.
+    postings: Terms,
     /// document -> term count, for the length normalisation.
     /// Each document's number of terms: none is indexed without one, so
     /// 0 is none.
     lengths: DocMap,
     total_terms: u64,
-    /// What the dictionary and the postings hold, as `memory_bytes` counts
-    /// it, kept as they change: summed over every term it cost 0.42 ms at
-    /// 200 000 documents, and `--max-memory` asks before every write.
-    heap: usize,
     /// The words in order, for `fuzzy` and `prefix`: sorted by the first
     /// `match` that asks either, kept up by the writes from then on, as a
     /// derived index is ([`crate::fuzzy`]). An index no `match` reads
@@ -422,10 +358,9 @@ impl TextIndex {
     pub fn new(spec: TextIndexSpec) -> TextIndex {
         TextIndex {
             spec,
-            postings: Sharded::default(),
+            postings: Terms::default(),
             lengths: DocMap::default(),
             total_terms: 0,
-            heap: 0,
             words: Lazy::new(),
             longest: 0,
         }
@@ -434,7 +369,7 @@ impl TextIndex {
     /// The words in order, sorted the first time they are asked for.
     fn dictionary(&self) -> &Dictionary {
         self.words
-            .get_or_init(|| Dictionary::of(self.postings.iter().map(|(t, _)| t.as_str())))
+            .get_or_init(|| Dictionary::of_bytes(self.postings.words()))
     }
 
     pub fn len(&self) -> usize {
@@ -450,19 +385,18 @@ impl TextIndex {
     }
 
     pub fn postings_count(&self) -> usize {
-        self.postings.values().map(|p| p.len()).sum()
+        self.postings.postings()
     }
 
     /// Postings, the term dictionary and the length table, as they sit in
-    /// memory, and the sorted words once a `match` has asked for them. Not
-    /// RSS -- the same caveat as `Database::memory_bytes`.
+    /// memory -- each list's arrays with what an allocator takes past
+    /// them -- and the sorted words once a `match` has asked for them. Not
+    /// RSS, the same caveat as `Database::memory_bytes`, but within a tenth
+    /// of what musl's allocator holds for them (`make text-memory`), where
+    /// the count of a map, its table and its allocations left out, was a
+    /// third of it for a tenant's notes and four fifths for FiQA.
     pub fn memory_bytes(&self) -> usize {
-        self.heap + self.lengths.bytes() + self.words.get().map_or(0, Dictionary::bytes)
-    }
-
-    /// What one term costs: its dictionary entry and its postings.
-    fn term_bytes(term: &str, p: &Postings) -> usize {
-        term.len() + 32 + p.bytes()
+        self.postings.bytes() + self.lengths.bytes() + self.words.get().map_or(0, Dictionary::bytes)
     }
 
     /// Each of the document's terms goes straight into its list, a word at
@@ -474,20 +408,9 @@ impl TextIndex {
         let mut n = 0u32;
         for_each_indexed_term(text, &spec, |t| {
             n += 1;
-            match self.postings.get_mut(t) {
-                Some(p) => {
-                    let before = p.bytes();
-                    p.bump(doc);
-                    self.heap += p.bytes() - before;
-                }
-                None => {
-                    let mut p = Postings::default();
-                    p.bump(doc);
-                    self.heap += t.len() + 32 + p.bytes();
-                    self.postings.insert(t.to_string(), p);
-                    if let Some(words) = self.words.get_mut() {
-                        words.add(t);
-                    }
+            if self.postings.bump(t, doc) {
+                if let Some(words) = self.words.get_mut() {
+                    words.add(t);
                 }
             }
         });
@@ -510,14 +433,9 @@ impl TextIndex {
     pub fn remove(&mut self, doc: DocId, text: &str) {
         let spec = self.spec;
         for_each_indexed_term(text, &spec, |t| {
-            if let Some(list) = self.postings.get_mut(t) {
-                list.drop_doc(doc);
-                if list.is_empty() {
-                    self.heap -= TextIndex::term_bytes(t, list);
-                    self.postings.remove(t);
-                    if let Some(words) = self.words.get_mut() {
-                        words.remove(t);
-                    }
+            if self.postings.drop_doc(t, doc) {
+                if let Some(words) = self.words.get_mut() {
+                    words.remove(t);
                 }
             }
         });
@@ -526,7 +444,8 @@ impl TextIndex {
         }
     }
 
-    /// Gives back the growth slack of every postings list.
+    /// Gives back the growth slack of every postings list, of the table
+    /// and of the arrays the terms are in.
     ///
     /// `Vec` grows by doubling, so a list built one document at a time sits
     /// at ~1.5x the bytes it needs -- 3.8 MB of the 13.0 MB SciFact index.
@@ -535,20 +454,14 @@ impl TextIndex {
     /// Called where the index is known to be complete: its build from the
     /// documents, and `create index`.
     pub fn shrink_to_fit(&mut self) {
-        self.heap = 0;
-        for (term, list) in self.postings.iter_mut() {
-            list.shrink();
-            self.heap += TextIndex::term_bytes(term, list);
-        }
         self.postings.shrink_to_fit();
         self.lengths.shrink_to_fit();
     }
 
     pub fn clear(&mut self) {
-        self.postings.clear();
+        self.postings = Terms::default();
         self.lengths.clear();
         self.total_terms = 0;
-        self.heap = 0;
         self.words = Lazy::new();
         self.longest = 0;
     }
@@ -588,10 +501,10 @@ impl TextIndex {
     /// document holding a term of the query or a variant of one of its
     /// words, what `facet` counts beside a loose `match`.
     pub fn matching_loose(&self, query: &str, loose: Loose) -> Result<Vec<DocId>> {
-        let mut lists: Vec<&Postings> = Vec::new();
+        let mut lists: Vec<Postings> = Vec::new();
         for_each_indexed_term(query, &self.spec, |t| {
             if let Some(list) = self.postings.get(t) {
-                if !lists.iter().any(|l| std::ptr::eq(*l, list)) {
+                if !lists.iter().any(|l| l.docs.as_ptr() == list.docs.as_ptr()) {
                     lists.push(list);
                 }
             }
@@ -604,7 +517,7 @@ impl TextIndex {
         }
         let mut out: Vec<DocId> = Vec::new();
         for l in &lists {
-            out.extend_from_slice(&l.docs);
+            out.extend_from_slice(l.docs);
         }
         if lists.len() > 1 {
             out.sort_unstable();
@@ -650,7 +563,7 @@ impl TextIndex {
         let (n, avgdl) = self.counted(within);
         let mut cursors: Vec<Cursor> = Vec::with_capacity(qtf.len());
         for (term, count) in &qtf {
-            if let Some(list) = self.postings.get(term.as_str()) {
+            if let Some(list) = self.postings.get(term) {
                 cursors.extend(self.cursor(list, *count as f32, n, within));
             }
         }
@@ -677,14 +590,14 @@ impl TextIndex {
     /// its list unwalked.
     fn cursor<'a>(
         &self,
-        list: &'a Postings,
+        list: Postings<'a>,
         times: f32,
         n: usize,
         within: Option<&[DocId]>,
     ) -> Option<Cursor<'a>> {
         let df = match within {
             None => list.len(),
-            Some(w) => held_by(&list.docs, w),
+            Some(w) => held_by(list.docs, w),
         };
         if df == 0 {
             return None;
@@ -806,7 +719,7 @@ impl TextIndex {
             }
             out.push(Reach {
                 count: *count,
-                own: self.postings.get(w.as_str()),
+                own: self.postings.get(w),
                 found,
             });
         }
@@ -820,19 +733,19 @@ impl TextIndex {
         &'a self,
         qtf: &Map<String, u32>,
         reach: &[Reach<'a>],
-        unions: &'a [Postings],
+        unions: &'a [List],
         n: usize,
         avgdl: f32,
         within: Option<&[DocId]>,
     ) -> Vec<Cursor<'a>> {
         let mut cursors: Vec<Cursor> = Vec::with_capacity(qtf.len() + 3 * reach.len());
         for (term, count) in qtf {
-            if let Some(list) = self.postings.get(term.as_str()) {
+            if let Some(list) = self.postings.get(term) {
                 cursors.extend(self.cursor(list, *count as f32, n, within));
             }
         }
         let (k1, b) = (self.spec.k1(), self.spec.b());
-        let mut next = unions.iter();
+        let mut next = unions.iter().map(List::view);
         for r in reach {
             let mark = cursors.len();
             for (d, scale) in NEAR_WEIGHT.iter().enumerate() {
@@ -1008,15 +921,15 @@ struct Reach<'a> {
     /// How often the query holds the word.
     count: u32,
     /// The word's own list, where the index holds it.
-    own: Option<&'a Postings>,
+    own: Option<Postings<'a>>,
     /// Each variant, its distance and its list.
-    found: Vec<(&'a str, u8, &'a Postings)>,
+    found: Vec<(&'a str, u8, Postings<'a>)>,
 }
 
 #[cfg(feature = "text")]
 impl<'a> Reach<'a> {
     /// The lists of its variants `d` edits away.
-    fn of(&self, d: u8) -> Vec<&'a Postings> {
+    fn of(&self, d: u8) -> Vec<Postings<'a>> {
         self.found
             .iter()
             .filter(|f| f.1 == d)
@@ -1028,7 +941,7 @@ impl<'a> Reach<'a> {
 /// Each word's variants of one distance as one list where there are
 /// several, in the order [`TextIndex::loose_cursors`] takes them.
 #[cfg(feature = "text")]
-fn unions(reach: &[Reach]) -> Vec<Postings> {
+fn unions(reach: &[Reach]) -> Vec<List> {
     let mut out = Vec::new();
     for r in reach {
         for d in 0..NEAR_WEIGHT.len() as u8 {
@@ -1045,16 +958,16 @@ fn unions(reach: &[Reach]) -> Vec<Postings> {
 /// there summed: merged two at a time, a level at a time, so a word
 /// reaching `n` lists costs the postings `log n` times over.
 #[cfg(feature = "text")]
-fn union(lists: &[&Postings]) -> Postings {
-    let none = Postings::default();
-    let mut level: Vec<Postings> = Vec::with_capacity(lists.len().div_ceil(2));
+fn union(lists: &[Postings]) -> List {
+    let none = List::default();
+    let mut level: Vec<List> = Vec::with_capacity(lists.len().div_ceil(2));
     for p in lists.chunks(2) {
-        level.push(merged(p[0], p.get(1).copied().unwrap_or(&none)));
+        level.push(merged(p[0], p.get(1).copied().unwrap_or(none.view())));
     }
     while level.len() > 1 {
         let mut up = Vec::with_capacity(level.len().div_ceil(2));
         for p in level.chunks(2) {
-            up.push(merged(&p[0], p.get(1).unwrap_or(&none)));
+            up.push(merged(p[0].view(), p.get(1).unwrap_or(&none).view()));
         }
         level = up;
     }
@@ -1062,12 +975,8 @@ fn union(lists: &[&Postings]) -> Postings {
 }
 
 #[cfg(feature = "text")]
-fn merged(a: &Postings, b: &Postings) -> Postings {
-    let mut out = Postings {
-        docs: Vec::with_capacity(a.len() + b.len()),
-        tfs: Vec::with_capacity(a.len() + b.len()),
-        max_tf: 0,
-    };
+fn merged(a: Postings, b: Postings) -> List {
+    let mut out = List::with_capacity(a.len() + b.len());
     let (mut i, mut j) = (0, 0);
     loop {
         let (doc, tf) = match (a.docs.get(i), b.docs.get(j)) {
@@ -1143,6 +1052,7 @@ pub(crate) fn best_first(a: &(DocId, f32), b: &(DocId, f32)) -> Ordering {
 ///
 /// The vector index's candidates keep theirs: this way a build of 30 000 x
 /// 128 took 2.5% longer, for 0.4 KB brotli.
+#[cfg(feature = "text")]
 fn by_ceiling<'a>(cursors: &[Cursor<'a>]) -> Vec<Cursor<'a>> {
     let mut order: Vec<(DocId, f32)> = cursors
         .iter()
@@ -1154,16 +1064,18 @@ fn by_ceiling<'a>(cursors: &[Cursor<'a>]) -> Vec<Cursor<'a>> {
 }
 
 /// One query term's walk through its postings.
+#[cfg(feature = "text")]
 #[derive(Clone, Copy)]
 struct Cursor<'a> {
     at: usize,
-    list: &'a Postings,
+    list: Postings<'a>,
     /// idf, times how often the term occurs in the query.
     weight: f32,
     /// The most this term can contribute to any single document.
     ceiling: f32,
 }
 
+#[cfg(feature = "text")]
 impl Cursor<'_> {
     /// One term's BM25 contribution, accumulated in `f64`.
     ///
@@ -1607,16 +1519,15 @@ mod tests {
         assert_eq!(ix.matching("alpha"), [1]);
     }
 
-    /// The count `memory_bytes` reads is the sum over every term it
-    /// replaced, through inserts, updates, removals and a shrink.
+    /// The count `memory_bytes` reads is what the terms hold -- each
+    /// shard's count of its lists their walk (`Terms::check`) -- through
+    /// inserts, updates, removals and a shrink, and the index answers as
+    /// one built afresh from the documents left.
     #[test]
     fn the_byte_count_is_the_walk_it_replaced() {
         let walked = |ix: &TextIndex| {
-            ix.postings
-                .iter()
-                .map(|(t, p)| TextIndex::term_bytes(t, p))
-                .sum::<usize>()
-                + ix.lengths.bytes()
+            ix.postings.check();
+            ix.postings.bytes() + ix.lengths.bytes()
         };
         let mut ix = TextIndex::new(spec());
         let mut seed = 0x51ED_u64;
@@ -1645,11 +1556,22 @@ mod tests {
         }
         ix.shrink_to_fit();
         assert_eq!(ix.memory_bytes(), walked(&ix));
+        let mut fresh = TextIndex::new(spec());
+        for (id, text) in &docs {
+            fresh.insert(*id, text);
+        }
+        for q in ["w1", "w2 w3", "w7 w7 w30", "w39 w0 w12 w5"] {
+            assert_eq!(ix.search(q, 50, |_| true), fresh.search(q, 50, |_| true));
+            assert_eq!(ix.matching(q), fresh.matching(q));
+        }
+        assert_eq!(ix.postings_count(), fresh.postings_count());
         for (id, text) in docs {
             ix.remove(id, &text);
         }
         assert_eq!(ix.terms(), 0);
-        assert_eq!(ix.memory_bytes(), ix.lengths.bytes());
+        ix.shrink_to_fit();
+        assert_eq!(ix.memory_bytes(), walked(&ix));
+        assert_eq!(ix.postings.bytes(), 0);
     }
 
     #[test]

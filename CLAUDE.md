@@ -92,6 +92,7 @@ make composite-bench     # an index over several fields: a user's latest twenty 
 make lookup-bench        # a lookup over a key of several fields: a tenant's 20 shops x 3 orders x 5 lines against the key joined into one @hash field (ARGS="all 500 2", ARGS=single)
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
 make fuzzy-bench         # match ... fuzzy and prefix over 100 000 documents: the sorted words' build and size, the walk at one edit and two, a query plain, with a typo and half typed (BEIR=dir: its words too)
+make text-memory         # what a text index holds, counted by the allocator: a tenant's notes over a Zipf vocabulary and of made-up words, musl's slots for them and memory_bytes (BEIR="a b": those corpora)
 make nocase-bench        # a `nocase` field against a plain one over 100 000 rows: a put asking @unique, lookups, scans, `~`, an order, group and facet (ARGS=scan for some)
 make collate-bench       # order ... collate tr over a million Turkish names, against PostgreSQL's tr-x-icu (that side after pgvector-up)
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M, a lone put and del beside such a field (`writes`)
@@ -2489,7 +2490,7 @@ write lock, every request waiting -- and a `@unique` field holds a key a
 row: `make recon-bench`'s journal passing 1 835 008 entries held one
 transfer and everything behind it 120 to 137 ms in every run, and `make
 growth-bench`'s 4 million puts one at a time took 7, 19, 49, 109 and
-235-267 ms at each doubling from 229 376 keys. A `@text` index's terms are
+235-267 ms at each doubling from 229 376 keys. A `@text` index's terms were
 the same map, and a field whose rows bring terms of their own -- an id, a
 code, a name -- doubled it as often: 9-10, 23-25, 55-59, 125-132 and
 276-324 ms over the same doublings (`growth-bench`'s `text`, four new terms
@@ -2497,7 +2498,8 @@ a row to 4 million). Past `SPLIT_AT` (114 688 keys, a table of 2^17
 buckets' worth) the map is 256 maps, each growing on its own: the longest
 put is the split's, 2.5-3.6 ms for a hash index's keys and 4.9-5.3 for a
 text index's terms, against 6.2-8.2 and 8.5-10.6 while the split hashed
-every key again. Each key is kept beside its hash (`Hashed`), which its
+every key again. A text index's terms are a table of their own since,
+split the same way (below). Each key is kept beside its hash (`Hashed`), which its
 table takes as it is (`Pass`): a lookup is one SipHash under the map's own
 random keys, and the shard is bits 49 to 56 of it -- below the seven a
 table tags its buckets with: by the top byte, every key of a shard had one
@@ -2507,7 +2509,7 @@ lookup in a loop over a million keys took 94-135 ns and over four million
 121-144, against 68-87 and 83-93 now, and 33-42 -> 24-34 under the split;
 an index built after an open is 15-25% faster, its tables growing with no
 key hashed again. The cost is 8 bytes a slot: 48 -> 56 a hash index's, 80
--> 88 a text index's. A put's p50 is as it was (1.08-1.29 us), and so is
+-> 88 a text index's then. A put's p50 is as it was (1.08-1.29 us), and so is
 `match` (a new term 1.05-1.29 us against 1.09-1.37, three 1.37-1.65 against
 1.41-1.72). Rejected:
 one table taken into a new one 4 096 keys at a time, looked up in both
@@ -3108,12 +3110,12 @@ which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
 HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
 `avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
 `having` are in every build). `make wasm-sizes` builds each added to the
-module with none (432.5 KB, 149.0 brotli, against 711.0 and 241.9 with
+module with none (432.5 KB, 149.0 brotli, against 713.8 and 244.1 with
 every one) and left out of the full one, brotli added and saved:
 `vector` 20.4 and 19.0, `sorted` 8.7 and 23.5 with `composite`,
-`composite` beside it 11.6 and 10.9, `collate` 8.9 and 8.4, `text` 10.9
-and 13.0 with `fuzzy` and `prefix` (5.7 and 7.3 before), `facets` 3.6 and
-4.5, `highlight` beside `text` 3.8 and 3.6, `nocase` 2.8 and 2.6, `geo`
+`composite` beside it 11.6 and 10.9, `collate` 8.9 and 8.4, `text` 13.1
+and 15.2 with `fuzzy`, `prefix` and its term table (5.7 and 7.3 before
+the first two, 10.9 and 13.0 before the table), `facets` 3.6 and 4.5, `highlight` beside `text` 3.8 and 3.6, `nocase` 2.8 and 2.6, `geo`
 2.5 and 6.0 (its index with it), `analytics` 5.5 and 5.1, `sparse` 2.4
 and 1.4, the schema check 9.5 and 9.5. The module with every feature is the code
 it was (`make size-report BASE=main`: 14 bytes less of it, functions moved
@@ -3166,9 +3168,9 @@ schema check, search -- `match`, `highlight` and `snippet`, facets,
 `near` with its graph, `fuse` -- and the standard query features. A
 plugin is an extra one kind of app needs: geo, sparse vectors, a
 language's collation, `bucket` and the HLL sketches. Held to that rule
-the core is about 221 KB brotli and the extras about 21 together (`geo`
+the core is about 223 KB brotli and the extras about 21 together (`geo`
 6.0, `collate` 8.4, `sparse` 1.4, `bucket` and the sketches 5.1), 9% of
-the full module's 242: too little to pay for modules built ahead
+the full module's 244: too little to pay for modules built ahead
 for sets of features and a choice of one per page, let alone a module a
 plugin loaded beside the engine, which would carry its own copy of the
 standard library's allocator and panic machinery and reach into the write
@@ -3180,10 +3182,10 @@ and `first`/`last` are standard, and are in the core.
 
 **One module and a client entry, by where the queries run, and a test
 build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 241.9 KB brotli) and `@fenecdb/web/client`, so a user has two
+check, 244.1 KB brotli) and `@fenecdb/web/client`, so a user has two
 clear choices: queries on a server through the client entry and no
 module, or a database in the page or a synced replica through the full
-module. `fenec-lite.wasm` (no index, no schema check, 172 KB brotli; `make
+module. `fenec-lite.wasm` (no index, no schema check, 173 KB brotli; `make
 wasm-lite`, as `make wasm FEATURES=language SCHEMA=0` now) was shipped
 beside it and is a test build now -- built in CI, packed and released by
 nothing -- because it holds the invariant above: a build without an index
@@ -3904,8 +3906,63 @@ builds an inverted index from the documents the first time a statement reads it
 after an open — 16 µs per document against the HNSW graph's ~34 µs. Nothing
 about it reaches the file, so there is no validation path and no stale-index
 case to handle. It is shrunk to fit where it is known complete (its build,
-`create index`); live ingest keeps `Vec` growth slack. Its term map grows a
-256th at a time, as a hash index's does (`maps::Sharded`, above).
+`create index`); live ingest keeps `Vec` growth slack. Its terms grow a
+256th at a time, as a hash index's keys do (below).
+
+**A text index's word is 9 bytes of a table, 16 of a term, and its bytes**
+(`text/terms.rs`). A map of `String` to two `Vec`s, its hash beside it, was
+a slot of 88 bytes and three allocations a word: a `--dir` node's tenant of
+200 notes of 30 words held 565 KB of anonymous memory for its text index
+over a Zipf vocabulary and 1 135 over made-up words (musl, in Docker, 500
+tenants) -- 11 to 22 times the tenant's 51 KB, its hash and ordered indexes
+4-5 KB each, the map's table 729 KB of the second -- and `memory_bytes`
+counted 28% of the tenant, no table and no allocator. A slot is now a
+word's place under half its hash, with a control byte; its bytes are in an
+arena after their length; a word one document holds (three in four over a
+Zipf vocabulary) is a `One` of 16 bytes, the document and its count, no
+allocation; a word of more a `List` the slot names directly, as the map's
+slot held it. The same tenants' indexes hold 192 and 225 KB, a tenant 594
+-> 221 and 1 164 -> 255 KB, and 500 of them building their indexes as they
+were written 375 -> 173 and 703 -> 172 MB; in musl's slots (`make
+text-memory`) SciFact's index 15.0 -> 10.4 MB and FiQA's 75.8 -> 66.5.
+`memory_bytes` counts the table, the arrays and what each list's allocation
+takes past its bytes (`ALLOC`, 12): within a tenth of musl's slots where it
+was a third (a tenant's notes) to four fifths (FiQA), and 79 and 86% of a
+tenant's anonymous memory. A word that goes leaves its place to the next
+(`free`, and `spare` for a list, its arrays kept to 16 documents: moved
+into by the last, its slot found by its hash again, a browser's update of a
+note took 12% longer) and its bytes dead in the arena, written again once
+half of it is; a slot that goes moves the ones after it back, no tombstone;
+a build closes the places up and shrinks every array. A probe reads a group
+of 8 slots by their control bytes, as hashbrown does without SIMD
+(`GROUP`): a slot at a time, a word past its own slot cost a mispredicted
+exit and `make search-bench`'s build took 149 ms against the map's 142 --
+though FiQA, its common words in their own slots, built in 505 against 536
+by groups. A word is compared by its length and first seven bytes as one
+masked word (`Key`): through `memcmp` a length's branch mispredicted at
+each. Past 98 304 words natively the table, arrays and arena are 256 shards
+by the hash's top byte, as `maps::Sharded` splits a map: `make growth-bench
+GROWTH=text`'s put p50 1.21-1.25 -> 0.83-0.88 us, p99 2.9-7.1 -> 1.6-2.0,
+the split's 5.2-6.3 ms -> 3.4-4.7, the index built after an open 1.8-2.6 s
+-> 0.46-0.58. In ABBA turns against main, load 2-5: search-bench's build
+140-146 -> 139-142 ms and `match` 0.054 either way, SciFact's build 90-91
+-> 87 ms (one run of six 94) and FiQA's 559-565 -> 535-539, `match` over
+them 4-6% quicker, 400 000 words each in one document 113-178 -> 38-47 ms,
+BEIR's nDCG@10 the same to the fourth digit and its loose `match`es as
+quick or quicker, an update of a FiQA document 1% slower on macOS (306-309
+-> 310-312 us, though its own instructions only +0.23%: the same binary
+search, out of line in both, 5-8% apart in samples, and `#[inline(never)]`
+on main's own `drop_doc` moved main's up to 0.8%, its removals 0.4-1.2%; a
+list's record a cache line, its word's head in it, or its drop out of line,
+no nearer) and the same on Linux in Docker's VM, in turns (musl 1 505-1 521
+against 1 509-1 514 us, glibc 2 100-2 160 against 2 105-2 161), and of a
+SciFact one the same; the browser module's build of SciFact 151-154 ->
+145-146 ms (one run of six 155) and of 20 000 notes of made-up words 75-77
+-> 32, `match` 3-7% quicker, `make wasm-speed` as it was, for 2.2 KB brotli
+of the module, 3.1 KB raw (hashbrown's copy for the map, 3.0 KB raw, gone).
+Rejected: control bytes in each group's cache line beside its slots, FiQA
+533 ms and search-bench 147; a group's tags compared one by one, 171; the
+first two slots picked without a branch, 155.
 
 **`match ... fuzzy` and `prefix` walk a sorted copy of the index's words**
 (`fuzzy.rs`, `TextIndex::search_loose`). `fuzzy [N]` reads a query's word
