@@ -1258,7 +1258,7 @@ public sealed class Query
     async Task<byte[]> BodyAsync(CancellationToken ct)
     {
         var (text, ps) = ToFenecQL();
-        var (body, _) = await Client.RunAsync(text, ps, ct).ConfigureAwait(false);
+        var (body, _) = await Client.RunReadAsync(text, ps, ct).ConfigureAwait(false);
         return body;
     }
 
@@ -1302,7 +1302,7 @@ public sealed class Query
     public async Task<IReadOnlyList<string>> ExplainAsync(CancellationToken cancellationToken = default)
     {
         var (text, ps) = ToFenecQL();
-        var (body, _) = await Client.RunAsync($"explain {text}", ps, cancellationToken).ConfigureAwait(false);
+        var (body, _) = await Client.RunReadAsync($"explain {text}", ps, cancellationToken).ConfigureAwait(false);
         return FenecClient.RowsOf(body)
             .Select(r => r.TryGetProperty("plan", out var p) ? p.GetString() ?? "" : "").ToList();
     }

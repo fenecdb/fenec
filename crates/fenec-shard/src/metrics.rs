@@ -98,6 +98,29 @@ static FANOUT_TIMES: Timings = Timings::new(&BUCKETS);
 /// The tenants those queries asked: `[answered, failed]`.
 static FANOUT_TENANTS: [AtomicU64; 2] = [ZERO; 2];
 
+/// Reads marked for a replica (`Fenec-Read: replica`), by [`ReplicaRead`].
+static REPLICA_READS: [AtomicU64; 3] = [ZERO; 3];
+
+/// Where a read its client marked for a replica was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaRead {
+    /// By the tenant's read replica in the router's region.
+    Replica = 0,
+    /// At home, the replica not reached, going down or behind the write
+    /// the read waited for.
+    Fallback = 1,
+    /// At home, the tenant having no replica in the router's region -- or
+    /// its home being that region.
+    Home = 2,
+}
+
+const REPLICA_READ: [&str; 3] = ["replica", "fallback", "home"];
+
+/// Counts a read marked for a replica by where it was answered.
+pub fn replica_read(how: ReplicaRead) {
+    REPLICA_READS[how as usize].fetch_add(1, Ordering::Relaxed);
+}
+
 /// How a query across tenants ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fanned {
@@ -316,6 +339,18 @@ pub fn counters(out: &mut Text) {
             "fenec_router_fanout_tenants_total",
             &[("outcome", outcome)],
             FANOUT_TENANTS[i].load(Ordering::Relaxed),
+        );
+    }
+    out.family(
+        "fenec_router_replica_reads_total",
+        "counter",
+        "Reads their client marked for a replica (Fenec-Read: replica), by where they were answered: replica (the tenant's read replica in the router's region), fallback (home, the replica not reached or behind the write the read waited for), home (no replica in the router's region).",
+    );
+    for (i, outcome) in REPLICA_READ.iter().enumerate() {
+        out.sample(
+            "fenec_router_replica_reads_total",
+            &[("outcome", outcome)],
+            REPLICA_READS[i].load(Ordering::Relaxed),
         );
     }
     out.family(

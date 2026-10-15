@@ -874,6 +874,81 @@ fn read_only_refuses_writes_before_routing() {
     }
 }
 
+/// A request its client marked as a read (`Fenec-Read: replica`), which a
+/// router may answer from a read replica, runs read-only on every server:
+/// a write marked by mistake is refused in words that say so, on the
+/// primary as on a replica, rather than land at home and teach nothing.
+#[test]
+fn a_read_marked_for_a_replica_runs_read_only_everywhere() {
+    let h = start(Config::default());
+    let marked = [("Fenec-Read", "replica")];
+    let r = call_with(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"get articles count"}"#),
+        &marked,
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = call_with(h.port, "GET", "/articles?limit=1", None, &marked);
+    assert_eq!(r.status, 200, "{}", r.body);
+    for (m, t, b) in [
+        (
+            "POST",
+            "/query",
+            Some(r#"{"query":"put articles {title: \"x\"}"}"#),
+        ),
+        (
+            "POST",
+            "/batch",
+            Some(r#"{"query":"del articles where id = 1"}"#),
+        ),
+        ("POST", "/articles", Some(r#"{"title":"x"}"#)),
+    ] {
+        let r = call_with(h.port, m, t, b, &marked);
+        assert_eq!(r.status, 403, "{m} {t}: {}", r.body);
+        assert!(
+            r.body.contains("Fenec-Read: replica only reads"),
+            "{}",
+            r.body
+        );
+    }
+    // Nothing was written, and unmarked the same write goes through.
+    let r = call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"get articles count"}"#),
+    );
+    let before = r.body.clone();
+    let r = call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"put articles {title: \"x\"}"}"#),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_ne!(
+        call(
+            h.port,
+            "POST",
+            "/query",
+            Some(r#"{"query":"get articles count"}"#)
+        )
+        .body,
+        before
+    );
+    // A value the header does not take is refused, not taken for a write.
+    let r = call_with(
+        h.port,
+        "GET",
+        "/articles",
+        None,
+        &[("Fenec-Read", "nearest")],
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+}
+
 #[test]
 fn remote_bind_without_token_is_refused() {
     let server = Server::new(
@@ -926,9 +1001,18 @@ fn cors_headers_only_when_configured() {
     assert!(r
         .header("Access-Control-Allow-Headers")
         .is_some_and(|v| v.contains("idempotency-key")));
-    assert!(r
-        .header("Access-Control-Expose-Headers")
-        .is_some_and(|v| v.contains("fenec-seq")));
+    // And marks its reads for a replica near it, after the change and
+    // the history its last answer named.
+    for h in ["fenec-read", "fenec-after", "fenec-history"] {
+        assert!(r
+            .header("Access-Control-Allow-Headers")
+            .is_some_and(|v| v.contains(h)));
+    }
+    for h in ["fenec-seq", "fenec-history"] {
+        assert!(r
+            .header("Access-Control-Expose-Headers")
+            .is_some_and(|v| v.contains(h)));
+    }
 }
 
 /// A browser sends a preflight with no `Authorization` -- the Fetch

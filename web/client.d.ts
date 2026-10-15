@@ -20,6 +20,7 @@ export type {
   Facets,
   Fields,
   HttpOptions,
+  RunOptions,
   Insert,
   InsertRow,
   Json,

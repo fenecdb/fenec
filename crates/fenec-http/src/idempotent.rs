@@ -178,6 +178,7 @@ pub fn answered(db: &Database, key: &Key, ttl_ms: i64) -> Option<Response> {
     // as none.
     if *status < 300 {
         sent.seq = Some(db.change_seq());
+        sent.history = crate::http::history_of(db);
     }
     Some(sent)
 }

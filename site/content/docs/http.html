@@ -459,6 +459,27 @@ href="/docs/queues#wait">Waiting for a job</a>).</p>
     below, and holds no write.</li>
 </ul>
 
+<h2 id="read">Marking a read</h2>
+
+<p>Send <code>Fenec-Read: replica</code> with a request that only reads, and
+a router standing in a region where the tenant has a read replica answers it
+there rather than from the tenant's home (<a
+href="sharding.html#read-replicas">Read replicas</a>); with
+<code>Fenec-After</code> and <code>Fenec-History</code>, as an answer from home
+named them, it is answered from nothing older than that change of that
+history (<a href="replication.html#read-your-writes">Reading your own
+writes</a>). Every server runs a marked request read-only on every route —
+home, a replica, a single file; a statement, REST, <code>/batch</code>, an
+MCP tool, a change-stream consumer's commit — so a write sent with the mark
+is refused with <code>403</code> and words that say why, never landed; a
+value but <code>replica</code> is a <code>400</code>. A copy that has not
+caught up with its primary yet answers it <code>503</code>.</p>
+
+<pre data-lang="bash">curl -X POST https://ap.example.com/t/acme/query -H 'Fenec-Read: replica' \
+  -H 'Fenec-After: 1043' -H 'Fenec-History: 2-6c1f0a9e44d7b2c8' \
+  -d '{"query":"get orders where customer = $1","params":["c-7"]}'
+</pre>
+
 <h2>The data ceiling</h2>
 
 <p>With <code>--max-memory</code>, writes that would grow the data past the
@@ -493,7 +514,7 @@ which is the one to wait). Every SDK's error carries all of them.</p>
 <tbody>
 <tr><td class="n">400</td><td>a statement that does not parse or run, a bad parameter</td><td>fix the request</td></tr>
 <tr><td class="n">401</td><td>no token, or a wrong one</td><td>send the right token</td></tr>
-<tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole — a write to a replica or a read-only server</td><td>write where it is taken</td></tr>
+<tr><td class="n">403</td><td>outside the token's rules — a row, a field, a change no transition names, a <code>returning</code> row it may not read, the write put back whole — a write to a replica or a read-only server, or one marked <code>Fenec-Read</code></td><td>write where it is taken</td></tr>
 <tr><td class="n">404</td><td>a collection, field or tenant that is not there</td><td></td></tr>
 <tr><td class="n">409</td><td>an id or a <code>@unique</code> value taken, a collection that exists</td><td>a lost race for a value</td></tr>
 <tr><td class="n">410</td><td>a <code>/_changes</code> cursor the server no longer reaches</td><td>start again from the <code>since</code> it names</td></tr>
@@ -502,7 +523,7 @@ which is the one to wait). Every SDK's error carries all of them.</p>
 <tr><td class="n">422</td><td>an <code>Idempotency-Key</code> sent with another request</td><td>a new key for a new request</td></tr>
 <tr><td class="n">429</td><td>a tenant's quota of <code>streams</code>, <code>held</code>, <code>requests</code>, <code>writes</code> or <code>write_bytes</code></td><td>come back after <code>retry_after_ms</code></td></tr>
 <tr><td class="n">503</td><td>too many connections or subscriptions; a tenant being moved or failed over; a node going down</td><td>come back after <code>Retry-After</code> seconds</td></tr>
-<tr><td class="n">504</td><td>a <code>Fenec-After</code> change that did not reach a replica in the wait</td><td>ask again, or ask the primary</td></tr>
+<tr><td class="n">504</td><td>a <code>Fenec-After</code> change that did not reach a replica in the wait, or one a primary's history does not hold — lost in a failover; <code>seq</code> and <code>history</code> say where it stands</td><td>ask again, or ask the primary; take the primary's position as yours</td></tr>
 <tr><td class="n">507</td><td>past <code>--max-memory</code>, or a tenant's quota of <code>bytes</code> or <code>rows</code>; the write put back whole</td><td>delete, then write again: waiting does not help</td></tr>
 </tbody>
 </table>

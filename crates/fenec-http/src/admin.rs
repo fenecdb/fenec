@@ -112,6 +112,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             content_type: "application/octet-stream",
             extra: Vec::new(),
             seq: None,
+            history: None,
             version: None,
         }),
         (Method::Put, ["tenants", t, "file"]) => tenants

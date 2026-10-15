@@ -193,6 +193,34 @@ impl Pool {
         }
     }
 
+    /// [`Pool::send`] of a read its client marked (`Fenec-Read: replica`)
+    /// to a read replica, connected and its answer's head read within
+    /// `within` -- the wait its `Fenec-After` asks for and the router's
+    /// `--replica-timeout` -- not the pool's timeout: a replica that does
+    /// not answer by then is passed over for home, where the read runs as
+    /// any. Sent again on a fresh connection where one ended before its
+    /// answer, as [`replayable`] lets a marked read be.
+    pub fn send_within(
+        &self,
+        addr: &str,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        within: Duration,
+    ) -> io::Result<Answer> {
+        let replay = replayable(method, headers);
+        self.send_timed(
+            addr,
+            method,
+            target,
+            headers,
+            body,
+            (within, within),
+            replay,
+        )
+    }
+
     /// [`Pool::send`] of a read that must be answered by `deadline`: the
     /// connect and the head's reads are bounded by what is left of it
     /// (and by the pool's timeout), and [`Answer::read_body_by`] reads the
@@ -427,12 +455,17 @@ impl Pool {
 
 /// Whether a request whose connection ended before its answer may be sent
 /// again: one a node never writes for, or a write the node makes once
-/// under its key, answering a second request with the first one's answer.
+/// under its key, answering a second request with the first one's answer
+/// -- or a request its client marked as a read (`Fenec-Read: replica`),
+/// which every node runs read-only on every route, a `POST /query` among
+/// them: the value [`fenec_http::read_marked`] takes, and no other, which
+/// a node refuses unrun.
 fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
     matches!(method, "GET" | "HEAD" | "OPTIONS")
-        || headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("idempotency-key"))
+        || headers.iter().any(|(k, v)| {
+            k.eq_ignore_ascii_case("idempotency-key")
+                || (k.eq_ignore_ascii_case(fenec_http::READ_HEADER) && fenec_http::marks_read(v))
+        })
 }
 
 fn timed_out(e: &io::Error) -> bool {

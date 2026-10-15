@@ -1314,6 +1314,14 @@ def _count(answer: Any) -> int:
     return rows[0].get("count", 0) if rows and isinstance(rows[0], dict) else 0
 
 
+def _read_kw(client: Any) -> dict:
+    """What a query's read passes its client beside the text: `read=True`
+    to a client reading near (`reads="nearest"`), which marks it for a read
+    replica near it; nothing to any other, a client of one's own making
+    among them."""
+    return {"read": True} if getattr(client, "reads", "home") == "nearest" else {}
+
+
 class Query(_Builder):
     """A query over a `Client`: immutable, its endpoints sending it."""
 
@@ -1322,7 +1330,8 @@ class Query(_Builder):
     def rows(self) -> Rows:
         """Every row the query answers, a dict each -- and, for a query that
         asked facets, the counts as the list's `facets`."""
-        return _rows(self._client().query(*self.to_fenecql()))
+        client = self._client()
+        return _rows(client.query(*self.to_fenecql(), **_read_kw(client)))
 
     def first(self) -> dict | None:
         """The first row, or None: the query with `limit 1`."""
@@ -1332,12 +1341,15 @@ class Query(_Builder):
     def count(self) -> int:
         """How many rows match: `get ... count`, no row decoded."""
         q = self._counted()
-        return _count(q._client().query(*q.to_fenecql()))
+        client = q._client()
+        return _count(client.query(*q.to_fenecql(), **_read_kw(client)))
 
     def explain(self) -> list[str]:
         """The path the query took, a line a step; the query runs to tell."""
         sql, params = self.to_fenecql()
-        return [r.get("plan") for r in _rows(self._client().query(f"explain {sql}", params))]
+        client = self._client()
+        answer = client.query(f"explain {sql}", params, **_read_kw(client))
+        return [r.get("plan") for r in _rows(answer)]
 
     def insert(
         self,
@@ -1413,7 +1425,8 @@ class AsyncQuery(_Builder):
     __slots__ = ()
 
     async def rows(self) -> Rows:
-        return _rows(await self._client().query(*self.to_fenecql()))
+        client = self._client()
+        return _rows(await client.query(*self.to_fenecql(), **_read_kw(client)))
 
     async def first(self) -> dict | None:
         rows = await self.limit(1).rows()
@@ -1421,11 +1434,14 @@ class AsyncQuery(_Builder):
 
     async def count(self) -> int:
         q = self._counted()
-        return _count(await q._client().query(*q.to_fenecql()))
+        client = q._client()
+        return _count(await client.query(*q.to_fenecql(), **_read_kw(client)))
 
     async def explain(self) -> list[str]:
         sql, params = self.to_fenecql()
-        return [r.get("plan") for r in _rows(await self._client().query(f"explain {sql}", params))]
+        client = self._client()
+        answer = await client.query(f"explain {sql}", params, **_read_kw(client))
+        return [r.get("plan") for r in _rows(answer)]
 
     async def insert(
         self,

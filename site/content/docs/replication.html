@@ -138,6 +138,10 @@ curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
 <ul>
   <li><b>It waits 5 seconds</b> unless <code>Fenec-Wait</code> says otherwise
     (in milliseconds, 30 s at most), then answers 504.</li>
+  <li><b>Across a failover, send <code>Fenec-History</code> too:</b> the
+    answer names the history its change is of, which a promotion forks. A
+    replica left on the old branch holds a change of that number of its
+    own, and answers no read sent after the new one.</li>
   <li><b>Its token comes first:</b> a request the server refuses (401, or
     403 for another tenant's token) is answered at once, not after the
     wait, and learns nothing of where the replica stands.</li>
@@ -154,6 +158,25 @@ names the change it left the database at, <code>Fenec-Seq</code>; a request
 sent to a replica with <code>Fenec-After: &lt;that number&gt;</code> is
 served once the replica holds it, and answered 504 with where the replica
 stands if it does not within the wait — never from before the write.</p>
+
+<p>A change number names a write within one history. A promotion forks the
+history where the replica promoted stood: a write the old primary answered
+and the replica never got is lost, the new primary's next write takes its
+number, and a replica still following the old primary holds a change of that
+number — the lost write. So an answer of a database that has had a replica
+also names its history, <code>Fenec-History: &lt;term&gt;-&lt;id&gt;</code>,
+the term one more at each promotion; a read sent with it beside
+<code>Fenec-After</code> is served once the replica holds that change of that
+history — a replica on the old branch waits until it follows the new primary
+and takes its image. A primary asked for a position its history does not
+hold — the write lost — answers 504 at once, with its own
+<code>seq</code> and <code>history</code>, which a client takes as where it
+stands from then — over the position it sent that read after alone, and
+never an earlier term of the same lineage, which only a fenced old primary
+names. A history's lineage is the top half of its id: every promotion and
+restore keeps it, and a database made anew — a tenant deleted and made again
+under its name, starting again at term 1 — has another, whose position a
+client takes, its term lower or not.</p>
 
 <p>The wait is 5 seconds unless <code>Fenec-Wait</code> gives it in
 milliseconds, 30 seconds at most, and a replica waits on the same

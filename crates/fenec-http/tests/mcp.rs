@@ -1168,6 +1168,65 @@ fn the_write_tool_is_off_until_asked_for_and_then_writes_rows_alone() {
     assert!(err && int(at(&s, &["status"])) == 403, "{s:?}");
 }
 
+/// A call its client marked as a read (`Fenec-Read: replica`) runs
+/// read-only, as every route does: the endpoint answered before the mark
+/// was read, and a router sends a marked request to a replica -- or again
+/// to home, its answer lost, since a read cannot run twice.
+#[test]
+fn a_write_tool_call_marked_as_a_read_is_refused() {
+    let n = start(Options {
+        write: true,
+        ..opts()
+    });
+    let body = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"write","arguments":{"statement":"insert docs {title: 'marked'}"}}}"#;
+    let auth = format!("Bearer {ROOT}");
+    let marked = [
+        ("Authorization", auth.as_str()),
+        ("MCP-Protocol-Version", "2025-06-18"),
+        ("Fenec-Read", "replica"),
+    ];
+    let a = n.post_raw("POST", "/_mcp", &marked, body);
+    assert_eq!(a.status, 200, "{}", a.body);
+    let v = a.json();
+    assert_eq!(
+        at(&v, &["result", "isError"]),
+        &Value::Bool(true),
+        "{}",
+        a.body
+    );
+    let r = at(&v, &["result", "structuredContent"]);
+    assert_eq!(int(at(r, &["status"])), 403, "{}", a.body);
+    assert!(
+        text(at(r, &["error"])).contains("Fenec-Read: replica only reads"),
+        "{}",
+        a.body
+    );
+    let (err, s) = n.call(
+        Some(ROOT),
+        "query",
+        r#"{"query":"get docs where title = 'marked' count"}"#,
+    );
+    assert!(!err, "{s:?}");
+    assert_eq!(at(&s, &["rows", "0", "count"]), &Value::Int(0), "{s:?}");
+    // A read marked so is answered as any.
+    let read = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"query","arguments":{"query":"get docs count"}}}"#;
+    let a = n.post_raw("POST", "/_mcp", &marked, read);
+    let v = a.json();
+    assert_eq!(
+        at(&v, &["result", "isError"]),
+        &Value::Bool(false),
+        "{}",
+        a.body
+    );
+    // And a value the mark does not take is refused before the call.
+    let wrong = [
+        ("Authorization", auth.as_str()),
+        ("MCP-Protocol-Version", "2025-06-18"),
+        ("Fenec-Read", "nearest"),
+    ];
+    assert_eq!(n.post_raw("POST", "/_mcp", &wrong, read).status, 400);
+}
+
 #[test]
 fn a_caller_past_its_rate_is_told_when_to_call_again() {
     let n = start_scoped(Options {

@@ -34,15 +34,18 @@ fn headers(origin: &str) -> [(&'static str, &str); 6] {
         // beside an answer so a person can find its lines in the logs.
         // An MCP client in a page -- the MCP Inspector's, an agent's --
         // mirrors a 2026-07-28 request's version, method and tool into
-        // headers its binding requires, refused unread otherwise.
+        // headers its binding requires, refused unread otherwise. A page
+        // marks its reads for a replica near it with `Fenec-Read`, which
+        // refused, went home every time.
         (
             "Access-Control-Allow-Headers",
-            "content-type, authorization, idempotency-key, fenec-after, fenec-wait, if-none-match, \
-             mcp-protocol-version, mcp-method, mcp-name",
+            "content-type, authorization, idempotency-key, fenec-after, fenec-history, fenec-wait, \
+             fenec-read, if-none-match, mcp-protocol-version, mcp-method, mcp-name",
         ),
         (
             "Access-Control-Expose-Headers",
-            "fenec-seq, fenec-next, idempotent-replayed, etag, x-request-id, fenec-quota, retry-after",
+            "fenec-seq, fenec-history, fenec-next, idempotent-replayed, etag, x-request-id, \
+             fenec-quota, retry-after",
         ),
         ("Access-Control-Max-Age", "600"),
         ("Vary", "Origin"),

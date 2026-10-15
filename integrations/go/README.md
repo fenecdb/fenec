@@ -35,6 +35,9 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
 - `Batch(ctx, fenecdb.Stmt(q, params...), ...)` runs statements as one block: all land, or none.
 - `IdempotencyKey(key)` makes a write once; `After(seq)` reads a write on a replica (`Fenec-After`), and
   `Wait(d)` beside it bounds how long the server holds the read for the change.
+- `New(url, fenecdb.WithReadsNearest())` sends the builder's reads, and a `Read()` copy's, to the tenant's read
+  replica near the client through a fenec-shard router (`Fenec-Read: replica`), each after the furthest position
+  an answer from home named (`Fenec-After`, `Fenec-History`); writes go home.
 - `QueryRaw` and `BatchRaw` hand the answer back as the server wrote it, its columns in the select list's order
   (a map loses it); `IfNoneMatch(r.ETag).QueryRaw(...)` is answered `NotModified` while nothing the statement
   reads was written. The tag names a change, not the statement: send it only with the request it came from.

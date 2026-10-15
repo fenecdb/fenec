@@ -270,7 +270,7 @@ impl Router {
     /// One call to `region`'s routers -- `""` the global directory's -- its
     /// whole answer: the status, the headers, the body. A router answering
     /// that it follows another ran nothing, and the next is asked.
-    fn call_routers(
+    pub(crate) fn call_routers(
         &self,
         region: &str,
         routers: &[String],
@@ -279,19 +279,28 @@ impl Router {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> std::result::Result<Whole, String> {
+        let call = (method, target, headers, body);
+        self.call_routers_by(&self.pool, region, routers, call)
+    }
+
+    /// [`Self::call_routers`] through `pool`, bounded by its timeout.
+    pub(crate) fn call_routers_by(
+        &self,
+        pool: &crate::upstream::Pool,
+        region: &str,
+        routers: &[String],
+        (method, target, headers, body): (&str, &str, &[(&str, &str)], &[u8]),
+    ) -> std::result::Result<Whole, String> {
         let start = self.first_router(region, routers);
         let mut last = String::from("no router is recorded");
         for k in 0..routers.len() {
             let i = (start + k) % routers.len();
             let url = &routers[i];
-            match self
-                .pool
-                .send_tried(host(url), method, target, headers, body, Duration::ZERO)
-            {
+            match pool.send_tried(host(url), method, target, headers, body, Duration::ZERO) {
                 Ok(a) => {
                     let (status, hs) = (a.status, a.headers.clone());
                     let body = a
-                        .read_body(&self.pool, false)
+                        .read_body(pool, false)
                         .map_err(|e| format!("{url} broke off: {e}"))?;
                     if status == 409 && contains(&body, b"follows another") {
                         last = format!("{url} follows another router");
@@ -319,7 +328,7 @@ impl Router {
 
     /// A call this router makes of `region`'s routers on its own, as the
     /// global router: its whole answer, or the failure a client is told.
-    fn ask_region(
+    pub(crate) fn ask_region(
         &self,
         region: &str,
         method: &str,
@@ -445,6 +454,12 @@ impl Router {
             match (req.method, rest) {
                 // A name taken or given back is the global directory's.
                 (Method::Put | Method::Delete, ["tenants", _]) => false,
+                // A read replica is kept by the directory holding its node:
+                // this one's in this region, the global router's -- or
+                // another region's, through it -- elsewhere. Their list
+                // spans every directory, which the global router gathers.
+                (Method::Put | Method::Delete, ["tenants", _, "read-replicas", r]) => *r == own,
+                (Method::Get, ["tenants", _, "read-replicas"]) => false,
                 (Method::Post, ["tenants", t, "move"]) => {
                     let to = field(&body, "to");
                     let region = place_field(&body, "region").ok().flatten();
@@ -490,6 +505,7 @@ impl Router {
             Relay(String),
             Across(String, String, Option<String>),
             Refuse(Fail),
+            Gather,
         }
         let body = body_fields(req).unwrap_or_default();
         let todo = {
@@ -544,6 +560,13 @@ impl Router {
                 (_, ["tenants", t]) | (_, ["tenants", t, "quota"]) => {
                     dir.home(t).map(|r| Do::Relay(r.to_string()))
                 }
+                // A read replica in a region keeping its own directory is
+                // that region's router's to place, whatever region its
+                // tenant lives in; their list is every directory's.
+                (Method::Put | Method::Delete, ["tenants", _, "read-replicas", r]) => {
+                    keeps(r).then(|| Do::Relay(r.to_string()))
+                }
+                (Method::Get, ["tenants", _, "read-replicas"]) => Some(Do::Gather),
                 (Method::Put, ["nodes", n]) if dir.node(n).is_none() => {
                     place_field(&body, "region")
                         .ok()
@@ -572,6 +595,7 @@ impl Router {
                 }
             }
             Do::Refuse(Fail(s, w)) => Response::error(s, &w),
+            Do::Gather => self.gather_readers(tenant),
         })
     }
 
@@ -587,6 +611,7 @@ impl Router {
         if self.read_dir().exists(tenant) {
             return Err(Fail(409, format!("tenant `{tenant}` already exists")));
         }
+        self.no_reader_traces(tenant)?;
         self.write_dir()
             .place_home(tenant, region)
             .map_err(internal)?;
@@ -612,7 +637,13 @@ impl Router {
     /// the region's router first, then its name given back. A region not
     /// reached deletes nothing.
     fn delete_homed(&self, req: &Request, tenant: &str, region: &str) -> Outcome<Response> {
+        // Its read replicas on this directory's nodes, which the region's
+        // router keeps no record of, held and taken off first, as a
+        // tenant of this directory's are ([`Router::delete`]): one that
+        // stays refuses the delete, 502, nothing else of it done.
+        let _held = self.hold_readers(tenant)?;
         let _claim = self.claim(tenant)?;
+        self.take_readers(tenant)?;
         let routers = self
             .read_dir()
             .routers(region)
@@ -812,6 +843,7 @@ impl Router {
                     content_type: "application/octet-stream",
                     extra: Vec::new(),
                     seq: None,
+                    history: None,
                     version: None,
                 };
                 resp = resp.header("Fenec-Node", &node);
@@ -960,6 +992,10 @@ impl Router {
             Some(n) => n.to_string(),
             None => self.least_loaded(self.cfg.region.as_deref(), None)?,
         };
+        // A read replica of it in the region it arrives in goes: its own
+        // copies there are nearer still, and it may sit on `to`.
+        let into = self.read_dir().region_of(&to).to_string();
+        let _arriving = self.readers_arriving(tenant, &into)?;
         if self.read_dir().is_standby(&to) {
             return Err(Fail(
                 409,
@@ -1339,6 +1375,7 @@ fn response_of(status: u16, headers: &[(String, String)], body: Vec<u8>) -> Resp
         content_type,
         extra: Vec::new(),
         seq: None,
+        history: None,
         version: None,
     };
     for name in [

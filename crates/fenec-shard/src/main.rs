@@ -118,6 +118,15 @@ usage: fenec-shard [options]
       --global-directory <path>  the region's router's copy of the global
                             directory  default: the --directory file with
                             .global before .fenec
+      --near <region>       the region this router stands in: a read its
+                            client marks (Fenec-Read: replica) of a tenant
+                            with a read replica there goes to it, every
+                            other request home. A region's router (--region)
+                            is near its region already
+      --replica-timeout <ms>  how long a read replica has to answer such a
+                            read, past the wait its Fenec-After asks for;
+                            one that does not is let be for 5 s, its
+                            region's reads going home  default: 2000
 
 The token is also read from the FENEC_SHARD_TOKEN environment variable.
 ";
@@ -263,6 +272,23 @@ fn main() {
                 }
             }
             "--global-directory" => global_path = Some(next(&mut i, "--global-directory")),
+            "--near" => {
+                let r = next(&mut i, "--near");
+                if fenec_http::tenants::check_name(&r).is_err() {
+                    fail(&format!(
+                        "--near `{r}`: a region is named [a-z0-9_-], 1 to {} characters",
+                        fenec_http::tenants::MAX_NAME
+                    ));
+                }
+                cfg.near = Some(r);
+            }
+            "--replica-timeout" => {
+                let ms = number(next(&mut i, "--replica-timeout"), "--replica-timeout");
+                if ms == 0 {
+                    fail("--replica-timeout cannot be zero");
+                }
+                cfg.replica_timeout = Duration::from_millis(ms);
+            }
             "--replication-buffer" => {
                 let mib = number(next(&mut i, "--replication-buffer"), "--replication-buffer");
                 replication_buffer = (mib as usize) << 20;

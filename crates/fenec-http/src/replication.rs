@@ -108,6 +108,29 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// The id of a history forked from `history` -- a promotion, a restore:
+/// `fresh`'s bottom half under the top half of the first history it took,
+/// which names its lineage, the database it was made as; a history begun
+/// from the root takes `fresh` whole, a lineage of its own. A client
+/// orders positions by their term within a lineage alone: a tenant
+/// deleted and made again under its name starts again at term 1, below
+/// the old one's, and a client that held the old position refused home's
+/// new one as a fenced primary's word on another branch, every read near
+/// waiting its whole wait for good. Never an id the lineage holds.
+pub fn fork_id(history: &fenec_core::history::History, fresh: u64) -> u64 {
+    let Some(&(first, _)) = history.lineage.first() else {
+        return fresh;
+    };
+    let mut low = (fresh & 0xffff_ffff).max(1);
+    loop {
+        let id = (first & !0xffff_ffff) | low;
+        if history.lineage.iter().all(|&(held, _)| held != id) {
+            return id;
+        }
+        low = (low % 0xffff_ffff) + 1;
+    }
+}
+
 /// A history id nobody else holds: 64 bits from the operating system's
 /// randomness (`RandomState` is seeded from it), never 0 -- the root's.
 pub fn fresh_id() -> u64 {
@@ -885,7 +908,7 @@ pub fn settle_history(
             crate::log!("--promote: {path} is not {role}; it opens as it is");
             return Ok(());
         }
-        let id = fresh_id();
+        let id = fork_id(db.history(), fresh_id());
         let r = db.fork(id).and_then(|_| db.sync());
         if r.is_ok() {
             crate::log!(
@@ -1491,6 +1514,11 @@ pub struct Follower {
     stop: AtomicBool,
     conn: Mutex<Option<TcpStream>>,
     ended: (Mutex<bool>, Condvar),
+    /// Told each time the primary has said hello and the replica holds a
+    /// prefix of its history -- its image adopted, or its place in that
+    /// history found: a tenant's read replica answers marked reads from
+    /// then on ([`crate::tenants::Tenant::ready`]).
+    hello: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Clone, Default)]
@@ -1522,7 +1550,14 @@ impl Follower {
             conn: Mutex::new(None),
             // Nothing to wait for until `run` starts.
             ended: (Mutex::new(true), Condvar::new()),
+            hello: Mutex::new(None),
         }))
+    }
+
+    /// Has `f` called each time the primary says hello and the replica
+    /// holds a prefix of its history, before any of its writes is applied.
+    pub fn on_hello(&self, f: Box<dyn Fn() + Send + Sync>) {
+        *lock(&self.hello) = Some(f);
     }
 
     /// Follows until promoted. Every stream that ends is connected again,
@@ -1627,6 +1662,9 @@ impl Follower {
             st.contact = Some(Instant::now());
             st.error = None;
         }
+        if let Some(hello) = lock(&self.hello).as_ref() {
+            hello();
+        }
 
         loop {
             match stream.receive()? {
@@ -1696,11 +1734,14 @@ impl Follower {
         Ok(())
     }
 
-    /// Stops following and starts taking writes, on a history of its own:
-    /// `id`, forked where the replica stands. Returns that change and `id`.
-    pub fn promote(&self, id: u64) -> fenec_core::error::Result<(u64, u64)> {
+    /// Stops following and starts taking writes, on a history of its own,
+    /// forked where the replica stands: of its lineage, `fresh`'s bottom
+    /// half under its top half ([`fork_id`]). Returns that change and the
+    /// history's id.
+    pub fn promote(&self, fresh: u64) -> fenec_core::error::Result<(u64, u64)> {
         self.halt();
         let mut g = crate::held::write(&self.db);
+        let id = fork_id(g.history(), fresh);
         g.fork(id)?;
         g.sync()?;
         Ok((g.change_seq(), id))
@@ -1808,6 +1849,30 @@ pub(crate) fn u64_at(b: &[u8], at: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fork keeps the top half of the first history its database took:
+    /// its lineage, by which a client tells an older term of the same
+    /// tenant from a tenant made again under the name. One begun from the
+    /// root takes the fresh id whole, and no fork takes an id the lineage
+    /// holds.
+    #[test]
+    fn a_fork_keeps_its_lineage_and_a_history_from_the_root_starts_one() {
+        use fenec_core::history::History;
+        let root = History::default();
+        assert_eq!(fork_id(&root, 0x1234_5678_9abc_def0), 0x1234_5678_9abc_def0);
+        let made = root.forked(0xaaaa_bbbb_0000_0001, 0);
+        let promoted = fork_id(&made, 0x1111_2222_3333_4444);
+        assert_eq!(promoted, 0xaaaa_bbbb_3333_4444);
+        let again = made.forked(promoted, 10);
+        assert_eq!(fork_id(&again, 0x9999_9999_3333_4444) >> 32, 0xaaaa_bbbb);
+        // A bottom half the lineage holds already: the next one free.
+        assert_eq!(
+            fork_id(&again, 0x9999_9999_3333_4444),
+            0xaaaa_bbbb_3333_4445
+        );
+        // 0's bottom half is 1, which the first history holds.
+        assert_eq!(fork_id(&again, 0), 0xaaaa_bbbb_0000_0002);
+    }
 
     fn record(n: usize) -> Vec<u8> {
         // [kind][cid][length][body], the body one frame `n` bytes long:

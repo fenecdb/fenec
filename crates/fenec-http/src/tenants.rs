@@ -100,11 +100,37 @@ pub struct Tenant {
     lease: Option<Arc<Lease>>,
     /// Its quota and what its requests hold of it now ([`crate::quota`]).
     pub quota: Arc<QuotaHeld>,
+    /// Whether its file is known to hold a prefix of its tenant's history:
+    /// a primary's always, a promoted copy's from its promotion; a
+    /// follower's once, since this open, the primary it follows has said
+    /// hello -- its image adopted, or its place in that history found. Not
+    /// kept past an open: a read replica made a moment ago is an empty file
+    /// of a history of its own, and answering a marked read from it told a
+    /// client the tenant had no collections; a file reopened, or pointed at
+    /// another node, may be one whose history the primary's does not
+    /// continue -- a copy left on a node gone for good while its tenant was
+    /// deleted and made again -- until the primary has said so.
+    ready: Arc<AtomicBool>,
 }
 
 impl Tenant {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether a read its client marked may be answered from this copy
+    /// ([`Self::ready`]'s field): one not ready is answered 503, which a
+    /// router takes to the tenant's home. A copy taking writes is always
+    /// ready, whatever made it a primary: asked only where the field says
+    /// no, which a following copy says until its primary's hello.
+    pub fn ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+            || !self
+                .db
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .history()
+                .following
     }
 
     pub fn is_frozen(&self) -> bool {
@@ -668,7 +694,12 @@ impl Tenants {
         let t = self.get(name)?;
         // Promoted, it follows nobody: the record would have the next open
         // make it follow its old primary again.
+        // And it is ready: a promoted copy that never heard from its primary
+        // since it opened -- a standby's, which a node pair's restart left
+        // waiting for a hello no primary now sends -- answered every marked
+        // read 503 for as long as it stayed open.
         let forget = |done| {
+            t.ready.store(true, Ordering::SeqCst);
             self.record_upstream(name, None)
                 .map_err(|e| Refused(500, format!("tenant `{name}` promoted, but {e}")))?;
             Ok(done)
@@ -688,7 +719,7 @@ impl Tenants {
         if !g.history().following {
             return Err(Refused(409, format!("tenant `{name}` is not a replica")));
         }
-        let id = fresh_id();
+        let id = crate::replication::fork_id(g.history(), fresh_id());
         g.fork(id)
             .and_then(|_| g.sync())
             .map_err(|e| Refused(500, e.to_string()))?;
@@ -735,6 +766,19 @@ impl Tenants {
             let path = self.path(name);
             if let Held::Open(t) = &*held {
                 if t.read().history().following && self.upstream_of(name) == wanted {
+                    // Following that node already: its stream is begun again
+                    // and the copy is not ready until the node says hello.
+                    // The tenant there may be another than the one it heard
+                    // -- deleted and made again while this copy was cut off
+                    // -- and a router placing a read replica over a file it
+                    // found on the node asks for no more than this follow.
+                    if let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) {
+                        f.halt();
+                        t.ready.store(false, Ordering::SeqCst);
+                        f.start(format!("fenec-replica-{name}")).map_err(|e| {
+                            Refused(500, format!("tenant `{name}` could not follow again: {e}"))
+                        })?;
+                    }
                     return Ok(());
                 }
                 // Closed first: one instance over the file, always. What it
@@ -881,6 +925,9 @@ impl Tenants {
         // The follower applies the primary node's writes for this tenant, and
         // holds the database -- not the tenant -- while it runs; `close`
         // therefore keeps a tenant with a running follower open.
+        // A primary's file holds its own history; a follower's a prefix of
+        // its primary's once that primary has said hello since this open.
+        let ready = Arc::new(AtomicBool::new(!following));
         let mut follower = None;
         if let (Some(r), Some(url), true) = (&self.repl, &upstream, following) {
             let started = Follower::new(
@@ -892,6 +939,10 @@ impl Tenants {
             )
             .map_err(|e| Refused(500, format!("tenant `{name}` cannot follow {url}: {e}")))
             .and_then(|f| {
+                // Ready at the primary's hello, for as long as this open
+                // lasts.
+                let seen = Arc::clone(&ready);
+                f.on_hello(Box::new(move || seen.store(true, Ordering::SeqCst)));
                 f.start(format!("fenec-replica-{name}")).map_err(|e| {
                     Refused(
                         500,
@@ -924,6 +975,7 @@ impl Tenants {
             last_used: AtomicU64::new(self.now()),
             lease: self.lease.clone(),
             quota: held,
+            ready,
         }))
     }
 

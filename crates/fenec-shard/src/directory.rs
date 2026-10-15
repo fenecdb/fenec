@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 /// in a region keeping its own: `@` and the region.
 pub const HOME: char = '@';
 
-const SCHEMA: [&str; 7] = [
+const SCHEMA: [&str; 8] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
@@ -61,6 +61,15 @@ const SCHEMA: [&str; 7] = [
     // The region a regional directory holds: one row, none in the global
     // directory.
     "create collection if not exists scope (region text)",
+    // A tenant's read replicas: a follower of its primary on a node of
+    // another region, which a router near that region answers the reads
+    // its clients mark from. Kept in the directory holding the node -- a
+    // region keeping its own directory keeps its own -- and keyed
+    // `<tenant>/<node>`, one row a replica, since a tenant has one in each
+    // of several regions. `follows` is the primary's address it was last
+    // told to follow, which the router compares with where the primary is.
+    "create collection if not exists readers \
+     (key text @hash, tenant text @hash, node text @hash, follows text)",
 ];
 
 /// The fields `nodes` took after directories were first written, added to
@@ -121,6 +130,14 @@ pub type Pairs = HashMap<String, String>;
 /// Which node holds a tenant's replica.
 pub type Replicas = HashMap<String, String>;
 
+/// A tenant's read replica: the node holding it, in a region other than
+/// the tenant's, and the primary's address it follows (`http://host:port`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reader {
+    pub node: String,
+    pub follows: String,
+}
+
 pub struct Directory {
     /// Shared, because a standby follows it: the follower thread applies the
     /// primary's writes to the same database (`fenec-shard --replica-of`).
@@ -142,6 +159,9 @@ pub struct Directory {
     replicas: Replicas,
     /// Each tenant's quota, where one is set: the JSON a node is sent.
     quotas: HashMap<String, String>,
+    /// Each tenant's read replicas on this directory's nodes, a region
+    /// each, sorted by node.
+    readers: HashMap<String, Vec<Reader>>,
     /// The regions keeping their own directory, and their routers.
     regions: BTreeMap<String, Vec<String>>,
     /// The region this directory holds, where it is a region's own.
@@ -158,7 +178,7 @@ pub struct Directory {
 }
 
 /// Document id -> key, one map a collection: nodes, tenants, pairs,
-/// replicas, quotas, regions, scope.
+/// replicas, quotas, regions, scope, readers.
 #[derive(Default)]
 struct Ids {
     nodes: HashMap<DocId, String>,
@@ -168,6 +188,7 @@ struct Ids {
     quotas: HashMap<DocId, String>,
     regions: HashMap<DocId, String>,
     scope: HashMap<DocId, String>,
+    readers: HashMap<DocId, String>,
     kept: bool,
 }
 
@@ -211,6 +232,7 @@ impl Directory {
             pairs: Pairs::new(),
             replicas: Replicas::new(),
             quotas: HashMap::new(),
+            readers: HashMap::new(),
             regions: BTreeMap::new(),
             scope: None,
             arrived: false,
@@ -290,6 +312,11 @@ impl Directory {
             ids.scope.insert(id, text(&row[0]));
             scope = Some(text(&row[0]));
         }
+        let mut readers = HashMap::new();
+        for (id, row) in rows(&g, "get readers select key, tenant, node, follows")? {
+            ids.readers.insert(id, text(&row[0]));
+            put_reader(&mut readers, &row);
+        }
         self.seq = g.change_seq();
         self.adopted = g.adoptions();
         self.nodes = nodes;
@@ -300,6 +327,7 @@ impl Directory {
         self.quotas = quotas;
         self.regions = regions;
         self.scope = scope;
+        self.readers = readers;
         self.ids = ids;
         self.arrived = g.collection("tenants").is_ok();
         Ok(())
@@ -344,6 +372,7 @@ impl Directory {
             Some(quotas),
             Some(regions),
             Some(scope),
+            Some(readers),
         ) = (
             changes("nodes", &node_fields(&g))?,
             changes("tenants", &["name", "node", "state"])?,
@@ -352,6 +381,7 @@ impl Directory {
             changes("quotas", &["tenant", "quota"])?,
             optional("regions", &["name", "routers"])?,
             optional("scope", &["region"])?,
+            optional("readers", &["key", "tenant", "node", "follows"])?,
         )
         else {
             return Ok(false);
@@ -378,6 +408,12 @@ impl Directory {
             apply(&mut ids.scope, scope, |k, v| match v {
                 Some(_) => self.scope = Some(k.into()),
                 None => self.scope = None,
+            });
+        }
+        if let Some(readers) = readers {
+            apply(&mut ids.readers, readers, |k, v| match v {
+                Some(v) => put_reader(&mut self.readers, v),
+                None => drop_reader(&mut self.readers, k),
             });
         }
         apply(&mut ids.pairs, pairs, |k, v| match v {
@@ -655,6 +691,68 @@ impl Directory {
             || self.replicas.values().any(|n| n == name)
             || self.pairs.contains_key(name)
             || self.is_standby(name)
+            || self.readers.values().flatten().any(|r| r.node == name)
+    }
+
+    /// A tenant's read replicas on this directory's nodes.
+    pub fn readers(&self, tenant: &str) -> &[Reader] {
+        self.readers.get(tenant).map_or(&[], Vec::as_slice)
+    }
+
+    /// A tenant's read replica on a node of `region`, if it has one here.
+    pub fn reader_in(&self, tenant: &str, region: &str) -> Option<&Reader> {
+        self.readers(tenant)
+            .iter()
+            .find(|r| self.region_of(&r.node) == region)
+    }
+
+    /// `(tenant, reader)` for every read replica this directory keeps,
+    /// sorted: what the router keeps following its tenants' primaries.
+    pub fn all_readers(&self) -> Vec<(String, Reader)> {
+        let mut out: Vec<(String, Reader)> = self
+            .readers
+            .iter()
+            .flat_map(|(t, rs)| rs.iter().map(move |r| (t.clone(), r.clone())))
+            .collect();
+        out.sort_by(|a, b| (&a.0, &a.1.node).cmp(&(&b.0, &b.1.node)));
+        out
+    }
+
+    /// The read replicas on each node, every node named.
+    pub fn readers_by_node(&self) -> BTreeMap<&str, usize> {
+        let mut by: BTreeMap<&str, usize> = self.nodes.keys().map(|n| (n.as_str(), 0)).collect();
+        for r in self.readers.values().flatten() {
+            *by.entry(r.node.as_str()).or_default() += 1;
+        }
+        by
+    }
+
+    /// Records a tenant's read replica on `node`, following `follows`.
+    pub fn set_reader(&mut self, tenant: &str, node: &str, follows: &str) -> Result<()> {
+        let params = [
+            Value::Text(format!("{tenant}/{node}")),
+            Value::Text(tenant.into()),
+            Value::Text(node.into()),
+            Value::Text(follows.into()),
+        ];
+        if self.readers(tenant).iter().any(|r| r.node == node) {
+            self.run("set readers {follows: $4} where key = $1", &params)?;
+        } else {
+            self.run(
+                "put readers {key: $1, tenant: $2, node: $3, follows: $4}",
+                &params,
+            )?;
+        }
+        put_reader(&mut self.readers, &params);
+        Ok(())
+    }
+
+    /// Forgets a tenant's read replica on `node`.
+    pub fn remove_reader(&mut self, tenant: &str, node: &str) -> Result<()> {
+        let key = format!("{tenant}/{node}");
+        self.run("del readers where key = $1", &[Value::Text(key.clone())])?;
+        drop_reader(&mut self.readers, &key);
+        Ok(())
     }
 
     /// The node holding the copy a failover of `tenant` promotes -- its
@@ -766,6 +864,20 @@ impl Directory {
                 "node `{name}` still holds tenant `{t}`: move or delete its tenants first"
             )));
         }
+        // A read replica's record let go of with its node left its copy
+        // following its primary with nothing to stop it, should the node
+        // come back: each is taken off first, or forgotten for a node gone.
+        if let Some((t, _)) = self
+            .readers
+            .iter()
+            .find(|(_, rs)| rs.iter().any(|r| r.node == name))
+        {
+            return Err(Error::Query(format!(
+                "node `{name}` still holds a read replica of `{t}`: DELETE \
+                 /_shard/tenants/{t}/read-replicas/<region> first, with ?forget for a node \
+                 gone for good"
+            )));
+        }
         self.run("del nodes where name = $1", &[Value::Text(name.into())])?;
         self.nodes.remove(name);
         // The pairs it was on either side of go with it.
@@ -810,6 +922,10 @@ impl Directory {
         self.place(tenant, &format!("{HOME}{region}"), State::Active)
     }
 
+    /// Forgets a tenant: its placement or home, its quota and its replica.
+    /// Not its read replicas, whose files the router takes off their nodes
+    /// with them: a tenant leaving this directory for a region keeping its
+    /// own keeps the ones here, which follow it there.
     pub fn remove_tenant(&mut self, tenant: &str) -> Result<()> {
         self.run("del tenants where name = $1", &[Value::Text(tenant.into())])?;
         self.tenants.remove(tenant);
@@ -915,6 +1031,32 @@ fn put_tenant(
         None => {
             homes.remove(&name);
             tenants.insert(name, p);
+        }
+    }
+}
+
+/// A row of `readers` (`key, tenant, node, follows`) into the map, in the
+/// place of the one of its node.
+fn put_reader(readers: &mut HashMap<String, Vec<Reader>>, row: &[Value]) {
+    let (tenant, node) = (text(&row[1]), text(&row[2]));
+    let list = readers.entry(tenant).or_default();
+    list.retain(|r| r.node != node);
+    list.push(Reader {
+        node,
+        follows: text(&row[3]),
+    });
+    list.sort_by(|a, b| a.node.cmp(&b.node));
+}
+
+/// The read replica of `key` (`<tenant>/<node>`) out of the map.
+fn drop_reader(readers: &mut HashMap<String, Vec<Reader>>, key: &str) {
+    let Some((tenant, node)) = key.split_once('/') else {
+        return;
+    };
+    if let Some(list) = readers.get_mut(tenant) {
+        list.retain(|r| r.node != node);
+        if list.is_empty() {
+            readers.remove(tenant);
         }
     }
 }
@@ -1034,12 +1176,13 @@ mod tests {
             d.replicas.iter().map(|(k, v)| format!("{k}@{v}")).collect();
         replicas.sort();
         format!(
-            "{:?} {:?} {pairs:?} {replicas:?} {:?} {:?} {:?}",
+            "{:?} {:?} {pairs:?} {replicas:?} {:?} {:?} {:?} {:?}",
             d.nodes(),
             d.tenants(),
             d.homes(),
             d.regions(),
-            d.scope()
+            d.scope(),
+            d.all_readers()
         )
     }
 
@@ -1085,6 +1228,11 @@ mod tests {
             r#"put scope {region: "us"}"#,
             r#"del scope where region = "us""#,
             r#"del regions where name = "us""#,
+            // Read replicas: two of one tenant, one re-pointed, one gone.
+            r#"put readers {key: "zeta/n4", tenant: "zeta", node: "n4", follows: "http://a1"}"#,
+            r#"put readers {key: "zeta/n2", tenant: "zeta", node: "n2", follows: "http://a1"}"#,
+            r#"set readers {follows: "http://a2"} where key = "zeta/n4""#,
+            r#"del readers where key = "zeta/n2""#,
         ] {
             underneath(&d, sql);
             assert!(d.stale());
@@ -1226,6 +1374,59 @@ mod tests {
         global.place("acme", "n1", State::Active).unwrap();
         assert_eq!(global.home("acme"), None);
         assert_eq!(global.primaries()["n1"], ["acme"]);
+    }
+
+    /// A tenant's read replicas are kept with the directory, one a node,
+    /// and go with the node that held them; a node holding one holds its
+    /// region in place.
+    #[test]
+    fn a_read_replica_is_kept_and_goes_with_its_node() {
+        let path = std::env::temp_dir().join(format!("fenec-dir-rr-{}.fenec", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut d = Directory::open(&path).unwrap();
+            for (n, region) in [("e1", "eu"), ("u1", "us"), ("a1", "ap")] {
+                let mut nd = node(n);
+                nd.region = region.into();
+                d.set_node(n, nd).unwrap();
+            }
+            d.place("acme", "e1", State::Active).unwrap();
+            d.place("beta", "e1", State::Active).unwrap();
+            d.set_reader("acme", "u1", "http://e1").unwrap();
+            d.set_reader("acme", "a1", "http://e1").unwrap();
+            d.set_reader("beta", "u1", "http://e1").unwrap();
+            d.set_reader("acme", "u1", "http://e2").unwrap();
+            assert!(d.holds("u1") && d.holds("a1"));
+        }
+        let mut d = Directory::open(&path).unwrap();
+        assert_eq!(
+            d.reader_in("acme", "us"),
+            Some(&Reader {
+                node: "u1".into(),
+                follows: "http://e2".into()
+            })
+        );
+        assert_eq!(d.readers("acme").len(), 2);
+        assert_eq!(d.reader_in("acme", "eu"), None);
+        assert_eq!(d.readers_by_node()["u1"], 2);
+        // A tenant forgotten keeps them -- the router takes them off with
+        // their files -- and a node holding one is not removed until it is
+        // taken off, or a copy would follow on unrecorded.
+        d.remove_tenant("beta").unwrap();
+        assert_eq!(d.readers("beta").len(), 1);
+        d.remove_reader("beta", "u1").unwrap();
+        assert!(d.readers("beta").is_empty());
+        let refused = d.remove_node("a1").unwrap_err().to_string();
+        assert!(refused.contains("read replica of `acme`"), "{refused}");
+        assert!(d.node("a1").is_some());
+        d.remove_reader("acme", "a1").unwrap();
+        d.remove_node("a1").unwrap();
+        assert_eq!(d.reader_in("acme", "ap"), None);
+        d.remove_reader("acme", "u1").unwrap();
+        assert!(!d.holds("u1"));
+        let d = Directory::open(&path).unwrap();
+        assert!(d.all_readers().is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -1061,6 +1061,25 @@ export interface SchemaInfo {
 export interface HttpOptions {
   token?: string;
   fetch?: typeof globalThis.fetch;
+  /**
+   * `'nearest'`: the builder's reads, and a `run` or `batch` given `{ read:
+   * true }`, are marked (`Fenec-Read: replica`) so that a router near a
+   * region holding the tenant's read replica answers them there, each sent
+   * after the furthest position an answer from home named to this client
+   * (`Fenec-After`, `Fenec-History`: the change and its history) -- never
+   * older than its own writes, nor a write a failover replaced. `'home'`,
+   * the default: every request goes to the tenant's home.
+   */
+  reads?: 'home' | 'nearest';
+}
+
+/**
+ * `run`'s and `batch`'s options: a write's, and `{ read: true }`, which says
+ * a text only reads -- on a client reading near, it may be answered by a
+ * read replica near it. A batch of builder queries alone says so on its own.
+ */
+export interface RunOptions extends WriteOptions {
+  read?: boolean;
 }
 
 /**
@@ -1076,7 +1095,7 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
    * database at, and `replayed`, whether the answer is the one kept for
    * its `idempotencyKey`.
    */
-  run(sql: string, params?: unknown[], opts?: WriteOptions): Promise<any>;
+  run(sql: string, params?: unknown[], opts?: RunOptions): Promise<any>;
   rows(sql: string, params?: unknown[]): Promise<any[]>;
   /**
    * `POST /batch`: the statements in order as one block -- every write
@@ -1084,7 +1103,7 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
    * it throws a `FenecError` with its place (`at`) and the refusal's
    * `status`: 412 for a `require` not met.
    */
-  batch(statements: readonly BatchStatement[], opts?: WriteOptions): Promise<BatchResult>;
+  batch(statements: readonly BatchStatement[], opts?: RunOptions): Promise<BatchResult>;
   /**
    * A copy whose writes carry `key` as their `Idempotency-Key` -- a
    * builder's writes among them -- sharing this one's `seq`.

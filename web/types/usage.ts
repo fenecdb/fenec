@@ -403,6 +403,14 @@ export async function remote() {
   // `@fenecdb/web/client`: the same classes and builder, no engine.
   const bare = client.connect<Schema>('http://127.0.0.1:8080');
   expect<FenecHttp<Schema>>(bare);
+  // Reads near a read replica: the builder's on their own, a text said to read.
+  const near = client.connect<Schema>('http://127.0.0.1:8080/t/acme', { reads: 'nearest' });
+  await near.run('get articles', [], { read: true });
+  await near.batch(['get articles'], { read: true });
+  // @ts-expect-error -- home or nearest
+  client.connect<Schema>('http://127.0.0.1:8080', { reads: 'far' });
+  // @ts-expect-error -- read is a boolean
+  void near.run('get articles', [], { read: 'yes' });
   expect<string>(client.from('articles').where('year', 2024).toFenecQL()[0]);
   // @ts-expect-error -- the client holds no engine
   void client.Fenec;

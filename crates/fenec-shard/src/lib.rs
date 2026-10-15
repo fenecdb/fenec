@@ -33,6 +33,7 @@ pub mod directory;
 pub mod fanout;
 pub mod lease;
 pub mod metrics;
+pub mod readers;
 pub mod region;
 pub mod upstream;
 
@@ -97,6 +98,25 @@ pub struct Config {
     /// first: where a region's router sends a change the global directory
     /// takes -- a create, a delete, a move across regions.
     pub global: Vec<String>,
+    /// The region this router stands in, for the reads its clients mark
+    /// (`--near`): such a read of a tenant with a read replica here goes
+    /// to it ([`readers`]). A region's router (`region`) is near its
+    /// region unless told otherwise; `None` with neither, every read goes
+    /// home.
+    pub near: Option<String>,
+    /// How long a read replica has to answer a marked read, past the wait
+    /// its `Fenec-After` asks for (`--replica-timeout`): the connect and
+    /// every read of its answer's head. One that does not is let be for
+    /// [`readers::RESTING`] -- every read of its region goes home -- and
+    /// the read goes home: at `upstream_timeout` a hung replica's node held
+    /// each marked read a minute.
+    pub replica_timeout: Duration,
+    /// How long a read replica that did not answer a marked read is let be
+    /// ([`readers::RESTING`] unless set).
+    pub replica_rest: Duration,
+    /// The longest a call a read replica's upkeep makes may take
+    /// ([`readers::CALL`] unless set).
+    pub reader_timeout: Duration,
 }
 
 impl Default for Config {
@@ -117,6 +137,10 @@ impl Default for Config {
             default_region: None,
             region: None,
             global: Vec::new(),
+            near: None,
+            replica_timeout: Duration::from_secs(2),
+            replica_rest: readers::RESTING,
+            reader_timeout: readers::CALL,
         }
     }
 }
@@ -154,6 +178,45 @@ pub struct Router {
     /// first, so a router gone costs its region one failed connect, not one
     /// a request.
     answered: Mutex<std::collections::HashMap<String, usize>>,
+    /// The read replicas this router last failed to point at their
+    /// tenant's primary (`<tenant>/<node>`): said once in the log, not at
+    /// every round of [`readers`], and again once one succeeds.
+    unfollowed: Mutex<HashSet<String>>,
+    /// The read replicas whose change is under way (`<tenant>/<region>`):
+    /// placed, taken off, pointed at a new primary. One change of each at
+    /// a time, so that a look over them never puts back one taken off
+    /// meanwhile; held across the calls to its node, so no tenant's claim
+    /// and no lock a move or a failover takes -- a node a region away, or
+    /// cut off, held those up for as long as it did not answer.
+    reader_busy: Mutex<HashSet<String>>,
+    /// The read replicas a marked read, or the check of their nodes
+    /// ([`readers::CHECK_EVERY`]), found gone from their node
+    /// (`<tenant>/<node>`): made there again at the next look.
+    reader_lost: Mutex<HashSet<String>>,
+    /// The quota each read replica (`<tenant>/<node>`) was last sent, `None`
+    /// for the node's own: a look wants it sent again only once its
+    /// tenant's changes ([`readers`]).
+    reader_quotas: Mutex<std::collections::HashMap<String, Option<String>>>,
+    /// The quotas the read replicas are to be sent, and the nodes a sender
+    /// is under way to ([`readers::QuotaQueue`]).
+    reader_quota_queue: Mutex<readers::QuotaQueue>,
+    /// Set, and its condvar told, when a quota is wanted: the senders start
+    /// now rather than at the next [`readers::CHECK_EVERY`].
+    quotas_soon: (Mutex<bool>, std::sync::Condvar),
+    /// The read replicas' nodes that did not answer a marked read, and
+    /// until when every read of their region goes home
+    /// ([`readers::RESTING`]): one that hangs would have every read wait
+    /// its [`Config::replica_timeout`] first. One that answers, a 503 that
+    /// it has not caught up among them, costs a read a hop alone.
+    resting: Mutex<std::collections::HashMap<String, Instant>>,
+    /// What the read replicas' calls to their nodes go through: bounded by
+    /// [`readers::CALL`], not `upstream_timeout`, so a node that does not
+    /// answer holds a look over them up that long at most.
+    reader_pool: Pool,
+    /// Set, and its condvar told, when a failover or a move changed a
+    /// primary: the next look over the read replicas comes now rather than
+    /// at its time, and the failover waits on no replica's node.
+    follow_soon: (Mutex<bool>, std::sync::Condvar),
 }
 
 /// An operation failure, shaped as an HTTP status and message.
@@ -200,6 +263,15 @@ impl Router {
                 .as_deref()
                 .map(|t| fenec_http::audit::router_mark(t).into()),
             answered: Mutex::new(Default::default()),
+            unfollowed: Mutex::new(HashSet::new()),
+            reader_busy: Mutex::new(HashSet::new()),
+            reader_lost: Mutex::new(HashSet::new()),
+            reader_quotas: Mutex::new(Default::default()),
+            reader_quota_queue: Mutex::new(Default::default()),
+            quotas_soon: (Mutex::new(false), std::sync::Condvar::new()),
+            resting: Mutex::new(Default::default()),
+            reader_pool: Pool::new(cfg.reader_timeout),
+            follow_soon: (Mutex::new(false), std::sync::Condvar::new()),
             cfg,
         })
     }
@@ -226,6 +298,9 @@ impl Router {
 
     pub fn serve_on(self: &Arc<Router>, listener: TcpListener) -> std::io::Result<()> {
         fenec_http::metrics::started();
+        // The read replicas this router keeps follow their tenants'
+        // primaries wherever those go ([`readers`]).
+        self.start_following()?;
         fenec_http::log!(
             "fenec-shard {} listening on: http://{}  [{} node(s), {} tenant(s)]",
             fenec_core::VERSION,
@@ -678,91 +753,17 @@ impl Router {
         if fenec_http::trace::recording() {
             fenec_http::trace::attr("fenec.tenant", tenant.to_string());
         }
-        // The node holding the tenant, as this router's own directory has
-        // it, with the node's region where the request asks for the
-        // tenant's home ([`region::HOME_HEADER`]); or, where that says
-        // nothing, the routers of the region the tenant lives in
-        // ([`region`]).
-        let placed = {
-            let dir = self.read_dir();
-            dir.placement(tenant).and_then(|p| {
-                dir.node(&p.node).map(|n| {
-                    let home = region::home_asked(req, &n.region);
-                    (p.node.clone(), n.addr.clone(), self.mark(&n.token), home)
-                })
-            })
-        };
+        // The tenant's home region, where the request asks for it
+        // ([`region::HOME_HEADER`]): named by the router forwarding to the
+        // tenant's node -- the home path below -- never on an answer from a
+        // read replica, whose region is not the tenant's.
         let mut home = None;
-        let (node, addr, mark, routers) = match placed {
-            Some((node, addr, mark, h)) => {
-                home = h;
-                (node, addr, Some(mark), None)
-            }
-            None => match self.elsewhere(tenant, relayed.is_some()) {
-                region::Target::Node(node, addr, mark, region) => {
-                    home = region::home_asked(req, &region);
-                    (node, addr, Some(mark), None)
-                }
-                region::Target::Region(region, routers) => {
-                    let first = self.first_router(&region, &routers);
-                    let addr = region::host(&routers[first]).to_string();
-                    let mark = self.relay_mark.clone();
-                    (region::label(&region), addr, mark, Some((region, routers)))
-                }
-                region::Target::Answer(resp) => return reply(out, resp),
-            },
-        };
-        if fenec_http::trace::recording() {
-            fenec_http::trace::attr("fenec.node", node.clone());
-        }
         // The router's own context goes to the node in place of the
         // client's (`Pool::send`), while it traces.
         let traced = fenec_http::trace::propagating();
-
-        // The node believes the client's address from the router alone:
-        // what a client sent under this name is dropped, and the router's
-        // own put in its place.
-        // Borrowed, not cloned: a request's headers were copied into
-        // `String`s here and formatted one by one into the head, which with
-        // the router's own header made a request through it 1.5 us slower.
         // A router relaying names the client it was relayed for, as the
         // router before it did.
         let client = relayed.or(peer.map(|p| p.ip()));
-        let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
-        let mut headers: Vec<(&str, &str)> = req
-            .headers
-            .iter()
-            .filter(|(k, _)| {
-                !hop_by_hop(k)
-                    && !k.eq_ignore_ascii_case("host")
-                    && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
-                    && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
-                    && !(traced
-                        && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
-                            || k.eq_ignore_ascii_case(fenec_http::trace::TRACESTATE)))
-            })
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        if let Some(named) = &named {
-            headers.push((fenec_http::audit::ROUTER_HEADER, named));
-        }
-        let sent = Instant::now();
-        // The forward, to the node's whole answer or a stream's head: the
-        // node's server span is its child.
-        let forwarding = fenec_http::trace::span_of("forward", fenec_http::trace::Kind::Client);
-        if fenec_http::trace::recording() {
-            forwarding.attr("http.request.method", req.method.name());
-            forwarding.attr("fenec.node", node.clone());
-            match addr.rsplit_once(':') {
-                Some((host, port)) => {
-                    forwarding.attr("server.address", host.to_string());
-                    if let Ok(p) = port.parse::<i64>() {
-                        forwarding.attr("server.port", p);
-                    }
-                }
-                None => forwarding.attr("server.address", addr.clone()),
-            }
-        }
         // A request the node may hold -- `Fenec-Wait`, for a claim or for
         // `Fenec-After` -- is waited for as long besides the timeout.
         let held = req
@@ -771,36 +772,162 @@ impl Router {
             .map_or(Duration::ZERO, |ms| {
                 Duration::from_millis(ms).min(fenec_http::waits::LONGEST)
             });
-        let sending = match &routers {
-            None => self.pool.send_held(
-                &addr,
+
+        // A read its client marked (`Fenec-Read: replica`) goes to the
+        // tenant's read replica in this router's region, where it has one
+        // ([`readers`]). One the replica cannot answer -- not reached, or not
+        // by its `Fenec-After`'s wait and `--replica-timeout` past it; not
+        // caught up with its primary, or going down (503); behind the write
+        // its `Fenec-After` names past the wait (504); its file gone from
+        // the node (a 404 saying so) -- goes home after all, as an unmarked
+        // one does: the client is answered either way, and from no copy
+        // older than its write. A replica that did not answer is let be for
+        // a few seconds ([`readers::RESTING`]), its region's reads going
+        // home at once meanwhile. An unmarked request asks the header alone.
+        let mut answered = None;
+        let near = match fenec_http::read_marked(req) {
+            Ok(true) => match self.reader_near(tenant) {
+                Some((rnode, ..)) if self.resting(&rnode) => {
+                    metrics::replica_read(metrics::ReplicaRead::Fallback);
+                    None
+                }
+                Some(near) => Some(near),
+                None => {
+                    metrics::replica_read(metrics::ReplicaRead::Home);
+                    None
+                }
+            },
+            _ => None,
+        };
+        if let Some((rnode, raddr, rmark)) = near {
+            let named = client.map(|ip| format!("{ip} {rmark}"));
+            let mut headers = forwarded_headers(req, traced);
+            if let Some(named) = &named {
+                headers.push((fenec_http::audit::ROUTER_HEADER, named));
+            }
+            if fenec_http::trace::recording() {
+                fenec_http::trace::attr("fenec.node", rnode.clone());
+            }
+            let sent = Instant::now();
+            let forwarding = forward_span(req, &rnode, &raddr);
+            let within = self.replica_within(req);
+            match self.pool.send_within(
+                &raddr,
                 req.method.name(),
                 &req.target,
                 &headers,
                 &req.body,
-                held,
-            ),
-            // A region's routers, in turn from the one that answered last,
-            // as far as the request cannot have run.
-            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held),
-        };
-        let answer = match sending {
-            Ok(a) => a,
-            Err(e) => {
-                forwarding.error(e.to_string());
-                drop(forwarding);
-                metrics::unreachable(&node);
-                // 502, as a node out of reach is: a client takes it to ask
-                // again, and a region cut off from this one answers its own
-                // clients all the while.
-                let why = match &routers {
-                    None => format!("node `{node}` ({addr}) did not answer: {e}"),
-                    Some((region, _)) => format!(
-                        "region `{region}`'s routers did not answer -- it may be cut off from \
-                         this one, and answers through its own: {e}"
-                    ),
+                within,
+            ) {
+                Ok(a) if a.status == 503 => {
+                    forwarding.error("503");
+                    metrics::replica_read(metrics::ReplicaRead::Fallback);
+                }
+                Ok(a) if a.status == 504 => {
+                    forwarding.error("504");
+                    metrics::replica_read(metrics::ReplicaRead::Fallback);
+                }
+                Ok(a) if a.status == 404 && a.header(fenec_http::ABSENT_HEADER).is_some() => {
+                    forwarding.error("404");
+                    self.reader_lost(tenant, &rnode);
+                    metrics::replica_read(metrics::ReplicaRead::Fallback);
+                }
+                Ok(a) => {
+                    metrics::replica_read(metrics::ReplicaRead::Replica);
+                    answered = Some((rnode, a, sent, forwarding));
+                }
+                Err(e) => {
+                    forwarding.error(e.to_string());
+                    self.rest(&rnode);
+                    metrics::unreachable(&rnode);
+                    metrics::replica_read(metrics::ReplicaRead::Fallback);
+                }
+            }
+        }
+
+        let (node, answer, sent, forwarding) = match answered {
+            Some(a) => a,
+            None => {
+                // The node holding the tenant, as this router's own
+                // directory has it, with the node's region where the
+                // request asks for the tenant's home; or, where that says
+                // nothing, the routers of the region the tenant lives in
+                // ([`region`]).
+                let placed = {
+                    let dir = self.read_dir();
+                    dir.placement(tenant).and_then(|p| {
+                        dir.node(&p.node).map(|n| {
+                            let home = region::home_asked(req, &n.region);
+                            (p.node.clone(), n.addr.clone(), self.mark(&n.token), home)
+                        })
+                    })
                 };
-                return reply(out, region::homed(Response::error(502, &why), &home));
+                let (node, addr, mark, routers) = match placed {
+                    Some((node, addr, mark, h)) => {
+                        home = h;
+                        (node, addr, Some(mark), None)
+                    }
+                    None => match self.elsewhere(tenant, relayed.is_some()) {
+                        region::Target::Node(node, addr, mark, region) => {
+                            home = region::home_asked(req, &region);
+                            (node, addr, Some(mark), None)
+                        }
+                        region::Target::Region(region, routers) => {
+                            let first = self.first_router(&region, &routers);
+                            let addr = region::host(&routers[first]).to_string();
+                            let mark = self.relay_mark.clone();
+                            (region::label(&region), addr, mark, Some((region, routers)))
+                        }
+                        region::Target::Answer(resp) => return reply(out, resp),
+                    },
+                };
+                if fenec_http::trace::recording() {
+                    fenec_http::trace::attr("fenec.node", node.clone());
+                }
+                // The node believes the client's address from the router
+                // alone: what a client sent under this name is dropped, and
+                // the router's own put in its place.
+                let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
+                let mut headers = forwarded_headers(req, traced);
+                if let Some(named) = &named {
+                    headers.push((fenec_http::audit::ROUTER_HEADER, named));
+                }
+                let sent = Instant::now();
+                let forwarding = forward_span(req, &node, &addr);
+                let sending = match &routers {
+                    None => self.pool.send_held(
+                        &addr,
+                        req.method.name(),
+                        &req.target,
+                        &headers,
+                        &req.body,
+                        held,
+                    ),
+                    // A region's routers, in turn from the one that answered
+                    // last, as far as the request cannot have run.
+                    Some((region, routers)) => {
+                        self.relay_send(region, routers, req, &headers, held)
+                    }
+                };
+                match sending {
+                    Ok(a) => (node, a, sent, forwarding),
+                    Err(e) => {
+                        forwarding.error(e.to_string());
+                        drop(forwarding);
+                        metrics::unreachable(&node);
+                        // 502, as a node out of reach is: a client takes it
+                        // to ask again, and a region cut off from this one
+                        // answers its own clients all the while.
+                        let why = match &routers {
+                            None => format!("node `{node}` ({addr}) did not answer: {e}"),
+                            Some((region, _)) => format!(
+                                "region `{region}`'s routers did not answer -- it may be cut off \
+                                 from this one, and answers through its own: {e}"
+                            ),
+                        };
+                        return reply(out, region::homed(Response::error(502, &why), &home));
+                    }
+                }
             }
         };
 
@@ -944,6 +1071,17 @@ impl Router {
     ///                                       replica -- and route them there
     /// POST   /_shard/replicas                  give every tenant in no pair
     ///                                       that has no replica one
+    /// PUT    /_shard/tenants/<t>/read-replicas/<r>  a read replica of the
+    ///                                       tenant in region r, which marked
+    ///                                       reads near r go to ([`readers`]);
+    ///                                       DELETE takes it off, ?forget its
+    ///                                       record alone, its node gone
+    /// GET    /_shard/tenants/<t>/read-replicas  {tenant, read_replicas:
+    ///                                       [{region, node, follows}], failed}
+    /// POST   /_shard/placements {tenants}     {"<t>": {node, addr, region}
+    ///                                       | null}: where this directory
+    ///                                       places each, another region's
+    ///                                       router asks
     /// POST   /_shard/query {query, params, tenants | prefix, merge, column,
     ///                       partial, timeout_ms}  one read on every tenant,
     ///                                       the answers merged ([`fanout`])
@@ -989,7 +1127,7 @@ impl Router {
                 | (Method::Get, ["tenants", _, "quota"])
                 | (Method::Get, ["region"])
                 | (Method::Get, ["regions"])
-        );
+        ) && !readers::reads_only(req, &segs[1..]);
         if writes && self.read_dir().following() {
             return Response::error(
                 409,
@@ -1028,6 +1166,10 @@ impl Router {
             (Method::Put, ["tenants", t, "quota"]) => self.set_quota(t, &req.body),
             (Method::Get, ["tenants", t, "quota"]) => self.quota_report(t),
             (Method::Delete, ["tenants", t]) => self.delete(t),
+            (Method::Get, ["tenants", t, "read-replicas"]) => Ok(self.list_readers(t)),
+            (Method::Put, ["tenants", t, "read-replicas", r]) => self.place_reader(t, r),
+            (Method::Delete, ["tenants", t, "read-replicas", r]) => self.drop_reader(t, r, req),
+            (Method::Post, ["placements"]) => Ok(self.placements(req)),
             (Method::Post, ["tenants", t, "move"]) => {
                 place_field(&body, "region").and_then(|region| match field(&body, "to") {
                     None if region.is_none() => Err(Fail(
@@ -1150,6 +1292,7 @@ impl Router {
             content_type: "text/plain; version=0.0.4; charset=utf-8",
             extra: Vec::new(),
             seq: None,
+            history: None,
             version: None,
         }
     }
@@ -1859,6 +2002,9 @@ impl Router {
                 )),
             }
         }
+        // Their read replicas follow the primaries they have now, from the
+        // next look, which comes at once ([`readers`]).
+        self.follow_soon();
         // Every tenant moved, the pair is over: `to` is a primary now, and
         // left recorded as `name`'s standby it would take no tenant. `name`
         // rejoins as the standby of `to`. With a tenant left behind the pair
@@ -1948,6 +2094,7 @@ impl Router {
                 Err(e) => failed.push(why(&tenant, &format!("`{to}` did not answer: {e}"))),
             }
         }
+        self.follow_soon();
         let mut unreplicated = Vec::new();
         for tenant in lost {
             match self.write_dir().set_replica(&tenant, None) {
@@ -1971,8 +2118,9 @@ impl Router {
     /// node's quota -- the whole set, replacing the one before; `{}` leaves
     /// it at the node's. Its own node takes it first, and one it refuses
     /// records nothing; then the directory keeps it, and the tenant's
-    /// standby and replica are sent it, so a failover finds it there. A
-    /// copy that does not answer is sent it again as it is promoted.
+    /// standby and replica are sent it, so a failover finds it there, and
+    /// its read replicas. A copy that does not answer is sent it again as
+    /// it is promoted.
     fn set_quota(&self, tenant: &str, body: &[u8]) -> Outcome<Response> {
         let set = fenec_http::quota::Set::parse(&String::from_utf8_lossy(body))
             .map_err(|e| Fail(400, e))?;
@@ -1998,14 +2146,30 @@ impl Router {
         self.write_dir()
             .set_quota(tenant, (!set.is_empty()).then_some(json.as_str()))
             .map_err(internal)?;
-        let copies = [
-            self.read_dir().standby(&node).map(str::to_string),
-            self.read_dir().replica(tenant).map(str::to_string),
-        ];
-        for copy in copies.into_iter().flatten() {
+        let copies: Vec<String> = {
+            let dir = self.read_dir();
+            let own = [dir.standby(&node), dir.replica(tenant)];
+            own.into_iter().flatten().map(str::to_string).collect()
+        };
+        for copy in copies {
             if let Some(w) = self.put_quota(tenant, &copy, &json) {
                 fenec_http::log!("tenant `{tenant}`'s quota did not reach its copy: {w}");
             }
+        }
+        // Its read replicas too, each counting the streams and requests of
+        // its region: this directory's handed to their nodes' senders now,
+        // the request waiting on none of them, and every router keeping
+        // one, another region's among them, at its next look, which reads
+        // the quota where this directory keeps it ([`readers`]).
+        let kept = (!set.is_empty()).then_some(json.as_str());
+        let readers: Vec<String> = self
+            .read_dir()
+            .readers(tenant)
+            .iter()
+            .map(|r| r.node.clone())
+            .collect();
+        for reader in readers {
+            self.want_reader_quota(tenant, &reader, kept);
         }
         Ok(Response::json(200, report))
     }
@@ -2204,6 +2368,8 @@ impl Router {
         if self.read_dir().exists(tenant) {
             return Err(Fail(409, format!("tenant `{tenant}` already exists")));
         }
+        // And so is one a deleted tenant's read replicas still answer to.
+        self.no_reader_traces(tenant)?;
         let region = match at.node {
             None => at.region.or(self.cfg.default_region.as_deref()),
             Some(_) => at.region,
@@ -2340,6 +2506,10 @@ impl Router {
     }
 
     fn delete(&self, tenant: &str) -> Outcome<Response> {
+        // Every change of its read replicas held until the tenant is gone,
+        // one under way waited out -- before the claim, which a failover of
+        // the tenant meanwhile would have found taken and passed it over.
+        let _held = self.hold_readers(tenant)?;
         let _claim = self.claim(tenant)?;
         let placement = self
             .read_dir()
@@ -2348,6 +2518,12 @@ impl Router {
             .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
         let n = self.node(&placement.node)?;
         let replica = self.read_dir().replica(tenant).map(str::to_string);
+        // Its read replicas this directory keeps go first, the tenant still
+        // placed: nothing routes a marked read to one once its record is
+        // gone. One that stays refuses the delete, 502, the tenant kept.
+        // Another directory's go at its router's next look, which finds
+        // the tenant gone.
+        self.take_readers(tenant)?;
         let (status, body) = self
             .pool
             .call(
@@ -2474,6 +2650,12 @@ impl Router {
             }
             replica = None;
         }
+        // So does a read replica in the region it moves into, which its own
+        // copies there make no nearer -- and which may be on the target:
+        // held until the directory places the tenant there, so that no
+        // change of it lands on the node meanwhile.
+        let into = dst.region.clone();
+        let _arriving = self.readers_arriving(tenant, &into)?;
 
         self.write_dir()
             .place(tenant, &from, State::Moving)
@@ -2529,6 +2711,10 @@ impl Router {
             return Err(thaw(internal(e)));
         }
         self.lease_now(to);
+        // Its read replicas follow it there, from the next look, which comes
+        // at once: the image carried the history, so each goes on from where
+        // it stood.
+        self.follow_soon();
 
         // The replica follows the node the tenant is on now: a file there,
         // and the copy on the old node's standby is not this tenant's any
@@ -2687,6 +2873,50 @@ fn hop_by_hop(name: &str) -> bool {
     ]
     .iter()
     .any(|h| name.eq_ignore_ascii_case(h))
+}
+
+/// The client's headers a forward sends on: not the connection's, not the
+/// router's own name for its client -- what a client sent under it is
+/// dropped, and the router's put in its place, which the node believes
+/// from the router alone -- nor the request id the router sends, nor,
+/// while it traces, the client's trace context, which the router's own
+/// replaces. Borrowed, not cloned: a request's headers were copied into
+/// `String`s here and formatted one by one into the head, which with the
+/// router's own header made a request through it 1.5 us slower.
+fn forwarded_headers(req: &Request, traced: bool) -> Vec<(&str, &str)> {
+    req.headers
+        .iter()
+        .filter(|(k, _)| {
+            !hop_by_hop(k)
+                && !k.eq_ignore_ascii_case("host")
+                && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
+                && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
+                && !(traced
+                    && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
+                        || k.eq_ignore_ascii_case(fenec_http::trace::TRACESTATE)))
+        })
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
+
+/// The span of a forward to `node` at `addr`, to its whole answer or a
+/// stream's head: the node's server span is its child.
+fn forward_span(req: &Request, node: &str, addr: &str) -> fenec_http::trace::Span {
+    let forwarding = fenec_http::trace::span_of("forward", fenec_http::trace::Kind::Client);
+    if fenec_http::trace::recording() {
+        forwarding.attr("http.request.method", req.method.name());
+        forwarding.attr("fenec.node", node.to_string());
+        match addr.rsplit_once(':') {
+            Some((host, port)) => {
+                forwarding.attr("server.address", host.to_string());
+                if let Ok(p) = port.parse::<i64>() {
+                    forwarding.attr("server.port", p);
+                }
+            }
+            None => forwarding.attr("server.address", addr.to_string()),
+        }
+    }
+    forwarding
 }
 
 fn body_fields(req: &Request) -> std::result::Result<Vec<(String, Value)>, String> {
