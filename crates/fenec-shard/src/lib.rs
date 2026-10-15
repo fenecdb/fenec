@@ -2211,7 +2211,9 @@ impl Router {
             201,
             &name,
         )?;
-        if let Err(e) = self.write_dir().place(tenant, &name, State::Active) {
+        // Bound first: an `if let`'s guard lives through its block, the DELETE's round trip too.
+        let placed = self.write_dir().place(tenant, &name, State::Active);
+        if let Err(e) = placed {
             // Not recorded means not reachable: take the file back off the
             // node rather than leave an orphan there.
             let _ = self.pool.call(&n.addr, "DELETE", &target, &n.token, b"");
@@ -2502,7 +2504,9 @@ impl Router {
             return Err(thaw(Fail(502, w)));
         }
 
-        if let Err(e) = self.write_dir().place(tenant, to, State::Active) {
+        // Bound first: an `if let`'s guard lives through its block, where `thaw` locks it again.
+        let placed = self.write_dir().place(tenant, to, State::Active);
+        if let Err(e) = placed {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             return Err(thaw(internal(e)));
         }
