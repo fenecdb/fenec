@@ -1081,11 +1081,22 @@ impl Router {
     ///                                       DELETE takes it off, ?forget its
     ///                                       record alone, its node gone
     /// GET    /_shard/tenants/<t>/read-replicas  {tenant, read_replicas:
-    ///                                       [{region, node, follows}], failed}
-    /// POST   /_shard/placements {tenants}     {"<t>": {node, addr, region}
-    ///                                       | null}: where this directory
-    ///                                       places each, another region's
-    ///                                       router asks
+    ///                                       [{region, node, follows}], failed,
+    ///                                       changing}
+    /// PUT    /_shard/tenants/<t>/traces/<r>   on the global router: region r,
+    ///                                       keeping its own directory, may keep
+    ///                                       a read replica of the name, which
+    ///                                       a create of it asks r of; its
+    ///                                       router says so as it places one,
+    ///                                       and DELETE as its last goes. DELETE
+    ///                                       by hand lets the name be made again
+    ///                                       with r gone for good: a copy left
+    ///                                       there takes nothing from another
+    ///                                       tenant of the name (its lineage)
+    /// POST   /_shard/placements {tenants}     {"<t>": {node, addr, region,
+    ///                                       quota, lineage} | null}: where this
+    ///                                       directory places each, another
+    ///                                       region's router asks
     /// POST   /_shard/query {query, params, tenants | prefix, merge, column,
     ///                       partial, timeout_ms}  one read on every tenant,
     ///                                       the answers merged ([`fanout`])
@@ -2396,13 +2407,20 @@ impl Router {
             ));
         }
         let target = format!("/_admin/tenants/{tenant}");
-        expect(
+        let made = expect(
             self.pool.call(&n.addr, "PUT", &target, &n.token, b""),
             201,
             &name,
         )?;
+        // Its lineage beside its placement: its read replicas are bound to
+        // it, and a tenant made again under the name has another.
+        let lineage = lineage_in(&made);
         // Bound first: an `if let`'s guard lives through its block, the DELETE's round trip too.
-        let placed = self.write_dir().place(tenant, &name, State::Active);
+        let placed = {
+            let mut dir = self.write_dir();
+            dir.place(tenant, &name, State::Active)
+                .and_then(|_| dir.set_lineage(tenant, lineage.as_deref()))
+        };
         if let Err(e) = placed {
             // Not recorded means not reachable: take the file back off the
             // node rather than leave an orphan there.
@@ -2824,6 +2842,16 @@ fn expect(got: std::io::Result<(u16, Vec<u8>)>, want: u16, node: &str) -> Outcom
         )),
         Err(e) => Err(Fail(502, format!("node `{node}` did not answer: {e}"))),
     }
+}
+
+/// The lineage a node's answer names (`"lineage": "<8 hex>"`): the one it
+/// made a tenant of, or took one's image in at.
+pub(crate) fn lineage_in(body: &[u8]) -> Option<String> {
+    let fields = fenec_core::json::parse_object(&String::from_utf8_lossy(body)).ok()?;
+    fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
+        ("lineage", Value::Text(l)) => Some(l),
+        _ => None,
+    })
 }
 
 /// `{tenant, why}`, a failure's entry in a list of them.

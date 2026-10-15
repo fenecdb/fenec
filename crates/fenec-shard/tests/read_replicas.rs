@@ -2004,6 +2004,186 @@ fn a_read_replica_s_silent_node_holds_up_no_other_s_re_pointing() {
     w.links[2].heal();
 }
 
+/// A read replica's copy takes nothing from another tenant of its name: a
+/// tenant deleted and made again on the very node its copy followed --
+/// the record forgotten by hand (`?forget`, a node thought gone for good),
+/// or never written (a router lost between the follow and the record) --
+/// had the copy's follower, reconnecting to the same address, take the new
+/// one's image: another owner's data in a region nobody chose for it. The
+/// copy was told its tenant's lineage, keeps it across restarts, refuses a
+/// primary of another, and answers no marked read after.
+#[test]
+fn a_read_replica_s_copy_takes_nothing_from_another_tenant_of_its_name() {
+    let w = OneDirectory::new("lineage-copy");
+    w.tenant("acme");
+    write(w.primary, "acme", r#"put notes {body: "theirs before"}"#);
+    w.holds("acme", r#""theirs before""#);
+    let (status, body) = shard(
+        w.primary,
+        "DELETE",
+        "/_shard/tenants/acme/read-replicas/us?forget",
+        "",
+    );
+    assert_eq!(status, 204, "{body}");
+    let (status, body) = shard(w.primary, "DELETE", "/_shard/tenants/acme", "");
+    assert_eq!(status, 204, "{body}");
+    let (status, body) = shard(
+        w.primary,
+        "PUT",
+        "/_shard/tenants/acme",
+        r#"{"node":"eu1","schema":"create collection notes (body text)"}"#,
+    );
+    assert_eq!(status, 201, "{body}");
+    write(w.primary, "acme", r#"put notes {body: "another owner's"}"#);
+    let us1 = w._nodes[2].port;
+    let mut last = (0, String::new());
+    until("us1's copy refuses the new tenant, or takes it", || {
+        last = marked(us1, "acme", "get notes select body", None);
+        last.0 == 503 || last.1.contains("another owner's")
+    });
+    assert_eq!(last.0, 503, "{}", last.1);
+}
+
+/// A read replica whose tenant's name was made again -- its record kept by
+/// another region's directory, the trace let go of by hand, the new tenant
+/// on the very node the old one was -- is taken off, never pointed at the
+/// new one: the look found nothing to change, the address the same.
+#[test]
+fn a_read_replica_of_a_tenant_made_again_is_taken_off() {
+    let tag = "remade-same";
+    let files = files(tag);
+    let names = ["eu1", "eu2", "us1"];
+    let nodes = names.map(|n| node(&format!("{tag}-{n}")));
+    let us1_link = Proxy::to(nodes[2].port);
+    let global = global_router(&files.0.join("global.fenec"), None, "eu");
+    let upstream = format!("http://127.0.0.1:{global}");
+    let mut cfg = config(None, Some("us"), Some(upstream.clone()));
+    cfg.reader_timeout = Duration::from_secs(600);
+    let us = region_router_with(&files.0.join("us.fenec"), &upstream, cfg);
+    let (status, body) = shard(
+        global,
+        "PUT",
+        "/_shard/regions/us",
+        &format!(r#"{{"routers":["http://127.0.0.1:{us}"]}}"#),
+    );
+    assert_eq!(status, 200, "{body}");
+    for (i, (name, region)) in names.iter().zip(["eu", "eu", "us"]).enumerate() {
+        let addr = match i {
+            2 => us1_link.addr.clone(),
+            _ => format!("127.0.0.1:{}", nodes[i].port),
+        };
+        let body = format!(r#"{{"addr":"{addr}","token":"adm-{tag}-{name}","region":"{region}"}}"#);
+        let (status, answer) = shard(global, "PUT", &format!("/_shard/nodes/{name}"), &body);
+        assert_eq!(status, 201, "{name}: {answer}");
+    }
+    until("us's copy of the global directory arrives", || {
+        shard(us, "GET", "/_shard/regions", "")
+            .1
+            .contains(r#""name":"us""#)
+    });
+    let make = r#"{"node":"eu1","schema":"create collection notes (body text)"}"#;
+    let (status, body) = shard(global, "PUT", "/_shard/tenants/ab", make);
+    assert_eq!(status, 201, "{body}");
+    until("us's router places ab's read replica", || {
+        shard(global, "PUT", "/_shard/tenants/ab/read-replicas/us", "").0 == 201
+    });
+    us1_link.hang();
+    let (status, body) = shard(global, "DELETE", "/_shard/tenants/ab", "");
+    assert_eq!(status, 204, "{body}");
+    // us out of reach for good, as far as the operator knows: its trace let
+    // go of, and the name made again on the same node.
+    let (status, body) = shard(global, "DELETE", "/_shard/tenants/ab/traces/us", "");
+    assert_eq!(status, 204, "{body}");
+    let (status, body) = shard(global, "PUT", "/_shard/tenants/ab", make);
+    assert_eq!(status, 201, "{body}");
+    write(global, "ab", r#"put notes {body: "another owner's"}"#);
+    us1_link.heal();
+    until(
+        "us's router takes the old tenant's read replica off",
+        || {
+            let (_, list) = shard(us, "GET", "/_shard/tenants/ab/read-replicas", "");
+            let (_, held) = admin(
+                nodes[2].port,
+                &format!("{tag}-us1"),
+                "GET",
+                "/_admin/tenants",
+                "",
+            );
+            list.contains(r#""read_replicas":[]"#) && !held.contains(r#""ab""#)
+        },
+    );
+}
+
+/// A trace names a tenant the global directory holds: a region's router
+/// whose copy of it still showed a tenant just deleted traced and placed a
+/// replica of it as the name was made again.
+#[test]
+fn a_trace_of_a_name_no_tenant_holds_is_refused() {
+    let w = OneDirectory::new("ghost");
+    let (status, body) = shard(w.primary, "PUT", "/_shard/tenants/ghost/traces/us", "");
+    assert_eq!(status, 404, "{body}");
+    w.made("acme");
+    let (status, body) = shard(w.primary, "PUT", "/_shard/tenants/acme/traces/us", "");
+    assert_eq!(status, 204, "{body}");
+}
+
+/// A node's worker looks again where a tenant's primary is as it reaches
+/// the tenant's replica: reached after a slow node's earlier calls, it
+/// pointed the replica at the primary of the look's time -- the one a move
+/// meanwhile had left. Here the worker is held at the node's door on one
+/// tenant's `follow` while the other moves.
+#[test]
+fn a_look_s_worker_points_a_replica_at_its_primary_as_it_reaches_it() {
+    let mut primary = config(Some("eu"), None, None);
+    primary.reader_timeout = Duration::from_secs(600);
+    let w = OneDirectory::build("late", false, primary, config(Some("us"), None, None));
+    w.tenant("acme");
+    w.made("beta");
+    let (status, body) = shard(
+        w.primary,
+        "PUT",
+        "/_shard/tenants/beta/read-replicas/us",
+        "",
+    );
+    assert_eq!(status, 201, "{body}");
+    // Recorded once the tenants have their replicas, on eu2.
+    let eu3 = node("late-eu3");
+    let (status, body) = shard(
+        w.primary,
+        "PUT",
+        "/_shard/nodes/eu3",
+        &format!(
+            r#"{{"addr":"127.0.0.1:{}","token":"adm-late-eu3","region":"eu","zone":"eu-c"}}"#,
+            eu3.port
+        ),
+    );
+    assert_eq!(status, 201, "{body}");
+    w.links[2].park("/follow");
+    w.links[0].cut();
+    let (status, body) = shard(w.primary, "POST", "/_shard/nodes/eu1/failover", "");
+    assert_eq!(status, 200, "{body}");
+    until("the worker waits at us1's door on acme's follow", || {
+        !w.links[2].parked("acme/follow").is_empty()
+    });
+    let (status, body) = shard(
+        w.primary,
+        "POST",
+        "/_shard/tenants/beta/move",
+        r#"{"to":"eu3"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    w.links[2].unpark("acme/follow");
+    until("the worker reaches beta", || {
+        !w.links[2].parked("beta/follow").is_empty()
+    });
+    let sent = w.links[2].parked("beta/follow").remove(0);
+    assert!(
+        sent.contains(&format!("127.0.0.1:{}", eu3.port)),
+        "beta's replica pointed elsewhere than eu3: {sent}"
+    );
+    w.links[2].unpark("/follow");
+}
+
 /// A tenant's quota reaches its read replicas, as its standby and its
 /// replica: set before one is placed, and after.
 #[test]

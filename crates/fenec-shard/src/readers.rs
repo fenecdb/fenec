@@ -28,6 +28,14 @@
 //! tells the global router as it places one (`traces`), and a create asks
 //! those regions alone.
 //!
+//! **Bound to its tenant's lineage.** Each replica is a copy of one tenant,
+//! not of a name: its record keeps the lineage the directory recorded for
+//! the tenant (`lineages`), every `follow` tells the copy, and the copy
+//! takes nothing from a primary of another. A look finding the tenant's
+//! lineage another than the replica's takes the replica off. Whatever a
+//! router forgets or records late, a tenant made again under the name is
+//! never copied into a region nobody chose for it.
+//!
 //! **Never promoted.** A failover promotes a tenant's standby copy or its
 //! replica of its own, both in its home region, and reads nothing here:
 //! a read replica is neither, by construction, so no failover of the
@@ -131,14 +139,16 @@ const LOOKERS: usize = 8;
 #[derive(Clone)]
 pub(crate) enum Primary {
     /// On the node at `addr` (`host:port`), in `region`: its name where
-    /// this router's own directory holds it, and the tenant's quota where
-    /// the directory placing it keeps one -- which its read replicas are
-    /// sent wherever they are recorded.
+    /// this router's own directory holds it, the tenant's quota where the
+    /// directory placing it keeps one -- which its read replicas are sent
+    /// wherever they are recorded -- and its lineage where that directory
+    /// knows it (`lineages`), which its read replicas are bound to.
     At {
         region: String,
         addr: String,
         node: Option<String>,
         quota: Option<String>,
+        lineage: Option<String>,
     },
     /// In no directory this router reads: deleted.
     Gone,
@@ -475,7 +485,7 @@ impl Router {
         if let Some(r) = self.read_dir().reader_in(tenant, region).cloned() {
             return Ok(Response::json(200, reader_item(region, &r)));
         }
-        let (addr, quota) = match self.primary_of(tenant) {
+        let (addr, quota, lineage) = match self.primary_of(tenant) {
             Primary::At { region: home, .. } if home == region => {
                 return Err(Fail(
                     409,
@@ -486,7 +496,12 @@ impl Router {
                     ),
                 ))
             }
-            Primary::At { addr, quota, .. } => (addr, quota),
+            Primary::At {
+                addr,
+                quota,
+                lineage,
+                ..
+            } => (addr, quota, lineage),
             Primary::Gone => {
                 return Err(Fail(404, format!("no tenant `{tenant}` in the directory")))
             }
@@ -511,7 +526,7 @@ impl Router {
                 ),
             )
         })?;
-        if let Err(w) = self.tell_follow(tenant, &node, &url, true) {
+        if let Err(w) = self.tell_follow(tenant, &node, &url, true, lineage.as_deref()) {
             self.untrace_if_none(tenant);
             return Err(Fail(502, w));
         }
@@ -524,14 +539,24 @@ impl Router {
         // Bound apart: in an `if let`, the directory's write guard was held
         // into the block, whose taking the copy off reads the directory --
         // a directory refusing writes, its disk failing, held the router.
-        let recorded = self.write_dir().set_reader(tenant, &node, &url);
+        let recorded = self
+            .write_dir()
+            .set_reader(tenant, &node, &url, lineage.as_deref());
         if let Err(e) = recorded {
-            let r = Reader { node, follows: url };
+            let r = Reader {
+                node,
+                follows: url,
+                lineage,
+            };
             let _ = self.delete_copy(tenant, &r);
             self.untrace_if_none(tenant);
             return Err(internal(e));
         }
-        let reader = Reader { node, follows: url };
+        let reader = Reader {
+            node,
+            follows: url,
+            lineage,
+        };
         Ok(Response::json(201, reader_item(region, &reader)))
     }
 
@@ -590,7 +615,10 @@ impl Router {
             .map_err(|e| message(&e))?;
         self.standbys_sent();
         if let Err(w) = self.delete_copy(tenant, r) {
-            if let Err(e) = self.write_dir().set_reader(tenant, &r.node, &r.follows) {
+            let put_back =
+                self.write_dir()
+                    .set_reader(tenant, &r.node, &r.follows, r.lineage.as_deref());
+            if let Err(e) = put_back {
                 fenec_http::log!(
                     "tenant `{tenant}`'s read replica on `{}` stayed on its node, unrecorded: {e}",
                     r.node
@@ -1037,7 +1065,10 @@ impl Router {
                 503,
                 format!(
                     "{} may keep a read replica of a tenant `{tenant}`, and whether it does is \
-                     not known ({why}): the name is made once its router answers",
+                     not known ({why}): the name is made once its router answers. For a region \
+                     gone for good, DELETE /_shard/tenants/{tenant}/traces/{r} lets go of its \
+                     trace: a copy left there is of the old tenant's lineage, and takes nothing \
+                     from a new one",
                     region_name(r)
                 ),
             ));
@@ -1126,7 +1157,19 @@ impl Router {
 
     /// `PUT /_shard/tenants/<t>/traces/<region>`: a region's router saying
     /// it may keep a read replica of `tenant`'s name.
+    /// Refused, 404, for a name the directory holds no tenant of: a
+    /// region's router whose copy of this directory still showed a tenant
+    /// just deleted traced and placed a replica of it as the name was made
+    /// again, the create having asked before the trace landed. Held under
+    /// the tenant's claim, as a create of the name is.
     pub(crate) fn set_trace(&self, tenant: &str, region: &str) -> Outcome<Response> {
+        let _claim = self.claim(tenant)?;
+        if !self.read_dir().exists(tenant) {
+            return Err(Fail(
+                404,
+                format!("no tenant `{tenant}`: no read replica of it is placed"),
+            ));
+        }
         self.write_dir()
             .set_trace(tenant, region)
             .map_err(internal)?;
@@ -1216,12 +1259,19 @@ impl Router {
     /// here that then would not follow is deleted again: left, it was a
     /// primary of its own holding nothing, which a marked read reaching it
     /// would have taken for the tenant.
+    ///
+    /// `lineage`, the tenant's where known, goes with the follow: the copy
+    /// takes nothing from a primary of another ([`fenec_http::replication::Follower::expect_lineage`]),
+    /// and keeps refusing it across a restart -- whatever this router
+    /// records or forgets, a tenant made again under the name, on the very
+    /// node, is never copied into a region nobody chose for it.
     fn tell_follow(
         &self,
         tenant: &str,
         node: &str,
         url: &str,
         create: bool,
+        lineage: Option<&str>,
     ) -> std::result::Result<(), String> {
         let n = self
             .read_dir()
@@ -1229,7 +1279,10 @@ impl Router {
             .cloned()
             .ok_or_else(|| format!("no node `{node}`"))?;
         let base = format!("/_admin/tenants/{tenant}");
-        let body = format!("{{\"from\":{}}}", quote(url));
+        let body = match lineage {
+            Some(l) => format!("{{\"from\":{},\"lineage\":{}}}", quote(url), quote(l)),
+            None => format!("{{\"from\":{}}}", quote(url)),
+        };
         // Named, so a node a newer term leases refuses to follow at the
         // word of a router it superseded.
         let holder = self.holder_header();
@@ -1289,17 +1342,20 @@ impl Router {
         {
             let dir = self.read_dir();
             let global = self.global.as_ref().map(crate::read);
-            let at =
-                |n: &crate::directory::Node, node: Option<&str>, quota: Option<&str>| Primary::At {
-                    region: n.region.clone(),
-                    addr: n.addr.clone(),
-                    node: node.map(str::to_string),
-                    quota: quota.map(str::to_string),
-                };
+            let at = |n: &crate::directory::Node,
+                      node: Option<&str>,
+                      quota: Option<&str>,
+                      lineage: Option<String>| Primary::At {
+                region: n.region.clone(),
+                addr: n.addr.clone(),
+                node: node.map(str::to_string),
+                quota: quota.map(str::to_string),
+                lineage,
+            };
             for t in tenants {
                 if let Some(p) = dir.placement(t) {
                     let found = match dir.node(&p.node) {
-                        Some(n) => at(n, Some(&p.node), dir.quota(t)),
+                        Some(n) => at(n, Some(&p.node), dir.quota(t), dir.lineage(t)),
                         None => Primary::Unknown(format!("no node `{}` here", p.node)),
                     };
                     out.insert(t.clone(), found);
@@ -1319,7 +1375,7 @@ impl Router {
                 };
                 if let Some(p) = g.placement(t) {
                     let found = match g.node(&p.node) {
-                        Some(n) => at(n, None, g.quota(t)),
+                        Some(n) => at(n, None, g.quota(t), g.lineage(t)),
                         None => Primary::Unknown(format!("no node `{}` known", p.node)),
                     };
                     out.insert(t.clone(), found);
@@ -1420,11 +1476,16 @@ impl Router {
                     }
                     _ => None,
                 };
+                let lineage = match v.member("lineage") {
+                    Some(Value::Text(l)) => Some(l.clone()),
+                    _ => None,
+                };
                 let p = Primary::At {
                     region: text(&v, "region"),
                     addr: text(&v, "addr"),
                     node: None,
                     quota,
+                    lineage,
                 };
                 (t, p)
             })
@@ -1454,12 +1515,13 @@ impl Router {
                 .and_then(|p| dir.node(&p.node).map(|n| (p, n)));
             items.push(match found {
                 Some((p, n)) => format!(
-                    "{}:{{\"node\":{},\"addr\":{},\"region\":{},\"quota\":{}}}",
+                    "{}:{{\"node\":{},\"addr\":{},\"region\":{},\"quota\":{},\"lineage\":{}}}",
                     quote(&t),
                     quote(&p.node),
                     quote(&n.addr),
                     quote(&n.region),
-                    dir.quota(&t).unwrap_or("null")
+                    dir.quota(&t).unwrap_or("null"),
+                    dir.lineage(&t).map_or("null".into(), |l| quote(&l))
                 ),
                 None => format!("{}:null", quote(&t)),
             });
@@ -1661,11 +1723,16 @@ impl Router {
     fn due(&self, tenant: &str, r: &Reader, p: &Primary) -> bool {
         match p {
             Primary::At {
-                region, addr, node, ..
+                region,
+                addr,
+                node,
+                lineage,
+                ..
             } => {
                 let dir = self.read_dir();
                 let n = dir.node(&r.node);
-                node.as_deref() == Some(r.node.as_str())
+                another_lineage(r, lineage.as_deref())
+                    || node.as_deref() == Some(r.node.as_str())
                     || n.is_some_and(|n| n.addr == *addr || n.region == *region)
                     || r.follows != format!("http://{addr}")
                     || self
@@ -1680,8 +1747,12 @@ impl Router {
     }
 
     /// [`Self::keep_following`] of one read replica, held for it: passed
-    /// over where a change of it is under way, and read again once held.
-    fn look_at(&self, tenant: &str, r: &Reader, p: &Primary) {
+    /// over where a change of it is under way, and read again once held --
+    /// its record, and where its primary is: a node's worker reaches an
+    /// item after the ones before it on that node, tens of seconds after
+    /// the look where that node is slow, and a failover meanwhile had the
+    /// primary of the look's time, the old one, pointed at until the next.
+    fn look_at(&self, tenant: &str, r: &Reader, _seen: &Primary) {
         let region = self.read_dir().region_of(&r.node).to_string();
         let Some(_hold) = self.hold_reader(tenant, &region) else {
             return;
@@ -1692,8 +1763,12 @@ impl Router {
             .iter()
             .find(|x| x.node == r.node)
             .cloned();
-        if let Some(r) = now {
-            self.keep_following(tenant, &r, p);
+        let Some(r) = now else {
+            return;
+        };
+        let p = self.primary_of(tenant);
+        if self.due(tenant, &r, &p) {
+            self.keep_following(tenant, &r, &p);
         }
     }
 
@@ -1758,6 +1833,14 @@ impl Router {
         let key = format!("{tenant}/{}", r.node);
         let mut why = "";
         let failed = match primary {
+            // Another tenant of the name -- deleted and made again, its
+            // record kept by a node out of reach or forgotten by hand: the
+            // replica goes, never pointed at it. Its copy refuses the new
+            // one's image all the same ([`Self::tell_follow`]).
+            Primary::At { lineage, .. } if another_lineage(r, lineage.as_deref()) => {
+                why = "as its tenant was made again under its name";
+                self.take_reader(tenant, r).err()
+            }
             Primary::At {
                 region, addr, node, ..
             } => {
@@ -1795,10 +1878,10 @@ impl Router {
                     let mut failed = None;
                     if r.follows != url || lost {
                         let told = self
-                            .tell_follow(tenant, &r.node, &url, false)
+                            .tell_follow(tenant, &r.node, &url, false, r.lineage.as_deref())
                             .and_then(|_| {
                                 self.write_dir()
-                                    .set_reader(tenant, &r.node, &url)
+                                    .set_reader(tenant, &r.node, &url, r.lineage.as_deref())
                                     .map_err(|e| message(&e))
                             });
                         match told {
@@ -1838,6 +1921,12 @@ impl Router {
             }
         }
     }
+}
+
+/// Whether the read replica `r` copies another tenant of its name than the
+/// primary of `lineage`: both known, and not the same.
+fn another_lineage(r: &Reader, lineage: Option<&str>) -> bool {
+    matches!((r.lineage.as_deref(), lineage), (Some(ours), Some(theirs)) if ours != theirs)
 }
 
 /// What a region's router said of the read replicas of a name it keeps.
@@ -1953,7 +2042,8 @@ mod tests {
                 };
                 dir.set_node(name, node).unwrap();
             }
-            dir.set_reader("acme", "us1", "http://127.0.0.1:1").unwrap();
+            dir.set_reader("acme", "us1", "http://127.0.0.1:1", None)
+                .unwrap();
         }
         assert!(router.reader_near("acme").is_none(), "a tenant gone");
         router

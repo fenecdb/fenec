@@ -1675,7 +1675,19 @@ name alone, all at once, each within 10 s, and one not reached — or answered
 by a router following the region's, which cannot see what the one it
 follows has under way — refuses that name (<code>503</code>) and no
 other. A name no region named asks none, so a region out of reach holds up
-no create anywhere else.
+no create anywhere else. For a region gone for good, <code>DELETE
+/_shard/tenants/&lt;t&gt;/traces/&lt;region&gt;</code> on the global router
+lets go of its trace, and the name is made again. That cannot copy the new
+tenant into the region: each read replica is bound to its tenant's
+<em>lineage</em> — the top half of its history's id, which a failover and a
+move keep and a tenant made again does not, recorded by the directory as
+the tenant's node makes it or takes its image in — and its copy is told
+it with every <code>follow</code> and keeps it across restarts. A copy
+whose primary turns out to be of another lineage takes nothing from it and
+answers no marked read; a look finding a replica's tenant of another
+lineage takes it off rather than point it anywhere. So does every other
+way a record outlives its tenant — <code>?forget</code> of a node that
+comes back, a router lost between a <code>follow</code> and the record.
 A marked read goes to no read replica of a tenant no directory places. One
 moved into a region holding its read replica takes that replica
 off — the tenant's own copies are nearer still — a change of it under way

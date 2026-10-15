@@ -1162,7 +1162,25 @@ create go on while the primary took a replica off that its node then put
 back. Every region asked one after another, one region's router out of
 reach refused every create in every region, and hung, after the upstream
 timeout's minute; a name no region traced now asks none, a create costing
-what main's did. A failover reads `pairs` and
+what main's did. The way out for a region gone for good is `DELETE
+/_shard/tenants/<t>/traces/<r>` by hand, which the 503 names, and it
+cannot copy a new tenant of the name there: a read replica is bound to its
+tenant's lineage (`lineages`, recorded from the node's answer to a create
+or an import, `"lineage"` in `POST /_shard/placements`; the record's
+`lineage`), which every `follow` tells the copy and `.follows` keeps
+(`lineage <8 hex>`, `Follower::expect_lineage`): a copy whose primary is of
+another lineage takes nothing from it, answers no marked read, and its
+follower stops, and a look finding a replica's tenant of another lineage
+takes it off (`another_lineage`). With only the trace to go by, the trace
+let go of and the name made again on the very node, the look found
+nothing to change and the copy's follower took the new tenant's image; a
+`?forget` of a node that came back, and a router lost between the
+`follow` and the record, did the same. A trace names a tenant the global
+directory holds, under its claim (`set_trace`, 404 otherwise). A node's
+worker looks again where a tenant's primary is as it reaches the replica
+(`look_at`), not where the look saw it: reached after a slow node's
+earlier calls, it pointed the replica at the primary a failover had left.
+A failover reads `pairs` and
 `replicas` alone, so none is ever promoted. Each is held to its tenant's
 quota wherever it is recorded: `POST /_shard/placements` answers the quota
 beside the placement, so every look wants each read replica sent the quota
@@ -1327,7 +1345,12 @@ request), a move onto a replica's node waiting out a look's `follow` held
 there, and a failover keeping the tenant's lineage where a tenant made
 again starts another (`readers::tests` a refused hold keeping the other's,
 no marked read to a tenant gone, the quota queue's order;
-`replication::tests` the fork's id), a create asking only the regions that
+`replication::tests` the fork's id), a copy taking nothing from another
+tenant of its name made again on its very node, a replica of a tenant made
+again taken off where its trace was let go of by hand, a trace of a name no
+tenant holds refused, a look's worker pointing a replica at the primary as
+it reaches it (the parking proxy holding one tenant's `follow` as the other
+moves), a create asking only the regions that
 may keep a replica of its name -- one out of reach refusing those names
 alone, a name no region traced made with every region cut off -- a router
 following a region's saying `changing: null`, a placement the directory

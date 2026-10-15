@@ -77,9 +77,17 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Get, ["tenants", t, "quota"]) => tenants
             .quota_report(t)
             .map(|report| Response::json(200, report)),
-        (Method::Put, ["tenants", t]) => tenants
-            .create(t)
-            .map(|_| Response::json(201, format!("{{\"created\":\"{t}\"}}"))),
+        // The lineage the tenant's history is of, which a router binds its
+        // read replicas to.
+        (Method::Put, ["tenants", t]) => tenants.create(t).map(|tenant| {
+            Response::json(
+                201,
+                format!(
+                    "{{\"created\":\"{t}\",\"lineage\":{}}}",
+                    lineage_json(&tenant)
+                ),
+            )
+        }),
         (Method::Delete, ["tenants", t]) => tenants.delete(t).map(|_| Response::empty(204)),
         // The node's admin token, which the router holds, rather than its
         // data token, which reaches every tenant: an app creating tenants
@@ -117,7 +125,16 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         }),
         (Method::Put, ["tenants", t, "file"]) => tenants
             .import(t, &req.body)
-            .map(|_| Response::json(201, format!("{{\"imported\":\"{t}\"}}"))),
+            .and_then(|_| tenants.get(t))
+            .map(|tenant| {
+                Response::json(
+                    201,
+                    format!(
+                        "{{\"imported\":\"{t}\",\"lineage\":{}}}",
+                        lineage_json(&tenant)
+                    ),
+                )
+            }),
         // The failover, tenant by tenant: what a replica's file needs to
         // take writes. It goes through the admin token the router already
         // holds rather than the replication one, which the router does not.
@@ -135,8 +152,8 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         // placed its replica.
         (Method::Post, ["tenants", t, "follow"]) => {
             match superseded(tenants, req).and_then(|_| from(&req.body)) {
-                Ok(from) => tenants
-                    .follow(t, from.as_deref())
+                Ok((from, lineage)) => tenants
+                    .follow_lineage(t, from.as_deref(), lineage)
                     .map(|_| Response::json(200, format!("{{\"following\":\"{t}\"}}"))),
                 Err(e) => Err(e),
             }
@@ -163,17 +180,40 @@ pub fn schema_description(fenecql: &str) -> Result<String, String> {
 }
 
 /// The `from` of a follow's body, when it has one.
-fn from(body: &[u8]) -> Result<Option<String>, Refused> {
+/// A follow's body: the node to follow, and the lineage its tenant must be
+/// of (`"lineage": "<8 hex>"`), a router's read replica told which tenant
+/// it copies.
+fn from(body: &[u8]) -> Result<(Option<String>, Option<u32>), Refused> {
     let text = String::from_utf8_lossy(body);
     if text.trim().is_empty() {
-        return Ok(None);
+        return Ok((None, None));
     }
     let fields = fenec_core::json::parse_object(&text)
         .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
-    Ok(fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
-        ("from", fenec_core::prelude::Value::Text(url)) => Some(url),
-        _ => None,
-    }))
+    let (mut from, mut lineage) = (None, None);
+    for (k, v) in fields {
+        match (k.as_str(), v) {
+            ("from", fenec_core::prelude::Value::Text(url)) => from = Some(url),
+            ("lineage", fenec_core::prelude::Value::Text(l)) => {
+                lineage = Some(
+                    crate::replication::parse_lineage(&l)
+                        .ok_or_else(|| Refused(400, "`lineage` is 8 hex digits".into()))?,
+                )
+            }
+            _ => {}
+        }
+    }
+    Ok((from, lineage))
+}
+
+/// A tenant's lineage as JSON: 8 hex digits, or `null` for one that never
+/// had a history of its own.
+fn lineage_json(tenant: &crate::tenants::Tenant) -> String {
+    let db = tenant.db.read().unwrap_or_else(|e| e.into_inner());
+    match crate::replication::lineage_of(db.history()) {
+        Some(l) => format!("\"{}\"", crate::replication::lineage_text(l)),
+        None => "null".into(),
+    }
 }
 
 /// A promotion or a follow from a router a newer term superseded, on a

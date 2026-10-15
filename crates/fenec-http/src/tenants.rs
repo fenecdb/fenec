@@ -535,15 +535,36 @@ impl Tenants {
     /// recorded by [`Self::follow`], or this node's standby upstream.
     fn upstream_of(&self, name: &str) -> Option<String> {
         let own = std::fs::read_to_string(self.follows_path(name)).ok();
-        match own.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
+        let first = own.and_then(|text| text.lines().next().map(|l| l.trim().to_string()));
+        match first.filter(|u| !u.is_empty()) {
             Some(url) => Some(url),
             None => self.repl.as_ref()?.upstream.clone(),
         }
     }
 
-    /// Records the node a tenant follows, whole or not at all: written
-    /// beside and renamed, as a tenant's file is installed.
+    /// The lineage a tenant was told its primary is of, which `.follows`
+    /// keeps on a line of its own after the address (`lineage <8 hex>`):
+    /// a restart keeps refusing another tenant of the name.
+    fn lineage_followed(&self, name: &str) -> Option<u32> {
+        let text = std::fs::read_to_string(self.follows_path(name)).ok()?;
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix("lineage "))
+            .and_then(|l| crate::replication::parse_lineage(l.trim()))
+    }
+
+    /// Records the node a tenant follows, and the lineage it is told that
+    /// node's tenant is of, whole or not at all: written beside and
+    /// renamed, as a tenant's file is installed.
     fn record_upstream(&self, name: &str, url: Option<&str>) -> std::io::Result<()> {
+        self.record_following(name, url, None)
+    }
+
+    fn record_following(
+        &self,
+        name: &str,
+        url: Option<&str>,
+        lineage: Option<u32>,
+    ) -> std::io::Result<()> {
         let path = self.follows_path(name);
         let Some(url) = url else {
             return match std::fs::remove_file(&path) {
@@ -551,11 +572,16 @@ impl Tenants {
                 _ => Ok(()),
             };
         };
+        let mut text = url.to_string();
+        if let Some(l) = lineage {
+            text.push_str("\nlineage ");
+            text.push_str(&crate::replication::lineage_text(l));
+        }
         let tmp = self.dir.join(format!("{name}.follows.writing"));
         std::fs::File::create(&tmp)
             .and_then(|mut f| {
                 use std::io::Write;
-                f.write_all(url.as_bytes())?;
+                f.write_all(text.as_bytes())?;
                 f.sync_all()
             })
             .and_then(|_| std::fs::rename(&tmp, &path))
@@ -734,6 +760,18 @@ impl Tenants {
     /// writes that node took that were never sent are gone, the trade a
     /// failover makes.
     pub fn follow(&self, name: &str, from: Option<&str>) -> std::result::Result<(), Refused> {
+        self.follow_lineage(name, from, None)
+    }
+
+    /// [`Tenants::follow`], the tenant told the lineage its primary is of
+    /// (a router's read replica): kept in `.follows`, and a primary of
+    /// another taken nothing from ([`Follower::expect_lineage`]).
+    pub fn follow_lineage(
+        &self,
+        name: &str,
+        from: Option<&str>,
+        lineage: Option<u32>,
+    ) -> std::result::Result<(), Refused> {
         check_name(name)?;
         let Some(repl) = &self.repl else {
             return Err(Refused(
@@ -772,8 +810,15 @@ impl Tenants {
                     // -- deleted and made again while this copy was cut off
                     // -- and a router placing a read replica over a file it
                     // found on the node asks for no more than this follow.
+                    self.record_following(name, from, lineage).map_err(|e| {
+                        Refused(
+                            500,
+                            format!("could not record the node tenant `{name}` follows: {e}"),
+                        )
+                    })?;
                     if let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) {
                         f.halt();
+                        f.expect_lineage(lineage);
                         t.ready.store(false, Ordering::SeqCst);
                         f.start(format!("fenec-replica-{name}")).map_err(|e| {
                             Refused(500, format!("tenant `{name}` could not follow again: {e}"))
@@ -795,7 +840,7 @@ impl Tenants {
             if !path.exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
             }
-            self.record_upstream(name, from).map_err(|e| {
+            self.record_following(name, from, lineage).map_err(|e| {
                 Refused(
                     500,
                     format!("could not record the node tenant `{name}` follows: {e}"),
@@ -940,9 +985,11 @@ impl Tenants {
             .map_err(|e| Refused(500, format!("tenant `{name}` cannot follow {url}: {e}")))
             .and_then(|f| {
                 // Ready at the primary's hello, for as long as this open
-                // lasts.
+                // lasts -- and no more where the primary is refused as
+                // another tenant of the name, whose image it never takes.
                 let seen = Arc::clone(&ready);
-                f.on_hello(Box::new(move || seen.store(true, Ordering::SeqCst)));
+                f.on_hello(Box::new(move |ok| seen.store(ok, Ordering::SeqCst)));
+                f.expect_lineage(self.lineage_followed(name));
                 f.start(format!("fenec-replica-{name}")).map_err(|e| {
                     Refused(
                         500,

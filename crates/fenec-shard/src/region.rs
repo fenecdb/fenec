@@ -956,7 +956,13 @@ impl Router {
 
     /// Installs `image` as `tenant` on the node `to` and gives it `quota`:
     /// nothing recorded. Taken back off where its quota is refused.
-    fn install(&self, tenant: &str, to: &str, image: &[u8], quota: Option<&str>) -> Outcome<()> {
+    fn install(
+        &self,
+        tenant: &str,
+        to: &str,
+        image: &[u8],
+        quota: Option<&str>,
+    ) -> Outcome<Option<String>> {
         let dst = self.node(to)?;
         let base = format!("/_admin/tenants/{tenant}");
         let put = |image: &[u8]| {
@@ -969,12 +975,13 @@ impl Router {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             installed = put(image);
         }
-        expect(installed, 201, to)?;
+        let answer = expect(installed, 201, to)?;
         if let Some(w) = quota.and_then(|q| self.put_quota(tenant, to, q)) {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             return Err(Fail(502, w));
         }
-        Ok(())
+        // The lineage its image is of, which the move keeps.
+        Ok(crate::lineage_in(&answer))
     }
 
     /// Takes `tenant` in from another region: its image installed on the
@@ -1004,12 +1011,13 @@ impl Router {
                 format!("`{to}` is a standby: its tenants follow another node's"),
             ));
         }
-        self.install(tenant, &to, image, quota)?;
+        let lineage = self.install(tenant, &to, image, quota)?;
         let base = format!("/_admin/tenants/{tenant}");
         let recorded = {
             let mut dir = self.write_dir();
             dir.place(tenant, &to, State::Active)
                 .and_then(|_| dir.set_quota(tenant, quota))
+                .and_then(|_| dir.set_lineage(tenant, lineage.as_deref()))
         };
         if let Err(e) = recorded {
             if let Ok(n) = self.node(&to) {
@@ -1171,8 +1179,8 @@ impl Router {
                     return Err(Fail(409, format!("`{to}` is a standby")));
                 }
                 drop(dir);
-                self.install(tenant, &to, &image, quota.as_deref())?;
-                Ok((to, String::new()))
+                let lineage = self.install(tenant, &to, &image, quota.as_deref())?;
+                Ok((to, String::new(), lineage))
             })(),
             true => (|| {
                 let mut target = format!("/_shard/tenants/{tenant}/file");
@@ -1205,10 +1213,10 @@ impl Router {
                             .map(|at| text[at..text.len() - 1].to_string())
                     })
                     .unwrap_or_default();
-                Ok((node, replica))
+                Ok((node, replica, None))
             })(),
         };
-        let (to, replica) = match landed {
+        let (to, replica, lineage) = match landed {
             Ok(l) => l,
             Err(f) => {
                 thaw();
@@ -1259,10 +1267,16 @@ impl Router {
                 return Err(f);
             }
         }
-        // The flip: one statement of the global directory.
-        let flipped = match keeps_into {
-            false => self.write_dir().place(tenant, &to, State::Active),
-            true => self.write_dir().place_home(tenant, into),
+        // The flip: one statement of the global directory, and the lineage
+        // where this directory now places the tenant -- its region's
+        // directory keeps it otherwise.
+        let flipped = {
+            let mut dir = self.write_dir();
+            match keeps_into {
+                false => dir.place(tenant, &to, State::Active),
+                true => dir.place_home(tenant, into),
+            }
+            .and_then(|_| dir.set_lineage(tenant, lineage.as_deref()))
         };
         if let Err(e) = flipped {
             fenec_http::log!(
