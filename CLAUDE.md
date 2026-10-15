@@ -1148,7 +1148,21 @@ whose record is out while its node is asked to take the copy off
 (`reader_traces`, `changing` in the list) -- the global router asking each
 region keeping its own, 503 where one is not reached (`no_reader_traces`);
 and a marked read goes to no read replica of a tenant no directory the
-router reads places (`reader_near`). A failover reads `pairs` and
+router reads places (`reader_near`). The regions asked are only those
+that may keep one: a region's router tells the global router as it places
+one, before the copy exists (`trace_globally`, `PUT
+/_shard/tenants/<t>/traces/<r>`, a row of the global directory's `traces`
+read where asked and never mapped), and once its last is taken off, under
+the replica's hold (`untrace_if_none`); a create asks those regions at once,
+each through the pool bounded by `reader_timeout`, takes off the trace of
+one that keeps none, and is refused 503 for that name alone where one is
+not reached or answers from a router following the region's, whose list
+says `changing: null` -- its holds are not the primary's, and `false` let a
+create go on while the primary took a replica off that its node then put
+back. Every region asked one after another, one region's router out of
+reach refused every create in every region, and hung, after the upstream
+timeout's minute; a name no region traced now asks none, a create costing
+what main's did. A failover reads `pairs` and
 `replicas` alone, so none is ever promoted. Each is held to its tenant's
 quota wherever it is recorded: `POST /_shard/placements` answers the quota
 beside the placement, so every look wants each read replica sent the quota
@@ -1213,7 +1227,11 @@ has its own -- a tenant deleted and made again under its name starts again
 at term 1, below the old one's, and refused as a fenced primary's word, every
 read near of a client that held the old position waited its whole wait, then
 home's 504, for good. In the id, not a field of the header: the header and
-`Response` the size they were. The SDKs
+`Response` the size they were. A binary from before keeps no lineage: a
+promotion or a restore it makes starts a fresh one, which an SDK takes at
+any term -- so during a rolling upgrade a router whose copy of the directory
+lags a failover can again set a client back onto the old branch, until
+every node runs a build that keeps it. The SDKs
 keep the furthest position an answer from home named -- a write's, a
 read-only `/batch`'s, `/_changes`'s where the SDK reads it: of another
 lineage, a later term of the same, or further in one, so one arriving late
@@ -1249,8 +1267,11 @@ pooled connection's end only for the value a node runs read-only
 at where each primary it keeps a read replica of is -- its directory, its
 copy of the global one, or another region's router through `POST
 /_shard/placements`, one call a region a look -- and re-points the ones
-following another address, those needing a call on eight threads at most
-(`LOOKERS`), each call through a pool bounded by `CALL` (10 s,
+following another address, those needing a call on a worker a node the
+look waits for none of (`look_on`, one at a time a node; on threads the look
+waited for, a node that did not answer held every look after it up for its
+timeout, the next tenant failed over left following the old primary as
+long), each call through a pool bounded by `CALL` (10 s,
 `Config::reader_timeout`) and no lock
 held across one: a mutex over every change made a move's `readers_arriving`
 wait out a node a region away. Each read replica is held for its change
@@ -1306,7 +1327,14 @@ request), a move onto a replica's node waiting out a look's `follow` held
 there, and a failover keeping the tenant's lineage where a tenant made
 again starts another (`readers::tests` a refused hold keeping the other's,
 no marked read to a tenant gone, the quota queue's order;
-`replication::tests` the fork's id); fenec-http's `api.rs`, `mcp.rs` and `cdc.rs` a marked
+`replication::tests` the fork's id), a create asking only the regions that
+may keep a replica of its name -- one out of reach refusing those names
+alone, a name no region traced made with every region cut off -- a router
+following a region's saying `changing: null`, a placement the directory
+cannot record answering and taking its copy off (a directory database made
+to fail its writes), and a node that does not answer holding up no other's
+re-pointing (fenec-http's `archive.rs` a restore's and a backup's
+lineage); fenec-http's `api.rs`, `mcp.rs` and `cdc.rs` a marked
 statement, MCP write and consumer commit refused; `web/fenec.replicas.test.js`
 the JS client against real nodes and routers, eu1 killed, and its position
 taken from a 504 -- over its own alone, a write answered meanwhile and an

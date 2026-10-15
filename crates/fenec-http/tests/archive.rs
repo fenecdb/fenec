@@ -190,6 +190,11 @@ fn a_restore_holds_what_the_primary_held_at_that_moment() {
         restored_history.current(),
         p.db.read().unwrap().history().current()
     );
+    // Of the primary's lineage, the top half of its first history's id: a
+    // client orders positions by term within a lineage alone, and took a
+    // restore's for another tenant's, at any term.
+    let lineage = p.db.read().unwrap().history().lineage[0].0 >> 32;
+    assert_eq!(restored_history.current() >> 32, lineage);
 
     // To a change: each document a statement writes is a change of its
     // own, but the statement's writes land together -- the primary never
@@ -286,8 +291,13 @@ fn a_backup_is_a_database_of_its_own() {
     let mut db = fenec_core::fs::open(&file).unwrap();
     assert_eq!(rows(&db, "get c"), rows(&p.db.read().unwrap(), "get c"));
     assert_eq!(db.change_seq(), seq);
-    // Forked where it was taken, and taking writes.
+    // Forked where it was taken, of the primary's lineage, and taking
+    // writes.
     assert_eq!(db.history().lineage.last().unwrap().1, seq);
+    assert_eq!(
+        db.history().current() >> 32,
+        p.db.read().unwrap().history().lineage[0].0 >> 32
+    );
     db.execute(&fenec_ql::parse_one("put c {x: 1000}").unwrap())
         .unwrap();
 

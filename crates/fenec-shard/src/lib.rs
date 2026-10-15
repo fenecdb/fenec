@@ -197,6 +197,9 @@ pub struct Router {
     /// for the node's own: a look wants it sent again only once its
     /// tenant's changes ([`readers`]).
     reader_quotas: Mutex<std::collections::HashMap<String, Option<String>>>,
+    /// The read replicas' nodes a look's worker is under way on
+    /// ([`Router::follow_round`]): one a node at a time.
+    lookers: Mutex<HashSet<String>>,
     /// The quotas the read replicas are to be sent, and the nodes a sender
     /// is under way to ([`readers::QuotaQueue`]).
     reader_quota_queue: Mutex<readers::QuotaQueue>,
@@ -267,6 +270,7 @@ impl Router {
             reader_busy: Mutex::new(HashSet::new()),
             reader_lost: Mutex::new(HashSet::new()),
             reader_quotas: Mutex::new(Default::default()),
+            lookers: Mutex::new(HashSet::new()),
             reader_quota_queue: Mutex::new(Default::default()),
             quotas_soon: (Mutex::new(false), std::sync::Condvar::new()),
             resting: Mutex::new(Default::default()),
@@ -1169,6 +1173,8 @@ impl Router {
             (Method::Get, ["tenants", t, "read-replicas"]) => Ok(self.list_readers(t)),
             (Method::Put, ["tenants", t, "read-replicas", r]) => self.place_reader(t, r),
             (Method::Delete, ["tenants", t, "read-replicas", r]) => self.drop_reader(t, r, req),
+            (Method::Put, ["tenants", t, "traces", r]) => self.set_trace(t, r),
+            (Method::Delete, ["tenants", t, "traces", r]) => self.drop_trace(t, r),
             (Method::Post, ["placements"]) => Ok(self.placements(req)),
             (Method::Post, ["tenants", t, "move"]) => {
                 place_field(&body, "region").and_then(|region| match field(&body, "to") {

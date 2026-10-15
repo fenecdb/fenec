@@ -24,7 +24,9 @@
 //! keeps the tenant, 502. Another region's directory's go at its router's
 //! next look, and the name is not made again while any directory keeps
 //! one of it ([`Router::no_reader_traces`]): a look finding the name made
-//! again, another owner's, pointed the old copy at it.
+//! again, another owner's, pointed the old copy at it. A region's router
+//! tells the global router as it places one (`traces`), and a create asks
+//! those regions alone.
 //!
 //! **Never promoted.** A failover promotes a tenant's standby copy or its
 //! replica of its own, both in its home region, and reads nothing here:
@@ -35,8 +37,9 @@
 //! [`FOLLOW_EVERY`] at where each primary it keeps a read replica of is --
 //! in its own directory, its copy of the global one, or the tenant's
 //! region's router, asked for every tenant of that region at once -- and
-//! points the ones that follow another address there, a few at once, each
-//! call bounded by [`CALL`]; a failover or a move it makes has that look
+//! points the ones that follow another address there, on a worker a node
+//! that the look waits for none of, each call bounded by [`CALL`]; a
+//! failover or a move it makes has that look
 //! come at once, on its own thread: the failover waits on no replica's
 //! node, a region away or cut off, and holds nothing the look needs. A
 //! region keeping its own directory learns of a failover in another within
@@ -119,8 +122,8 @@ pub const RESTING: Duration = Duration::from_secs(5);
 /// region's, routes the reads and keeps no record.
 pub const CHECK_EVERY: Duration = Duration::from_secs(10);
 
-/// The threads a look points read replicas at their primaries on, at most:
-/// in turn, each node that did not answer held the others up for its
+/// The threads the check of the read replicas' nodes asks them on, at
+/// most: in turn, each node that did not answer held the others up for its
 /// [`CALL`].
 const LOOKERS: usize = 8;
 
@@ -372,7 +375,7 @@ impl Router {
     /// router's directory keeps of `tenant`.
     pub(crate) fn list_readers(&self, tenant: &str) -> Response {
         let items = self.reader_items(tenant);
-        let changing = self.changing_readers(tenant);
+        let changing = self.changing_said(tenant);
         Response::json(
             200,
             format!(
@@ -396,7 +399,7 @@ impl Router {
     /// region not reached is named in `failed`, 502, beside the others.
     pub(crate) fn gather_readers(&self, tenant: &str) -> Response {
         let mut items = self.reader_items(tenant);
-        let mut changing = self.changing_readers(tenant);
+        let mut changing = self.changing_said(tenant);
         let mut failed = Vec::new();
         let regions: Vec<String> = self.read_dir().regions().keys().cloned().collect();
         let target = format!("/_shard/tenants/{tenant}/read-replicas");
@@ -410,9 +413,11 @@ impl Router {
             let listed = answer.and_then(|body| {
                 let fields = fenec_core::json::parse_object(&String::from_utf8_lossy(&body))
                     .map_err(|e| Fail(502, e.to_string()))?;
-                changing |= fields
-                    .iter()
-                    .any(|(k, v)| k == "changing" && *v == Value::Bool(true));
+                changing = match (changing, fields.iter().find(|(k, _)| k == "changing")) {
+                    ("true", _) | (_, Some((_, Value::Bool(true)))) => "true",
+                    (_, Some((_, Value::Bool(false)))) => changing,
+                    _ => "null",
+                };
                 Ok(fields
                     .into_iter()
                     .find(|(k, _)| k == "read_replicas")
@@ -495,17 +500,35 @@ impl Router {
         };
         let node = self.reader_node(tenant, region)?;
         let url = format!("http://{addr}");
-        self.tell_follow(tenant, &node, &url, true)
-            .map_err(|w| Fail(502, w))?;
+        // Its trace in the global directory first, before any copy exists:
+        // a create of the name asks the regions traced there alone.
+        self.trace_globally(tenant, "PUT").map_err(|w| {
+            Fail(
+                503,
+                format!(
+                    "a read replica here is made once the global router knows this region \
+                     may keep one of `{tenant}`: {w}"
+                ),
+            )
+        })?;
+        if let Err(w) = self.tell_follow(tenant, &node, &url, true) {
+            self.untrace_if_none(tenant);
+            return Err(Fail(502, w));
+        }
         // The tenant's quota, as its standby and its replica are sent it: a
         // read replica counts the streams and the requests its region
         // sends. One that does not reach it is sent it again by a look.
         if let Err(w) = self.send_reader_quota(tenant, &node, quota.as_deref()) {
             fenec_http::log!("tenant `{tenant}`'s read replica on `{node}` has no quota yet: {w}");
         }
-        if let Err(e) = self.write_dir().set_reader(tenant, &node, &url) {
+        // Bound apart: in an `if let`, the directory's write guard was held
+        // into the block, whose taking the copy off reads the directory --
+        // a directory refusing writes, its disk failing, held the router.
+        let recorded = self.write_dir().set_reader(tenant, &node, &url);
+        if let Err(e) = recorded {
             let r = Reader { node, follows: url };
             let _ = self.delete_copy(tenant, &r);
+            self.untrace_if_none(tenant);
             return Err(internal(e));
         }
         let reader = Reader { node, follows: url };
@@ -542,6 +565,7 @@ impl Router {
                 .remove_reader(tenant, &r.node)
                 .map_err(internal)?;
             self.forget_reader(tenant, &r.node);
+            self.untrace_if_none(tenant);
             return Ok(Response::empty(204));
         }
         self.take_reader(tenant, &r).map_err(|w| {
@@ -575,6 +599,7 @@ impl Router {
             return Err(w);
         }
         self.forget_reader(tenant, &r.node);
+        self.untrace_if_none(tenant);
         Ok(())
     }
 
@@ -920,6 +945,18 @@ impl Router {
         !self.read_dir().readers(tenant).is_empty() || self.changing_readers(tenant)
     }
 
+    /// [`Self::changing_readers`] as the list says it: `null` on a router
+    /// following another, whose own holds say nothing of the changes the
+    /// one it follows has under way -- `false` there let a create of the
+    /// name go on while the primary took a replica off.
+    fn changing_said(&self, tenant: &str) -> &'static str {
+        match (self.read_dir().following(), self.changing_readers(tenant)) {
+            (true, _) => "null",
+            (false, true) => "true",
+            (false, false) => "false",
+        }
+    }
+
     /// Whether a change of a read replica of `tenant` is under way here.
     fn changing_readers(&self, tenant: &str) -> bool {
         let prefix = format!("{tenant}/");
@@ -932,13 +969,18 @@ impl Router {
 
     /// Refuses a create of `tenant`, 409, while a trace of a read replica
     /// of the name is kept ([`Self::reader_traces`]): here, or -- on the
-    /// global router, where regions keep their own directories -- by any
-    /// region's router, asked; one not reached refuses it too, 503, its
-    /// traces not known. A deleted tenant's replica in another region's
+    /// global router -- by a region keeping its own directory that its
+    /// router said may keep one (`traces`, [`Self::trace_globally`]), each
+    /// such region asked at once and bounded by `reader_timeout`; one not
+    /// reached, or whose router answering cannot say what is under way,
+    /// refuses it too, 503. A deleted tenant's replica in another region's
     /// directory goes at that router's next look; made again before it,
     /// the name was another owner's, and the look pointed the old copy at
     /// the new tenant, which took its image into a region nobody had
-    /// chosen.
+    /// chosen. Every region was asked, one after another: one out of reach
+    /// refused every create in every region, the one a partition is meant
+    /// to leave working. A name no region traced asks none, and a region
+    /// that says it keeps none has its trace taken off.
     pub(crate) fn no_reader_traces(&self, tenant: &str) -> Outcome<()> {
         let kept = |whose: &str| {
             Fail(
@@ -954,34 +996,151 @@ impl Router {
         if self.reader_traces(tenant) {
             return Err(kept("here"));
         }
-        let regions: Vec<String> = self.read_dir().regions().keys().cloned().collect();
-        let target = format!("/_shard/tenants/{tenant}/read-replicas");
-        for region in regions {
-            let (status, _, body) = self.ask_region(&region, "GET", &target, &[], b"")?;
-            let fields = match status {
-                200 => fenec_core::json::parse_object(&String::from_utf8_lossy(&body)).ok(),
-                _ => None,
-            };
-            let Some(fields) = fields else {
-                return Err(Fail(
-                    503,
-                    format!(
-                        "{}'s router answered {status}: whether it keeps a read replica of a \
-                         tenant `{tenant}` is not known",
-                        region_name(&region)
-                    ),
-                ));
-            };
-            let traced = fields.iter().any(|(k, v)| match (k.as_str(), v) {
-                ("read_replicas", Value::List(l)) => !l.is_empty(),
-                ("changing", Value::Bool(b)) => *b,
-                _ => false,
-            });
-            if traced {
-                return Err(kept(&format!("in {}", region_name(&region))));
+        let asked: Vec<(String, Vec<String>)> = {
+            let dir = self.read_dir();
+            let traced = dir.traced_in(tenant).map_err(internal)?;
+            traced
+                .into_iter()
+                .filter_map(|r| dir.routers(&r).map(|rs| (r, rs.to_vec())))
+                .collect()
+        };
+        let answers: Vec<(String, Traced)> = match asked.len() {
+            0 => return Ok(()),
+            1 => asked
+                .iter()
+                .map(|(r, rs)| (r.clone(), self.region_traces(tenant, r, rs)))
+                .collect(),
+            _ => std::thread::scope(|s| {
+                let asking: Vec<_> = asked
+                    .iter()
+                    .map(|(r, rs)| (r, s.spawn(move || self.region_traces(tenant, r, rs))))
+                    .collect();
+                asking
+                    .into_iter()
+                    .map(|(r, h)| {
+                        let t = h
+                            .join()
+                            .unwrap_or_else(|_| Traced::Unknown("asking it failed".into()));
+                        (r.clone(), t)
+                    })
+                    .collect()
+            }),
+        };
+        if let Some((r, _)) = answers.iter().find(|(_, t)| matches!(t, Traced::Kept)) {
+            return Err(kept(&format!("in {}", region_name(r))));
+        }
+        if let Some((r, Traced::Unknown(why))) = answers
+            .iter()
+            .find(|(_, t)| matches!(t, Traced::Unknown(_)))
+        {
+            return Err(Fail(
+                503,
+                format!(
+                    "{} may keep a read replica of a tenant `{tenant}`, and whether it does is \
+                     not known ({why}): the name is made once its router answers",
+                    region_name(r)
+                ),
+            ));
+        }
+        for (r, _) in &answers {
+            if let Err(e) = self.write_dir().remove_trace(tenant, r) {
+                fenec_http::log!("the trace of `{tenant}` in {} stayed: {e}", region_name(r));
             }
         }
         Ok(())
+    }
+
+    /// Whether `region`'s router keeps a trace of a read replica of
+    /// `tenant`, asked of `routers` for its list.
+    fn region_traces(&self, tenant: &str, region: &str, routers: &[String]) -> Traced {
+        let target = format!("/_shard/tenants/{tenant}/read-replicas");
+        let (auth, global) = self.own_headers();
+        let mut headers: Vec<(&str, &str)> = global.to_vec();
+        if let Some(a) = &auth {
+            headers.push(("Authorization", a));
+        }
+        let call = ("GET", target.as_str(), &headers[..], &b""[..]);
+        match self.call_routers_by(&self.reader_pool, region, routers, call) {
+            Ok((200, _, body)) => {
+                match fenec_core::json::parse_object(&String::from_utf8_lossy(&body)) {
+                    Ok(fields) => traced(&fields),
+                    Err(e) => Traced::Unknown(format!("its answer: {e}")),
+                }
+            }
+            Ok((status, _, body)) => Traced::Unknown(format!(
+                "its router answered {status}: {}",
+                String::from_utf8_lossy(&body).trim()
+            )),
+            Err(e) => Traced::Unknown(e),
+        }
+    }
+
+    /// Tells the global router, from a region's, whether this region may
+    /// keep a read replica of `tenant`'s name (`PUT`) or keeps none
+    /// (`DELETE`): the `traces` a create of the name asks by. Nothing on a
+    /// router keeping no region's directory, which a create asks itself.
+    pub(crate) fn trace_globally(
+        &self,
+        tenant: &str,
+        method: &str,
+    ) -> std::result::Result<(), String> {
+        let Some(region) = self.cfg.region.as_deref() else {
+            return Ok(());
+        };
+        if self.cfg.global.is_empty() {
+            return Ok(());
+        }
+        let target = format!("/_shard/tenants/{tenant}/traces/{region}");
+        let auth = self.cfg.token.as_ref().map(|t| format!("Bearer {t}"));
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        if let Some(a) = &auth {
+            headers.push(("Authorization", a));
+        }
+        let routers = self.cfg.global.clone();
+        let call = (method, target.as_str(), &headers[..], &b""[..]);
+        match self.call_routers_by(&self.reader_pool, "", &routers, call) {
+            Ok((200 | 204, _, _)) => Ok(()),
+            Ok((status, _, body)) => Err(format!(
+                "the global router answered {status}: {}",
+                String::from_utf8_lossy(&body).trim()
+            )),
+            Err(e) => Err(format!("the global router was not reached: {e}")),
+        }
+    }
+
+    /// On a region's router, once it keeps no read replica of `tenant`:
+    /// the global router told, so a create of the name asks this region no
+    /// more. Not told -- out of reach -- the trace stays, and the create
+    /// asks, finds none, and takes it off. Called with the replica held.
+    fn untrace_if_none(&self, tenant: &str) {
+        if self.cfg.region.is_none() || !self.read_dir().readers(tenant).is_empty() {
+            return;
+        }
+        if let Err(w) = self.trace_globally(tenant, "DELETE") {
+            fenec_http::log!(
+                "tenant `{tenant}`'s read replicas here are gone, and the global router was not \
+                 told: {w}"
+            );
+        }
+    }
+
+    /// `PUT /_shard/tenants/<t>/traces/<region>`: a region's router saying
+    /// it may keep a read replica of `tenant`'s name.
+    pub(crate) fn set_trace(&self, tenant: &str, region: &str) -> Outcome<Response> {
+        self.write_dir()
+            .set_trace(tenant, region)
+            .map_err(internal)?;
+        self.standbys_sent();
+        Ok(Response::empty(204))
+    }
+
+    /// `DELETE /_shard/tenants/<t>/traces/<region>`: one saying it keeps
+    /// none.
+    pub(crate) fn drop_trace(&self, tenant: &str, region: &str) -> Outcome<Response> {
+        self.write_dir()
+            .remove_trace(tenant, region)
+            .map_err(internal)?;
+        Ok(Response::empty(204))
     }
 
     /// When a delete or a move gives up waiting for a change of a read
@@ -1324,12 +1483,16 @@ impl Router {
     /// pointed at its tenant's primary where it follows another address,
     /// made again where a marked read found it gone, taken off where its
     /// tenant is gone or has come to its region. What needs a call to a
-    /// node is done on [`LOOKERS`] threads at most, each call bounded by
+    /// node is handed to a worker of that node's, one at a time a node, the
+    /// look waiting for none ([`Self::look_on`]); each call bounded by
     /// [`CALL`], each replica held as it is changed and no lock held across
-    /// a call: a node a region away that does not answer holds up neither
-    /// the others nor a failover. Nothing on a router following another,
-    /// whose directory its primary keeps.
-    pub fn follow_round(&self) {
+    /// a call. Done on threads the look waited for, a node that did not
+    /// answer held up every look after it for its `reader_timeout` -- a
+    /// failover promoting a tenant after the one whose replica sat there
+    /// left the next tenant's replica following the old primary as long.
+    /// Nothing on a router following another, whose directory its primary
+    /// keeps.
+    pub fn follow_round(self: &Arc<Router>) {
         let readers = {
             let dir = self.read_dir();
             if dir.following() {
@@ -1366,24 +1529,53 @@ impl Router {
                 self.due(&t, &r, &p).then_some((t, r, p))
             })
             .collect();
-        match due.len() {
-            0 => {}
-            1 => {
-                let (t, r, p) = &due[0];
-                self.look_at(t, r, p);
-            }
-            n => {
-                let each = n.div_ceil(LOOKERS);
-                std::thread::scope(|s| {
-                    for part in due.chunks(each) {
-                        s.spawn(move || {
-                            for (t, r, p) in part {
-                                self.look_at(t, r, p);
-                            }
-                        });
+        let mut by_node: BTreeMap<String, Vec<(String, Reader, Primary)>> = BTreeMap::new();
+        for (t, r, p) in due {
+            by_node.entry(r.node.clone()).or_default().push((t, r, p));
+        }
+        for (node, items) in by_node {
+            self.look_on(node, items);
+        }
+    }
+
+    /// `items`, read replicas on `node` needing a call to it, looked at in
+    /// turn on a thread of the node's -- unless one is under way there,
+    /// whose node has not answered yet: they wait for the next look.
+    fn look_on(self: &Arc<Router>, node: String, items: Vec<(String, Reader, Primary)>) {
+        if !self
+            .lookers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(node.clone())
+        {
+            return;
+        }
+        let router = Arc::clone(self);
+        let n = node.clone();
+        let started = std::thread::Builder::new()
+            .name("fenec-readers-look".into())
+            .spawn(move || {
+                // Let go of however it ends.
+                struct Done(Arc<Router>, String);
+                impl Drop for Done {
+                    fn drop(&mut self) {
+                        self.0
+                            .lookers
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&self.1);
                     }
-                });
-            }
+                }
+                let done = Done(router, n);
+                for (t, r, p) in &items {
+                    done.0.look_at(t, r, p);
+                }
+            });
+        if started.is_err() {
+            self.lookers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&node);
         }
     }
 
@@ -1586,6 +1778,7 @@ impl Router {
                         fenec_http::log!("tenant `{tenant}`'s read replica record stayed: {e}");
                     }
                     self.forget_reader(tenant, &r.node);
+                    self.untrace_if_none(tenant);
                     return;
                 }
                 if *region == here {
@@ -1647,6 +1840,33 @@ impl Router {
     }
 }
 
+/// What a region's router said of the read replicas of a name it keeps.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Traced {
+    /// None, and no change of one under way.
+    None,
+    /// One, or a change of one under way.
+    Kept,
+    /// Not known, and why: not reached, or answered by a router following
+    /// the region's, which cannot see a change under way on the one it
+    /// follows -- whose record of a replica being taken off is out until
+    /// its node answers, and put back if it does not.
+    Unknown(String),
+}
+
+/// [`Traced`] of a region's `GET /_shard/tenants/<t>/read-replicas`.
+pub(crate) fn traced(fields: &[(String, Value)]) -> Traced {
+    let listed = fields
+        .iter()
+        .any(|(k, v)| k == "read_replicas" && matches!(v, Value::List(l) if !l.is_empty()));
+    let changing = fields.iter().find(|(k, _)| k == "changing").map(|(_, v)| v);
+    match (listed, changing) {
+        (true, _) | (_, Some(Value::Bool(true))) => Traced::Kept,
+        (false, Some(Value::Bool(false))) => Traced::None,
+        _ => Traced::Unknown("its router follows another, and cannot say what is under way".into()),
+    }
+}
+
 /// One read replica as `GET /_shard/tenants/<t>/read-replicas` lists it.
 fn reader_item(region: &str, r: &Reader) -> String {
     format!(
@@ -1674,6 +1894,42 @@ mod tests {
     use crate::{Config, Router};
     use std::sync::mpsc;
     use std::time::Duration;
+
+    /// A router following another says it cannot tell whether a change of
+    /// a read replica is under way: `false` there let the global router
+    /// make a name again while the region's primary router was taking a
+    /// replica of it off, which a node not answering put back.
+    #[test]
+    fn a_router_following_another_cannot_say_what_is_under_way() {
+        use fenec_core::prelude::Database;
+        use std::sync::{Arc, RwLock};
+        let mut db = Database::new();
+        db.follow(Vec::new()).unwrap();
+        let dir = Directory::load(Arc::new(RwLock::new(db))).unwrap();
+        let router = Router::new(dir, Config::default());
+        let body = String::from_utf8_lossy(&router.list_readers("acme").body).into_owned();
+        assert!(body.contains(r#""changing":null"#), "{body}");
+        let own = Router::new(Directory::in_memory(), Config::default());
+        let body = String::from_utf8_lossy(&own.list_readers("acme").body).into_owned();
+        assert!(body.contains(r#""changing":false"#), "{body}");
+    }
+
+    /// What a region's list says of a name, read.
+    #[test]
+    fn a_region_s_list_is_read_as_kept_none_or_not_known() {
+        use super::{traced, Traced};
+        let of = |text: &str| traced(&fenec_core::json::parse_object(text).unwrap());
+        let one =
+            r#"{"read_replicas":[{"region":"us","node":"us1","follows":"x"}],"changing":false}"#;
+        assert_eq!(of(one), Traced::Kept);
+        assert_eq!(of(r#"{"read_replicas":[],"changing":true}"#), Traced::Kept);
+        assert_eq!(of(r#"{"read_replicas":[],"changing":false}"#), Traced::None);
+        assert!(matches!(
+            of(r#"{"read_replicas":[],"changing":null}"#),
+            Traced::Unknown(_)
+        ));
+        assert!(matches!(of(r#"{"read_replicas":[]}"#), Traced::Unknown(_)));
+    }
 
     /// A marked read goes to no read replica of a tenant no directory the
     /// router reads places: a record another region's directory keeps

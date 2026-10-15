@@ -319,7 +319,7 @@ impl Router {
     /// The headers of a call this router makes of another on its own: its
     /// `--token`, which the routers of a deployment share, and the mark of
     /// the global router.
-    fn own_headers(&self) -> (Option<String>, [(&'static str, &'static str); 1]) {
+    pub(crate) fn own_headers(&self) -> (Option<String>, [(&'static str, &'static str); 1]) {
         (
             self.cfg.token.as_ref().map(|t| format!("Bearer {t}")),
             [(GLOBAL_HEADER, "1")],
@@ -460,6 +460,8 @@ impl Router {
                 // spans every directory, which the global router gathers.
                 (Method::Put | Method::Delete, ["tenants", _, "read-replicas", r]) => *r == own,
                 (Method::Get, ["tenants", _, "read-replicas"]) => false,
+                // The global directory's, which a create asks by.
+                (_, ["tenants", _, "traces", _]) => false,
                 (Method::Post, ["tenants", t, "move"]) => {
                     let to = field(&body, "to");
                     let region = place_field(&body, "region").ok().flatten();

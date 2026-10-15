@@ -1636,14 +1636,19 @@ asks home once more with no mark. A history's lineage is the top half of its
 id: every fork of the tenant keeps it, and a tenant deleted and made again
 under its name, which starts again at term 1, has another — whose position
 the client takes, from a 504 or any answer from home, its term lower or
-not.</p>
+not. A node from before lineages keeps none: a promotion or a restore it
+makes starts a fresh one, so while a deployment is upgraded node by node a
+router lagging a failover can again set a client back onto the old
+branch.</p>
 
 <p><b>Failovers and moves.</b> Every router looks once a second at where the
 primary of each tenant it keeps a read replica of is — its own directory, its
 copy of the global one, or, for a tenant of another region keeping its own
 directory, that region's router, asked once for all of its tenants — and
-re-points the ones that follow another address, on eight threads at most,
-each call to a node bounded by 10 s and no lock held across one. A failover —
+re-points the ones that follow another address, on a worker a node the
+look waits for none of, each call to a node bounded by 10 s and no lock held
+across one, so a node that does not answer holds up its own replicas alone.
+A failover —
 by hand or on a lease — or a move it makes has that look come at once, on a
 thread of its own: the failover waits on no replica's node, which may be a
 region away or cut off. So a region keeping its own directory follows a
@@ -1661,9 +1666,16 @@ waited out, 15 s at most and with no claim on the tenant held, so none is
 left when the delete answers, and one whose node does not take it off keeps
 the tenant (<code>502</code>), as <code>DELETE .../read-replicas</code> keeps
 a record — and at the next look in another; the name is not made again
-(<code>409</code>) while any directory keeps one of it, or is changing one, a
-region not reached refusing it too (<code>503</code>): made again, the look
-would point the old copy at another owner's tenant, in a region nobody chose.
+(<code>409</code>) while any directory keeps one of it, or is changing one:
+made again, the look would point the old copy at another owner's tenant, in
+a region nobody chose. A region keeping its own directory tells the global
+router as it places one, before any copy exists, and that it keeps none
+once the last is taken off; a create asks the regions so named for the
+name alone, all at once, each within 10 s, and one not reached — or answered
+by a router following the region's, which cannot see what the one it
+follows has under way — refuses that name (<code>503</code>) and no
+other. A name no region named asks none, so a region out of reach holds up
+no create anywhere else.
 A marked read goes to no read replica of a tenant no directory places. One
 moved into a region holding its read replica takes that replica
 off — the tenant's own copies are nearer still — a change of it under way

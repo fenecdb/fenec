@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 /// in a region keeping its own: `@` and the region.
 pub const HOME: char = '@';
 
-const SCHEMA: [&str; 8] = [
+const SCHEMA: [&str; 9] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
@@ -70,6 +70,15 @@ const SCHEMA: [&str; 8] = [
     // told to follow, which the router compares with where the primary is.
     "create collection if not exists readers \
      (key text @hash, tenant text @hash, node text @hash, follows text)",
+    // The regions keeping their own directory a read replica of a tenant's
+    // name may be kept in, as their routers said placing one -- the global
+    // directory's alone, keyed `<tenant>/<region>`. A create of the name
+    // asks those regions alone whether one is still kept: every region,
+    // one out of reach refused every create. A row outlives its replica
+    // where the router taking it off could not say so, and goes once the
+    // region says it keeps none. Read from the database where asked, never
+    // mapped: a create reads it, nothing routes by it.
+    "create collection if not exists traces (key text @hash, tenant text @hash, region text)",
 ];
 
 /// The fields `nodes` took after directories were first written, added to
@@ -745,6 +754,40 @@ impl Directory {
         }
         put_reader(&mut self.readers, &params);
         Ok(())
+    }
+
+    /// The regions a read replica of `tenant`'s name may be kept in
+    /// (`traces`), sorted.
+    pub fn traced_in(&self, tenant: &str) -> Result<Vec<String>> {
+        let g = read(&self.db);
+        let stmt = fenec_ql::parse_one("get traces select region where tenant = $1")?;
+        let mut out = match g.query(&stmt, &[Value::Text(tenant.into())]) {
+            Ok(Response::Rows(rs)) => rs.rows.into_iter().map(|r| text(&r.values[0])).collect(),
+            Ok(_) | Err(Error::NotFound(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// Notes that `region` may keep a read replica of `tenant`'s name.
+    pub fn set_trace(&mut self, tenant: &str, region: &str) -> Result<()> {
+        if self.traced_in(tenant)?.iter().any(|r| r == region) {
+            return Ok(());
+        }
+        let params = [
+            Value::Text(format!("{tenant}/{region}")),
+            Value::Text(tenant.into()),
+            Value::Text(region.into()),
+        ];
+        self.run("put traces {key: $1, tenant: $2, region: $3}", &params)
+    }
+
+    /// Notes that `region` keeps no read replica of `tenant`'s name.
+    pub fn remove_trace(&mut self, tenant: &str, region: &str) -> Result<()> {
+        let key = Value::Text(format!("{tenant}/{region}"));
+        self.run("del traces where key = $1", &[key])
     }
 
     /// Forgets a tenant's read replica on `node`.

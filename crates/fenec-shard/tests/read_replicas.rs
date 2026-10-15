@@ -1811,6 +1811,199 @@ fn a_failover_keeps_the_tenant_s_lineage_and_a_tenant_made_again_starts_another(
     assert_ne!(c.1, a.1, "a tenant made again is a lineage of its own");
 }
 
+/// A create asks only the regions that may keep a read replica of its
+/// name -- those whose router said so placing one -- and one out of reach
+/// refuses those names alone: every region asked, one after another, one
+/// region's router out of reach refused every create in every region, a
+/// partition's whole point lost. A name no region traced asks none; one a
+/// region traced waits for it, 503 while it is out of reach and 409 while
+/// it keeps the replica; and once the region keeps none, the name is free
+/// and its trace gone, asking nothing again.
+#[test]
+fn a_create_asks_only_the_regions_that_may_keep_a_read_replica_of_its_name() {
+    let tag = "traces";
+    let files = files(tag);
+    let names = ["eu1", "eu2", "us1"];
+    let nodes = names.map(|n| node(&format!("{tag}-{n}")));
+    let us1_link = Proxy::to(nodes[2].port);
+    let global = global_router(&files.0.join("global.fenec"), None, "eu");
+    let upstream = format!("http://127.0.0.1:{global}");
+    let mut cfg = config(None, Some("us"), Some(upstream.clone()));
+    // Its node silent, the look's taking the copy off waits until healed.
+    cfg.reader_timeout = Duration::from_secs(600);
+    let us = region_router_with(&files.0.join("us.fenec"), &upstream, cfg);
+    let us_link = Proxy::to(us);
+    let (status, body) = shard(
+        global,
+        "PUT",
+        "/_shard/regions/us",
+        &format!(r#"{{"routers":["{}"]}}"#, us_link.url()),
+    );
+    assert_eq!(status, 200, "{body}");
+    for (i, (name, region)) in names.iter().zip(["eu", "eu", "us"]).enumerate() {
+        let addr = match i {
+            2 => us1_link.addr.clone(),
+            _ => format!("127.0.0.1:{}", nodes[i].port),
+        };
+        let body = format!(r#"{{"addr":"{addr}","token":"adm-{tag}-{name}","region":"{region}"}}"#);
+        let (status, answer) = shard(global, "PUT", &format!("/_shard/nodes/{name}"), &body);
+        assert_eq!(status, 201, "{name}: {answer}");
+    }
+    until("us's copy of the global directory arrives", || {
+        shard(us, "GET", "/_shard/regions", "")
+            .1
+            .contains(r#""name":"us""#)
+    });
+    let create = |t: &str| {
+        let body = r#"{"region":"eu","schema":"create collection notes (body text)"}"#;
+        shard(global, "PUT", &format!("/_shard/tenants/{t}"), body)
+    };
+
+    // us out of reach: a name no region traced is made all the same.
+    us_link.cut();
+    let (status, body) = create("cd");
+    assert_eq!(status, 201, "{body}");
+    us_link.heal();
+
+    // ab's read replica placed in us, by us's router: traced there.
+    let (status, body) = create("ab");
+    assert_eq!(status, 201, "{body}");
+    until("us's router places ab's read replica", || {
+        shard(global, "PUT", "/_shard/tenants/ab/read-replicas/us", "").0 == 201
+    });
+    us1_link.hang();
+    let (status, body) = shard(global, "DELETE", "/_shard/tenants/ab", "");
+    assert_eq!(status, 204, "{body}");
+    us_link.cut();
+    let (status, body) = create("ab");
+    assert_eq!(status, 503, "{body}");
+    let (status, body) = create("ef");
+    assert_eq!(status, 201, "{body}");
+    us_link.heal();
+    let (status, body) = create("ab");
+    assert_eq!(status, 409, "{body}");
+
+    // Its node back, us's router takes the replica off and says so.
+    us1_link.heal();
+    until("ab is made once us keeps no read replica of it", || {
+        create("ab").0 == 201
+    });
+    let (status, body) = shard(global, "DELETE", "/_shard/tenants/ab", "");
+    assert_eq!(status, 204, "{body}");
+    us_link.cut();
+    let (status, body) = create("ab");
+    assert_eq!(status, 201, "the trace is gone: {body}");
+}
+
+/// A placement whose record the directory cannot write -- its disk failing
+/// -- answers, the copy it made taken back off: the directory's write
+/// guard was held into the error's block, whose taking the copy off reads
+/// the directory, and the router waited on itself for good.
+#[test]
+fn a_placement_the_directory_cannot_record_answers_and_takes_its_copy_off() {
+    let tag = "unrecorded";
+    let files = files(tag);
+    let names = ["eu1", "eu2", "us1"];
+    let nodes = names.map(|n| node(&format!("{tag}-{n}")));
+    let (db, repl) = directory(&files.0.join("global.fenec"), None);
+    let dir = Directory::load(Arc::clone(&db)).unwrap();
+    let router = serve(Router::replicated(
+        dir,
+        config(Some("eu"), None, None),
+        repl,
+    ));
+    for (i, (name, region)) in names.iter().zip(["eu", "eu", "us"]).enumerate() {
+        let body = format!(
+            r#"{{"addr":"127.0.0.1:{}","token":"adm-{tag}-{name}","region":"{region}"}}"#,
+            nodes[i].port
+        );
+        let (status, answer) = shard(router, "PUT", &format!("/_shard/nodes/{name}"), &body);
+        assert_eq!(status, 201, "{name}: {answer}");
+    }
+    let (status, body) = shard(
+        router,
+        "PUT",
+        "/_shard/tenants/acme",
+        r#"{"node":"eu1","schema":"create collection notes (body text)"}"#,
+    );
+    assert_eq!(status, 201, "{body}");
+    db.write()
+        .unwrap()
+        .fail(&fenec_core::error::Error::Io("the disk is gone".into()));
+    let (status, body) = shard(router, "PUT", "/_shard/tenants/acme/read-replicas/us", "");
+    assert_eq!(status, 500, "{body}");
+    let (_, held) = admin(
+        nodes[2].port,
+        &format!("{tag}-us1"),
+        "GET",
+        "/_admin/tenants",
+        "",
+    );
+    assert!(!held.contains("acme"), "{held}");
+    let (status, body) = shard(router, "GET", "/_shard/tenants/acme", "");
+    assert_eq!(status, 200, "{body}");
+}
+
+/// A read replica's node that does not answer holds up no other's
+/// re-pointing: the look waited for every call its round made, so a move
+/// of one tenant -- its replica's node silent -- held the next tenant's
+/// replica following the old primary for that node's whole timeout, ten
+/// minutes here. A worker a node now, the look waiting for none.
+#[test]
+fn a_read_replica_s_silent_node_holds_up_no_other_s_re_pointing() {
+    let mut primary = config(Some("eu"), None, None);
+    primary.reader_timeout = Duration::from_secs(600);
+    let w = OneDirectory::build("stall", false, primary, config(Some("us"), None, None));
+    let ap1 = node("stall-ap1");
+    let (status, body) = shard(
+        w.primary,
+        "PUT",
+        "/_shard/nodes/ap1",
+        &format!(
+            r#"{{"addr":"127.0.0.1:{}","token":"adm-stall-ap1","region":"ap"}}"#,
+            ap1.port
+        ),
+    );
+    assert_eq!(status, 201, "{body}");
+    w.tenant("acme");
+    w.made("beta");
+    let (status, body) = shard(
+        w.primary,
+        "PUT",
+        "/_shard/tenants/beta/read-replicas/ap",
+        "",
+    );
+    assert_eq!(status, 201, "{body}");
+    w.links[2].hang();
+    let (status, body) = shard(
+        w.primary,
+        "POST",
+        "/_shard/tenants/acme/move",
+        r#"{"to":"eu2"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    until(
+        "the look asks us1, silent, to follow acme's new primary",
+        || w.links[2].asked("/_admin/tenants/acme/follow") >= 1,
+    );
+    let (status, body) = shard(
+        w.primary,
+        "POST",
+        "/_shard/tenants/beta/move",
+        r#"{"to":"eu2"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    until(
+        "beta's read replica follows it while us1 says nothing",
+        || {
+            shard(w.primary, "GET", "/_shard/tenants/beta/read-replicas", "")
+                .1
+                .contains(&w.links[1].url())
+        },
+    );
+    w.links[2].heal();
+}
+
 /// A tenant's quota reaches its read replicas, as its standby and its
 /// replica: set before one is placed, and after.
 #[test]
