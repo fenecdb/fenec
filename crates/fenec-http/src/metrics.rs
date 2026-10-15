@@ -513,6 +513,14 @@ fn render(source: Source) -> String {
                 );
             }
             unlinked(&mut out, s.unlinked);
+            if let Some(n) = s.node_streams {
+                out.family(
+                    "fenec_node_streams",
+                    "gauge",
+                    "Streams of every tenant connected now (POST /_replication/tenants): a node's archivers.",
+                );
+                out.sample("fenec_node_streams", &[], n);
+            }
         }
     }
     out.0

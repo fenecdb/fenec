@@ -57,11 +57,12 @@
 use crate::constant_eq;
 use crate::http::{Request, Response};
 use fenec_core::prelude::*;
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Default size of a primary's feed. A replica that falls further behind is
@@ -75,21 +76,21 @@ const CHUNK: usize = 1 << 20;
 
 /// The records one `W` message carries, at most; a larger record goes alone.
 /// It is also what a replica applies under one hold of its write lock.
-const MESSAGE: usize = 1 << 20;
+pub(crate) const MESSAGE: usize = 1 << 20;
 
 /// A stream with nothing to send says so this often: the replica learns the
 /// primary is there, and how far it has got.
-const ALIVE: Duration = Duration::from_secs(2);
+pub(crate) const ALIVE: Duration = Duration::from_secs(2);
 
 /// A replica that hears nothing for this long takes the primary for gone and
 /// connects again.
-const SILENCE: Duration = Duration::from_secs(10);
+pub(crate) const SILENCE: Duration = Duration::from_secs(10);
 
 /// An image is sent once the primary's disk holds it; a primary whose disk
 /// does not get there in this long is not sending it.
-const DURABLE_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const DURABLE_WAIT: Duration = Duration::from_secs(30);
 
-const VERSION: u8 = 1;
+pub(crate) const VERSION: u8 = 1;
 
 /// How long a durable write waits for the streams to send it. A stream
 /// sends within microseconds of the fsync; one that has not in this long is
@@ -131,6 +132,16 @@ pub struct Feed {
     /// The streams sending from it, and how far each has sent.
     senders: Mutex<Vec<Sender>>,
     sent_cv: Condvar,
+    /// Told whenever the writes on disk move on, the feed starts over or
+    /// closes: a tenant's, by the node's stream of every tenant
+    /// ([`crate::node_stream`]), under the tenant's name. Unset everywhere
+    /// else, where it costs a sync a load; set, two -- the streams' count is
+    /// read before anything is told, and no stream connected tells nothing.
+    told: OnceLock<(Arc<crate::node_stream::NodeStreams>, String)>,
+    /// Durable writes that waited out their whole wait for a stream, which
+    /// was then let lag: what a stream that holds writes up costs, counted
+    /// so a test asks the count rather than a clock.
+    waited_out: AtomicU64,
 }
 
 /// A stream as a durable write waits for it: the last write it put into its
@@ -139,6 +150,47 @@ struct Sender {
     key: u64,
     sent: u64,
     lagging: bool,
+    /// Set while the stream is held up elsewhere -- the node's stream of
+    /// every tenant, busy with another tenant's image, an open or a full
+    /// socket -- when no write waits for it: one stream for every tenant,
+    /// it held each tenant's durable writes for its `SENT_WAIT` whenever it
+    /// was busy with any one.
+    held: Option<Arc<AtomicBool>>,
+}
+
+impl Sender {
+    fn waited_for(&self, upto: u64) -> bool {
+        !self.lagging
+            && self.sent < upto
+            && !self
+                .held
+                .as_ref()
+                .is_some_and(|h| h.load(Ordering::Relaxed))
+    }
+}
+
+thread_local! {
+    /// Set while a durability runs that no answer waits on: see
+    /// [`unwaited`].
+    static UNWAITED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `durable` -- a [`Durability`] -- without waiting for the streams to
+/// send what it made durable: the syncer's and a closing tenant's, which no
+/// client's answer waits on. The wait is what a durable write's answer is
+/// held for; held in the syncer, a stream busy elsewhere kept every tenant
+/// of a pass waiting a `SENT_WAIT` each, 5.06 s over five, the writes of a
+/// pass unsynced meanwhile, and a close under its slot's lock.
+pub fn unwaited<R>(durable: impl FnOnce() -> R) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            UNWAITED.with(|u| u.set(false));
+        }
+    }
+    UNWAITED.with(|u| u.set(true));
+    let _reset = Reset;
+    durable()
 }
 
 struct Ring {
@@ -155,6 +207,11 @@ struct Ring {
     /// The database is going: every stream ends rather than holding it open
     /// (a tenant being deleted or moved).
     closed: bool,
+    /// The history the writes are on, as the database last wrote it: the
+    /// node's stream sends it on when it moves (a promotion), before the
+    /// writes after it. Taken from the history records the database
+    /// appends ([`Tee`]), which no write's record carries.
+    lineage: Vec<(u64, u64)>,
 }
 
 /// Consecutive records, the first write in them numbered `first`.
@@ -188,7 +245,7 @@ pub(crate) enum Tail {
     Gone,
 }
 
-enum Next {
+pub(crate) enum Next {
     /// The first write's number, the last's, the records' times, the
     /// records.
     Records(u64, u64, Vec<u64>, Vec<u8>),
@@ -213,20 +270,102 @@ impl Feed {
                 durable: 0,
                 epoch: 0,
                 closed: false,
+                lineage: Vec::new(),
             }),
             cv: Condvar::new(),
             senders: Mutex::new(Vec::new()),
             sent_cv: Condvar::new(),
+            told: OnceLock::new(),
+            waited_out: AtomicU64::new(0),
         })
     }
 
-    /// A stream begins sending after write `at`.
+    /// How many durable writes waited out their whole wait for a stream.
+    pub fn waited_out(&self) -> u64 {
+        self.waited_out.load(Ordering::Relaxed)
+    }
+
+    /// Has `streams` told of `name` whenever the writes on disk move on,
+    /// the feed starts over or it closes. Once: a feed belongs to one
+    /// tenant. Held strongly: a weak hold's upgrade was a compare-and-swap
+    /// on one count every tenant's sync shared; the cycle it makes, feed to
+    /// streams to a stream's feeds, is broken as the stream lets go of its
+    /// feeds.
+    pub(crate) fn tell_with(&self, streams: &Arc<crate::node_stream::NodeStreams>, name: &str) {
+        let _ = self.told.set((Arc::clone(streams), name.to_string()));
+    }
+
+    fn tell(&self) {
+        if let Some((streams, name)) = self.told.get() {
+            streams.touch(name);
+        }
+    }
+
+    /// A stream begins sending after write `at`. A stream already sending
+    /// from it starts there again: the node's stream is put on a tenant's
+    /// feed as it opens and again as it judges where it stands, and a
+    /// second entry of one key, never moved on, would have kept a durable
+    /// write waiting and the tenant from closing.
     pub(crate) fn sending(&self, key: u64, at: u64) {
-        lock(&self.senders).push(Sender {
-            key,
-            sent: at,
-            lagging: false,
-        });
+        self.sending_as(key, at, None, false);
+    }
+
+    /// [`Self::sending`], for a stream that `held` says is held up
+    /// elsewhere, and `behind` where it starts behind -- to send an image
+    /// first, or as it connects with every tenant to look at: no write
+    /// waits for it until it has caught up.
+    pub(crate) fn sending_as(
+        &self,
+        key: u64,
+        at: u64,
+        held: Option<&Arc<AtomicBool>>,
+        behind: bool,
+    ) {
+        let mut s = lock(&self.senders);
+        match s.iter_mut().find(|x| x.key == key) {
+            Some(x) => {
+                x.sent = at;
+                x.lagging = behind;
+            }
+            None => s.push(Sender {
+                key,
+                sent: at,
+                lagging: behind,
+                held: held.cloned(),
+            }),
+        }
+    }
+
+    /// A stream sending from it is held up elsewhere now: a write waiting
+    /// for it looks again, and waits no more.
+    pub(crate) fn wake_waits(&self) {
+        let _held = lock(&self.senders);
+        self.sent_cv.notify_all();
+    }
+
+    /// Whether a stream sending from it has not yet sent a write its disk
+    /// holds: the node's stream, which a tenant waits for before it closes
+    /// -- closed, its feed goes with it, and what the stream had not sent
+    /// would have come again as an image. A replica's stream holds its
+    /// tenant open anyway. Lagging or not: a stream that stopped reading is
+    /// cut at its socket's timeout, and is no sender after that.
+    pub(crate) fn unsent(&self) -> bool {
+        let durable = lock(&self.ring).durable;
+        lock(&self.senders).iter().any(|x| x.sent < durable)
+    }
+
+    /// The history the writes are on, as the database last wrote it.
+    pub(crate) fn lineage(&self) -> Vec<(u64, u64)> {
+        lock(&self.ring).lineage.clone()
+    }
+
+    /// Takes the history the database is on: as it opens or takes an
+    /// image, and from each history record it appends.
+    pub fn set_lineage(&self, lineage: &[(u64, u64)]) {
+        let mut r = lock(&self.ring);
+        if r.lineage != lineage {
+            r.lineage = lineage.to_vec();
+        }
     }
 
     /// The stream `key` has written everything up to `sent` into its
@@ -254,14 +393,15 @@ impl Feed {
         let deadline = Instant::now() + timeout;
         let mut s = lock(&self.senders);
         loop {
-            if s.iter().all(|x| x.lagging || x.sent >= upto) {
+            if !s.iter().any(|x| x.waited_for(upto)) {
                 return;
             }
             let now = Instant::now();
             if now >= deadline {
-                for x in s.iter_mut().filter(|x| x.sent < upto) {
+                for x in s.iter_mut().filter(|x| x.waited_for(upto)) {
                     x.lagging = true;
                 }
+                self.waited_out.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             s = self
@@ -283,6 +423,7 @@ impl Feed {
         r.epoch += 1;
         drop(r);
         self.cv.notify_all();
+        self.tell();
     }
 
     /// Ends every stream reading from this feed. A tenant being deleted or
@@ -291,6 +432,7 @@ impl Feed {
     pub fn close(&self) {
         lock(&self.ring).closed = true;
         self.cv.notify_all();
+        self.tell();
     }
 
     /// Takes streams again after a [`Self::close`] whose reason fell through.
@@ -310,6 +452,11 @@ impl Feed {
 
     pub(crate) fn epoch(&self) -> u64 {
         lock(&self.ring).epoch
+    }
+
+    /// Whether it holds no more streams: its database is going.
+    pub(crate) fn is_closed(&self) -> bool {
+        lock(&self.ring).closed
     }
 
     /// A record numbered `seq`, as its last write: it holds as many as
@@ -353,6 +500,13 @@ impl Feed {
         }
     }
 
+    /// A record appended and synced, as a [`Tee`] makes one: for tests.
+    #[cfg(test)]
+    pub(crate) fn push_durable(&self, seq: u64, bytes: &[u8]) {
+        self.push(seq, bytes);
+        self.mark_durable(seq);
+    }
+
     fn mark_durable(&self, upto: u64) {
         let mut r = lock(&self.ring);
         let upto = upto.min(r.seq);
@@ -360,17 +514,18 @@ impl Feed {
             r.durable = upto;
             drop(r);
             self.cv.notify_all();
+            self.tell();
         }
     }
 
     /// Whether every write after `cursor` is still kept.
-    fn serves(&self, cursor: u64) -> bool {
+    pub(crate) fn serves(&self, cursor: u64) -> bool {
         let r = lock(&self.ring);
         cursor == r.seq || cursor < r.seq && r.chunks.front().is_some_and(|c| c.first <= cursor + 1)
     }
 
     /// The durable records after `cursor`, up to about `max` bytes.
-    fn next(&self, cursor: u64, epoch: u64, max: usize) -> Next {
+    pub(crate) fn next(&self, cursor: u64, epoch: u64, max: usize) -> Next {
         let r = lock(&self.ring);
         if r.closed {
             return Next::Gone;
@@ -510,8 +665,14 @@ pub struct Tee {
 }
 
 impl Sink for Tee {
+    /// Passed on; a history record -- a fork, a replica following -- also
+    /// moves the feed's lineage, which no write's record carries.
     fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
-        self.file.append(bytes)
+        self.file.append(bytes)?;
+        if let Some(h) = history_in(bytes) {
+            self.feed.set_lineage(&h.lineage);
+        }
+        Ok(())
     }
     fn append_deferred(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.file.append_deferred(bytes)
@@ -619,14 +780,28 @@ impl Sink for Tee {
                     durable()?;
                     drop(syncing);
                     feed.mark_durable(upto);
-                    let sending = crate::trace::span("replication.wait_sent");
-                    feed.wait_sent(upto, SENT_WAIT);
-                    drop(sending);
+                    if !UNWAITED.with(|u| u.get()) {
+                        let sending = crate::trace::span("replication.wait_sent");
+                        feed.wait_sent(upto, SENT_WAIT);
+                        drop(sending);
+                    }
                     Ok(())
                 })))
             }
         }
     }
+}
+
+/// The history a history record holds, `[8][0][length][history]`; `None`
+/// for any other record.
+fn history_in(record: &[u8]) -> Option<History> {
+    if record.first() != Some(&fenec_core::history::RECORD) {
+        return None;
+    }
+    let mut pos = 1;
+    fenec_core::codec::get_uvarint(record, &mut pos).ok()?;
+    let len = fenec_core::codec::get_uvarint(record, &mut pos).ok()? as usize;
+    History::decode(record.get(pos..pos.checked_add(len)?)?).ok()
 }
 
 /// Opens a file for a server that has replicas, or is one, with its writes
@@ -677,6 +852,7 @@ fn open_as(
         true => fenec_core::fs::open_serving(path, mapped, wrap)?,
         false => fenec_core::fs::open_with(path, mapped, wrap)?,
     };
+    feed.set_lineage(&db.history().lineage);
     feed.start(db.change_seq());
     Ok((db, feed))
 }
@@ -962,7 +1138,7 @@ fn status(db: &Arc<RwLock<Database>>, repl: &Replication) -> Response {
     Response::json(200, out)
 }
 
-fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
+pub(crate) fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
     let len: usize = parts.iter().map(|p| p.len()).sum();
     let mut head = [0u8; 9];
     head[0] = tag;
@@ -974,7 +1150,7 @@ fn message(out: &mut impl Write, tag: u8, parts: &[&[u8]]) -> io::Result<()> {
     Ok(())
 }
 
-fn u64s(values: &[u64]) -> Vec<u8> {
+pub(crate) fn u64s(values: &[u64]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
@@ -1146,11 +1322,11 @@ impl Drop for Unlist<'_> {
 #[derive(Clone)]
 pub struct Upstream {
     url: String,
-    addr: String,
+    pub(crate) addr: String,
     /// What the stream hangs off: nothing for a file, `/t/<tenant>` for one
     /// tenant of a node that replicates its tenants.
-    base: String,
-    token: String,
+    pub(crate) base: String,
+    pub(crate) token: String,
 }
 
 /// A message of the stream, decoded.
@@ -1429,6 +1605,9 @@ impl Follower {
             g.adopt(fresh, &bytes).map_err(io::Error::other)?;
             g.follow(lineage).map_err(io::Error::other)?;
             if let Some(feed) = &self.feed {
+                // The image's history, which `follow` appends no record
+                // for where it is the one the image held.
+                feed.set_lineage(&g.history().lineage);
                 feed.start(g.change_seq());
             }
             debug_assert_eq!(g.change_seq(), seq);
@@ -1563,7 +1742,7 @@ impl Follower {
     }
 }
 
-fn connect(addr: &str) -> io::Result<TcpStream> {
+pub(crate) fn connect(addr: &str) -> io::Result<TcpStream> {
     let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
     for a in addr.to_socket_addrs()? {
         match TcpStream::connect_timeout(&a, Duration::from_secs(5)) {
@@ -1578,7 +1757,7 @@ fn connect(addr: &str) -> io::Result<TcpStream> {
 }
 
 /// The status line and the length of the body, when it has one.
-fn read_head(r: &mut impl BufRead) -> io::Result<(u16, Option<usize>)> {
+pub(crate) fn read_head(r: &mut impl BufRead) -> io::Result<(u16, Option<usize>)> {
     let mut line = String::new();
     r.read_line(&mut line)?;
     let status = line
@@ -1607,7 +1786,7 @@ fn read_head(r: &mut impl BufRead) -> io::Result<(u16, Option<usize>)> {
     }
 }
 
-fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+pub(crate) fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     let mut head = [0u8; 9];
     r.read_exact(&mut head)?;
     let len = u64::from_le_bytes(head[1..].try_into().unwrap());
@@ -1622,7 +1801,7 @@ fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     Ok((head[0], body))
 }
 
-fn u64_at(b: &[u8], at: usize) -> u64 {
+pub(crate) fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
 }
 
@@ -1706,6 +1885,39 @@ mod tests {
         // A mark past what was appended counts only what was.
         feed.mark_durable(99);
         assert_eq!(feed.durable(), 15);
+    }
+
+    #[test]
+    fn the_syncers_durability_waits_for_no_stream() {
+        let dir = std::env::temp_dir().join(format!(
+            "fenec-unwaited-{}-{:?}",
+            std::process::id(),
+            Instant::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.fenec");
+        let (mut db, feed) = open(path.to_str().unwrap(), 1 << 20).unwrap();
+        db.execute(&fenec_ql::parse_one("create collection c (x int)").unwrap())
+            .unwrap();
+        if let Some(d) = db.flush().unwrap() {
+            d().unwrap();
+        }
+        // A stream that sends nothing: a durable write's answer waits for
+        // it, the syncer's durability does not.
+        feed.sending(7, db.change_seq());
+        let write = |db: &mut Database| {
+            db.execute(&fenec_ql::parse_one("put c {x: 1}").unwrap())
+                .unwrap();
+            db.flush().unwrap().expect("a durability to run")
+        };
+        unwaited(write(&mut db)).unwrap();
+        assert_eq!(feed.waited_out(), 0);
+        let t0 = Instant::now();
+        write(&mut db)().unwrap();
+        assert!(t0.elapsed() >= SENT_WAIT);
+        assert_eq!(feed.waited_out(), 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

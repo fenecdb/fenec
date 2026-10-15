@@ -13,6 +13,7 @@ mod claims;
 mod fields;
 mod idempotency;
 mod mcp;
+mod node_archive;
 mod prepared;
 mod reach;
 mod replication;

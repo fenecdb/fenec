@@ -53,6 +53,8 @@ pub mod lease;
 pub mod link;
 pub mod mcp;
 pub mod metrics;
+pub mod node_archive;
+pub mod node_stream;
 pub mod quota;
 pub mod replication;
 pub mod request_id;
@@ -726,6 +728,18 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             continue;
         }
 
+        // The node's stream of every tenant (`node_stream.rs`), with the
+        // node's replication token: a body with no end, as a replica's
+        // stream is, which takes the connection over.
+        if let Backend::Tenants(tenants) = backend {
+            if req.path.starts_with("/_replication") {
+                if node_stream(&mut out, tenants, cfg, &req, peer) {
+                    continue;
+                }
+                return;
+            }
+        }
+
         // A request from here on is traced: what is above it -- a health
         // check, a scrape, a preflight, the studio's files -- would be most
         // of the spans and none of the time.
@@ -1176,6 +1190,35 @@ fn operation(req: &Request, shape: &str) -> &'static str {
         (Method::Delete, _) => "del",
         _ => "other",
     }
+}
+
+/// `/_replication/...` on a node of tenants: the stream of every tenant,
+/// which takes the connection over, or the refusal. Whether the connection
+/// goes on to its next request. Out of line and cold: inlined, the stream's
+/// whole session landed in the loop every request runs.
+#[cold]
+#[inline(never)]
+fn node_stream(
+    out: &mut TcpStream,
+    tenants: &Tenants,
+    cfg: &Config,
+    req: &Request,
+    peer: Option<std::net::SocketAddr>,
+) -> bool {
+    let _ = out.set_read_timeout(None);
+    let Some(resp) = node_stream::handle(out, tenants, req) else {
+        return false;
+    };
+    audit::http(req, resp.status, peer);
+    if cors(resp, cfg)
+        .write(out, req.keep_alive, req.method == Method::Head)
+        .is_err()
+        || !req.keep_alive
+    {
+        return false;
+    }
+    let _ = out.set_read_timeout(cfg.idle_timeout);
+    true
 }
 
 /// Resolves `/t/<tenant>/rest` and strips the prefix, so everything below

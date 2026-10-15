@@ -849,3 +849,64 @@ fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
     let db = fenec_core::fs::open(&opened).unwrap();
     assert_eq!(rows(&db, "get c"), rows(&p.db.read().unwrap(), "get c"));
 }
+
+/// A primary restored to an earlier moment and served again is on a history
+/// of its own, behind the archive: its image and writes would land among
+/// changes of the same numbers the archive holds -- a segment of the same
+/// name written over -- so the archiver refuses it and leaves the archive as
+/// it was.
+#[test]
+fn a_primary_restored_to_an_earlier_moment_is_refused_not_mixed_in() {
+    let d = dir("diverged");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection c (x int)");
+    let arch = d.join("archive");
+    let a = archiver(&arch, &p.url);
+    for i in 0..10 {
+        p.exec(&format!("put c {{x: {i}}}"));
+    }
+    archived(&arch, p.seq());
+    a.finish();
+    let end = p.seq();
+    let (db, _) = restored(&arch, &d.join("back.fenec"), Target::Change(end - 5));
+    drop(db);
+    let q = primary(&d.join("back.fenec"), replication::DEFAULT_BUFFER);
+    q.exec("put c {x: 100}");
+    let upstream = Upstream::new(&q.url, TOKEN.into()).unwrap();
+    let err = Archive::new(&arch)
+        .unwrap()
+        .follow(&upstream, &AtomicBool::new(false), &|_| {})
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    assert!(err.to_string().contains("does not lead from"), "{err}");
+    let (db, r) = restored(&arch, &d.join("still.fenec"), Target::End);
+    assert_eq!(r.seq, end);
+    assert_eq!(rows(&db, "get c").len(), 10);
+    assert_eq!(Archive::new(&arch).unwrap().verify().unwrap().images, 1);
+}
+
+/// An archiver behind the primary's feed is sent an image; with no write
+/// after it, no segment follows the gap it leaves, and verify names that
+/// gap all the same -- counted only before a segment, it said none.
+#[test]
+fn verify_names_a_gap_an_image_alone_ends() {
+    let d = dir("trailing");
+    let p = primary(&d.join("p.fenec"), 512);
+    p.exec("create collection c (x int)");
+    let arch = d.join("archive");
+    let a = archiver(&arch, &p.url);
+    for i in 0..5 {
+        p.exec(&format!("put c {{x: {i}}}"));
+    }
+    archived(&arch, p.seq());
+    a.finish();
+    let stopped = p.seq();
+    for i in 5..200 {
+        p.exec(&format!("put c {{x: {i}}}"));
+    }
+    let a = archiver(&arch, &p.url);
+    archived(&arch, p.seq());
+    a.finish();
+    let v = Archive::new(&arch).unwrap().verify().unwrap();
+    assert_eq!(v.gaps, vec![(stopped + 1, p.seq())], "{v:?}");
+}
