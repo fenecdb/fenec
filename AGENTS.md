@@ -52,8 +52,9 @@ make docs-types   # every data-lang="ts" example on the site under tsc --strict 
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make langchain-test   # the LangChain.js vector store over a database in the page and over fenec-server (needs `make wasm`)
 make ai-sdk-test   # integrations/ai-sdk/rag.js against the Vercel AI SDK's own mock models (needs `make wasm`)
-make cloudflare-test  # a database in a Durable Object's storage, SQL rows and values: persist, restore, storage failing part way, the example Worker under wrangler dev
+make cloudflare-test  # a database in a Durable Object's storage, SQL rows and values: persist, restore, storage failing part way, the example Worker under wrangler dev; then the global entry (entry/) in front of two regions' routers and of stand-ins
 make cloudflare-bench # a Durable Object's first near after an eviction, under wrangler dev, against the ones after (SIZES=1000,10000 to choose); rows a write and a checkpoint cost; a restore's peak memory
+make entry-bench      # the global entry under wrangler dev: a read by id through it, its tenant's home heard, in the colo's cache and never heard (a relay), against the router asked directly, in turns
 make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP and stdio, both eras, the docs' configs
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js and build.py's rules
@@ -989,6 +990,85 @@ a side: a pair's 20 tenants 64 ms against 67, one node's 10 over their
 replicas 43.5 against 45.5, the repair after it 157.5 against 196, a lease's
 tenants writing again 1.36 s after the cut against 1.37. Nothing below
 `fenec-http`'s lease and admin changed.
+
+**One URL reaches every region: a Worker learns each tenant's home from
+the routers** (`integrations/cloudflare/entry`, `region::HOME_HEADER`). A
+client had to know its tenant's region, a router of another relaying the
+request once, a hop between regions every request. The entry is a plain
+Worker -- Workers for Platforms' dispatch, about 17 ms, stays out of the
+path -- sending `/t/<tenant>/...` to the routers of the tenant's home, and
+asking nobody where that is: every request carries `Fenec-Home: 1`, and the
+router forwarding it to the tenant's node -- from its directory, or from
+its copy of the global one (`Target::Node` carries the node's region now)
+-- answers `Fenec-Home: <region>`, the node's; a relaying router names
+nothing and passes the home router's through. A tenant not heard goes to
+the region of the client's continent (`REGIONS`' `continents`,
+`request.cf.continent`) or `DEFAULT_REGION`, is relayed home once, and its
+next request goes home; a move across leaves the old region's router
+relaying it and the answer naming the new home, a hop and never an error.
+Rejected: the global router asked at each miss (its `--token`, which moves
+and deletes every tenant, in the Worker, a round trip to its region, and
+every unknown name a client tries a question for that one router), and
+Workers KV (read eventually consistently, billed a read, and something must
+write it). An isolate keeps 50 000 homes (`HOMES`), forgotten first heard
+first -- by use it was a delete and a set every request -- and shares each
+it learns through the colo's Cache API (`waitUntil`, read only on an
+isolate's miss; nothing on `workers.dev`). Asked for, so every other
+client's answer is the bytes it was: not asked, the router's added p50 was
+24.15 us against main's 24.1 (23.5-24.3 and 23.7-24.5, six runs a side in
+ABBA turns, `make shard-bench ARGS=latency`), and asked, a router answered
+in 80 us p50 against 79. A request goes on with what the client sent but
+the hop-by-hop headers, the routers' marks (`Fenec-Router`, `Fenec-Global`,
+`Fenec-Verified`, the last dropped from answers too) and every address a
+client claims (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`,
+`True-Client-IP`, `cf-*`); `X-Request-Id` is the client's or Cloudflare's
+ray id. The client is named in `Fenec-Client: <address> <mark>`, the
+address `CF-Connecting-IP`, the mark 16 bytes of HMAC-SHA256 of its text
+(`CLIENT_MARK_TEXT`) under `ENTRY_TOKEN`, base64url, as
+`audit::router_mark` is made -- not
+`CF-Connecting-IP` believed from Cloudflare's ranges, since a Worker sets
+it and `X-Real-IP` as it likes towards an origin outside Cloudflare
+(Cloudflare's HTTP headers page), so any account's Worker could claim any
+address -- and the routers do not read it yet: until they do, a refused
+token behind the entry waits by Cloudflare's address, and any good token
+through it starts that count again. The routers' CORS headers pass
+unchanged; with `CORS` (their `--http-cors`) the entry answers a preflight
+itself and puts the same headers on its own answers alone, which the test
+holds to a router's preflight. Only `/t/<tenant>/` is served: `/_shard/`
+where `ADMIN` names the global router, everything else and a tenant's
+`/_replication` a 404. A region's routers are tried from the one that
+answered last: Cloudflare's 521/522/523/525/526/530 never reached one, so
+any request goes on; a thrown fetch may have -- workerd says `Network
+connection lost.` of a connection refused and of one reset after the
+request alike (probed) -- so only a `GET`, `HEAD`, `OPTIONS` or a keyed
+request goes on, the router's own rule towards a node, any other a 502
+saying it may have run; every router failing is a 503 with `Retry-After`
+and `retry_after`, and no request goes to another region, whose router
+would relay to the same routers. A body up to a mebibyte is read whole for
+a retry, a longer one streamed to one router: `request.body` handed on
+keeps its length (probed), and a router refuses a chunked body (411). An
+answer goes back as its body arrives; `request.signal` (the
+`enable_request_signal` flag) cancels the fetch with the client. Waiting on
+a fetch is not CPU time and an HTTP-triggered Worker has no duration limit
+while its client is connected (Cloudflare's Workers limits), so a held
+write or a stream is not cut; a proxied hostname's answer must start within
+the proxy read timeout (100 s below Enterprise), past `Fenec-Wait`'s 30.
+Under `wrangler dev` a client gone before its answer's head never reaches
+the Worker -- wrangler's own proxy Worker fetches it detached, and workerd
+notices a client as it writes -- so that case is held in Node, the handler
+over Node's `fetch`; a stream is let go of at a stand-in router 2 s after
+its client, at a node through a router in 4 to 8. And a router waiting on a
+node's held answer does not watch its client: a claim whose client went
+through the router took the next job, leased to nobody, where asked of the
+node itself it passed it on (a follow-up of the router's, not the entry's).
+`entry.test.js` runs the Worker under `wrangler dev` in front of real
+routers and nodes (`entry/cluster.mjs`: a global router, us with a standby,
+eu, each on port 0) and of stand-ins. Under `wrangler dev`, a read by id
+took 79-82 us p50 of us's router, 1.17-1.26 ms through the entry with its
+home heard -- 0.65-0.75 past wrangler's proxy -- 1.24-1.32 never heard (eu
+relaying, 106-113 us asked directly) and 1.56-1.66 heard through
+miniflare's cache, two runs at loads of 3 to 6.6 (`make entry-bench`):
+loopback and workerd, not a colo and a region away.
 
 **A scoped token is held to its rules at every level, twice for writes**
 (`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement

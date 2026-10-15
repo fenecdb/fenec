@@ -285,6 +285,37 @@ fn query(port: u16, tenant: &str, sql: &str) -> (u16, String) {
     call(port, "POST", &format!("/t/{tenant}/query"), &body, None)
 }
 
+/// A count of `tenant`'s notes through the router at `port`, asking for the
+/// tenant's home region (`Fenec-Home`) or not: the status and the region
+/// the answer names.
+fn home(port: u16, tenant: &str, ask: bool) -> (u16, Option<String>) {
+    let body = r#"{"query":"get notes count"}"#;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let asked = if ask { "Fenec-Home: 1\r\n" } else { "" };
+    write!(
+        s,
+        "POST /t/{tenant}/query HTTP/1.1\r\nHost: x\r\n{asked}Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let head = out.split_once("\r\n\r\n").map_or(out.as_str(), |(h, _)| h);
+    let named: Vec<&str> = head
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(k, _)| k.eq_ignore_ascii_case("fenec-home"))
+        .map(|(_, v)| v.trim())
+        .collect();
+    assert!(named.len() <= 1, "one home named at most: {head}");
+    (
+        out[9..12].parse().unwrap(),
+        named.first().map(|v| v.to_string()),
+    )
+}
+
 /// Waits until `check` holds, 60 s at most: a bound on something that must
 /// happen, never on how soon.
 fn until(what: &str, mut check: impl FnMut() -> bool) {
@@ -605,6 +636,59 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
     assert_eq!(status, 204, "{body}");
     let (status, _) = shard(w.global, "GET", "/_shard/tenants/acme", "");
     assert_eq!(status, 404);
+}
+
+/// A request asking for its tenant's home (`Fenec-Home`) is told the
+/// region of the node it reached, by whichever router it was sent to --
+/// the one placing the tenant, or one relaying it there, which names
+/// nothing of its own -- and after a move across, the region it went to.
+/// One that does not ask is told nothing: the global entry
+/// (integrations/cloudflare/entry) learns where to send a tenant from it.
+#[test]
+fn a_tenants_home_is_named_to_a_request_asking_for_it() {
+    let w = World::new("home");
+    until("us's copy of the global directory arrives", || {
+        shard(w.us, "GET", "/_shard/regions", "")
+            .1
+            .contains(r#""name":"us""#)
+    });
+    for (tenant, region) in [("acme", "us"), ("beta", "eu")] {
+        let body =
+            format!(r#"{{"region":"{region}","schema":"create collection notes (title text)"}}"#);
+        let (status, answer) = shard(w.global, "PUT", &format!("/_shard/tenants/{tenant}"), &body);
+        assert_eq!(status, 201, "{tenant}: {answer}");
+    }
+    let us = Some("us".to_string());
+    let eu = Some("eu".to_string());
+    // us's tenant: placed by us's router, relayed to it by the global one.
+    assert_eq!(home(w.us, "acme", true), (200, us.clone()));
+    assert_eq!(home(w.global, "acme", true), (200, us.clone()));
+    assert_eq!(home(w.global, "acme", false), (200, None));
+    assert_eq!(home(w.us, "acme", false), (200, None));
+    until("the standby's directory arrives", || {
+        home(w.standby, "acme", true) == (200, us.clone())
+    });
+    // eu's, placed by the global directory: by the global router, and by
+    // us's router from its copy of it, which forwards to the node itself.
+    assert_eq!(home(w.global, "beta", true), (200, eu.clone()));
+    until("us's copy places beta", || {
+        home(w.us, "beta", true) == (200, eu.clone())
+    });
+    // A tenant no directory holds: the router's own 404, naming nothing.
+    assert_eq!(home(w.global, "nobody", true), (404, None));
+
+    // acme moved across to eu: every router names eu from then on.
+    let (status, body) = shard(
+        w.global,
+        "POST",
+        "/_shard/tenants/acme/move",
+        r#"{"region":"eu"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(home(w.global, "acme", true), (200, eu.clone()));
+    until("us's router sends acme to eu", || {
+        home(w.us, "acme", true) == (200, eu.clone())
+    });
 }
 
 /// us's router lost -- cut off, say, and its standby promoted over it --

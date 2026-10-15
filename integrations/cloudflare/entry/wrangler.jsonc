@@ -1,0 +1,36 @@
+{
+  // The global entry: `https://<one host>/t/<tenant>/...` sent to the
+  // routers of the tenant's home region (entry.js says how it learns it).
+  // Named with --config, as the example is.
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "fenecdb-entry",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  // `request.signal` aborts once the client goes away, and the fetch to the
+  // router it is handed to is cancelled with it: a subscription, a held
+  // write or a long batch lets go of its router at once.
+  "compatibility_flags": ["enable_request_signal"],
+  // One host, a custom domain: the Cache API the isolates of a colo share
+  // the tenants' homes through does nothing on workers.dev.
+  // "routes": [{ "pattern": "db.example.com", "custom_domain": true }],
+  "vars": {
+    // Each region by the name its routers give it, its routers in the order
+    // to try -- the one keeping its directory, then its standbys -- each an
+    // HTTPS hostname (a Cloudflare Tunnel to the router: fenecdb speaks no
+    // TLS, and a Worker fetches no bare IP address), and the continents
+    // whose clients send a tenant the entry has not seen there first.
+    "REGIONS": {
+      "us": { "routers": ["https://router-1.us.example.com", "https://router-2.us.example.com"], "continents": ["NA", "SA"] },
+      "eu": { "routers": ["https://router-1.eu.example.com", "https://router-2.eu.example.com"], "continents": ["EU", "AF"] }
+    },
+    // Where a tenant not heard of goes from any other continent.
+    "DEFAULT_REGION": "eu",
+    // The routers' --http-cors, for the preflights answered here; unset,
+    // they go on to the routers.
+    "CORS": ""
+    // "ADMIN": ["https://router-1.eu.example.com"]: /_shard/ to the global
+    // router. Unset, as every path but /t/<tenant>/ is, a 404 here.
+  }
+  // The key of the client's mark (Fenec-Client), the routers' to share:
+  //   npx wrangler secret put ENTRY_TOKEN --config entry/wrangler.jsonc
+}

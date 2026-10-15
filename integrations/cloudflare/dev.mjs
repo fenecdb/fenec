@@ -20,14 +20,29 @@ export function readyUrl(log) {
   return /Ready on (http:\/\/\S+)\s/.exec(log.replace(ANSI, ''))?.[1] ?? null;
 }
 
+/**
+ * The address of the Worker's own workerd socket in what `wrangler dev`
+ * printed under `--log-level debug`; null until it is there. `wrangler
+ * dev`'s "Ready on" address is a proxy Worker of its own, which fetches
+ * the Worker detached from its client's request: a client gone before its
+ * answer's head never cancels the Worker's request there, as it does on
+ * Cloudflare, where nothing stands between.
+ */
+export function innerUrl(log) {
+  const m = /"userWorkerUrl":\{"protocol":"(https?:)","hostname":"([^"]+)","port":"(\d+)"\}/.exec(log);
+  return m ? `${m[1]}//${m[2]}:${m[3]}` : null;
+}
+
 /** Every `wrangler dev` started and not yet ended: a test that failed ends them all. */
 export const running = new Set();
 
 /**
  * `wrangler dev` for the Worker in `dir` (beside this file, or absolute)
  * over the storage in `state`, with `vars` its environment; resolves once
- * it says it is ready to `{url, log(), stop()}`, and rejects with what it
- * printed when it ends, or cannot start, before that.
+ * it says it is ready to `{url, inner, log(), stop()}`, and rejects with
+ * what it printed when it ends, or cannot start, before that. `inner`,
+ * the Worker's own socket past wrangler's proxy ({@link innerUrl}), is read
+ * where `{ inner: true }` asks for it.
  *
  * On port 0, the port read off the line saying it is ready: one found free
  * and handed over is free only until another suite on the machine takes it.
@@ -35,11 +50,12 @@ export const running = new Set();
  * killing wrangler alone left those holding its output open, and the test
  * process with them. With no colour, the line plain to read.
  */
-export function serve(dir, state, vars = {}) {
+export function serve(dir, state, vars = {}, { inner = false } = {}) {
   const child = spawn(
     resolve(here, 'node_modules/.bin/wrangler'),
     [
       'dev', '--config', 'wrangler.jsonc', '--port', '0', '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false',
+      ...(inner ? ['--log-level', 'debug'] : []),
       ...Object.entries(vars).flatMap(([k, v]) => ['--var', `${k}:${v}`]),
     ],
     {
@@ -57,7 +73,7 @@ export function serve(dir, state, vars = {}) {
     const read = (d) => {
       log += d;
       const url = readyUrl(log);
-      if (url) ready(url);
+      if (url && (!inner || innerUrl(log))) ready(url);
     };
     child.stdout.on('data', read);
     child.stderr.on('data', read);
@@ -66,6 +82,7 @@ export function serve(dir, state, vars = {}) {
   });
   return url.then((url) => ({
     url,
+    inner: inner ? innerUrl(log) : null,
     log: () => log,
     async stop() {
       if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid, 'SIGINT');

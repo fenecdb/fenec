@@ -17,7 +17,7 @@ SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
 .PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
-	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench \
+	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
 	site site-serve site-deploy
@@ -534,8 +534,11 @@ ai-sdk-test:
 ## A database kept in a Durable Object's storage: persist, restore, and
 ## storage that fails part way, against stand-ins for a SQLite-backed and a
 ## key-value backed object; then the example Worker under `wrangler dev`,
-## stopped and started again (needs `make wasm`)
+## stopped and started again (needs `make wasm`); then the global entry
+## (entry/) under `wrangler dev` in front of two regions' fenec-shard
+## routers and fenec-server nodes, and in front of stand-ins
 cloudflare-test:
+	$(CARGO) build -p fenec-server -p fenec-shard
 	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## A Durable Object's first answer after an eviction: the example Worker
@@ -545,6 +548,14 @@ cloudflare-test:
 ## restore holds at its peak (memory.mjs; ROWS=50000)
 cloudflare-bench:
 	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && node coldstart.mjs && node rows.mjs && node memory.mjs
+
+## What the global entry adds to a request under `wrangler dev`: a read by
+## id through it -- the tenant's home heard, in the colo's cache, never
+## heard (a relay) -- against the router asked directly, in turns
+## (integrations/cloudflare/entry/bench.mjs; N=2000 ROUNDS=6 to choose)
+entry-bench:
+	$(CARGO) build --release -p fenec-server -p fenec-shard
+	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && BUILD=release node entry/bench.mjs
 
 ## What `order ... collate tr` costs over a million Turkish names, in fenecdb
 ## and (after `make pgvector-up`) in PostgreSQL under ICU's tr-x-icu

@@ -44,6 +44,6 @@
     "esbuild@0.28.1": true
   },
   "scripts": {
-    "test": "node --test test.js example.test.js worker.test.js"
+    "test": "node --test test.js example.test.js worker.test.js entry.test.js"
   }
 }
