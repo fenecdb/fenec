@@ -1,6 +1,7 @@
 // What the global entry adds to a request, under `wrangler dev` on this
 // machine: a read by id of a tenant in us, asked of us's router directly,
-// and through the entry -- its home heard (the common path), heard from
+// and through the entry -- its home heard (the common path), and so with
+// the client named (`ENTRY_TOKEN`, an HMAC a request), heard from
 // the colo's cache alone (an isolate that has not seen the tenant), and
 // never heard (every request sent to eu first, whose router relays it to
 // us: the miss); us's router asked for the tenant's home as the entry asks
@@ -33,7 +34,14 @@ const agent = () => new http.Agent({ keepAlive: true, maxSockets: 1 });
 function timed(url, body, ag, ask) {
   return new Promise((done, failed) => {
     const t0 = process.hrtime.bigint();
-    const headers = { Authorization: `Bearer ${cluster.DATA}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) };
+    // CF-Connecting-IP as Cloudflare would put it on: an entry with an
+    // ENTRY_TOKEN names the client by it, an HMAC a request.
+    const headers = {
+      Authorization: `Bearer ${cluster.DATA}`,
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      'CF-Connecting-IP': '203.0.113.7',
+    };
     if (ask) headers['Fenec-Home'] = '1';
     const req = http.request(
       url,
@@ -75,12 +83,19 @@ try {
     workers.push(f);
     return f;
   };
-  const [heard, cached, never] = [await front({}), await front({ HOMES: '0' }), await front({ HOMES: '0', HOMES_CACHE: 'off' })];
+  const [heard, named, cached, never] = [
+    await front({}),
+    await front({ ENTRY_TOKEN: 'bench-secret' }),
+    await front({ HOMES: '0' }),
+    await front({ HOMES: '0', HOMES_CACHE: 'off' }),
+  ];
   const paths = {
     'us router, direct': w.us.url,
     '  asking the home (Fenec-Home)': w.us.url,
     'entry, home heard': heard.url,
     '  past wrangler\'s proxy': heard.inner,
+    'entry, home heard, client named': named.url,
+    '  past wrangler\'s proxy   ': named.inner,
     'entry, home in the colo cache': cached.url,
     '  past wrangler\'s proxy ': cached.inner,
     'entry, never heard (eu relays)': never.url,

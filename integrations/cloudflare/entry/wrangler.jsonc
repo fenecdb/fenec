@@ -25,12 +25,16 @@
     },
     // Where a tenant not heard of goes from any other continent.
     "DEFAULT_REGION": "eu",
-    // The routers' --http-cors, for the preflights answered here; unset,
-    // they go on to the routers.
+    // The routers' --http-cors, for the preflights answered here and the
+    // entry's own answers. Set it wherever the routers have --http-cors:
+    // left empty, a region down or a path refused is an answer with no CORS
+    // headers, which a page reads as the network failing (the entry logs a
+    // warning once it sees the routers send them).
     "CORS": ""
     // "ADMIN": ["https://router-1.eu.example.com"]: /_shard/ to the global
     // router. Unset, as every path but /t/<tenant>/ is, a 404 here.
   }
-  // The key of the client's mark (Fenec-Client), the routers' to share:
+  // The key of the client's mark (Fenec-Client: an HMAC of the client's
+  // address and the time), the routers' to share:
   //   npx wrangler secret put ENTRY_TOKEN --config entry/wrangler.jsonc
 }

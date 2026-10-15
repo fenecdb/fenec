@@ -1001,11 +1001,18 @@ asking nobody where that is: every request carries `Fenec-Home: 1`, and the
 router forwarding it to the tenant's node -- from its directory, or from
 its copy of the global one (`Target::Node` carries the node's region now)
 -- answers `Fenec-Home: <region>`, the node's; a relaying router names
-nothing and passes the home router's through. A tenant not heard goes to
-the region of the client's continent (`REGIONS`' `continents`,
-`request.cf.continent`) or `DEFAULT_REGION`, is relayed home once, and its
-next request goes home; a move across leaves the old region's router
-relaying it and the answer naming the new home, a hop and never an error.
+nothing and passes the home router's through, and the entry takes it off
+the answer (a router names it on a 401 too, to anyone with a tenant's
+name). A tenant not heard goes to the region of the client's continent
+(`REGIONS`' `continents`, `request.cf.continent`) or `DEFAULT_REGION`, is
+relayed home once, and its next request goes home; where that region's
+routers fail, it goes on to the others (`guesses`), since any router
+relays a tenant home and only the home's places it on a node -- a known
+home is never left (a 503), and a region found down is asked last for 10 s
+(`DOWN_MS`): a write that may have reached a dead guess is not resent, and
+without it every write of a tenant not heard was a 502 while the default
+region was down. A move across leaves the old region's router relaying
+the tenant and the answer naming the new home, a hop and never an error.
 Rejected: the global router asked at each miss (its `--token`, which moves
 and deletes every tenant, in the Worker, a round trip to its region, and
 every unknown name a client tries a question for that one router), and
@@ -1017,57 +1024,82 @@ isolate's miss; nothing on `workers.dev`). Asked for, so every other
 client's answer is the bytes it was: not asked, the router's added p50 was
 24.15 us against main's 24.1 (23.5-24.3 and 23.7-24.5, six runs a side in
 ABBA turns, `make shard-bench ARGS=latency`), and asked, a router answered
-in 80 us p50 against 79. A request goes on with what the client sent but
-the hop-by-hop headers, the routers' marks (`Fenec-Router`, `Fenec-Global`,
+in 82-83 us p50 against 81. A path is judged as the router and the node read
+it, decoded as fenec-http decodes one (`percentDecode`, `segments`):
+WHATWG's URL leaves `%5F` and `%2F` encoded, and `/t/acme/%5Freplication`
+with a tenant's replication token was its whole replication stream through
+the public entry. A request goes on with what the client sent but the
+hop-by-hop headers, the routers' marks (`Fenec-Router`, `Fenec-Global`,
 `Fenec-Verified`, the last dropped from answers too) and every address a
 client claims (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`,
 `True-Client-IP`, `cf-*`); `X-Request-Id` is the client's or Cloudflare's
-ray id. The client is named in `Fenec-Client: <address> <mark>`, the
-address `CF-Connecting-IP`, the mark 16 bytes of HMAC-SHA256 of its text
-(`CLIENT_MARK_TEXT`) under `ENTRY_TOKEN`, base64url, as
-`audit::router_mark` is made -- not
-`CF-Connecting-IP` believed from Cloudflare's ranges, since a Worker sets
-it and `X-Real-IP` as it likes towards an origin outside Cloudflare
-(Cloudflare's HTTP headers page), so any account's Worker could claim any
-address -- and the routers do not read it yet: until they do, a refused
-token behind the entry waits by Cloudflare's address, and any good token
-through it starts that count again. The routers' CORS headers pass
-unchanged; with `CORS` (their `--http-cors`) the entry answers a preflight
-itself and puts the same headers on its own answers alone, which the test
-holds to a router's preflight. Only `/t/<tenant>/` is served: `/_shard/`
-where `ADMIN` names the global router, everything else and a tenant's
-`/_replication` a 404. A region's routers are tried from the one that
-answered last: Cloudflare's 521/522/523/525/526/530 never reached one, so
-any request goes on; a thrown fetch may have -- workerd says `Network
-connection lost.` of a connection refused and of one reset after the
-request alike (probed) -- so only a `GET`, `HEAD`, `OPTIONS` or a keyed
-request goes on, the router's own rule towards a node, any other a 502
-saying it may have run; every router failing is a 503 with `Retry-After`
-and `retry_after`, and no request goes to another region, whose router
-would relay to the same routers. A body up to a mebibyte is read whole for
-a retry, a longer one streamed to one router: `request.body` handed on
-keeps its length (probed), and a router refuses a chunked body (411). An
-answer goes back as its body arrives; `request.signal` (the
-`enable_request_signal` flag) cancels the fetch with the client. Waiting on
-a fetch is not CPU time and an HTTP-triggered Worker has no duration limit
-while its client is connected (Cloudflare's Workers limits), so a held
-write or a stream is not cut; a proxied hostname's answer must start within
-the proxy read timeout (100 s below Enterprise), past `Fenec-Wait`'s 30.
-Under `wrangler dev` a client gone before its answer's head never reaches
-the Worker -- wrangler's own proxy Worker fetches it detached, and workerd
-notices a client as it writes -- so that case is held in Node, the handler
-over Node's `fetch`; a stream is let go of at a stand-in router 2 s after
-its client, at a node through a router in 4 to 8. And a router waiting on a
-node's held answer does not watch its client: a claim whose client went
-through the router took the next job, leased to nobody, where asked of the
-node itself it passed it on (a follow-up of the router's, not the entry's).
-`entry.test.js` runs the Worker under `wrangler dev` in front of real
-routers and nodes (`entry/cluster.mjs`: a global router, us with a standby,
-eu, each on port 0) and of stand-ins. Under `wrangler dev`, a read by id
-took 79-82 us p50 of us's router, 1.17-1.26 ms through the entry with its
-home heard -- 0.65-0.75 past wrangler's proxy -- 1.24-1.32 never heard (eu
-relaying, 106-113 us asked directly) and 1.56-1.66 heard through
-miniflare's cache, two runs at loads of 3 to 6.6 (`make entry-bench`):
+ray id. The client is named in `Fenec-Client: <address> <seconds>
+<mark>`, the address `CF-Connecting-IP`, the mark 16 bytes of HMAC-SHA256
+of `fenec-client <address> <seconds>` under `ENTRY_TOKEN`, base64url
+(`clientMark`): bound to the address and the time, a mark seen names that
+address for a minute, where one of the token alone, as `audit::router_mark`
+is, would name any address for good -- and not `CF-Connecting-IP` believed
+from Cloudflare's ranges, since a Worker sets it and `X-Real-IP` as it
+likes towards an origin outside Cloudflare (Cloudflare's HTTP headers page),
+so any account's Worker could claim any address. The routers do not read
+it yet. What they must (V3): with `--entry-token`, parse the header, take
+the seconds within 60 of their clock, check the mark in constant time
+against their own HMAC of `fenec-client <address> <seconds>`, and use the
+address in place of the connection's peer for that request alone -- the
+refusal's wait and count, a verified token's clearing, the audit and slow
+lines' peer, the trace, the `Fenec-Router` they name to a node or a relay
+-- still waiting a refusal out themselves and still relaying a tenant of
+another region, as for a relayed request they do neither; and drop the
+header from what they forward. Until they do, a refused token behind the
+entry waits by Cloudflare's address, and any good token through it starts
+that count again. The routers' CORS headers pass unchanged; with `CORS`
+(their `--http-cors`) the entry answers a preflight itself and puts the
+same headers on its own answers alone, which the test holds to a router's
+preflight, and an isolate seeing a router's `Access-Control-Allow-Origin`
+with no `CORS` logs it once: its own 503s would read as the network
+failing. Only `/t/<tenant>/` is served: `/_shard/` where `ADMIN` names the
+global router, everything else and a tenant's `/_replication` a 404. A
+region's routers are tried from the one that answered last; every answer a
+router writes carries `X-Request-Id`, and one without it is not the
+router's (`judged`). Cloudflare's 521/523/525/526/530 never reached one, so
+any request goes on; one that may have -- a thrown fetch (workerd says
+`Network connection lost.` of a connection refused and of one reset after
+the request alike, probed), Cloudflare's 520/522/524 (its 522 page counts a
+request unacknowledged for 90 s on a connection made), a tunnel's connector
+answering 502 for a router it cannot reach (Cloudflare's tunnel
+troubleshooting: 530 means no connector, the 502 a connector up and its
+origin not) -- goes on only for a `GET`, `HEAD`, `OPTIONS` or a keyed
+request, the router's own rule towards a node, any other a 502 saying it
+may have run; a router's own 502 is its answer. A body up to a mebibyte is
+read whole for a retry, a longer one streamed to one router (`request.body`
+handed on keeps its length, probed; a router refuses a chunked body, 411),
+and one sent with no length is read up to a mebibyte and refused past it
+(411): read whole, it was as large as a client sent, in isolates sharing
+128 MB. An answer goes back as its body arrives; `request.signal` (the
+`enable_request_signal` flag) cancels the fetch with the client. Waiting
+on a fetch is not CPU time and an HTTP-triggered Worker has no duration
+limit while its client is connected (Cloudflare's Workers limits), so a
+held write or a stream is not cut; a proxied hostname's answer must start
+within the proxy read timeout (100 s below Enterprise), past
+`Fenec-Wait`'s 30. Under `wrangler dev` a client gone before its answer's
+head never reaches the Worker -- workerd notices a client only as it writes
+to it, past wrangler's own proxy Worker too -- so that case is held in Node,
+the handler over Node's `fetch`; a stream is let go of at a stand-in router
+2 s after its client, at a node through a router in 4 to 8. And a router
+waiting on a node's held answer does not watch its client (`upstream.rs`'s
+`exchange` blocks in `read_line`, `forward` reads nothing of the client): a
+claim whose client went through the router took the next job, leased to
+nobody, where asked of the node itself it passed it on -- the router's to
+fix, so cancellation reaches the router and stops there. `entry.test.js`
+runs the Worker under `wrangler dev` in front of real routers and nodes
+(`entry/cluster.mjs`: a global router, us with a standby, eu, each on port
+0) and of stand-ins (a tunnel's connector, Cloudflare's 522 and 530), each
+fix held by a test that fails without it. Under `wrangler dev`, a read by
+id took 81 us p50 of us's router, 1.18-1.22 ms through the entry with its
+home heard -- 0.66-0.68 past wrangler's proxy -- and 1.23-1.24 with the
+client named besides (an HMAC a request), 1.29-1.31 never heard (eu
+relaying, 114-115 us asked directly) and 1.60-1.61 heard through
+miniflare's cache, two runs at loads of 3.4 to 5 (`make entry-bench`):
 loopback and workerd, not a colo and a region away.
 
 **A scoped token is held to its rules at every level, twice for writes**

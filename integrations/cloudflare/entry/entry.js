@@ -27,41 +27,50 @@ export const HOME = 'fenec-home';
 
 /**
  * The header the entry names its client in for the routers: `<address>
- * <mark>`, the mark 16 bytes of HMAC-SHA256 of {@link CLIENT_MARK_TEXT}
- * under the entry's token, base64url, as a router names its client to a
- * node (`Fenec-Router`, fenec-http's `audit::router_mark`). Behind the
- * entry every request reaches a router from Cloudflare's addresses, so the
+ * <seconds> <mark>`, the mark 16 bytes of HMAC-SHA256 of `fenec-client
+ * <address> <seconds>` under the entry's token, base64url ({@link
+ * clientMark}), the seconds the Unix time it was made at. Behind the entry
+ * every request reaches a router from Cloudflare's addresses, so the
  * router's wait after a refused token would key every client to them. A
  * Worker controls `CF-Connecting-IP` and `X-Real-IP` on what it sends to an
  * origin outside Cloudflare (Cloudflare's "HTTP request headers" page), so
  * any Worker of any account can claim any address from Cloudflare's
  * ranges: a router may believe the address only beside a secret it shares
- * with this entry, never by the peer's address.
+ * with this entry, never by the peer's address. Bound to the address and
+ * the time, a mark seen once names that address alone, and for a minute:
+ * a mark of the token alone, as a router's to a node, would let whoever saw
+ * one claim any address for good.
  */
 export const CLIENT = 'fenec-client';
-
-/** What the client mark is an HMAC of. */
-export const CLIENT_MARK_TEXT = 'fenec-client: a request through the entry, the client named beside it';
 
 /** How many tenants' homes an isolate keeps by default. */
 export const HOMES = 50_000;
 
 /**
- * A body up to this is read whole before it goes, so it can go to a
- * region's next router where the first cannot be reached; a longer one is
- * streamed to one router, its length kept (a router refuses a chunked
- * body, 411). 1 MiB: what isolates sharing 128 MB hold for a request's
- * retry, against a load's pages of many megabytes.
+ * A body up to this is read whole before it goes, so it can go to a next
+ * router where the first cannot be reached; a longer one is streamed to
+ * one router, its length kept (a router refuses a chunked body, 411), and
+ * one sent with no length past it is refused here (411). 1 MiB: what
+ * isolates sharing 128 MB hold for a request's retry, against a load's
+ * pages of many megabytes and the routers' 64 MiB ceiling.
  */
 export const BUFFER_AT = 1 << 20;
 
 /**
- * Answers Cloudflare gives a Worker's fetch where the origin was never
- * reached -- refused (521), not connected (522), unreachable (523), its
- * TLS failed (525, 526), no tunnel connector (530) -- so the router cannot
- * have run the request. fenecdb sends none of them.
+ * How long a region whose routers all failed is asked last for a tenant
+ * whose home is not known: any region's router relays it home, and a
+ * request sent to one that may have run it cannot be sent again.
  */
-const UNREACHED = new Set([521, 522, 523, 525, 526, 530]);
+export const DOWN_MS = 10_000;
+
+/**
+ * Answers Cloudflare gives a Worker's fetch where the origin was never
+ * reached -- refused (521), unreachable (523), its TLS failed (525, 526),
+ * no tunnel connector (530) -- so the router cannot have run the request.
+ * Not 522: Cloudflare's page counts a lost acknowledgement of the request's
+ * bytes among its time-outs. fenecdb sends none of them.
+ */
+const UNREACHED = new Set([521, 523, 525, 526, 530]);
 
 /** Methods a router may be sent twice (Go's net/http rule, the router's own towards a node). */
 const REPEATABLE = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -100,10 +109,12 @@ const DROPPED = new Set([
 ]);
 
 /**
- * Answer headers never sent back: hop by hop, and whether a node verified
- * a token, which a router tells only a router relaying for a client.
+ * Answer headers never sent back: hop by hop; whether a node verified a
+ * token, which a router tells only a router relaying for a client; and the
+ * tenant's home, which the entry asked for itself and a client did not --
+ * a router names it on a refusal too, so to anyone with a tenant's name.
  */
-const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'fenec-verified'];
+const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'fenec-verified', HOME];
 
 /**
  * The headers fenec-http's `cors::headers` writes under `--http-cors`: the
@@ -153,6 +164,9 @@ function origin(url, what) {
  *   the first of `REGIONS` without it.
  * - `CORS`: the routers' `--http-cors`, for the preflights the entry
  *   answers and its own answers; none without it, preflights going on.
+ *   Set it wherever the routers have `--http-cors`: without it the entry's
+ *   own answers -- a region down, a path refused -- carry none, and a page
+ *   reads them as the network failing.
  * - `ADMIN`: the global router and its standbys, to send `/_shard/` to;
  *   without it `/_shard/` is a 404 here, as every other path but `/t/` is.
  * - `HOMES`: how many tenants' homes an isolate keeps (50 000).
@@ -187,6 +201,8 @@ export function configure(env) {
     homes,
     share: env.HOMES_CACHE !== 'off',
     token: env.ENTRY_TOKEN || null,
+    // The token's HMAC key, imported at the first request naming a client.
+    key: null,
   };
 }
 
@@ -197,35 +213,79 @@ function b64url(bytes) {
   return btoa(s).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
 }
 
-/** The mark the entry names its client beside ({@link CLIENT}): worked out once an isolate. */
-export async function clientMark(token) {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey('raw', enc.encode(token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(CLIENT_MARK_TEXT)));
+const enc = new TextEncoder();
+
+/** The HMAC key the client's mark is made under. */
+export function markKey(token) {
+  return crypto.subtle.importKey('raw', enc.encode(token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+}
+
+/** The mark of `address` at `seconds`: 16 bytes of HMAC-SHA256 of `fenec-client <address> <seconds>`, base64url. */
+export async function clientMark(key, address, seconds) {
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', await key, enc.encode(`fenec-client ${address} ${seconds}`)));
   return b64url(mac.subarray(0, 16));
 }
 
 /**
- * The headers a request goes to a router with: `mark` names the client,
- * where there is one. A header a client names in `Connection` cannot be
- * told apart here -- the runtime keeps `Connection` from the Worker -- and
- * goes on: a router reads no header it does not know.
+ * The headers a request goes to a router with: `client` the {@link CLIENT}
+ * header's value, where there is one. A header a client names in
+ * `Connection` cannot be told apart here -- the runtime keeps `Connection`
+ * from the Worker -- and goes on: a router reads no header it does not know.
  */
-export function sentHeaders(incoming, mark) {
+export function sentHeaders(incoming, client) {
   const out = new Headers();
   for (const [k, v] of incoming) {
     if (DROPPED.has(k) || k.startsWith('cf-')) continue;
     out.append(k, v);
   }
   out.set(HOME, '1');
-  // The client's address as Cloudflare saw it: the client cannot set it.
-  const ip = incoming.get('cf-connecting-ip');
-  if (mark && ip && !/\s/.test(ip)) out.set(CLIENT, `${ip} ${mark}`);
+  if (client) out.set(CLIENT, client);
   // The router takes a client's request id, or makes one: Cloudflare's ray
   // id, which every Cloudflare log of the request carries, where the client
   // sent none.
   if (!out.has('x-request-id') && incoming.has('cf-ray')) out.set('x-request-id', incoming.get('cf-ray'));
   return out;
+}
+
+/** The {@link CLIENT} header's value: the client's address as Cloudflare saw it -- the client cannot set it -- marked now. */
+async function clientNamed(cfg, incoming) {
+  const ip = incoming.get('cf-connecting-ip');
+  if (!cfg.token || !ip || /\s/.test(ip)) return null;
+  cfg.key ??= markKey(cfg.token);
+  const seconds = Math.floor(Date.now() / 1000);
+  return `${ip} ${seconds} ${await clientMark(cfg.key, ip, seconds)}`;
+}
+
+/**
+ * A path decoded as fenec-http decodes one (`http::percent_decode`): `%XX`
+ * a byte, `+` a space, an invalid sequence left as it is, the bytes read as
+ * UTF-8. The router and the node route by the path so decoded, from the
+ * target the entry sends as it came, so the entry judges a path by the
+ * segments they will see: `/t/acme/%5Freplication` is a tenant's
+ * replication stream to them, which WHATWG's URL leaves encoded.
+ */
+export function percentDecode(s) {
+  const b = enc.encode(s);
+  const out = new Uint8Array(b.length);
+  let n = 0;
+  const hex = (c) => (c >= 48 && c <= 57 ? c - 48 : c >= 65 && c <= 70 ? c - 55 : c >= 97 && c <= 102 ? c - 87 : -1);
+  for (let i = 0; i < b.length; ) {
+    if (b[i] === 0x2b) {
+      out[n++] = 0x20;
+      i += 1;
+    } else if (b[i] === 0x25 && i + 2 < b.length && hex(b[i + 1]) >= 0 && hex(b[i + 2]) >= 0) {
+      out[n++] = (hex(b[i + 1]) << 4) | hex(b[i + 2]);
+      i += 3;
+    } else {
+      out[n++] = b[i++];
+    }
+  }
+  return new TextDecoder().decode(out.subarray(0, n));
+}
+
+/** The segments of a path as fenec-http's `Request::segments` has them, decoded first. */
+export function segments(pathname) {
+  return percentDecode(pathname).split('/').filter(Boolean);
 }
 
 /** Whether `--http-cors <cors>` lets the request's origin in (fenec-http's `cors::allows`). */
@@ -257,15 +317,17 @@ function own(cfg, request, status, message, retry) {
 }
 
 /**
- * Where an isolate's requests go: the tenants' homes it has heard, and the
- * router of each region that answered last, tried first.
+ * Where an isolate's requests go: the tenants' homes it has heard, the
+ * router of each region that answered last, tried first, and when each
+ * region last had no router answer.
  */
 export class State {
   constructor() {
     this.homes = new Map();
     this.answered = new Map();
-    this.mark = null;
+    this.down = new Map();
     this.cache = null;
+    this.warned = false;
   }
 
   /**
@@ -312,56 +374,120 @@ async function remember(state, url, tenant, region) {
   }
 }
 
+/** A request the entry refuses before sending it anywhere. */
+class Refusal extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** A body sent with no length, read up to `cap`; null past it. */
+async function readUpTo(stream, cap) {
+  const reader = stream.getReader();
+  const parts = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > cap) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    parts.push(value);
+  }
+  const out = new Uint8Array(n);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.byteLength;
+  }
+  return out;
+}
+
 /**
- * Sends `request` to `region`'s routers, from the one that answered last,
- * moving to the next only where the one asked cannot have run it, or where
- * running it twice does no harm; its answer, or the entry's own. What went
- * wrong with a router is logged with the router named, and told the client
- * without it: the routers' hostnames are the operator's.
+ * What a request goes to the routers with, made once however many it is
+ * tried at: its headers, its body, whether the body can go again, and
+ * whether the request may run twice.
  */
-async function forward(request, url, region, cfg, state) {
-  const mark = cfg.token ? await (state.mark ??= clientMark(cfg.token)) : null;
-  const headers = sentHeaders(request.headers, mark);
+async function prepare(request, cfg) {
+  const headers = sentHeaders(request.headers, await clientNamed(cfg, request.headers));
   const method = request.method;
-  const tries = region.routers.length;
-  let body = method === 'GET' || method === 'HEAD' ? null : request.body;
-  let again = body === null;
-  if (body !== null) {
+  let body = null;
+  let again = true;
+  if (method !== 'GET' && method !== 'HEAD' && request.body !== null) {
     const length = request.headers.get('content-length');
-    // A chunked body is read whole: a router takes none.
-    if (length === null || (tries > 1 && Number(length) <= BUFFER_AT)) {
+    if (length === null) {
+      // A router takes no chunked body, so it is read here: up to what is
+      // kept for a retry, which also bounds what the isolates' 128 MB hold.
+      body = await readUpTo(request.body, BUFFER_AT);
+      if (body === null) throw new Refusal(411, `a body of more than ${BUFFER_AT} bytes is sent with its Content-Length`);
+    } else if (Number(length) <= BUFFER_AT) {
       body = await request.arrayBuffer();
-      again = true;
+    } else {
+      body = request.body;
+      again = false;
     }
   }
-  const repeatable = REPEATABLE.has(method) || headers.has('idempotency-key');
+  return { method, headers, body, again, repeatable: REPEATABLE.has(method) || headers.has('idempotency-key') };
+}
+
+/**
+ * How an answer at a router's URL is taken: the router's (`router`), one
+ * Cloudflare gives for a router never reached (`unrun`), or one something
+ * else in front of the router gave -- a tunnel's connector that could not
+ * reach it answers 502, Cloudflare 520, 522 or 524 -- which may have
+ * reached it (`unknown`). Every answer a fenecdb router writes, its own
+ * and those it forwards, carries `X-Request-Id`; none of those does.
+ */
+export function judged(answer) {
+  if (UNREACHED.has(answer.status)) return 'unrun';
+  if (answer.status >= 500 && !answer.headers.has('x-request-id')) return 'unknown';
+  return 'router';
+}
+
+/**
+ * Sends `sent` to `region`'s routers, from the one that answered last,
+ * moving to the next only where the one asked cannot have run it, or where
+ * running it twice does no harm: `{answer}`, `{gone}` where the client
+ * went, or why none answered -- `fail` `resend` where the request may go to
+ * another region, `ran` where it may have run, `spent` where its body
+ * cannot go again. What went wrong with a router is logged with the router
+ * named, and told the client without it: the routers' hostnames are the
+ * operator's.
+ */
+async function toRegion(request, url, region, sent, state) {
+  const tries = region.routers.length;
   const start = (state.answered.get(region.name) ?? 0) % tries;
   let why = '';
   for (let k = 0; k < tries; k++) {
     const i = (start + k) % tries;
     const router = region.routers[i];
     let answer = null;
+    let kind = 'unknown';
     try {
       answer = await fetch(router + url.pathname + url.search, {
-        method,
-        headers,
-        body,
+        method: sent.method,
+        headers: sent.headers,
+        body: sent.body,
         redirect: 'manual',
         // Cancelled with the client: a stream, a held write, a long
         // batch, and the router's connection with them.
         signal: request.signal,
       });
     } catch (e) {
-      // Gone: nobody reads what this says.
-      if (request.signal?.aborted) return new Response(null, { status: 499 });
+      if (request.signal?.aborted) return { gone: true };
       why = String(e?.message ?? e);
     }
-    if (answer && !UNREACHED.has(answer.status)) {
-      state.answered.set(region.name, i);
-      return answer;
-    }
     if (answer) {
-      why = `Cloudflare answered ${answer.status}`;
+      kind = judged(answer);
+      if (kind === 'router') {
+        state.answered.set(region.name, i);
+        state.down.delete(region.name);
+        return { answer };
+      }
+      why = `answered ${answer.status}, not by the router`;
       // Read nothing of it, and let its connection go.
       await answer.body?.cancel().catch(() => {});
     }
@@ -370,24 +496,52 @@ async function forward(request, url, region, cfg, state) {
     state.answered.set(region.name, (i + 1) % tries);
     // A fetch that failed may have reached the router: workerd says the
     // same of a connection refused and of one reset after the request was
-    // written. Sent again to the region's next router, a write would reach
-    // its node twice -- unless its key makes it once there.
-    if (!answer && !repeatable) {
-      return own(cfg, request, 502, `region \`${region.name}\`'s router did not answer, and may have run the request (${why}): it is not sent again`);
+    // written. Sent again, a write would reach its node twice -- unless its
+    // key makes it once there.
+    if (kind === 'unknown' && !sent.repeatable) {
+      state.down.set(region.name, Date.now());
+      return { fail: 'ran', why };
     }
-    if (!again) break;
+    if (!sent.again) {
+      state.down.set(region.name, Date.now());
+      return { fail: 'spent', why };
+    }
   }
-  return own(cfg, request, 503, `region \`${region.name}\`'s routers did not answer (${why})`, 1);
+  state.down.set(region.name, Date.now());
+  return { fail: 'resend', why };
 }
 
-/** {@link forward}, an error it throws -- the client's body lost on its way in, say -- answered as the entry's own, not the runtime's page. */
-async function sent(request, url, region, cfg, state) {
+/**
+ * Sends `request` to the first of `regions` whose routers answer: its
+ * answer, or the entry's own. A request goes on to the next region only
+ * where none of this one's routers can have run it or it may run twice --
+ * `regions` is one, the tenant's home, wherever the home is known.
+ */
+async function send(request, url, regions, cfg, state) {
+  let sent;
   try {
-    return await forward(request, url, region, cfg, state);
+    sent = await prepare(request, cfg);
   } catch (e) {
     if (request.signal?.aborted) return new Response(null, { status: 499 });
-    return own(cfg, request, 502, `the entry could not send the request: ${e?.message ?? e}`);
+    if (e instanceof Refusal) return own(cfg, request, e.status, e.message);
+    // The client's body lost on its way in, say: the entry's own answer,
+    // not the runtime's page.
+    return own(cfg, request, 502, `the entry could not read the request: ${e?.message ?? e}`);
   }
+  let why = '';
+  for (const region of regions) {
+    const r = await toRegion(request, url, region, sent, state);
+    // Gone: nobody reads what this says.
+    if (r.gone) return new Response(null, { status: 499 });
+    if (r.answer) return r.answer;
+    why = r.why;
+    if (r.fail === 'ran') {
+      return own(cfg, request, 502, `region \`${region.name}\`'s router did not answer, and may have run the request (${why}): it is not sent again`);
+    }
+    if (r.fail === 'spent') return own(cfg, request, 503, `region \`${region.name}\`'s routers did not answer (${why})`, 1);
+  }
+  const names = regions.map((r) => `\`${r.name}\``).join(', ');
+  return own(cfg, request, 503, `region ${names}'s routers did not answer (${why})`, 1);
 }
 
 /** The answer as the client is given it: the router's, less its hops and its marks. */
@@ -397,9 +551,19 @@ function passed(answer) {
   return out;
 }
 
-/** The region a tenant not heard of goes to first: the client's continent's, or the default. */
-function nearest(cfg, request) {
-  return cfg.byContinent.get(request.cf?.continent) ?? cfg.fallback;
+/**
+ * The regions a tenant whose home is not known is sent to, in turn: the
+ * client's continent's or the default first, then the rest -- any region's
+ * router relays a tenant home, and only the home's places it on a node, so
+ * no write lands anywhere else -- each found down in the last {@link
+ * DOWN_MS} asked after the others.
+ */
+function guesses(cfg, request, state) {
+  const first = cfg.byContinent.get(request.cf?.continent) ?? cfg.fallback;
+  const all = [first, ...[...cfg.regions.values()].filter((r) => r !== first)];
+  const now = Date.now();
+  const isDown = (r) => now - (state.down.get(r.name) ?? -Infinity) < DOWN_MS;
+  return [...all.filter((r) => !isDown(r)), ...all.filter(isDown)];
 }
 
 /**
@@ -419,8 +583,9 @@ export function entry() {
         return own(null, request, 500, `the entry is not configured: ${e.message}`);
       }
       const url = new URL(request.url);
-      const segs = url.pathname.split('/').filter(Boolean);
-      if (segs[0] === '_shard' && cfg.admin) return passed(await sent(request, url, cfg.admin, cfg, state));
+      // As the router and the node will read the path: decoded.
+      const segs = segments(url.pathname);
+      if (segs[0] === '_shard' && cfg.admin) return passed(await send(request, url, [cfg.admin], cfg, state));
       // `/_admin/` is a node's, `/_replication` a router's directory for its
       // standbys, `/_metrics` and `/_studio/` the operator's: none of them
       // goes out on the public entry.
@@ -430,7 +595,7 @@ export function entry() {
       const tenant = segs[1];
       if (!TENANT.test(tenant)) return own(cfg, request, 404, `no tenant \`${tenant}\``);
       // A tenant's replication stream is a standby node's, on the private network.
-      if (segs[2] === '_replication') return own(cfg, request, 404, 'a tenant\'s replication stream is not served here');
+      if (segs[2] === '_replication') return own(cfg, request, 404, "a tenant's replication stream is not served here");
       // A preflight answered here, as a router answers its own: no hop to
       // the region, and a page reads an answer from a region that is down.
       if (request.method === 'OPTIONS' && allows(cfg.cors, request)) {
@@ -441,13 +606,23 @@ export function entry() {
         home = (await cached(state, url, tenant)) ?? undefined;
         if (home && cfg.regions.has(home)) state.learn(tenant, home, cfg.homes);
       }
-      const region = cfg.regions.get(home) ?? nearest(cfg, request);
-      const answer = await sent(request, url, region, cfg, state);
+      // A known home alone: another region's router would relay to the
+      // same routers. Not known, every region in turn.
+      const known = cfg.regions.get(home);
+      const regions = known ? [known] : guesses(cfg, request, state);
+      const answer = await send(request, url, regions, cfg, state);
       // The tenant's home as the router placing it names it; a region the
       // entry does not know is not one to send anything to.
       const named = answer.headers.get(HOME);
       if (named && named !== home && cfg.regions.has(named) && state.learn(tenant, named, cfg.homes) && cfg.share) {
         ctx?.waitUntil?.(remember(state, url, tenant, named));
+      }
+      if (!cfg.cors && !state.warned && answer.headers.has('access-control-allow-origin')) {
+        state.warned = true;
+        console.warn(
+          'the routers send CORS headers and CORS is not set: the entry answers no preflight, and its own answers ' +
+            '(a region down, a path refused) carry none, which a page reads as the network failing. Set CORS to their --http-cors.',
+        );
       }
       return passed(answer);
     },

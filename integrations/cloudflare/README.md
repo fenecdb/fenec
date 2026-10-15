@@ -251,10 +251,12 @@ npx wrangler deploy --config entry/wrangler.jsonc
 
 - **Where a tenant lives** is learnt from the routers, not asked of
   anyone: each request carries `Fenec-Home: 1`, and the router that
-  forwards it to the tenant's node answers `Fenec-Home: <region>`. A
-  tenant not heard goes to the region of the client's continent
-  (`continents`) or `DEFAULT_REGION`, whose router relays it home once.
-  A tenant moved to another region is relayed by the router of the one it
+  forwards it to the tenant's node answers `Fenec-Home: <region>`, which
+  the entry takes off the answer. A tenant not heard goes to the region of
+  the client's continent (`continents`) or `DEFAULT_REGION`, whose router
+  relays it home once -- and on to the other regions in turn where that
+  one's routers do not answer, since any router relays a tenant home. A
+  tenant moved to another region is relayed by the router of the one it
   left, and the answer names the new home: a stale home costs a hop, not
   an error. An isolate keeps 50 000 homes (`HOMES`) and shares each it
   learns with the colo through the Cache API (`HOMES_CACHE=off` not to),
@@ -263,22 +265,32 @@ npx wrangler deploy --config entry/wrangler.jsonc
   routers' marks (`Fenec-Router`, `Fenec-Global`, `Fenec-Verified`) and
   any address a client claims (`X-Forwarded-For`, `X-Real-IP`,
   `Forwarded`, `True-Client-IP`, `CF-*`). The client is named in
-  `Fenec-Client: <address> <mark>`, the mark an HMAC of its text under
-  `ENTRY_TOKEN` (`entry.js`), for the routers to believe from the entry
-  alone -- they do not read it yet. `X-Request-Id` is the client's, or
-  Cloudflare's ray id.
+  `Fenec-Client: <address> <seconds> <mark>`, the mark an HMAC of
+  `fenec-client <address> <seconds>` under `ENTRY_TOKEN` (`entry.js`), for
+  the routers to believe from the entry alone -- they do not read it yet.
+  `X-Request-Id` is the client's, or Cloudflare's ray id.
 - **CORS**: the routers' answers pass unchanged. With `CORS` set to the
   routers' `--http-cors`, the entry answers preflights itself and puts the
-  same headers on its own answers.
-- **Paths**: only `/t/<tenant>/...`; `/_shard/` goes to the routers `ADMIN`
-  names where it is set, and everything else is a 404.
+  same headers on its own answers. Set it wherever the routers have
+  `--http-cors`: without it a page reads the entry's own answers -- a region
+  down, a path refused -- as the network failing. The entry logs a warning
+  once it sees the routers send CORS headers and has none.
+- **Paths**: only `/t/<tenant>/...`, judged decoded as the routers decode
+  them (`/t/acme/%5Freplication` is a tenant's replication stream to them);
+  `/_shard/` goes to the routers `ADMIN` names where it is set, and
+  everything else is a 404.
 - **Failure**: a region's routers are tried from the one that answered
-  last. One Cloudflare could not reach (521, 522, 523, 525, 526, 530) is
-  passed over for any request; a failed fetch, which may have reached the
-  router, only for a `GET`, `HEAD`, `OPTIONS` or a request with an
-  `Idempotency-Key` -- any other is a 502 saying it may have run. All of
-  them failing is a 503 with `Retry-After` and `retry_after`, never a
-  request to another region.
+  last. An answer without the router's `X-Request-Id` is not the router's.
+  One Cloudflare could not reach (521, 523, 525, 526, 530) is passed over
+  for any request; one that may have reached it -- a failed fetch,
+  Cloudflare's 520, 522 and 524, a tunnel connector's 502 -- only for a
+  `GET`, `HEAD`, `OPTIONS` or a request with an `Idempotency-Key`, any
+  other being a 502 saying it may have run. A known home's routers all
+  failing is a 503 with `Retry-After` and `retry_after`, never a request
+  to another region. A body with no length past 1 MiB is refused, 411.
+- **Cancellation**: a stream lets go of its router when its client goes;
+  a held write lets go of the router, which does not yet let go of it at
+  the node.
 
 `entry.test.js` runs it under `wrangler dev` in front of real routers and
 nodes (`entry/cluster.mjs`: a global router, us with a standby router, eu)

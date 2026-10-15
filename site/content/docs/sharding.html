@@ -1316,23 +1316,32 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
 <ul>
   <li><b>It learns where a tenant lives from the routers:</b> every request
     asks for the tenant's home, and the router that forwards it to the
-    tenant's node names the node's region in its answer. A tenant the entry
-    has not seen goes to the region nearest the client, whose router serves
-    it or relays it home once; its next request goes home.</li>
+    tenant's node names the node's region in its answer, to the entry alone.
+    A tenant the entry has not seen goes to the region nearest the client,
+    whose router serves it or relays it home once; its next request goes
+    home.</li>
   <li><b>A tenant moved to another region</b> is relayed by the router of
     the region it left, as any client's request is, and the answer names
     its new home: a stale home costs one hop, never an error.</li>
   <li><b>Streams pass through as they come</b> — a subscription,
-    <code>/_changes?wait</code>, a held write, a long <code>/batch</code> —
-    and are let go of when their client goes.</li>
+    <code>/_changes?wait</code>, a held write, a long <code>/batch</code>.
+    A stream is let go of when its client goes; a held write is let go of at
+    the router, which does not yet let go of it at the node.</li>
   <li><b>Only <code>/t/&lt;tenant&gt;/...</code> is served:</b>
     <code>/_shard/</code> goes to the global router only where the entry is
     told to (<code>ADMIN</code>), and <code>/_admin/</code>,
-    <code>/_replication</code> and the rest are a <code>404</code>.</li>
+    <code>/_replication</code> and the rest are a <code>404</code>, however
+    the path is spelled.</li>
   <li><b>A router that cannot be reached</b> is passed over for the region's
-    standby router; a region whose routers all fail is a <code>503</code>
-    with <code>Retry-After</code>, never a request sent to another
-    region.</li>
+    standby router. A tenant whose home the entry knows is never sent to
+    another region: its region's routers all failing is a <code>503</code>
+    with <code>Retry-After</code>. One it has not heard goes on to the next
+    region, whose router relays it home.</li>
+  <li><b>Set <code>CORS</code> wherever the routers have
+    <code>--http-cors</code>:</b> without it the entry's own answers — a
+    region down, a path refused — carry no CORS headers, and a page reads them
+    as the network failing. The entry says so in its log once it sees the
+    routers send them.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -1340,24 +1349,28 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
 request carries <code>Fenec-Home: 1</code>, and the router that forwards it
 to the tenant's node answers with <code>Fenec-Home: &lt;region&gt;</code>, the
 node's — a router relaying it to another region names nothing of its own,
-and the answer it passes back carries the home router's. The entry keeps
-50 000 tenants' homes an isolate (<code>HOMES</code>), forgotten
-first-heard first, and shares each one it learns with the colo's other
-isolates through the Cache API, read only by an isolate that has not heard
-the tenant (<code>HOMES_CACHE</code>; it does nothing on
-<code>workers.dev</code>, so the entry wants a custom domain). A tenant
-heard nowhere goes to the region <code>REGIONS</code> names for the client's
-continent (Cloudflare's <code>request.cf.continent</code>), else
-<code>DEFAULT_REGION</code>. Asking the global router at each miss would
-have needed its <code>--token</code>, which moves and deletes every tenant,
-in the Worker, a round trip to the global router's region, and would have
-turned every unknown name a client tries into a question for that one
-router; a table in Workers KV is read eventually consistently and billed
-by the read, and still needs something to write it. A router answers the
-header only to a request asking for it, so every other client's answers
-are the bytes they were; a router from before it answers none, and the
-entry keeps sending such a tenant to the nearest region, relayed each
-time.</p>
+and the answer it passes back carries the home router's. The entry takes the
+header off before the answer goes to the client: a router names the home on
+a refusal too, so to anyone holding a tenant's name. The entry keeps 50 000
+tenants' homes an isolate (<code>HOMES</code>), forgotten first-heard first,
+and shares each one it learns with the colo's other isolates through the
+Cache API, read only by an isolate that has not heard the tenant
+(<code>HOMES_CACHE</code>; it does nothing on <code>workers.dev</code>, so
+the entry wants a custom domain). A tenant heard nowhere goes to the region
+<code>REGIONS</code> names for the client's continent (Cloudflare's
+<code>request.cf.continent</code>), else <code>DEFAULT_REGION</code>, then to
+each other region in turn where one's routers cannot be reached — any
+region's router relays the tenant home, and only the home's router places it
+on a node, so no write lands anywhere else; a region found down is asked last
+for ten seconds. Asking the global router at each miss would have needed its
+<code>--token</code>, which moves and deletes every tenant, in the Worker, a
+round trip to the global router's region, and would have turned every unknown
+name a client tries into a question for that one router; a table in Workers
+KV is read eventually consistently and billed by the read, and still needs
+something to write it. A router answers the header only to a request asking
+for it, so every other client's answers are the bytes they were; a router
+from before it answers none, and the entry keeps sending such a tenant to the
+nearest region, relayed each time.</p>
 
 <p><b>Streams and Cloudflare's limits.</b> The answer is handed back as its
 body arrives, so a server-sent event reaches the client as the router sends
@@ -1375,14 +1388,14 @@ flag) is handed to the fetch, so a client gone cancels the request to the
 router. Under <code>wrangler dev</code> a stream is let go of at a
 stand-in router 2 s after its client goes, workerd noticing as the next
 keep-alive is written, and at a node through a router in 4 to 8 s, each
-hop noticing at its next; a client gone before its answer's head is not
-told to the Worker there — workerd notices a client as it writes, and
-wrangler's own proxy fetches the Worker detached from its client — so that
-case is held in Node, the handler over Node's <code>fetch</code>. Past the
-entry it stops at the router: a router waiting on a node's held answer does
-not watch its client, so a claim whose client went stays held at the node,
-and the job it then takes is leased to nobody until its lease ends — asked
-of the node itself, the claim passes the job to the next.</p>
+hop noticing at its next. A client gone before its answer's head is not
+told to the Worker there at all — workerd notices a client only as it
+writes to it, past wrangler's own proxy too — so that case is held in Node,
+the handler over Node's <code>fetch</code>. Past the entry it stops at the
+router: a router waiting on a node's held answer does not watch its client,
+so a claim whose client went stays held at the node, and the job it then
+takes is leased to nobody until its lease ends — asked of the node itself,
+the claim passes the job to the next.</p>
 
 <p><b>Headers.</b> Everything a client sends goes on —
 <code>Authorization</code>, <code>Idempotency-Key</code>,
@@ -1394,62 +1407,79 @@ nodes' lines carry it) — but the hop-by-hop headers, the routers' own marks
 alone, and every way a client names an address
 (<code>X-Forwarded-For</code>, <code>X-Real-IP</code>,
 <code>Forwarded</code>, <code>True-Client-IP</code>,
-<code>CF-*</code>). <code>Fenec-Verified</code> is dropped from answers too.
-The routers' CORS headers come back as they sent them; with
-<code>CORS</code> set to their <code>--http-cors</code>, the entry answers a
-preflight itself with the same headers, a round trip saved and a region
-that is down no reason for a page to see a network error, and puts them on
-its own answers alone — two <code>Access-Control-Allow-Origin</code>s are
-refused whole by a browser.</p>
+<code>CF-*</code>). <code>Fenec-Verified</code> and
+<code>Fenec-Home</code> are dropped from answers. The routers' CORS headers
+come back as they sent them; with <code>CORS</code> set to their
+<code>--http-cors</code>, the entry answers a preflight itself with the same
+headers, a round trip saved and a region that is down no reason for a page to
+see a network error, and puts them on its own answers alone — two
+<code>Access-Control-Allow-Origin</code>s are refused whole by a browser. A
+path is judged as the router and the node will read it, decoded as
+fenec-http decodes one: <code>/t/acme/%5Freplication</code> and
+<code>/t/acme%2F_replication</code> are a tenant's replication stream to
+them, which a URL's own parsing leaves encoded.</p>
 
 <p><b>The client's address.</b> Behind the entry every request reaches a
 router from Cloudflare's addresses, so the wait after a refused token would
 count every client's refusals together, and any good token would start the
 count again. The entry names its client in <code>Fenec-Client:
-&lt;address&gt; &lt;mark&gt;</code>, the address Cloudflare's
-<code>CF-Connecting-IP</code>, the mark 16 bytes of HMAC-SHA256 of
-<code>fenec-client: a request through the entry, the client named beside
-it</code> under <code>ENTRY_TOKEN</code>, base64url, as a router names its
-client to a node. Not <code>CF-Connecting-IP</code> or
-<code>X-Forwarded-For</code> believed from Cloudflare's addresses: a Worker
-sets <code>CF-Connecting-IP</code> and <code>X-Real-IP</code> as it likes on
-a request to an origin outside Cloudflare (Cloudflare's <a
+&lt;address&gt; &lt;seconds&gt; &lt;mark&gt;</code>, the address Cloudflare's
+<code>CF-Connecting-IP</code>, the seconds the Unix time the entry made it
+at, the mark 16 bytes of HMAC-SHA256 of <code>fenec-client &lt;address&gt;
+&lt;seconds&gt;</code> under <code>ENTRY_TOKEN</code>, base64url. Bound to
+the address and the time, a mark seen names that one address for a minute,
+where a mark of the token alone would let whoever saw one name any address
+for good. Not <code>CF-Connecting-IP</code> or <code>X-Forwarded-For</code>
+believed from Cloudflare's addresses: a Worker sets
+<code>CF-Connecting-IP</code> and <code>X-Real-IP</code> as it likes on a
+request to an origin outside Cloudflare (Cloudflare's <a
 href="https://developers.cloudflare.com/fundamentals/reference/http-headers/">HTTP
 headers</a> page), so any account's Worker could claim any address from
 those ranges. The routers do not read it yet: until they take the mark, a
 refused token behind the entry waits by Cloudflare's address.</p>
 
 <p><b>When a router cannot be reached.</b> A region's routers are tried in
-turn from the one that answered last. Cloudflare's own answers for an
-origin it never reached (521, 522, 523, 525, 526, 530) are passed over for
-the next router whatever the request. A <code>fetch</code> that fails may
-have reached the router — workerd says the same of a connection refused and
-of one reset after the request was written — so only a
-<code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code> or a request
-carrying an <code>Idempotency-Key</code> goes on, as the router's own rule
-towards a node; any other is a <code>502</code> saying it may have run, and
-the region's next request goes to the next router. A body up to a mebibyte
-is kept for the next router; a longer one is streamed to one, its length
-kept (a router takes no chunked body). No router of another region is
-tried: it would only relay to the same routers, and a tenant's writes have
-one home.</p>
+turn from the one that answered last. Every answer a router writes carries
+<code>X-Request-Id</code>; an answer at a router's URL without one is not the
+router's. Cloudflare's own answers for an origin it never reached (521, 523,
+525, 526, and 530, a tunnel with no connector) go on to the next router
+whatever the request. One that may have reached the router — a
+<code>fetch</code> that fails, which workerd says alike of a connection
+refused and of one reset after the request was written; Cloudflare's 520,
+<a href="https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-522/">522</a>
+(a request whose bytes went unacknowledged for 90 seconds is among its
+time-outs) and 524; and any other 5xx without the router's request id, such
+as <a href="https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/troubleshoot-tunnels/common-errors/">a
+tunnel's connector answering 502</a> for a router it cannot reach — goes on only
+for a <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code> or a request
+carrying an <code>Idempotency-Key</code>, as the router's own rule towards a
+node; any other is a <code>502</code> saying it may have run, and the
+region's next request goes to the next router. A router's own
+<code>502</code> — a node it could not reach — is its answer, passed on. A
+body up to a mebibyte is kept for the next router; a longer one is streamed
+to one, its length kept (a router takes no chunked body), and one sent with
+no length past a mebibyte is refused with <code>411</code>: read whole, it
+was as large as a client cared to send, in isolates whose 128 MB are
+shared.</p>
 
 <p><b>What it costs.</b> Under <code>wrangler dev</code> on this machine, a
-read by id of a tenant in us took 79 to 82 µs p50 asked of us's router
-directly, and through the entry with its home heard 1.17 to 1.26 ms, 0.65
-to 0.75 past wrangler's own proxy Worker — workerd taking the request, the
-entry and its fetch, all on loopback. Never heard, it went to eu first,
-whose router relayed it: 1.24 to 1.32 ms (0.71 to 0.76), eu's router asked
-directly relaying it in 106 to 113 µs. Heard only through the colo's cache,
-1.56 to 1.66 ms (0.97 to 1.09), miniflare's cache a service of its own
-(<code>make entry-bench</code>: two runs of six rounds of 2 000 in turns,
-at loads of 3 to 6.6). That is not what Cloudflare adds: there a client
-reaches its nearest colo and the router is a region away, the leg it would
-pay to reach the router itself; a home not heard costs a relay between
-regions, where the cache is read inside the colo. A router asked for the
-home answered in 80 µs p50 against 79 not asked; not asked, its added p50
-was 24.15 µs against main's 24.1 (23.5 to 24.3 and 23.7 to 24.5, six runs a
-side in ABBA turns, <code>make shard-bench ARGS=latency</code>).</p>
+read by id of a tenant in us took 81 µs p50 asked of us's router directly,
+and through the entry with its home heard 1.18 to 1.22 ms, 0.66 to 0.68 past
+wrangler's own proxy Worker — workerd taking the request, the entry and its
+fetch, all on loopback; with the client named besides
+(<code>ENTRY_TOKEN</code>, an HMAC a request), 1.23 to 1.24 ms (0.68 to
+0.70). Never heard, it went to eu first, whose router relayed it: 1.29 to
+1.31 ms (0.71 to 0.75), eu's router asked directly relaying it in 114 to
+115 µs. Heard only through the colo's cache, 1.60 to 1.61 ms (1.00),
+miniflare's cache a service of its own (<code>make entry-bench</code>: two
+runs of six rounds of 2 000 in turns, at loads of 3.4 to 5). That is not
+what Cloudflare adds: there a client reaches its nearest colo and the router
+is a region away, the leg it would pay to reach the router itself; a home
+not heard costs a relay between regions, where the cache is read inside the
+colo. A router asked for the home answered in 82 to 83 µs p50 against 81 not
+asked; not asked, its added p50 was 24.15 µs against main's 24.1 (23.5 to
+24.3 and 23.7 to 24.5, six runs a side in ABBA turns, <code>make shard-bench
+ARGS=latency</code>).</p>
 </details>
 
 <h2 id="tokens">Tokens</h2>

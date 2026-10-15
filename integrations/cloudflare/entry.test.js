@@ -2,24 +2,28 @@
 // fenec-shard routers and fenec-server nodes (entry/cluster.mjs): two
 // regions keeping their own directory, us with a standby router, behind a
 // global router. What it holds: a tenant goes to its home region, learnt
-// from the routers' answers, and to its new one after a move; a stream and
-// a held write pass through whole and let go when the client does; the
-// admin paths stay private; the routers' marks never come from a client,
-// and the client is named by the entry's mark; a router gone is passed over
-// for its standby, and a region gone is a 503 to come back from -- never
-// another region. Needs `npm ci` here (wrangler) and the debug binaries
-// (cargo build -p fenec-server -p fenec-shard).
+// from the routers' answers, and to its new one after a move; a tenant not
+// yet heard reaches its home past a region that is down; a stream and a
+// held write pass through whole, and a stream lets go when its client does;
+// the admin paths stay private however a path is spelled; the routers'
+// marks never come from a client, and the client is named by the entry's
+// mark, bound to its address; a router gone -- or one a tunnel's connector
+// cannot reach -- is passed over for its standby, and a known home gone is
+// a 503 to come back from, never another region. Needs `npm ci` here
+// (wrangler) and the debug binaries (cargo build -p fenec-server -p
+// fenec-shard).
 
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { access, mkdtemp, rm } from 'node:fs/promises';
 import http from 'node:http';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { running, serve } from './dev.mjs';
 import * as cluster from './entry/cluster.mjs';
-import { CLIENT_MARK_TEXT, State, clientMark, configure, corsHeaders, entry, sentHeaders } from './entry/entry.js';
+import { BUFFER_AT, State, clientMark, configure, corsHeaders, entry, judged, markKey, percentDecode, segments, sentHeaders } from './entry/entry.js';
 
 const { DATA, ORIGIN, ROOT, query, request, shard, until } = cluster;
 
@@ -35,12 +39,48 @@ after(() => {
 });
 
 const SECRET = 'entry-secret';
-/** The client mark as a router would work it out, here with node:crypto. */
-const MARK = createHmac('sha256', SECRET).update(CLIENT_MARK_TEXT).digest().subarray(0, 16).toString('base64url');
+/** A client's mark as a router would work it out, here with node:crypto. */
+const markOf = (address, seconds) =>
+  createHmac('sha256', SECRET).update(`fenec-client ${address} ${seconds}`).digest().subarray(0, 16).toString('base64url');
 
-test('the client mark is HMAC-SHA256 of its text, 16 bytes, base64url', async () => {
-  assert.equal(await clientMark(SECRET), MARK);
-  assert.equal(MARK.length, 22);
+/** Holds a `Fenec-Client` value to `address`: its time within a minute of now, its mark the router's. */
+function namesClient(value, address) {
+  const [ip, seconds, mark] = value.split(' ');
+  assert.equal(ip, address);
+  assert.ok(Math.abs(Number(seconds) - Date.now() / 1000) < 60, value);
+  assert.equal(mark, markOf(address, seconds));
+}
+
+/** A port nothing listens on: a router gone. */
+async function closedPort() {
+  const s = net.createServer();
+  await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const { port } = s.address();
+  await new Promise((r) => s.close(r));
+  return `http://127.0.0.1:${port}`;
+}
+
+test("the client's mark is HMAC-SHA256 of its address and time, 16 bytes, base64url", async () => {
+  const key = markKey(SECRET);
+  assert.equal(await clientMark(key, '203.0.113.7', 1_800_000_000), markOf('203.0.113.7', 1_800_000_000));
+  assert.equal((await clientMark(key, '203.0.113.7', 1_800_000_000)).length, 22);
+  // Bound to both: a mark seen names no other address, and no other time.
+  assert.notEqual(await clientMark(key, '203.0.113.8', 1_800_000_000), markOf('203.0.113.7', 1_800_000_000));
+  assert.notEqual(await clientMark(key, '203.0.113.7', 1_800_000_001), markOf('203.0.113.7', 1_800_000_000));
+});
+
+test('a path is read as fenec-http reads one: decoded, then cut at its slashes', () => {
+  // fenec-http's own cases (http.rs, `percent_decode`).
+  assert.equal(percentDecode('a%20b'), 'a b');
+  assert.equal(percentDecode('a+b'), 'a b');
+  assert.equal(percentDecode('%C3%BCst'), 'üst');
+  assert.equal(percentDecode('%zz'), '%zz');
+  assert.equal(percentDecode('100%'), '100%');
+  assert.equal(percentDecode('%4'), '%4');
+  for (const p of ['/t/acme/%5Freplication', '/t/acme/%5freplication', '/t/acme%2F_replication', '/t/acme/%2F_replication', '//t//acme//_replication']) {
+    assert.deepEqual(segments(p), ['t', 'acme', '_replication'], p);
+  }
+  assert.deepEqual(segments('/%74/%61cme/query'), ['t', 'acme', 'query']);
 });
 
 test('the configuration is read, and refused where it names nothing to send to', () => {
@@ -77,6 +117,7 @@ test('a home is forgotten first-heard first past the bound, and moved on a chang
 });
 
 test('a request goes on less its hops, the marks and every address a client claims', () => {
+  const client = `203.0.113.7 1800000000 ${markOf('203.0.113.7', 1_800_000_000)}`;
   const sent = sentHeaders(
     new Headers({
       Authorization: 'Bearer t',
@@ -91,7 +132,7 @@ test('a request goes on less its hops, the marks and every address a client clai
       'CF-Connecting-IP': '203.0.113.7',
       'CF-Ray': '8f1e2d3c4b5a6978-FRA',
     }),
-    MARK,
+    client,
   );
   assert.deepEqual(Object.fromEntries(sent), {
     authorization: 'Bearer t',
@@ -99,11 +140,21 @@ test('a request goes on less its hops, the marks and every address a client clai
     'fenec-wait': '100',
     traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
     'fenec-home': '1',
-    'fenec-client': `203.0.113.7 ${MARK}`,
+    'fenec-client': client,
     'x-request-id': '8f1e2d3c4b5a6978-FRA',
   });
-  // No token, no client named: the address alone would be believed of anyone.
+  // No mark, no client named: the address alone would be believed of anyone.
   assert.equal(sentHeaders(new Headers({ 'CF-Connecting-IP': '203.0.113.7' }), null).has('fenec-client'), false);
+});
+
+test("an answer is a router's where it carries X-Request-Id, as every answer a router writes does", () => {
+  const answer = (status, headers = {}) => new Response(null, { status, headers });
+  assert.equal(judged(answer(200)), 'router');
+  assert.equal(judged(answer(502, { 'X-Request-Id': 'r' })), 'router');
+  assert.equal(judged(answer(503, { 'X-Request-Id': 'r' })), 'router');
+  // A tunnel's connector that could not reach the router, Cloudflare timing out.
+  for (const s of [502, 503, 504, 520, 522, 524]) assert.equal(judged(answer(s)), 'unknown', String(s));
+  for (const s of [521, 523, 525, 526, 530]) assert.equal(judged(answer(s)), 'unrun', String(s));
 });
 
 /** Reads a stream's chunks until `done(text)` holds: the text read. */
@@ -141,6 +192,7 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
   let w;
   let front;
   let shared;
+  let guess;
   let state;
 
   before(async () => {
@@ -150,7 +202,9 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
         ['beta', 'eu'],
         ['mover', 'us'],
         ['live', 'us'],
-        ['gone', 'us'],
+        ['feed', 'us'],
+        ['fresh1', 'us'],
+        ['fresh2', 'us'],
       ],
       schema: SCHEMA,
       // A silent stream writes a keep-alive every second, so a router and
@@ -173,11 +227,19 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
       DEFAULT_REGION: 'eu',
       HOMES: '0',
     });
+    // One whose default region is down: eu's router is a port nothing
+    // listens on.
+    guess = await serve('entry', join(state, 'guess'), {
+      REGIONS: JSON.stringify({ eu: { routers: [await closedPort()] }, us: regions.us }),
+      DEFAULT_REGION: 'eu',
+      HOMES_CACHE: 'off',
+    });
   });
 
   after(async () => {
     await front?.stop();
     await shared?.stop();
+    await guess?.stop();
     await w?.stop();
     if (state) await rm(state, { recursive: true, force: true });
   });
@@ -185,11 +247,12 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
   test('a tenant goes to its home region, learnt from the routers', async () => {
     const [eu, us, standby] = [await forwarded(w.eu), await forwarded(w.us), await forwarded(w.usStandby)];
     // acme is us's; the entry has not seen it, and sends it to eu first,
-    // whose router relays it home -- and the answer names the home.
+    // whose router relays it home -- and the answer names the home, to the
+    // entry alone.
     for (let i = 0; i < 5; i++) {
       const r = await query(front.url, 'acme', 'put notes {title: $1}', [`n${i}`]);
       assert.equal(r.status, 200, r.text);
-      assert.equal(r.header('fenec-home'), 'us');
+      assert.equal(r.header('fenec-home'), undefined);
     }
     for (let i = 0; i < 3; i++) assert.equal((await query(front.url, 'beta', 'get notes count')).status, 200);
     // eu answered acme's first request alone, and beta's; us all of acme's.
@@ -198,6 +261,16 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     assert.equal(await forwarded(w.usStandby), standby);
     const count = await query(w.us.url, 'acme', 'get notes count');
     assert.deepEqual(count.json(), [{ count: 5 }]);
+  });
+
+  test("a tenant's home is told nobody, a request refused for its token least of all", async () => {
+    // The router names it on the refusal too: the entry drops it.
+    const r = await request(`${front.url}/t/acme/query`, { method: 'POST', body: '{"query":"get notes count"}' });
+    assert.equal(r.status, 401, r.text);
+    assert.equal(r.header('fenec-home'), undefined);
+    const asked = await query(front.url, 'acme', 'get notes count', undefined, { 'Fenec-Home': '1' });
+    assert.equal(asked.status, 200);
+    assert.equal(asked.header('fenec-home'), undefined);
   });
 
   test('a tenant moved across regions is relayed once, and then sent to its new home', async () => {
@@ -210,13 +283,27 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     await until(async () => {
       const r = await query(front.url, 'mover', 'get notes count');
       assert.ok(r.status === 200 || r.status === 503, `${r.status} ${r.text}`);
-      return r.status === 200 && r.header('fenec-home') === 'eu';
-    }, 'the answer naming eu');
+      return r.status === 200;
+    }, 'mover answered');
     const [eu, us] = [await forwarded(w.eu), await forwarded(w.us)];
     for (let i = 0; i < 4; i++) assert.equal((await query(front.url, 'mover', 'put notes {title: "after"}')).status, 200);
     assert.equal(await forwarded(w.eu), eu + 4);
     assert.equal(await forwarded(w.us), us, 'nothing more by us');
     assert.deepEqual((await query(w.eu.url, 'mover', 'get notes count')).json(), [{ count: 6 }]);
+  });
+
+  test('a tenant not yet heard reaches its home past a region that is down', async () => {
+    // eu, the region guessed first, does not answer: the read goes on to us
+    // in the same request, whose router places it.
+    const read = await request(`${guess.url}/t/fresh1/notes`, { headers: { Authorization: `Bearer ${DATA}` } });
+    assert.equal(read.status, 200, read.text);
+    // A write, which may not go to a second router once it may have reached
+    // the first, goes to us first while eu is down -- and lands in us.
+    const us = await forwarded(w.us);
+    const wrote = await query(guess.url, 'fresh2', 'put notes {title: "past eu"}');
+    assert.equal(wrote.status, 200, wrote.text);
+    assert.equal(await forwarded(w.us), us + 1);
+    assert.deepEqual((await query(w.us.url, 'fresh2', 'get notes count')).json(), [{ count: 1 }]);
   });
 
   test('a subscription streams through change by change, and lets go with its client', async () => {
@@ -259,21 +346,54 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(r.json(), [{ n: 7 }]);
 
-    // A change feed's wait, the same way: after the claim's write.
-    const seq = Number(r.header('fenec-seq'));
-    const changes = request(`${front.url}/t/live/_changes?since=${seq}&wait=20000`, { headers: { Authorization: `Bearer ${DATA}` } });
-    await new Promise((r) => setTimeout(r, 300));
-    assert.equal((await query(w.us.url, 'live', 'put notes {title: "fed"}')).status, 200);
+    // A change feed's wait, the same way: the write made once the wait is
+    // held at the node, which counts it among the tenant's streams where
+    // the tenant has a quota of them.
+    const admin = { Authorization: 'Bearer adm-us', 'Content-Type': 'application/json' };
+    const set = await request(`${w.nodes.us.url}/_admin/tenants/feed/quota`, { method: 'PUT', headers: admin, body: '{"streams": 100}' });
+    assert.ok(set.status < 300, `${set.status} ${set.text}`);
+    const first = await query(w.us.url, 'feed', 'put notes {title: "first"}');
+    const seq = Number(first.header('fenec-seq'));
+    const changes = request(`${front.url}/t/feed/_changes?since=${seq}&wait=20000`, { headers: { Authorization: `Bearer ${DATA}` } });
+    const waiting = async () => {
+      const q = await request(`${w.nodes.us.url}/_admin/tenants/feed/quota`, { headers: admin });
+      return q.json().usage.streams === 1;
+    };
+    await until(waiting, 'the wait held at the node');
+    assert.equal((await query(w.us.url, 'feed', 'put notes {title: "fed"}')).status, 200);
     const fed = await changes;
     assert.equal(fed.status, 200, fed.text);
     assert.match(fed.text, /fed/);
   });
 
-  test('the admin paths are not served, and a tenant is named by the rule', async () => {
-    for (const path of ['/_shard/tenants', '/_admin/tenants', '/_replication', '/_metrics', '/_studio/', '/', '/t', '/t/acme/_replication', '/t/Acme/query']) {
-      const r = await request(`${front.url}${path}`, { headers: { Authorization: `Bearer ${ROOT}` } });
-      assert.equal(r.status, 404, `${path}: ${r.text}`);
-      assert.ok(r.json().error, path);
+  test('the admin paths are not served, however the path is spelled', async () => {
+    const plain = ['/_shard/tenants', '/_admin/tenants', '/_replication', '/_metrics', '/_studio/', '/', '/t', '/t/acme/_replication', '/t/Acme/query'];
+    // As the router and the node decode them, each of these is one of the
+    // above: the entry decodes them the same way first.
+    const spelled = [
+      '/t/acme/%5Freplication',
+      '/t/acme/%5freplication',
+      '/t/acme%2F_replication',
+      '/t/acme/%2F_replication',
+      '/t//acme//_replication',
+      '/t/%61cme/_repl%69cation',
+      '/%5Freplication',
+      '/%5Fshard/tenants',
+      '/%5Fadmin/tenants',
+      '/%74/acme/%5Freplication',
+    ];
+    for (const path of [...plain, ...spelled]) {
+      // A tenant's replication token, which its stream would take.
+      const ac = new AbortController();
+      const r = await request(`${front.url}${path}`, {
+        headers: { Authorization: path.includes('repl') ? 'Bearer tenant-replication' : `Bearer ${ROOT}` },
+        signal: ac.signal,
+        stream: true,
+      });
+      r.res.on('error', () => {});
+      ac.abort();
+      assert.equal(r.status, 404, path);
+      assert.match(r.header('content-type'), /application\/json/, path);
       // Its own answers carry the routers' CORS headers, once.
       assert.deepEqual(r.all('access-control-allow-origin'), [ORIGIN], path);
     }
@@ -314,7 +434,7 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
   });
 
   // Last: it ends us's routers.
-  test('a router gone is passed over for its standby, and a region gone is a 503 -- never another region', async () => {
+  test('a router gone is passed over for its standby, and a known home gone is a 503 -- never another region', async () => {
     assert.equal((await query(front.url, 'acme', 'get notes count')).status, 200);
     const eu = await forwarded(w.eu);
     const auth = { Authorization: `Bearer ${DATA}` };
@@ -351,39 +471,10 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
   });
 });
 
-test('a request held at its router is let go of with its client', async () => {
-  // The handler in Node, Node's fetch for Cloudflare's: workerd under
-  // `wrangler dev` does not tell a Worker of a client gone before its
-  // answer's head -- it notices a client gone as it writes, and wrangler's
-  // own proxy fetches the Worker detached from its client -- where
-  // Cloudflare aborts `request.signal` (the entry's stream, which has a
-  // head, is let go of under `wrangler dev` below).
-  const stub = await standIn(() => {});
-  try {
-    const worker = entry();
-    const env = { REGIONS: JSON.stringify({ stub: [stub.url] }), HOMES_CACHE: 'off' };
-    const ac = new AbortController();
-    const held = new Request('http://entry.test/t/held/query', {
-      method: 'POST',
-      body: '{"query":"set jobs {owner: 1} limit 1"}',
-      headers: { 'Fenec-Wait': '30000' },
-      signal: ac.signal,
-    });
-    const answered = worker.fetch(held, env, { waitUntil() {} });
-    const at = await until(() => stub.seen[0], 'the request at the router', 10_000);
-    assert.equal(at.closed, false);
-    ac.abort();
-    await until(() => at.closed, 'the request let go of at the router', 10_000);
-    assert.equal((await answered).status, 499);
-  } finally {
-    stub.close();
-  }
-});
-
 /**
  * A stand-in router: each request recorded with its headers, answered by
- * `answer(req, res)`; `closed` resolves the requests whose connection
- * closed.
+ * `answer(req, res, one)`; each record's `closed` turns true as its
+ * connection closes.
  */
 function standIn(answer) {
   const seen = [];
@@ -403,9 +494,93 @@ function standIn(answer) {
   );
 }
 
+/**
+ * The handler in Node, Node's fetch for Cloudflare's, over `env`: what
+ * `wrangler dev` cannot show -- a client gone before its answer's head
+ * never reaches a Worker there, workerd noticing a client only as it
+ * writes, where Cloudflare aborts `request.signal` -- and what is plainest
+ * to hold without it.
+ */
+function inNode(env) {
+  const worker = entry();
+  return (path, init) => worker.fetch(new Request(`http://entry.test${path}`, init), env, { waitUntil() {} });
+}
+
+test('a request held at its router is let go of with its client', async () => {
+  const stub = await standIn(() => {});
+  try {
+    const fetchOf = inNode({ REGIONS: JSON.stringify({ stub: [stub.url] }), HOMES_CACHE: 'off' });
+    const ac = new AbortController();
+    const answered = fetchOf('/t/held/query', {
+      method: 'POST',
+      body: '{"query":"set jobs {owner: 1} limit 1"}',
+      headers: { 'Fenec-Wait': '30000' },
+      signal: ac.signal,
+    });
+    const at = await until(() => stub.seen[0], 'the request at the router', 10_000);
+    assert.equal(at.closed, false);
+    ac.abort();
+    await until(() => at.closed, 'the request let go of at the router', 10_000);
+    assert.equal((await answered).status, 499);
+  } finally {
+    stub.close();
+  }
+});
+
+test('a body sent with no length is read up to what is kept for a retry, and refused past it', async () => {
+  const stub = await standIn((req, res) => res.end('{}'));
+  try {
+    const fetchOf = inNode({ REGIONS: JSON.stringify({ stub: [stub.url] }), HOMES_CACHE: 'off' });
+    /** A body of `n` bytes as a stream, so with no length. */
+    const streamed = (n) => {
+      let left = n;
+      return new ReadableStream({
+        pull(c) {
+          if (left === 0) return c.close();
+          const k = Math.min(left, 64 << 10);
+          left -= k;
+          c.enqueue(new Uint8Array(k).fill(0x20));
+        },
+      });
+    };
+    const small = await fetchOf('/t/acme/query', { method: 'POST', body: streamed(1000), duplex: 'half' });
+    assert.equal(small.status, 200);
+    // Sent on with its length: a router takes no chunked body.
+    assert.equal(stub.seen.at(-1).headers['content-length'], '1000');
+    const seen = stub.seen.length;
+    const big = await fetchOf('/t/acme/query', { method: 'POST', body: streamed(BUFFER_AT + 1), duplex: 'half' });
+    assert.equal(big.status, 411);
+    assert.match((await big.json()).error, /Content-Length/);
+    assert.equal(stub.seen.length, seen, 'nothing sent');
+  } finally {
+    stub.close();
+  }
+});
+
+test('the routers sending CORS headers to an entry with no CORS is said, once', async () => {
+  const stub = await standIn((req, res) => {
+    res.writeHead(200, { 'Access-Control-Allow-Origin': ORIGIN });
+    res.end('{}');
+  });
+  const said = [];
+  const warn = console.warn;
+  console.warn = (...a) => said.push(a.join(' '));
+  try {
+    const fetchOf = inNode({ REGIONS: JSON.stringify({ stub: [stub.url] }), HOMES_CACHE: 'off' });
+    for (let i = 0; i < 3; i++) assert.equal((await fetchOf('/t/acme/notes')).status, 200);
+    assert.equal(said.filter((s) => s.includes('CORS is not set')).length, 1, said.join('\n'));
+  } finally {
+    console.warn = warn;
+    stub.close();
+  }
+});
+
 describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, () => {
   let stub;
   let unreached;
+  let connector;
+  let timedOut;
+  let failing;
   let w;
   let front;
   let state;
@@ -421,13 +596,14 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
         res.on('close', () => clearInterval(beat));
         return;
       }
+      // A tenant named `to-<region>` lives in <region>, as a router says.
+      const home = /^\/t\/to-([a-z0-9]+)\//.exec(req.url)?.[1];
       res.writeHead(200, {
         'Content-Type': 'application/json',
+        'X-Request-Id': 'stub',
         'Fenec-Verified': '1',
         'Fenec-Seq': '5',
-        ...(req.url.startsWith('/t/far/') ? { 'Fenec-Home': 'far' } : {}),
-        ...(req.url.startsWith('/t/mars/') ? { 'Fenec-Home': 'mars' } : {}),
-        ...(req.url.startsWith('/t/far2/') ? { 'Fenec-Home': 'far2' } : {}),
+        ...(home ? { 'Fenec-Home': home } : {}),
       });
       res.end(JSON.stringify({ body: e.body }));
     });
@@ -437,11 +613,37 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
       res.writeHead(530, { 'Content-Type': 'text/html' });
       res.end('error code: 1033');
     });
+    // A tunnel's connector that cannot reach its router (Cloudflare's
+    // "502 Bad Gateway: Unable to reach the origin service"): the request
+    // may have reached it.
+    connector = await standIn((req, res) => {
+      res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Bad Gateway');
+    });
+    // Cloudflare's 522: the connection timed out, an acknowledgement of the
+    // request's bytes among what it counts.
+    timedOut = await standIn((req, res) => {
+      res.writeHead(522, { 'Content-Type': 'text/html' });
+      res.end('error code: 522');
+    });
+    // A router's own 502 -- a node it could not reach -- is an answer.
+    failing = await standIn((req, res) => {
+      res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8', 'X-Request-Id': 'r1' });
+      res.end('{"error":"node `n1` did not answer"}');
+    });
     // The global router, for /_shard/ when it is let through.
     w = await cluster.world({});
     state = await mkdtemp(join(tmpdir(), 'fenecdb-entry-stub-'));
     front = await serve('entry', state, {
-      REGIONS: JSON.stringify({ stub: [stub.url], far: [unreached.url, stub.url], far2: [unreached.url, stub.url] }),
+      REGIONS: JSON.stringify({
+        stub: [stub.url],
+        far: [unreached.url, stub.url],
+        far2: [unreached.url, stub.url],
+        tunnel: [connector.url, stub.url],
+        tunnel2: [connector.url, stub.url],
+        slow: [timedOut.url, stub.url],
+        own: [failing.url, stub.url],
+      }),
       DEFAULT_REGION: 'stub',
       ADMIN: JSON.stringify([w.global.url]),
       ENTRY_TOKEN: SECRET,
@@ -451,10 +653,17 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
   after(async () => {
     await front?.stop();
     await w?.stop();
-    stub?.close();
-    unreached?.close();
+    for (const s of [stub, unreached, connector, timedOut, failing]) s?.close();
     if (state) await rm(state, { recursive: true, force: true });
   });
+
+  /** A tenant of `region`, heard by the entry: its first request's answer names the region. */
+  async function homed(region) {
+    const r = await request(`${front.url}/t/to-${region}/query`, { method: 'POST', body: '{}' });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.header('fenec-home'), undefined);
+    return `/t/to-${region}`;
+  }
 
   test('the headers a client may send go on, the marks and its claimed addresses do not, and the client is named', async () => {
     const r = await request(`${front.url}/t/acme/query`, {
@@ -499,10 +708,10 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
       ['x-request-id', 'rid-1'],
       ['if-none-match', '"e"'],
       ['fenec-home', '1'],
-      ['fenec-client', `203.0.113.7 ${MARK}`],
     ]) {
       assert.equal(h[k], v, k);
     }
+    namesClient(h['fenec-client'], '203.0.113.7');
     for (const k of ['fenec-router', 'fenec-global', 'fenec-verified', 'x-real-ip', 'forwarded', 'true-client-ip']) assert.equal(h[k], undefined, k);
     // Nothing the client claimed reaches the router, under any name.
     const all = JSON.stringify(h);
@@ -528,27 +737,63 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
   });
 
   test('a router Cloudflare could not reach is passed over, a write too: it never ran there', async () => {
-    // The stand-in names `far` the home: the entry learns it, and its next
-    // request goes to far's routers, the first unreached.
-    assert.equal((await request(`${front.url}/t/far/query`, { method: 'POST', body: '{}' })).header('fenec-home'), 'far');
+    // far's first router is unreached; the entry's next request after
+    // hearing the home goes to it, then on.
+    const path = await homed('far');
     const before = unreached.seen.length;
-    const r = await request(`${front.url}/t/far/query`, { method: 'POST', body: '{"query":"put"}' });
+    const r = await request(`${front.url}${path}/query`, { method: 'POST', body: '{"query":"put"}' });
     assert.equal(r.status, 200, r.text);
     assert.equal(unreached.seen.length, before + 1);
     assert.equal(stub.seen.at(-1).body, '{"query":"put"}');
+  });
+
+  test("a router a tunnel's connector cannot reach is passed over for a read, and a write is told it may have run", async () => {
+    // tunnel: a read goes on to the standby in the same request.
+    let path = await homed('tunnel');
+    let before = connector.seen.length;
+    const read = await request(`${front.url}${path}/notes`);
+    assert.equal(read.status, 200, read.text);
+    assert.equal(connector.seen.length, before + 1);
+    assert.equal(stub.seen.at(-1).url, `${path}/notes`);
+    // tunnel2: a write is not sent again, and the next goes to the standby.
+    path = await homed('tunnel2');
+    before = stub.seen.length;
+    const once = await request(`${front.url}${path}/query`, { method: 'POST', body: '{"query":"put"}' });
+    assert.equal(once.status, 502, once.text);
+    assert.match(once.json().error, /may have run/);
+    assert.equal(stub.seen.length, before, 'not sent again');
+    const next = await request(`${front.url}${path}/query`, { method: 'POST', body: '{"query":"put"}' });
+    assert.equal(next.status, 200, next.text);
+  });
+
+  test("a 522 may have reached the router: a write is not sent again, a router's own 502 is its answer", async () => {
+    let path = await homed('slow');
+    let before = stub.seen.length;
+    const once = await request(`${front.url}${path}/query`, { method: 'POST', body: '{"query":"put"}' });
+    assert.equal(once.status, 502, once.text);
+    assert.match(once.json().error, /may have run/);
+    assert.equal(stub.seen.length, before, 'not sent again');
+    // A router's 502, with its request id: passed on, the standby not asked.
+    path = await homed('own');
+    before = stub.seen.length;
+    const r = await request(`${front.url}${path}/notes`);
+    assert.equal(r.status, 502);
+    assert.equal(r.header('x-request-id'), 'r1');
+    assert.match(r.text, /node `n1` did not answer/);
+    assert.equal(stub.seen.length, before);
   });
 
   test('a body past what is kept for a retry goes to one router, its length kept', async () => {
     // far2's first router is unreached, as Cloudflare says: a body of 2
     // MiB is streamed to it and not kept, so it cannot go on to the next --
     // the client is told to come back, which it may: it never ran.
-    assert.equal((await request(`${front.url}/t/far2/query`, { method: 'POST', body: '{}' })).header('fenec-home'), 'far2');
+    const path = await homed('far2');
     const big = JSON.stringify({ query: 'put', pad: 'x'.repeat(2 << 20) });
-    const r = await request(`${front.url}/t/far2/query`, { method: 'POST', body: big });
+    const r = await request(`${front.url}${path}/query`, { method: 'POST', body: big });
     assert.equal(r.status, 503, r.text);
     assert.equal(r.json().retry_after, 1);
     // The next goes to the next router, whole.
-    const ok = await request(`${front.url}/t/far2/query`, { method: 'POST', body: big });
+    const ok = await request(`${front.url}${path}/query`, { method: 'POST', body: big });
     assert.equal(ok.status, 200, ok.text);
     const seen = stub.seen.at(-1);
     assert.equal(seen.headers['content-length'], String(Buffer.byteLength(big)));
@@ -559,9 +804,8 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
   test('a home in a region the entry does not know is not one it sends to', async () => {
     const before = stub.seen.length;
     for (let i = 0; i < 2; i++) {
-      const r = await request(`${front.url}/t/mars/query`, { method: 'POST', body: '{}' });
+      const r = await request(`${front.url}/t/to-mars/query`, { method: 'POST', body: '{}' });
       assert.equal(r.status, 200);
-      assert.equal(r.header('fenec-home'), 'mars');
     }
     // Both to the default region's router, the stand-in.
     assert.equal(stub.seen.length, before + 2);

@@ -23,10 +23,11 @@ export function readyUrl(log) {
 /**
  * The address of the Worker's own workerd socket in what `wrangler dev`
  * printed under `--log-level debug`; null until it is there. `wrangler
- * dev`'s "Ready on" address is a proxy Worker of its own, which fetches
- * the Worker detached from its client's request: a client gone before its
- * answer's head never cancels the Worker's request there, as it does on
- * Cloudflare, where nothing stands between.
+ * dev`'s "Ready on" address is a proxy Worker of its own in front of the
+ * Worker, which a measurement may want to leave out (entry/bench.mjs).
+ * Neither address tells a Worker of a client gone before its answer's
+ * head: workerd notices a client only as it writes to it, there and past
+ * the proxy alike, where Cloudflare aborts the request's `signal`.
  */
 export function innerUrl(log) {
   const m = /"userWorkerUrl":\{"protocol":"(https?:)","hostname":"([^"]+)","port":"(\d+)"\}/.exec(log);
