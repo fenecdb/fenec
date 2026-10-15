@@ -1,13 +1,16 @@
 //! The router end to end: two in-process `--dir` nodes and a router in
 //! front of them, driven over raw TCP.
 
+use fenec_core::prelude::{
+    Database, Document, Error, Hook, Plugin, Registry, Result, Schema, Value, WriteOp,
+};
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, RwLock};
 use std::time::{Duration, Instant};
 
 struct Node {
@@ -61,6 +64,8 @@ fn node_cors(
 struct Cluster {
     port: u16,
     nodes: Vec<Node>,
+    /// The router's directory's database, for a test to make its writes fail.
+    directory: Arc<RwLock<Database>>,
 }
 
 /// A router with `n` nodes registered as `n1`, `n2`, ...
@@ -104,13 +109,19 @@ fn cluster_timed(
         upstream_timeout,
         ..Config::default()
     };
-    let router = Router::new(Directory::in_memory(), cfg);
+    let dir = Directory::in_memory();
+    let directory = Arc::clone(dir.db());
+    let router = Router::new(dir, cfg);
     let listener = router.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let _ = router.serve_on(listener);
     });
-    let c = Cluster { port, nodes };
+    let c = Cluster {
+        port,
+        nodes,
+        directory,
+    };
     for (i, nd) in c.nodes.iter().enumerate() {
         let body = format!(r#"{{"addr":"{}","token":"adm-{tag}{}"}}"#, nd.addr, i + 1);
         let r = c.call("PUT", &format!("/_shard/nodes/n{}", i + 1), &body, token);
@@ -412,6 +423,80 @@ fn a_move_replaces_a_stale_copy_left_on_the_target() {
     assert_eq!(r.0, 200, "{}", r.1);
     let r = c.call("GET", "/t/acme/notes?select=title", "", None);
     assert_eq!(body(&r), r#"[{"title":"real"}]"#);
+}
+
+/// Refuses, as a failing disk would, the directory's write placing a
+/// tenant active on its node: the flip at a move's end, and that alone --
+/// the source marked moving before it and put back active after it land.
+struct FailFlip(&'static str);
+
+impl Hook for FailFlip {
+    fn name(&self) -> &str {
+        "fail-flip"
+    }
+    fn rewrites(&self) -> bool {
+        false
+    }
+    fn before_write(&self, schema: &Schema, _: WriteOp, doc: &mut Document) -> Result<()> {
+        let is = |f: &str, v: &str| matches!(doc.get(f), Some(Value::Text(t)) if t == v);
+        if schema.name == "tenants" && is("node", self.0) && is("state", "active") {
+            return Err(Error::Io("the directory's disk is gone".into()));
+        }
+        Ok(())
+    }
+}
+
+impl Plugin for FailFlip {
+    fn name(&self) -> &str {
+        "fail-flip"
+    }
+    fn init(&self, reg: &mut Registry) -> Result<()> {
+        reg.register_hook(Arc::new(FailFlip(self.0)));
+        Ok(())
+    }
+}
+
+/// A move whose flip the directory cannot write is answered and put back:
+/// the write guard taken for the flip was held through the block that
+/// thaws the source, whose own directory write then waited on it -- the
+/// router's every request behind it, for good.
+#[test]
+fn a_move_whose_flip_the_directory_refuses_is_put_back_not_hung() {
+    let c = cluster("flip", 2, None);
+    c.create("acme", Some("n1"));
+    c.query("acme", "create collection notes (title text)");
+    c.directory
+        .write()
+        .unwrap()
+        .install_plugin(&FailFlip("n2"))
+        .unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let port = c.port;
+    std::thread::spawn(move || {
+        let _ = tx.send(call(
+            port,
+            "POST",
+            "/_shard/tenants/acme/move",
+            r#"{"to":"n2"}"#,
+            None,
+        ));
+    });
+    let r = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the move answered");
+    assert_eq!(r.0, 500, "the move answered nothing: {}", r.1);
+    assert!(body(&r).contains("the directory's disk is gone"), "{}", r.1);
+
+    // Put back: on its source, active and thawed, and no copy on the target.
+    let r = c.call("GET", "/_shard/tenants", "", None);
+    assert_eq!(
+        body(&r),
+        r#"[{"name":"acme","node":"n1","state":"active"}]"#
+    );
+    assert!(c.nodes[1].tenants.names().is_empty());
+    let r = c.call("POST", "/t/acme/notes", r#"{"title":"after"}"#, None);
+    assert_eq!(r.0, 201, "{}", r.1);
 }
 
 #[test]
