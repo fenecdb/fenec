@@ -944,10 +944,14 @@ impl Session<'_> {
         if !live || p.feed.epoch() != p.epoch || p.feed.is_closed() {
             // The tenant closed -- its feed went with it, and an open since
             // has one of its own -- or the feed started over or is going:
-            // taken again from the tenant as it is now. Sent, the image put
-            // the dead feed back among the stream's, which read nothing
-            // from it again: the archive stood still until the archiver
-            // connected again.
+            // taken again from the tenant as it is now. `live` is defence in
+            // depth, not what keeps the archive going: an image of a tenant
+            // that closed since is still where its file stands -- a close
+            // waits for the stream's writes -- and nothing below puts its
+            // feed back, which is what stalled the archive (the stream read
+            // nothing from the dead feed again until the archiver
+            // connected again). It spares an image the stream would follow
+            // with a look at the tenant anyway.
             let p = self.pending.remove(name).expect("looked at above");
             l.unfeed(name, &p.feed);
             p.feed.stopped(l.key);

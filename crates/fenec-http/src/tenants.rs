@@ -188,7 +188,9 @@ pub struct Tenants {
     /// the time the node's stream tells an archive it is gone, as a write's
     /// is the time the node appended it -- told when the stream came to
     /// it, a moment between the two, the stream busy or the archiver away,
-    /// restored a tenant the node no longer held.
+    /// restored a tenant the node no longer held. Kept only on a node that
+    /// replicates its tenants (`streams`), where an archiver can ask: up to
+    /// [`DEPARTED_KEPT`] names, a few megabytes, for nothing elsewhere.
     departed: Mutex<Departed>,
 }
 
@@ -1284,17 +1286,23 @@ impl Tenants {
             if !path.exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
             }
-            // Before the file goes, so the stream, which looks for it
-            // without the slot, finds the time with it gone.
-            let at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
-            self.departed
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .note(name, at);
             std::fs::remove_file(&path)
                 .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
+            // Once the file is gone: a delete that failed is no departure --
+            // noted before, a removal refused had the archive say the tenant
+            // went and came back 62 ms later, and a restore between left out
+            // a tenant that never left. The stream, which looks for the file
+            // without the slot, may find it gone a moment first, and takes
+            // that moment.
+            if self.streams.is_some() {
+                let at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64);
+                self.departed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .note(name, at);
+            }
             let _ = std::fs::remove_file(path.with_extension("fenec.compacting"));
             // The sync log beside it (`fenec_core::fs`): a log names the
             // file it was written for, and is kept from a tenant made
@@ -1680,6 +1688,54 @@ mod tests {
         )
         .unwrap();
         assert!(reg.peek("t").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn replicating(dir: &Path) -> Tenants {
+        Tenants::new(dir).unwrap().with_replication(Replicated {
+            token: "r".into(),
+            buffer: 1 << 20,
+            upstream: None,
+            sync_on_write: true,
+        })
+    }
+
+    /// A delete is a departure only on a node that replicates its tenants,
+    /// where an archiver can ask when one went: elsewhere the names were
+    /// kept for nothing.
+    #[test]
+    fn departures_are_kept_where_an_archiver_can_ask() {
+        let dir = scratch("departed");
+        let reg = replicating(&dir);
+        drop(reg.create("t").unwrap());
+        reg.delete("t").unwrap();
+        assert!(reg.departed("t").is_some());
+        let plain = Tenants::new(dir.join("plain")).unwrap();
+        drop(plain.create("t").unwrap());
+        plain.delete("t").unwrap();
+        assert!(plain.departed("t").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A delete whose file could not be removed is no departure: noted as
+    /// one, the archive said the tenant went and came back 62 ms later, and
+    /// a restore to a moment between left out a tenant that never left.
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_that_fails_is_no_departure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("delete-fails");
+        let reg = replicating(&dir);
+        drop(reg.create("t").unwrap());
+        let mode = |m| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m));
+        mode(0o555).unwrap();
+        let deleted = reg.delete("t");
+        mode(0o755).unwrap();
+        // Run as root, the directory refuses nothing: no failure to hold.
+        if deleted.is_err() {
+            assert!(dir.join("t.fenec").exists());
+            assert_eq!(reg.departed("t"), None);
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
