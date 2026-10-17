@@ -5202,7 +5202,27 @@ copy still being made is left for the next start) before its checkpoint;
 an error it cannot wait out ends the process rather than leave it serving
 a mirror that no longer moves. This is why the PostgreSQL client is
 `fenec-wire`'s, below the importer: in the server it made the importer
-depend on the server, which could then not run it. A subscriber hears a PostgreSQL
+depend on the server, which could then not run it. A message's length is
+held to PostgreSQL's gigabyte (`proto::MAX_MESSAGE`, its MaxAllocSize)
+before anything is allocated, and under it the body's buffer is the
+length believed, allocated so its failure is an error (`proto::zeroed`,
+as the router's `zeroed`, and for its reasons: no copy at any size, a
+lying length costing the pages its bytes reach): a length from the
+server, or from anyone on the path (fenecdb speaks no TLS), that a system
+refused -- one that does not overcommit, Linux's heuristic on a machine
+smaller than the gigabyte -- aborted `fenec import`, and `fenec-server
+--follow` with everything it served, and is a broken stream now, which
+the follower connects again after. The counts a message carries are held
+to it too: a column count is an Int16 never negative, read unsigned
+(`be_count`: read signed, `0xFFFF` sized a `Vec` by `usize::MAX` and
+panicked), and a TRUNCATE's relations are given room for what the
+message holds, where its count alone asked for 16 GiB. The reader is the
+code it was, `calloc` either way, the loop reading messages the same
+instructions in other registers once the refusal's message went out of
+line (`refused`: formatted in place, the length was stored to the stack
+at every message): over messages in memory, twelve runs a side in ABBA
+turns, 120 B 30.2 ns a message against 30.3, 3 500 B 248.4 against
+250.0, 64 KiB 8.53 us against 8.61, 2 MiB 58.5 against 58.6. A subscriber hears a PostgreSQL
 commit 0.09 ms after it returned at the median, a row inserted with a
 vector under HNSW 0.19 ms, p99 4.0 and 3.3 (`make mirror-bench`; the code
 before the pg wire went gave 3.7 and 3.7 the same day); a server killed

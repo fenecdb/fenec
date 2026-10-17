@@ -60,7 +60,8 @@ pub fn read_i32(r: &mut impl Read) -> io::Result<i32> {
 
 /// Reads a tagged message. Since the length is read *before* the body, the
 /// ceiling is applied before allocation: the body of an oversized message
-/// is never allocated.
+/// is never allocated. Under it the body's buffer is the length the server
+/// says, allocated so that its failure is an error ([`zeroed`]).
 pub fn read_message(r: &mut impl Read) -> io::Result<Message> {
     let mut tag = [0u8; 1];
     r.read_exact(&mut tag)?;
@@ -71,9 +72,55 @@ pub fn read_message(r: &mut impl Read) -> io::Result<Message> {
             format!("message length {len}, ceiling {MAX_MESSAGE} bytes"),
         ));
     }
-    let mut body = vec![0u8; (len - 4) as usize];
+    let mut body = zeroed((len - 4) as usize)?;
     r.read_exact(&mut body)?;
     Ok(Message { tag: tag[0], body })
+}
+
+/// `len` zero bytes for a message the server says is that long: the
+/// allocation `vec![0u8; len]` makes -- `alloc_zeroed`, the system's zero
+/// pages, each taken up as its bytes arrive -- with its failure an error
+/// where `vec!`'s aborts. Under the ceiling a length is up to a gigabyte,
+/// sent by the server, buggy or not, or by anyone on the path (fenecdb
+/// speaks no TLS), and where the system refuses that much -- a host that
+/// does not overcommit, Linux's heuristic refusing more than its memory and
+/// swap on a small machine -- the refusal aborted `fenec import`, and
+/// `fenec-server --follow` with every request it served; now it is an
+/// error, which the follower takes for a broken stream and connects again
+/// after. A buffer grown as the bytes came would cost a lying length only
+/// what was sent, but would copy what had come at each growth of every
+/// message past its first size -- a row of a wide vector or a long text is
+/// one COPY message -- where believing the length costs the pages its bytes
+/// reach, and on a system that lends it nothing more. fenec-shard reads a
+/// node's answer the same way, for the same reasons (its `zeroed`).
+fn zeroed(len: usize) -> io::Result<Vec<u8>> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let Ok(layout) = std::alloc::Layout::array::<u8>(len) else {
+        return Err(refused(len));
+    };
+    // SAFETY: a layout of a non-zero size.
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    if ptr.is_null() {
+        return Err(refused(len));
+    }
+    // SAFETY: allocated by the global allocator for exactly `len` bytes of
+    // `u8`'s alignment, every one of them initialised to zero -- the
+    // allocation a `Vec<u8>` of that capacity owns, as `vec!` makes it.
+    Ok(unsafe { Vec::from_raw_parts(ptr, len, len) })
+}
+
+/// The error of a length no allocation holds, out of line: formatted where
+/// it is refused, the length was stored to the stack for its address on
+/// every message read, the one instruction `read_message`'s loop gained.
+#[cold]
+#[inline(never)]
+fn refused(len: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::OutOfMemory,
+        format!("the server's message says it is {len} bytes, which cannot be held"),
+    )
 }
 
 /// Reads a NUL-terminated string from the body. The terminator is found a
@@ -112,5 +159,57 @@ mod tests {
         assert_eq!(pos, body.len());
         assert_eq!(take_cstr(body, &mut pos), "");
         assert_eq!(pos, body.len());
+    }
+
+    /// A message's tag and its length, as a server sends them.
+    fn header(tag: u8, len: i32) -> Vec<u8> {
+        let mut m = vec![tag];
+        m.extend_from_slice(&len.to_be_bytes());
+        m
+    }
+
+    /// A length is held to the protocol before anything is allocated or
+    /// read past it: under 4 (its own four bytes) or past PostgreSQL's
+    /// gigabyte, the message is refused with the rest of the stream
+    /// unread. Under the ceiling a length is believed as far as the system
+    /// lends it: a gigabyte said and three bytes sent is an error -- the
+    /// allocation refused, or lent and the message cut short -- never an
+    /// abort; past what an allocation can be, refused before it is asked.
+    /// And a message of 20 MiB comes whole, its neighbour after it.
+    #[test]
+    fn a_message_s_length_is_held_to_the_protocol_and_never_aborts() {
+        for len in [i32::MIN, -1, 0, 3, (MAX_MESSAGE + 1) as i32, i32::MAX] {
+            let mut m = header(b'd', len);
+            m.extend_from_slice(b"rest");
+            let mut r = &m[..];
+            let e = read_message(&mut r).err().unwrap();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{len}: {e}");
+            assert_eq!(r, b"rest", "{len}: read past its header");
+        }
+        let mut m = header(b'd', MAX_MESSAGE as i32);
+        m.extend_from_slice(b"abc");
+        let e = read_message(&mut &m[..]).err().unwrap();
+        let kind = e.kind();
+        assert!(
+            matches!(
+                kind,
+                io::ErrorKind::OutOfMemory | io::ErrorKind::UnexpectedEof
+            ),
+            "{e}"
+        );
+        let past = zeroed(isize::MAX as usize + 1).unwrap_err();
+        assert_eq!(past.kind(), io::ErrorKind::OutOfMemory, "{past}");
+        assert!(zeroed(0).unwrap().is_empty());
+        let whole: Vec<u8> = (0..(20 << 20) + 7).map(|i| (i % 251) as u8).collect();
+        let mut m = header(b'd', whole.len() as i32 + 4);
+        m.extend_from_slice(&whole);
+        m.extend_from_slice(&header(b'Z', 5));
+        m.push(b'I');
+        let mut r = &m[..];
+        let d = read_message(&mut r).unwrap();
+        assert!(d.tag == b'd' && d.body == whole);
+        let z = read_message(&mut r).unwrap();
+        assert_eq!((z.tag, z.body), (b'Z', b"I".to_vec()));
+        assert!(r.is_empty());
     }
 }
