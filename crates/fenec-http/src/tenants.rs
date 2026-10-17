@@ -495,8 +495,10 @@ impl Tenants {
 
     /// The token a tenant's `/_replication` asks for, when the node
     /// replicates its tenants.
+    /// The token a tenant's stream and the node's are asked for: none where
+    /// it is empty, which a request with no `Authorization` would match.
     pub fn replication_token(&self) -> Option<&str> {
-        Some(self.repl.as_ref()?.token.as_str())
+        Some(self.repl.as_ref()?.token.as_str()).filter(|t| !t.is_empty())
     }
 
     pub fn with_change_capacity(mut self, n: usize) -> Tenants {

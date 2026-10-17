@@ -39,7 +39,9 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
   files, or the backup file, sealed with it
 
   <primary> is its HTTP address, http://host:port, <node> a --dir node's,
-  and <t> its --replication-token (also read from FENEC_REPLICATION_TOKEN).
+  and <t> its --replication-token (also read from FENEC_REPLICATION_TOKEN;
+  set and empty, it is unset). An empty --token, and an empty key file from
+  --key-file or FENEC_KEY_FILE, are refused.
 
   backup    the database as it stands, taken while the server runs: into a
             file that opens as a database of its own, or into an archive as
@@ -118,7 +120,11 @@ fn fail(msg: &str) -> ! {
 /// exit code.
 pub fn main(command: &str, args: &[String]) -> i32 {
     let mut positional = Vec::new();
-    let mut token = std::env::var("FENEC_REPLICATION_TOKEN").ok();
+    // Set and empty is unset, as an environment file leaves a line it does
+    // not use: the primary's ask for its token is then said here.
+    let mut token = std::env::var("FENEC_REPLICATION_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
     let mut target = Target::End;
     let mut every = Duration::from_secs(3600);
     let mut keep: Option<Duration> = None;
@@ -200,6 +206,19 @@ pub fn main(command: &str, args: &[String]) -> i32 {
                 1
             }
         };
+    }
+    // `--token "$REPL"` with REPL unset: refused, not sent as a token.
+    if token.as_deref() == Some("") {
+        fail("--token is empty: give the primary's replication token, or leave the flag out");
+    }
+    // An empty key file is refused, from the environment too, never taken
+    // for none: none writes the archive or the backup in the clear, and an
+    // environment file's line left empty is a key meant.
+    if key_file.as_deref() == Some("") {
+        fail(
+            "the key file is empty (--key-file or FENEC_KEY_FILE): name the key, or leave both \
+             out for an archive or a backup in the clear",
+        );
     }
     let key = key_file.as_ref().map(|p| {
         Key::from_file(Path::new(p)).unwrap_or_else(|e| fail(&format!("--key-file {p}: {e}")))

@@ -1878,6 +1878,29 @@ database installs the `Check` hook as a single one does
 (`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
 and a scoped write to a tenant went unchecked.
 
+**An empty token is no token.** Every check reads a request carrying no
+`Authorization` as the empty token (`unwrap_or("")` before the constant-time
+compare), so an empty token configured matched everyone: an empty
+`FENEC_SHARD_TOKEN` -- an environment file's line left blank -- opened
+`/_shard/` and passed the router's check against a public address with no
+token, and an empty `--admin-token` opened `/_admin/`. Every token and key
+variable is read through a filter, set and empty being unset
+(`env_secret` in fenec-server, `env` in fenec-shard's main,
+`FENEC_HTTP_TOKEN` and `FENEC_SHARD_ENTRY_TOKEN` as they were), and every
+token flag given empty is refused at the start (`--http-token
+"$TOKEN"` with `TOKEN` unset), as is an empty JWT secret's file; the
+library holds an embedder to the same -- `Config::settled` in each
+`Server` constructor, `Router::assemble`, `Replication::new` and
+`Tenants::replication_token` take an empty token for none. The archiver's
+`FENEC_REPLICATION_TOKEN` is unset when empty and its `--token` refused,
+and an empty key file (`--key-file`, `FENEC_KEY_FILE`) is refused, never
+none, which would write an archive in the clear. `tests/tokens.rs` in
+fenec-server, fenec-shard and fenec-cli and fenec-http's
+`tests/empty_tokens.rs` fail without it. A node also reads `--admin-token`
+from `FENEC_ADMIN_TOKEN` and a router `--replication-token` from
+`FENEC_SHARD_REPLICATION_TOKEN`, the two that had no variable, so no token
+need be on a command line `ps` shows.
+
 **A tenant is held to its quota by its node, a block as it lands**
 (`fenec_http::quota`, `fenec_core::engine::limit`). A node's tenants
 share its disk, memory and threads, and only `--max-connections` and

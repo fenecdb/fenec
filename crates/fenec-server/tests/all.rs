@@ -11,4 +11,5 @@ mod otlp;
 mod shutdown;
 mod studio;
 mod support;
+mod tokens;
 mod tracing;

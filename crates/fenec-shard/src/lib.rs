@@ -280,6 +280,13 @@ impl Router {
         repl: Option<Arc<Replication>>,
         global: Option<RwLock<Directory>>,
     ) -> Arc<Router> {
+        // An empty token is none: `/_shard/` read a request with no
+        // `Authorization` as the empty token, and the relay's mark made of
+        // it was anyone's to make. As none, the router asks for none on
+        // loopback and refuses an address past it.
+        let mut cfg = cfg;
+        cfg.token = cfg.token.filter(|t| !t.is_empty());
+        cfg.entry_token = cfg.entry_token.filter(|t| !t.is_empty());
         Arc::new(Router {
             dir: RwLock::new(dir),
             repl,

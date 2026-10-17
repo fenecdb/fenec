@@ -1895,4 +1895,18 @@ The router forwards <code>Authorization</code> as it came and holds no keys,
 so the node is what enforces it, behind the router or reached directly.
 What a scoped token writes to a tenant is checked against its rules as on a
 single file (<a href="/docs/http#scoped-access">Scoped access</a>).</p>
+
+<p>Every token is also read from the environment, which keeps it off a
+command line every user of the machine reads with <code>ps</code>: a node's
+from <code>FENEC_HTTP_TOKEN</code>, <code>FENEC_ADMIN_TOKEN</code> and
+<code>FENEC_REPLICATION_TOKEN</code>, a router's from
+<code>FENEC_SHARD_TOKEN</code>, <code>FENEC_SHARD_REPLICATION_TOKEN</code>
+and <code>FENEC_SHARD_ENTRY_TOKEN</code>, an archiver's from
+<code>FENEC_REPLICATION_TOKEN</code>. A variable set and empty, as an
+environment file leaves a line it does not use, is no token; a token given
+empty as a flag is refused at the start. A request carrying no
+<code>Authorization</code> reads as the empty token, so an empty
+<code>FENEC_SHARD_TOKEN</code>, taken for one, let anyone into
+<code>/_shard/</code> -- and past the check that keeps a router with no
+token off a public address.</p>
 </details>

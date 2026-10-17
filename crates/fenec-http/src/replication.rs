@@ -979,7 +979,7 @@ impl Replication {
         follower: Option<Arc<Follower>>,
     ) -> Arc<Replication> {
         Arc::new(Replication {
-            token,
+            token: token.filter(|t| !t.is_empty()),
             feed,
             follower,
             streams: Mutex::new(Vec::new()),
