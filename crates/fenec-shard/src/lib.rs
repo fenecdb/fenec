@@ -105,11 +105,12 @@ pub struct Config {
     /// home.
     pub near: Option<String>,
     /// How long a read replica has to answer a marked read, past the wait
-    /// its `Fenec-After` asks for (`--replica-timeout`): the connect and
-    /// every read of its answer's head. One that does not is let be for
-    /// [`readers::RESTING`] -- its node, not reached, or its tenant's
-    /// copy alone, its read slower than this -- and the read goes home: at
-    /// `upstream_timeout` a hung replica's node held each marked read a
+    /// its `Fenec-After` asks for (`--replica-timeout`): the connect, every
+    /// write of the request and every read of its answer's head. One that
+    /// does not is let be for [`readers::RESTING`] -- its node, not
+    /// reached, or its tenant's copy alone, its read slower than this, and
+    /// the node once a second tenant's copy is -- and the read goes home:
+    /// at `upstream_timeout` a hung replica's node held each marked read a
     /// minute.
     pub replica_timeout: Duration,
     /// How long a read replica that did not answer a marked read is let be
@@ -1170,8 +1171,11 @@ impl Router {
                 // timeout, or its query's panic dropping that connection
                 // alone. Resting the node sent every tenant's marked reads
                 // of it home, and one slow read every few seconds kept a
-                // region's replicas unread. A node that is gone is not
-                // reached by the next read, and rested then.
+                // region's replicas unread. A node that refuses connections
+                // is not reached by the next read, and rested then; one
+                // that takes them and answers nothing -- stopped,
+                // deadlocked -- is rested once a second tenant's copy is
+                // (`readers::rest_copy_in`).
                 Err(upstream::Near::Unanswered(e)) => {
                     forwarding.error(e.to_string());
                     self.rest_copy(tenant, &rnode);

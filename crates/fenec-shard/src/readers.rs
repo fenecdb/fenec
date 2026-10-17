@@ -80,7 +80,9 @@
 //! [`crate::Config::replica_timeout`] past it, goes home, and a replica
 //! that did not answer is let be for [`RESTING`]: its node, where it was
 //! not reached or took no whole request, its tenant's copy alone where it
-//! took one and did not answer in time. Home answers it, or --
+//! took one and did not answer in time -- and the node too once a second
+//! tenant's copy there is, a node that takes requests and answers none.
+//! Home answers it, or --
 //! the write lost in the failover -- says at once where it stands, which
 //! the SDK takes as its position over the one that read was sent after,
 //! never an earlier term of the same lineage -- its history id's top half,
@@ -363,9 +365,12 @@ impl Router {
     /// or broke its answer off. Its head comes once its query has run, so
     /// a read slower than [`crate::Config::replica_timeout`] -- a client's
     /// own, one every few seconds -- rested the whole node, and every
-    /// tenant's marked reads of the region went home meanwhile.
+    /// tenant's marked reads of the region went home meanwhile. The node
+    /// too where another tenant's copy there is resting ([`rest_copy_in`]).
     pub(crate) fn rest_copy(&self, tenant: &str, node: &str) {
-        self.rest_key(format!("{tenant}/{node}"));
+        let now = Instant::now();
+        let mut resting = self.resting.lock().unwrap_or_else(|e| e.into_inner());
+        rest_copy_in(&mut resting, tenant, node, now, now + self.cfg.replica_rest);
     }
 
     /// Rests `key`, letting go of every rest that has run out: a tenant's
@@ -2532,11 +2537,70 @@ pub(crate) fn reads_only(req: &Request, rest: &[&str]) -> bool {
     )
 }
 
+/// Rests `tenant`'s copy on `node` in `resting` until `until`, letting go
+/// of every rest that ran out by `now`, and the node with it where another
+/// tenant's copy there is resting: two tenants' reads it took whole and did
+/// not answer is the node's. A node stopped, deadlocked or waiting on its
+/// disk still has the kernel take a connection and a small request, so its
+/// reads time out on the head, and rested a copy at a time it had every
+/// tenant with a copy there wait out `--replica-timeout` once a
+/// [`RESTING`] -- where one tenant's slow reads alone, however often, are
+/// that tenant's, and never rest the node: tenants are counted, not reads.
+fn rest_copy_in(
+    resting: &mut HashMap<String, Instant>,
+    tenant: &str,
+    node: &str,
+    now: Instant,
+    until: Instant,
+) {
+    let mut another = false;
+    resting.retain(|key, at| {
+        let live = now < *at;
+        if live && !another {
+            another = key
+                .strip_suffix(node)
+                .and_then(|t| t.strip_suffix('/'))
+                .is_some_and(|t| t != tenant);
+        }
+        live
+    });
+    resting.insert(format!("{tenant}/{node}"), until);
+    if another {
+        resting.insert(node.to_string(), until);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::QuotaQueue;
+    use super::{rest_copy_in, QuotaQueue};
     use crate::directory::{Directory, Node, State};
     use crate::{Config, Router};
+
+    #[test]
+    fn a_node_is_rested_by_two_tenants_copies_never_by_one_tenant_s_reads() {
+        let mut resting = std::collections::HashMap::new();
+        let now = std::time::Instant::now();
+        let until = now + std::time::Duration::from_secs(5);
+        // One tenant's slow reads, again and again: its copy alone.
+        for _ in 0..5 {
+            rest_copy_in(&mut resting, "slow", "us1", now, until);
+        }
+        assert!(!resting.contains_key("us1"), "{resting:?}");
+        // Another node's copies, and a tenant whose name ends as the node's
+        // does, count for none of this node's.
+        rest_copy_in(&mut resting, "other", "us2", now, until);
+        rest_copy_in(&mut resting, "x", "sus1", now, until);
+        assert!(!resting.contains_key("us1"), "{resting:?}");
+        // A second tenant's copy on the node: the node's.
+        rest_copy_in(&mut resting, "b", "us1", now, until);
+        assert_eq!(resting.get("us1"), Some(&until));
+        // A copy whose rest ran out counts for nothing, and is let go of.
+        let mut resting = std::collections::HashMap::new();
+        rest_copy_in(&mut resting, "a", "us1", now, now);
+        rest_copy_in(&mut resting, "b", "us1", now, until);
+        assert!(!resting.contains_key("us1"), "{resting:?}");
+        assert!(!resting.contains_key("a/us1"), "{resting:?}");
+    }
     use std::sync::mpsc;
     use std::time::Duration;
 

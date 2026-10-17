@@ -3026,6 +3026,76 @@ fn a_slow_marked_read_lets_its_tenant_s_copy_be_and_no_other() {
     w.us_link.unpark_answers("/t/slow/query");
 }
 
+/// A replica node that takes connections and answers nothing -- stopped,
+/// deadlocked, waiting on its disk: the kernel takes the request, and the
+/// head never comes -- is let be once two tenants' reads have waited it
+/// out. Rested a tenant's copy at a time, every tenant with a copy there
+/// waited `--replica-timeout` once a rest, for as long as the node hung.
+#[test]
+fn a_hung_replica_node_is_let_be_once_two_tenants_have_waited_it_out() {
+    let tag = "hung-node";
+    let w = Near::with(tag, |cfg| {
+        cfg.replica_timeout = Duration::from_secs(1);
+        cfg.replica_rest = Duration::from_secs(600);
+    });
+    for t in ["a", "b", "c"] {
+        w.tenant(t);
+    }
+    w.us_link.hang();
+    for t in ["a", "b"] {
+        let (status, body) = marked(w.port, t, "get notes select body", None);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#""before""#), "answered home: {body}");
+        assert_eq!(w.us_link.asked(&format!("/t/{t}/")), 1, "{t} waited it out");
+    }
+    // A third tenant's read goes home without asking the node.
+    let (status, body) = marked(w.port, "c", "get notes select body", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""before""#), "{body}");
+    assert_eq!(w.us_link.asked("/t/c/"), 0, "the node let be");
+    w.us_link.heal();
+}
+
+/// A marked read whose body is past what the sockets between the router
+/// and its replica hold, sent to a node that stopped reading, goes home by
+/// `--replica-timeout`: its write was bounded by the pool's timeout alone
+/// (the upstream timeout, a minute here), the connect and the head's reads
+/// by the replica's.
+#[test]
+fn a_marked_read_whose_body_the_replica_does_not_read_goes_home_by_the_replica_timeout() {
+    let tag = "unread-body";
+    let w = Near::with(tag, |cfg| {
+        cfg.replica_timeout = Duration::from_secs(1);
+        cfg.replica_rest = Duration::from_secs(600);
+    });
+    w.tenant("a");
+    w.us_link.hang();
+    // 24 MB, past loopback's buffers on both ends; the node takes 64.
+    let pad = "x".repeat(24 << 20);
+    let body = format!(r#"{{"query":"get notes select body","pad":"{pad}"}}"#);
+    // A client of its own: `request`'s refusal would print the body.
+    let mut s = TcpStream::connect(("127.0.0.1", w.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let started = Instant::now();
+    write!(
+        s,
+        "POST /t/a/query HTTP/1.1\r\nHost: x\r\nConnection: close\r\nFenec-Read: replica\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    let read = s.read_to_string(&mut answer);
+    let took = started.elapsed();
+    assert!(read.is_ok(), "{read:?} after {took:?}");
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(answer.contains(r#""before""#), "answered home: {answer}");
+    assert_eq!(w.us_link.asked("/t/a/"), 1, "the replica asked");
+    // Half the upstream timeout it would have waited.
+    assert!(took < Duration::from_secs(30), "{took:?}");
+    w.us_link.heal();
+}
+
 /// A read replica that breaks its answer off mid-body has the read go
 /// home, as one that failed its head does: the answer is read whole
 /// before a byte of it goes to the client, which was answered 502.

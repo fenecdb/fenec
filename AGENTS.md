@@ -1345,9 +1345,13 @@ router's `--region`) and sends a marked request of a tenant with a read
 replica there, and not living there, to it -- one header looked for on every
 forward, the lookup only for a marked one, and one more on the node, which
 reads the mark once a request in `serve_connection` -- bounded by the wait its
-`Fenec-After` asks and `--replica-timeout` (2 s) past it (`Pool::send_within`):
-at the upstream timeout a node that took connections and never answered held
-each marked read a minute. It goes home where the replica does not answer --
+`Fenec-After` asks and `--replica-timeout` (2 s) past it (`Pool::send_within`,
+the connect, each write and each read of the head, the write timeout kept
+with a pooled connection as its read timeout is, so a request sets it on no
+connection a replica's read has not used): at the upstream timeout a node
+that took connections and never answered held each marked read a minute,
+and one that stopped reading a body past the sockets' buffers held the
+write as long. It goes home where the replica does not answer --
 and is let be for `RESTING` (5 s, `Config::replica_rest`), its reads going
 home at once: the node, where it was not reached or took no whole request
 (`upstream::Near::Unreached`), the tenant's copy alone where it took one and
@@ -1358,7 +1362,13 @@ region home -- breaks its answer off (read whole before its head goes on,
 `read_body_kept`: answered 502 before; a stream goes on as it comes, and
 the tail `forward` shares took the body as a parameter: an unmarked
 request's added p50 20.6 us either way, main's 23.75, sixteen runs a side
-in turns),
+in turns); a node that takes connections and answers nothing -- stopped,
+deadlocked, its disk stalled: the kernel takes a small request -- looks
+like a slow read to each tenant, and resting a copy at a time had every
+tenant with a copy there wait out the timeout once a `RESTING`, so the
+node is rested too once a second tenant's copy there is
+(`readers::rest_copy_in`, tenants counted, not reads: one tenant's slow
+reads never rest the node),
 answers 503 or 504, or a 404 with
 `Fenec-Tenant: absent` (the file gone, made again at the next look; every
 `CHECK_EVERY`, 10 s, a thread of its own asks each replica's node what it

@@ -1600,9 +1600,9 @@ region whose directory it keeps (<code>--region</code>). Asked for a request
 marked <code>Fenec-Read: replica</code> of a tenant with a read replica in
 that region — and not living in it — it forwards the request to the replica;
 every other request goes where it went. A marked read the replica does not
-answer — its node not reached, or not by the wait its
-<code>Fenec-After</code> asks and <code>--replica-timeout</code> past it
-(2 s); not caught up with its primary yet, or going down (<code>503</code>);
+answer — its node not reached, or the request not written or answered by
+the wait its <code>Fenec-After</code> asks and
+<code>--replica-timeout</code> past it (2 s); not caught up with its primary yet, or going down (<code>503</code>);
 still behind the position it was sent after at the end of the wait
 (<code>504</code>); its file gone from the node (a <code>404</code> with
 <code>Fenec-Tenant: absent</code>) — is sent home, so the client is answered
@@ -1613,7 +1613,12 @@ replica that did not answer is let be for 5 s, its reads going home at once
 meanwhile: the node's, every tenant's, where it was not reached or took no
 whole request; the tenant's copy alone where it took one and did not answer
 in time, since its answer comes once the query has run and one slow read is
-that read's, not the node's. <code>fenec_router_replica_reads_total</code> counts marked reads by
+that read's, not the node's. A node that takes connections and answers
+nothing — stopped, deadlocked, waiting on its disk — looks like a slow read
+to each tenant, so once a second tenant's copy there is let be, the node is
+too: each tenant would otherwise wait out the timeout once every 5 s for as
+long as it hung. One tenant's slow reads, however many, never let the node
+be. <code>fenec_router_replica_reads_total</code> counts marked reads by
 where they were answered: <code>outcome="replica"</code>,
 <code>"fallback"</code>, <code>"home"</code>. Every server runs a marked
 request read-only on every route — a statement, REST, <code>/batch</code>, an
