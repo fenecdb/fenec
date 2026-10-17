@@ -139,8 +139,9 @@ export function corsHeaders(origin) {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers':
-      'content-type, authorization, idempotency-key, fenec-after, fenec-wait, if-none-match, mcp-protocol-version, mcp-method, mcp-name',
-    'Access-Control-Expose-Headers': 'fenec-seq, fenec-next, idempotent-replayed, etag, x-request-id, fenec-quota, retry-after',
+      'content-type, authorization, idempotency-key, fenec-after, fenec-history, fenec-wait, fenec-read, if-none-match, mcp-protocol-version, mcp-method, mcp-name',
+    'Access-Control-Expose-Headers':
+      'fenec-seq, fenec-history, fenec-next, idempotent-replayed, etag, x-request-id, fenec-quota, retry-after',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
   };
