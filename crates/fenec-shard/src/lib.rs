@@ -108,10 +108,13 @@ pub struct Config {
     /// its `Fenec-After` asks for (`--replica-timeout`): the connect, every
     /// write of the request and every read of its answer's head. One that
     /// does not is let be for [`readers::RESTING`] -- its node, not
-    /// reached, or its tenant's copy alone, its read slower than this, and
-    /// the node once a second tenant's copy is -- and the read goes home:
-    /// at `upstream_timeout` a hung replica's node held each marked read a
-    /// minute.
+    /// reached, or not answering its `/_health` either within
+    /// [`readers::HEALTH_WAIT`] (this where shorter); its tenant's copy
+    /// alone where the node answers, the read slower than this -- and the
+    /// read goes home: at `upstream_timeout` a hung replica's node held
+    /// each marked read a minute. A node that answers its health while
+    /// every query on it stalls, its disk stalled under them, costs each
+    /// tenant with a copy there one timeout a rest.
     pub replica_timeout: Duration,
     /// How long a read replica that did not answer a marked read is let be
     /// ([`readers::RESTING`] unless set).
@@ -234,7 +237,11 @@ pub struct Router {
     /// hangs would have every read wait its [`Config::replica_timeout`]
     /// first. One that answers, a 503 that it has not caught up among
     /// them, costs a read a hop alone.
-    resting: Mutex<std::collections::HashMap<String, Instant>>,
+    resting: Arc<Mutex<std::collections::HashMap<String, Instant>>>,
+    /// The read replicas' nodes being asked their `/_health` now, one
+    /// question a node at a time ([`Router::rest_unanswered`]): shared with
+    /// the thread asking it, as `resting` is.
+    probing: Arc<Mutex<HashSet<String>>>,
     /// What the read replicas' calls to their nodes go through: bounded by
     /// [`readers::CALL`], not `upstream_timeout`, so a node that does not
     /// answer holds a look over them up that long at most.
@@ -303,7 +310,8 @@ impl Router {
             reader_remade: Mutex::new(std::collections::HashMap::new()),
             reader_quota_queue: Mutex::new(Default::default()),
             quotas_soon: (Mutex::new(false), std::sync::Condvar::new()),
-            resting: Mutex::new(Default::default()),
+            resting: Arc::new(Mutex::new(Default::default())),
+            probing: Arc::new(Mutex::new(HashSet::new())),
             reader_pool: Pool::new(cfg.reader_timeout),
             follow_soon: (Mutex::new(false), std::sync::Condvar::new()),
             cfg,
@@ -766,7 +774,14 @@ impl Router {
                 }
             }
             let keep = match req.segments().first() {
-                Some(&"t") => self.forward(&req, &mut out, arrived, peer, relayed),
+                Some(&"t") => {
+                    // The client's socket, for a held request to watch: not
+                    // where the reader holds bytes of its next request, a
+                    // client that has gone having sent none (`upstream`'s
+                    // `answered_or_gone`).
+                    let watch = reader.buffer().is_empty().then(|| reader.get_ref());
+                    self.forward(&req, &mut out, arrived, peer, relayed, watch)
+                }
                 Some(&"_replication") => {
                     let Some(repl) = self.repl.clone() else {
                         let _ = self
@@ -833,7 +848,8 @@ impl Router {
     /// Forwards one request and copies the answer back, and counts it.
     /// Returns whether the client connection can carry another request.
     /// `relayed` is the client another router relayed it for, where it
-    /// came so ([`region`]).
+    /// came so ([`region`]); `watch` the client's socket, which a held
+    /// request watches ([`upstream::Pool::send_held`]).
     fn forward(
         &self,
         req: &Request,
@@ -841,6 +857,7 @@ impl Router {
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         relayed: Option<std::net::IpAddr>,
+        watch: Option<&TcpStream>,
     ) -> bool {
         let head_only = req.method == Method::Head;
         // A forwarded request is traced, the rest of the router's are not:
@@ -963,13 +980,16 @@ impl Router {
             }
         }
         // A request the node may hold -- `Fenec-Wait`, for a claim or for
-        // `Fenec-After` -- is waited for as long besides the timeout.
+        // `Fenec-After` -- is waited for as long besides the timeout, and
+        // watches its client meanwhile: one gone has the node's connection
+        // let go of, so a claim's job goes to the next claim held.
         let held = req
             .header("fenec-wait")
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map_or(Duration::ZERO, |ms| {
                 Duration::from_millis(ms).min(fenec_http::waits::LONGEST)
             });
+        let watch = watch.filter(|_| !held.is_zero());
         let sending = match &routers {
             None => self.pool.send_held(
                 &addr,
@@ -978,13 +998,25 @@ impl Router {
                 &headers,
                 &req.body,
                 held,
+                watch,
             ),
             // A region's routers, in turn from the one that answered last,
             // as far as the request cannot have run.
-            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held),
+            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held, watch),
         };
         let answer = match sending {
             Ok(a) => a,
+            // Its client reset the connection: nobody is left to answer,
+            // and the node is no more out of reach than before. Nothing is
+            // written; the request is counted as `gone`, and the trace says
+            // 499, as nginx and Envoy name a request its client closed.
+            Err(e) if upstream::client_gone(&e) => {
+                forwarding.error(e.to_string());
+                drop(forwarding);
+                metrics::gone(Route::Tenant, arrived.elapsed());
+                fenec_http::trace::end(499);
+                return false;
+            }
             Err(e) => {
                 forwarding.error(e.to_string());
                 drop(forwarding);
@@ -1242,7 +1274,10 @@ impl Router {
                             Ok(body) => Some(body),
                             Err(e) => {
                                 forwarding.error(e.to_string());
-                                self.rest_copy(tenant, &rnode);
+                                // Its connection let go of first: the
+                                // question is the node's, on one of its own.
+                                drop(a);
+                                self.rest_unanswered(tenant, &rnode, &raddr);
                                 metrics::replica_read(metrics::ReplicaRead::Fallback);
                                 return None;
                             }
@@ -1264,18 +1299,18 @@ impl Router {
                     metrics::replica_read(metrics::ReplicaRead::Fallback);
                 }
                 // Taken and not answered in time, or its connection ended:
-                // this tenant's copy -- its read maybe slower than the
-                // timeout, or its query's panic dropping that connection
-                // alone. Resting the node sent every tenant's marked reads
-                // of it home, and one slow read every few seconds kept a
-                // region's replicas unread. A node that refuses connections
-                // is not reached by the next read, and rested then; one
-                // that takes them and answers nothing -- stopped,
-                // deadlocked -- is rested once a second tenant's copy is
-                // (`readers::rest_copy_in`).
+                // this tenant's copy at once -- its read maybe slower than
+                // the timeout, or its query's panic dropping that
+                // connection alone; resting the node sent every tenant's
+                // marked reads of it home, and one slow read every few
+                // seconds kept a region's replicas unread -- and the node
+                // where its `/_health`, asked on a thread of its own, goes
+                // unanswered too: one that takes connections and answers
+                // nothing, stopped or deadlocked
+                // (`readers::rest_unanswered`).
                 Err(upstream::Near::Unanswered(e)) => {
                     forwarding.error(e.to_string());
-                    self.rest_copy(tenant, &rnode);
+                    self.rest_unanswered(tenant, &rnode, &raddr);
                     metrics::replica_read(metrics::ReplicaRead::Fallback);
                 }
             }

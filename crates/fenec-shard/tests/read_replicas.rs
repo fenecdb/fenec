@@ -2994,8 +2994,10 @@ fn readers_call() -> Duration {
 /// head comes once its query has run, so a read slower than the timeout
 /// looks just like a node that hangs, and resting the node sent every
 /// tenant's marked reads of the region home -- kept so by one slow read
-/// every few seconds. Here the slow read's answer is held at the node's
-/// door past the timeout.
+/// every few seconds. The node answers its `/_health`, asked on a thread
+/// of the router's own once the read timed out, which tells the two
+/// apart. Here the slow read's answer is held at the node's door past the
+/// timeout.
 #[test]
 fn a_slow_marked_read_lets_its_tenant_s_copy_be_and_no_other() {
     let tag = "slow-read";
@@ -3009,6 +3011,11 @@ fn a_slow_marked_read_lets_its_tenant_s_copy_be_and_no_other() {
     let (status, body) = marked(w.port, "slow", "get notes select body", None);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(r#""before""#), "answered home: {body}");
+    until("the node's health answered", || {
+        w.router.health_questions() == 0
+    });
+    assert_eq!(w.us_link.seen("GET /_health").len(), 1, "its health asked");
+    assert!(!w.router.replica_node_resting("us1"));
     for _ in 0..3 {
         let (status, body) = marked(w.port, "other", "get notes select body", None);
         assert_eq!(status, 200, "{body}");
@@ -3027,32 +3034,120 @@ fn a_slow_marked_read_lets_its_tenant_s_copy_be_and_no_other() {
 }
 
 /// A replica node that takes connections and answers nothing -- stopped,
-/// deadlocked, waiting on its disk: the kernel takes the request, and the
-/// head never comes -- is let be once two tenants' reads have waited it
-/// out. Rested a tenant's copy at a time, every tenant with a copy there
-/// waited `--replica-timeout` once a rest, for as long as the node hung.
+/// deadlocked: the kernel takes the request, and the head never comes --
+/// is let be once the first read has waited it out: its `/_health`, asked
+/// on a thread of the router's own while that read goes home, goes
+/// unanswered too. Rested a tenant's copy at a time, every tenant with a
+/// copy there waited `--replica-timeout` once a rest, for as long as the
+/// node hung.
 #[test]
-fn a_hung_replica_node_is_let_be_once_two_tenants_have_waited_it_out() {
+fn a_hung_replica_node_is_let_be_by_the_first_read_that_waits_it_out() {
     let tag = "hung-node";
     let w = Near::with(tag, |cfg| {
         cfg.replica_timeout = Duration::from_secs(1);
         cfg.replica_rest = Duration::from_secs(600);
     });
-    for t in ["a", "b", "c"] {
+    for t in ["a", "b"] {
         w.tenant(t);
     }
     w.us_link.hang();
-    for t in ["a", "b"] {
+    let (status, body) = marked(w.port, "a", "get notes select body", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""before""#), "answered home: {body}");
+    assert_eq!(w.us_link.asked("/t/a/"), 1, "a waited it out");
+    until("the node let be", || w.router.replica_node_resting("us1"));
+    until("the node's health asked", || {
+        w.us_link.asked("GET /_health") == 1
+    });
+    // Another tenant's read goes home without asking the node.
+    let (status, body) = marked(w.port, "b", "get notes select body", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""before""#), "{body}");
+    assert_eq!(w.us_link.asked("/t/b/"), 0, "the node let be");
+    w.us_link.heal();
+}
+
+/// Two tenants' marked reads slower at their read replicas than
+/// `--replica-timeout` let those two copies be, never the node: it answers
+/// its `/_health`, so a third tenant's marked reads are answered by its
+/// replica still. Counted by tenants -- the node rested once a second
+/// tenant's copy was -- a client holding two tenants' tokens, or two
+/// tenants' slow analytics, sent every tenant's marked reads of the node
+/// home.
+#[test]
+fn two_tenants_slow_reads_leave_a_third_s_answered_by_its_replica() {
+    let tag = "two-slow";
+    let w = Near::with(tag, |cfg| {
+        cfg.replica_timeout = Duration::from_secs(1);
+        cfg.replica_rest = Duration::from_secs(600);
+    });
+    for t in ["slow1", "slow2", "third"] {
+        w.tenant(t);
+    }
+    for t in ["slow1", "slow2"] {
+        w.us_link.park_answers(&format!("/t/{t}/query"));
+    }
+    for t in ["slow1", "slow2"] {
         let (status, body) = marked(w.port, t, "get notes select body", None);
         assert_eq!(status, 200, "{body}");
         assert!(body.contains(r#""before""#), "answered home: {body}");
-        assert_eq!(w.us_link.asked(&format!("/t/{t}/")), 1, "{t} waited it out");
     }
-    // A third tenant's read goes home without asking the node.
-    let (status, body) = marked(w.port, "c", "get notes select body", None);
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains(r#""before""#), "{body}");
-    assert_eq!(w.us_link.asked("/t/c/"), 0, "the node let be");
+    until("the node's health answered", || {
+        w.router.health_questions() == 0
+    });
+    assert!(
+        !w.us_link.seen("GET /_health").is_empty(),
+        "its health asked"
+    );
+    assert!(!w.router.replica_node_resting("us1"));
+    for _ in 0..3 {
+        let (status, body) = marked(w.port, "third", "get notes select body", None);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#""before""#), "{body}");
+    }
+    assert_eq!(
+        w.us_link.seen("/t/third/query").len(),
+        3,
+        "third's reads answered by its replica"
+    );
+    for t in ["slow1", "slow2"] {
+        w.us_link.unpark_answers(&format!("/t/{t}/query"));
+    }
+}
+
+/// Marked reads timing out together on a node that hangs ask its
+/// `/_health` once: one question a node at a time, on a thread of the
+/// router's own, and none once it rests. Asked on each read's path, every
+/// one of them waited the question out past its timeout and asked it
+/// again. The replica timeout is three seconds, so every read reaches the
+/// node before the first times out.
+#[test]
+fn reads_timing_out_together_on_a_hung_node_ask_its_health_once() {
+    const READS: usize = 8;
+    let tag = "hung-many";
+    let w = Near::with(tag, |cfg| {
+        cfg.replica_timeout = Duration::from_secs(3);
+        cfg.replica_rest = Duration::from_secs(600);
+    });
+    w.tenant("a");
+    w.us_link.hang();
+    let port = w.port;
+    let reads: Vec<_> = (0..READS)
+        .map(|_| std::thread::spawn(move || marked(port, "a", "get notes select body", None)))
+        .collect();
+    for r in reads {
+        let (status, body) = r.join().unwrap();
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#""before""#), "answered home: {body}");
+    }
+    assert_eq!(w.us_link.asked("/t/a/"), READS, "every read waited it out");
+    until("the node let be", || {
+        w.router.replica_node_resting("us1") && w.router.health_questions() == 0
+    });
+    until("the node's health asked", || {
+        w.us_link.asked("GET /_health") >= 1
+    });
+    assert_eq!(w.us_link.asked("GET /_health"), 1, "asked once");
     w.us_link.heal();
 }
 

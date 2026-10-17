@@ -1181,11 +1181,12 @@ head never reaches the Worker -- workerd notices a client only as it writes
 to it, past wrangler's own proxy Worker too -- so that case is held in Node,
 the handler over Node's `fetch`; a stream is let go of at a stand-in router
 2 s after its client, at a node through a router in 4 to 8. And a router
-waiting on a node's held answer does not watch its client (`upstream.rs`'s
-`exchange` blocks in `read_line`, `forward` reads nothing of the client): a
-claim whose client went through the router took the next job, leased to
-nobody, where asked of the node itself it passed it on -- the router's to
-fix, so cancellation reaches the router and stops there. `entry.test.js`
+waiting on a node's held answer watches its client and passes its end on
+to the node (`upstream::answered_or_gone`, below): blocked in the head's
+`read_line`, it had a claim whose client went through it take the next
+job, leased to nobody, where asked of the node itself the claim passed it
+on -- so cancellation reaches the node from the entry through every
+router on the way. `entry.test.js`
 runs the Worker under `wrangler dev` in front of real routers and nodes
 (`entry/cluster.mjs`: a global router, us with a standby, eu, each on port
 0) and of stand-ins (a tunnel's connector, Cloudflare's 522 and 530), each
@@ -1419,21 +1420,40 @@ and one that stopped reading a body past the sockets' buffers held the
 write as long. It goes home where the replica does not answer --
 and is let be for `RESTING` (5 s, `Config::replica_rest`), its reads going
 home at once: the node, where it was not reached or took no whole request
-(`upstream::Near::Unreached`), the tenant's copy alone where it took one and
-answered nothing in time (`Unanswered`, `rest_copy`), since the head comes
-once the query has run and a read slower than the timeout -- one every few
-seconds -- rested the node and sent every tenant's marked reads of the
-region home -- breaks its answer off (read whole before its head goes on,
-`read_body_kept`: answered 502 before; a stream goes on as it comes, and
-the tail `forward` shares took the body as a parameter: an unmarked
-request's added p50 20.6 us either way, main's 23.75, sixteen runs a side
-in turns); a node that takes connections and answers nothing -- stopped,
-deadlocked, its disk stalled: the kernel takes a small request -- looks
-like a slow read to each tenant, and resting a copy at a time had every
-tenant with a copy there wait out the timeout once a `RESTING`, so the
-node is rested too once a second tenant's copy there is
-(`readers::rest_copy_in`, tenants counted, not reads: one tenant's slow
-reads never rest the node),
+(`upstream::Near::Unreached`); where it took one and answered nothing in
+time (`Unanswered`) or broke its answer off (read whole before its head
+goes on, `read_body_kept`: answered 502 before; a stream goes on as it
+comes, and the tail `forward` shares took the body as a parameter: an
+unmarked request's added p50 20.6 us either way, main's 23.75, sixteen
+runs a side in turns), the tenant's copy is let be at once, the read going
+home, and the node is asked its `/_health` -- answered before any token,
+lock or routing -- on a thread of the router's own within `HEALTH_WAIT`
+(500 ms, the replica timeout where shorter; `Router::rest_unanswered`,
+`upstream::answers_health`), one question a node at a time and none while
+it rests (`probing`): unanswered, the node is let be too -- stopped,
+deadlocked: the kernel takes a small request -- so no other tenant waits
+it out, where resting a copy at a time had each wait the timeout once a
+`RESTING`; answered, the copy alone, since the head comes once the query
+has run and a read slower than the timeout -- one every few seconds --
+rested the node and sent every tenant's marked reads of the region home.
+Asked on the read's own path, a read sent home from a hung node waited the
+question out past its timeout, and every read timing out beside it asked
+again (`tests/read_replicas.rs`: eight timing out together ask once,
+failing with that rule back; `Router::replica_node_resting` and
+`health_questions` are what its tests wait on). Rested once a second
+tenant's copy there was, as before, the node was any client's to rest:
+one holding two tenants' tokens, or two tenants' slow analytics, sent
+every tenant's marked reads of the node home (a third tenant's reads held
+to its replica beside two slow ones, failing with that rule back). Left:
+a node that answers its health while every query on it stalls -- its disk
+stalled under the queries, or its tenant registry deadlocked -- costs
+each tenant with a copy there one timeout a `RESTING`. A question through
+the tenant path, the node's registry and no database's lock, was weighed
+and left: it would catch the registry deadlocked, a bug of the node's
+own, and nothing a disk does, a disk stalled under a write lock leaving
+the registry free; while a tenant's slot is held through its open,
+seconds for a large file, so a node opening one copy would read as hung
+and rest every tenant's. It goes home too where the replica
 answers 503 or 504, or a 404 with
 `Fenec-Tenant: absent` (the file gone, made again at the next look; every
 `CHECK_EVERY`, 10 s, a thread of its own asks each replica's node what it
@@ -5775,7 +5795,76 @@ two `setsockopt`s every exchange made, 0.67 us, are gone from a reused
 connection: the write timeout is set at the connect, the read timeout
 only when it changes (a `Fenec-Wait`), kept with the pooled connection.
 `make shard-bench`'s added p50 stayed 23.3 us against main's 23.3, six
-runs each in ABBA turns (23.1-24.8 and 20.0-24.4).
+runs each in ABBA turns (23.1-24.8 and 20.0-24.4). A request the node may
+hold (`Fenec-Wait`) watches its client while its head is waited for
+(`answered_or_gone`: one `poll` of the node's socket and the client's,
+declared by hand as `recv` is, `nfds_t` each system's own, until either
+moves), and passes on what the client did as the node would read it from
+a client of its own. The client's end -- closed, or half-closed and
+reading on, which read alike -- is the node's connection shut for
+writing, not pooled after: the node's held claim sees it before its next
+run and hands its row on, and the node's answer goes on to the client as
+any. A reset, which can read nothing more, is the client gone
+(`Stage::Abandoned`, `upstream::client_gone`): the node's connection let
+go of, nothing written, sent again or counted against the node, the
+request counted in `fenec_router_requests_total`'s `gone` class -- left
+out of the counts, an abandoned claim never showed -- and its trace ended
+499. Taken for gone as a reset is, an end let go of the node's
+connection, and a client that half-closed after its claim -- which the
+node answers as any, its first run looking at no client -- was answered
+nothing while its claim took a job on a busy queue. Bytes from the client
+are a next request sent ahead, after which the node alone is waited for,
+as the node lets a client be whose next request it holds; so is a client
+whose next request the router's reader holds already. Blocked in the
+head's `read_line`, a claim whose client went through the router took the
+next job, leased to nobody until the lease ran out. A router relaying the
+request watches its client the same way (`relay_send`), so the end goes on
+hop by hop. `tests/upstream.rs` holds two claims through one router,
+through a global router relaying to a region's, and through a region's
+router finding the node in its copy of the global directory
+(`Target::Node`), the first one's client closed or reset and the job put
+once the relay saw the router let go: the job is the second's, failing
+with either hop's watch taken out; and a half-closed claim on a busy queue
+answered its job through the router as straight to the node, failing with
+the end taken for gone. The `poll` is a `Fenec-Wait` request's alone: one
+with no such header passes no socket to watch and makes the system calls
+it made: with the body's buffer and the read replicas' health below,
+`make shard-bench ARGS=latency`'s added p50 stayed 20.5 us against main's
+20.5, sixteen runs a side in ABBA turns at loads of 2.7-2.9 (20.0-21.2 and
+19.8-23.0). A claim
+answered at once came through the router 61.3 us p50 against 60.8 on
+main, 0.3 us more past the node's answer at the median (27.4 against
+27.1), and a held claim woken by a job put straight to the node 332
+against 324 (70.1 against 61.8 past the node), eight runs a side in ABBA
+turns of 20 000 and 2 000 claims (a scratch bench), on macOS; the review
+measured 0.7 us there and 1.2 on Linux on a claim answered at once. A
+watcher thread, and the head read in slices with the client looked at
+between, were prototyped in the review: worse, or waking every one of a
+thousand held claims for nothing.
+A node's answer is read into a buffer of the length it says, allocated
+so its failure is an error (`zeroed`: `alloc_zeroed`, the allocation
+`vec![0u8; len]` makes, the system's zero pages taken up as the bytes
+reach them, null a 502), by `read_body`, `read_body_kept` and
+`read_body_by` alike: through `vec!`, a node -- buggy, or not the
+router's -- declaring a petabyte and sending three bytes aborted the
+router on the allocation's failure, every tenant's clients with it, and is
+a 502 now, the router answering on (`tests/upstream.rs`'s stand-in node,
+and each reader in the unit tests, both aborting without it). A buffer
+grown as the bytes came, from a mebibyte fourfold, copied what came at
+each growth -- a body of 4 MiB and a byte 596 us against 440 in the
+review's measure, every forwarded answer past a mebibyte slower -- and a
+node sending without end
+under such a length met a growth whose allocation aborted all the same;
+one of 64 MiB first was as fast, past which the growth was the same; a
+bound on the length would refuse a tenant's image on its way through a
+move. So the length is believed as far as the system lends it, which costs
+what `vec!` did: through `Pool::call` off loopback, eight runs a side in
+ABBA turns, 200 B 20.3 us either way, 64 KiB 28.1 against 28.2, 1.5 MiB
+126.4 against 126.1, 4 000 000 B 332 against 327 (325-338 and 324-336),
+4 MiB and a byte 350 against 350, 16 MiB and a byte 2.96 ms either way, 64
+MiB 12.7 against 12.5 (12.65-12.75 and 10.9-12.7). A query across tenants
+refuses a declared length past `--fanout-max-bytes` before it adds it to
+the query's sum, which one near `usize::MAX` overflowed.
 
 **A query across tenants is the router's admin's, merged by what the
 request says** (`fenec-shard/src/fanout.rs`, `POST /_shard/query`). An

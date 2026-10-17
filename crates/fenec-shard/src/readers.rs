@@ -79,9 +79,14 @@
 //! One the replica cannot answer in the wait, or that does not answer in
 //! [`crate::Config::replica_timeout`] past it, goes home, and a replica
 //! that did not answer is let be for [`RESTING`]: its node, where it was
-//! not reached or took no whole request, its tenant's copy alone where it
-//! took one and did not answer in time -- and the node too once a second
-//! tenant's copy there is, a node that takes requests and answers none.
+//! not reached or took no whole request; where it took one and did not
+//! answer in time, its tenant's copy at once, and the node too if it does
+//! not answer its `/_health` -- before any token, lock or routing --
+//! asked on a thread of its own in [`HEALTH_WAIT`], one that takes
+//! requests and answers none. A node that answers its health while every
+//! query on it stalls -- its disk stalled under the queries, not under the
+//! accept loop -- costs each tenant with a copy there one timeout a
+//! [`RESTING`].
 //! Home answers it, or --
 //! the write lost in the failover -- says at once where it stands, which
 //! the SDK takes as its position over the one that read was sent after,
@@ -97,7 +102,7 @@ use crate::{internal, message, quote, region_name, Fail, Outcome, Router};
 use fenec_core::prelude::*;
 use fenec_http::http::{Method, Request, Response};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How often a router looks at where the primary of each tenant it keeps a
@@ -139,6 +144,28 @@ pub const REMAKES: u32 = 3;
 /// every read of its region goes home meanwhile, rather than each wait out
 /// the replica first.
 pub const RESTING: Duration = Duration::from_secs(5);
+
+/// The longest a read replica's node has to answer its `/_health` once it
+/// took a marked read whole and did not answer it in time
+/// ([`Router::rest_unanswered`]), or [`crate::Config::replica_timeout`]
+/// where that is shorter. A node answers it before any token, lock or
+/// routing, so one that does not -- stopped, deadlocked -- is the node's,
+/// and a read the node answers its health beside is that read's. Asked on
+/// a thread of its own, the read gone home meanwhile: asked on the read's
+/// path, every read sent home from a hung node waited the question out
+/// past its timeout, and each of them asked.
+///
+/// What it cannot tell is a node that answers it while every query on it
+/// stalls, which costs each tenant with a copy there one timeout a
+/// [`RESTING`]. A question through the tenant path, taking the node's
+/// registry and no database's lock, was weighed: it would catch the
+/// registry deadlocked, a bug of the node's own, and nothing a disk does --
+/// a disk stalled under a write lock leaves the registry free, so it would
+/// answer as `/_health` does, and a question that waited on the database's
+/// lock would look just like the slow read it is asked to judge -- while a
+/// tenant's slot is held through its open, seconds for a large file, so a
+/// node opening one copy would read as hung and rest every tenant's.
+pub const HEALTH_WAIT: Duration = Duration::from_millis(500);
 
 /// How often a router asks each read replica's node which tenants it
 /// holds, once a call a node, apart from the looks: a copy gone -- the node wiped, the file
@@ -360,27 +387,73 @@ impl Router {
         self.rest_key(node.to_string());
     }
 
+    /// `tenant`'s read replica on `node`, at `addr`, took a marked read
+    /// whole and did not answer it in time, or broke its answer off: the
+    /// tenant's copy is let be for [`RESTING`] at once, the read going
+    /// home, and the node is asked its `/_health` on a thread of its own,
+    /// within [`HEALTH_WAIT`] (the replica timeout where shorter) -- one
+    /// question a node at a time, and none while it rests -- and let be
+    /// too where it does not answer. A replica's head comes once its query
+    /// has run, so a read slower than [`crate::Config::replica_timeout`] --
+    /// a client's own, one every few seconds -- looks just like a node that
+    /// hangs: resting the node sent every tenant's marked reads of the
+    /// region home, and resting the copy alone had every tenant with a copy
+    /// on a hung node wait the timeout out once a rest. Counted by tenants
+    /// instead -- the node rested once a second tenant's copy was -- a
+    /// client holding two tenants' tokens, or two tenants' slow analytics,
+    /// rested the node for every tenant.
+    pub(crate) fn rest_unanswered(&self, tenant: &str, node: &str, addr: &str) {
+        self.rest_copy(tenant, node);
+        let fresh = || lock(&self.probing).insert(node.to_string());
+        if self.replica_node_resting(node) || !fresh() {
+            return;
+        }
+        let (resting, probing) = (Arc::clone(&self.resting), Arc::clone(&self.probing));
+        let (name, addr) = (node.to_string(), addr.to_string());
+        let within = self.cfg.replica_timeout.min(HEALTH_WAIT);
+        let rest = self.cfg.replica_rest;
+        let asking = std::thread::Builder::new()
+            .name("fenec-health".into())
+            .spawn(move || {
+                // Rested before the question is let go of, so a read that
+                // times out in between asks nothing more.
+                if !crate::upstream::answers_health(&addr, within) {
+                    rest_in(&resting, name.clone(), rest);
+                }
+                lock(&probing).remove(&name);
+            });
+        if asking.is_err() {
+            lock(&self.probing).remove(node);
+        }
+    }
+
+    /// Whether every marked read of a read replica on `node` passes it by
+    /// now: the node not reached, or not answering its `/_health`, less
+    /// than [`RESTING`] ago. What a test waits for, the question being
+    /// asked on a thread of its own.
+    pub fn replica_node_resting(&self, node: &str) -> bool {
+        lock(&self.resting)
+            .get(node)
+            .is_some_and(|until| Instant::now() < *until)
+    }
+
+    /// How many read replicas' nodes are being asked their `/_health` now
+    /// ([`Self::rest_unanswered`]).
+    pub fn health_questions(&self) -> usize {
+        lock(&self.probing).len()
+    }
+
     /// Has `tenant`'s marked reads pass its read replica on `node` by for
-    /// [`RESTING`]: it took a whole request and did not answer it in time,
-    /// or broke its answer off. Its head comes once its query has run, so
-    /// a read slower than [`crate::Config::replica_timeout`] -- a client's
-    /// own, one every few seconds -- rested the whole node, and every
-    /// tenant's marked reads of the region went home meanwhile. The node
-    /// too where another tenant's copy there is resting ([`rest_copy_in`]).
-    pub(crate) fn rest_copy(&self, tenant: &str, node: &str) {
-        let now = Instant::now();
-        let mut resting = self.resting.lock().unwrap_or_else(|e| e.into_inner());
-        rest_copy_in(&mut resting, tenant, node, now, now + self.cfg.replica_rest);
+    /// [`RESTING`], every other tenant's reads of the node going on.
+    fn rest_copy(&self, tenant: &str, node: &str) {
+        self.rest_key(format!("{tenant}/{node}"));
     }
 
     /// Rests `key`, letting go of every rest that has run out: a tenant's
     /// copy rested and never read again -- deleted, say -- is looked at by
     /// no read, and its entry would stay for good.
     fn rest_key(&self, key: String) {
-        let now = Instant::now();
-        let mut resting = self.resting.lock().unwrap_or_else(|e| e.into_inner());
-        resting.retain(|_, until| now < *until);
-        resting.insert(key, now + self.cfg.replica_rest);
+        rest_in(&self.resting, key, self.cfg.replica_rest);
     }
 
     /// How long a read replica has to answer `req`: the wait its
@@ -2516,6 +2589,20 @@ pub(crate) fn traced(fields: &[(String, Value)]) -> Traced {
     }
 }
 
+/// Rests `key` in `resting` for `rest`, letting go of every rest that has
+/// run out ([`Router::rest_key`]).
+fn rest_in(resting: &Mutex<HashMap<String, Instant>>, key: String, rest: Duration) {
+    let now = Instant::now();
+    let mut resting = lock(resting);
+    resting.retain(|_, until| now < *until);
+    resting.insert(key, now + rest);
+}
+
+/// `m` locked, whatever a thread that panicked holding it left.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// One read replica as `GET /_shard/tenants/<t>/read-replicas` lists it.
 fn reader_item(region: &str, r: &Reader) -> String {
     format!(
@@ -2537,69 +2624,40 @@ pub(crate) fn reads_only(req: &Request, rest: &[&str]) -> bool {
     )
 }
 
-/// Rests `tenant`'s copy on `node` in `resting` until `until`, letting go
-/// of every rest that ran out by `now`, and the node with it where another
-/// tenant's copy there is resting: two tenants' reads it took whole and did
-/// not answer is the node's. A node stopped, deadlocked or waiting on its
-/// disk still has the kernel take a connection and a small request, so its
-/// reads time out on the head, and rested a copy at a time it had every
-/// tenant with a copy there wait out `--replica-timeout` once a
-/// [`RESTING`] -- where one tenant's slow reads alone, however often, are
-/// that tenant's, and never rest the node: tenants are counted, not reads.
-fn rest_copy_in(
-    resting: &mut HashMap<String, Instant>,
-    tenant: &str,
-    node: &str,
-    now: Instant,
-    until: Instant,
-) {
-    let mut another = false;
-    resting.retain(|key, at| {
-        let live = now < *at;
-        if live && !another {
-            another = key
-                .strip_suffix(node)
-                .and_then(|t| t.strip_suffix('/'))
-                .is_some_and(|t| t != tenant);
-        }
-        live
-    });
-    resting.insert(format!("{tenant}/{node}"), until);
-    if another {
-        resting.insert(node.to_string(), until);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{rest_copy_in, QuotaQueue};
+    use super::QuotaQueue;
     use crate::directory::{Directory, Node, State};
     use crate::{Config, Router};
 
+    /// A copy's rest is its tenant's reads of its node, and a node's is
+    /// every tenant's: a copy rested, however many, rests no node -- not
+    /// one whose name another's ends with, keyed as `<tenant>/<node>` is.
     #[test]
-    fn a_node_is_rested_by_two_tenants_copies_never_by_one_tenant_s_reads() {
-        let mut resting = std::collections::HashMap::new();
-        let now = std::time::Instant::now();
-        let until = now + std::time::Duration::from_secs(5);
-        // One tenant's slow reads, again and again: its copy alone.
-        for _ in 0..5 {
-            rest_copy_in(&mut resting, "slow", "us1", now, until);
+    fn a_copy_s_rest_is_its_tenant_s_alone_and_a_node_s_every_tenant_s() {
+        let router = Router::new(Directory::in_memory(), Config::default());
+        router.rest_copy("x", "sus1");
+        router.rest_copy("y", "us1");
+        assert!(router.resting("x", "sus1"));
+        assert!(router.resting("y", "us1"));
+        for (tenant, node) in [("y", "sus1"), ("x", "us1"), ("z", "us1"), ("z", "sus1")] {
+            assert!(!router.resting(tenant, node), "{tenant}/{node}");
         }
-        assert!(!resting.contains_key("us1"), "{resting:?}");
-        // Another node's copies, and a tenant whose name ends as the node's
-        // does, count for none of this node's.
-        rest_copy_in(&mut resting, "other", "us2", now, until);
-        rest_copy_in(&mut resting, "x", "sus1", now, until);
-        assert!(!resting.contains_key("us1"), "{resting:?}");
-        // A second tenant's copy on the node: the node's.
-        rest_copy_in(&mut resting, "b", "us1", now, until);
-        assert_eq!(resting.get("us1"), Some(&until));
-        // A copy whose rest ran out counts for nothing, and is let go of.
-        let mut resting = std::collections::HashMap::new();
-        rest_copy_in(&mut resting, "a", "us1", now, now);
-        rest_copy_in(&mut resting, "b", "us1", now, until);
-        assert!(!resting.contains_key("us1"), "{resting:?}");
-        assert!(!resting.contains_key("a/us1"), "{resting:?}");
+        router.rest("us1");
+        assert!(router.resting("z", "us1") && router.resting("x", "us1"));
+        assert!(!router.resting("z", "sus1"));
+        // A rest that ran out is let go of.
+        let router = Router::new(
+            Directory::in_memory(),
+            Config {
+                replica_rest: Duration::ZERO,
+                ..Config::default()
+            },
+        );
+        router.rest_copy("x", "us1");
+        router.rest("us1");
+        assert!(!router.resting("x", "us1"));
+        assert!(router.resting.lock().unwrap().is_empty());
     }
     use std::sync::mpsc;
     use std::time::Duration;

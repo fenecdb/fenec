@@ -31,7 +31,10 @@ pub enum Route {
 }
 
 const ROUTES: [&str; 5] = ["tenant", "shard", "replication", "metrics", "other"];
-const CODES: [&str; 4] = ["2xx", "3xx", "4xx", "5xx"];
+/// The status classes, and `gone`: a request whose client reset its
+/// connection while the router waited on its node, answered nothing --
+/// counted nowhere, an abandoned claim never showed.
+const CODES: [&str; 5] = ["2xx", "3xx", "4xx", "5xx", "gone"];
 
 /// Upper bounds of a move's buckets, in microseconds: 10 ms, a tenant of a
 /// few rows, to 1 000 s, one of gigabytes.
@@ -191,6 +194,13 @@ pub fn request(route: Route, status: u16, took: Duration) {
     SHARDS[shard()].durations[route as usize].add(took);
 }
 
+/// Counts and times a request whose client went before its answer: the
+/// `gone` class, no status having been written.
+pub fn gone(route: Route, took: Duration) {
+    SHARDS[shard()].requests[route as usize][4].fetch_add(1, Ordering::Relaxed);
+    SHARDS[shard()].durations[route as usize].add(took);
+}
+
 /// Counts a request and does not time it: a standby's replication stream,
 /// whose head the stream writes itself and which lasts as long as the
 /// standby stays connected.
@@ -265,7 +275,7 @@ pub fn counters(out: &mut Text) {
     out.family(
         "fenec_router_requests_total",
         "counter",
-        "Requests answered, by route and by status class.",
+        "Requests answered, by route and by status class; `gone`, a request whose client reset its connection before its answer.",
     );
     for (r, route) in ROUTES.iter().enumerate() {
         for (c, code) in CODES.iter().enumerate() {

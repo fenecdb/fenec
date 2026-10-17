@@ -234,7 +234,9 @@ impl Router {
 
     /// Sends a request to `region`'s routers, from the one that answered
     /// last, moving to the next only where the one asked cannot have run
-    /// it ([`Tried`]): its answer's head.
+    /// it ([`Tried`]): its answer's head. A held request watches `client`
+    /// as [`crate::upstream::Pool::send_held`] does: gone, the router asked
+    /// is let go of, and lets go of the node in turn.
     pub(crate) fn relay_send(
         &self,
         region: &str,
@@ -242,6 +244,7 @@ impl Router {
         req: &Request,
         headers: &[(&str, &str)],
         held: Duration,
+        client: Option<&std::net::TcpStream>,
     ) -> std::io::Result<Answer> {
         let start = self.first_router(region, routers);
         let mut last = None;
@@ -254,6 +257,7 @@ impl Router {
                 headers,
                 &req.body,
                 held,
+                client,
             );
             match sent {
                 Ok(a) => {
@@ -296,7 +300,15 @@ impl Router {
         for k in 0..routers.len() {
             let i = (start + k) % routers.len();
             let url = &routers[i];
-            match pool.send_tried(host(url), method, target, headers, body, Duration::ZERO) {
+            match pool.send_tried(
+                host(url),
+                method,
+                target,
+                headers,
+                body,
+                Duration::ZERO,
+                None,
+            ) {
                 Ok(a) => {
                     let (status, hs) = (a.status, a.headers.clone());
                     let body = a
