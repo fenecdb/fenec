@@ -132,6 +132,10 @@ struct Proxy {
     /// The answers it holds: the request's line, the answer's bytes, and
     /// the client it is for.
     answers: Answers,
+    /// Cutting, it sends on each request whose line holds one of these
+    /// and passes back the node's answer less its last bytes, the
+    /// connection then closed: a node that broke off mid-body.
+    cutting: Arc<Mutex<Vec<String>>>,
 }
 
 type Parked = Arc<Mutex<Vec<(Vec<u8>, TcpStream)>>>;
@@ -160,6 +164,8 @@ impl Proxy {
         let answering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let answers: Answers = Arc::new(Mutex::new(Vec::new()));
         let (holding_answers, held_answers) = (Arc::clone(&answering), Arc::clone(&answers));
+        let cutting: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cuts = Arc::clone(&cutting);
         std::thread::spawn(move || {
             for client in listener.incoming() {
                 let Ok(client) = client else { continue };
@@ -185,6 +191,7 @@ impl Proxy {
                 }
                 if !holding.lock().unwrap().is_empty()
                     || !holding_answers.lock().unwrap().is_empty()
+                    || !cuts.lock().unwrap().is_empty()
                 {
                     let (holding, held, streams, target, saw) = (
                         Arc::clone(&holding),
@@ -195,6 +202,7 @@ impl Proxy {
                     );
                     let (holding_answers, held_answers) =
                         (Arc::clone(&holding_answers), Arc::clone(&held_answers));
+                    let cuts = Arc::clone(&cuts);
                     std::thread::spawn(move || {
                         let Some(bytes) = first_request(&client) else {
                             return;
@@ -217,6 +225,12 @@ impl Proxy {
                         {
                             if let Some(answer) = asked_of(&target, &bytes) {
                                 held_answers.lock().unwrap().push((line, answer, client));
+                            }
+                        } else if cuts.lock().unwrap().iter().any(|p| line.contains(p)) {
+                            if let Some(answer) = asked_of(&target, &bytes) {
+                                let mut client = client;
+                                let _ = client.write_all(&answer[..answer.len().saturating_sub(3)]);
+                                let _ = client.shutdown(Shutdown::Both);
                             }
                         } else {
                             pass_on(client, &target, &bytes, &streams);
@@ -248,6 +262,16 @@ impl Proxy {
             seen,
             answering,
             answers,
+            cutting,
+        }
+    }
+
+    /// Cuts the node's answer to every request whose line holds `what`
+    /// off mid-body from now on.
+    fn cut_answers(&self, what: &str) {
+        self.cutting.lock().unwrap().push(what.to_string());
+        for s in self.open.lock().unwrap().drain(..) {
+            let _ = s.shutdown(Shutdown::Both);
         }
     }
 
@@ -2459,12 +2483,17 @@ struct Near {
 
 impl Near {
     fn new(tag: &str, reader_timeout: Duration) -> Near {
+        Near::with(tag, |cfg| cfg.reader_timeout = reader_timeout)
+    }
+
+    /// The same, the router configured by `set`.
+    fn with(tag: &str, set: impl FnOnce(&mut Config)) -> Near {
         let eu1 = node(&format!("{tag}-eu1"));
         let us1 = node(&format!("{tag}-us1"));
         let link = Proxy::to(eu1.port);
         let us_link = Proxy::to(us1.port);
         let mut cfg = config(Some("us"), None, None);
-        cfg.reader_timeout = reader_timeout;
+        set(&mut cfg);
         let router = Router::new(Directory::in_memory(), cfg);
         let port = serve(Arc::clone(&router));
         for (name, addr, region) in [
@@ -2957,6 +2986,63 @@ fn a_lineage_backfilled_late_writes_over_none_recorded_since() {
 /// The router's own bound on a call of a read replica's upkeep.
 fn readers_call() -> Duration {
     fenec_shard::readers::CALL
+}
+
+/// A marked read slower at its read replica than `--replica-timeout`
+/// lets that tenant's copy be, not the node: every other tenant's marked
+/// reads of the node are answered by their replicas still. A replica's
+/// head comes once its query has run, so a read slower than the timeout
+/// looks just like a node that hangs, and resting the node sent every
+/// tenant's marked reads of the region home -- kept so by one slow read
+/// every few seconds. Here the slow read's answer is held at the node's
+/// door past the timeout.
+#[test]
+fn a_slow_marked_read_lets_its_tenant_s_copy_be_and_no_other() {
+    let tag = "slow-read";
+    let w = Near::with(tag, |cfg| {
+        cfg.replica_timeout = Duration::from_secs(1);
+        cfg.replica_rest = Duration::from_secs(600);
+    });
+    w.tenant("slow");
+    w.tenant("other");
+    w.us_link.park_answers("/t/slow/query");
+    let (status, body) = marked(w.port, "slow", "get notes select body", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""before""#), "answered home: {body}");
+    for _ in 0..3 {
+        let (status, body) = marked(w.port, "other", "get notes select body", None);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#""before""#), "{body}");
+    }
+    assert_eq!(
+        w.us_link.seen("/t/other/query").len(),
+        3,
+        "other's reads answered by its replica"
+    );
+    // The slow tenant's copy is let be: its next read goes home at once.
+    let (status, body) = marked(w.port, "slow", "get notes select body", None);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(w.us_link.seen("/t/slow/query").len(), 1, "the copy let be");
+    w.us_link.unpark_answers("/t/slow/query");
+}
+
+/// A read replica that breaks its answer off mid-body has the read go
+/// home, as one that failed its head does: the answer is read whole
+/// before a byte of it goes to the client, which was answered 502.
+#[test]
+fn a_replica_s_answer_broken_off_mid_body_goes_home() {
+    let tag = "broken-body";
+    let w = Near::new(tag, readers_call());
+    w.tenant("acme");
+    w.us_link.cut_answers("/t/acme/query");
+    let (status, body) = marked(w.port, "acme", "get notes select body", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""before""#), "{body}");
+    assert_eq!(
+        w.us_link.seen("/t/acme/query").len(),
+        1,
+        "the replica asked"
+    );
 }
 
 /// A tenant's quota reaches its read replicas, as its standby and its

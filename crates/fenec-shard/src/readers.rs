@@ -78,7 +78,9 @@
 //! left on the old branch, at the same change number, holds other writes.
 //! One the replica cannot answer in the wait, or that does not answer in
 //! [`crate::Config::replica_timeout`] past it, goes home, and a replica
-//! that did not answer is let be for [`RESTING`]. Home answers it, or --
+//! that did not answer is let be for [`RESTING`]: its node, where it was
+//! not reached or took no whole request, its tenant's copy alone where it
+//! took one and did not answer in time. Home answers it, or --
 //! the write lost in the failover -- says at once where it stands, which
 //! the SDK takes as its position over the one that read was sent after,
 //! never an earlier term of the same lineage -- its history id's top half,
@@ -327,27 +329,53 @@ impl Router {
         Some((r.node.clone(), n.addr.clone(), self.mark(&n.token)))
     }
 
-    /// Whether marked reads pass `node` by for now: it did not answer one
-    /// less than [`RESTING`] ago.
-    pub(crate) fn resting(&self, node: &str) -> bool {
+    /// Whether `tenant`'s marked reads pass its read replica on `node` by
+    /// for now: the node, or the tenant's copy there, did not answer one
+    /// less than [`RESTING`] ago ([`Self::rest`], [`Self::rest_copy`]).
+    pub(crate) fn resting(&self, tenant: &str, node: &str) -> bool {
         let mut resting = self.resting.lock().unwrap_or_else(|e| e.into_inner());
-        match resting.get(node) {
-            None => false,
-            Some(until) if Instant::now() < *until => true,
-            Some(_) => {
-                resting.remove(node);
-                false
-            }
+        if resting.is_empty() {
+            return false;
         }
+        let now = Instant::now();
+        let copy = format!("{tenant}/{node}");
+        [node, copy.as_str()]
+            .iter()
+            .any(|key| match resting.get(*key) {
+                None => false,
+                Some(until) if now < *until => true,
+                Some(_) => {
+                    resting.remove(*key);
+                    false
+                }
+            })
     }
 
-    /// Has marked reads pass `node` by for [`RESTING`]
-    /// ([`crate::Config::replica_rest`]).
+    /// Has every marked read pass `node` by for [`RESTING`]
+    /// ([`crate::Config::replica_rest`]): it was not reached, or took no
+    /// whole request -- the node's, whatever the read.
     pub(crate) fn rest(&self, node: &str) {
-        self.resting
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(node.to_string(), Instant::now() + self.cfg.replica_rest);
+        self.rest_key(node.to_string());
+    }
+
+    /// Has `tenant`'s marked reads pass its read replica on `node` by for
+    /// [`RESTING`]: it took a whole request and did not answer it in time,
+    /// or broke its answer off. Its head comes once its query has run, so
+    /// a read slower than [`crate::Config::replica_timeout`] -- a client's
+    /// own, one every few seconds -- rested the whole node, and every
+    /// tenant's marked reads of the region went home meanwhile.
+    pub(crate) fn rest_copy(&self, tenant: &str, node: &str) {
+        self.rest_key(format!("{tenant}/{node}"));
+    }
+
+    /// Rests `key`, letting go of every rest that has run out: a tenant's
+    /// copy rested and never read again -- deleted, say -- is looked at by
+    /// no read, and its entry would stay for good.
+    fn rest_key(&self, key: String) {
+        let now = Instant::now();
+        let mut resting = self.resting.lock().unwrap_or_else(|e| e.into_inner());
+        resting.retain(|_, until| now < *until);
+        resting.insert(key, now + self.cfg.replica_rest);
     }
 
     /// How long a read replica has to answer `req`: the wait its

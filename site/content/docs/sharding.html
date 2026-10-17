@@ -1325,14 +1325,16 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
     the region it left, as any client's request is, and the answer names
     its new home: a stale home costs one hop, never an error.</li>
   <li><b>A read marked for a replica</b> (<code>Fenec-Read: replica</code>,
-    <a href="#read-replicas">read replicas</a>) goes to the region nearest
-    the client first, whatever the tenant's home: its router answers it from
-    the tenant's read replica there, or relays it home — a hop, where the
-    region keeps none — and the home is asked where that region fails. A
-    marked read runs read-only wherever it lands, so it may go to two; a
-    write never leaves a known home. Sent to the home the entry had learned,
-    every marked read crossed to it, and the replica near the client was
-    never asked.</li>
+    <a href="#read-replicas">read replicas</a>) goes to the region of the
+    client's continent first, whatever the tenant's home: its router answers
+    it from the tenant's read replica there, or relays it home — a hop, where
+    the region keeps none — and the home is asked where that region fails. A
+    continent no region names sends it home alone: the default region is
+    where an unknown tenant is guessed, no nearer such a client than the
+    home. A marked read runs read-only wherever it lands, so it may go to
+    two; an unmarked request never leaves a known home. Sent to the home the
+    entry had learned, every marked read crossed to it, and the replica near
+    the client was never asked.</li>
   <li><b>Streams pass through as they come</b> — a subscription,
     <code>/_changes?wait</code>, a held write, a long <code>/batch</code>.
     A stream is let go of when its client goes; a held write is let go of at
@@ -1343,10 +1345,11 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
     <code>/_replication</code> and the rest are a <code>404</code>, however
     the path is spelled.</li>
   <li><b>A router that cannot be reached</b> is passed over for the region's
-    standby router. A tenant whose home the entry knows is never sent to
-    another region: its region's routers all failing is a <code>503</code>
-    with <code>Retry-After</code>. One it has not heard goes on to the next
-    region, whose router relays it home.</li>
+    standby router. An unmarked request of a tenant whose home the entry
+    knows is never sent to another region: its region's routers all failing
+    is a <code>503</code> with <code>Retry-After</code>. One it has not heard
+    goes on to the next region, whose router relays it home, and a marked
+    read goes home past its continent's region.</li>
   <li><b>Set <code>CORS</code> wherever the routers have
     <code>--http-cors</code>:</b> without it the entry's own answers — a
     region down, a path refused — carry no CORS headers, and a page reads them
@@ -1551,9 +1554,10 @@ const mine = await db.from('orders').rows();               // ap's replica, afte
 </ul>
 
 <p><b>Behind the global entry</b> (<a href="#global-entry">one URL for every
-region</a>) a marked read goes to the region nearest the client first,
-whatever the tenant's home, and its router answers it from the read replica
-there; every other request goes to the home the entry has learned.</p>
+region</a>) a marked read goes to the region of the client's continent
+first, whatever the tenant's home, and its router answers it from the read
+replica there; every other request goes to the home the entry has
+learned.</p>
 
 <details class="deep"><summary>Details</summary>
 <p><b>Placing one.</b> <code>PUT
@@ -1602,9 +1606,14 @@ answer — its node not reached, or not by the wait its
 still behind the position it was sent after at the end of the wait
 (<code>504</code>); its file gone from the node (a <code>404</code> with
 <code>Fenec-Tenant: absent</code>) — is sent home, so the client is answered
-either way and from nothing older than its write. A replica that did not
-answer is let be for 5 s, its region's marked reads going home at once
-meanwhile. <code>fenec_router_replica_reads_total</code> counts marked reads by
+either way and from nothing older than its write; and so is one whose answer
+breaks off before its end, the router reading a replica's answer whole
+before any of it goes to the client (a stream's goes on as it comes). A
+replica that did not answer is let be for 5 s, its reads going home at once
+meanwhile: the node's, every tenant's, where it was not reached or took no
+whole request; the tenant's copy alone where it took one and did not answer
+in time, since its answer comes once the query has run and one slow read is
+that read's, not the node's. <code>fenec_router_replica_reads_total</code> counts marked reads by
 where they were answered: <code>outcome="replica"</code>,
 <code>"fallback"</code>, <code>"home"</code>. Every server runs a marked
 request read-only on every route — a statement, REST, <code>/batch</code>, an

@@ -96,11 +96,14 @@ export function marked(request) {
 
 /**
  * Whether `request` may reach a router twice: a method that reads, a key
- * that makes a write once, or a read marked for a replica, which runs
- * read-only on every route.
+ * that makes a write once, or -- to a tenant's path, `tenant` -- a read
+ * marked for a replica, which runs read-only on every route there. Not to
+ * `/_shard/`: the mark is a tenant's read's, and a change of the global
+ * router's sent with it ran as any, so one a router may have run was sent
+ * to its standby again.
  */
-function repeatable(request) {
-  return REPEATABLE.has(request.method) || request.headers.has('idempotency-key') || marked(request);
+function repeatable(request, tenant) {
+  return REPEATABLE.has(request.method) || request.headers.has('idempotency-key') || (tenant && marked(request));
 }
 
 /**
@@ -444,7 +447,7 @@ async function readUpTo(stream, cap) {
  * tried at: its headers, its body, whether the body can go again, and
  * whether the request may run twice.
  */
-async function prepare(request, cfg) {
+async function prepare(request, cfg, tenant) {
   const headers = sentHeaders(request.headers, await clientNamed(cfg, request.headers));
   const method = request.method;
   let body = null;
@@ -463,7 +466,7 @@ async function prepare(request, cfg) {
       again = false;
     }
   }
-  return { method, headers, body, again, repeatable: repeatable(request) };
+  return { method, headers, body, again, repeatable: repeatable(request, tenant) };
 }
 
 /**
@@ -560,12 +563,13 @@ async function toRegion(request, url, region, sent, state, guess) {
  * answer, or the entry's own. A request goes on to the next region only
  * where none of this one's routers can have run it or it may run twice --
  * `regions` is one, the tenant's home, wherever the home is known, but for
- * a read marked for a replica ({@link near}).
+ * a read marked for a replica ({@link near}). `tenant` where the path is a
+ * tenant's, not the global router's `/_shard/`.
  */
-async function send(request, url, regions, cfg, state) {
+async function send(request, url, regions, cfg, state, tenant) {
   let sent;
   try {
-    sent = await prepare(request, cfg);
+    sent = await prepare(request, cfg, tenant);
   } catch (e) {
     if (request.signal?.aborted) return new Response(null, { status: 499 });
     if (e instanceof Refusal) return own(cfg, request, e.status, e.message);
@@ -625,26 +629,31 @@ function guesses(cfg, request, state) {
   const first = cfg.byContinent.get(request.cf?.continent) ?? cfg.fallback;
   const all = [first, ...[...cfg.regions.values()].filter((r) => r !== first)];
   const now = Date.now();
-  const again = repeatable(request);
+  const again = repeatable(request, true);
   const isDown = (r) => state.down.has(r.name) && (!again || now - state.down.get(r.name) < cfg.downMs);
   return [...all.filter((r) => !isDown(r)), ...all.filter(isDown)];
 }
 
 /**
  * The regions a read marked for a replica of a tenant at home in `home` is
- * sent to: the one nearest the client first, whose router answers it from
- * the tenant's read replica there or relays it home -- a hop, where it
- * keeps none -- then the home, where that region's routers fail or answer
- * a 5xx naming no home. A marked read runs read-only wherever it lands, so
- * sending it to two is safe. Sent to the known home alone, every marked
- * read went to the home once one unmarked request had taught the colo
- * where that was, and the replica near the client was never asked. A
- * nearest region found down is passed over for {@link DOWN_MS}.
+ * sent to: the region of the client's continent first, whose router
+ * answers it from the tenant's read replica there or relays it home -- a
+ * hop, where it keeps none -- then the home, where that region's routers
+ * fail or answer a 5xx naming no home. A marked read runs read-only
+ * wherever it lands, so sending it to two is safe. Sent to the known home
+ * alone, every marked read went to the home once one unmarked request had
+ * taught the colo where that was, and the replica near the client was
+ * never asked. A continent no region names goes home alone: the default
+ * region is where a tenant not heard of is guessed, no nearer to such a
+ * client than the home -- an Asian client's read of a us tenant went
+ * through eu, where it had no replica, to us. A region found down is
+ * passed over for {@link DOWN_MS}.
  */
 function near(cfg, request, state, home) {
-  const nearest = cfg.byContinent.get(request.cf?.continent) ?? cfg.fallback;
+  const nearest = cfg.byContinent.get(request.cf?.continent);
+  if (!nearest || nearest === home) return [home];
   const down = state.down.has(nearest.name) && Date.now() - state.down.get(nearest.name) < cfg.downMs;
-  return nearest === home || down ? [home] : [nearest, home];
+  return down ? [home] : [nearest, home];
 }
 
 /**
@@ -666,7 +675,7 @@ export function entry() {
       const url = new URL(request.url);
       // As the router and the node will read the path: decoded.
       const segs = segments(url.pathname);
-      if (segs[0] === '_shard' && cfg.admin) return passed(await send(request, url, [cfg.admin], cfg, state));
+      if (segs[0] === '_shard' && cfg.admin) return passed(await send(request, url, [cfg.admin], cfg, state, false));
       // `/_admin/` is a node's, `/_replication` a router's directory for its
       // standbys, `/_metrics` and `/_studio/` the operator's: none of them
       // goes out on the public entry.
@@ -693,7 +702,7 @@ export function entry() {
       // in turn.
       const known = cfg.regions.get(home);
       const regions = !known ? guesses(cfg, request, state) : marked(request) ? near(cfg, request, state, known) : [known];
-      const answer = await send(request, url, regions, cfg, state);
+      const answer = await send(request, url, regions, cfg, state, true);
       // The tenant's home as the router placing it names it; a region the
       // entry does not know is not one to send anything to.
       const named = answer.headers.get(HOME);

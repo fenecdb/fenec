@@ -1019,17 +1019,25 @@ home's region) sends a read on to the next region; the placing router's own
 the answer. A move across leaves the old region's router relaying
 the tenant and the answer naming the new home, a hop and never an error.
 A read marked for a replica (`Fenec-Read: replica`, the read replicas
-below; `marked`, `near`) goes to the client's nearest region first
-whatever the home, then to the home where that region fails or answers a
-5xx naming none: sent to the known home alone, every marked read went home
-once one unmarked request had taught the colo the home, and the replica
-near the client was never asked. It may go to two -- the mark has every
-router and node run it read-only, so `repeatable` takes it as the
-routers' `replayable` does -- while a write never leaves a known home; a
-nearest region found down is passed over for `DOWN_MS`, and where it
-keeps no replica its router relays home, a hop. `entry.test.js` holds a
-marked read of a tenant whose home was learned to eu's router and its
-replica, us asked none.
+below; `marked`, `near`) goes to the region of the client's continent
+first whatever the home, then to the home where that region fails or
+answers a 5xx naming none: sent to the known home alone, every marked read
+went home once one unmarked request had taught the colo the home, and the
+replica near the client was never asked. A continent no region names goes
+home alone -- through `DEFAULT_REGION`, an Asian client's read of a us
+tenant went by eu, where it had no replica. It may go to two -- the mark
+has every router and node run a request to a tenant's path read-only, so
+`repeatable` takes it there as the routers' `replayable` does, and not on
+`/_shard/`, where a marked change of the global router runs as any and a
+thrown fetch had it sent to the standby again -- while an unmarked request
+never leaves a known home; a region found down is passed over for
+`DOWN_MS`, and where it keeps no replica its router relays home, a hop.
+`entry.test.js` holds a marked read of a tenant whose home was learned to
+eu's router and its replica, us asked none, under `wrangler dev` with the
+client's continent pinned (`serve`'s `cf`, `CLOUDFLARE_CF_FETCH_PATH`:
+miniflare otherwise gives this machine's), and in Node the home alone from
+a continent no region names and a marked `/_shard/` change not sent
+again.
 Rejected: the global router asked at each miss (its `--token`, which moves
 and deletes every tenant, in the Worker, a round trip to its region, and
 every unknown name a client tries a question for that one router), and
@@ -1340,8 +1348,18 @@ reads the mark once a request in `serve_connection` -- bounded by the wait its
 `Fenec-After` asks and `--replica-timeout` (2 s) past it (`Pool::send_within`):
 at the upstream timeout a node that took connections and never answered held
 each marked read a minute. It goes home where the replica does not answer --
-and the node is let be for `RESTING` (5 s, `Config::replica_rest`), its
-region's reads going home at once -- answers 503 or 504, or a 404 with
+and is let be for `RESTING` (5 s, `Config::replica_rest`), its reads going
+home at once: the node, where it was not reached or took no whole request
+(`upstream::Near::Unreached`), the tenant's copy alone where it took one and
+answered nothing in time (`Unanswered`, `rest_copy`), since the head comes
+once the query has run and a read slower than the timeout -- one every few
+seconds -- rested the node and sent every tenant's marked reads of the
+region home -- breaks its answer off (read whole before its head goes on,
+`read_body_kept`: answered 502 before; a stream goes on as it comes, and
+the tail `forward` shares took the body as a parameter: an unmarked
+request's added p50 20.6 us either way, main's 23.75, sixteen runs a side
+in turns),
+answers 503 or 504, or a 404 with
 `Fenec-Tenant: absent` (the file gone, made again at the next look; every
 `CHECK_EVERY`, 10 s, a thread of its own asks each replica's node what it
 holds, a set of its names, since a standby or another region's router routes

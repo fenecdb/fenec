@@ -75,6 +75,9 @@ enum Stage {
     /// The request went out whole and the connection ended before the
     /// first byte of an answer: the node may have run it.
     Unanswered,
+    /// A write of the request timed out: the node took part of it and
+    /// stopped reading. Sent again, it would wait as long.
+    Unread,
     /// A timeout, or an answer cut short or malformed.
     Other,
 }
@@ -88,6 +91,17 @@ struct Failure(Stage, io::Error);
 pub enum Tried {
     Unrun(io::Error),
     MayHaveRun(io::Error),
+}
+
+/// How a read sent to a read replica failed ([`Pool::send_within`]):
+/// before the replica took the whole request -- not reached, or not
+/// reading -- which is the node's, or after, its answer not come in time
+/// or broken off, which may be that one read's own: its head comes once
+/// its query has run, and a read slower than the router's
+/// `--replica-timeout` looks just like a node that hangs.
+pub enum Near {
+    Unreached(io::Error),
+    Unanswered(io::Error),
 }
 
 impl Tried {
@@ -200,7 +214,8 @@ impl Pool {
     /// `--replica-timeout` -- not the pool's timeout: a replica that does
     /// not answer by then is passed over for home, where the read runs as
     /// any. Sent again on a fresh connection where one ended before its
-    /// answer, as [`replayable`] lets a marked read be.
+    /// answer, as [`replayable`] lets a marked read be. A failure says
+    /// whether the replica took the whole request ([`Near`]).
     pub fn send_within(
         &self,
         addr: &str,
@@ -209,9 +224,13 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
         within: Duration,
-    ) -> io::Result<Answer> {
+    ) -> Result<Answer, Near> {
         let times = (within, within);
-        self.send_timed(addr, method, target, headers, body, times, Replay::AsAsked)
+        match self.send_staged(addr, method, target, headers, body, times, Replay::AsAsked) {
+            Ok(a) => Ok(a),
+            Err(Failure(Stage::Unsent | Stage::Unread, e)) => Err(Near::Unreached(e)),
+            Err(Failure(Stage::Unanswered | Stage::Other, e)) => Err(Near::Unanswered(e)),
+        }
     }
 
     /// [`Pool::send`] of a read that must be answered by `deadline`: the
@@ -358,7 +377,7 @@ impl Pool {
                 // Timed out, the node is there and not reading: sent again,
                 // it would wait as long.
                 let stage = if timed_out(&e) {
-                    Stage::Other
+                    Stage::Unread
                 } else {
                     Stage::Unsent
                 };
@@ -556,6 +575,31 @@ impl Answer {
         self.header("content-length")?.parse().ok()
     }
 
+    /// [`Answer::read_body`], the answer kept for its head: the connection
+    /// handed back to the pool as a copy of its descriptor, and this
+    /// answer's reader, read to its end, dropped with it. What reads a
+    /// read replica's whole answer before a byte of it goes to the client,
+    /// so that one broken off goes home instead.
+    pub fn read_body_kept(&mut self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
+        let Some(len) = self.content_length() else {
+            return Err(bad("a stream is read as it comes"));
+        };
+        let len = if head_only { 0 } else { len };
+        let mut body = vec![0u8; len];
+        self.reader.read_exact(&mut body)?;
+        if self.reusable && self.reader.buffer().is_empty() {
+            if let Ok(stream) = self.reader.get_ref().try_clone() {
+                let idle = Idle {
+                    stream,
+                    read_timeout: self.read_timeout,
+                };
+                pool.put(&self.addr, idle);
+            }
+        }
+        self.reusable = false;
+        Ok(body)
+    }
+
     /// Reads a `Content-Length` body and hands the connection back to the
     /// pool when the node keeps it open.
     pub fn read_body(mut self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
@@ -705,7 +749,7 @@ mod tests {
             Ok(_) => "answered",
             Err(Failure(Stage::Unsent, _)) => "unsent",
             Err(Failure(Stage::Unanswered, _)) => "unanswered",
-            Err(Failure(Stage::Other, e)) => panic!("{e}"),
+            Err(Failure(Stage::Unread | Stage::Other, e)) => panic!("{e}"),
         }
     }
 

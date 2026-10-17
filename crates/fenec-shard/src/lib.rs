@@ -107,9 +107,10 @@ pub struct Config {
     /// How long a read replica has to answer a marked read, past the wait
     /// its `Fenec-After` asks for (`--replica-timeout`): the connect and
     /// every read of its answer's head. One that does not is let be for
-    /// [`readers::RESTING`] -- every read of its region goes home -- and
-    /// the read goes home: at `upstream_timeout` a hung replica's node held
-    /// each marked read a minute.
+    /// [`readers::RESTING`] -- its node, not reached, or its tenant's
+    /// copy alone, its read slower than this -- and the read goes home: at
+    /// `upstream_timeout` a hung replica's node held each marked read a
+    /// minute.
     pub replica_timeout: Duration,
     /// How long a read replica that did not answer a marked read is let be
     /// ([`readers::RESTING`] unless set).
@@ -214,11 +215,12 @@ pub struct Router {
     /// Set, and its condvar told, when a quota is wanted: the senders start
     /// now rather than at the next [`readers::CHECK_EVERY`].
     quotas_soon: (Mutex<bool>, std::sync::Condvar),
-    /// The read replicas' nodes that did not answer a marked read, and
-    /// until when every read of their region goes home
-    /// ([`readers::RESTING`]): one that hangs would have every read wait
-    /// its [`Config::replica_timeout`] first. One that answers, a 503 that
-    /// it has not caught up among them, costs a read a hop alone.
+    /// The read replicas' nodes that were not reached, and tenants' copies
+    /// that did not answer a marked read in time (`<tenant>/<node>`), and
+    /// until when their reads go home ([`readers::RESTING`]): one that
+    /// hangs would have every read wait its [`Config::replica_timeout`]
+    /// first. One that answers, a 503 that it has not caught up among
+    /// them, costs a read a hop alone.
     resting: Mutex<std::collections::HashMap<String, Instant>>,
     /// What the read replicas' calls to their nodes go through: bounded by
     /// [`readers::CALL`], not `upstream_timeout`, so a node that does not
@@ -906,13 +908,14 @@ impl Router {
             }
         };
         self.answer_out(
-            req, out, arrived, peer, &node, answer, sent, forwarding, &home,
+            req, out, arrived, peer, &node, answer, None, sent, forwarding, &home,
         )
     }
 
     /// The node's `answer` to `req`, forwarded to `node`, written to the
-    /// client: its head as the router writes it, and its body or stream.
-    /// `home` the tenant's region where the request asked for it. Inlined
+    /// client: its head as the router writes it, and its body -- `read`,
+    /// where it was read already -- or stream. `home` the tenant's region
+    /// where the request asked for it. Inlined
     /// where it is called, so the request every client sends compiles as it
     /// did written out in [`Self::forward`].
     #[inline(always)]
@@ -925,6 +928,7 @@ impl Router {
         peer: Option<std::net::SocketAddr>,
         node: &str,
         answer: upstream::Answer,
+        read: Option<Vec<u8>>,
         sent: Instant,
         forwarding: fenec_http::trace::Span,
         home: &Option<String>,
@@ -1005,7 +1009,7 @@ impl Router {
         });
 
         if let Some(length) = answer.content_length() {
-            let body = match answer.read_body(&self.pool, head_only) {
+            let body = match read.map_or_else(|| answer.read_body(&self.pool, head_only), Ok) {
                 Ok(b) => b,
                 Err(e) => {
                     forwarding.error(e.to_string());
@@ -1079,7 +1083,7 @@ impl Router {
         tenant: &str,
     ) -> Option<bool> {
         let near = match self.reader_near(tenant) {
-            Some((rnode, ..)) if self.resting(&rnode) => {
+            Some((rnode, ..)) if self.resting(tenant, &rnode) => {
                 metrics::replica_read(metrics::ReplicaRead::Fallback);
                 None
             }
@@ -1127,21 +1131,50 @@ impl Router {
                     self.reader_lost(tenant, &rnode);
                     metrics::replica_read(metrics::ReplicaRead::Fallback);
                 }
-                Ok(a) => {
+                Ok(mut a) => {
+                    // Read whole before a byte goes to the client, so one
+                    // broken off goes home as one that failed its head
+                    // does, where the client was answered 502. A stream
+                    // has no length and is copied as it comes, its head
+                    // gone on before its body: one cut short is the
+                    // client's to see, as from home.
+                    let body = match a.content_length() {
+                        None => None,
+                        Some(_) => match a.read_body_kept(&self.pool, req.method == Method::Head) {
+                            Ok(body) => Some(body),
+                            Err(e) => {
+                                forwarding.error(e.to_string());
+                                self.rest_copy(tenant, &rnode);
+                                metrics::replica_read(metrics::ReplicaRead::Fallback);
+                                return None;
+                            }
+                        },
+                    };
                     metrics::replica_read(metrics::ReplicaRead::Replica);
                     // A replica's region is not the tenant's: its answer
                     // names no home.
                     let home = None;
-                    return Some(
-                        self.answer_out(
-                            req, out, arrived, peer, &rnode, a, sent, forwarding, &home,
-                        ),
-                    );
+                    return Some(self.answer_out(
+                        req, out, arrived, peer, &rnode, a, body, sent, forwarding, &home,
+                    ));
                 }
-                Err(e) => {
+                // Not reached, or no whole request taken: the node's.
+                Err(upstream::Near::Unreached(e)) => {
                     forwarding.error(e.to_string());
                     self.rest(&rnode);
                     metrics::unreachable(&rnode);
+                    metrics::replica_read(metrics::ReplicaRead::Fallback);
+                }
+                // Taken and not answered in time, or its connection ended:
+                // this tenant's copy -- its read maybe slower than the
+                // timeout, or its query's panic dropping that connection
+                // alone. Resting the node sent every tenant's marked reads
+                // of it home, and one slow read every few seconds kept a
+                // region's replicas unread. A node that is gone is not
+                // reached by the next read, and rested then.
+                Err(upstream::Near::Unanswered(e)) => {
+                    forwarding.error(e.to_string());
+                    self.rest_copy(tenant, &rnode);
                     metrics::replica_read(metrics::ReplicaRead::Fallback);
                 }
             }
