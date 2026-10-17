@@ -76,6 +76,22 @@ test('wrangler dev that ends before it is ready fails the start, and one asked f
   }
 });
 
+test('wrangler devs started at once each start', { skip, timeout: 120_000 }, async () => {
+  const state = await mkdtemp(join(tmpdir(), 'fenecdb-dev-'));
+  try {
+    // The entry, which needs no module: six at once, as `npm test`'s files start theirs.
+    const all = await Promise.allSettled(
+      Array.from({ length: 6 }, (_, i) => dev('entry', join(state, String(i)), { REGIONS: '{"us": ["https://x.example"]}' })),
+    );
+    for (const a of all) if (a.status === 'fulfilled') await a.value.stop();
+    const failed = all.filter((a) => a.status === 'rejected').map((a) => String(a.reason?.message).match(/bind\(\)[^\n]*/)?.[0] ?? a.reason);
+    assert.deepEqual(failed, []);
+  } finally {
+    for (const child of running) process.kill(-child.pid, 'SIGKILL');
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
 test('a tenant database lives in a Durable Object and comes back', { skip, timeout: 180_000 }, async () => {
   const state = await mkdtemp(join(tmpdir(), 'fenecdb-worker-'));
   try {
