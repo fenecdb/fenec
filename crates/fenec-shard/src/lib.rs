@@ -581,23 +581,26 @@ impl Router {
     }
 
     /// Counts what the global entry's name for a request's client came to,
-    /// and says in the log, once a kind, why one was not believed: a token
-    /// the entry does not share, or a clock a minute off, leaves every
-    /// client behind the entry counted as Cloudflare's address, with
-    /// nothing else to show for it. Not an audit event: the audit log's
-    /// lines each cost their sender a refusal's wait, a token or a write,
-    /// and a header that does not check costs nothing -- the request goes
-    /// on as the connection's -- so a line each would let anyone grow the
-    /// log at the router's request rate, and a token mistyped would write
-    /// one for every request through the entry.
+    /// and says in the log why one was not believed, a minute apart at
+    /// most a kind: a token the entry does not share, or a clock a minute
+    /// off, leaves every client behind the entry counted as Cloudflare's
+    /// address, with nothing else to show for it. Said once a process, a
+    /// router running for weeks said it once, long gone from any log kept.
+    /// Not an audit event: the audit log's lines each cost their sender a
+    /// refusal's wait, a token or a write, and a header that does not check
+    /// costs nothing -- the request goes on as the connection's -- so a
+    /// line each would let anyone grow the log at the router's request
+    /// rate, and a token mistyped would write one for every request through
+    /// the entry.
     fn entry_named(
         &self,
         named: std::result::Result<std::net::IpAddr, fenec_http::audit::Unnamed>,
         peer: Option<std::net::SocketAddr>,
     ) {
         use fenec_http::audit::Unnamed;
-        use std::sync::atomic::AtomicBool;
-        static SAID: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+        use std::sync::atomic::AtomicU64;
+        // The Unix second each kind was last said at; 0, never.
+        static SAID: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
         let (how, said, why) = match named {
             Ok(_) => return metrics::entry_client(metrics::EntryClient::Named),
             Err(Unnamed::BadMark) => (
@@ -615,12 +618,20 @@ impl Router {
             ),
         };
         metrics::entry_client(how);
-        if !said.swap(true, Ordering::Relaxed) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let last = said.load(Ordering::Relaxed);
+        if now >= last + 60
+            && said
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
             let from = peer.map_or_else(|| "?".to_string(), |p| p.to_string());
             fenec_http::log!(
                 "a Fenec-Client header from {from} {why}; its client is not named, and the \
-                 connection's address counts in its place (said once; \
-                 fenec_router_entry_clients_total counts them)"
+                 connection's address counts in its place (said a minute apart at most; \
+                 fenec_router_entry_clients_total counts each)"
             );
         }
     }
@@ -693,10 +704,17 @@ impl Router {
             // alone: from then on this request's in the connection's
             // place, the entry's address being Cloudflare's. Without
             // `--entry-token` the header is not looked for; with it, a
-            // request without it costs one look among its headers.
+            // request without it costs one look among its headers, and a
+            // tenant's request a count: an entry whose `ENTRY_TOKEN` is not
+            // set names no one, and every client behind it would be
+            // Cloudflare's address with nothing to show for it.
             if let (Some(key), None) = (&self.entry, relayed) {
-                if let Some(named) = fenec_http::audit::entry(&req, key) {
-                    self.entry_named(named, peer);
+                match fenec_http::audit::entry(&req, key) {
+                    Some(named) => self.entry_named(named, peer),
+                    None if req.path.starts_with("/t/") => {
+                        metrics::entry_client(metrics::EntryClient::Absent)
+                    }
+                    None => {}
                 }
             }
             // A browser's preflight is answered here, as a node answers its
@@ -1742,6 +1760,16 @@ impl Router {
                 "the body needs {\"addr\": .., \"token\": ..}".into(),
             ));
         };
+        // The entry's token is in a Worker's secrets: as a node's admin
+        // token it would reach `/_admin/` there, every tenant's file.
+        if self.cfg.entry_token.as_deref() == Some(token) {
+            return Err(Fail(
+                400,
+                "the node's admin token is this router's --entry-token, which the global \
+                 entry's Worker holds: give the node one of its own"
+                    .into(),
+            ));
+        }
         let (region, zone) = (place_field(body, "region")?, place_field(body, "zone")?);
         let mut node = Node {
             addr: addr.into(),

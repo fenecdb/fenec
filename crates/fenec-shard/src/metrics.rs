@@ -141,9 +141,13 @@ pub enum EntryClient {
     /// Its mark is the entry's, made more than a minute from this clock --
     /// replayed, or a clock off -- and the connection's address counts.
     Stale = 2,
+    /// A tenant's request (`/t/`) no other router relayed carried none: a
+    /// client reaching the router itself, or an entry whose `ENTRY_TOKEN`
+    /// is not set, which names no client at all.
+    Absent = 3,
 }
 
-const ENTRY_CLIENT: [&str; 3] = ["named", "bad_mark", "stale"];
+const ENTRY_CLIENT: [&str; 4] = ["named", "bad_mark", "stale", "absent"];
 
 /// Counts what a request's `Fenec-Client` header came to.
 pub fn entry_client(how: EntryClient) {
@@ -390,7 +394,7 @@ pub fn counters(out: &mut Text) {
     out.family(
         "fenec_router_entry_clients_total",
         "counter",
-        "Requests whose Fenec-Client header -- the global entry's name for its client -- a router with --entry-token read, by outcome: named (the mark checked, the address the request's), bad_mark (not the entry's mark: another token, or a client sending the header itself), stale (the entry's mark, made more than 60 s from this router's clock). The last two count by the connection's address.",
+        "What a router with --entry-token made of the Fenec-Client header -- the global entry's name for its client -- of the requests no other router relayed, by outcome: named (the mark checked, the address the request's), bad_mark (not the entry's mark: another token, or a client sending the header itself), stale (the entry's mark, made more than 60 s from this router's clock), absent (a tenant's request carrying none: a client reaching the router itself, or an entry with no ENTRY_TOKEN). All but named count by the connection's address.",
     );
     for (i, outcome) in ENTRY_CLIENT.iter().enumerate() {
         let n: u64 = SHARDS

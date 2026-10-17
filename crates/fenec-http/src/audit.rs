@@ -241,7 +241,9 @@ pub fn check_client(value: &str, key: &EntryKey, now: u64) -> Result<IpAddr, Unn
     if at.abs_diff(now) > CLIENT_WITHIN_SECS {
         return Err(Unnamed::Stale);
     }
-    Ok(ip)
+    // The mark is over the text the entry was given; the address is the
+    // one an IPv4 client is counted, logged and named onwards by.
+    Ok(ip.to_canonical())
 }
 
 /// The client the global entry named for `req`, checked under `key`
@@ -478,6 +480,15 @@ pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::Sock
 
 type Failures = HashMap<IpAddr, (u32, Instant)>;
 
+/// The address a count is kept by: an IPv4 address mapped into IPv6 as
+/// itself. A router listening on `[::]` sees a client reaching it over
+/// IPv4 as `::ffff:a.b.c.d`, and the global entry names the same client
+/// `a.b.c.d`: kept apart, one client had two counts, and its good token
+/// through the entry cleared only one of them.
+fn counted_as(ip: IpAddr) -> IpAddr {
+    ip.to_canonical()
+}
+
 fn failures() -> &'static Mutex<Failures> {
     static F: OnceLock<Mutex<Failures>> = OnceLock::new();
     F.get_or_init(Default::default)
@@ -487,7 +498,7 @@ fn failures() -> &'static Mutex<Failures> {
 /// counted.
 pub fn failed(peer: Option<IpAddr>) -> Duration {
     let base = DELAY_MS.load(Ordering::Relaxed);
-    let Some(ip) = peer.filter(|_| base > 0) else {
+    let Some(ip) = peer.filter(|_| base > 0).map(counted_as) else {
         return Duration::ZERO;
     };
     let now = Instant::now();
@@ -514,7 +525,7 @@ pub fn failed(peer: Option<IpAddr>) -> Duration {
 /// of another address.
 pub fn would_wait(peer: Option<IpAddr>) -> Duration {
     let base = DELAY_MS.load(Ordering::Relaxed);
-    let Some(ip) = peer.filter(|_| base > 0) else {
+    let Some(ip) = peer.filter(|_| base > 0).map(counted_as) else {
         return Duration::ZERO;
     };
     let map = failures().lock().unwrap_or_else(|e| e.into_inner());
@@ -567,7 +578,7 @@ pub fn push_verified(head: &mut String) {
 pub fn succeeded(peer: Option<IpAddr>) {
     if let Some(ip) = peer.filter(|_| FAILING.load(Ordering::Relaxed) > 0) {
         let mut map = failures().lock().unwrap_or_else(|e| e.into_inner());
-        map.remove(&ip);
+        map.remove(&counted_as(ip));
         FAILING.store(map.len() as u64, Ordering::Relaxed);
     }
 }
@@ -704,6 +715,36 @@ mod tests {
         let slow = line("slow", Level::Warn, &[]);
         assert!(slow.contains(r#""peer":"172.64.0.9:4410""#), "{slow}");
         assert!(!slow.contains("via"), "{slow}");
+    }
+
+    /// An IPv4 client is one count whether a dual-stack listener saw it as
+    /// `::ffff:a.b.c.d` or the entry named it `a.b.c.d`, and a name the
+    /// entry gave in the mapped form is the address itself.
+    #[test]
+    fn an_ipv4_address_mapped_into_ipv6_is_counted_as_itself() {
+        let v4: Option<IpAddr> = Some("198.51.100.77".parse().unwrap());
+        let mapped: Option<IpAddr> = Some("::ffff:198.51.100.77".parse().unwrap());
+        succeeded(v4);
+        assert_eq!(failed(mapped).as_millis(), 100);
+        assert_eq!(would_wait(v4).as_millis(), 200);
+        assert_eq!(failed(v4).as_millis(), 200);
+        assert_eq!(would_wait(mapped).as_millis(), 400);
+        succeeded(mapped);
+        assert_eq!(would_wait(v4).as_millis(), 100);
+        // A real IPv6 address is its own.
+        let v6: Option<IpAddr> = Some("2001:db8::77".parse().unwrap());
+        assert_eq!(failed(v6).as_millis(), 100);
+        assert_eq!(would_wait(v4).as_millis(), 100);
+        succeeded(v6);
+
+        let key = EntryKey::new("entry-secret");
+        let mark = key.mark("::ffff:198.51.100.77", "1800000000");
+        let value = format!(
+            "::ffff:198.51.100.77 1800000000 {}",
+            std::str::from_utf8(&mark).unwrap()
+        );
+        let plain: IpAddr = "198.51.100.77".parse().unwrap();
+        assert_eq!(check_client(&value, &key, 1_800_000_000), Ok(plain));
     }
 
     #[test]

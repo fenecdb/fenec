@@ -290,7 +290,9 @@ router from Cloudflare's addresses; a router started with the entry's token
 (<code>--entry-token</code>) takes the address the entry names in
 <code>Fenec-Client</code> for the request's, its mark checked and its time
 within a minute, and counts, clears, logs (<code>peer</code>, the entry as
-<code>via</code>) and names that address onwards. Behind another reverse
+<code>via</code>) and names that address onwards. An IPv4 client is one
+count however it arrives: a listener on <code>[::]</code> sees it as
+<code>::ffff:a.b.c.d</code>, counted as <code>a.b.c.d</code>. Behind another reverse
 proxy every client has the proxy's address, so the proxy's own rate limit
 is the one that counts there. <code>--auth-delay 0</code> turns the wait
 off.</p>
@@ -318,7 +320,7 @@ tenant moves. No label names a tenant.</p>
 <tr><td><code>fenec_router_upstream_duration_seconds</code></td><td>histogram</td><td>a forwarded request's time at its node: from its sending to the whole answer. Taken from the request's duration, it leaves the router's own</td></tr>
 <tr><td><code>fenec_router_upstream_errors_total{node}</code></td><td>counter</td><td>forwarded requests a node did not answer or broke off, each answered 502: the one to alert on</td></tr>
 <tr><td><code>fenec_router_refused_total</code></td><td>counter</td><td>requests refused for their token (401): the router's own, and its nodes' it passed on</td></tr>
-<tr><td><code>fenec_router_entry_clients_total{outcome}</code></td><td>counter</td><td>with <code>--entry-token</code>, the requests whose <code>Fenec-Client</code> — the <a href="sharding.html#global-entry">global entry</a>'s name for its client — the router read: <code>named</code>, the address taken for the request's; <code>bad_mark</code>, not the entry's mark (another token, or a client sending the header itself); <code>stale</code>, the entry's mark made more than a minute from the router's clock. The last two count by the connection's address: one that grows while the entry sends is a token or a clock to fix</td></tr>
+<tr><td><code>fenec_router_entry_clients_total{outcome}</code></td><td>counter</td><td>with <code>--entry-token</code>, what the router made of the <a href="sharding.html#global-entry">global entry</a>'s name for the client (<code>Fenec-Client</code>) of each request no other router relayed: <code>named</code>, the address taken for the request's; <code>bad_mark</code>, not the entry's mark (another token, or a client sending the header itself); <code>stale</code>, the entry's mark made more than a minute from the router's clock; <code>absent</code>, a tenant's request carrying none — a client reaching the router itself, or an entry with no <code>ENTRY_TOKEN</code>, which names nobody. All but <code>named</code> count by the connection's address</td></tr>
 <tr><td><code>fenec_router_moves_total{outcome}</code></td><td>counter</td><td>tenant moves that began, <code>done</code> or <code>failed</code> and thawed; one refused before it began is not one</td></tr>
 <tr><td><code>fenec_router_move_duration_seconds</code></td><td>histogram</td><td>how long a move that was done took, the tenant frozen for all of it, in buckets from 10 ms to 1 000 s</td></tr>
 <tr><td><code>fenec_router_fanouts_total{outcome}</code></td><td>counter</td><td><a href="sharding.html#across-tenants">queries across tenants</a>: <code>done</code>, every tenant answered; <code>partial</code>, some failed and the caller asked for the others' rows; <code>failed</code>, answered with the tenants that failed; <code>refused</code> as a whole, before or after the asking (a request that does not read, a bound passed)</td></tr>
@@ -356,6 +358,10 @@ fenec_router_tenants_moving > 0
 increase(fenec_router_auto_failovers_total[5m]) > 0
 fenec_router_node_failed_over > 0
 fenec_router_same_zone_copies > 0
+# behind the global entry: a token or a clock to fix, or an entry naming
+# nobody (its ENTRY_TOKEN unset) -- on a router only the entry reaches
+rate(fenec_router_entry_clients_total{outcome=~"bad_mark|stale"}[5m]) > 0
+rate(fenec_router_entry_clients_total{outcome="absent"}[5m]) > 0
 
 # tenants by region
 sum by (region) (fenec_router_tenants)
@@ -435,8 +441,8 @@ OTEL_SERVICE_NAME=orders-db fenec-server --file data.fenec \
 <code>/t/{tenant}/{collection}/near</code>), <code>url.path</code>,
 <code>http.response.status_code</code>, <code>server.address</code> and
 <code>server.port</code>, <code>client.address</code> — the client behind
-a router, or behind the global entry where a router believes it, with the
-connection's own address as <code>network.peer.address</code> —
+a router, or behind the global entry where a router believes it — and the
+connection's own address as <code>network.peer.address</code>,
 <code>db.system</code> (<code>fenecdb</code>),
 <code>db.operation.name</code> (<code>get</code>, <code>put</code>,
 <code>create</code>…) and, for FenecQL, <code>db.query.text</code> — the

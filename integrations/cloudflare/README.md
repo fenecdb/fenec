@@ -270,15 +270,20 @@ npx wrangler deploy --config entry/wrangler.jsonc
   `Fenec-Client: <address> <seconds> <mark>`, the mark an HMAC of
   `fenec-client <address> <seconds>` under `ENTRY_TOKEN` (`entry.js`),
   which the routers believe from the entry alone: started with the same
-  token (`fenec-shard --entry-token`, or `FENEC_SHARD_ENTRY_TOKEN`), a
+  token (`fenec-shard --entry-token`, or `FENEC_SHARD_ENTRY_TOKEN`; one of
+  its own, which a router refuses equal to its `--token`, its
+  `--replication-token` or a node's admin token), a
   router takes the address for the request's -- a refused token waits by
   it and a good one clears its count alone, its audit line and trace name
   it, and it is the client the router names to a node or another region's
   router -- where every client would otherwise be Cloudflare's address. A
   mark is believed for a minute either side of the router's clock. A
   router without the flag, or a header that does not check, counts the
-  connection's address. `X-Request-Id` is the client's, or Cloudflare's
-  ray id.
+  connection's address, and `fenec_router_entry_clients_total` counts
+  each (`absent` too: an entry with no `ENTRY_TOKEN` names nobody). To
+  change the token, start the routers with the new one, then put it here;
+  in between, requests are served and counted by Cloudflare's address.
+  `X-Request-Id` is the client's, or Cloudflare's ray id.
 - **CORS**: the routers' answers pass unchanged. With `CORS` set to the
   routers' `--http-cors`, the entry answers preflights itself and puts the
   same headers on its own answers. Set it wherever the routers have

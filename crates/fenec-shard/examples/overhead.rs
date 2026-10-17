@@ -21,10 +21,10 @@
 //!   * a read through the router of a region holding a tenant's read
 //!     replica: sent home, marked for the replica, and marked after the
 //!     client's write, the replica waiting for it (`reads` alone)
-//!   * with `latency`, a request the global entry names its client in
-//!     (`Fenec-Client`) through a router reading it (`--entry-token`)
-//!     against the same request through one that does not, and the mark's
-//!     check alone
+//!   * with `latency`, a request with no `Fenec-Client` and one the global
+//!     entry names its client in, each through a router reading the header
+//!     (`--entry-token`) against one that does not, in turns, and the
+//!     mark's check alone
 
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::{Directory, Node, State};
@@ -512,13 +512,15 @@ fn main() {
     fanout();
 }
 
-/// A request the global entry names its client in (`Fenec-Client: <address>
-/// <seconds> <mark>`) through a router with `--entry-token`, which checks
-/// the mark -- one HMAC-SHA256 -- and takes the address for the request's,
-/// against the same request through a router without it, which reads none
-/// of it and drops it as every router does: what naming the client costs.
-/// Then the mark's check alone, and the HMAC worked out with the key's
-/// padded blocks hashed every time, as `hmac_sha256` did.
+/// Through a router with `--entry-token` against one without, in turns: a
+/// request with no `Fenec-Client` -- what the flag costs a request the
+/// entry does not name, a look among its headers and an `absent` count --
+/// and one the global entry names its client in (`Fenec-Client: <address>
+/// <seconds> <mark>`), whose mark the router with the flag checks -- one
+/// HMAC-SHA256 -- and whose address it takes for the request's, where the
+/// other reads none of it and drops it as every router does. Then the
+/// mark's check alone, and the HMAC worked out with the key's padded
+/// blocks hashed every time, as `hmac_sha256` did.
 fn entry(node: &str, target: &str) {
     use fenec_http::audit::{check_client, EntryKey};
     const TOKEN: &str = "entry-token";
@@ -559,47 +561,59 @@ fn entry(node: &str, target: &str) {
         std::str::from_utf8(&mark).unwrap()
     );
     let header = format!("Fenec-Client: {value}\r\n");
-    let timed = |addr: &str| -> Vec<f64> {
+    let timed = |addr: &str, extra: &str| -> Vec<f64> {
         let mut c = Client::new(addr);
         for _ in 0..500 {
-            c.get_with(target, &header);
+            c.get_with(target, extra);
         }
-        let mut out: Vec<f64> = (0..ROUNDS)
+        (0..ROUNDS)
             .map(|_| {
                 let t = Instant::now();
-                assert_eq!(c.get_with(target, &header), 200);
+                assert_eq!(c.get_with(target, extra), 200);
                 t.elapsed().as_secs_f64() * 1e6
             })
-            .collect();
-        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        out
+            .collect()
     };
-    // In turns, each twice, so neither has the machine to itself.
-    let (mut ignored, mut checked) = (Vec::new(), Vec::new());
-    for _ in 0..2 {
-        ignored.extend(timed(&plain));
-        checked.extend(timed(&named));
-    }
-    ignored.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    checked.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // Each request through both routers in ABBA turns -- the router
+    // without the flag first in one round, second in the next -- so that
+    // neither has the machine to itself, nor always the same place in a
+    // run: the one timed first in every run, an order no turns of whole
+    // runs undo, could not be told apart from what the HMAC costs.
     println!(
-        "\nthe global entry's name for its client (Fenec-Client), {} x GET each",
-        2 * ROUNDS
+        "\nthe global entry's name for its client (Fenec-Client), {} x GET each, in ABBA turns",
+        4 * ROUNDS
     );
-    for (label, v) in [("ignored", &ignored), ("named", &checked)] {
+    println!("                              p50       p95       p99");
+    for (kind, extra) in [("no header", ""), ("header", header.as_str())] {
+        let (mut without, mut with) = (Vec::new(), Vec::new());
+        for round in 0..4 {
+            if round % 2 == 0 {
+                without.extend(timed(&plain, extra));
+                with.extend(timed(&named, extra));
+            } else {
+                with.extend(timed(&named, extra));
+                without.extend(timed(&plain, extra));
+            }
+        }
+        without.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        with.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (label, v) in [("no flag", &without), ("--entry-token", &with)] {
+            println!(
+                "  {:<26} {:>6.1} us {:>6.1} us {:>6.1} us",
+                format!("{kind}, {label}"),
+                pct(v, 0.5),
+                pct(v, 0.95),
+                pct(v, 0.99)
+            );
+        }
         println!(
-            "  {label:<8} {:>6.1} us {:>6.1} us {:>6.1} us",
-            pct(v, 0.5),
-            pct(v, 0.95),
-            pct(v, 0.99)
+            "  {:<26} {:>6.1} us {:>6.1} us {:>6.1} us",
+            format!("{kind}, added"),
+            pct(&with, 0.5) - pct(&without, 0.5),
+            pct(&with, 0.95) - pct(&without, 0.95),
+            pct(&with, 0.99) - pct(&without, 0.99)
         );
     }
-    println!(
-        "  added    {:>6.1} us {:>6.1} us {:>6.1} us",
-        pct(&checked, 0.5) - pct(&ignored, 0.5),
-        pct(&checked, 0.95) - pct(&ignored, 0.95),
-        pct(&checked, 0.99) - pct(&ignored, 0.99)
-    );
     let per = |f: &dyn Fn()| -> f64 {
         let rounds = 200_000;
         let t = Instant::now();

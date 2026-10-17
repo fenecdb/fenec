@@ -1069,54 +1069,78 @@ is, would name any address for good -- and not `CF-Connecting-IP` believed
 from Cloudflare's ranges, since a Worker sets it and `X-Real-IP` as it
 likes towards an origin outside Cloudflare (Cloudflare's HTTP headers page),
 so any account's Worker could claim any address. A router started with
-the same token (`fenec-shard --entry-token`, `FENEC_SHARD_ENTRY_TOKEN`;
-refused empty, and refused equal to `--token`, which moves and deletes
-every tenant and so stays out of the Worker) reads it (`audit::entry`,
-after `audit::request` and for a request no router relayed): the mark
-first, in constant time against its own HMAC of `fenec-client <address>
-<seconds>` (`EntryKey`, the key's padded blocks hashed once, a `HmacKey`:
-0.73-0.78 us a mark checked where the HMAC alone took 1.28-1.33 with them
-hashed each time), then the seconds within 60 of its clock either way
-(`CLIENT_WITHIN_SECS`), so a stale header is one the entry made. The
-address then stands in for the connection's peer for that request alone
-(`audit::NAMED`, cleared by each request's `audit::request`) -- the
+the same token (`fenec-shard --entry-token`, `FENEC_SHARD_ENTRY_TOKEN`, set
+and empty being unset) reads it (`audit::entry`, after `audit::request`
+and for a request no router relayed): the mark first, in constant time
+against its own HMAC of `fenec-client <address> <seconds>` (`EntryKey`, the
+key's padded blocks hashed once, a `HmacKey`: 0.73-0.78 us a mark checked
+where the HMAC alone took 1.28-1.36 with them hashed each time), then the seconds
+within 60 of its clock either way (`CLIENT_WITHIN_SECS`), so a stale header
+is one the entry made. The address then stands in for the connection's
+peer for that request alone (`audit::NAMED`, cleared by each request's
+`audit::request`, a kept-alive connection carrying many clients) -- the
 refusal's wait and count (`audit::http`), a verified token's clearing
 (`audit::verified`), the audit and slow lines' `peer`, the entry's address
-their `via` (`audit::line`), the trace's `client.address`, the connection's
-its `network.peer.address` (on a node too, for the client a router named),
-and the `Fenec-Router` the router names to a node or a relay, which names
-it to the node in turn -- the router still waiting a refusal out and still
-relaying a tenant of another region, where for a relayed request it does
-neither. Replayed, a header names that one address for its minute: what
-the minute costs against a mark of the token alone, which named any for
-good. A header that does not check, or a router without the flag, leaves
-the connection's address, and every router drops the header from what it
-forwards, flag or not (`forward`'s list, `forwarded_headers`), so a node
-never reads a client's claim: relays, held requests and streams go out
-through that list, and `/_shard/`'s relays and a fan-out write headers of
-their own. One not believed is counted
+their `via` (`audit::line`), the trace's `client.address` (on a node too,
+for the client a router named; the connection's own `network.peer.address`
+always), and the `Fenec-Router` the router names to a node, a read
+replica's (`forward_near`) or a relay, which names it to the node in turn
+-- the router still waiting a refusal out and still relaying a tenant of
+another region, where for a relayed request it does neither. A count is
+kept by the address made canonical (`counted_as`, and the name the entry
+gives): a router on `[::]` saw an IPv4 client as `::ffff:a.b.c.d`, the
+entry named it `a.b.c.d`, and one client had two counts. Replayed, a header
+names that one address for its minute: what the minute costs against a
+mark of the token alone, which named any for good. A header that does not
+check, or a router without the flag, leaves the connection's address, and
+every router drops the header from what it forwards, flag or not
+(`forward`'s list, `forwarded_headers`), so a node never reads a client's
+claim: relays, held requests, streams and a read replica's reads go out
+through those lists, and `/_shard/`'s relays and a fan-out write headers of
+their own. What each came to is counted
 (`fenec_router_entry_clients_total{outcome}`: `named`, `bad_mark`,
-`stale`, in the thread's metrics shard as a request is) and said once a
-kind in the log -- and is no audit event: each audit line costs its sender
-a refusal's wait, a token or a write, and such a header costs nothing, so
-a line each would grow the log at the router's request rate, and a
-mistyped token write one for every request through the entry. Nodes read
-none of it: the entry reaches routers alone (`REGIONS`, `ADMIN`). A
-forwarded request compares each header once more, to drop it, and with the
-flag one without the header pays a look among its headers besides: the
-router's added p50 stayed 20.4 us against main's 20.4 (20.1-21.0 and
-20.0-22.9, ten runs a side in ABBA turns at loads of 1.7-2.3, `make
-shard-bench ARGS=latency`), and a request the entry named its client in
-took 41.9 us p50 through a router reading it against 42.0 through one that
-reads none of it, the runs' differences -0.4 to +1.0 (the bench's `entry`
-part): the mark's 0.73 us is inside them.
+`stale`, and `absent` for a tenant's request carrying none -- every one,
+behind an entry whose `ENTRY_TOKEN` is unset, which names nobody and
+otherwise shows nothing -- in the thread's metrics shard as a request is),
+one not believed said in the log a minute apart at most a kind -- once a
+process, a router running for weeks said it once -- and none is an audit
+event: each audit line costs its sender a refusal's wait, a token or a
+write, and such a header costs nothing, so a line each would grow the log
+at the router's request rate, and a mistyped token write one for every
+request through the entry. On a router only the entry reaches, all but
+`named` is worth an alert (monitoring.html). The entry's token is refused
+where the router holds it for anything else (`main.rs`, `set_node`): empty,
+equal to `--token` (moves and deletes every tenant), to
+`--replication-token` (the directory's stream carries every node's admin
+token) or to a node's admin token in its directories, at the start and as
+a node is added; the nodes' data and replication tokens it never sees.
+One token at a time: rotated by starting the routers with the new one and
+then the Worker, every request served in between and its client counted by
+Cloudflare's address (`bad_mark`) -- a second accepted token was not worth
+its flag against minutes of the counting there was before. Nodes read none
+of it: the entry reaches routers alone (`REGIONS`, `ADMIN`). A forwarded
+request compares each header once more, to drop it: the router's added p50
+stayed 20.4 us against main's 20.4 (20.1-21.0 and 20.0-22.9, ten runs a
+side in ABBA turns at loads of 1.7-2.3, `make shard-bench ARGS=latency`).
+With the flag, in the bench's `entry` part (each request through a router
+with it and one without, in ABBA turns, eight runs at loads of 2.2-2.9):
+one without the header -- a look among its headers, an `absent` count --
+took 42.0 us p50 against 42.05 (the runs' differences -0.2 to +0.1), and
+one the entry named its client in 41.7 against 42.1 (-0.8 to +0.1, one run
++2.8): the mark's 0.75 us is not seen in a round trip. The router without
+the flag was timed first in every run before, an order no turns of whole
+runs undo; it takes turns inside each run now.
 `tests/entry.rs` holds two named clients' counts apart and a good token
 clearing its own alone, the router's own refusals and the node's; a bad
 mark, a moved address, a stale time either way and a router without the
-flag to the connection's address; the header at no node, through a
-forward, a held request and a stream; the audit lines; and a relay
-carrying the client to the home router's and the node's lines and spans
--- each failing with its part taken out -- and `entry.test.js` a token
+flag to the connection's address, and a request carrying no name counted
+`absent`; one kept-alive connection named, then not, then named again; the
+header at no node, through a forward, a held request and a stream; the
+audit lines; a relay carrying the client to the home router's and the
+node's lines and spans; a read a read replica answers naming it to the
+replica's node; and the entry's token refused as each other token, at the
+start and as a node is added, an empty environment's taken as unset --
+each failing with its part taken out -- and `entry.test.js` a token
 refused through the Worker in front of real routers waiting by
 `CF-Connecting-IP`'s address, never cleared by another client's good
 token. The routers' CORS headers pass unchanged; with `CORS`

@@ -24,12 +24,13 @@ mod otlp;
 use fenec_http::audit::{self, would_wait};
 use fenec_http::crypto::{b64url_encode, hmac_sha256};
 use fenec_http::replication::{fresh_id, Follower, Replication};
-use fenec_http::tenants::Tenants;
+use fenec_http::tenants::{Replicated, Tenants};
 use fenec_shard::directory::{Directory, Node, State};
 use fenec_shard::{Config, Router};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -246,15 +247,16 @@ fn text_of<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 
 /// A scrape's `fenec_router_entry_clients_total` of `outcome`.
 fn entry_clients(router: &str, outcome: &str) -> u64 {
-    let (status, out, _) = ask(
-        router,
-        "GET",
-        "/_metrics",
-        "Authorization: Bearer rt\r\n",
-        "",
-    );
+    sample(router, "rt", "fenec_router_entry_clients_total", outcome)
+}
+
+/// A scrape's `family{outcome="<outcome>"}`, through `router` with its
+/// `token`.
+fn sample(router: &str, token: &str, family: &str, outcome: &str) -> u64 {
+    let auth = format!("Authorization: Bearer {token}\r\n");
+    let (status, out, _) = ask(router, "GET", "/_metrics", &auth, "");
     assert_eq!(status, 200, "{out}");
-    let line = format!("fenec_router_entry_clients_total{{outcome=\"{outcome}\"}} ");
+    let line = format!("{family}{{outcome=\"{outcome}\"}} ");
     out.lines()
         .find_map(|l| l.strip_prefix(&line))
         .map_or(0, |n| n.trim().parse().unwrap())
@@ -348,6 +350,7 @@ fn a_name_that_does_not_check_leaves_the_connections_address() {
     let plain = router(&node, None);
     let before = |o| entry_clients(&entry, o);
     let (named0, bad0, stale0) = (before("named"), before("bad_mark"), before("stale"));
+    let absent0 = before("absent");
 
     // Another token's mark, a mark moved to another address, a time two
     // minutes gone, and a router without the flag: each is 127.0.0.1's
@@ -382,11 +385,308 @@ fn a_name_that_does_not_check_leaves_the_connections_address() {
     assert_eq!(would_wait(ip(c)), ms(100));
     assert_eq!(would_wait(LOOPBACK), ms(50));
 
+    // A tenant's request with no name at all, as an entry with no
+    // ENTRY_TOKEN sends every one: 127.0.0.1's, and counted as absent by
+    // the router with the flag alone -- a scrape, no tenant's, is not.
+    for router in [&entry, &plain] {
+        let (status, _) = count(router, FORGED);
+        assert_eq!(status, 401);
+    }
+    assert_eq!(would_wait(LOOPBACK), ms(200));
+    assert_eq!(would_wait(ip(c)), ms(100));
+
     // Counted by what each came to: two marks not the entry's, two times
-    // past the minute; the router without the flag read none.
+    // past the minute, one request carrying none; the router without the
+    // flag read none of them.
     assert_eq!(entry_clients(&entry, "bad_mark") - bad0, 2);
     assert_eq!(entry_clients(&entry, "stale") - stale0, 3);
+    assert_eq!(entry_clients(&entry, "absent") - absent0, 1);
     assert!(entry_clients(&entry, "named") > named0);
+}
+
+/// A keep-alive client: requests one after another on one connection, as
+/// the entry's fetches reach a router.
+struct KeptAlive {
+    reader: BufReader<TcpStream>,
+    out: TcpStream,
+}
+
+impl KeptAlive {
+    fn new(addr: &str) -> KeptAlive {
+        let s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        KeptAlive {
+            out: s.try_clone().unwrap(),
+            reader: BufReader::new(s),
+        }
+    }
+
+    /// A count of acme's notes with `headers`: its status.
+    fn count(&mut self, headers: &str) -> u16 {
+        let body = r#"{"query":"get notes count"}"#;
+        write!(
+            self.out,
+            "POST /t/acme/query HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        let status = line[9..12].parse().unwrap();
+        let mut len = 0;
+        loop {
+            line.clear();
+            self.reader.read_line(&mut line).unwrap();
+            let l = line.trim_end();
+            if l.is_empty() {
+                break;
+            }
+            if let Some((_, v)) = l
+                .split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            {
+                len = v.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0u8; len];
+        self.reader.read_exact(&mut body).unwrap();
+        status
+    }
+}
+
+/// The entry's fetches reach a router over kept-alive connections, one
+/// carrying many clients' requests: each is named by its own header, or
+/// is the connection's, never by the one before it.
+#[test]
+fn a_kept_alive_connection_names_each_request_by_its_own_header() {
+    let a = "203.0.113.70";
+    let _turn = turn(&[a]);
+    let files = scratch("kept");
+    let node = node(&files.0, "adm", &["acme"]);
+    let entry = router(&node, Some(SECRET));
+    let mut c = KeptAlive::new(&entry);
+    let name = named(a);
+
+    assert_eq!(c.count(&format!("{FORGED}{name}")), 401);
+    assert_eq!((would_wait(ip(a)), would_wait(LOOPBACK)), (ms(100), ms(50)));
+    // No name: the connection's, though the request before named a.
+    assert_eq!(c.count(FORGED), 401);
+    assert_eq!(
+        (would_wait(ip(a)), would_wait(LOOPBACK)),
+        (ms(100), ms(100))
+    );
+    assert_eq!(c.count(&format!("{FORGED}{name}")), 401);
+    assert_eq!(
+        (would_wait(ip(a)), would_wait(LOOPBACK)),
+        (ms(200), ms(100))
+    );
+    // A good token with no name clears the connection's count, not a's.
+    assert_eq!(c.count(DATA), 200);
+    assert_eq!((would_wait(ip(a)), would_wait(LOOPBACK)), (ms(200), ms(50)));
+    assert_eq!(c.count(&format!("{DATA}{name}")), 200);
+    assert_eq!((would_wait(ip(a)), would_wait(LOOPBACK)), (ms(50), ms(50)));
+}
+
+/// A node holding nothing at `dir` whose tenants follow and feed others
+/// (`Replicated`), admin token `admin`, data token `data`: its address.
+fn replicating_node(dir: &Path, admin: &str) -> String {
+    let tenants = Tenants::new(dir).unwrap().with_replication(Replicated {
+        token: "tenant-replication".into(),
+        buffer: 8 << 20,
+        upstream: None,
+        sync_on_write: true,
+    });
+    let server = fenec_http::Server::with_tenants(
+        Arc::new(tenants),
+        fenec_http::Config {
+            addr: "127.0.0.1:0".into(),
+            admin_token: Some(admin.into()),
+            token: Some("data".into()),
+            sync_on_write: true,
+            ..fenec_http::Config::default()
+        },
+    );
+    let listener = server.bind().unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    addr
+}
+
+/// A read its client marked for a replica, through a router standing in
+/// the region of the tenant's read replica, goes to the replica's node
+/// (`forward_near`): the client the entry named is the one the router
+/// names to that node, and the node's audit line names it.
+#[test]
+fn a_read_answered_by_a_read_replica_names_the_entrys_client_to_its_node() {
+    let r = "203.0.113.60";
+    let _turn = turn(&[r]);
+    let files = scratch("near");
+    let eu1 = replicating_node(&files.0.join("eu1"), "adm-eu1");
+    let us1 = replicating_node(&files.0.join("us1"), "adm-us1");
+    let router = serve(Router::new(
+        Directory::in_memory(),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            token: Some(ROOT.into()),
+            near: Some("us".into()),
+            entry_token: Some(SECRET.into()),
+            upstream_timeout: Duration::from_secs(20),
+            ..Config::default()
+        },
+    ));
+    for (name, addr, region) in [("eu1", &eu1, "eu"), ("us1", &us1, "us")] {
+        let body = format!(r#"{{"addr":"{addr}","token":"adm-{name}","region":"{region}"}}"#);
+        let (status, out) = shard(&router, "PUT", &format!("/_shard/nodes/{name}"), &body);
+        assert_eq!(status, 201, "{out}");
+    }
+    let body = r#"{"node":"eu1","schema":"create collection notes (title text)"}"#;
+    let (status, out) = shard(&router, "PUT", "/_shard/tenants/acme", body);
+    assert_eq!(status, 201, "{out}");
+    let (status, out) = shard(&router, "PUT", "/_shard/tenants/acme/read-replicas/us", "");
+    assert_eq!(status, 201, "{out}");
+    let put = r#"{"query":"put notes {title: \"here\"}"}"#;
+    let (status, out, _) = ask(&router, "POST", "/t/acme/query", DATA, put);
+    assert_eq!(status, 200, "{out}");
+    let marked = "Fenec-Read: replica\r\n";
+    until("us1's copy holds the write", || {
+        let body = r#"{"query":"get notes count"}"#;
+        let (_, out, _) = ask(
+            &us1,
+            "POST",
+            "/t/acme/query",
+            &format!("{DATA}{marked}"),
+            body,
+        );
+        out.ends_with(r#"[{"count":1}]"#)
+    });
+
+    let replica = || sample(&router, ROOT, "fenec_router_replica_reads_total", "replica");
+    let before = replica();
+    let headers = format!("{FORGED}{}{marked}X-Request-Id: entry-near-1\r\n", named(r));
+    let (status, took) = count(&router, &headers);
+    assert_eq!(status, 401);
+    assert!(took >= ms(50), "{took:?}");
+    // Answered by the replica, not sent home.
+    assert_eq!(replica() - before, 1);
+    assert_eq!(would_wait(ip(r)), ms(100));
+    assert_eq!(would_wait(LOOPBACK), ms(50));
+    // The router's line and us1's, both naming r.
+    let lines = lines_of("entry-near-1");
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    for l in &lines {
+        assert_eq!(text_of(l, "event"), Some("refused"), "{l}");
+        assert_eq!(text_of(l, "peer"), Some(r), "{l}");
+    }
+}
+
+/// The entry's token is a Worker's secret: a router takes it for nothing
+/// else it holds -- its own token, the directory's replication token, a
+/// node's admin token, at the start or as a node is added -- and a token
+/// set empty in the environment is none.
+#[test]
+fn the_entrys_token_is_refused_where_the_router_holds_it_for_another() {
+    let _turn = turn(&[]);
+    let files = scratch("tokens");
+    let node = node(&files.0.join("n"), "adm", &["acme"]);
+    let entry = router(&node, Some(SECRET));
+    let body = format!(r#"{{"addr":"{node}","token":"{SECRET}"}}"#);
+    let (status, out, _) = ask(
+        &entry,
+        "PUT",
+        "/_shard/nodes/n2",
+        "Authorization: Bearer rt\r\nContent-Type: application/json\r\n",
+        &body,
+    );
+    assert_eq!(status, 400, "{out}");
+    assert!(out.contains("--entry-token"), "{out}");
+
+    // A directory holding a node whose admin token is the entry's.
+    let held = files.0.join("held.fenec");
+    {
+        let db = Arc::new(RwLock::new(
+            fenec_core::fs::open(held.to_str().unwrap()).unwrap(),
+        ));
+        let mut dir = Directory::load(Arc::clone(&db)).unwrap();
+        let n = Node {
+            addr: node.clone(),
+            token: "same".into(),
+            ..Node::default()
+        };
+        dir.set_node("n1", n).unwrap();
+        db.write().unwrap().sync().unwrap();
+    }
+    let fresh = files.0.join("fresh.fenec");
+    let start = |args: &[&str], env: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_fenec-shard"));
+        cmd.args(["--listen", "127.0.0.1:0"]).args(args);
+        cmd.env_remove("FENEC_SHARD_ENTRY_TOKEN");
+        if let Some(v) = env {
+            cmd.env("FENEC_SHARD_ENTRY_TOKEN", v);
+        }
+        cmd.stderr(Stdio::piped()).spawn().unwrap()
+    };
+    let fresh_dir = fresh.to_str().unwrap();
+    let held_dir = held.to_str().unwrap();
+    for (args, says) in [
+        (
+            vec!["--directory", fresh_dir, "--entry-token", ""],
+            "is empty",
+        ),
+        (
+            vec![
+                "--directory",
+                fresh_dir,
+                "--entry-token",
+                "t",
+                "--token",
+                "t",
+            ],
+            "is --token",
+        ),
+        (
+            vec![
+                "--directory",
+                fresh_dir,
+                "--entry-token",
+                "t",
+                "--replication-token",
+                "t",
+            ],
+            "is --replication-token",
+        ),
+        (
+            vec!["--directory", held_dir, "--entry-token", "same"],
+            "node `n1`'s admin token",
+        ),
+    ] {
+        // A router that starts is stopped and named: waited for, it served
+        // for good and the test with it.
+        let mut child = start(&args, None);
+        let mut said = String::new();
+        for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+            let line = line.unwrap();
+            if line.contains("listening on: http://") {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{args:?} started: {said}{line}");
+            }
+            said.push_str(&line);
+            said.push('\n');
+        }
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(2), "{args:?}: {said}");
+        assert!(said.contains(says), "{args:?}: {said}");
+    }
+    // Set and empty in the environment, as a template leaves it: unset,
+    // and the router starts.
+    let mut child = start(&["--directory", fresh_dir], Some(""));
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    let started = lines.any(|l| l.is_ok_and(|l| l.contains("listening on: http://")));
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(started, "the router did not start");
 }
 
 /// What a node or another router is sent, recorded: a stand-in node that

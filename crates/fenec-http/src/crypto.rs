@@ -158,7 +158,7 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; SHA256_LEN] {
 /// a short message is then two compressions where the key's blocks made it
 /// four. What a router checks the global entry's mark on a request with
 /// (`audit::EntryKey`): a mark checked, its parse and comparison included,
-/// in 0.73-0.78 us, where the HMAC alone took 1.28-1.33 with the key's
+/// in 0.73-0.78 us, where the HMAC alone took 1.28-1.36 with the key's
 /// blocks hashed each time (`make shard-bench ARGS=latency`'s `entry`
 /// part).
 #[derive(Clone)]

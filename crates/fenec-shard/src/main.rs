@@ -50,8 +50,17 @@ usage: fenec-shard [options]
                             minute, naming that one address. Without it, or
                             for a header that does not check, the
                             connection's address counts. Every router drops
-                            the header from what it forwards. Not --token:
-                            the entry's Worker holds it
+                            the header from what it forwards. A token of its
+                            own, since the entry's Worker holds it: refused
+                            equal to --token, --replication-token or a node's
+                            admin token the directory holds; the nodes' data
+                            and replication tokens this router never sees,
+                            and those are yours to keep apart. One at a time:
+                            to change it, start each router with the new one,
+                            then put it in the Worker (ENTRY_TOKEN); between
+                            the two every request is served, and its client
+                            counted by Cloudflare's address, as bad_mark in
+                            fenec_router_entry_clients_total
       --audit <path>        append a JSON line to this file for each request
                             refused for its token and each /_shard/ request
                             that changes something
@@ -151,10 +160,26 @@ fn fail(msg: &str) -> ! {
     std::process::exit(2);
 }
 
+/// Refuses `--entry-token` where a node `dir` holds has it for its admin
+/// token, which reaches `/_admin/` there; a node added later is refused it
+/// as it is added (`PUT /_shard/nodes/<n>`).
+fn refuse_node_token(dir: &Directory, entry_token: Option<&str>, path: &str) {
+    let Some(t) = entry_token else { return };
+    if let Some((name, _)) = dir.nodes().iter().find(|(_, n)| n.token == t) {
+        fail(&format!(
+            "--entry-token is node `{name}`'s admin token in {path}: the entry's Worker holds \
+             its token, and that one reaches /_admin/ on the node; give the entry one of its own"
+        ));
+    }
+}
+
 fn main() {
     let mut cfg = Config {
         token: std::env::var("FENEC_SHARD_TOKEN").ok(),
-        entry_token: std::env::var("FENEC_SHARD_ENTRY_TOKEN").ok(),
+        // Set and empty is unset, as a deployment's template leaves it.
+        entry_token: std::env::var("FENEC_SHARD_ENTRY_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty()),
         ..Config::default()
     };
     let mut path = "shard.fenec".to_string();
@@ -331,14 +356,21 @@ fn main() {
         }
     }
 
-    // An empty key would let anyone make the entry's mark, and the
-    // routers' own token in the entry's Worker would reach `/_shard/`,
-    // which moves and deletes every tenant: the entry is kept from it.
+    // An empty key would let anyone make the entry's mark, and a token
+    // the entry's Worker holds that this router takes for something else
+    // would reach more than the client's name: `--token` moves and deletes
+    // every tenant, and the directory's replication stream carries every
+    // node's admin token.
     match cfg.entry_token.as_deref() {
         Some("") => fail("--entry-token is empty: the entry's mark would be anyone's to make"),
         Some(t) if cfg.token.as_deref() == Some(t) => fail(
             "--entry-token is --token: the entry's Worker holds its token, and --token moves \
              and deletes every tenant; give the entry one of its own",
+        ),
+        Some(t) if replication_token.as_deref() == Some(t) => fail(
+            "--entry-token is --replication-token: the entry's Worker holds its token, and \
+             the directory's replication stream carries every node's admin token; give the \
+             entry one of its own",
         ),
         _ => {}
     }
@@ -391,6 +423,7 @@ fn main() {
         Ok(d) => d,
         Err(e) => fail(&format!("could not read the directory {path}: {e}")),
     };
+    refuse_node_token(&dir, cfg.entry_token.as_deref(), &path);
     if cfg.region.is_none() {
         if let Err(e) = dir.settle_scope(None) {
             fail(&format!("{path}: {e}"));
@@ -423,6 +456,7 @@ fn main() {
                 "could not read the global directory's copy {gpath}: {e}"
             )),
         };
+        refuse_node_token(&gdir, cfg.entry_token.as_deref(), &gpath);
         let f = Follower::new(
             &cfg.global[0],
             replication_token.clone().unwrap_or_default(),
