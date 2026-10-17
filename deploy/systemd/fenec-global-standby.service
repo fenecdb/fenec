@@ -1,0 +1,99 @@
+# The standby of the global router: the same process, following the
+# primary's directory (--replica-of FENEC_PRIMARY), on another machine --
+# in another region. It forwards every request as the primary does and
+# refuses changes (409) until it is promoted. It carries the primary's
+# flags, so that once promoted it takes the changes as the primary did.
+#
+# Promoting it is an operator's call, never the routers' (deploy/RUNBOOK.md):
+#   curl -X POST -H "Authorization: Bearer $FENEC_SHARD_REPLICATION_TOKEN" \
+#        http://<this machine>:8090/_replication/promote
+#   systemctl enable fenec-global && systemctl disable fenec-global-standby
+#   systemctl start fenec-global
+# The directory is the same file under both units, which conflict: the last
+# start stops this one and opens the promoted file as the primary's. Do it
+# at once -- this unit started again, by a crash or a reboot, would have the
+# promoted file follow FENEC_PRIMARY again.
+#
+#   install -m 0644 fenec-global-standby.service /etc/systemd/system/
+#   install -m 0600 ../env/global.env /etc/fenecdb/global.env   # then edit it
+#   systemctl enable --now fenec-global-standby
+
+[Unit]
+Description=fenecdb global router (fenec-shard) standby
+Documentation=https://fenecdb.com/docs/sharding file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+# One process on the directory file at a time: two corrupt it.
+Conflicts=fenec-global.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=fenec
+Group=fenec
+EnvironmentFile=/etc/fenecdb/global.env
+# No --region: this directory is the global one. Its regions keep their
+# own (PUT /_shard/regions/<r>), so it leases no node: what it takes are
+# the changes every region must agree on -- a tenant's name made or given
+# back, a move between regions.
+ExecStart=/usr/local/bin/fenec-shard \
+    --listen ${FENEC_LISTEN} \
+    --directory /var/lib/fenecdb/global/directory.fenec \
+    --replica-of ${FENEC_PRIMARY} \
+    --max-connections 1000 \
+    --audit /var/log/fenecdb/global-audit.log \
+    $FENEC_GLOBAL_FLAGS
+Restart=on-failure
+RestartSec=2s
+
+# The router writes and syncs each change of its directory before it acts
+# on it, so SIGTERM's default action loses nothing: it holds no write. What
+# it ends are the requests it was forwarding, which a client sends again.
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+
+# Descriptors: a client's connection each (--max-connections 1000) and a
+# pooled one to a node for each in flight, the directory's replication and
+# its standbys' streams -- 2 x 1000, with room. Raise with them.
+LimitNOFILE=8192
+# Threads: a connection each, under systemd's DefaultTasksMax unless set.
+TasksMax=4096
+# A core dump would hold the router's tokens.
+LimitCORE=0
+
+StateDirectory=fenecdb/global
+StateDirectoryMode=0700
+LogsDirectory=fenecdb
+ReadWritePaths=/var/lib/fenecdb/global
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -2025,5 +2025,72 @@ empty as a flag is refused at the start. A request carrying no
 <code>Authorization</code> reads as the empty token, so an empty
 <code>FENEC_SHARD_TOKEN</code>, taken for one, let anyone into
 <code>/_shard/</code> -- and past the check that keeps a router with no
-token off a public address.</p>
+token off a public address. The kit's systemd units hand every one over
+from an environment file (<a href="#deploying">Deploying it</a>).</p>
+</details>
+
+<h2 id="deploying">Deploying it</h2>
+
+<p>The repository's <a href="https://github.com/fenecdb/fenec/tree/main/deploy"><code>deploy/</code></a>
+is a kit for running all of the above on machines of your own: systemd
+units, their environment files, alert rules, and the operator's
+<a href="https://github.com/fenecdb/fenec/blob/main/deploy/RUNBOOK.md">runbook</a>.
+<code>make drill</code> breaks a deployment of two regions on purpose, in
+Docker, and holds it to losing no acknowledged write.</p>
+
+<pre data-lang="bash">make deploy-check   # the units under a real systemd, the alert rules under promtool
+make drill          # two regions: a node killed and back, a router killed, the global router cut off, a restore
+</pre>
+
+<ul>
+  <li><b>A unit for each part</b>: a tenant node, a region's router and
+    its standby, the global router and its standby, a node's archiver and
+    its copy to a bucket (rclone), and the Cloudflare Tunnel the
+    <a href="#global-entry">global entry</a> reaches a router through. Each
+    runs sandboxed as its own user, its tokens in an environment file only
+    root reads.</li>
+  <li><b>Alerts</b> for Prometheus and for Grafana: failovers and late
+    leases, tenants without a replica, copies in their primary's zone, read
+    replicas given up, quota refusals, the entry's marks not believed,
+    refusals and errors.</li>
+  <li><b>The drill's figures</b>, lease 2 s, three runs: a killed node's
+    tenants wrote again 2.5 to 5.0 s after the kill, none of 42 202
+    acknowledged writes was lost, and a tenant restored from its node's
+    archive held exactly the rows acknowledged by the moment it was
+    restored to.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>make deploy-check</code> boots systemd in two privileged
+containers, installs every unit and environment file as the runbook
+installs them, and runs them: <code>systemd-analyze verify</code> on each,
+a region, two nodes and a tenant made through the global router, rows
+written through the router and its standby, no token on any process's
+command line or in an environment another user can read, the limits and
+the sandbox in force (<code>systemd-analyze security</code> puts each unit
+at 1.2), a node's stop syncing within its timeout, a sealed archive
+verified with the key the unit hands its archiver, and a standby router
+promoted and its unit switched as the runbook does it. promtool checks the
+alert rules and runs their tests, and a test of fenec-shard holds every
+metric and label value they read to a real scrape of every kind of
+process.</p>
+
+<p><code>make drill</code> runs each process in a container of its own on
+one Docker network -- two regions, each a router keeping its own directory
+and that router's standby, two nodes in two zones under
+<code>--lease</code> and <code>--replicas</code>, an archiver for each node,
+and the global router and its standby -- every token in the processes'
+environments and no port fixed. A writer a tenant puts rows by id, the next
+only once the one before was answered, while the drill cuts the global
+routers off the network (each region writes on), kills the node holding the
+most primaries with <code>docker kill</code> and starts it again, kills a
+region's router and promotes its standby as an operator would, and marks a
+moment it later restores a tenant to from its node's archive. Then every
+acknowledged write is read back from each tenant's primary and its replica,
+and the times are printed. A killed node's tenants write again a lease and
+a tenth after their last renewal, plus however long the replica's
+reconnection to the dead node takes to fail, its 5 s timeout at most: the
+2.5 and 5.0 s the runs measured. The runbook says what each alert means,
+the order to bring a deployment up in, how to rotate each token and
+upgrade with no downtime, and what is not measured yet.</p>
 </details>

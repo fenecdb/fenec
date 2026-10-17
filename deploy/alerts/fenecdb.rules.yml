@@ -1,0 +1,227 @@
+# Prometheus alerting rules for a fenecdb deployment of regions: nodes
+# (fenec-server --dir), region routers and the global router (fenec-shard),
+# their standbys. deploy/RUNBOOK.md, "Alerts", says what each means and
+# what to do; grafana.yml is the same rules for Grafana's own alerting.
+#
+#   rule_files: [/etc/prometheus/fenecdb.rules.yml]
+#   scrape_configs:
+#     - job_name: fenecdb-node        # each node's FENEC_LISTEN
+#       metrics_path: /_metrics
+#       authorization: {credentials_file: /etc/prometheus/fenec-node.token}
+#       static_configs: [{targets: ["10.1.0.11:8081", "10.1.1.11:8081"]}]
+#     - job_name: fenecdb-router      # every router, standbys and global too
+#       metrics_path: /_metrics
+#       authorization: {credentials_file: /etc/prometheus/fenec-router.token}
+#       static_configs: [{targets: ["10.1.0.21:8090", "10.1.1.21:8090"]}]
+#
+# A node's /_metrics takes its data or its admin token, a router's its
+# --token: no token reads metrics alone (RUNBOOK, "Alerts").
+#
+# crates/fenec-shard/tests/datadog.rs holds every metric and label value
+# here to a scrape of every kind of process, and grafana.yml's rules to
+# these, expression for expression.
+#
+# Not here, for want of a metric: a tenant's replica lag on a node (a --dir
+# node exports none by tenant; /t/<t>/_replication/status has it), and how
+# far a node's archive is behind (`fenec archive` serves no metrics; the
+# node's fenec_node_streams says only whether an archiver is connected).
+
+groups:
+  - name: fenecdb-router
+    rules:
+      - alert: FenecNodeFailedOver
+        expr: fenec_router_node_failed_over == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.node }} ({{ $labels.region }}) was failed over and has not answered since"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      - alert: FenecAutoFailoverIncomplete
+        expr: increase(fenec_router_auto_failovers_total{outcome="failed"}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} failed a node over and left a tenant unpromoted"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      - alert: FenecAutoFailover
+        expr: increase(fenec_router_auto_failovers_total{outcome="done"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} failed a node over in the last 10 minutes"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      # For FENEC_LEASE=5: renewed every 1.7 s, failed over unrenewed at
+      # 5.5 s. Past 3 s a renewal or two did not land. Set it to three
+      # fifths of your lease.
+      - alert: FenecLeaseRenewalLate
+        expr: fenec_router_lease_age_seconds > 3
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.node }} took its last lease {{ $value }} s ago"
+          runbook: deploy/RUNBOOK.md#a-lease-late
+      # With --replicas, every tenant keeps one. A node's replica count is
+      # absent where it holds none -- every node of a region of two once one
+      # is lost -- hence the `or`, which counts it 0.
+      - alert: FenecTenantsWithoutReplica
+        expr: (sum by (instance) (fenec_router_tenants) - (sum by (instance) (fenec_router_replicas) or sum by (instance) (fenec_router_tenants) * 0) > 0) and on (instance) fenec_router_following == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} tenants of {{ $labels.instance }} have no replica"
+          runbook: deploy/RUNBOOK.md#a-node-back
+      - alert: FenecSameZoneCopies
+        expr: fenec_router_same_zone_copies > 0 and on (instance) fenec_router_following == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} tenants of {{ $labels.region }} keep their copy in their own zone"
+          runbook: deploy/RUNBOOK.md#adding-a-node
+      - alert: FenecReadReplicasGivenUp
+        expr: fenec_router_read_replicas_given_up > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} read replicas on {{ $labels.instance }} were lost three times and are made again no more"
+          runbook: deploy/RUNBOOK.md#read-replicas
+      - alert: FenecTenantsMoving
+        expr: fenec_router_tenants_moving > 0 and on (instance) fenec_router_following == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A move on {{ $labels.instance }} has not recorded done in 15 minutes"
+          runbook: deploy/RUNBOOK.md#placing-and-moving-a-tenant
+      - alert: FenecNodeUnreachable
+        expr: sum by (instance, node) (rate(fenec_router_upstream_errors_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} cannot reach node {{ $labels.node }}: its requests are answered 502"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      - alert: FenecRouter5xx
+        expr: sum by (instance) (rate(fenec_router_requests_total{route="tenant",code="5xx"}[5m])) / sum by (instance) (rate(fenec_router_requests_total{route="tenant"}[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} answers more than 1% of tenants' requests 5xx"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - alert: FenecEntryMarkRefused
+        expr: sum by (instance, outcome) (rate(fenec_router_entry_clients_total{outcome=~"bad_mark|stale"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} does not believe the entry's client marks ({{ $labels.outcome }})"
+          runbook: deploy/RUNBOOK.md#the-entry-token
+      # Only for routers the global entry alone reaches (through their
+      # tunnel): any client reaching a router itself is counted absent.
+      - alert: FenecEntryMarkAbsent
+        expr: sum by (instance) (rate(fenec_router_entry_clients_total{outcome="absent"}[5m])) > 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.instance }} takes tenants' requests that name no client: the entry's ENTRY_TOKEN unset, or a client past the entry"
+          runbook: deploy/RUNBOOK.md#the-entry-token
+      - alert: FenecRouterRefusals
+        expr: sum by (instance) (rate(fenec_router_refused_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} refuses more than one token a second (401)"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+
+  - name: fenecdb-directories
+    rules:
+      # A standby router (and a region router's copy of the global
+      # directory), or any replica of a file: its primary not heard.
+      - alert: FenecReplicaDisconnected
+        expr: fenec_replica_connected == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} lost its primary: a standby router that cannot be promoted up to date"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - alert: FenecReplicaBehind
+        expr: fenec_replica_behind > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is {{ $value }} writes behind its primary"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - alert: FenecReplicaSilent
+        expr: fenec_replica_last_contact_seconds > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} has not heard from its primary in {{ $value }} s"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - alert: FenecDirectoryUnreplicated
+        expr: fenec_replicas == 0 and on (instance) fenec_router_following == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} keeps a directory no standby follows"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+
+  - name: fenecdb-node
+    rules:
+      - alert: FenecQuotaRefusals
+        expr: sum by (instance, quota) (increase(fenec_quota_refused_total[15m])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "A tenant of {{ $labels.instance }} was refused for its quota of {{ $labels.quota }}"
+          runbook: deploy/RUNBOOK.md#quotas
+      - alert: FenecNodeRefusals
+        expr: sum by (instance) (rate(fenec_refused_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} refuses more than one token a second (401)"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - alert: FenecStatementErrors
+        expr: sum by (instance) (rate(fenec_statement_errors_total[5m])) / sum by (instance) (rate(fenec_statements_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of {{ $labels.instance }}'s statements end in an error"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      # A server of one file; a tenant's disk refusing a write shows on its
+      # node as statement errors, and in its log.
+      - alert: FenecStorageFailed
+        expr: fenec_storage_failed == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }}'s disk refused a write: it takes none until restarted"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - alert: FenecArchiverDisconnected
+        expr: fenec_node_streams < 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No archiver follows {{ $labels.instance }}: its writes reach no archive"
+          runbook: deploy/RUNBOOK.md#archives-and-restores
+      - alert: FenecCopiesRefused
+        expr: increase(fenec_copies_refused_total[1h]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "A copy on {{ $labels.instance }} refused a primary of another lineage and deleted itself"
+          runbook: deploy/RUNBOOK.md#read-replicas

@@ -1,0 +1,86 @@
+# A node's archive: every write of every tenant of the node, kept with the
+# time it was made, over one connection however many tenants it holds
+# (fenec archive --tenants). One instance a node, named after it, on a
+# machine apart from the node's -- an archive on the node's own disk is lost
+# with it:
+#
+#   install -m 0644 fenec-archive@.service /etc/systemd/system/
+#   install -m 0600 ../env/archive.env /etc/fenecdb/archive.env          # the token
+#   install -m 0644 ../env/archive-node.env /etc/fenecdb/archive-eu-a.env # the node
+#   fenec key /etc/fenecdb/archive.key    # once; keep a copy apart from the archive
+#   systemctl enable --now fenec-archive@eu-a
+#
+# The archive goes to a bucket with fenec-archive-sync@.service; a restore
+# reads it back (deploy/RUNBOOK.md, "Archives and restores").
+
+[Unit]
+Description=fenecdb archive of node %i (fenec archive --tenants)
+Documentation=https://fenecdb.com/docs/sharding#archive file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=fenec
+Group=fenec
+EnvironmentFile=/etc/fenecdb/archive.env
+EnvironmentFile=/etc/fenecdb/archive-%i.env
+# The archive is sealed (ChaCha20-Poly1305): a copy in a bucket is out of
+# reach of the disk's encryption. The key is handed over as a credential,
+# readable by this service alone, for as long as it runs; FENEC_KEY_FILE
+# names where. Take both lines out for an archive kept in the clear.
+LoadCredential=archive.key:/etc/fenecdb/archive.key
+Environment=FENEC_KEY_FILE=%d/archive.key
+# An image of each tenant's end every hour, so a restore replays an hour of
+# writes at most; what no restore within a week needs is let go of. The
+# replication token is FENEC_REPLICATION_TOKEN, from archive.env.
+ExecStart=/usr/local/bin/fenec archive --tenants ${FENEC_NODE_URL} \
+    /var/lib/fenecdb/archive/%i --image-every 1h --keep 7d
+# It reconnects on its own (5 s apart at most) while the node is away; it
+# ends only on a stop, or on an archive it cannot read.
+Restart=on-failure
+RestartSec=5s
+
+# SIGTERM: the segment being written is closed and synced, every archive
+# left where a restore reads it to the end.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# A segment file is open only while its tenant writes; with room for many.
+LimitNOFILE=4096
+LimitCORE=0
+
+StateDirectory=fenecdb/archive/%i
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/fenecdb/archive/%i
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

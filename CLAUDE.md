@@ -59,6 +59,8 @@ make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP 
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js and build.py's rules
 make grafana-check # monitoring/'s compose (Docker): both data dashboards, Infinity's and the Grafana plugin's (integrations/grafana), and its alert rule held to fenec-server
+make deploy-check  # deploy/: promtool over the alert rules and their tests, then every systemd unit in two privileged containers booting systemd -- verified, started, used, a standby router promoted by the units
+make drill         # deploy/'s failover drill (Docker): two regions, a node killed and back, a router killed and its standby promoted, the global routers cut off, a restore; lost must be 0 (DRILL_LEASE, DRILL_KEEP=1)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
@@ -6506,6 +6508,49 @@ and `@grafana/ui` with it -- sat at 0% CPU for ten minutes, so the logic
 jest runs lives in modules importing types alone. `site/build.py` writes
 the editor's FenecQL colours into `src/fenecql/highlight.js` as it writes
 the studio's.
+
+**`deploy/` is the kit for running regions, held to the binaries by two
+checks** (`deploy/RUNBOOK.md`). systemd units for a tenant node, a region's
+router and its standby, the global router and its standby, a node's
+archiver (`fenec-archive@<node>`) and its rclone copy to a bucket, and
+cloudflared; their environment files (`deploy/env/`), alert rules for
+Prometheus and Grafana (`deploy/alerts/`) and the runbook. A token goes in
+an environment file systemd reads as root (`EnvironmentFile=`, 0600), the
+archive key and the tunnel's and rclone's credentials through
+`LoadCredential=`, and never on a command line, which `ps` shows every user
+(every token has a variable, and an empty one is none: An empty token is
+no token, above). A standby router's
+unit carries its primary's flags and the same directory file and conflicts
+with the primary's, and a promotion is `POST /_replication/promote` and the
+switch of units at once: `--replica-of` makes any file follow again
+(`replication::settle_history`), so the standby's unit started after a
+promotion would have the promoted file follow the dead router. `make
+deploy-check` runs promtool over the rules and their tests, then boots
+systemd in two privileged containers (`deploy/Dockerfile`'s `systemd`, whose
+boot script makes `/` shared first: systemd in a container leaves it
+private, and `LoadCredential=` then hands a service an empty directory) and
+installs, verifies, starts and uses every unit (`deploy/test/units.py`);
+fenec-shard's `tests/datadog.rs` holds every metric and label value the
+rules read to a scrape of every kind of process, a leasing router and a
+replicated node among them, and Grafana's rules to Prometheus's. `make
+drill` (`deploy/drill/drill.py`, the standard library and the Docker CLI)
+runs two regions -- a router keeping each one's directory and its standby,
+two nodes in two zones under `--lease --replicas --sync always`, an
+archiver a node, the global router and its standby -- every token in the
+environment and no port fixed, a writer a tenant putting rows by id 1..K
+through the routers; it cuts the global routers off (each region writes
+on), `docker kill`s a node and starts it again, kills a region's router and
+promotes its standby as the runbook does, restores a tenant from its node's
+archive to a moment it marked, and reads every acknowledged write back from
+each primary and its replica. Three runs at a lease of 2 s: 42 202
+acknowledged, 0 lost; a killed node's tenants wrote again 2.5, 4.9 and 5.0 s
+after the kill, every other tenant's longest gap 21 ms; the repair 0.4-0.7
+s after the node's start; a region whose router was killed stopped writing
+1.35-1.58 s after and wrote again 0.11-0.48 s after its standby's
+promotion. The 5 s tail is `Follower::halt` in `promote` waiting out the
+replica's reconnection to the dead node (`replication::connect`'s 5 s
+timeout, a dead machine's address swallowing the SYN): reported, not worked
+around. CI's `deploy` job runs both.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-server` stays on `release`: a

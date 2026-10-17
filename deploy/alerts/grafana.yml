@@ -1,0 +1,641 @@
+# deploy/alerts/fenecdb.rules.yml as Grafana-managed alert rules, over the
+# Prometheus data source Grafana reads fenecdb's metrics through (uid
+# `prometheus`, as monitoring/grafana/provisioning/datasources/prometheus.yml
+# provisions it). Copy it into Grafana's provisioning/alerting/ beside
+# monitoring/'s own rule.
+#
+# Each rule is the Prometheus rule's expression, which returns the series
+# that are alerting and nothing else, and a condition that fires for every
+# series it returns (is_number), whatever its value -- 0 for an archiver
+# count below 1. No series is no alert (noDataState: OK).
+#
+# crates/fenec-shard/tests/datadog.rs holds every rule here to its
+# Prometheus twin, title to alert and expression to expression.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: fenecdb-deployment
+    folder: fenecdb
+    interval: 1m
+    rules:
+      - uid: fenec-node-failed-over
+        title: FenecNodeFailedOver
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_router_node_failed_over == 1
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.node }} ({{ $labels.region }}) was failed over and has not answered since"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      - uid: fenec-auto-failover-incomplete
+        title: FenecAutoFailoverIncomplete
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: increase(fenec_router_auto_failovers_total{outcome="failed"}[10m]) > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} failed a node over and left a tenant unpromoted"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      - uid: fenec-auto-failover
+        title: FenecAutoFailover
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: increase(fenec_router_auto_failovers_total{outcome="done"}[10m]) > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} failed a node over in the last 10 minutes"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      - uid: fenec-lease-renewal-late
+        title: FenecLeaseRenewalLate
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_router_lease_age_seconds > 3
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.node }} took its last lease {{ $values.A.Value }} s ago"
+          runbook: deploy/RUNBOOK.md#a-lease-late
+      - uid: fenec-tenants-without-replica
+        title: FenecTenantsWithoutReplica
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: (sum by (instance) (fenec_router_tenants) - (sum by (instance) (fenec_router_replicas) or sum by (instance) (fenec_router_tenants) * 0) > 0) and on (instance) fenec_router_following == 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $values.A.Value }} tenants of {{ $labels.instance }} have no replica"
+          runbook: deploy/RUNBOOK.md#a-node-back
+      - uid: fenec-same-zone-copies
+        title: FenecSameZoneCopies
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_router_same_zone_copies > 0 and on (instance) fenec_router_following == 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $values.A.Value }} tenants of {{ $labels.region }} keep their copy in their own zone"
+          runbook: deploy/RUNBOOK.md#adding-a-node
+      - uid: fenec-read-replicas-given-up
+        title: FenecReadReplicasGivenUp
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_router_read_replicas_given_up > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $values.A.Value }} read replicas on {{ $labels.instance }} were lost three times and are made again no more"
+          runbook: deploy/RUNBOOK.md#read-replicas
+      - uid: fenec-tenants-moving
+        title: FenecTenantsMoving
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_router_tenants_moving > 0 and on (instance) fenec_router_following == 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A move on {{ $labels.instance }} has not recorded done in 15 minutes"
+          runbook: deploy/RUNBOOK.md#placing-and-moving-a-tenant
+      - uid: fenec-node-unreachable
+        title: FenecNodeUnreachable
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance, node) (rate(fenec_router_upstream_errors_total[5m])) > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} cannot reach node {{ $labels.node }}: its requests are answered 502"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      - uid: fenec-router5xx
+        title: FenecRouter5xx
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance) (rate(fenec_router_requests_total{route="tenant",code="5xx"}[5m])) / sum by (instance) (rate(fenec_router_requests_total{route="tenant"}[5m])) > 0.01
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} answers more than 1% of tenants' requests 5xx"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - uid: fenec-entry-mark-refused
+        title: FenecEntryMarkRefused
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance, outcome) (rate(fenec_router_entry_clients_total{outcome=~"bad_mark|stale"}[5m])) > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} does not believe the entry's client marks ({{ $labels.outcome }})"
+          runbook: deploy/RUNBOOK.md#the-entry-token
+      - uid: fenec-entry-mark-absent
+        title: FenecEntryMarkAbsent
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance) (rate(fenec_router_entry_clients_total{outcome="absent"}[5m])) > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.instance }} takes tenants' requests that name no client: the entry's ENTRY_TOKEN unset, or a client past the entry"
+          runbook: deploy/RUNBOOK.md#the-entry-token
+      - uid: fenec-router-refusals
+        title: FenecRouterRefusals
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance) (rate(fenec_router_refused_total[5m])) > 1
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} refuses more than one token a second (401)"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - uid: fenec-replica-disconnected
+        title: FenecReplicaDisconnected
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_replica_connected == 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} lost its primary: a standby router that cannot be promoted up to date"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - uid: fenec-replica-behind
+        title: FenecReplicaBehind
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_replica_behind > 1000
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is {{ $values.A.Value }} writes behind its primary"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - uid: fenec-replica-silent
+        title: FenecReplicaSilent
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_replica_last_contact_seconds > 60
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} has not heard from its primary in {{ $values.A.Value }} s"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - uid: fenec-directory-unreplicated
+        title: FenecDirectoryUnreplicated
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_replicas == 0 and on (instance) fenec_router_following == 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} keeps a directory no standby follows"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - uid: fenec-quota-refusals
+        title: FenecQuotaRefusals
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance, quota) (increase(fenec_quota_refused_total[15m])) > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: info
+        annotations:
+          summary: "A tenant of {{ $labels.instance }} was refused for its quota of {{ $labels.quota }}"
+          runbook: deploy/RUNBOOK.md#quotas
+      - uid: fenec-node-refusals
+        title: FenecNodeRefusals
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance) (rate(fenec_refused_total[5m])) > 1
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} refuses more than one token a second (401)"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - uid: fenec-statement-errors
+        title: FenecStatementErrors
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (instance) (rate(fenec_statement_errors_total[5m])) / sum by (instance) (rate(fenec_statements_total[5m])) > 0.05
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of {{ $labels.instance }}'s statements end in an error"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - uid: fenec-storage-failed
+        title: FenecStorageFailed
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_storage_failed == 1
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }}'s disk refused a write: it takes none until restarted"
+          runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - uid: fenec-archiver-disconnected
+        title: FenecArchiverDisconnected
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_node_streams < 1
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No archiver follows {{ $labels.instance }}: its writes reach no archive"
+          runbook: deploy/RUNBOOK.md#archives-and-restores
+      - uid: fenec-copies-refused
+        title: FenecCopiesRefused
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: increase(fenec_copies_refused_total[1h]) > 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: info
+        annotations:
+          summary: "A copy on {{ $labels.instance }} refused a primary of another lineage and deleted itself"
+          runbook: deploy/RUNBOOK.md#read-replicas

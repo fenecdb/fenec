@@ -1,0 +1,7 @@
+# /etc/sysusers.d/fenecdb.conf: the user every fenecdb unit runs as, made
+# by `systemd-sysusers` (or at the next boot). A user of its own rather than
+# DynamicUser: the data outlive the service, an archive's files are read by
+# the bucket sync, and a disk of its own mounted at /var/lib/fenecdb keeps
+# one owner across reinstalls. It has no shell and no login.
+#Type Name  ID  GECOS     Home            Shell
+u     fenec -   "fenecdb" /var/lib/fenecdb /usr/sbin/nologin

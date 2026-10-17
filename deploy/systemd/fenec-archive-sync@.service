@@ -1,0 +1,57 @@
+# A node's archive copied to a bucket (S3, R2, any rclone remote), run by
+# fenec-archive-sync@<node>.timer. fenecdb speaks no TLS and no S3: rclone
+# does both. An archive is safe to copy while it is written -- a segment is
+# closed and synced before the next begins, an image renamed into place --
+# so a copy taken a file at a time is the archive up to a moment.
+#
+#   apt install rclone          # or the release from rclone.org
+#   install -m 0600 rclone.conf /etc/fenecdb/rclone.conf   # the remote's keys
+#   install -m 0644 fenec-archive-sync@.service fenec-archive-sync@.timer \
+#       /etc/systemd/system/
+#   systemctl enable --now fenec-archive-sync@eu-a.timer
+#
+# `sync` makes the bucket the archive: what --keep let go of goes there too.
+# Against a bucket with object lock, or to keep more than the archive keeps,
+# use `copy` and the bucket's own lifecycle rules.
+
+[Unit]
+Description=fenecdb archive of node %i to the bucket (rclone)
+Documentation=https://rclone.org/docs/ file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=fenec
+Group=fenec
+EnvironmentFile=/etc/fenecdb/archive.env
+# The remote's keys, readable by this run alone.
+LoadCredential=rclone.conf:/etc/fenecdb/rclone.conf
+ExecStart=/usr/bin/rclone sync --config %d/rclone.conf --cache-dir %C/fenecdb-rclone \
+    /var/lib/fenecdb/archive/%i ${FENEC_ARCHIVE_REMOTE}/%i
+CacheDirectory=fenecdb-rclone
+# Reads the archive, writes nothing of it.
+ReadOnlyPaths=/var/lib/fenecdb/archive/%i
+TimeoutStartSec=1h
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM

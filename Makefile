@@ -19,7 +19,7 @@ WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --fe
 .PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
-	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check memory clean \
+	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
 	site site-serve site-deploy
 
 all: test wasm
@@ -649,6 +649,32 @@ grafana-check:
 	  status=$$?; \
 	  if [ $$status -ne 0 ]; then $(GRAFANA_CHECK) logs --no-color --tail 60; fi; \
 	  $(GRAFANA_CHECK) down -v --remove-orphans; exit $$status
+
+## deploy/: the alert rules checked and their tests run by promtool, then
+## the systemd units under a real systemd (Docker, privileged): two
+## machines, every unit installed as deploy/RUNBOOK.md installs it, checked
+## by `systemd-analyze verify`, started and used -- a region, two nodes and
+## a tenant made through the global router, its tokens on no command line,
+## its limits and sandbox in force, a stop that syncs, a sealed archive, the
+## standby router promoted by the units -- then both removed
+PROMTOOL = docker run --rm -v "$(CURDIR)/deploy/alerts:/a:ro" -w /a --entrypoint promtool prom/prometheus:v3.15.0
+deploy-check:
+	$(PROMTOOL) check rules fenecdb.rules.yml
+	$(PROMTOOL) test rules fenecdb.rules.test.yml
+	docker build -f deploy/Dockerfile --target systemd -t fenec-kit-systemd .
+	python3 deploy/test/units.py
+
+## The failover drill (Docker): two regions -- a router keeping each one's
+## directory and its standby, two nodes in two zones, an archiver a node --
+## behind the global router and its standby; writers record every write
+## answered while a node is killed and brought back, a region's router is
+## killed and its standby promoted, the global routers are cut off, and a
+## tenant is restored from its archive; every answered write is read back
+## (lost = 0) and the times printed. No fixed port, everything removed after.
+## DRILL_LEASE, DRILL_TENANTS, DRILL_RATE, DRILL_KEEP=1, DRILL_JSON=<path>
+drill:
+	docker build -f deploy/Dockerfile --target kit -t fenec-kit .
+	python3 deploy/drill/drill.py
 
 ## A file under updates, compacted on its own or not: YCSB's 1 KB records,
 ## a field updated at a time while a thread reads whole records, the file's

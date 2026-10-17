@@ -1,21 +1,25 @@
-//! `monitoring/datadog/`'s check and dashboard against what `/_metrics`
-//! really exposes. Datadog is not run here: what can drift is a name, and a
-//! dashboard asking for a metric no server sends draws an empty chart with
-//! no error. So every metric `conf.yaml` keeps must be in a scrape, and every
-//! metric `dashboard.json` asks for must be one `conf.yaml` keeps -- named
-//! as the Agent's OpenMetrics check names it -- and in a scrape too.
+//! `monitoring/datadog/`'s check and dashboard, and `deploy/alerts/`'s
+//! rules, against what `/_metrics` really exposes. Neither Datadog nor
+//! Prometheus is run here: what can drift is a name, and a dashboard asking
+//! for a metric no server sends draws an empty chart with no error, as an
+//! alert over one never fires. So every metric `conf.yaml` keeps must be in a
+//! scrape, and every metric `dashboard.json` asks for must be one `conf.yaml`
+//! keeps -- named as the Agent's OpenMetrics check names it -- and in a
+//! scrape too; and every metric an alert rule reads, with every label value
+//! it matches, must be in a scrape, and Grafana's rules Prometheus's.
 //!
 //! The scrapes are of every kind of process there is, in this one: a
 //! primary with a collection, its replica once it has heard from it, a
-//! tenant node and the router. A file of its own, as the metrics' tests
-//! are: a scrape counts the process's own requests.
+//! tenant node whose tenants replicate, a router and a router leasing its
+//! nodes. A file of its own, as the metrics' tests are: a scrape counts the
+//! process's own requests.
 
 use fenec_core::prelude::*;
 use fenec_http::replication::{self, fresh_id, Follower, Replication};
-use fenec_http::tenants::Tenants;
+use fenec_http::tenants::{Replicated, Tenants};
 use fenec_shard::directory::{Directory, Node, State};
 use fenec_shard::{Config, Router};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -24,8 +28,13 @@ use std::time::{Duration, Instant};
 
 const REPL: &str = "replication-secret";
 
+/// A directory of its own for each call: both tests scrape at once, each
+/// its own servers, and a name shared by the process's id alone had one
+/// remove the other's files from under it.
 fn scratch(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("fenec-datadog-{tag}-{}", std::process::id()));
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("fenec-datadog-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -145,8 +154,9 @@ fn asked(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-#[test]
-fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
+/// Every kind of process there is, each scraped: the families they declare
+/// with their types, and the scrapes' text, every sample line.
+fn scrape() -> (BTreeMap<String, String>, String) {
     // A primary with a collection, as `--replication-token` starts one.
     let d = scratch("primary");
     let (mut db, feed) = replication::open(d.join("p.fenec").to_str().unwrap(), 1 << 20).unwrap();
@@ -191,8 +201,18 @@ fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
         )),
     );
 
-    // A tenant node and the router in front of it.
-    let tenants = Arc::new(Tenants::new(scratch("node")).unwrap());
+    // A tenant node, its tenants replicated as `--replication-token` has
+    // them (an archiver's stream counted), and the router in front of it.
+    let tenants = Arc::new(
+        Tenants::new(scratch("node"))
+            .unwrap()
+            .with_replication(Replicated {
+                token: REPL.into(),
+                buffer: 1 << 20,
+                upstream: None,
+                sync_on_write: true,
+            }),
+    );
     let node = serve(fenec_http::Server::with_tenants(
         tenants,
         fenec_http::Config {
@@ -227,6 +247,22 @@ fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
     });
     // A request it forwards, so its histograms have a sample.
     call(&router_addr, "GET", "/t/acme/", "", None);
+    // A router under --auto-failover, whose scrape carries its leases. Its
+    // lease is long and its leasing thread never started: no grant is made,
+    // and the families are declared all the same.
+    let leasing = Router::new(
+        Directory::in_memory(),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            auto_failover: Some(Duration::from_secs(600)),
+            ..Config::default()
+        },
+    );
+    let listener = leasing.bind().unwrap();
+    let leasing_addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = leasing.serve_on(listener);
+    });
 
     // The replica's gauges are there once it has heard from its primary.
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -241,12 +277,24 @@ fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
     };
     let mut exposed = BTreeMap::new();
     families(&replica_scrape, &mut exposed);
-    for (addr, token) in [(&primary, None), (&node, Some("adm")), (&router_addr, None)] {
-        let (status, text) = call(addr, "GET", "/_metrics", "", token);
-        assert_eq!(status, 200, "{addr}: {text}");
-        families(&text, &mut exposed);
+    let mut text = replica_scrape;
+    for (addr, token) in [
+        (&primary, None),
+        (&node, Some("adm")),
+        (&router_addr, None),
+        (&leasing_addr, None),
+    ] {
+        let (status, scraped) = call(addr, "GET", "/_metrics", "", token);
+        assert_eq!(status, 200, "{addr}: {scraped}");
+        families(&scraped, &mut exposed);
+        text.push_str(&scraped);
     }
+    (exposed, text)
+}
 
+#[test]
+fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
+    let (exposed, _) = scrape();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../monitoring/datadog");
     let conf = std::fs::read_to_string(root.join("conf.yaml")).unwrap();
     let entries = kept(&conf);
@@ -297,5 +345,119 @@ fn the_datadog_check_and_dashboard_name_only_what_the_servers_expose() {
             names.iter().any(|n| n == want),
             "no {want} in the dashboard"
         );
+    }
+}
+
+/// The rules of an alerting file, each a name and its expression, both on
+/// one line as the files keep them: `- alert:` and `expr:` in Prometheus's,
+/// `title:` and its query's `expr:` in Grafana's.
+fn rules(text: &str, name_key: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for l in text.lines() {
+        let t = l.trim();
+        let t = t.strip_prefix("- ").unwrap_or(t);
+        if let Some(name) = t.strip_prefix(name_key) {
+            out.push((name.trim().to_string(), String::new()));
+        } else if let Some(expr) = t.strip_prefix("expr:") {
+            let last = out.last_mut().expect("an expr before any rule");
+            assert!(last.1.is_empty(), "rule {} has two exprs", last.0);
+            last.1 = expr.trim().to_string();
+        }
+    }
+    out
+}
+
+/// Each metric an expression reads, and the label values its selector
+/// matches: `name{label="v"}`, and `label=~"a|b"` as `a` and `b` each.
+fn selectors(expr: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let b = expr.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(at) = expr[i..].find("fenec_") {
+        let start = i + at;
+        let mut end = start;
+        while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
+            end += 1;
+        }
+        let mut matchers = Vec::new();
+        i = end;
+        if b.get(end) == Some(&b'{') {
+            let close = end + expr[end..].find('}').expect("a selector left open");
+            for m in expr[end + 1..close].split(',').map(str::trim) {
+                let (label, value) = m
+                    .split_once("=~")
+                    .or_else(|| m.split_once('='))
+                    .unwrap_or_else(|| panic!("a matcher this reads no label of: {m}"));
+                // A negative one says nothing a scrape could show.
+                assert!(!label.ends_with('!'), "`{m}`: hold it here before using it");
+                for v in value.trim_matches('"').split('|') {
+                    matchers.push((label.trim().to_string(), v.to_string()));
+                }
+            }
+            i = close;
+        }
+        out.push((expr[start..end].to_string(), matchers));
+    }
+    out
+}
+
+#[test]
+fn the_alert_rules_read_only_what_the_servers_expose() {
+    let (exposed, text) = scrape();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/alerts");
+    let read_rules =
+        |file: &str, key: &str| rules(&std::fs::read_to_string(root.join(file)).unwrap(), key);
+    let prometheus = read_rules("fenecdb.rules.yml", "alert:");
+    let grafana = read_rules("grafana.yml", "title:");
+    assert!(prometheus.len() > 15, "{prometheus:?}");
+    assert_eq!(
+        grafana, prometheus,
+        "grafana.yml's rules are fenecdb.rules.yml's, title for alert and expression for \
+         expression, in its order"
+    );
+
+    let mut read = BTreeSet::new();
+    for (alert, expr) in &prometheus {
+        let found = selectors(expr);
+        assert!(
+            !found.is_empty(),
+            "{alert} reads no fenec_ metric: `{expr}`"
+        );
+        for (name, matchers) in found {
+            assert!(
+                exposed.contains_key(&name),
+                "{alert} reads {name}, which no server exposes: {:?}",
+                exposed.keys().collect::<Vec<_>>()
+            );
+            for (label, value) in matchers {
+                let head = format!("{name}{{");
+                let pair = format!("{label}=\"{value}\"");
+                assert!(
+                    text.lines()
+                        .any(|l| l.starts_with(&head) && l.contains(&pair)),
+                    "{alert} matches {name}{{{pair}}}, a sample no server sends"
+                );
+            }
+            read.insert(name);
+        }
+    }
+    // And they watch what an operator of regions acts on.
+    for want in [
+        "fenec_router_lease_age_seconds",
+        "fenec_router_auto_failovers_total",
+        "fenec_router_node_failed_over",
+        "fenec_replica_behind",
+        "fenec_router_same_zone_copies",
+        "fenec_router_read_replicas_given_up",
+        "fenec_quota_refused_total",
+        "fenec_router_entry_clients_total",
+        "fenec_storage_failed",
+        "fenec_refused_total",
+        "fenec_router_refused_total",
+        "fenec_router_requests_total",
+        "fenec_statement_errors_total",
+        "fenec_node_streams",
+    ] {
+        assert!(read.contains(want), "no alert reads {want}");
     }
 }

@@ -1,0 +1,134 @@
+# promtool's tests of fenecdb.rules.yml: the rules whose expression could
+# be quietly wrong, each over series shaped as the binaries export them.
+# `make deploy-check` runs them (promtool test rules, in Docker).
+rule_files:
+  - fenecdb.rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  # A node failed over: on the router that keeps its directory.
+  - interval: 15s
+    input_series:
+      - series: 'fenec_router_node_failed_over{instance="r1:8090",node="eu-a",region="eu"}'
+        values: '0 0 1 1 1'
+      - series: 'fenec_router_node_failed_over{instance="r1:8090",node="eu-b",region="eu"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: FenecNodeFailedOver
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "r1:8090", node: eu-a, region: eu}
+            exp_annotations:
+              summary: "Node eu-a (eu) was failed over and has not answered since"
+              runbook: deploy/RUNBOOK.md#a-node-lost
+
+  # A region of two nodes after one was lost: every tenant on the other,
+  # which holds no replica -- its count absent, not 0 -- and the standby
+  # router's copy of the same directory alerting nothing.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-b",region="eu"}'
+        values: '6x20'
+      - series: 'fenec_router_following{instance="r1:8090"}'
+        values: '0x20'
+      - series: 'fenec_router_tenants{instance="r2:8090",node="eu-b",region="eu"}'
+        values: '6x20'
+      - series: 'fenec_router_following{instance="r2:8090"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: FenecTenantsWithoutReplica
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090"}
+            exp_annotations:
+              summary: "6 tenants of r1:8090 have no replica"
+              runbook: deploy/RUNBOOK.md#a-node-back
+
+  # Every tenant replicated: nothing.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-a",region="eu"}'
+        values: '3x20'
+      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-b",region="eu"}'
+        values: '3x20'
+      - series: 'fenec_router_replicas{instance="r1:8090",node="eu-a",region="eu"}'
+        values: '3x20'
+      - series: 'fenec_router_replicas{instance="r1:8090",node="eu-b",region="eu"}'
+        values: '3x20'
+      - series: 'fenec_router_following{instance="r1:8090"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: FenecTenantsWithoutReplica
+        exp_alerts: []
+
+  # No archiver connected: a count of 0, which still alerts.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_node_streams{instance="n1:8081"}'
+        values: '1 1 0x15'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FenecArchiverDisconnected
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "n1:8081"}
+            exp_annotations:
+              summary: "No archiver follows n1:8081: its writes reach no archive"
+              runbook: deploy/RUNBOOK.md#archives-and-restores
+
+  # The entry's marks refused, by outcome; named ones alert nothing.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_entry_clients_total{instance="r1:8090",outcome="named"}'
+        values: '0+600x20'
+      - series: 'fenec_router_entry_clients_total{instance="r1:8090",outcome="bad_mark"}'
+        values: '0+60x20'
+      - series: 'fenec_router_entry_clients_total{instance="r1:8090",outcome="stale"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: FenecEntryMarkRefused
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090", outcome: bad_mark}
+            exp_annotations:
+              summary: "r1:8090 does not believe the entry's client marks (bad_mark)"
+              runbook: deploy/RUNBOOK.md#the-entry-token
+
+  # 5xx past 1% of the tenants' requests.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_requests_total{instance="r1:8090",route="tenant",code="2xx"}'
+        values: '0+1000x20'
+      - series: 'fenec_router_requests_total{instance="r1:8090",route="tenant",code="5xx"}'
+        values: '0+50x20'
+      - series: 'fenec_router_requests_total{instance="r1:8090",route="shard",code="5xx"}'
+        values: '0+5000x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: FenecRouter5xx
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090"}
+            exp_annotations:
+              summary: "r1:8090 answers more than 1% of tenants' requests 5xx"
+              runbook: deploy/RUNBOOK.md#errors-and-refusals
+
+  # A directory no standby follows: a primary router's, not a standby's.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_replicas{instance="r1:8090"}'
+        values: '1 0x15'
+      - series: 'fenec_router_following{instance="r1:8090"}'
+        values: '0x16'
+      - series: 'fenec_replicas{instance="r2:8090"}'
+        values: '0x16'
+      - series: 'fenec_router_following{instance="r2:8090"}'
+        values: '1x16'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FenecDirectoryUnreplicated
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090"}
+            exp_annotations:
+              summary: "r1:8090 keeps a directory no standby follows"
+              runbook: deploy/RUNBOOK.md#a-router-lost

@@ -1,0 +1,22 @@
+# /etc/cloudflared/config.yml on a region router's machine
+# (cloudflared.service): the tunnel's hostname to this machine's router, and
+# nothing else. The credentials file is handed over by the unit
+# (--credentials-file), so this file names no secret.
+tunnel: router-1-eu
+
+ingress:
+  # The global entry Worker's REGIONS name this hostname among eu's routers.
+  # The hostname is public -- anyone may ask it, not the entry alone -- so
+  # only what the entry sends a region's router is let through: a tenant's
+  # path. /_shard/, /_replication, /_metrics and the studio answer 404 at
+  # the edge, whatever token a request carries. (The global router, which
+  # the entry's ADMIN may send /_shard/ to, wants a rule of its own.)
+  - hostname: router-1.eu.example.com
+    path: ^/t/[a-z0-9_-]+(/|$)
+    service: http://10.1.0.21:8090
+    originRequest:
+      # A held write (Fenec-Wait) waits 30 s at most and a silent stream
+      # writes a keep-alive every 20 s: neither meets these.
+      connectTimeout: 10s
+      keepAliveTimeout: 90s
+  - service: http_status:404

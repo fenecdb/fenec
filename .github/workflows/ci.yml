@@ -537,6 +537,24 @@ jobs:
           docker cp fenec-server:/usr/local/bin/fenec-server "$RUNNER_TEMP/fenec-server"
           FENEC_SERVER="$RUNNER_TEMP/fenec-server" go test -count=1 ./pkg/...
 
+  # deploy/: the alert rules under promtool, every systemd unit booted in
+  # two privileged containers running systemd, and the failover drill --
+  # two regions in Docker, a node and a router killed, nothing acknowledged
+  # lost. One build of the binaries (musl, release, deploy/Dockerfile) for
+  # both images.
+  deploy:
+    name: deploy (systemd units, alert rules, failover drill)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The units and the alert rules
+        run: make deploy-check
+
+      - name: The failover drill
+        run: make drill
+
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest

@@ -302,6 +302,7 @@ query; it is not a join and is not trying to be one.
 | [Points and distances](https://fenecdb.com/docs/geo) | A `geo` field: distances in metres, rows within a radius or a box, the nearest first, positions that expire |
 | [Analytics and market data](https://fenecdb.com/docs/analytics) | Rollups by the minute, distinct users, funnels and retention over events; bars, VWAP and the latest price over ticks |
 | [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places, moves and fails them over; regions and zones, a region that keeps its own directory, one URL for every region, and read replicas near the client |
+| [Deploying across regions](deploy/RUNBOOK.md) | `deploy/`: systemd units for nodes, routers, archivers and the tunnel, alert rules, the operator's runbook, and `make drill`, which kills a node and a router of a two-region deployment in Docker and checks no acknowledged write was lost |
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |

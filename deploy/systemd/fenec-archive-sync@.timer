@@ -1,0 +1,16 @@
+# fenec-archive-sync@<node>.service every five minutes: the bucket is at
+# most that far behind the archive, which is itself behind the node only by
+# what its stream has not yet written (deploy/RUNBOOK.md says how far a
+# write may be from the bucket, and why).
+
+[Unit]
+Description=fenecdb archive of node %i to the bucket, every five minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
