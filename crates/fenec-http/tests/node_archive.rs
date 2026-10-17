@@ -375,7 +375,12 @@ fn a_deleted_tenant_is_no_longer_followed_and_its_archive_is_kept() {
     let doomed = made(&n, "doomed", 4);
     let root = d.join("root");
     let a = archiver(&root, &n.url);
+    // Both archived before the delete. The stream images `doomed` first, in
+    // name order, and a `keep` imaged after the delete began its archive
+    // past the moment before it, where the restore below passed it over as
+    // not yet archived.
     archived(&root.join("doomed"), seq(&doomed));
+    archived(&root.join("keep"), seq(&keep));
     let last = rows(&doomed.db.read().unwrap(), "get notes");
     drop(doomed);
     n.tenants.delete("doomed").unwrap();
@@ -1282,6 +1287,16 @@ fn a_restore_to_a_moment_takes_the_line_that_began_by_then() {
     let before = a_moment();
     n.tenants.delete("e").unwrap();
     let new = made(&n, "e", 2);
+    // The old line moved aside first: until then `e` is the old line, and a
+    // wait for the new tenant's change 3 was met at once by its 11 -- the
+    // archiver stopped before the new tenant's writes reached it, and its
+    // line restored no row.
+    until("the old line was not moved aside", || {
+        node_archive::lines(&root)
+            .unwrap()
+            .iter()
+            .any(|l| l.tenant == "e" && !l.current)
+    });
     archived(&root.join("e"), seq(&new));
     let new_rows = rows(&new.db.read().unwrap(), "get notes");
     drop(new);
