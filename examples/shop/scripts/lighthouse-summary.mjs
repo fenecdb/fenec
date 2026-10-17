@@ -16,6 +16,7 @@ const median = (xs) => {
 const kb = (b) => `${(b / 1024).toFixed(1)} KB`;
 console.log('| page | perf | a11y | best practices | SEO | FCP | LCP | TBT | CLS | JS (compressed) | page weight |');
 console.log('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+const each = [];
 for (const [url, rs] of byUrl) {
   // The run whose LCP is the median, so every number in a row is one run's.
   const lcp = median(rs.map((r) => r.audits['largest-contentful-paint'].numericValue));
@@ -30,4 +31,14 @@ for (const [url, rs] of byUrl) {
       `${Math.round(r.audits['total-blocking-time'].numericValue)} ms | ${r.audits['cumulative-layout-shift'].numericValue.toFixed(3)} | ` +
       `${kb(of('script'))} | ${kb(of('total'))} |`,
   );
+  // Every run's machine and TBT: the budget is asserted on the median TBT,
+  // which need not be the row's run.
+  each.push(
+    `\`${path}\`: ` +
+      rs
+        .map((x) => `benchmarkIndex ${Math.round(x.environment.benchmarkIndex)} TBT ${Math.round(x.audits['total-blocking-time'].numericValue)} ms`)
+        .join(', '),
+  );
 }
+const slowdowns = [...new Set(runs.map((r) => r.configSettings.throttling.cpuSlowdownMultiplier))];
+console.log(`\nThe CPU slowed ${slowdowns.join(', ')}x. Each run:\n${each.map((l) => `- ${l}`).join('\n')}`);

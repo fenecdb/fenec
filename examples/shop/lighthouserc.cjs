@@ -26,6 +26,7 @@ const budgets = {
 };
 
 module.exports = {
+  cpuTarget: Number(process.env.LHCI_CPU_TARGET || 264),
   ci: {
     collect: {
       url: [`${shop}/`, `${shop}/c/backpacks`, `${shop}/search?q=titanium+stove`, `${shop}${product}`],
@@ -35,6 +36,7 @@ module.exports = {
         // throttled network adds the round trips a phone would wait.
         chromeFlags: '--headless=new --no-sandbox',
         throttlingMethod: process.env.LHCI_THROTTLING || 'devtools',
+        throttling: { cpuSlowdownMultiplier: Number(process.env.LHCI_CPU_SLOWDOWN || 4) },
         onlyCategories: ['performance', 'seo', 'accessibility', 'best-practices'],
       },
     },

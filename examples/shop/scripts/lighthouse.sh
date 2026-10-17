@@ -11,6 +11,8 @@ cd "$here"
 shop=${SHOP_URL:-http://localhost:3000}
 slug=$(node -e "fetch('$shop/api/c/tents').then(r=>r.json()).then(b=>console.log(b.cards[0].slug))")
 export LHCI_PRODUCT="/p/$slug"
+LHCI_CPU_SLOWDOWN=${LHCI_CPU_SLOWDOWN:-$(node scripts/cpu-slowdown.mjs)}
+export LHCI_CPU_SLOWDOWN
 rm -rf .lighthouseci
 status=0
 npx lhci autorun || status=$?

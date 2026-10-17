@@ -13,6 +13,8 @@ LHCI_COOKIE=$(curl -s -o /dev/null -D - -H "origin: $app" -d "name=nadia&passwor
     sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p')
 [ -n "$LHCI_COOKIE" ] || { echo "could not sign in to $app" >&2; exit 1; }
 export LHCI_COOKIE KESTREL_URL="$app"
+LHCI_CPU_SLOWDOWN=${LHCI_CPU_SLOWDOWN:-$(node scripts/cpu-slowdown.mjs)}
+export LHCI_CPU_SLOWDOWN
 rm -rf .lighthouseci
 status=0
 npx lhci autorun || status=$?

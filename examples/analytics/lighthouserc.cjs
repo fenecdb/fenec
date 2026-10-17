@@ -27,6 +27,7 @@ const budgets = {
 };
 
 module.exports = {
+  cpuTarget: Number(process.env.LHCI_CPU_TARGET || 264),
   ci: {
     collect: {
       // The sign-in page as /signin: signed in, / sends to the dashboard.
@@ -35,6 +36,7 @@ module.exports = {
       settings: {
         chromeFlags: '--headless=new --no-sandbox',
         throttlingMethod: process.env.LHCI_THROTTLING || 'devtools',
+        throttling: { cpuSlowdownMultiplier: Number(process.env.LHCI_CPU_SLOWDOWN || 4) },
         onlyCategories: ['performance', 'seo', 'accessibility', 'best-practices'],
         skipAudits: ['is-crawlable'],
         extraHeaders: process.env.LHCI_COOKIE ? JSON.stringify({ Cookie: process.env.LHCI_COOKIE }) : undefined,
