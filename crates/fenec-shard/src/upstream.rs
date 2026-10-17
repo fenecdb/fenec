@@ -817,12 +817,27 @@ impl Answer {
     }
 
     /// Reads a `Content-Length` body and hands the connection back to the
-    /// pool when the node keeps it open.
+    /// pool when the node keeps it open. An answer with no length is
+    /// refused at its head, as [`Answer::read_body_kept`] and
+    /// [`Answer::read_body_by`] refuse one, and its connection let go of.
+    /// Read to its close, it grew the router's memory for as long as its
+    /// peer sent: what reads a body here is the router's own call to a
+    /// node's `/_admin/` ([`Pool::call`]) or to a region's router's
+    /// `/_shard/`, and a peer -- buggy, or not the router's -- answering one
+    /// in chunks or with a body that never ends held the calling thread and
+    /// took the memory every tenant's requests needed. Every answer those
+    /// peers write carries its length (fenec-http's `Response::write`, a
+    /// tenant's image among them) and none of these calls asks for a
+    /// stream, while a stream a client asked for goes out as it comes
+    /// (`Router::answer_out`, which reads a body here only where it has a
+    /// length). Refused rather than capped: a cap would be a bound picked
+    /// for an answer that never comes, and reading up to it held the
+    /// thread as long as the peer chose to trickle it in.
     pub fn read_body(mut self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
         let Some(len) = self.content_length() else {
-            let mut body = Vec::new();
-            self.reader.read_to_end(&mut body)?;
-            return Ok(body);
+            return Err(bad(
+                "an answer with no length, which only a stream sends and this call asks for none",
+            ));
         };
         let len = if head_only { 0 } else { len };
         let body = body_of(&mut self.reader, len, |_| Ok(()))?;
@@ -1150,6 +1165,20 @@ mod tests {
     /// An answer to one request, its head and `body`, from a node's end
     /// that reads the request first and closes after: the head read.
     fn answered(pool: &Pool, length: usize, body: Vec<u8>) -> Answer {
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n");
+        answered_with(pool, head, move |mut theirs| {
+            let _ = theirs.write_all(&body);
+        })
+    }
+
+    /// An answer to one request from a node's end that reads the request
+    /// first, writes `head` and has `rest` write what follows it: the head
+    /// read.
+    fn answered_with(
+        pool: &Pool,
+        head: String,
+        rest: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> Answer {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let ours = TcpStream::connect(l.local_addr().unwrap()).unwrap();
         let (mut theirs, _) = l.accept().unwrap();
@@ -1162,9 +1191,9 @@ mod tests {
                     Ok(n) => asked.extend_from_slice(&chunk[..n]),
                 }
             }
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n");
-            let _ = theirs.write_all(head.as_bytes());
-            let _ = theirs.write_all(&body);
+            if theirs.write_all(head.as_bytes()).is_ok() {
+                rest(theirs);
+            }
         });
         let head = b"GET /t/acme/notes HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
         let (set, want) = ((None, pool.timeout), (pool.timeout, pool.timeout));
@@ -1212,5 +1241,41 @@ mod tests {
             .read_body_by(&pool, by)
             .unwrap();
         assert!(body == whole);
+    }
+
+    /// An answer with no length is refused at its head by each of the
+    /// three readers, and its connection let go of: a node sending a body
+    /// with no length and no end is cut off long before it is done, where
+    /// `read_body` read it to its close -- the router's memory growing for
+    /// as long as the node sent, the calling thread held all the while.
+    #[test]
+    fn an_answer_with_no_length_is_refused_at_its_head() {
+        const SENDS: usize = 64 << 20;
+        type Reader = fn(Answer, &Pool, Instant) -> io::Result<Vec<u8>>;
+        let readers: [Reader; 3] = [
+            |a, pool, _| a.read_body(pool, false),
+            |mut a, pool, _| a.read_body_kept(pool, false),
+            |a, pool, by| a.read_body_by(pool, by),
+        ];
+        let pool = Pool::new(Duration::from_secs(10));
+        for read in readers {
+            let (told, sent) = std::sync::mpsc::channel();
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n".to_string();
+            let a = answered_with(&pool, head, move |mut theirs| {
+                let chunk = [b'x'; 64 << 10];
+                let mut n = 0;
+                while n < SENDS && theirs.write_all(&chunk).is_ok() {
+                    n += chunk.len();
+                }
+                let _ = told.send(n);
+            });
+            let by = Instant::now() + Duration::from_secs(10);
+            let e = read(a, &pool, by).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+            // The node's writes fail once the connection is let go of,
+            // past what the two ends' buffers hold and short of its end.
+            let n = sent.recv_timeout(Duration::from_secs(30)).unwrap();
+            assert!(n < SENDS, "the node sent its {n} bytes whole");
+        }
     }
 }

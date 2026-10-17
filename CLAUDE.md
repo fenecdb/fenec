@@ -5875,6 +5875,28 @@ ABBA turns, 200 B 20.3 us either way, 64 KiB 28.1 against 28.2, 1.5 MiB
 MiB 12.7 against 12.5 (12.65-12.75 and 10.9-12.7). A query across tenants
 refuses a declared length past `--fanout-max-bytes` before it adds it to
 the query's sum, which one near `usize::MAX` overflowed.
+An answer with no length is refused by `read_body` as by the other two,
+a 502 at its head and its connection let go of: read to its close, it
+grew the router's memory for as long as its peer sent, the request
+waiting all the while. What reads a body there is the router's own call
+-- `Pool::call` to a node's `/_admin/`, `call_routers_by` to a router's
+`/_shard/` -- and every answer of those peers carries its length
+(`Response::write`, a tenant's image among them), none of them a stream;
+a stream a client asked for goes out as it comes (`answer_out`, which
+reads a body only where it has a length: `router.rs`'s
+`a_subscription_streams_through_the_router`, `entry.rs`'s `_changes`).
+Refused rather than capped as a request's body is: a cap is a bound
+picked for an answer that never comes, and reading up to it held the
+thread as long as the peer trickled it in. `tests/upstream.rs` registers
+a node standing in with stats of no length and 64 MiB, which the router
+read whole and recorded the node by (201), and the unit tests send each
+reader such a body without end; both fail with the read to the close put
+back. A declared length is still believed, as above. `make shard-bench
+ARGS=latency`'s added p50 stayed 20.6 us against main's 20.5, 24 runs a
+side in ABBA turns over three rounds at loads of 1.3-2.7 (20.1-23.8 and
+18.6-21.5; the third round 20.5 against 20.55): `forward`, `answer_out`
+inlined in it, is main's to the instruction, and `read_body`'s path for a
+body with a length the same instructions in other registers.
 
 **A query across tenants is the router's admin's, merged by what the
 request says** (`fenec-shard/src/fanout.rs`, `POST /_shard/query`). An

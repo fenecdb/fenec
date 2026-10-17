@@ -616,3 +616,69 @@ fn a_node_declaring_an_answer_no_memory_holds_is_a_502_and_the_router_goes_on() 
     assert_eq!(r.0, 200, "{}", r.2);
     assert!(r.2.contains(r#""name":"n1""#), "{}", r.2);
 }
+
+/// A node answering the router's own call with no length and a body that
+/// does not end -- chunked, or a stream where none was asked for -- is a
+/// 502 at the answer's head, its connection let go of, and the router goes
+/// on answering. Read to its close, the answer grew the router's memory for
+/// as long as the node sent, the admin request waiting all the while; here
+/// the node stops at 64 MiB, so that without the refusal the router reads
+/// it whole, takes it for the node's stats and records the node.
+#[test]
+fn a_node_answering_an_admin_call_with_no_length_is_a_502_and_the_router_goes_on() {
+    const SENDS: usize = 64 << 20;
+    fenec_http::audit::set_delay(0);
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let node = l.local_addr().unwrap().to_string();
+    let (told, sent) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(mut c) = c else { continue };
+            let told = told.clone();
+            std::thread::spawn(move || {
+                let mut asked = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !asked.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match c.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => asked.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
+                if c.write_all(head).is_err() {
+                    return;
+                }
+                let body = [b' '; 64 << 10];
+                let mut n = 0;
+                while n < SENDS && c.write_all(&body).is_ok() {
+                    n += body.len();
+                }
+                let _ = told.send(n);
+            });
+        }
+    });
+    let router = Router::new(
+        Directory::in_memory(),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(10),
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let front = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let body = format!(r#"{{"addr":"{node}","token":"adm"}}"#);
+    let r = call(&front, "PUT", "/_shard/nodes/n1", &body, "");
+    assert_eq!(r.0, 502, "{}", r.2);
+    assert!(r.2.contains("no length"), "{}", r.2);
+    // The node's writes fail once the router lets the connection go, past
+    // what the two ends' buffers hold and well short of its 64 MiB.
+    let n = sent.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert!(n < SENDS, "the node sent its {n} bytes whole");
+    let r = call(&front, "GET", "/_shard/nodes", "", "");
+    assert_eq!(r.0, 200, "{}", r.2);
+    assert!(!r.2.contains(r#""name":"n1""#), "{}", r.2);
+}
