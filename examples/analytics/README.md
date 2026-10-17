@@ -386,15 +386,18 @@ refused to count past a million.
 ### The pages
 
 Lighthouse CI on its mobile profile with the throttling applied (slow 4G,
-150 ms round trips, the CPU slowed 4x), the median of three runs
+150 ms round trips) and the CPU of a mid-tier phone: slowed until
+Lighthouse's own benchmark scores 1 000, DevTools' calibrated "mid-tier
+mobile", which took 3.15x on this machine (`scripts/cpu-slowdown.mjs`; the
+shop's README has why a fixed 4x is not used). The median of three runs
 (`npm run lighthouse`), over the demo's data:
 
 | page | perf | a11y | best practices | SEO | FCP | LCP | TBT | CLS | JS (compressed) | page weight |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `/s/fieldnotes?range=24h` | 100 | 100 | 100 | 100 | 0.75 s | 0.75 s | 0 ms | 0.000 | 2.0 KB | 111.4 KB |
-| `/s/fieldnotes?range=90d` | 100 | 100 | 100 | 100 | 0.75 s | 0.75 s | 0 ms | 0.000 | 2.0 KB | 114.0 KB |
-| `/markets` | 100 | 100 | 100 | 100 | 0.74 s | 0.74 s | 0 ms | 0.000 | 2.0 KB | 201.8 KB |
-| `/signin` | 100 | 100 | 100 | 100 | 0.70 s | 0.70 s | 0 ms | 0.000 | 0.0 KB | 93.1 KB |
+| `/s/fieldnotes?range=24h` | 100 | 100 | 100 | 100 | 0.77 s | 0.77 s | 0 ms | 0.000 | 2.0 KB | 106.6 KB |
+| `/s/fieldnotes?range=90d` | 100 | 100 | 100 | 100 | 0.74 s | 0.74 s | 0 ms | 0.000 | 2.0 KB | 106.0 KB |
+| `/markets` | 100 | 100 | 100 | 100 | 0.74 s | 0.74 s | 0 ms | 0.000 | 2.0 KB | 201.6 KB |
+| `/signin` | 100 | 100 | 100 | 100 | 0.71 s | 0.71 s | 0 ms | 0.000 | 0.0 KB | 93.1 KB |
 
 The budgets CI asserts on every page: LCP under 1.8 s, CLS under 0.05,
 TBT under 150 ms, script under 10 KB, performance, accessibility and SEO
@@ -610,6 +613,6 @@ src/
   live.ts           the shared live polls
   sim.ts, traffic.ts    invented visitors, and the demo's beacons
   setup.ts, users.ts, tokens.ts, db.ts, time.ts, config.ts
-scripts/            db.sh, setup.ts, rollup.ts, build.ts, ci.sh, lighthouse.sh, bench-*.ts
+scripts/            db.sh, setup.ts, rollup.ts, build.ts, ci.sh, lighthouse.sh, cpu-slowdown.mjs, bench-*.ts
 test/               correctness, security, seo, perf
 ```

@@ -1,10 +1,16 @@
 // Lighthouse CI over the dashboard (a day from the raw events, 90 days from
 // the rollups), the market page and the sign-in page, on Lighthouse's
 // mobile profile with the throttling applied (`devtools`): a Moto G
-// Power-class screen on slow 4G, 150 ms round trips, 1.6 Mbps, the CPU
-// slowed 4x. The shop's budgets: LCP under 1.8 s, CLS under 0.05, TBT under
-// 150 ms; performance and accessibility at 0.9 at least, SEO at 0.9 on
-// every page.
+// Power-class screen on slow 4G, 150 ms round trips, 1.6 Mbps, and the CPU
+// of a mid-tier phone. The shop's budgets: LCP under 1.8 s, CLS under 0.05,
+// TBT under 150 ms; performance and accessibility at 0.9 at least, SEO at
+// 0.9 on every page.
+//
+// The CPU is the shop's (examples/shop/lighthouserc.cjs has why): applied
+// throttling slows the machine's own CPU, and GitHub's runners differ by
+// a factor of 1.7 in Lighthouse's benchmark, so the slowdown is worked out
+// on the machine before the runs (scripts/cpu-slowdown.mjs) to bring that
+// benchmark to DevTools' "mid-tier mobile", a benchmarkIndex of 1 000.
 //
 // The dashboard is behind a sign-in: scripts/lighthouse.sh signs in and
 // hands the session cookie over (LHCI_COOKIE). A dashboard says `noindex`
@@ -27,6 +33,7 @@ const budgets = {
 };
 
 module.exports = {
+  cpuTarget: Number(process.env.LHCI_CPU_TARGET || 1000),
   ci: {
     collect: {
       // The sign-in page as /signin: signed in, / sends to the dashboard.
@@ -35,6 +42,8 @@ module.exports = {
       settings: {
         chromeFlags: '--headless=new --no-sandbox',
         throttlingMethod: process.env.LHCI_THROTTLING || 'devtools',
+        // Lighthouse's own 4x where lhci runs without scripts/lighthouse.sh.
+        throttling: { cpuSlowdownMultiplier: Number(process.env.LHCI_CPU_SLOWDOWN || 4) },
         onlyCategories: ['performance', 'seo', 'accessibility', 'best-practices'],
         skipAudits: ['is-crawlable'],
         extraHeaders: process.env.LHCI_COOKIE ? JSON.stringify({ Cookie: process.env.LHCI_COOKIE }) : undefined,

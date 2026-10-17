@@ -155,8 +155,11 @@ data was the generated catalog of 10 000 products.
 
 ### Lighthouse
 
-The profile is Lighthouse's mobile one: a Moto G Power-class screen on slow
-4G (150 ms round trips, 1.6 Mbps down, the CPU slowed 4x). Each row is the
+The profile is Lighthouse's mobile one, a Moto G Power-class screen on slow
+4G (150 ms round trips, 1.6 Mbps down), with the CPU of a mid-tier phone:
+slowed until Lighthouse's own benchmark scores 1 000, DevTools' calibrated
+"mid-tier mobile" (a Pixel 5), which took 3.13x on this machine. Why the
+slowdown is worked out rather than Lighthouse's 4x is below. Each row is the
 median of 3 runs (`npm run lighthouse`, `lighthouserc.cjs`).
 
 **With the throttling applied** (`throttlingMethod: devtools`), which is what
@@ -164,33 +167,35 @@ CI asserts:
 
 | page | perf | a11y | best practices | SEO | FCP | LCP | TBT | CLS | JS (compressed) | page weight |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `/` | 100 | 100 | 100 | 100 | 1.43 s | 1.43 s | 35 ms | 0.000 | 132.8 KB | 163.2 KB |
-| `/c/backpacks` | 100 | 100 | 100 | 100 | 1.41 s | 1.41 s | 48 ms | 0.000 | 136.6 KB | 181.4 KB |
-| `/search?q=titanium+stove` | 100 | 100 | 100 | 66 | 1.43 s | 1.43 s | 65 ms | 0.000 | 136.6 KB | 184.1 KB |
-| `/p/<a tent>` | 100 | 100 | 100 | 100 | 1.42 s | 1.42 s | 28 ms | 0.000 | 134.2 KB | 162.5 KB |
+| `/` | 100 | 100 | 100 | 100 | 1.39 s | 1.39 s | 20 ms | 0.000 | 132.8 KB | 163.2 KB |
+| `/c/backpacks` | 100 | 100 | 100 | 100 | 1.39 s | 1.39 s | 14 ms | 0.000 | 136.6 KB | 181.4 KB |
+| `/search?q=titanium+stove` | 100 | 100 | 100 | 66 | 1.38 s | 1.38 s | 14 ms | 0.000 | 136.6 KB | 184.1 KB |
+| `/p/<a tent>` | 100 | 100 | 100 | 100 | 1.40 s | 1.40 s | 15 ms | 0.000 | 134.2 KB | 162.5 KB |
 
 **With Lighthouse's default estimate** (`simulate`, Lantern), measured the
-same day:
+same day with the same slowdown:
 
 | page | perf | FCP | LCP | TBT | CLS |
 | --- | --- | --- | --- | --- | --- |
-| `/` | 99 | 0.77 s | 2.07 s | 44 ms | 0.000 |
-| `/c/backpacks` | 99 | 0.91 s | 2.20 s | 37 ms | 0.000 |
-| `/search?q=titanium+stove` | 99 | 0.91 s | 2.20 s | 36 ms | 0.000 |
-| `/p/<a tent>` | 99 | 0.77 s | 2.06 s | 46 ms | 0.000 |
+| `/` | 99 | 0.76 s | 2.02 s | 11 ms | 0.000 |
+| `/c/backpacks` | 99 | 0.91 s | 2.17 s | 14 ms | 0.000 |
+| `/search?q=titanium+stove` | 99 | 0.91 s | 2.17 s | 15 ms | 0.000 |
+| `/p/<a tent>` | 99 | 0.76 s | 2.02 s | 11 ms | 0.000 |
 
 Against the budgets:
 
-- **CLS under 0.05 and TBT under 150 ms** are met both ways. Pictures are
-  inline SVG in boxes of fixed size, and the font's fallback is sized to it.
-- **LCP under 1.8 s** is met with the throttling applied (1.41 to 1.43 s)
-  and missed under the estimate (2.06 to 2.20 s). The estimate replays the
+- **CLS under 0.05** is met both ways. Pictures are inline SVG in boxes of
+  fixed size, and the font's fallback is sized to it.
+- **TBT under 150 ms** is met both ways on a mid-tier phone's CPU, and not
+  on a low-tier phone's (below).
+- **LCP under 1.8 s** is met with the throttling applied (1.38 to 1.40 s)
+  and missed under the estimate (2.02 to 2.17 s). The estimate replays the
   page's own load. On this machine the page's scripts arrive and run before
   its first paint, so Lantern puts Next.js's runtime on the LCP's path, even
   though the scripts are `async` and on a phone load after the paint. The
   observed LCP was the first paint, 83 ms, every time. An empty Next 16 page
-  is estimated at 1.37 s on the same profile. CI asserts the applied numbers,
-  and both are here.
+  was estimated at 1.37 s with the CPU slowed 4x. CI asserts the applied
+  numbers, and both are here.
 - **JavaScript under about 70 KB, compressed, on product and category
   pages** is not met, and cannot be with this stack. An empty Next 16 App
   Router page (one `<h1>`) ships 132.3 KB of JavaScript, compressed, on the
@@ -202,6 +207,47 @@ Against the budgets:
   70 KB would mean a lighter renderer than the App Router.
 - **SEO** is 100 everywhere but search, whose results pages carry `noindex`
   on purpose.
+
+**The CPU is worked out for the machine.** Applied throttling slows the
+machine's own CPU by a factor, so Lighthouse's fixed 4x measures a different
+phone on every machine, and GitHub's runners come with different CPUs. Over
+67 CI runs at 4x the pages' TBT came in bands, the four pages of a run
+moving together (the product page against the other three's mean: a
+correlation of 0.77), and the one failure, the product page at 194 ms, came
+from the slowest band. A median of three runs takes out a run, not the
+machine. So `scripts/cpu-slowdown.mjs` runs Lighthouse's own benchmark, the
+`benchmarkIndex` every report carries, in a Chrome launched as Lighthouse
+launches one, before the runs, and slows the CPU by what brings it to 1 000,
+as DevTools' calibrated CPU throttling finds its rates. Ten runners at once
+each way, each page's median TBT:
+
+| CPU | benchmarkIndex | TBT at 4x | slowed to 1 000 | TBT there |
+| --- | --- | --- | --- | --- |
+| AMD EPYC 7763 | 2 140-2 520 | 103-133 ms | 2.46-2.64x | 40-54 ms |
+| Intel Xeon Platinum 8370C | 2 630-2 700 | | 2.58x | 37-43 ms |
+| Intel Xeon Platinum 8573C | 2 740-3 350 | 72-85 ms | | |
+| AMD EPYC 9V74 | 2 860-3 130 | 64-78 ms | | |
+| Intel Xeon 6973P-C | 3 140-3 750 | 54-62 ms | 3.72x | 41-49 ms |
+| AMD EPYC 9V45 | 3 530-4 540 | 40-57 ms | 3.99-4.44x | 48-63 ms |
+| this M1 | 2 390-3 050 | 31-36 ms | 2.99-3.13x | 8-14 ms |
+
+The benchmarkIndex is the one Lighthouse measured as each run began; a
+blank is a CPU the draw of runners did not give that way. The benchmark is
+not the pages' work: at one score the runners still differ by up to 1.5
+times, and at the mid tier this M1 blocks for a quarter to a third of what
+they do, so CI's numbers are not this machine's. After the runs `npm run
+lighthouse` prints each run's TBT and the benchmarkIndex it began at, and
+marks one a fifth or more off the index the slowdown was worked out from,
+which ran on a busier or an idler machine than that: here at 4x, while
+another job ran, the product page's last two runs began at 1 740 and 1 710
+against 2 390-2 880 for the rest, and blocked for 84 and 85 ms.
+
+**On a low-tier phone the TBT budget is not met.** DevTools' "low-tier
+mobile", a benchmarkIndex of 264, is the Moto G Power whose screen the
+profile has. Slowed to it (`LHCI_CPU_TARGET=264 npm run lighthouse`: 11.52x
+here, 7.5 to 15.5x on the runners), the pages block for 182 to 191 ms here
+and 242 to 400 ms on the runners. Lighthouse says its 4x moves a desktop
+into the mid-tier mobile bracket, and CI asserts the mid tier.
 
 Two choices were measured on the way:
 
@@ -337,6 +383,6 @@ lib/
   db.ts, jwt.ts      connections, minted tokens, /batch
   generate.ts        the seeded catalog generator
 policy.txt           what a shopper's token may read and write
-scripts/             db.sh, seed.ts, ci.sh, lighthouse.sh, timing.ts, load.ts
+scripts/             db.sh, seed.ts, ci.sh, lighthouse.sh, cpu-slowdown.mjs, timing.ts, load.ts
 test/                checkout, security and SEO tests
 ```
