@@ -786,8 +786,7 @@ impl Answer {
             return Err(bad("a stream is read as it comes"));
         };
         let len = if head_only { 0 } else { len };
-        let mut body = vec![0u8; len];
-        self.reader.read_exact(&mut body)?;
+        let body = body_of(&mut self.reader, len, |_| Ok(()))?;
         if self.reusable && self.reader.buffer().is_empty() {
             if let Ok(stream) = self.reader.get_ref().try_clone() {
                 let idle = Idle {
@@ -811,8 +810,7 @@ impl Answer {
             return Ok(body);
         };
         let len = if head_only { 0 } else { len };
-        let mut body = vec![0u8; len];
-        self.reader.read_exact(&mut body)?;
+        let body = body_of(&mut self.reader, len, |_| Ok(()))?;
         // Bytes left in the buffer would be the start of an answer nobody
         // asked for; such a connection is not reused.
         if self.reusable && self.reader.buffer().is_empty() {
@@ -835,19 +833,15 @@ impl Answer {
         let Some(len) = self.content_length() else {
             return Err(bad("an answer with no length: a stream"));
         };
-        let mut body = vec![0u8; len];
-        let mut got = 0;
-        while got < len {
-            if self.reader.buffer().is_empty() {
-                let left = left_until(deadline)?.min(self.read_timeout);
-                self.reader.get_ref().set_read_timeout(Some(left))?;
-                self.read_timeout = left;
+        let timeout = &mut self.read_timeout;
+        let body = body_of(&mut self.reader, len, |reader| {
+            if reader.buffer().is_empty() {
+                let left = left_until(deadline)?.min(*timeout);
+                reader.get_ref().set_read_timeout(Some(left))?;
+                *timeout = left;
             }
-            match self.reader.read(&mut body[got..])? {
-                0 => return Err(io::ErrorKind::UnexpectedEof.into()),
-                n => got += n,
-            }
-        }
+            Ok(())
+        })?;
         if self.reusable && self.reader.buffer().is_empty() {
             let idle = Idle {
                 stream: self.reader.into_inner(),
@@ -866,6 +860,64 @@ impl Answer {
         self.reader.get_ref().set_read_timeout(None)?;
         Ok(self.reader)
     }
+}
+
+/// The `len` bytes of a body off `reader`, `before` run ahead of each read,
+/// read into a buffer of the whole length ([`zeroed`]).
+fn body_of(
+    reader: &mut BufReader<TcpStream>,
+    len: usize,
+    mut before: impl FnMut(&BufReader<TcpStream>) -> io::Result<()>,
+) -> io::Result<Vec<u8>> {
+    let mut body = zeroed(len)?;
+    let mut got = 0;
+    while got < len {
+        before(reader)?;
+        match reader.read(&mut body[got..]) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(body)
+}
+
+/// `len` zero bytes for a body the node says is that long: the allocation
+/// `vec![0u8; len]` makes -- `alloc_zeroed`, the system's zero pages, each
+/// taken up as it is first written -- with its failure an error, a 502,
+/// where `vec!`'s aborts. A node, buggy or not the router's, declaring a
+/// petabyte and sending three bytes aborted the router, every tenant's
+/// clients with it. A buffer grown as the bytes came instead, from a
+/// mebibyte fourfold, copied what came at each growth -- a body of 4 MiB
+/// and a byte 596 us against 440 in the review's measure, every forwarded
+/// answer past a mebibyte slower -- and a node sending without end under
+/// such a length met a growth whose allocation aborted all the same; a
+/// first buffer of 64 MiB was as fast, past which the growth was the same.
+/// So the length is believed as far as the system lends it, which costs
+/// what `vec!` did at every size measured, 200 B to 64 MiB: an allocation
+/// it grants holds only the pages the bytes reach, and a bound on the
+/// length would refuse a tenant's image on its way through a move.
+fn zeroed(len: usize) -> io::Result<Vec<u8>> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let refused = || {
+        io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            format!("the node's answer says it is {len} bytes, which this router cannot hold"),
+        )
+    };
+    let layout = std::alloc::Layout::array::<u8>(len).map_err(|_| refused())?;
+    // SAFETY: a layout of a non-zero size.
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    if ptr.is_null() {
+        return Err(refused());
+    }
+    // SAFETY: allocated by the global allocator for exactly `len` bytes of
+    // `u8`'s alignment, every one of them initialised to zero -- the
+    // allocation a `Vec<u8>` of that capacity owns, as `vec!` makes it.
+    Ok(unsafe { Vec::from_raw_parts(ptr, len, len) })
 }
 
 /// What is left until `deadline`, or the timeout it has come to.
@@ -1037,5 +1089,72 @@ mod tests {
             answered_or_gone(&node, &client, long).ok(),
             Some(Watched::Answering)
         );
+    }
+
+    /// An answer to one request, its head and `body`, from a node's end
+    /// that reads the request first and closes after: the head read.
+    fn answered(pool: &Pool, length: usize, body: Vec<u8>) -> Answer {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut theirs, _) = l.accept().unwrap();
+        std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !asked.windows(4).any(|w| w == b"\r\n\r\n") {
+                match theirs.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => asked.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n");
+            let _ = theirs.write_all(head.as_bytes());
+            let _ = theirs.write_all(&body);
+        });
+        let head = b"GET /t/acme/notes HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+        let (set, want) = ((None, pool.timeout), (pool.timeout, pool.timeout));
+        match pool.exchange("node", ours, set, (head, b""), want, None) {
+            Ok(a) => a,
+            Err(Failure(_, e)) => panic!("{e}"),
+        }
+    }
+
+    /// A body's buffer is the length its node says, with the allocation's
+    /// failure an error: a node declaring a petabyte and sending three
+    /// bytes is an error to each of the three readers -- the allocation
+    /// refused, or lent and the answer broken off -- where `vec!`'s failure
+    /// aborted the router; past what an allocation can be, it is refused
+    /// before it is asked; and a body of 20 MiB comes whole.
+    #[test]
+    fn a_body_s_buffer_failing_to_allocate_is_an_error_not_an_abort() {
+        let pool = Pool::new(Duration::from_secs(10));
+        let lie = 1usize << 50;
+        let failed = |r: io::Result<Vec<u8>>| matches!(r, Err(e) if matches!(e.kind(), io::ErrorKind::OutOfMemory | io::ErrorKind::UnexpectedEof));
+        assert!(failed(
+            answered(&pool, lie, b"abc".to_vec()).read_body(&pool, false)
+        ));
+        assert!(failed(
+            answered(&pool, lie, b"abc".to_vec()).read_body_kept(&pool, false)
+        ));
+        let by = Instant::now() + Duration::from_secs(10);
+        assert!(failed(
+            answered(&pool, lie, b"abc".to_vec()).read_body_by(&pool, by)
+        ));
+        let past = zeroed(isize::MAX as usize + 1).unwrap_err();
+        assert_eq!(past.kind(), io::ErrorKind::OutOfMemory, "{past}");
+        assert!(zeroed(0).unwrap().is_empty());
+        let whole: Vec<u8> = (0..(20 << 20) + 7).map(|i| (i % 251) as u8).collect();
+        let n = whole.len();
+        let body = answered(&pool, n, whole.clone())
+            .read_body(&pool, false)
+            .unwrap();
+        assert!(body == whole);
+        let body = answered(&pool, n, whole.clone())
+            .read_body_kept(&pool, false)
+            .unwrap();
+        assert!(body == whole);
+        let body = answered(&pool, n, whole.clone())
+            .read_body_by(&pool, by)
+            .unwrap();
+        assert!(body == whole);
     }
 }

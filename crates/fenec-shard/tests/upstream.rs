@@ -554,3 +554,58 @@ fn a_held_claim_whose_client_went_away_hands_its_job_on_through_a_relay() {
     });
     a_held_claim_s_client_gone_hands_the_job_on(&s, &front, false);
 }
+
+/// A node that says its answer is a petabyte long and sends three bytes of
+/// it: the router answers 502, as for any answer broken off, and goes on
+/// answering. Its body's buffer was made whole from the length, and the
+/// allocation's failure aborted the router, every tenant's client with it.
+#[test]
+fn a_node_declaring_an_answer_no_memory_holds_is_a_502_and_the_router_goes_on() {
+    fenec_http::audit::set_delay(0);
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let node = l.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(mut c) = c else { continue };
+            std::thread::spawn(move || {
+                let mut asked = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !asked.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match c.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => asked.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let _ =
+                    c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1125899906842624\r\n\r\nabc");
+            });
+        }
+    });
+    let mut d = Directory::in_memory();
+    let placed = Node {
+        addr: node,
+        token: "adm".into(),
+        ..Node::default()
+    };
+    d.set_node("n1", placed).unwrap();
+    d.place("acme", "n1", State::Active).unwrap();
+    let router = Router::new(
+        d,
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(10),
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let front = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let r = call(&front, "GET", "/t/acme/notes", "", "");
+    assert_eq!(r.0, 502, "{}", r.2);
+    assert!(r.2.contains("broke off"), "{}", r.2);
+    let r = call(&front, "GET", "/_shard/nodes", "", "");
+    assert_eq!(r.0, 200, "{}", r.2);
+    assert!(r.2.contains(r#""name":"n1""#), "{}", r.2);
+}
