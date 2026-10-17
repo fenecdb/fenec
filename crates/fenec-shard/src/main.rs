@@ -38,6 +38,20 @@ usage: fenec-shard [options]
                             a tenant's collections and rows in a browser,
                             through this router, with the token pasted in.
                             Off by default; keep it on a private network
+      --entry-token <value> the global entry's ENTRY_TOKEN
+                            (integrations/cloudflare/entry): a request whose
+                            Fenec-Client header carries the entry's mark for
+                            its address, made within 60 s of this clock, is
+                            that client's -- its refusal's wait and count, a
+                            good token's clearing, the audit line, the trace
+                            and the client named to a node or another
+                            region's router -- where it would be Cloudflare's
+                            address. A header seen can be replayed for that
+                            minute, naming that one address. Without it, or
+                            for a header that does not check, the
+                            connection's address counts. Every router drops
+                            the header from what it forwards. Not --token:
+                            the entry's Worker holds it
       --audit <path>        append a JSON line to this file for each request
                             refused for its token and each /_shard/ request
                             that changes something
@@ -128,7 +142,8 @@ usage: fenec-shard [options]
                             one that does not is let be for 5 s, its
                             region's reads going home  default: 2000
 
-The token is also read from the FENEC_SHARD_TOKEN environment variable.
+The token is also read from the FENEC_SHARD_TOKEN environment variable, and
+the entry's from FENEC_SHARD_ENTRY_TOKEN.
 ";
 
 fn fail(msg: &str) -> ! {
@@ -139,6 +154,7 @@ fn fail(msg: &str) -> ! {
 fn main() {
     let mut cfg = Config {
         token: std::env::var("FENEC_SHARD_TOKEN").ok(),
+        entry_token: std::env::var("FENEC_SHARD_ENTRY_TOKEN").ok(),
         ..Config::default()
     };
     let mut path = "shard.fenec".to_string();
@@ -165,6 +181,7 @@ fn main() {
             "--listen" | "-l" => cfg.addr = next(&mut i, "--listen"),
             "--directory" | "-d" => path = next(&mut i, "--directory"),
             "--token" => cfg.token = Some(next(&mut i, "--token")),
+            "--entry-token" => cfg.entry_token = Some(next(&mut i, "--entry-token")),
             "--insecure" => cfg.insecure = true,
             "--http-cors" => cfg.cors = Some(next(&mut i, "--http-cors")),
             "--studio" => {
@@ -314,6 +331,17 @@ fn main() {
         }
     }
 
+    // An empty key would let anyone make the entry's mark, and the
+    // routers' own token in the entry's Worker would reach `/_shard/`,
+    // which moves and deletes every tenant: the entry is kept from it.
+    match cfg.entry_token.as_deref() {
+        Some("") => fail("--entry-token is empty: the entry's mark would be anyone's to make"),
+        Some(t) if cfg.token.as_deref() == Some(t) => fail(
+            "--entry-token is --token: the entry's Worker holds its token, and --token moves \
+             and deletes every tenant; give the entry one of its own",
+        ),
+        _ => {}
+    }
     let replicating = replication_token.as_deref().is_some_and(|t| !t.is_empty());
     if replica_of.is_some() && !replicating {
         fail("--replica-of needs --replication-token: the primary asks for it");

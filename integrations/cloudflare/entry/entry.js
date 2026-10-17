@@ -42,7 +42,10 @@ export const HOME = 'fenec-home';
  * with this entry, never by the peer's address. Bound to the address and
  * the time, a mark seen once names that address alone, and for a minute:
  * a mark of the token alone, as a router's to a node, would let whoever saw
- * one claim any address for good.
+ * one claim any address for good. A router started with the same token
+ * (`fenec-shard --entry-token`, `audit::entry`) checks the mark and a time
+ * within a minute of its clock, and takes the address for the request's;
+ * every router drops the header from what it forwards.
  */
 export const CLIENT = 'fenec-client';
 

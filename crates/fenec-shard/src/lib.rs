@@ -119,6 +119,14 @@ pub struct Config {
     /// The longest a call a read replica's upkeep makes may take
     /// ([`readers::CALL`] unless set).
     pub reader_timeout: Duration,
+    /// The global entry's token (`--entry-token`, its `ENTRY_TOKEN`): a
+    /// request whose `Fenec-Client` header carries the entry's mark for
+    /// its address and a time within a minute of this clock is the named
+    /// client's, not the connection's -- its refusal's wait and count, a
+    /// verified token's clearing, the audit line, the trace and the client
+    /// named to a node or a relay ([`fenec_http::audit::entry`]). `None`:
+    /// the header is read by no one, and dropped as every router drops it.
+    pub entry_token: Option<String>,
 }
 
 impl Default for Config {
@@ -143,6 +151,7 @@ impl Default for Config {
             replica_timeout: Duration::from_secs(2),
             replica_rest: readers::RESTING,
             reader_timeout: readers::CALL,
+            entry_token: None,
         }
     }
 }
@@ -176,6 +185,9 @@ pub struct Router {
     /// which they share. `None` without one: the relaying router is then
     /// the client.
     relay_mark: Option<Arc<str>>,
+    /// The key the global entry's marks are checked with
+    /// ([`Config::entry_token`]), its padded blocks hashed once.
+    entry: Option<fenec_http::audit::EntryKey>,
     /// For each region, the router of its list that answered last: asked
     /// first, so a router gone costs its region one failed connect, not one
     /// a request.
@@ -276,6 +288,10 @@ impl Router {
                 .token
                 .as_deref()
                 .map(|t| fenec_http::audit::router_mark(t).into()),
+            entry: cfg
+                .entry_token
+                .as_deref()
+                .map(fenec_http::audit::EntryKey::new),
             answered: Mutex::new(Default::default()),
             unfollowed: Mutex::new(HashSet::new()),
             reader_busy: Mutex::new(HashSet::new()),
@@ -564,6 +580,51 @@ impl Router {
         }
     }
 
+    /// Counts what the global entry's name for a request's client came to,
+    /// and says in the log, once a kind, why one was not believed: a token
+    /// the entry does not share, or a clock a minute off, leaves every
+    /// client behind the entry counted as Cloudflare's address, with
+    /// nothing else to show for it. Not an audit event: the audit log's
+    /// lines each cost their sender a refusal's wait, a token or a write,
+    /// and a header that does not check costs nothing -- the request goes
+    /// on as the connection's -- so a line each would let anyone grow the
+    /// log at the router's request rate, and a token mistyped would write
+    /// one for every request through the entry.
+    fn entry_named(
+        &self,
+        named: std::result::Result<std::net::IpAddr, fenec_http::audit::Unnamed>,
+        peer: Option<std::net::SocketAddr>,
+    ) {
+        use fenec_http::audit::Unnamed;
+        use std::sync::atomic::AtomicBool;
+        static SAID: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+        let (how, said, why) = match named {
+            Ok(_) => return metrics::entry_client(metrics::EntryClient::Named),
+            Err(Unnamed::BadMark) => (
+                metrics::EntryClient::BadMark,
+                &SAID[0],
+                "does not carry the global entry's mark for its address and time: is this \
+                 router's --entry-token the entry's ENTRY_TOKEN? A client sending the header \
+                 itself is answered the same",
+            ),
+            Err(Unnamed::Stale) => (
+                metrics::EntryClient::Stale,
+                &SAID[1],
+                "carries the global entry's mark, made more than a minute from this router's \
+                 clock: is either machine's clock off? A header replayed is answered the same",
+            ),
+        };
+        metrics::entry_client(how);
+        if !said.swap(true, Ordering::Relaxed) {
+            let from = peer.map_or_else(|| "?".to_string(), |p| p.to_string());
+            fenec_http::log!(
+                "a Fenec-Client header from {from} {why}; its client is not named, and the \
+                 connection's address counts in its place (said once; \
+                 fenec_router_entry_clients_total counts them)"
+            );
+        }
+    }
+
     /// The mark of what is forwarded to the node whose admin token is
     /// `token`.
     fn mark(&self, token: &str) -> Arc<str> {
@@ -628,6 +689,16 @@ impl Router {
             // waited out a refusal by that client's address already, and is
             // told when a token is verified here.
             let relayed = fenec_http::audit::request(&req, self.relay_mark.as_deref());
+            // The client the global entry named, believed with its mark
+            // alone: from then on this request's in the connection's
+            // place, the entry's address being Cloudflare's. Without
+            // `--entry-token` the header is not looked for; with it, a
+            // request without it costs one look among its headers.
+            if let (Some(key), None) = (&self.entry, relayed) {
+                if let Some(named) = fenec_http::audit::entry(&req, key) {
+                    self.entry_named(named, peer);
+                }
+            }
             // A browser's preflight is answered here, as a node answers its
             // own: before the directory is read, so a tenant the directory
             // does not hold, a standby whose directory has not arrived or a
@@ -826,13 +897,17 @@ impl Router {
 
         // The node believes the client's address from the router alone:
         // what a client sent under this name is dropped, and the router's
-        // own put in its place.
+        // own put in its place. The global entry's name for its client is
+        // dropped too, believed or not, flag or not: it is this router's
+        // to read, and the node takes the client from the router's.
         // Borrowed, not cloned: a request's headers were copied into
         // `String`s here and formatted one by one into the head, which with
         // the router's own header made a request through it 1.5 us slower.
         // A router relaying names the client it was relayed for, as the
-        // router before it did.
-        let client = relayed.or(peer.map(|p| p.ip()));
+        // router before it did, and the client the global entry named.
+        let client = relayed
+            .or_else(fenec_http::audit::named)
+            .or(peer.map(|p| p.ip()));
         let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
         let mut headers: Vec<(&str, &str)> = req
             .headers
@@ -841,6 +916,7 @@ impl Router {
                 !hop_by_hop(k)
                     && !k.eq_ignore_ascii_case("host")
                     && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
+                    && !k.eq_ignore_ascii_case(fenec_http::audit::CLIENT_HEADER)
                     && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
                     && !(traced
                         && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
@@ -1096,9 +1172,12 @@ impl Router {
         };
         // The router's own context goes to the node in place of the
         // client's (`Pool::send`), while it traces; a router relaying
-        // names the client it was relayed for.
+        // names the client it was relayed for, and the one the global entry
+        // named.
         let traced = fenec_http::trace::propagating();
-        let client = relayed.or(peer.map(|p| p.ip()));
+        let client = relayed
+            .or_else(fenec_http::audit::named)
+            .or(peer.map(|p| p.ip()));
         if let Some((rnode, raddr, rmark)) = near {
             let named = client.map(|ip| format!("{ip} {rmark}"));
             let mut headers = forwarded_headers(req, traced);
@@ -3077,7 +3156,8 @@ fn hop_by_hop(name: &str) -> bool {
 /// The client's headers a forward sends on: not the connection's, not the
 /// router's own name for its client -- what a client sent under it is
 /// dropped, and the router's put in its place, which the node believes
-/// from the router alone -- nor the request id the router sends, nor,
+/// from the router alone -- nor the global entry's, which is this
+/// router's to read, nor the request id the router sends, nor,
 /// while it traces, the client's trace context, which the router's own
 /// replaces. Borrowed, not cloned: a request's headers were copied into
 /// `String`s here and formatted one by one into the head, which with the
@@ -3089,6 +3169,7 @@ fn forwarded_headers(req: &Request, traced: bool) -> Vec<(&str, &str)> {
             !hop_by_hop(k)
                 && !k.eq_ignore_ascii_case("host")
                 && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
+                && !k.eq_ignore_ascii_case(fenec_http::audit::CLIENT_HEADER)
                 && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
                 && !(traced
                     && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
@@ -3252,4 +3333,43 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a read sent to a read replica carries ([`Router::forward_near`]):
+    /// the client's headers, less those that are the connection's or the
+    /// router's to write -- the global entry's name for its client among
+    /// them, which the router reads and the node never sees.
+    #[test]
+    fn a_replicas_read_is_sent_without_the_names_the_router_reads() {
+        let header = |k: &str, v: &str| (k.to_string(), v.to_string());
+        let req = Request {
+            method: Method::Post,
+            target: "/t/acme/query".into(),
+            path: "/t/acme/query".into(),
+            query: Vec::new(),
+            headers: vec![
+                header("Host", "router"),
+                header("Authorization", "Bearer data"),
+                header(
+                    "Fenec-Client",
+                    "203.0.113.7 1800000000 U6Z3YHsO6YiFX39RTKe6Fg",
+                ),
+                header("FENEC-ROUTER", "198.51.100.1 forged"),
+                header("X-Request-Id", "r-1"),
+                header("Fenec-Read", "replica"),
+                header("Connection", "keep-alive"),
+            ],
+            body: Vec::new(),
+            keep_alive: true,
+        };
+        let sent: Vec<&str> = forwarded_headers(&req, false)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(sent, ["Authorization", "Fenec-Read"]);
+    }
 }

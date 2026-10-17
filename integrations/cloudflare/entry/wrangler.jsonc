@@ -35,6 +35,8 @@
     // router. Unset, as every path but /t/<tenant>/ is, a 404 here.
   }
   // The key of the client's mark (Fenec-Client: an HMAC of the client's
-  // address and the time), the routers' to share:
+  // address and the time), shared with the routers, each started with
+  // --entry-token (or FENEC_SHARD_ENTRY_TOKEN) set to it -- not their
+  // --token, which moves and deletes tenants:
   //   npx wrangler secret put ENTRY_TOKEN --config entry/wrangler.jsonc
 }

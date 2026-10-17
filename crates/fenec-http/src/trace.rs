@@ -288,7 +288,9 @@ fn hex_into(out: &mut String, bytes: &[u8]) {
 
 /// The connection this thread serves from now on: `local` its address,
 /// `peer` the client's. On the server span as `server.address` and
-/// `client.address`.
+/// `client.address` -- the latter the client a router or the global entry
+/// named where one did (`audit::client_ip`), `peer` then
+/// `network.peer.address`.
 pub fn connection(local: Option<SocketAddr>, peer: Option<SocketAddr>) {
     if !on() {
         return;
@@ -408,8 +410,17 @@ pub fn begin(req: &Request) {
         if let Some((local, peer)) = PEER.with(Cell::get) {
             attrs.push(("server.address", Val::from(local.ip().to_string())));
             attrs.push(("server.port", Val::Int(local.port() as i64)));
-            if let Some(p) = peer {
-                attrs.push(("client.address", Val::from(p.ip().to_string())));
+            // The client behind the router or the global entry where one
+            // named it, as OpenTelemetry's `client.address` is "the client
+            // address behind any intermediaries", and the connection's own
+            // peer beside it as `network.peer.address`: by the peer alone,
+            // every request behind the entry was Cloudflare's.
+            let client = crate::audit::client_ip();
+            if let Some(ip) = client {
+                attrs.push(("client.address", Val::from(ip.to_string())));
+            }
+            if let Some(p) = peer.filter(|p| Some(p.ip()) != client) {
+                attrs.push(("network.peer.address", Val::from(p.ip().to_string())));
             }
         }
         let name = format!("{} {route}", req.method.name());

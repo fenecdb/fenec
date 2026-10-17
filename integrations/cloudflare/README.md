@@ -268,9 +268,17 @@ npx wrangler deploy --config entry/wrangler.jsonc
   any address a client claims (`X-Forwarded-For`, `X-Real-IP`,
   `Forwarded`, `True-Client-IP`, `CF-*`). The client is named in
   `Fenec-Client: <address> <seconds> <mark>`, the mark an HMAC of
-  `fenec-client <address> <seconds>` under `ENTRY_TOKEN` (`entry.js`), for
-  the routers to believe from the entry alone -- they do not read it yet.
-  `X-Request-Id` is the client's, or Cloudflare's ray id.
+  `fenec-client <address> <seconds>` under `ENTRY_TOKEN` (`entry.js`),
+  which the routers believe from the entry alone: started with the same
+  token (`fenec-shard --entry-token`, or `FENEC_SHARD_ENTRY_TOKEN`), a
+  router takes the address for the request's -- a refused token waits by
+  it and a good one clears its count alone, its audit line and trace name
+  it, and it is the client the router names to a node or another region's
+  router -- where every client would otherwise be Cloudflare's address. A
+  mark is believed for a minute either side of the router's clock. A
+  router without the flag, or a header that does not check, counts the
+  connection's address. `X-Request-Id` is the client's, or Cloudflare's
+  ray id.
 - **CORS**: the routers' answers pass unchanged. With `CORS` set to the
   routers' `--http-cors`, the entry answers preflights itself and puts the
   same headers on its own answers. Set it wherever the routers have

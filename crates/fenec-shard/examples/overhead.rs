@@ -21,9 +21,13 @@
 //!   * a read through the router of a region holding a tenant's read
 //!     replica: sent home, marked for the replica, and marked after the
 //!     client's write, the replica waiting for it (`reads` alone)
+//!   * with `latency`, a request the global entry names its client in
+//!     (`Fenec-Client`) through a router reading it (`--entry-token`)
+//!     against the same request through one that does not, and the mark's
+//!     check alone
 
 use fenec_http::tenants::Tenants;
-use fenec_shard::directory::Directory;
+use fenec_shard::directory::{Directory, Node, State};
 use fenec_shard::metrics::{self, Route};
 use fenec_shard::{Config, Router};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -215,6 +219,34 @@ impl Client {
         (status, body)
     }
 
+    /// [`Client::send`]'s `GET` with one header line more, `extra`: the
+    /// request the global entry sends a router.
+    fn get_with(&mut self, target: &str, extra: &str) -> u16 {
+        let head = format!("GET {target} HTTP/1.1\r\nHost: b\r\nContent-Length: 0\r\n{extra}\r\n");
+        self.out.write_all(head.as_bytes()).unwrap();
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let mut len = 0;
+        loop {
+            line.clear();
+            self.reader.read_line(&mut line).unwrap();
+            let l = line.trim_end();
+            if l.is_empty() {
+                break;
+            }
+            if let Some(v) = l
+                .split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            {
+                len = v.1.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0u8; len];
+        self.reader.read_exact(&mut body).unwrap();
+        status
+    }
+
     /// A request with headers of its own: its status, body and `Fenec-Seq`.
     fn send_with(
         &mut self,
@@ -388,6 +420,7 @@ fn main() {
         pct(&routed, 0.99) - pct(&direct, 0.99)
     );
     if only.is_some() {
+        entry(&a1, target);
         let _ = std::fs::remove_dir_all(d1);
         let _ = std::fs::remove_dir_all(d2);
         return;
@@ -477,6 +510,118 @@ fn main() {
     automatic();
     regions();
     fanout();
+}
+
+/// A request the global entry names its client in (`Fenec-Client: <address>
+/// <seconds> <mark>`) through a router with `--entry-token`, which checks
+/// the mark -- one HMAC-SHA256 -- and takes the address for the request's,
+/// against the same request through a router without it, which reads none
+/// of it and drops it as every router does: what naming the client costs.
+/// Then the mark's check alone, and the HMAC worked out with the key's
+/// padded blocks hashed every time, as `hmac_sha256` did.
+fn entry(node: &str, target: &str) {
+    use fenec_http::audit::{check_client, EntryKey};
+    const TOKEN: &str = "entry-token";
+    let routed = |entry_token: Option<&str>| {
+        let mut dir = Directory::in_memory();
+        let n = Node {
+            addr: node.to_string(),
+            token: "adm".into(),
+            ..Node::default()
+        };
+        dir.set_node("n1", n).unwrap();
+        dir.place("acme", "n1", State::Active).unwrap();
+        let router = Router::new(
+            dir,
+            Config {
+                addr: "127.0.0.1:0".into(),
+                entry_token: entry_token.map(str::to_string),
+                ..Config::default()
+            },
+        );
+        let listener = router.bind().unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let _ = router.serve_on(listener);
+        });
+        addr
+    };
+    let (plain, named) = (routed(None), routed(Some(TOKEN)));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let key = EntryKey::new(TOKEN);
+    let seconds = now.to_string();
+    let mark = key.mark("203.0.113.7", &seconds);
+    let value = format!(
+        "203.0.113.7 {seconds} {}",
+        std::str::from_utf8(&mark).unwrap()
+    );
+    let header = format!("Fenec-Client: {value}\r\n");
+    let timed = |addr: &str| -> Vec<f64> {
+        let mut c = Client::new(addr);
+        for _ in 0..500 {
+            c.get_with(target, &header);
+        }
+        let mut out: Vec<f64> = (0..ROUNDS)
+            .map(|_| {
+                let t = Instant::now();
+                assert_eq!(c.get_with(target, &header), 200);
+                t.elapsed().as_secs_f64() * 1e6
+            })
+            .collect();
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out
+    };
+    // In turns, each twice, so neither has the machine to itself.
+    let (mut ignored, mut checked) = (Vec::new(), Vec::new());
+    for _ in 0..2 {
+        ignored.extend(timed(&plain));
+        checked.extend(timed(&named));
+    }
+    ignored.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    checked.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!(
+        "\nthe global entry's name for its client (Fenec-Client), {} x GET each",
+        2 * ROUNDS
+    );
+    for (label, v) in [("ignored", &ignored), ("named", &checked)] {
+        println!(
+            "  {label:<8} {:>6.1} us {:>6.1} us {:>6.1} us",
+            pct(v, 0.5),
+            pct(v, 0.95),
+            pct(v, 0.99)
+        );
+    }
+    println!(
+        "  added    {:>6.1} us {:>6.1} us {:>6.1} us",
+        pct(&checked, 0.5) - pct(&ignored, 0.5),
+        pct(&checked, 0.95) - pct(&ignored, 0.95),
+        pct(&checked, 0.99) - pct(&ignored, 0.99)
+    );
+    let per = |f: &dyn Fn()| -> f64 {
+        let rounds = 200_000;
+        let t = Instant::now();
+        for _ in 0..rounds {
+            f();
+        }
+        t.elapsed().as_secs_f64() * 1e9 / rounds as f64
+    };
+    let checks = per(&|| {
+        std::hint::black_box(check_client(std::hint::black_box(&value), &key, now)).unwrap();
+    });
+    let message = format!("fenec-client 203.0.113.7 {seconds}");
+    let whole = per(&|| {
+        std::hint::black_box(fenec_http::crypto::hmac_sha256(
+            std::hint::black_box(TOKEN.as_bytes()),
+            message.as_bytes(),
+        ));
+    });
+    println!(
+        "  a mark checked {:.0} ns; its HMAC with the key's blocks hashed each time {:.0} ns",
+        checks, whole
+    );
 }
 
 /// A query across tenants (`POST /_shard/query`) over 100 tenants on three

@@ -284,9 +284,16 @@ the header from what a client sends, and a node believes it from no one
 else. Its audit log names the client as <code>peer</code> and the router as
 <code>via</code>. The router holds no keys: the node tells it, in its
 answer, that it verified a forwarded request's token, and the router clears
-its client's count on that alone. Behind another reverse proxy every client has the
-proxy's address, so the proxy's own rate limit is the one that counts
-there. <code>--auth-delay 0</code> turns the wait off.</p>
+its client's count on that alone. Behind the <a
+href="sharding.html#global-entry">global entry</a> every client reaches a
+router from Cloudflare's addresses; a router started with the entry's token
+(<code>--entry-token</code>) takes the address the entry names in
+<code>Fenec-Client</code> for the request's, its mark checked and its time
+within a minute, and counts, clears, logs (<code>peer</code>, the entry as
+<code>via</code>) and names that address onwards. Behind another reverse
+proxy every client has the proxy's address, so the proxy's own rate limit
+is the one that counts there. <code>--auth-delay 0</code> turns the wait
+off.</p>
 </details>
 
 <h2 id="router">The router</h2>
@@ -311,6 +318,7 @@ tenant moves. No label names a tenant.</p>
 <tr><td><code>fenec_router_upstream_duration_seconds</code></td><td>histogram</td><td>a forwarded request's time at its node: from its sending to the whole answer. Taken from the request's duration, it leaves the router's own</td></tr>
 <tr><td><code>fenec_router_upstream_errors_total{node}</code></td><td>counter</td><td>forwarded requests a node did not answer or broke off, each answered 502: the one to alert on</td></tr>
 <tr><td><code>fenec_router_refused_total</code></td><td>counter</td><td>requests refused for their token (401): the router's own, and its nodes' it passed on</td></tr>
+<tr><td><code>fenec_router_entry_clients_total{outcome}</code></td><td>counter</td><td>with <code>--entry-token</code>, the requests whose <code>Fenec-Client</code> — the <a href="sharding.html#global-entry">global entry</a>'s name for its client — the router read: <code>named</code>, the address taken for the request's; <code>bad_mark</code>, not the entry's mark (another token, or a client sending the header itself); <code>stale</code>, the entry's mark made more than a minute from the router's clock. The last two count by the connection's address: one that grows while the entry sends is a token or a clock to fix</td></tr>
 <tr><td><code>fenec_router_moves_total{outcome}</code></td><td>counter</td><td>tenant moves that began, <code>done</code> or <code>failed</code> and thawed; one refused before it began is not one</td></tr>
 <tr><td><code>fenec_router_move_duration_seconds</code></td><td>histogram</td><td>how long a move that was done took, the tenant frozen for all of it, in buckets from 10 ms to 1 000 s</td></tr>
 <tr><td><code>fenec_router_fanouts_total{outcome}</code></td><td>counter</td><td><a href="sharding.html#across-tenants">queries across tenants</a>: <code>done</code>, every tenant answered; <code>partial</code>, some failed and the caller asked for the others' rows; <code>failed</code>, answered with the tenants that failed; <code>refused</code> as a whole, before or after the asking (a request that does not read, a bound passed)</td></tr>
@@ -426,7 +434,9 @@ OTEL_SERVICE_NAME=orders-db fenec-server --file data.fenec \
 <code>http.request.method</code>, <code>http.route</code> (a template:
 <code>/t/{tenant}/{collection}/near</code>), <code>url.path</code>,
 <code>http.response.status_code</code>, <code>server.address</code> and
-<code>server.port</code>, <code>client.address</code>,
+<code>server.port</code>, <code>client.address</code> — the client behind
+a router, or behind the global entry where a router believes it, with the
+connection's own address as <code>network.peer.address</code> —
 <code>db.system</code> (<code>fenecdb</code>),
 <code>db.operation.name</code> (<code>get</code>, <code>put</code>,
 <code>create</code>…) and, for FenecQL, <code>db.query.text</code> — the

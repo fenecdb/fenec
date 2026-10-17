@@ -948,7 +948,8 @@ by the partition's length, sending writes to the node failed over away from
 -- so the routers holding the placement answer, and after a partition every
 router reaches the new one with its first request, for a hop inside the
 tenant's region a client of that region never takes; a relayed request is
-never relayed again (503). The relaying router names its client in
+never relayed again (503). The relaying router names its client -- the
+one the global entry named, where it believed one (`--entry-token`) -- in
 `Fenec-Router` under an HMAC of the shared `--token` (`relay_mark`, believed
 through `audit::request`, `Fenec-Verified` passed back), and moves to the
 next router of a region only where the one asked cannot have run the
@@ -1067,18 +1068,58 @@ address for a minute, where one of the token alone, as `audit::router_mark`
 is, would name any address for good -- and not `CF-Connecting-IP` believed
 from Cloudflare's ranges, since a Worker sets it and `X-Real-IP` as it
 likes towards an origin outside Cloudflare (Cloudflare's HTTP headers page),
-so any account's Worker could claim any address. The routers do not read
-it yet. What they must (V3): with `--entry-token`, parse the header, take
-the seconds within 60 of their clock, check the mark in constant time
-against their own HMAC of `fenec-client <address> <seconds>`, and use the
-address in place of the connection's peer for that request alone -- the
-refusal's wait and count, a verified token's clearing, the audit and slow
-lines' peer, the trace, the `Fenec-Router` they name to a node or a relay
--- still waiting a refusal out themselves and still relaying a tenant of
-another region, as for a relayed request they do neither; and drop the
-header from what they forward. Until they do, a refused token behind the
-entry waits by Cloudflare's address, and any good token through it starts
-that count again. The routers' CORS headers pass unchanged; with `CORS`
+so any account's Worker could claim any address. A router started with
+the same token (`fenec-shard --entry-token`, `FENEC_SHARD_ENTRY_TOKEN`;
+refused empty, and refused equal to `--token`, which moves and deletes
+every tenant and so stays out of the Worker) reads it (`audit::entry`,
+after `audit::request` and for a request no router relayed): the mark
+first, in constant time against its own HMAC of `fenec-client <address>
+<seconds>` (`EntryKey`, the key's padded blocks hashed once, a `HmacKey`:
+0.73-0.78 us a mark checked where the HMAC alone took 1.28-1.33 with them
+hashed each time), then the seconds within 60 of its clock either way
+(`CLIENT_WITHIN_SECS`), so a stale header is one the entry made. The
+address then stands in for the connection's peer for that request alone
+(`audit::NAMED`, cleared by each request's `audit::request`) -- the
+refusal's wait and count (`audit::http`), a verified token's clearing
+(`audit::verified`), the audit and slow lines' `peer`, the entry's address
+their `via` (`audit::line`), the trace's `client.address`, the connection's
+its `network.peer.address` (on a node too, for the client a router named),
+and the `Fenec-Router` the router names to a node or a relay, which names
+it to the node in turn -- the router still waiting a refusal out and still
+relaying a tenant of another region, where for a relayed request it does
+neither. Replayed, a header names that one address for its minute: what
+the minute costs against a mark of the token alone, which named any for
+good. A header that does not check, or a router without the flag, leaves
+the connection's address, and every router drops the header from what it
+forwards, flag or not (`forward`'s list, `forwarded_headers`), so a node
+never reads a client's claim: relays, held requests and streams go out
+through that list, and `/_shard/`'s relays and a fan-out write headers of
+their own. One not believed is counted
+(`fenec_router_entry_clients_total{outcome}`: `named`, `bad_mark`,
+`stale`, in the thread's metrics shard as a request is) and said once a
+kind in the log -- and is no audit event: each audit line costs its sender
+a refusal's wait, a token or a write, and such a header costs nothing, so
+a line each would grow the log at the router's request rate, and a
+mistyped token write one for every request through the entry. Nodes read
+none of it: the entry reaches routers alone (`REGIONS`, `ADMIN`). A
+forwarded request compares each header once more, to drop it, and with the
+flag one without the header pays a look among its headers besides: the
+router's added p50 stayed 20.4 us against main's 20.4 (20.1-21.0 and
+20.0-22.9, ten runs a side in ABBA turns at loads of 1.7-2.3, `make
+shard-bench ARGS=latency`), and a request the entry named its client in
+took 41.9 us p50 through a router reading it against 42.0 through one that
+reads none of it, the runs' differences -0.4 to +1.0 (the bench's `entry`
+part): the mark's 0.73 us is inside them.
+`tests/entry.rs` holds two named clients' counts apart and a good token
+clearing its own alone, the router's own refusals and the node's; a bad
+mark, a moved address, a stale time either way and a router without the
+flag to the connection's address; the header at no node, through a
+forward, a held request and a stream; the audit lines; and a relay
+carrying the client to the home router's and the node's lines and spans
+-- each failing with its part taken out -- and `entry.test.js` a token
+refused through the Worker in front of real routers waiting by
+`CF-Connecting-IP`'s address, never cleared by another client's good
+token. The routers' CORS headers pass unchanged; with `CORS`
 (their `--http-cors`) the entry answers a preflight itself and puts the
 same headers on its own answers alone, which the test holds to a router's
 preflight, and an isolate seeing a router's `Access-Control-Allow-Origin`
@@ -3596,7 +3637,10 @@ waits none for a request bearing `Fenec-Router: <address> <mark>`, the mark
 `Config::router_mark`), the address the log's `peer` (the router `via`):
 the router drops the header from what a client sends, and a node believes
 it from no one else. At the router the count is one across every node.
-As two headers and the whole HMAC it added 2.5 us to the 22 a request
+Behind the global entry the router's peer is Cloudflare's address, so with
+`--entry-token` it counts, clears, logs and names onwards the address the
+entry's `Fenec-Client` names (`audit::entry`, `NAMED`; under *One URL
+reaches every region*). As two headers and the whole HMAC it added 2.5 us to the 22 a request
 through the router took; as one, with the forwarded headers borrowed
 rather than cloned and written without `format!` (`Pool::send`), 0.85 us
 on average over four turns against main, inside its spread of 21.2-23.0. A browser's preflight is
