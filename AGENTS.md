@@ -5202,7 +5202,27 @@ copy still being made is left for the next start) before its checkpoint;
 an error it cannot wait out ends the process rather than leave it serving
 a mirror that no longer moves. This is why the PostgreSQL client is
 `fenec-wire`'s, below the importer: in the server it made the importer
-depend on the server, which could then not run it. A subscriber hears a PostgreSQL
+depend on the server, which could then not run it. A message's length is
+held to PostgreSQL's gigabyte (`proto::MAX_MESSAGE`, its MaxAllocSize)
+before anything is allocated, and under it the body's buffer is the
+length believed, allocated so its failure is an error (`proto::zeroed`,
+as the router's `zeroed`, and for its reasons: no copy at any size, a
+lying length costing the pages its bytes reach): a length from the
+server, or from anyone on the path (fenecdb speaks no TLS), that a system
+refused -- one that does not overcommit, Linux's heuristic on a machine
+smaller than the gigabyte -- aborted `fenec import`, and `fenec-server
+--follow` with everything it served, and is a broken stream now, which
+the follower connects again after. The counts a message carries are held
+to it too: a column count is an Int16 never negative, read unsigned
+(`be_count`: read signed, `0xFFFF` sized a `Vec` by `usize::MAX` and
+panicked), and a TRUNCATE's relations are given room for what the
+message holds, where its count alone asked for 16 GiB. The reader is the
+code it was, `calloc` either way, the loop reading messages the same
+instructions in other registers once the refusal's message went out of
+line (`refused`: formatted in place, the length was stored to the stack
+at every message): over messages in memory, twelve runs a side in ABBA
+turns, 120 B 30.2 ns a message against 30.3, 3 500 B 248.4 against
+250.0, 64 KiB 8.53 us against 8.61, 2 MiB 58.5 against 58.6. A subscriber hears a PostgreSQL
 commit 0.09 ms after it returned at the median, a row inserted with a
 vector under HNSW 0.19 ms, p99 4.0 and 3.3 (`make mirror-bench`; the code
 before the pg wire went gave 3.7 and 3.7 the same day); a server killed
@@ -5875,6 +5895,28 @@ ABBA turns, 200 B 20.3 us either way, 64 KiB 28.1 against 28.2, 1.5 MiB
 MiB 12.7 against 12.5 (12.65-12.75 and 10.9-12.7). A query across tenants
 refuses a declared length past `--fanout-max-bytes` before it adds it to
 the query's sum, which one near `usize::MAX` overflowed.
+An answer with no length is refused by `read_body` as by the other two,
+a 502 at its head and its connection let go of: read to its close, it
+grew the router's memory for as long as its peer sent, the request
+waiting all the while. What reads a body there is the router's own call
+-- `Pool::call` to a node's `/_admin/`, `call_routers_by` to a router's
+`/_shard/` -- and every answer of those peers carries its length
+(`Response::write`, a tenant's image among them), none of them a stream;
+a stream a client asked for goes out as it comes (`answer_out`, which
+reads a body only where it has a length: `router.rs`'s
+`a_subscription_streams_through_the_router`, `entry.rs`'s `_changes`).
+Refused rather than capped as a request's body is: a cap is a bound
+picked for an answer that never comes, and reading up to it held the
+thread as long as the peer trickled it in. `tests/upstream.rs` registers
+a node standing in with stats of no length and 64 MiB, which the router
+read whole and recorded the node by (201), and the unit tests send each
+reader such a body without end; both fail with the read to the close put
+back. A declared length is still believed, as above. `make shard-bench
+ARGS=latency`'s added p50 stayed 20.6 us against main's 20.5, 24 runs a
+side in ABBA turns over three rounds at loads of 1.3-2.7 (20.1-23.8 and
+18.6-21.5; the third round 20.5 against 20.55): `forward`, `answer_out`
+inlined in it, is main's to the instruction, and `read_body`'s path for a
+body with a length the same instructions in other registers.
 
 **A query across tenants is the router's admin's, merged by what the
 request says** (`fenec-shard/src/fanout.rs`, `POST /_shard/query`). An

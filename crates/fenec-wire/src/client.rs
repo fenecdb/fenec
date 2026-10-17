@@ -172,8 +172,12 @@ fn server_error(m: &Message) -> Error {
     Error::Query(format!("postgres {code}: {msg}"))
 }
 
-fn be_i16(b: &[u8], at: usize) -> i16 {
-    i16::from_be_bytes([b[at], b[at + 1]])
+/// A count of columns, which the protocol writes as an Int16 that is never
+/// negative: read as one, a server's `0xFFFF` became `usize::MAX` and the
+/// `Vec::with_capacity` sized by it panicked, where as a `u16` it is at most
+/// 65 535 columns' room and the body, too short for them, an error.
+fn be_count(b: &[u8], at: usize) -> usize {
+    u16::from_be_bytes([b[at], b[at + 1]]) as usize
 }
 
 fn be_i32(b: &[u8], at: usize) -> i32 {
@@ -189,7 +193,7 @@ fn row_description(m: &Message) -> Result<Vec<FieldDesc>> {
     if m.body.len() < 2 {
         return Err(short());
     }
-    let n = be_i16(&m.body, 0) as usize;
+    let n = be_count(&m.body, 0);
     let mut pos = 2;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
@@ -218,7 +222,7 @@ fn data_row(m: &Message) -> Result<Vec<Option<String>>> {
     if m.body.len() < 2 {
         return Err(short());
     }
-    let n = be_i16(&m.body, 0) as usize;
+    let n = be_count(&m.body, 0);
     let mut pos = 2;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
@@ -789,6 +793,20 @@ mod tests {
         body.extend_from_slice(&0i32.to_be_bytes()); // empty string
         let cells = data_row(&Message { tag: b'D', body }).unwrap();
         assert_eq!(cells, vec![Some("hi".into()), None, Some(String::new())]);
+    }
+
+    /// A count of columns past what the body holds -- `0xFFFF`, which read
+    /// as an Int16 sized a `Vec` by `usize::MAX` and panicked -- is the
+    /// message's error.
+    #[test]
+    fn a_count_of_columns_the_body_does_not_hold_is_an_error() {
+        for body in [vec![0xFF, 0xFF], vec![0xFF, 0xFF, 0, 0, 0, 1, b'x']] {
+            let short = |e: Error| matches!(e, Error::Corrupt(_));
+            let m = Message { tag: b'D', body };
+            assert!(short(data_row(&m).unwrap_err()));
+            let m = Message { tag: b'T', ..m };
+            assert!(short(row_description(&m).unwrap_err()));
+        }
     }
 
     #[test]

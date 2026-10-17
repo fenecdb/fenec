@@ -872,7 +872,12 @@ fn decode(body: &[u8]) -> Result<Message> {
         b'T' => {
             let n = c.u32()? as usize;
             c.u8()?; // cascade / restart identity
-            let mut rels = Vec::with_capacity(n);
+
+            // Room for the relations the message can hold, never more: by
+            // the count alone, `0xFFFFFFFF` asked for 16 GiB, which a
+            // system refusing it (Linux, past its memory and swap) turned
+            // into an abort of the server following the slot.
+            let mut rels = Vec::with_capacity(n.min(c.b.len().saturating_sub(c.at) / 4));
             for _ in 0..n {
                 rels.push(c.u32()?);
             }
@@ -1384,6 +1389,13 @@ mod tests {
         for n in 0..whole.len() {
             assert!(decode(&whole[..n]).is_err(), "{n}");
         }
+        // A count of relations past what the message holds is its error,
+        // the room made for what it holds.
+        let mut t = vec![b'T'];
+        t.extend_from_slice(&u32::MAX.to_be_bytes());
+        t.push(0);
+        t.extend_from_slice(&1u32.to_be_bytes());
+        assert!(decode(&t).is_err());
     }
 
     // ------------------------------------------------ applying them
