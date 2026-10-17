@@ -231,7 +231,7 @@ pub fn serve(
     // the wait from the body, where plain text left it at its own backoff.
     let Some(_slot) = hub.reserve(cfg.max_streams) else {
         let refused = crate::http::Response::retry_after(503, "too many subscriptions", 1);
-        let _ = write_head(out, cfg, 503, refused.content_type, Some(1));
+        let _ = write_head(out, cfg, 503, refused.content_type, Some(1), None);
         let _ = out.write_all(&refused.body);
         return;
     };
@@ -274,9 +274,17 @@ pub fn serve(
     //
     // A token whose rules read other collections has them bound under each
     // look's lock ([`Reach`]), from the shape as the subscriber sent it.
-    let sub = {
+    //
+    // Where the database stands is read under the same lock, for the head
+    // (`Fenec-Seq`, `Fenec-History`): a client running reads of its own
+    // after the changes the stream names -- near, on a read replica, while
+    // the stream stays home -- sends them after that history, which a seq
+    // alone does not name across a failover. Read here, it costs the
+    // stream no lock of its own.
+    let (sub, at) = {
         let guard = crate::held::read(db);
-        api::subscription(&guard, req).and_then(|mut sub| {
+        let at = crate::At::of(&guard);
+        let sub = api::subscription(&guard, req).and_then(|mut sub| {
             let mut quiet = false;
             let mut view = None;
             let mut reach = None;
@@ -295,7 +303,8 @@ pub fn serve(
                 sub.filter = scope.restrict(&sub.collection, shape)?;
             }
             Ok((sub, quiet, view, reach))
-        })
+        });
+        (sub, at)
     };
     let (mut sub, quiet, mut view, reach) = match sub {
         Ok(s) => s,
@@ -306,6 +315,7 @@ pub fn serve(
                 api::status_of(&e),
                 "application/json; charset=utf-8",
                 None,
+                None,
             );
             let mut body = String::from("{\"error\":");
             fenec_core::json::escape_into(&mut body, &e.to_string());
@@ -315,7 +325,7 @@ pub fn serve(
         }
     };
 
-    if write_head(out, cfg, 200, "text/event-stream", None).is_err() {
+    if write_head(out, cfg, 200, "text/event-stream", None, Some(at)).is_err() {
         return;
     }
     // A client stalled during the stream must not hold the thread forever:
@@ -904,12 +914,16 @@ fn event(out: &mut TcpStream, name: &str, data: &str) -> std::io::Result<()> {
     out.flush()
 }
 
+/// A stream's head, or a refusal's in its place; `at` where the database
+/// stood as the stream opened, which its head names: the change its seed is
+/// at or after, and the history every event's `seq` is a change of.
 fn write_head(
     out: &mut TcpStream,
     cfg: &Config,
     status: u16,
     content_type: &str,
     retry_after: Option<u64>,
+    at: Option<crate::At>,
 ) -> std::io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\n\
@@ -924,10 +938,22 @@ fn write_head(
     if status == 200 {
         head.push_str("X-Accel-Buffering: no\r\n");
     }
+    if let Some(at) = at {
+        head.push_str("Fenec-Seq: ");
+        crate::http::push_number(&mut head, at.seq);
+        head.push_str("\r\n");
+        // The root's history names nothing, as every answer's does.
+        if let Some(h) = at.history {
+            head.push_str("Fenec-History: ");
+            crate::http::push_history(&mut head, h);
+            head.push_str("\r\n");
+        }
+    }
+    // Every answer's CORS headers, not the origin alone: without
+    // `Access-Control-Expose-Headers` a page on another origin could not
+    // read the head's `Fenec-History`, nor a refusal's `Retry-After`.
     if let Some(origin) = &cfg.cors {
-        head.push_str(&format!(
-            "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n"
-        ));
+        crate::cors::push_into(&mut head, origin);
     }
     crate::request_id::with(|id| {
         if !id.is_empty() {

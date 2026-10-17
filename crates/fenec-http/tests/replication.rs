@@ -764,6 +764,57 @@ fn a_stream_and_changes_sent_after_a_write_wait_for_it_on_a_replica() {
     assert_eq!(r.server.after_waiting(), 0);
 }
 
+/// A subscription's head, read on a connection of its own.
+fn stream_head(port: u16, path: &str) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut out = String::new();
+    let mut chunk = [0u8; 4096];
+    while !out.contains("\r\n\r\n") {
+        match s.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.push_str(&String::from_utf8_lossy(&chunk[..n])),
+        }
+    }
+    out.split("\r\n\r\n").next().unwrap().to_string()
+}
+
+/// A header of `head`, by its name.
+fn header_of<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+/// A stream's head names the change the database stood at as it opened
+/// (`Fenec-Seq`) and the history that change and every event's `seq` are
+/// of (`Fenec-History`), as a write's answer does: a client running reads
+/// after a change the stream names -- near, on a read replica, while the
+/// stream stays home -- sends them after that change of that history,
+/// which a number alone does not name across a failover. A replica's names
+/// its primary's history.
+#[test]
+fn a_stream_s_head_names_the_history_of_its_changes() {
+    let d = dir("stream-history");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    let r = replica(&d.join("r.fenec"), p.port);
+    query(&p, SCHEMA);
+    let put = "{\"query\":\"put items {name: \\\"x\\\", n: 1, e: [1.0, 0.5, 2.0]}\"}";
+    let (status, written, body) = raw(p.port, "POST", "/query", "", put);
+    assert_eq!(status, 200, "{body}");
+    let history = header_of(&written, "Fenec-History").expect("a write names its history");
+    let seq = header_of(&written, "Fenec-Seq").unwrap();
+    caught_up(&r, &p);
+    for node in [&p, &r] {
+        let head = stream_head(node.port, "/items/changes");
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert_eq!(header_of(&head, "Fenec-History"), Some(history), "{head}");
+        assert_eq!(header_of(&head, "Fenec-Seq"), Some(seq), "{head}");
+    }
+}
+
 /// The primary sweeps the rows past their time (`@ttl`) and its replica
 /// applies the deletes as any it is sent; the replica itself never sweeps,
 /// its writes being its primary's.

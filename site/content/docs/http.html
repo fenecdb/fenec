@@ -576,6 +576,14 @@ the rows matching your filter, then each change to them as it happens.</p>
     writes</a>). One resumed with <code>since</code> waits the same way:
     <code>since</code> is where the stream left off, not a write it must
     see.</li>
+  <li><b>Its head says where the server stood</b> as it opened:
+    <code>Fenec-Seq</code>, the change its seed is at or after, and
+    <code>Fenec-History</code>, the history that change and every event's
+    <code>seq</code> are of, as a write's answer names it (none on a
+    database that never had a replica). A read sent after an event's
+    <code>seq</code> to another copy goes with both (<a
+    href="replication.html#read-your-writes">Reading your own
+    writes</a>): a number alone names no write across a failover.</li>
   <li><b>In the browser,</b> <a href="sync.html">Sync</a> builds on this
     stream.</li>
 </ul>

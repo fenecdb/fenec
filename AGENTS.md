@@ -2730,14 +2730,26 @@ at once with the header; fenec-shard's
 `a_marked_stream_after_a_write_waits_on_the_replica_or_goes_home` a
 stream and a page going home past the replica's wait, and a stream
 answered by the replica once it catches up, home cut off -- each failing
-with its wait taken out. Without the header a stream and a page look for
+with its wait taken out. A stream's head names where the database stood
+as it opened, as an answer does: `Fenec-Seq`, the change its seed is at
+or after, and `Fenec-History` where the database has a history of its
+own -- read under the lock the shape is parsed under, no lock of its own
+-- so a client re-running its reads near while the stream stays home
+sends them after an event's `seq` of that history, which a number alone
+does not name across a failover (`tests/replication.rs`, a primary's and
+its replica's head; `tests/changes.rs`, the root's naming none). The head
+carries every answer's CORS headers (`cors::push_into`): it wrote the
+origin alone, and a page on another origin could read no header of it.
+Without the header a stream and a page look for
 it once, as a read does: `make requests-bench` in three ABBA quartets
 against main, a row by id 0.021-0.022 ms p50 against 0.022, a put
 0.021-0.023 against 0.022-0.027, eight clients' rates inside main's
 spread (by id 136-147k a second against 126-145k); a subscription opened
-to its seed of a row, 1 000 opens a side in each of four ABBA runs a
-build, 240.5-253.9 us p50 against main's 248.0-256.9, and sent after a
-change the database holds already 240.8-249.3.
+to its seed of a row, its head naming its position, 1 000 opens a side in
+each of four ABBA runs a build: over a database with a history of its own
+245.2-251.2 us p50 against main's 250.6-254.6 (the root's, no history
+written, 248.1-251.6 against 251.0-254.4), and sent after a change the
+database holds already 247.8-252.7.
 
 **`insert` never writes over; `put` does.** `Statement::Put` carries
 `insert` (the parser sets it for the keyword, `POST /<name>` over REST):
