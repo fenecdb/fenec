@@ -700,9 +700,13 @@ impl Router {
         let length = answer.content_length().unwrap_or(0);
         if status == 200 {
             // The bound before a byte of the body is read: what is past it
-            // is never gathered, and its connection is let go of.
-            let gathered = shared.bytes.fetch_add(length, Ordering::Relaxed) + length;
-            if gathered > self.cfg.fanout.max_bytes {
+            // is never gathered, and its connection is let go of. A length
+            // past it alone is never added: a node declaring one near
+            // `usize::MAX` overflowed the sum -- a panic in a debug build,
+            // and in a release one a wrapped figure, which let that answer
+            // through and held every tenant's after it to the wrap.
+            let max = self.cfg.fanout.max_bytes;
+            if length > max || shared.bytes.fetch_add(length, Ordering::Relaxed) + length > max {
                 noted(false);
                 over(
                     shared,

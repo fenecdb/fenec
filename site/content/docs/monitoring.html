@@ -315,7 +315,7 @@ tenant moves. No label names a tenant.</p>
 <table>
 <thead><tr><th>Metric</th><th>Type</th><th>What it says</th></tr></thead>
 <tbody>
-<tr><td><code>fenec_router_requests_total{route, code}</code></td><td>counter</td><td>requests answered; <code>route</code> is <code>tenant</code> (<code>/t/…</code>, forwarded), <code>shard</code>, <code>replication</code>, <code>metrics</code> or <code>other</code>, <code>code</code> the status class, <code>2xx</code> to <code>5xx</code></td></tr>
+<tr><td><code>fenec_router_requests_total{route, code}</code></td><td>counter</td><td>requests answered; <code>route</code> is <code>tenant</code> (<code>/t/…</code>, forwarded), <code>shard</code>, <code>replication</code>, <code>metrics</code> or <code>other</code>, <code>code</code> the status class, <code>2xx</code> to <code>5xx</code>, or <code>gone</code>: a request held at its node (<code>Fenec-Wait</code>) whose client reset its connection, answered nothing. A client gone with its end — most timeouts and aborts — reads as one that half-closed and still reads, so its request is answered as the node answers it and counted by that status</td></tr>
 <tr><td><code>fenec_router_request_duration_seconds{route}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
 <tr><td><code>fenec_router_upstream_duration_seconds</code></td><td>histogram</td><td>a forwarded request's time at its node: from its sending to the whole answer. Taken from the request's duration, it leaves the router's own</td></tr>
 <tr><td><code>fenec_router_upstream_errors_total{node}</code></td><td>counter</td><td>forwarded requests a node did not answer or broke off, each answered 502: the one to alert on</td></tr>

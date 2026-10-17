@@ -3,7 +3,9 @@
 //! the node's close of a connection on as a reset -- what macOS does to
 //! the router's end about a minute after the node's FIN -- or drops an
 //! answer the node sent and closes the router's end, as a node that ran a
-//! request and went down before answering would.
+//! request and went down before answering would. It counts the
+//! connections the router let go of, which a held claim's client gone
+//! makes the router do.
 
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::{Directory, Node, State};
@@ -26,8 +28,9 @@ struct Shared {
     reset: bool,
     /// The node's next answer is dropped and the router's end closed.
     swallow: AtomicBool,
-    /// Connections open now.
-    open: Mutex<usize>,
+    /// Connections open now, and those the router closed its end of
+    /// while the node's was open.
+    open: Mutex<(usize, usize)>,
     changed: Condvar,
 }
 
@@ -39,18 +42,18 @@ impl Relay {
             node: node.to_string(),
             reset,
             swallow: AtomicBool::new(false),
-            open: Mutex::new(0),
+            open: Mutex::new((0, 0)),
             changed: Condvar::new(),
         });
         let s = Arc::clone(&shared);
         std::thread::spawn(move || {
             for router in l.incoming() {
                 let Ok(router) = router else { continue };
-                *s.open.lock().unwrap() += 1;
+                s.open.lock().unwrap().0 += 1;
                 let s = Arc::clone(&s);
                 std::thread::spawn(move || {
                     pass(&s, router);
-                    *s.open.lock().unwrap() -= 1;
+                    s.open.lock().unwrap().0 -= 1;
                     s.changed.notify_all();
                 });
             }
@@ -69,18 +72,38 @@ impl Relay {
         let (open, waited) = self
             .shared
             .changed
-            .wait_timeout_while(open, Duration::from_secs(30), |n| *n > 0)
+            .wait_timeout_while(open, Duration::from_secs(30), |n| n.0 > 0)
             .unwrap();
-        assert!(!waited.timed_out(), "{} connections still open", *open);
+        assert!(!waited.timed_out(), "{} connections still open", open.0);
+    }
+
+    /// Waits for the router to have closed its end of `n` connections the
+    /// node had not closed.
+    fn until_router_closed(&self, n: usize) {
+        let open = self.shared.open.lock().unwrap();
+        let (open, waited) = self
+            .shared
+            .changed
+            .wait_timeout_while(open, Duration::from_secs(20), |c| c.1 < n)
+            .unwrap();
+        assert!(
+            !waited.timed_out(),
+            "the router let go of {} connections of {n}",
+            open.1
+        );
     }
 }
 
 /// One connection from the router, passed on to the node until either end
 /// closes it.
-fn pass(s: &Shared, router: TcpStream) {
+fn pass(s: &Arc<Shared>, router: TcpStream) {
     let node = TcpStream::connect(&s.node).unwrap();
     let mut from_router = router.try_clone().unwrap();
     let mut to_node = node.try_clone().unwrap();
+    // Set once the node's end is done, so that the router's end read to its
+    // close is told from the relay letting go after the node.
+    let node_done = Arc::new(AtomicBool::new(false));
+    let (done, shared) = (Arc::clone(&node_done), Arc::clone(s));
     let up = std::thread::spawn(move || {
         let mut buf = [0u8; 16 << 10];
         while let Ok(n @ 1..) = from_router.read(&mut buf) {
@@ -89,8 +112,14 @@ fn pass(s: &Shared, router: TcpStream) {
             }
         }
         // The router closed its end, or the relay is letting go: the node
-        // is told as the router would tell it.
+        // is told as the router would tell it -- and only then is the
+        // router's close counted, so that a test waiting for it acts on a
+        // node that has been told.
         let _ = to_node.shutdown(Shutdown::Write);
+        if !done.load(Ordering::SeqCst) {
+            shared.open.lock().unwrap().1 += 1;
+            shared.changed.notify_all();
+        }
     });
     let (mut from_node, mut to_router) = (node, router);
     let mut buf = [0u8; 16 << 10];
@@ -104,6 +133,7 @@ fn pass(s: &Shared, router: TcpStream) {
             break;
         }
     }
+    node_done.store(true, Ordering::SeqCst);
     if s.reset && !swallowed {
         reset_on_close(&to_router);
     }
@@ -140,6 +170,7 @@ struct Setup {
     router: String,
     node: String,
     relay: Relay,
+    tenants: Arc<Tenants>,
     dir: PathBuf,
 }
 
@@ -149,12 +180,30 @@ impl Drop for Setup {
     }
 }
 
-/// A node holding tenant `acme` with a collection `notes`, the relay in
-/// front of it and a router in front of that. The directory is written
-/// before the router starts, so nothing the test does not send goes from
-/// the router to the node: no request but the test's meets the node's
-/// idle timeout on its way.
+/// A node holding tenant `acme` with collections `notes` and `jobs`, the
+/// relay in front of it and a router in front of that. The directory is
+/// written before the router starts, so nothing the test does not send
+/// goes from the router to the node: no request but the test's meets the
+/// node's idle timeout on its way.
 fn setup(tag: &str, idle_timeout: Option<Duration>, reset: bool) -> Setup {
+    setup_in(tag, idle_timeout, reset, Front::Global)
+}
+
+/// Which router stands in front of the relay, and where it finds the node.
+#[derive(Clone, Copy)]
+enum Front {
+    /// The global directory's router, placing the tenant itself.
+    Global,
+    /// Region `us`'s router, its own directory placing the tenant.
+    Region,
+    /// Region `us`'s router whose own directory places nothing, the tenant
+    /// on a node its copy of the global directory places it on
+    /// (`Target::Node`).
+    GlobalCopy,
+}
+
+/// [`setup`], the router in front as `front` says.
+fn setup_in(tag: &str, idle_timeout: Option<Duration>, reset: bool, front: Front) -> Setup {
     fenec_http::audit::set_delay(0);
     let dir = std::env::temp_dir().join(format!(
         "fenec-shard-upstream-{tag}-{}-{:?}",
@@ -163,11 +212,16 @@ fn setup(tag: &str, idle_timeout: Option<Duration>, reset: bool) -> Setup {
     ));
     let tenants = Arc::new(Tenants::new(&dir).unwrap());
     let acme = tenants.create("acme").unwrap();
-    let create = fenec_ql::parse_one("create collection notes (title text)").unwrap();
-    acme.db.write().unwrap().execute(&create).unwrap();
+    for made in [
+        "create collection notes (title text)",
+        "create collection jobs (run_at timestamp @sorted, owner text)",
+    ] {
+        let create = fenec_ql::parse_one(made).unwrap();
+        acme.db.write().unwrap().execute(&create).unwrap();
+    }
     drop(acme);
     let server = fenec_http::Server::with_tenants(
-        tenants,
+        Arc::clone(&tenants),
         fenec_http::Config {
             addr: "127.0.0.1:0".into(),
             admin_token: Some("adm".into()),
@@ -181,23 +235,41 @@ fn setup(tag: &str, idle_timeout: Option<Duration>, reset: bool) -> Setup {
         let _ = server.serve_on(listener);
     });
     let relay = Relay::start(&node, reset);
-    let mut d = Directory::in_memory();
-    let (addr, token) = (relay.addr.clone(), "adm".to_string());
-    let placed = Node {
-        addr,
-        token,
-        ..Node::default()
+    let region = match front {
+        Front::Global => None,
+        Front::Region | Front::GlobalCopy => Some("us"),
     };
-    d.set_node("n1", placed).unwrap();
-    d.place("acme", "n1", State::Active).unwrap();
-    let router = Router::new(
-        d,
-        Config {
-            addr: "127.0.0.1:0".into(),
-            upstream_timeout: Duration::from_secs(10),
-            ..Config::default()
-        },
-    );
+    let placing = |region: Option<&str>| {
+        let mut d = Directory::in_memory();
+        d.settle_scope(region).unwrap();
+        let (addr, token) = (relay.addr.clone(), "adm".to_string());
+        let placed = Node {
+            addr,
+            token,
+            region: region.unwrap_or_default().to_string(),
+            ..Node::default()
+        };
+        d.set_node("n1", placed).unwrap();
+        d.place("acme", "n1", State::Active).unwrap();
+        d
+    };
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        upstream_timeout: Duration::from_secs(10),
+        region: region.map(String::from),
+        ..Config::default()
+    };
+    let router = match front {
+        Front::Global => Router::new(placing(None), cfg),
+        Front::Region => {
+            Router::regional(placing(region), cfg, None, Directory::in_memory()).unwrap()
+        }
+        Front::GlobalCopy => {
+            let mut own = Directory::in_memory();
+            own.settle_scope(region).unwrap();
+            Router::regional(own, cfg, None, placing(None)).unwrap()
+        }
+    };
     let listener = router.bind().unwrap();
     let front = listener.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
@@ -207,6 +279,7 @@ fn setup(tag: &str, idle_timeout: Option<Duration>, reset: bool) -> Setup {
         router: front,
         node,
         relay,
+        tenants,
         dir,
     }
 }
@@ -317,4 +390,229 @@ fn a_keyed_write_or_a_read_the_node_never_answered_is_sent_again() {
     let r = call(&s.router, "GET", "/t/acme/notes", "", "");
     assert_eq!(r.0, 200, "{}", r.2);
     assert!(r.2.contains("second"), "{}", r.2);
+}
+
+/// A claim a worker sends, held up to 30 s for a job.
+const CLAIM: &str = r#"{"query":"set jobs {owner: $1, run_at: now() + 60000} where run_at <= now() order run_at limit 1 returning id","params":["OWNER"]}"#;
+
+/// How many claims the node holds for `acme`.
+fn held(s: &Setup) -> usize {
+    let acme = s.tenants.get("acme").unwrap();
+    let n = acme.hub.waits().stats().held;
+    n
+}
+
+/// Waits until the node holds `n` claims.
+fn until_held(s: &Setup, n: usize) {
+    let t = Instant::now();
+    while held(s) < n {
+        assert!(t.elapsed() < Duration::from_secs(20), "{n} never held");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// `owner`'s claim, sent to `front` to be held, on a connection of its own.
+fn claim(front: &str, owner: &str) -> TcpStream {
+    let body = CLAIM.replace("OWNER", owner);
+    let mut c = TcpStream::connect(front).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    write!(
+        c,
+        "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\
+         Fenec-Wait: 30000\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    c
+}
+
+/// Two claims held through `front` on an empty queue, and the first one's
+/// client gone -- closed, or `reset` -- the job enqueued after goes to the
+/// second at once. The router waiting on the node's held answer watched
+/// nothing of its client, so the first claim, still open at the node, took
+/// the job -- leased to nobody for a minute -- and the second waited on.
+/// Asked of the node itself, the node sees its client's end before it runs
+/// the claim and hands the job on; through the router, the router passes
+/// the end on, or lets go of the connection on a reset. The job is put once
+/// the relay has seen the router do so: put before, it would race the
+/// router's look.
+fn a_held_claim_s_client_gone_hands_the_job_on(s: &Setup, front: &str, reset: bool) {
+    let gone = claim(front, "gone");
+    until_held(s, 1);
+    let mut next = claim(front, "next");
+    until_held(s, 2);
+    if reset {
+        reset_on_close(&gone);
+    }
+    drop(gone);
+    s.relay.until_router_closed(1);
+    let r = call(
+        front,
+        "POST",
+        "/t/acme/query",
+        r#"{"query":"put jobs {run_at: 1}"}"#,
+        "",
+    );
+    assert_eq!(r.0, 200, "{}", r.2);
+    let mut answer = String::new();
+    next.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(answer.contains(r#"[{"id":"#), "the job: {answer}");
+    let (status, _, owners) = call(
+        &s.node,
+        "POST",
+        "/t/acme/query",
+        r#"{"query":"get jobs select owner"}"#,
+        "",
+    );
+    assert_eq!(status, 200, "{owners}");
+    assert_eq!(owners, r#"[{"owner":"next"}]"#);
+}
+
+#[test]
+fn a_held_claim_whose_client_went_away_hands_its_job_on_through_the_router() {
+    let s = setup("gone", None, false);
+    a_held_claim_s_client_gone_hands_the_job_on(&s, &s.router, false);
+}
+
+/// The same with the client's connection reset, which can read nothing
+/// more: the router lets go of the node's connection and writes nothing.
+/// Nothing else of it differs from an end where the test can see: the node
+/// reads the router's end of its connection either way, and the client
+/// reads nothing either way; what differs is the router reading the node's
+/// answer and counting the request, `gone` or by its status, which
+/// `tests/metrics.rs` holds.
+#[test]
+fn a_held_claim_whose_client_reset_hands_its_job_on_through_the_router() {
+    let s = setup("reset-client", None, false);
+    a_held_claim_s_client_gone_hands_the_job_on(&s, &s.router, true);
+}
+
+/// The same through region `us`'s router, which finds the node in its copy
+/// of the global directory (`Target::Node`), its own placing nothing.
+#[test]
+fn a_held_claim_whose_client_went_away_hands_its_job_on_through_a_global_copy() {
+    let s = setup_in("gone-copy", None, false, Front::GlobalCopy);
+    a_held_claim_s_client_gone_hands_the_job_on(&s, &s.router, false);
+}
+
+/// A client that half-closes its connection once its claim is sent, and
+/// reads on: on a busy queue the claim takes a job and is answered it, as
+/// it is asked of the node itself, whose first run looks at no client.
+/// Taken for a client gone, its end let go of the node's connection: the
+/// claim took the job all the same, leased to a client answered nothing.
+#[test]
+fn a_half_closed_held_claim_is_answered_its_job_through_the_router() {
+    let s = setup("half", None, false);
+    for _ in 0..2 {
+        let r = call(
+            &s.router,
+            "POST",
+            "/t/acme/query",
+            r#"{"query":"put jobs {run_at: 1}"}"#,
+            "",
+        );
+        assert_eq!(r.0, 200, "{}", r.2);
+    }
+    for (front, owner) in [(&s.node, "direct"), (&s.router, "half")] {
+        let mut c = claim(front, owner);
+        c.shutdown(Shutdown::Write).unwrap();
+        let mut answer = String::new();
+        c.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200"), "{owner}: {answer}");
+        assert!(answer.contains(r#"[{"id":"#), "{owner}'s job: {answer}");
+    }
+    let (status, _, owners) = call(
+        &s.node,
+        "POST",
+        "/t/acme/query",
+        r#"{"query":"get jobs select owner order owner"}"#,
+        "",
+    );
+    assert_eq!(status, 200, "{owners}");
+    assert_eq!(owners, r#"[{"owner":"direct"},{"owner":"half"}]"#);
+}
+
+/// The same through two routers: the global router relays the claim to the
+/// router of region `us`, which keeps its own directory and forwards it to
+/// the node. The relaying router lets go of the home router's connection,
+/// and the home router, its client gone, of the node's.
+#[test]
+fn a_held_claim_whose_client_went_away_hands_its_job_on_through_a_relay() {
+    let s = setup_in("gone-relay", None, false, Front::Region);
+    let mut d = Directory::in_memory();
+    let home = [format!("http://{}", s.router)];
+    d.set_region("us", Some(&home)).unwrap();
+    d.place_home("acme", "us").unwrap();
+    let global = Router::new(
+        d,
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(10),
+            ..Config::default()
+        },
+    );
+    let listener = global.bind().unwrap();
+    let front = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = global.serve_on(listener);
+    });
+    a_held_claim_s_client_gone_hands_the_job_on(&s, &front, false);
+}
+
+/// A node that says its answer is a petabyte long and sends three bytes of
+/// it: the router answers 502 and goes on answering -- the allocation
+/// refused (macOS), or lent by an overcommitting system (Linux) and the
+/// answer broken off at its three bytes. Its body's buffer was made whole
+/// from the length, and the allocation's failure aborted the router, every
+/// tenant's client with it.
+#[test]
+fn a_node_declaring_an_answer_no_memory_holds_is_a_502_and_the_router_goes_on() {
+    fenec_http::audit::set_delay(0);
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let node = l.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for c in l.incoming() {
+            let Ok(mut c) = c else { continue };
+            std::thread::spawn(move || {
+                let mut asked = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !asked.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match c.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => asked.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let _ =
+                    c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1125899906842624\r\n\r\nabc");
+            });
+        }
+    });
+    let mut d = Directory::in_memory();
+    let placed = Node {
+        addr: node,
+        token: "adm".into(),
+        ..Node::default()
+    };
+    d.set_node("n1", placed).unwrap();
+    d.place("acme", "n1", State::Active).unwrap();
+    let router = Router::new(
+        d,
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(10),
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let front = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let r = call(&front, "GET", "/t/acme/notes", "", "");
+    assert_eq!(r.0, 502, "{}", r.2);
+    assert!(r.2.contains("broke off"), "{}", r.2);
+    let r = call(&front, "GET", "/_shard/nodes", "", "");
+    assert_eq!(r.0, 200, "{}", r.2);
+    assert!(r.2.contains(r#""name":"n1""#), "{}", r.2);
 }
