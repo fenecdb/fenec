@@ -123,12 +123,16 @@ fn archived(arch: &Path, seq: u64) {
 }
 
 /// Waits for the image an archiver is sent as it first connects. A test
-/// counting the images `consolidate` takes writes after it: an archiver
-/// that connected late, under load, was sent an image holding the writes
-/// already made, and `consolidate` rightly found nothing after it to take.
+/// counting the images `consolidate` takes, or restoring to a change or a
+/// moment among its writes, writes after it: an archiver that connected
+/// late, under load, was sent an image holding the writes already made --
+/// `consolidate` rightly found nothing after it to take, and a restore to
+/// a change before it had no image to start from (in a three-core
+/// container beside busy loops, 7 runs of 160). The directory too: an
+/// archiver's thread makes it as it starts, which may be after the call.
 fn first_image(arch: &Path) {
     let deadline = Instant::now() + Duration::from_secs(20);
-    while files(arch, "image-") == 0 {
+    while !arch.is_dir() || files(arch, "image-") == 0 {
         assert!(Instant::now() < deadline, "the archiver was sent no image");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -146,6 +150,7 @@ fn a_restore_holds_what_the_primary_held_at_that_moment() {
     p.exec("create collection notes (title text @text, n int @hash)");
     let arch = d.join("archive");
     let a = archiver(&arch, &p.url);
+    first_image(&arch);
     for i in 0..20 {
         p.exec(&format!("put notes {{title: \"early {i}\", n: {i}}}"));
     }
@@ -872,6 +877,7 @@ fn a_primary_restored_to_an_earlier_moment_is_refused_not_mixed_in() {
     p.exec("create collection c (x int)");
     let arch = d.join("archive");
     let a = archiver(&arch, &p.url);
+    first_image(&arch);
     for i in 0..10 {
         p.exec(&format!("put c {{x: {i}}}"));
     }
