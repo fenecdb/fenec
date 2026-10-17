@@ -67,8 +67,30 @@ fn ask(
         body.len()
     ));
     s.write_all(head.as_bytes()).unwrap();
-    let mut out = String::new();
-    let _ = s.read_to_string(&mut out);
+    // Read to the end of the body its head says, not to the connection's:
+    // a stream served where an answer was meant has no end, its keep-alive
+    // lines coming faster than any read timeout, and the test would hang
+    // rather than fail. A stream's head is its answer here.
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let text = String::from_utf8_lossy(&out);
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let length = head.lines().find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse::<usize>().ok())?
+            });
+            if length.is_none_or(|n| body.len() >= n) {
+                break;
+            }
+        }
+        match s.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let out = String::from_utf8_lossy(&out);
     let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
     Answer {
         status: head.get(9..12).and_then(|s| s.parse().ok()).unwrap_or(0),

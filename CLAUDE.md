@@ -1419,7 +1419,13 @@ router's `--region`) and sends a marked request of a tenant with a read
 replica there, and not living there, to it -- one header looked for on every
 forward, the lookup only for a marked one, and one more on the node, which
 reads the mark once a request in `serve_connection` -- bounded by the wait its
-`Fenec-After` asks and `--replica-timeout` (2 s) past it (`Pool::send_within`,
+`Fenec-After` asks, a `/_changes` page's own `wait` (`cdc::page_wait`;
+left out, a consumer's long poll near an idle tenant was cut at the
+timeout, its copy rested and the page asked again home for the whole
+wait, `wait=10000` answered in 17 s, which
+`a_marked_change_page_waiting_past_the_replica_timeout_is_answered_near`
+holds -- nothing else marked waits on a node: a held write is refused
+there) and `--replica-timeout` (2 s) past them (`Pool::send_within`,
 the connect, each write and each read of the head, the write timeout kept
 with a pooled connection as its read timeout is, so a request sets it on no
 connection a replica's read has not used): at the upstream timeout a node
@@ -2726,11 +2732,17 @@ counts the requests in the wait, what the tests wait on before the write
 comes: `tests/replication.rs` holds a stream, a stream resumed and a page
 on a replica whose follower is halted, each seen waiting, then served
 with the write, and 504 past the wait; `tests/token_first.rs` each refused
-at once with the header; fenec-shard's
+at once with the header, and a good token's stream answered by the wait
+(its `ask` reads to the end its head names, so a stream served instead
+fails rather than hangs on its keep-alives); fenec-shard's
 `a_marked_stream_after_a_write_waits_on_the_replica_or_goes_home` a
 stream and a page going home past the replica's wait, and a stream
-answered by the replica once it catches up, home cut off -- each failing
-with its wait taken out. A stream's head names where the database stood
+answered by the replica once it catches up, home cut off; Go's
+`TestAStreamAfterAWriteWaitsForItOnAReplica` and .NET's
+`AStreamAfterAWriteWaitsForItOnAReplica` a real replica's stream after a
+write it cannot hold -- its link to the primary through a proxy the test
+cuts -- answered 504, and seeded with it once healed -- each failing with
+its wait taken out. A stream's head names where the database stood
 as it opened, as an answer does: `Fenec-Seq`, the change its seed is at
 or after, and `Fenec-History` where the database has a history of its
 own -- read under the lock the shape is parsed under, no lock of its own

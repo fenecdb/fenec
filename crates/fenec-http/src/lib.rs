@@ -1540,9 +1540,7 @@ fn admit(
 /// Whether a `/_changes` read waits for a write (`wait`), holding its
 /// thread as a stream does.
 fn cdc_waits(req: &Request) -> bool {
-    req.query
-        .iter()
-        .any(|(k, v)| k == "wait" && v.trim().parse::<u64>().is_ok_and(|ms| ms > 0))
+    !cdc::page_wait(req).is_zero()
 }
 
 /// `GET /<name>/changes`

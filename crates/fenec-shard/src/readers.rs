@@ -458,7 +458,14 @@ impl Router {
 
     /// How long a read replica has to answer `req`: the wait its
     /// `Fenec-After` asks of the node -- `Fenec-Wait`, or the node's own
-    /// -- and [`crate::Config::replica_timeout`] past it.
+    /// -- and a `/_changes` page's own `wait` for a write after it, and
+    /// [`crate::Config::replica_timeout`] past both. The page's was left
+    /// out: a consumer's long poll near an idle tenant was cut at the
+    /// timeout, its copy rested as one that did not answer, and asked
+    /// again home for the whole wait -- `wait=10000` answered in 17 s, and
+    /// a consumer polling in a loop kept its copy rested. Nothing else a
+    /// marked request asks waits on the node: a held write is refused
+    /// there, and a stream's head comes once its `Fenec-After` is met.
     pub(crate) fn replica_within(&self, req: &Request) -> Duration {
         let waits = req.header("fenec-after").is_some().then(|| {
             req.header("fenec-wait")
@@ -466,7 +473,11 @@ impl Router {
                 .map_or(fenec_http::AFTER_WAIT, Duration::from_millis)
                 .min(fenec_http::AFTER_LONGEST)
         });
-        self.cfg.replica_timeout + waits.unwrap_or_default()
+        let page = match req.segments().get(2) {
+            Some(&"_changes") => fenec_http::cdc::page_wait(req),
+            _ => Duration::ZERO,
+        };
+        self.cfg.replica_timeout + waits.unwrap_or_default() + page
     }
 
     /// A marked read found `tenant` gone from its read replica's `node`:

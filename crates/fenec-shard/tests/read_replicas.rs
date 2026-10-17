@@ -1616,6 +1616,38 @@ fn a_marked_read_passes_a_read_replica_that_does_not_answer_by_its_bound() {
     w.links[2].heal();
 }
 
+/// A marked `/_changes` page waiting for a write past the replica timeout
+/// -- a consumer's long poll of an idle tenant -- is given its `wait`
+/// besides the timeout, and answered near: cut at the timeout, it rested
+/// the tenant's copy as one that did not answer and was asked again home
+/// for the whole wait. Home cut off from the router shows both: a page or
+/// a read sent home would be its 502, and the copy, rested for longer than
+/// the test, would send the read after it home.
+#[test]
+fn a_marked_change_page_waiting_past_the_replica_timeout_is_answered_near() {
+    let mut us = config(Some("us"), None, None);
+    us.replica_timeout = Duration::from_secs(1);
+    us.replica_rest = Duration::from_secs(600);
+    let w = OneDirectory::with_us("page-wait", false, us);
+    w.tenant("acme");
+    let a = write(w.us, "acme", r#"put notes {body: "a"}"#);
+    w.holds("acme", r#""a""#);
+    w.links[0].cut();
+    let (status, _, page) = request(
+        w.us,
+        "GET",
+        &format!("/t/acme/_changes?since={}&wait=2000", a.seq),
+        "",
+        &[("Fenec-Read", "replica")],
+    );
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page, "", "an idle tenant's page");
+    let (status, body) = marked(w.us, "acme", "get notes select body", None);
+    assert_eq!(status, 200, "the copy was let be: {body}");
+    assert!(body.contains(r#""a""#), "{body}");
+    w.links[0].heal();
+}
+
 /// A read replica's node without its file -- wiped, or the file deleted by
 /// hand -- answered a marked read with its 404, which the client took for
 /// the tenant's. The node says the tenant is absent, the router asks home,

@@ -326,28 +326,48 @@ public sealed class ClientTests(Servers servers)
         using var r = new FenecClient(replica);
         var rows = await r.After(w.Seq).QueryAsync($"get {name} select t");
         Assert.Equal("written", Assert.Single(rows).GetProperty("t").GetString());
-        // A stream after the write waits for it as the read does: seeded with it, never from before it.
-        w = await db.ExecAsync($"put {name} {{t: $1}}", ["streamed"]);
-        using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
-        {
-            var events = r.After(w.Seq).SubscribeAsync(name, [new("t", "eq.streamed")], cts.Token)
-                .GetAsyncEnumerator(cts.Token);
-            try
-            {
-                Assert.True(await events.MoveNextAsync());
-                var seed = events.Current;
-                Assert.Equal("seed", seed.Type);
-                Assert.Single(seed.Rows);
-                Assert.True(seed.Seq >= w.Seq);
-            }
-            finally
-            {
-                await cts.CancelAsync();
-                try { await events.DisposeAsync(); } catch (OperationCanceledException) { }
-            }
-        }
         var e = await Assert.ThrowsAsync<FenecException>(() => r.ExecAsync($"put {name} {{t: $1}}", ["refused"]));
         Assert.Equal(403, e.Status);
+    }
+
+    /// <summary>A stream sent after a write waits for it on a replica as a read does. Its link to the primary cut,
+    /// the replica cannot hold the write: the stream is answered by the wait, 504, never seeded from before it --
+    /// served at once, it was. Healed, it is seeded with the write. The client's part, a stream near going home on a
+    /// 504 with home's position taken (<c>SentHome</c>), is held by <see cref="ReadsTests"/> against a scripted
+    /// handler.</summary>
+    [Fact]
+    public async Task AStreamAfterAWriteWaitsForItOnAReplica()
+    {
+        using var link = new Link(servers.Primary);
+        var replica = servers.Serve("--file", Path.Combine(servers.Scratch, "held.fenec"),
+            "--replication-token", Servers.ReplToken, "--replica-of", link.Url, "--sync", "50");
+        using var db = Root();
+        var name = Fresh("held");
+        await db.ExecAsync($"create collection {name} (t text)");
+        var first = await db.ExecAsync($"put {name} {{t: $1}}", ["before"]);
+        using var r = new FenecClient(replica);
+        await r.WithWait(TimeSpan.FromSeconds(20)).After(first.Seq).QueryAsync($"get {name}");
+        link.Cut(true);
+        var w = await db.ExecAsync($"put {name} {{t: $1}}", ["after"]);
+        var e = await Assert.ThrowsAsync<FenecException>(async () =>
+        {
+            await foreach (var _ in r.WithWait(TimeSpan.FromMilliseconds(300)).After(w.Seq).SubscribeAsync(name))
+                break;
+        });
+        Assert.Equal(504, e.Status);
+        link.Cut(false);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        Event? seed = null;
+        await foreach (var ev in r.WithWait(TimeSpan.FromSeconds(20)).After(w.Seq)
+                           .SubscribeAsync(name, null, cts.Token))
+        {
+            seed = ev;
+            break;
+        }
+        Assert.NotNull(seed);
+        Assert.Equal("seed", seed.Type);
+        Assert.Equal(2, seed.Rows.Count);
+        Assert.True(seed.Seq >= w.Seq);
     }
 
     [Fact]
