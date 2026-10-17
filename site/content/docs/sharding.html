@@ -1661,15 +1661,20 @@ breaks off before its end, the router reading a replica's answer whole
 before any of it goes to the client (a stream's goes on as it comes). A
 replica that did not answer is let be for 5 s, its reads going home at once
 meanwhile: the node's, every tenant's, where it was not reached or took no
-whole request; the tenant's copy alone where it took one and did not answer
-in time, since its answer comes once the query has run and one slow read is
-that read's, not the node's. A node that takes connections and answers
-nothing — stopped, deadlocked, waiting on its disk — looks like a slow read
-to each tenant, so once a second tenant's copy there is let be, the node is
-too: each tenant would otherwise wait out the timeout once every 5 s for as
-long as it hung. One tenant's slow reads, however many, never let the node
-be. <code>fenec_router_replica_reads_total</code> counts marked reads by
-where they were answered: <code>outcome="replica"</code>,
+whole request. Where it took one and did not answer in time, the tenant's
+copy is let be at once and the read goes home, while the router asks the
+node's <code>/_health</code> — answered before any token, lock or routing —
+on a connection of its own, within 500 ms (<code>--replica-timeout</code>
+where shorter), one question a node at a time. Answered, the copy alone is
+let be, since its answer comes once the query has run and a slow read is
+that read's, not the node's: no tenant's slow reads, nor several tenants',
+let the node be. Not answered, the node is too — it takes connections and
+answers nothing, stopped or deadlocked — and no other tenant waits it
+out. A node that answers its health while every query on it stalls — its
+disk stalled under the queries — costs each tenant with a copy there one
+timeout every 5 s for as long as that lasts.
+<code>fenec_router_replica_reads_total</code> counts marked reads by where
+they were answered: <code>outcome="replica"</code>,
 <code>"fallback"</code>, <code>"home"</code>. Every server runs a marked
 request read-only on every route — a statement, REST, <code>/batch</code>, an
 MCP tool, a change-stream consumer's commit — home as much as a replica, so a
