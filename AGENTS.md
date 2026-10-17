@@ -5827,6 +5827,35 @@ watcher thread, prototyped in the review, was worse; the head read in
 slices with the client looked at between was left on its reasoning, every
 one of a thousand held claims woken each slice for nothing and a client's
 end seen a slice late.
+A node's answer is read into a buffer of the length it says, allocated
+so its failure is an error (`zeroed`: `alloc_zeroed`, the allocation
+`vec![0u8; len]` makes, the system's zero pages taken up as the bytes
+reach them, null a 502), by `read_body`, `read_body_kept` and
+`read_body_by` alike: through `vec!`, a node -- buggy, or not the
+router's -- declaring a petabyte and sending three bytes aborted the
+router on the allocation's failure, every tenant's clients with it, and is
+a 502 now, the router answering on (`tests/upstream.rs`'s stand-in node,
+and each reader in the unit tests, both aborting without it). A buffer
+grown as the bytes came, from a mebibyte fourfold, copied what came at
+each growth -- a body of 4 MiB and a byte 596 us against 440 in the
+review's measure, every forwarded answer past a mebibyte slower -- and a
+node sending without end
+under such a length met a growth whose allocation aborted all the same;
+one of 64 MiB first was as fast, past which the growth was the same; a
+bound on the length would refuse a tenant's image on its way through a
+move. So the length is believed as far as the system lends it: macOS
+refuses a petabyte, the refusal the 502, and Linux, overcommitting, lends
+it -- two pages of it taken up in the review's Docker run -- the 502 then
+the answer broken off at its three bytes; either way a lying length costs
+the pages its bytes reach, and a node that keeps sending grows the
+router's memory as any large answer does, as it did before. It costs
+what `vec!` did: through `Pool::call` off loopback, eight runs a side in
+ABBA turns, 200 B 20.3 us either way, 64 KiB 28.1 against 28.2, 1.5 MiB
+126.4 against 126.1, 4 000 000 B 332 against 327 (325-338 and 324-336),
+4 MiB and a byte 350 against 350, 16 MiB and a byte 2.96 ms either way, 64
+MiB 12.7 against 12.5 (12.65-12.75 and 10.9-12.7). A query across tenants
+refuses a declared length past `--fanout-max-bytes` before it adds it to
+the query's sum, which one near `usize::MAX` overflowed.
 
 **A query across tenants is the router's admin's, merged by what the
 request says** (`fenec-shard/src/fanout.rs`, `POST /_shard/query`). An
