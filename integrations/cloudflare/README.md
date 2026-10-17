@@ -255,7 +255,9 @@ npx wrangler deploy --config entry/wrangler.jsonc
   the entry takes off the answer. A tenant not heard goes to the region of
   the client's continent (`continents`) or `DEFAULT_REGION`, whose router
   relays it home once -- and on to the other regions in turn where that
-  one's routers do not answer, since any router relays a tenant home. A
+  one's routers do not answer, or answer a read 5xx naming no home, since
+  any router relays a tenant home. A region whose routers failed is asked
+  last by a write until one answers again. A
   tenant moved to another region is relayed by the router of the one it
   left, and the answer names the new home: a stale home costs a hop, not
   an error. An isolate keeps 50 000 homes (`HOMES`) and shares each it
@@ -280,7 +282,8 @@ npx wrangler deploy --config entry/wrangler.jsonc
   `/_shard/` goes to the routers `ADMIN` names where it is set, and
   everything else is a 404.
 - **Failure**: a region's routers are tried from the one that answered
-  last. An answer without the router's `X-Request-Id` is not the router's.
+  last. An answer without the router's mark (`Fenec-Shard: 1`) is not the
+  router's.
   One Cloudflare could not reach (521, 523, 525, 526, 530) is passed over
   for any request; one that may have reached it -- a failed fetch,
   Cloudflare's 520, 522 and 524, a tunnel connector's 502 -- only for a

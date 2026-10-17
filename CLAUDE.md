@@ -1008,10 +1008,15 @@ name). A tenant not heard goes to the region of the client's continent
 relayed home once, and its next request goes home; where that region's
 routers fail, it goes on to the others (`guesses`), since any router
 relays a tenant home and only the home's places it on a node -- a known
-home is never left (a 503), and a region found down is asked last for 10 s
-(`DOWN_MS`): a write that may have reached a dead guess is not resent, and
-without it every write of a tenant not heard was a 502 while the default
-region was down. A move across leaves the old region's router relaying
+home is never left (a 503). A region whose routers failed is asked last:
+by a read or a keyed write for 10 s (`DOWN_MS`), by any other write until
+one of its routers answers -- a write that may have reached a dead guess is
+not resent, and dropped from the end after 10 s it was a 502 for an unrun
+write every 10 s an isolate while the default region stayed down. A
+guessed region's router answering 5xx naming no home (cut off from the
+home's region) sends a read on to the next region; the placing router's own
+502 for a node it could not reach names the home (`region::homed`), and is
+the answer. A move across leaves the old region's router relaying
 the tenant and the answer naming the new home, a hop and never an error.
 Rejected: the global router asked at each miss (its `--token`, which moves
 and deletes every tenant, in the Worker, a round trip to its region, and
@@ -1021,10 +1026,11 @@ write it). An isolate keeps 50 000 homes (`HOMES`), forgotten first heard
 first -- by use it was a delete and a set every request -- and shares each
 it learns through the colo's Cache API (`waitUntil`, read only on an
 isolate's miss; nothing on `workers.dev`). Asked for, so every other
-client's answer is the bytes it was: not asked, the router's added p50 was
-24.15 us against main's 24.1 (23.5-24.3 and 23.7-24.5, six runs a side in
-ABBA turns, `make shard-bench ARGS=latency`), and asked, a router answered
-in 82-83 us p50 against 81. A path is judged as the router and the node read
+client is told no home: not asked, the router's added p50 was
+23.75 us against origin/main's 23.9 with its mark on every answer
+(23.4-24.1 and 23.7-24.0, six runs a side in ABBA turns, `make shard-bench
+ARGS=latency`; 24.15 against 24.1 before the mark), and asked, a router
+answered in 82-83 us p50 against 81. A path is judged as the router and the node read
 it, decoded as fenec-http decodes one (`percentDecode`, `segments`):
 WHATWG's URL leaves `%5F` and `%2F` encoded, and `/t/acme/%5Freplication`
 with a tenant's replication token was its whole replication stream through
@@ -1060,8 +1066,12 @@ with no `CORS` logs it once: its own 503s would read as the network
 failing. Only `/t/<tenant>/` is served: `/_shard/` where `ADMIN` names the
 global router, everything else and a tenant's `/_replication` a 404. A
 region's routers are tried from the one that answered last; every answer a
-router writes carries `X-Request-Id`, and one without it is not the
-router's (`judged`). Cloudflare's 521/523/525/526/530 never reached one, so
+router writes carries its mark (`Fenec-Shard: 1`, `region::SHARD_HEADER`,
+written by `Router::cors` and `forward`, a relayed answer's the relaying
+router's alone), and one without it is not the router's (`judged`) -- not
+`X-Request-Id`, which a load balancer may write on its own 502, so that a
+dead router behind one looked like the router's answer and its standby was
+never tried. Cloudflare's 521/523/525/526/530 never reached one, so
 any request goes on; one that may have -- a thrown fetch (workerd says
 `Network connection lost.` of a connection refused and of one reset after
 the request alike, probed), Cloudflare's 520/522/524 (its 522 page counts a

@@ -57,11 +57,18 @@ export const HOMES = 50_000;
 export const BUFFER_AT = 1 << 20;
 
 /**
- * How long a region whose routers all failed is asked last for a tenant
- * whose home is not known: any region's router relays it home, and a
- * request sent to one that may have run it cannot be sent again.
+ * How long a region whose routers all failed is asked last by a request
+ * that may go to two -- a read, a keyed write -- for a tenant whose home is
+ * not known; past it such a request asks the region first again, and goes
+ * on where it still fails. Any other request asks it last until one of its
+ * routers answers, whatever the time: one that may have reached a router
+ * cannot be sent again, so sent first to a region still down it was a 502
+ * though it never ran (`DOWN_MS` in the environment sets it).
  */
 export const DOWN_MS = 10_000;
+
+/** The mark every answer a router writes carries (`fenec-shard`'s `region::SHARD_HEADER`). */
+export const SHARD = 'fenec-shard';
 
 /**
  * Answers Cloudflare gives a Worker's fetch where the origin was never
@@ -74,6 +81,11 @@ const UNREACHED = new Set([521, 523, 525, 526, 530]);
 
 /** Methods a router may be sent twice (Go's net/http rule, the router's own towards a node). */
 const REPEATABLE = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/** Whether `request` may reach a router twice: a method that reads, or a key that makes a write once. */
+function repeatable(request) {
+  return REPEATABLE.has(request.method) || request.headers.has('idempotency-key');
+}
 
 /**
  * Request headers never sent on: hop by hop (RFC 9110 7.6.1), what fetch
@@ -172,6 +184,7 @@ function origin(url, what) {
  * - `HOMES`: how many tenants' homes an isolate keeps (50 000).
  * - `HOMES_CACHE`: `off` keeps them in the isolate alone, not shared with
  *   the colo's other isolates through the Cache API.
+ * - `DOWN_MS`: {@link DOWN_MS}.
  * - `ENTRY_TOKEN` (a secret): the key of the client's mark ({@link CLIENT});
  *   without it no client is named.
  */
@@ -192,6 +205,8 @@ export function configure(env) {
   const admin = parsed(env.ADMIN, 'ADMIN');
   const homes = env.HOMES === undefined || env.HOMES === '' ? HOMES : Number(env.HOMES);
   if (!Number.isInteger(homes) || homes < 0) throw new Error(`HOMES is a count of tenants: ${env.HOMES}`);
+  const downMs = env.DOWN_MS === undefined || env.DOWN_MS === '' ? DOWN_MS : Number(env.DOWN_MS);
+  if (!Number.isInteger(downMs) || downMs < 0) throw new Error(`DOWN_MS is milliseconds: ${env.DOWN_MS}`);
   return {
     regions,
     byContinent,
@@ -200,6 +215,7 @@ export function configure(env) {
     admin: admin ? { name: 'global', routers: [].concat(admin).map((u) => origin(u, 'ADMIN')) } : null,
     homes,
     share: env.HOMES_CACHE !== 'off',
+    downMs,
     token: env.ENTRY_TOKEN || null,
     // The token's HMAC key, imported at the first request naming a client.
     key: null,
@@ -430,7 +446,7 @@ async function prepare(request, cfg) {
       again = false;
     }
   }
-  return { method, headers, body, again, repeatable: REPEATABLE.has(method) || headers.has('idempotency-key') };
+  return { method, headers, body, again, repeatable: repeatable(request) };
 }
 
 /**
@@ -438,12 +454,14 @@ async function prepare(request, cfg) {
  * Cloudflare gives for a router never reached (`unrun`), or one something
  * else in front of the router gave -- a tunnel's connector that could not
  * reach it answers 502, Cloudflare 520, 522 or 524 -- which may have
- * reached it (`unknown`). Every answer a fenecdb router writes, its own
- * and those it forwards, carries `X-Request-Id`; none of those does.
+ * reached it (`unknown`). Every answer a router writes, its own and those
+ * it forwards, carries its mark ({@link SHARD}), which nothing else in
+ * front of it writes: `X-Request-Id`, which every answer of a router
+ * carries too, a load balancer may write on its own 502.
  */
 export function judged(answer) {
   if (UNREACHED.has(answer.status)) return 'unrun';
-  if (answer.status >= 500 && !answer.headers.has('x-request-id')) return 'unknown';
+  if (answer.status >= 500 && !answer.headers.has(SHARD)) return 'unknown';
   return 'router';
 }
 
@@ -453,11 +471,12 @@ export function judged(answer) {
  * running it twice does no harm: `{answer}`, `{gone}` where the client
  * went, or why none answered -- `fail` `resend` where the request may go to
  * another region, `ran` where it may have run, `spent` where its body
- * cannot go again. What went wrong with a router is logged with the router
- * named, and told the client without it: the routers' hostnames are the
- * operator's.
+ * cannot go again. `guess`: the region is one the tenant's home is guessed
+ * to be reached through, and another follows it. What went wrong with a
+ * router is logged with the router named, and told the client without it:
+ * the routers' hostnames are the operator's.
  */
-async function toRegion(request, url, region, sent, state) {
+async function toRegion(request, url, region, sent, state, guess) {
   const tries = region.routers.length;
   const start = (state.answered.get(region.name) ?? 0) % tries;
   let why = '';
@@ -485,6 +504,14 @@ async function toRegion(request, url, region, sent, state) {
       if (kind === 'router') {
         state.answered.set(region.name, i);
         state.down.delete(region.name);
+        // A router that could not reach the tenant's home -- it relays to
+        // another region, cut off from this one -- answers 5xx naming no
+        // home; a read goes on to the next region, whose router may reach
+        // it. The home's own failure names the home, and is the answer.
+        if (guess && answer.status >= 500 && !answer.headers.has(HOME) && sent.repeatable && sent.again) {
+          console.warn(`region ${region.name}: ${router}: answered ${answer.status}, naming no home`);
+          return { fail: 'resend', why: `answered ${answer.status}`, answer };
+        }
         return { answer };
       }
       why = `answered ${answer.status}, not by the router`;
@@ -529,17 +556,33 @@ async function send(request, url, regions, cfg, state) {
     return own(cfg, request, 502, `the entry could not read the request: ${e?.message ?? e}`);
   }
   let why = '';
-  for (const region of regions) {
-    const r = await toRegion(request, url, region, sent, state);
+  // A router's answer a guessed region gave and the next was asked past:
+  // the client's, where no region does better.
+  let kept = null;
+  for (let n = 0; n < regions.length; n++) {
+    const region = regions[n];
+    const r = await toRegion(request, url, region, sent, state, n + 1 < regions.length);
     // Gone: nobody reads what this says.
     if (r.gone) return new Response(null, { status: 499 });
-    if (r.answer) return r.answer;
+    if (r.answer && !r.fail) {
+      await kept?.body?.cancel().catch(() => {});
+      return r.answer;
+    }
+    if (r.answer) {
+      await kept?.body?.cancel().catch(() => {});
+      kept = r.answer;
+    }
     why = r.why;
     if (r.fail === 'ran') {
+      await kept?.body?.cancel().catch(() => {});
       return own(cfg, request, 502, `region \`${region.name}\`'s router did not answer, and may have run the request (${why}): it is not sent again`);
     }
-    if (r.fail === 'spent') return own(cfg, request, 503, `region \`${region.name}\`'s routers did not answer (${why})`, 1);
+    if (r.fail === 'spent') {
+      await kept?.body?.cancel().catch(() => {});
+      return own(cfg, request, 503, `region \`${region.name}\`'s routers did not answer (${why})`, 1);
+    }
   }
+  if (kept) return kept;
   const names = regions.map((r) => `\`${r.name}\``).join(', ');
   return own(cfg, request, 503, `region ${names}'s routers did not answer (${why})`, 1);
 }
@@ -555,14 +598,17 @@ function passed(answer) {
  * The regions a tenant whose home is not known is sent to, in turn: the
  * client's continent's or the default first, then the rest -- any region's
  * router relays a tenant home, and only the home's places it on a node, so
- * no write lands anywhere else -- each found down in the last {@link
- * DOWN_MS} asked after the others.
+ * no write lands anywhere else -- each whose routers last failed asked
+ * after the others: by a request that may reach two routers for {@link
+ * DOWN_MS} after the failure, by any other until one of its routers
+ * answers.
  */
 function guesses(cfg, request, state) {
   const first = cfg.byContinent.get(request.cf?.continent) ?? cfg.fallback;
   const all = [first, ...[...cfg.regions.values()].filter((r) => r !== first)];
   const now = Date.now();
-  const isDown = (r) => now - (state.down.get(r.name) ?? -Infinity) < DOWN_MS;
+  const again = repeatable(request);
+  const isDown = (r) => state.down.has(r.name) && (!again || now - state.down.get(r.name) < cfg.downMs);
   return [...all.filter((r) => !isDown(r)), ...all.filter(isDown)];
 }
 

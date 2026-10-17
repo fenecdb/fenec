@@ -303,13 +303,18 @@ fn home(port: u16, tenant: &str, ask: bool) -> (u16, Option<String>) {
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
     let head = out.split_once("\r\n\r\n").map_or(out.as_str(), |(h, _)| h);
-    let named: Vec<&str> = head
-        .lines()
-        .filter_map(|l| l.split_once(':'))
-        .filter(|(k, _)| k.eq_ignore_ascii_case("fenec-home"))
-        .map(|(_, v)| v.trim())
-        .collect();
+    let values = |name: &str| -> Vec<&str> {
+        head.lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim())
+            .collect()
+    };
+    let named = values("fenec-home");
     assert!(named.len() <= 1, "one home named at most: {head}");
+    // Every answer a router writes carries its mark, once: a relayed one
+    // the relaying router's.
+    assert_eq!(values("fenec-shard"), ["1"], "{head}");
     (
         out[9..12].parse().unwrap(),
         named.first().map(|v| v.to_string()),
@@ -641,9 +646,11 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
 /// A request asking for its tenant's home (`Fenec-Home`) is told the
 /// region of the node it reached, by whichever router it was sent to --
 /// the one placing the tenant, or one relaying it there, which names
-/// nothing of its own -- and after a move across, the region it went to.
-/// One that does not ask is told nothing: the global entry
+/// nothing of its own -- and after a move across, the region it went to;
+/// and so is it where the placing router cannot reach the node. One that
+/// does not ask is told nothing: the global entry
 /// (integrations/cloudflare/entry) learns where to send a tenant from it.
+/// Every answer carries the router's mark (`Fenec-Shard`).
 #[test]
 fn a_tenants_home_is_named_to_a_request_asking_for_it() {
     let w = World::new("home");
@@ -676,6 +683,20 @@ fn a_tenants_home_is_named_to_a_request_asking_for_it() {
     });
     // A tenant no directory holds: the router's own 404, naming nothing.
     assert_eq!(home(w.global, "nobody", true), (404, None));
+    // us's nodes out of its router's reach: its 502 names the home it
+    // could not reach, through the global router too -- a home's answer,
+    // which the entry tries no other region after.
+    for link in &w.us_links {
+        link.cut();
+    }
+    assert_eq!(home(w.us, "acme", true), (502, us.clone()));
+    assert_eq!(home(w.global, "acme", true), (502, us.clone()));
+    for link in &w.us_links {
+        link.heal();
+    }
+    until("us reaches its nodes again", || {
+        home(w.us, "acme", true) == (200, us.clone())
+    });
 
     // acme moved across to eu: every router names eu from then on.
     let (status, body) = shard(

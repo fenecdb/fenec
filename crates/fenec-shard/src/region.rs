@@ -63,9 +63,30 @@ pub const GLOBAL_HEADER: &str = "fenec-global";
 /// region it last heard for the tenant, and learns the region from this:
 /// a tenant it has not seen, or one moved across regions since, costs the
 /// one relay a router makes, and its next request goes home. Asked for,
-/// so a client that does not ask is answered the bytes it was; and never
-/// named by a relaying router, whose own region is not the tenant's.
+/// so a client that does not ask is told no home; never named by a
+/// relaying router, whose own region is not the tenant's; and named on the
+/// placing router's own 502 for a node it cannot reach ([`homed`]).
 pub const HOME_HEADER: &str = "fenec-home";
+
+/// The mark on every answer a router writes, its own and those it
+/// forwards (`Fenec-Shard: 1`; one it relays carries the relaying
+/// router's, the other router's dropped): a proxy in front of the routers
+/// -- the global entry -- tells a router's answer from one something
+/// between them wrote, a tunnel's connector answering 502 for a router it
+/// cannot reach, and sends a request a router never answered to the next.
+/// `X-Request-Id` could not tell them apart: a load balancer may write its
+/// own on its own 502.
+pub const SHARD_HEADER: &str = "Fenec-Shard";
+
+/// `resp` naming the tenant's home where it is known: a placing router's
+/// own failure -- a node it could not reach -- is the home's answer, which
+/// the entry passes on rather than try another region.
+pub(crate) fn homed(resp: Response, home: &Option<String>) -> Response {
+    match home {
+        Some(region) => resp.header("Fenec-Home", region),
+        None => resp,
+    }
+}
 
 /// The region to name in an answer's [`HOME_HEADER`]: the placing node's,
 /// where `req` asks and the node is in one -- the unnamed region is every

@@ -1361,14 +1361,18 @@ the entry wants a custom domain). A tenant heard nowhere goes to the region
 <code>request.cf.continent</code>), else <code>DEFAULT_REGION</code>, then to
 each other region in turn where one's routers cannot be reached — any
 region's router relays the tenant home, and only the home's router places it
-on a node, so no write lands anywhere else; a region found down is asked last
-for ten seconds. Asking the global router at each miss would have needed its
+on a node, so no write lands anywhere else. A region whose routers failed is
+asked last: by a read or a keyed write for ten seconds, then first again; by
+any other write until one of its routers answers, since a write that may have
+reached a router cannot be sent to another. A guessed region's router that
+answers 5xx naming no home — cut off from the home's region, say — sends a
+read on to the next region too; a write it answered is its answer. Asking the global router at each miss would have needed its
 <code>--token</code>, which moves and deletes every tenant, in the Worker, a
 round trip to the global router's region, and would have turned every unknown
 name a client tries into a question for that one router; a table in Workers
 KV is read eventually consistently and billed by the read, and still needs
 something to write it. A router answers the header only to a request asking
-for it, so every other client's answers are the bytes they were; a router
+for it, so no other client is told one; a router
 from before it answers none, and the entry keeps sending such a tenant to the
 nearest region, relayed each time.</p>
 
@@ -1440,8 +1444,10 @@ refused token behind the entry waits by Cloudflare's address.</p>
 
 <p><b>When a router cannot be reached.</b> A region's routers are tried in
 turn from the one that answered last. Every answer a router writes carries
-<code>X-Request-Id</code>; an answer at a router's URL without one is not the
-router's. Cloudflare's own answers for an origin it never reached (521, 523,
+its mark, <code>Fenec-Shard: 1</code>, and an answer at a router's URL
+without it is not the router's — not <code>X-Request-Id</code>, which a
+router's answers carry too and a load balancer may write on its own 502.
+Cloudflare's own answers for an origin it never reached (521, 523,
 525, 526, and 530, a tunnel with no connector) go on to the next router
 whatever the request. One that may have reached the router — a
 <code>fetch</code> that fails, which workerd says alike of a connection
@@ -1455,7 +1461,8 @@ for a <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code> or a request
 carrying an <code>Idempotency-Key</code>, as the router's own rule towards a
 node; any other is a <code>502</code> saying it may have run, and the
 region's next request goes to the next router. A router's own
-<code>502</code> — a node it could not reach — is its answer, passed on. A
+<code>502</code> — a node it could not reach — names the home and is its
+answer, passed on, no other region tried. A
 body up to a mebibyte is kept for the next router; a longer one is streamed
 to one, its length kept (a router takes no chunked body), and one sent with
 no length past a mebibyte is refused with <code>411</code>: read whole, it
@@ -1477,9 +1484,9 @@ what Cloudflare adds: there a client reaches its nearest colo and the router
 is a region away, the leg it would pay to reach the router itself; a home
 not heard costs a relay between regions, where the cache is read inside the
 colo. A router asked for the home answered in 82 to 83 µs p50 against 81 not
-asked; not asked, its added p50 was 24.15 µs against main's 24.1 (23.5 to
-24.3 and 23.7 to 24.5, six runs a side in ABBA turns, <code>make shard-bench
-ARGS=latency</code>).</p>
+asked; not asked, its mark on every answer, its added p50 was 23.75 µs
+against main's 23.9 (23.4 to 24.1 and 23.7 to 24.0, six runs a side in ABBA
+turns, <code>make shard-bench ARGS=latency</code>).</p>
 </details>
 
 <h2 id="tokens">Tokens</h2>
