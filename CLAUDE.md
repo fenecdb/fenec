@@ -1174,26 +1174,46 @@ another lineage takes nothing from it and deletes itself, file and
 `Tenants::shared`, `fenec_copies_refused_total`) -- stopped and kept, it
 held the deleted tenant's rows on the node for anyone to read -- and a look
 finding a replica's tenant of another lineage takes it off
-(`another_lineage`). Deleting is safe where a copy is told a lineage at
-all: only a read replica is, never promoted, and a tenant's own replica and
-a node's standby copies are told none; a copy that never had its first
-image holds nothing to lose. A tenant's file replaced by hand with another
-lineage's has its read replicas refuse it and go, made again by each check
-and taking nothing, until the tenant is made again through the router,
-which records the new file's lineage -- the directory still names the old
-one, and a copy keeping the old rows meanwhile would be the leak this
-closes. A tenant with no lineage known --
-made before they were kept -- has it asked of its node at the next check
-(`want_lineage`, `backfill_lineages`, `GET /_admin/tenants/<t>/lineage`,
-wanted by a look over a tenant of this directory and by a placement asked
-of one), and each of its read replicas recorded with none is bound once
-its copy's node says the copy is of it, the copy told with a follow of the
-node it follows, and taken off where the copy is another's (`bind_reader`).
-A promotion changes nothing, on any build: the lineage is the top half of
-the history's first id, which every fork keeps, a node from before
-lineages' too -- the fork's own id, which only `fork_id` keeps under it,
-taken for it would have bound every replica to a lineage a node from
-before drew at random. Mixed versions protect less and
+(`another_lineage`). The delete is the copy's that refused alone:
+`delete_refused` asks, under the slot's lock it deletes under, that the
+tenant is still open as the open whose follower refused (`Tenant::opened`),
+following, its follower refusing (`Said::Refused` names the lineage) and
+`.follows` naming that lineage -- asked of `.follows` before the slot, a
+promotion of the copy or a move installing the tenant there landing
+between had the primary deleted (`tenants::refusals` holds a refusal
+there for a test). Only a read replica is told a lineage, and a copy that
+never had its first image holds nothing to lose. A primary of another
+lineage than the directory's, where the directory places the tenant, is
+the tenant -- every read and write of it goes there: a copy that never
+took its first image promoted (a lineage of its own: `fork_id` keeps the
+first id's top half only where there is a first id), an older file
+restored, a file put in place by hand. A failover records the lineage the
+promotion answers (`promoted`, `"lineage"` of `.../promote`), and a read
+replica's copy lost with nothing else changed has the primary's node
+asked first (`verify_lineage`, through `verify_primary`; another region's
+router or the global router asked by `POST /_shard/placements {verify}`):
+the directory takes the node's word, the lineage before kept as one the
+tenant was (`succeed_lineage`, `lineages.was`), and a replica bound to one
+it was is bound to the new one rather than taken off (`bound_before`).
+Bound to the old, the copy refused, deleted itself and was made again by
+every look, for good. A tenant made again through a router keeps no
+`was`: its create records a lineage of its own. A copy lost three times
+in a row anyway -- refusing a primary whose lineage the router cannot
+learn -- is made again no more (`REMAKES`, `may_remake`): said once,
+`"given_up": true` in its list and `fenec_router_read_replicas_given_up`,
+until its primary or its lineage changes or an operator places it again.
+A tenant with no lineage known -- made before they were kept -- has it
+asked of its node at the next check (`want_lineage`, `backfill_lineages`,
+`GET /_admin/tenants/<t>/lineage`, wanted by a look over a tenant of this
+directory and by a placement asked of one), recorded only where none is
+yet, asked under the write guard that records it -- a create meanwhile
+recorded the new tenant's lineage, which the answer of the one before
+wrote over. Each of its read replicas recorded with none is bound once its
+copy's node says the copy is of it and holds its primary's history
+(`"ready"`: a copy not caught up is of a new file's lineage, and was taken
+off as another tenant's as it caught up), the copy told with a follow of
+the node it follows, and taken off where the copy is another's
+(`bind_reader`). Mixed versions protect less and
 break nothing: a node from before lineages ignores `"lineage"` and has no
 `lineage` endpoint, a router from before them ignores `lineages`, and no
 copy refuses on their word. Lineages are kept in the directory's maps
@@ -1390,9 +1410,15 @@ again taken off where its trace was let go of by hand, a trace of a name no
 tenant holds refused, a look's worker pointing a replica at the primary as
 it reaches it (the parking proxy holding one tenant's `follow` as the other
 moves), a copy refusing another tenant of its name deleting itself (an
-orphan told its lineage by hand, and a `?forget`'s), a tenant and its read
-replica from before lineages bound to one and the copy then refusing the
-name made again behind the router's back, a worker asking a region for its
+orphan told its lineage by hand, and a `?forget`'s), a refused copy
+promoted or installed anew while its delete is held kept, a tenant and its
+read replica from before lineages bound to one, a replica not caught up
+bound once it is (its stream parked), a lineage backfilled late writing
+over none recorded since (the node's answer held: the proxy holds answers
+too), a replica following a primary promoted from a standby that never
+synced -- its copy refusing nothing -- and one following its tenant's file
+put in place by hand, one whose copy keeps refusing given up on (the
+primary's lineage asked and never answered), a worker asking a region for its
 replicas' primaries at once (at most one call names one tenant alone; the proxy
 records what it reads while parking), a create asking only the regions that
 may keep a replica of its name -- one out of reach refusing those names

@@ -100,6 +100,13 @@ static FANOUT_TENANTS: [AtomicU64; 2] = [ZERO; 2];
 
 /// Reads marked for a replica (`Fenec-Read: replica`), by [`ReplicaRead`].
 static REPLICA_READS: [AtomicU64; 3] = [ZERO; 3];
+static GIVEN_UP: AtomicI64 = AtomicI64::new(0);
+
+/// A read replica given up on (`1`), or let go of (`-1`): see
+/// `fenec_router_read_replicas_given_up`.
+pub fn given_up(by: i64) {
+    GIVEN_UP.fetch_add(by, Ordering::Relaxed);
+}
 
 /// Where a read its client marked for a replica was answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +360,16 @@ pub fn counters(out: &mut Text) {
             REPLICA_READS[i].load(Ordering::Relaxed),
         );
     }
+    out.family(
+        "fenec_router_read_replicas_given_up",
+        "gauge",
+        "Read replicas whose copy was lost and made again three times in a row -- it refuses its primary, of a lineage the router could not learn -- and is made again no more: placed again by an operator.",
+    );
+    out.sample(
+        "fenec_router_read_replicas_given_up",
+        &[],
+        GIVEN_UP.load(Ordering::Relaxed).max(0) as u64,
+    );
     out.family(
         "fenec_router_connections",
         "gauge",

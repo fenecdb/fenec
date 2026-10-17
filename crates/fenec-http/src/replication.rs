@@ -1521,9 +1521,16 @@ impl Receiver {
 
 /// A replica's side: connects to the primary, applies what it is sent, and
 /// connects again when the stream ends -- until it is promoted.
-/// What a follower tells of each hello: taken (`true`), or refused as
-/// another tenant's (`false`).
-type Hello = Box<dyn Fn(bool) + Send + Sync>;
+/// What a follower tells of each hello.
+pub enum Said {
+    /// Taken: the replica holds a prefix of the primary's history.
+    Taken,
+    /// Refused as another tenant's: the primary is not of `expected`, the
+    /// lineage this copy was told it follows.
+    Refused { expected: u32 },
+}
+
+type Hello = Box<dyn Fn(Said) + Send + Sync>;
 
 pub struct Follower {
     upstream: Upstream,
@@ -1540,9 +1547,9 @@ pub struct Follower {
     /// Told each time the primary has said hello and the replica holds a
     /// prefix of its history -- its image adopted, or its place in that
     /// history found: a tenant's read replica answers marked reads from
-    /// then on ([`crate::tenants::Tenant::ready`]) -- with `true`; with
-    /// `false` where the primary is of another lineage than the one this
-    /// copy was told it follows, and refused.
+    /// then on ([`crate::tenants::Tenant::ready`]) -- and where the primary
+    /// is of another lineage than the one this copy was told it follows,
+    /// and refused ([`Said`]).
     hello: Mutex<Option<Hello>>,
     /// The lineage the primary must be of ([`Follower::expect_lineage`]):
     /// another's is a tenant made again under the name, whose image this
@@ -1589,9 +1596,8 @@ impl Follower {
     }
 
     /// Has `f` called each time the primary says hello and the replica
-    /// holds a prefix of its history, before any of its writes is applied
-    /// (`true`), and where the primary is refused as of another lineage
-    /// (`false`).
+    /// holds a prefix of its history, before any of its writes is applied,
+    /// and where the primary is refused as of another lineage.
     pub fn on_hello(&self, f: Hello) {
         *lock(&self.hello) = Some(f);
     }
@@ -1695,7 +1701,7 @@ impl Follower {
             if theirs != Some(want) {
                 self.refused.store(true, Ordering::SeqCst);
                 if let Some(hello) = lock(&self.hello).as_ref() {
-                    hello(false);
+                    hello(Said::Refused { expected: want });
                 }
                 return Err(io::Error::other(format!(
                     "the primary is of lineage {}, not {}: another tenant of the name, which \
@@ -1739,7 +1745,7 @@ impl Follower {
             st.error = None;
         }
         if let Some(hello) = lock(&self.hello).as_ref() {
-            hello(true);
+            hello(Said::Taken);
         }
 
         loop {

@@ -85,9 +85,13 @@ const SCHEMA: [&str; 10] = [
     // Each tenant's lineage, as its node said when it made the tenant or
     // took its image in: the top half of its history's first id, 8 hex
     // digits, which a failover and a move keep and a tenant made again
-    // under the name does not. Its read replicas are bound to it. Read
-    // from the database where asked, as `traces` is.
-    "create collection if not exists lineages (tenant text @hash, lineage text)",
+    // under the name does not. Its read replicas are bound to it. `was`
+    // the lineages it succeeded, space-separated: where the tenant's
+    // primary came to be of another -- promoted from a copy that never
+    // took its first image, an older file restored, a file put in its
+    // place by hand -- the primary is the tenant, and the replicas bound to
+    // one it was are pointed at it, not taken off as another tenant's.
+    "create collection if not exists lineages (tenant text @hash, lineage text, was text)",
 ];
 
 /// The fields `nodes` took after directories were first written, added to
@@ -103,6 +107,25 @@ const NODE_FIELDS: [&str; 2] = ["region", "zone"];
 /// select failed with the field not found, which read as an empty
 /// directory -- every read replica record forgotten.
 const READER_FIELDS: [&str; 1] = ["lineage"];
+
+/// A tenant's lineage, and the ones it succeeded, oldest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Lineage {
+    pub now: String,
+    pub was: Vec<String>,
+}
+
+impl Lineage {
+    fn of(row: &[Value]) -> Lineage {
+        Lineage {
+            now: text(&row[1]),
+            was: match row.get(2) {
+                Some(Value::Text(w)) => w.split_whitespace().map(str::to_string).collect(),
+                _ => Vec::new(),
+            },
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Node {
@@ -190,11 +213,11 @@ pub struct Directory {
     /// Each tenant's read replicas on this directory's nodes, a region
     /// each, sorted by node.
     readers: HashMap<String, Vec<Reader>>,
-    /// Each tenant's lineage, where its node said it (`lineages`): read by
-    /// every look for every tenant with a read replica, and by every
-    /// placement another region asks for -- a statement parsed and run
-    /// each, read from the database.
-    lineages: HashMap<String, String>,
+    /// Each tenant's lineage, where its node said it, and the ones it
+    /// succeeded (`lineages`): read by every look for every tenant with a
+    /// read replica, and by every placement another region asks for -- a
+    /// statement parsed and run each, read from the database.
+    lineages: HashMap<String, Lineage>,
     /// The regions keeping their own directory, and their routers.
     regions: BTreeMap<String, Vec<String>>,
     /// The region this directory holds, where it is a region's own.
@@ -357,9 +380,9 @@ impl Directory {
             put_reader(&mut readers, &row);
         }
         let mut lineages = HashMap::new();
-        for (id, row) in rows(&g, "lineages", "get lineages select tenant, lineage")? {
+        for (id, row) in rows(&g, "lineages", "get lineages select tenant, lineage, was")? {
             ids.lineages.insert(id, text(&row[0]));
-            lineages.insert(text(&row[0]), text(&row[1]));
+            lineages.insert(text(&row[0]), Lineage::of(&row));
         }
         self.seq = g.change_seq();
         self.adopted = g.adoptions();
@@ -428,7 +451,7 @@ impl Directory {
             optional("regions", &["name", "routers"])?,
             optional("scope", &["region"])?,
             optional("readers", &reader_fields(&g))?,
-            optional("lineages", &["tenant", "lineage"])?,
+            optional("lineages", &["tenant", "lineage", "was"])?,
         )
         else {
             return Ok(false);
@@ -465,7 +488,7 @@ impl Directory {
         }
         if let Some(lineages) = lineages {
             apply(&mut ids.lineages, lineages, |k, v| match v {
-                Some(v) => drop(self.lineages.insert(k.into(), text(&v[1]))),
+                Some(v) => drop(self.lineages.insert(k.into(), Lineage::of(v))),
                 None => drop(self.lineages.remove(k)),
             });
         }
@@ -813,11 +836,43 @@ impl Directory {
 
     /// `tenant`'s lineage, as its node said (`lineages`).
     pub fn lineage(&self, tenant: &str) -> Option<String> {
-        self.lineages.get(tenant).cloned()
+        self.lineages.get(tenant).map(|l| l.now.clone())
     }
 
-    /// Records `tenant`'s lineage, or that it has none known.
+    /// The lineages `tenant`'s succeeded ([`Directory::succeed_lineage`]),
+    /// oldest first.
+    pub fn former_lineages(&self, tenant: &str) -> &[String] {
+        self.lineages.get(tenant).map_or(&[], |l| &l.was[..])
+    }
+
+    /// Records `tenant`'s lineage, or that it has none known: a tenant
+    /// made, or its image taken in, which no lineage before it is.
     pub fn set_lineage(&mut self, tenant: &str, lineage: Option<&str>) -> Result<()> {
+        let fresh = lineage.map(|l| Lineage {
+            now: l.to_string(),
+            was: Vec::new(),
+        });
+        self.put_lineage(tenant, fresh)
+    }
+
+    /// Records that `tenant`'s primary is of `lineage` now, the one it was
+    /// of kept among those it was: the same tenant, its primary promoted
+    /// from a copy that never took its first image, or an older file of it
+    /// put in its place.
+    pub fn succeed_lineage(&mut self, tenant: &str, lineage: &str) -> Result<()> {
+        let mut l = self.lineages.get(tenant).cloned().unwrap_or_default();
+        if l.now == lineage {
+            return Ok(());
+        }
+        if !l.now.is_empty() && !l.was.contains(&l.now) {
+            l.was.push(std::mem::take(&mut l.now));
+        }
+        l.was.retain(|w| w != lineage);
+        l.now = lineage.to_string();
+        self.put_lineage(tenant, Some(l))
+    }
+
+    fn put_lineage(&mut self, tenant: &str, lineage: Option<Lineage>) -> Result<()> {
         self.run(
             "del lineages where tenant = $1",
             &[Value::Text(tenant.into())],
@@ -826,11 +881,15 @@ impl Directory {
         let Some(l) = lineage else {
             return Ok(());
         };
+        let was = match l.was.is_empty() {
+            true => Value::Null,
+            false => Value::Text(l.was.join(" ")),
+        };
         self.run(
-            "put lineages {tenant: $1, lineage: $2}",
-            &[Value::Text(tenant.into()), Value::Text(l.into())],
+            "put lineages {tenant: $1, lineage: $2, was: $3}",
+            &[Value::Text(tenant.into()), Value::Text(l.now.clone()), was],
         )?;
-        self.lineages.insert(tenant.into(), l.into());
+        self.lineages.insert(tenant.into(), l);
         Ok(())
     }
 
@@ -1280,6 +1339,27 @@ mod tests {
         assert!(missing.is_err(), "{missing:?}");
         let none = rows(&db, "scope", "get scope select region").unwrap();
         assert!(none.is_empty());
+    }
+
+    /// A lineage succeeded keeps the one before among those the tenant was,
+    /// reloaded alike; a lineage recorded afresh -- a tenant made again --
+    /// keeps none.
+    #[test]
+    fn a_lineage_succeeded_keeps_the_one_before() {
+        let mut d = Directory::in_memory();
+        d.set_lineage("acme", Some("aaaaaaaa")).unwrap();
+        d.succeed_lineage("acme", "bbbbbbbb").unwrap();
+        d.succeed_lineage("acme", "bbbbbbbb").unwrap();
+        d.succeed_lineage("acme", "cccccccc").unwrap();
+        assert_eq!(d.lineage("acme").as_deref(), Some("cccccccc"));
+        assert_eq!(d.former_lineages("acme"), ["aaaaaaaa", "bbbbbbbb"]);
+        d.reload().unwrap();
+        assert_eq!(d.former_lineages("acme"), ["aaaaaaaa", "bbbbbbbb"]);
+        // Back to one it was: that one is no longer among them.
+        d.succeed_lineage("acme", "aaaaaaaa").unwrap();
+        assert_eq!(d.former_lineages("acme"), ["bbbbbbbb", "cccccccc"]);
+        d.set_lineage("acme", Some("dddddddd")).unwrap();
+        assert!(d.former_lineages("acme").is_empty());
     }
 
     /// Lineages are kept in the maps and follow the change ring, as

@@ -127,6 +127,10 @@ const CHANGE_WAIT_MOST: Duration = Duration::from_secs(15);
 /// made one a region.
 const PRIMARY_FRESH: Duration = Duration::from_secs(1);
 
+/// How many times in a row a read replica's lost copy is made again before
+/// it is given up on ([`Router::may_remake`]).
+pub const REMAKES: u32 = 3;
+
 /// How long a read replica that did not answer a marked read is let be:
 /// every read of its region goes home meanwhile, rather than each wait out
 /// the replica first.
@@ -151,13 +155,15 @@ pub(crate) enum Primary {
     /// this router's own directory holds it, the tenant's quota where the
     /// directory placing it keeps one -- which its read replicas are sent
     /// wherever they are recorded -- and its lineage where that directory
-    /// knows it (`lineages`), which its read replicas are bound to.
+    /// knows it (`lineages`), which its read replicas are bound to, with
+    /// the ones it succeeded (`was`), which they are bound to again.
     At {
         region: String,
         addr: String,
         node: Option<String>,
         quota: Option<String>,
         lineage: Option<String>,
+        was: Vec<String>,
     },
     /// In no directory this router reads: deleted.
     Gone,
@@ -409,7 +415,14 @@ impl Router {
         let dir = self.read_dir();
         dir.readers(tenant)
             .iter()
-            .map(|r| reader_item(dir.region_of(&r.node), r))
+            .map(|r| {
+                let mut item = reader_item(dir.region_of(&r.node), r);
+                if self.given_up(&format!("{tenant}/{}", r.node)) {
+                    item.pop();
+                    item.push_str(",\"given_up\":true}");
+                }
+                item
+            })
             .collect()
     }
 
@@ -599,6 +612,7 @@ impl Router {
                 .remove_reader(tenant, &r.node)
                 .map_err(internal)?;
             self.forget_reader(tenant, &r.node);
+            self.remakes_done(&format!("{tenant}/{}", r.node));
             self.untrace_if_none(tenant);
             return Ok(Response::empty(204));
         }
@@ -636,6 +650,7 @@ impl Router {
             return Err(w);
         }
         self.forget_reader(tenant, &r.node);
+        self.remakes_done(&format!("{tenant}/{}", r.node));
         self.untrace_if_none(tenant);
         Ok(())
     }
@@ -1354,17 +1369,25 @@ impl Router {
             let at = |n: &crate::directory::Node,
                       node: Option<&str>,
                       quota: Option<&str>,
-                      lineage: Option<String>| Primary::At {
+                      lineage: Option<String>,
+                      was: &[String]| Primary::At {
                 region: n.region.clone(),
                 addr: n.addr.clone(),
                 node: node.map(str::to_string),
                 quota: quota.map(str::to_string),
                 lineage,
+                was: was.to_vec(),
             };
             for t in tenants {
                 if let Some(p) = dir.placement(t) {
                     let found = match dir.node(&p.node) {
-                        Some(n) => at(n, Some(&p.node), dir.quota(t), dir.lineage(t)),
+                        Some(n) => at(
+                            n,
+                            Some(&p.node),
+                            dir.quota(t),
+                            dir.lineage(t),
+                            dir.former_lineages(t),
+                        ),
                         None => Primary::Unknown(format!("no node `{}` here", p.node)),
                     };
                     out.insert(t.clone(), found);
@@ -1384,7 +1407,7 @@ impl Router {
                 };
                 if let Some(p) = g.placement(t) {
                     let found = match g.node(&p.node) {
-                        Some(n) => at(n, None, g.quota(t), g.lineage(t)),
+                        Some(n) => at(n, None, g.quota(t), g.lineage(t), g.former_lineages(t)),
                         None => Primary::Unknown(format!("no node `{}` known", p.node)),
                     };
                     out.insert(t.clone(), found);
@@ -1413,7 +1436,7 @@ impl Router {
             }
         }
         for (region, names) in remote {
-            match self.ask_placements(&region, &names) {
+            match self.ask_placements(&region, &names, false) {
                 Ok(mut found) => {
                     for t in names {
                         let p = found.remove(&t).unwrap_or_else(|| {
@@ -1436,11 +1459,13 @@ impl Router {
     }
 
     /// `region`'s routers' word on where each of `names` is placed in its
-    /// directory (`POST /_shard/placements`).
+    /// directory (`POST /_shard/placements`), each primary's lineage asked
+    /// of its node first where `verify`.
     fn ask_placements(
         &self,
         region: &str,
         names: &[String],
+        verify: bool,
     ) -> std::result::Result<HashMap<String, Primary>, String> {
         let routers = {
             let own = self.read_dir().routers(region).map(<[String]>::to_vec);
@@ -1450,16 +1475,34 @@ impl Router {
             })
         }
         .ok_or_else(|| format!("no router is recorded for {}", region_name(region)))?;
+        self.ask_placements_of(region, &routers, names, verify)
+    }
+
+    /// [`Self::ask_placements`] of the routers `routers`: a region's, or
+    /// the global router's (`region` empty).
+    fn ask_placements_of(
+        &self,
+        region: &str,
+        routers: &[String],
+        names: &[String],
+        verify: bool,
+    ) -> std::result::Result<HashMap<String, Primary>, String> {
+        let region_name = |r: &str| match r {
+            "" => "the global directory".to_string(),
+            r => region_name(r),
+        };
         let list: Vec<String> = names.iter().map(|n| quote(n)).collect();
-        let body = format!("{{\"tenants\":[{}]}}", list.join(","));
+        let body = match verify {
+            true => format!("{{\"tenants\":[{0}],\"verify\":[{0}]}}", list.join(",")),
+            false => format!("{{\"tenants\":[{}]}}", list.join(",")),
+        };
         let auth = self.cfg.token.as_ref().map(|t| format!("Bearer {t}"));
         let mut headers: Vec<(&str, &str)> = vec![("content-type", "application/json")];
         if let Some(a) = &auth {
             headers.push(("authorization", a));
         }
         let call = ("POST", "/_shard/placements", &headers[..], body.as_bytes());
-        let (status, _, answer) =
-            self.call_routers_by(&self.reader_pool, region, &routers, call)?;
+        let (status, _, answer) = self.call_routers_by(&self.reader_pool, region, routers, call)?;
         if status != 200 {
             return Err(format!(
                 "{}'s router answered {status}: {}",
@@ -1489,32 +1532,56 @@ impl Router {
                     Some(Value::Text(l)) => Some(l.clone()),
                     _ => None,
                 };
+                let was = match v.member("was") {
+                    Some(Value::List(w)) => w
+                        .iter()
+                        .filter_map(|l| match l {
+                            Value::Text(l) => Some(l.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 let p = Primary::At {
                     region: text(&v, "region"),
                     addr: text(&v, "addr"),
                     node: None,
                     quota,
                     lineage,
+                    was,
                 };
                 (t, p)
             })
             .collect())
     }
 
-    /// `POST /_shard/placements {"tenants": [..]}`: where this router's own
-    /// directory places each, and its quota -- `{"<t>": {"node", "addr",
-    /// "region", "quota"} | null}` -- which another region's router asks to
-    /// point the read replicas it keeps of them at their primaries, and to
-    /// hold them to the tenant's quota. A read: a standby answers it from
-    /// the placements it follows.
+    /// `POST /_shard/placements {"tenants": [..], "verify": [..]}`: where
+    /// this router's own directory places each, its quota and its lineage
+    /// -- `{"<t>": {"node", "addr", "region", "quota", "lineage", "was"} |
+    /// null}` -- which another region's router asks to point the read
+    /// replicas it keeps of them at their primaries, to hold them to the
+    /// tenant's quota and to bind them to its lineage. Those in `verify`
+    /// -- a replica's copy lost, which may have refused its primary -- have
+    /// their primary's node asked its lineage first
+    /// ([`Self::verify_lineage`]). A read otherwise: a standby answers it
+    /// from the placements it follows.
     pub(crate) fn placements(&self, req: &Request) -> Response {
-        let names = match fenec_core::json::parse_object(&String::from_utf8_lossy(&req.body)) {
-            Ok(fields) => match fields.into_iter().find(|(k, _)| k == "tenants") {
-                Some((_, Value::List(list))) => list,
-                _ => Vec::new(),
-            },
-            Err(e) => return Response::error(400, &format!("the body is not JSON: {e}")),
-        };
+        let (names, verify) =
+            match fenec_core::json::parse_object(&String::from_utf8_lossy(&req.body)) {
+                Ok(fields) => {
+                    let list = |key: &str| match fields.iter().find(|(k, _)| k == key) {
+                        Some((_, Value::List(list))) => list.clone(),
+                        _ => Vec::new(),
+                    };
+                    (list("tenants"), list("verify"))
+                }
+                Err(e) => return Response::error(400, &format!("the body is not JSON: {e}")),
+            };
+        for v in verify {
+            if let Value::Text(t) = v {
+                self.verify_lineage(&t);
+            }
+        }
         let dir = self.read_dir();
         let mut items = Vec::with_capacity(names.len());
         for v in names {
@@ -1525,15 +1592,18 @@ impl Router {
             if found.is_some() && dir.lineage(&t).is_none() {
                 self.want_lineage(&t);
             }
+            let was: Vec<String> = dir.former_lineages(&t).iter().map(|l| quote(l)).collect();
             items.push(match found {
                 Some((p, n)) => format!(
-                    "{}:{{\"node\":{},\"addr\":{},\"region\":{},\"quota\":{},\"lineage\":{}}}",
+                    "{}:{{\"node\":{},\"addr\":{},\"region\":{},\"quota\":{},\"lineage\":{},\
+                     \"was\":[{}]}}",
                     quote(&t),
                     quote(&p.node),
                     quote(&n.addr),
                     quote(&n.region),
                     dir.quota(&t).unwrap_or("null"),
-                    dir.lineage(&t).map_or("null".into(), |l| quote(&l))
+                    dir.lineage(&t).map_or("null".into(), |l| quote(&l)),
+                    was.join(",")
                 ),
                 None => format!("{}:null", quote(&t)),
             });
@@ -1737,11 +1807,53 @@ impl Router {
         let mut lost = self.reader_lost.lock().unwrap_or_else(|e| e.into_inner());
         let mut any = false;
         for t in tenants {
-            if !held.contains(*t) {
-                any |= lost.insert(format!("{t}/{node}"));
+            let key = format!("{t}/{node}");
+            match held.contains(*t) {
+                false => any |= lost.insert(key),
+                true => self.remakes_done(&key),
             }
         }
         any
+    }
+
+    /// Counts a lost copy of the read replica `key` made again: whether it
+    /// may be, at most [`REMAKES`] in a row. A copy that refuses its
+    /// primary deletes itself, and made again by every look it refused
+    /// again for good -- a primary of a lineage this router could not learn
+    /// (its node out of reach, the tenant's directory a router's from
+    /// before lineages) -- so past that the replica is left recorded and
+    /// without a copy, said once and counted
+    /// (`fenec_router_read_replicas_given_up`), for an operator to place
+    /// again; its primary moving, or its lineage, tries it again.
+    /// The count goes one past [`REMAKES`] as it is given up on, which the
+    /// caller says and counts, once.
+    fn may_remake(&self, key: &str) -> bool {
+        let mut remade = self.reader_remade.lock().unwrap_or_else(|e| e.into_inner());
+        let n = remade.entry(key.to_string()).or_insert(0);
+        *n += 1;
+        *n <= REMAKES
+    }
+
+    /// Whether the read replica `key` was given up on ([`Self::may_remake`]).
+    fn given_up(&self, key: &str) -> bool {
+        self.reader_remade
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .is_some_and(|n| *n > REMAKES)
+    }
+
+    /// Lets go of the count of `key`'s copy made again: its copy found on
+    /// its node, its primary or lineage changed, or its record gone.
+    pub(crate) fn remakes_done(&self, key: &str) {
+        let gone = self
+            .reader_remade
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
+        if gone.is_some_and(|n| n > REMAKES) {
+            crate::metrics::given_up(-1);
+        }
     }
 
     /// Whether the read replica `r` of `tenant` needs anything done, its
@@ -1753,12 +1865,14 @@ impl Router {
                 addr,
                 node,
                 lineage,
+                was,
                 ..
             } => {
                 let dir = self.read_dir();
                 let n = dir.node(&r.node);
-                another_lineage(r, lineage.as_deref())
+                another_lineage(r, lineage.as_deref(), was)
                     || (r.lineage.is_none() && lineage.is_some())
+                    || bound_before(r, was)
                     || node.as_deref() == Some(r.node.as_str())
                     || n.is_some_and(|n| n.addr == *addr || n.region == *region)
                     || r.follows != format!("http://{addr}")
@@ -1834,7 +1948,10 @@ impl Router {
     /// `lineage`, its tenant's: where its copy's node says the copy is of
     /// it -- or says nothing of lineages, a node from before them -- the
     /// record takes it and the copy is told it with a follow of the node
-    /// it follows. A copy of another lineage is another tenant's.
+    /// it follows. A copy of another lineage is another tenant's -- once it
+    /// holds its primary's history: one that has not taken its first image
+    /// is of a lineage of its own, as every file a replicating node makes
+    /// is, and is asked again at a later look.
     fn bind_reader(&self, tenant: &str, r: &Reader, lineage: &str) -> Bound {
         let Some(n) = self.read_dir().node(&r.node).cloned() else {
             return Bound::Unknown;
@@ -1844,6 +1961,7 @@ impl Router {
             .reader_pool
             .call(&n.addr, "GET", &target, &n.token, b"")
         {
+            Ok((200, body)) if ready_in(&body) == Some(false) => return Bound::Unknown,
             Ok((200, body)) => crate::lineage_in(&body),
             // A node from before lineages: nothing to ask, nothing it
             // would refuse; the record is bound all the same.
@@ -1875,6 +1993,102 @@ impl Router {
             lineage: Some(lineage.to_string()),
             ..r.clone()
         })
+    }
+
+    /// Asks the node this directory places `tenant` on which lineage its
+    /// file is of, and where that is another than the directory's records
+    /// the node's ([`crate::directory::Directory::succeed_lineage`]): the
+    /// primary is the tenant -- every read and write of it goes there --
+    /// and the lineage before is kept as one it was, its read replicas
+    /// bound to it again rather than taken off. A tenant made again under
+    /// the name through a router is no such case: its create recorded its
+    /// lineage, and the replicas of the one before are of no lineage it
+    /// was. Nothing where the node is not reached, from before lineages,
+    /// or the tenant was placed elsewhere or given a lineage meanwhile.
+    pub(crate) fn verify_lineage(&self, tenant: &str) {
+        let (node, n, known) = {
+            let dir = self.read_dir();
+            let Some(p) = dir.placement(tenant) else {
+                return;
+            };
+            let Some(n) = dir.node(&p.node).cloned() else {
+                return;
+            };
+            (p.node.clone(), n, dir.lineage(tenant))
+        };
+        let target = format!("/_admin/tenants/{tenant}/lineage");
+        let theirs = match self
+            .reader_pool
+            .call(&n.addr, "GET", &target, &n.token, b"")
+        {
+            Ok((200, body)) if ready_in(&body) != Some(false) => crate::lineage_in(&body),
+            _ => None,
+        };
+        let Some(theirs) = theirs else {
+            return;
+        };
+        if known.as_deref() == Some(theirs.as_str()) {
+            return;
+        }
+        let mut dir = self.write_dir();
+        if dir.placement(tenant).map(|p| p.node.as_str()) != Some(node.as_str())
+            || dir.lineage(tenant) != known
+        {
+            return;
+        }
+        match dir.succeed_lineage(tenant, &theirs) {
+            Ok(()) => fenec_http::log!(
+                "tenant `{tenant}`'s primary on `{node}` is of lineage {theirs}, not {}: recorded, \
+                 its read replicas bound to it",
+                known.as_deref().unwrap_or("none")
+            ),
+            Err(e) => fenec_http::log!("tenant `{tenant}`'s lineage stayed unrecorded: {e}"),
+        }
+    }
+
+    /// [`Self::verify_lineage`] of `tenant` wherever its directory is --
+    /// this router's, a region's router's, the global router's -- and its
+    /// lineage then, with the ones it was: `None` where not known.
+    fn verify_primary(&self, tenant: &str) -> Option<(Option<String>, Vec<String>)> {
+        let here = self.read_dir().placement(tenant).is_some();
+        if here {
+            self.verify_lineage(tenant);
+            let dir = self.read_dir();
+            return Some((dir.lineage(tenant), dir.former_lineages(tenant).to_vec()));
+        }
+        // At home in a region keeping its own directory, as this one's or
+        // the global directory's copy says, or placed by the global one.
+        let names = [tenant.to_string()];
+        // This directory first, then the global copy, as `primaries_of`
+        // takes them.
+        let (home, global_places) = {
+            let dir = self.read_dir();
+            let global = self.global.as_ref().map(crate::read);
+            let home = dir.home(tenant).map(str::to_string);
+            let home = home.or_else(|| global.as_ref()?.home(tenant).map(str::to_string));
+            let places = global.is_some_and(|g| g.placement(tenant).is_some());
+            (home, places)
+        };
+        let asked = match (home, global_places) {
+            (Some(region), _) => self.ask_placements(&region, &names, true),
+            (None, true) if !self.cfg.global.is_empty() => {
+                let routers = self.cfg.global.clone();
+                self.ask_placements_of("", &routers, &names, true)
+            }
+            _ => return None,
+        };
+        match asked.ok()?.remove(tenant)? {
+            Primary::At { lineage, was, .. } => Some((lineage, was)),
+            _ => None,
+        }
+    }
+
+    /// How many of the nodes' answers [`Self::backfill_lineages`] has
+    /// taken, recorded or not: for a test to wait on, as
+    /// [`Router::grants_waiting`].
+    pub fn lineages_asked(&self) -> u64 {
+        self.lineage_answers
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Asks for `tenant`'s lineage to be had from its node, at the next
@@ -1937,16 +2151,19 @@ impl Router {
                                 self.want_lineage(t);
                                 continue;
                             };
-                            // Placed elsewhere since, or made again: the
-                            // node's word is of another tenant.
-                            let still = self
-                                .read_dir()
-                                .placement(t)
-                                .is_some_and(|p| &p.node == node);
+                            let _taken = Taken(&self.lineage_answers);
+                            // Placed elsewhere since, or made again -- whose
+                            // create recorded its own lineage while this was
+                            // asked: the node's word is of another tenant, or
+                            // of another moment. Asked under the guard that
+                            // writes it, so no create lands between.
+                            let mut dir = self.write_dir();
+                            let still = dir.placement(t).is_some_and(|p| &p.node == node)
+                                && dir.lineage(t).is_none();
                             if !still {
                                 continue;
                             }
-                            if let Err(e) = self.write_dir().set_lineage(t, Some(&l)) {
+                            if let Err(e) = dir.set_lineage(t, Some(&l)) {
                                 fenec_http::log!("tenant `{t}`'s lineage stayed unrecorded: {e}");
                             }
                         }
@@ -2052,12 +2269,17 @@ impl Router {
             // record kept by a node out of reach or forgotten by hand: the
             // replica goes, never pointed at it. Its copy refuses the new
             // one's image all the same ([`Self::tell_follow`]).
-            Primary::At { lineage, .. } if another_lineage(r, lineage.as_deref()) => {
+            Primary::At { lineage, was, .. } if another_lineage(r, lineage.as_deref(), was) => {
                 why = "as its tenant was made again under its name";
                 self.take_reader(tenant, r).err()
             }
             Primary::At {
-                region, addr, node, ..
+                region,
+                addr,
+                node,
+                lineage,
+                was,
+                ..
             } => {
                 let (here, theirs) = {
                     let dir = self.read_dir();
@@ -2076,6 +2298,7 @@ impl Router {
                         fenec_http::log!("tenant `{tenant}`'s read replica record stayed: {e}");
                     }
                     self.forget_reader(tenant, &r.node);
+                    self.remakes_done(&key);
                     self.untrace_if_none(tenant);
                     return;
                 }
@@ -2090,13 +2313,51 @@ impl Router {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .contains(&key);
+                    let (mut lineage, mut was) = (lineage.clone(), was.clone());
+                    // Its copy lost with nothing else changed: the copy may
+                    // have refused its primary, which is then of a lineage
+                    // the tenant's directory does not know -- a copy that
+                    // never took its first image promoted, an older file
+                    // restored, a file put in its place. The primary is the
+                    // tenant: its node is asked, and the directory takes its
+                    // word, the lineage before kept as one the tenant was
+                    // (`was`), so this replica is bound to it again rather
+                    // than made again to refuse it for good.
+                    if lost && r.follows == url && !bound_before(r, &was) {
+                        if self.given_up(&key) {
+                            return;
+                        }
+                        if let Some((l, w)) = self.verify_primary(tenant) {
+                            (lineage, was) = (l, w);
+                        }
+                        if !bound_before(r, &was) && !self.may_remake(&key) {
+                            crate::metrics::given_up(1);
+                            fenec_http::log!(
+                                "tenant `{tenant}`'s read replica on `{}` lost its copy {REMAKES} \
+                                 times in a row -- it refuses its primary at {url} -- and is made \
+                                 again no more: DELETE it and place it again",
+                                r.node
+                            );
+                            return;
+                        }
+                    }
+                    // Bound to a lineage its tenant was of: bound to the
+                    // one it is of now, a new beginning for its count.
+                    let rebound = bound_before(r, &was) && lineage.is_some();
+                    if rebound || r.follows != url {
+                        self.remakes_done(&key);
+                    }
+                    let bind = match rebound {
+                        true => lineage.as_deref(),
+                        false => r.lineage.as_deref(),
+                    };
                     let mut failed = None;
-                    if r.follows != url || lost {
+                    if r.follows != url || lost || rebound {
                         let told = self
-                            .tell_follow(tenant, &r.node, &url, false, r.lineage.as_deref())
+                            .tell_follow(tenant, &r.node, &url, false, bind)
                             .and_then(|_| {
                                 self.write_dir()
-                                    .set_reader(tenant, &r.node, &url, r.lineage.as_deref())
+                                    .set_reader(tenant, &r.node, &url, bind)
                                     .map_err(|e| message(&e))
                             });
                         match told {
@@ -2138,6 +2399,15 @@ impl Router {
     }
 }
 
+/// Counts an answer taken as it is dropped, whatever became of it.
+struct Taken<'a>(&'a std::sync::atomic::AtomicU64);
+
+impl Drop for Taken<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// A read replica a look's worker reaches, with where its primary was and
 /// when that was found.
 struct Item {
@@ -2158,9 +2428,27 @@ enum Bound {
 }
 
 /// Whether the read replica `r` copies another tenant of its name than the
-/// primary of `lineage`: both known, and not the same.
-fn another_lineage(r: &Reader, lineage: Option<&str>) -> bool {
-    matches!((r.lineage.as_deref(), lineage), (Some(ours), Some(theirs)) if ours != theirs)
+/// primary of `lineage`: both known, and not the same nor one the tenant
+/// was of (`was`).
+fn another_lineage(r: &Reader, lineage: Option<&str>, was: &[String]) -> bool {
+    matches!((r.lineage.as_deref(), lineage),
+        (Some(ours), Some(theirs)) if ours != theirs && !was.iter().any(|w| w == ours))
+}
+
+/// Whether the read replica `r` is bound to a lineage its tenant was of
+/// before the one it is of now.
+fn bound_before(r: &Reader, was: &[String]) -> bool {
+    r.lineage.as_ref().is_some_and(|l| was.contains(l))
+}
+
+/// Whether a node's word on a tenant's lineage says its file holds its
+/// primary's history (`"ready"`): `None` from a node that does not say.
+fn ready_in(body: &[u8]) -> Option<bool> {
+    let fields = fenec_core::json::parse_object(&String::from_utf8_lossy(body)).ok()?;
+    fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
+        ("ready", Value::Bool(b)) => Some(b),
+        _ => None,
+    })
 }
 
 /// What a region's router said of the read replicas of a name it keeps.

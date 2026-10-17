@@ -14,6 +14,7 @@
 //! read replicas on its nodes, whichever region the tenant lives in.
 
 use fenec_http::replication::{fresh_id, Follower, Replication};
+use fenec_http::tenants::refusals::{self, Stage};
 use fenec_http::tenants::{Replicated, Tenants};
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
@@ -123,9 +124,18 @@ struct Proxy {
     parked: Parked,
     /// Every request it read while parking, held or passed on, as text.
     seen: Arc<Mutex<Vec<String>>>,
+    /// Holding answers, it sends on each request whose line holds one of
+    /// these and holds the node's answer, not sent back, until let go
+    /// ([`Proxy::unpark_answers`]): what the node said at one moment,
+    /// heard at a later one.
+    answering: Arc<Mutex<Vec<String>>>,
+    /// The answers it holds: the request's line, the answer's bytes, and
+    /// the client it is for.
+    answers: Answers,
 }
 
 type Parked = Arc<Mutex<Vec<(Vec<u8>, TcpStream)>>>;
+type Answers = Arc<Mutex<Vec<(String, Vec<u8>, TcpStream)>>>;
 
 impl Proxy {
     fn to(port: u16) -> Proxy {
@@ -147,6 +157,9 @@ impl Proxy {
         let (holding, held) = (Arc::clone(&parking), Arc::clone(&parked));
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let saw = Arc::clone(&seen);
+        let answering: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let answers: Answers = Arc::new(Mutex::new(Vec::new()));
+        let (holding_answers, held_answers) = (Arc::clone(&answering), Arc::clone(&answers));
         std::thread::spawn(move || {
             for client in listener.incoming() {
                 let Ok(client) = client else { continue };
@@ -170,7 +183,9 @@ impl Proxy {
                     });
                     continue;
                 }
-                if !holding.lock().unwrap().is_empty() {
+                if !holding.lock().unwrap().is_empty()
+                    || !holding_answers.lock().unwrap().is_empty()
+                {
                     let (holding, held, streams, target, saw) = (
                         Arc::clone(&holding),
                         Arc::clone(&held),
@@ -178,6 +193,8 @@ impl Proxy {
                         target.clone(),
                         Arc::clone(&saw),
                     );
+                    let (holding_answers, held_answers) =
+                        (Arc::clone(&holding_answers), Arc::clone(&held_answers));
                     std::thread::spawn(move || {
                         let Some(bytes) = first_request(&client) else {
                             return;
@@ -192,6 +209,15 @@ impl Proxy {
                             .to_string();
                         if holding.lock().unwrap().iter().any(|p| line.contains(p)) {
                             held.lock().unwrap().push((bytes, client));
+                        } else if holding_answers
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|p| line.contains(p))
+                        {
+                            if let Some(answer) = asked_of(&target, &bytes) {
+                                held_answers.lock().unwrap().push((line, answer, client));
+                            }
                         } else {
                             pass_on(client, &target, &bytes, &streams);
                         }
@@ -220,6 +246,41 @@ impl Proxy {
             parking,
             parked,
             seen,
+            answering,
+            answers,
+        }
+    }
+
+    /// Holds the node's answer to every request whose line holds `what`
+    /// from now on.
+    fn park_answers(&self, what: &str) {
+        self.answering.lock().unwrap().push(what.to_string());
+        for s in self.open.lock().unwrap().drain(..) {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// How many answers it holds to requests whose line holds `what`.
+    fn answers_held(&self, what: &str) -> usize {
+        self.answers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(l, _, _)| l.contains(what))
+            .count()
+    }
+
+    /// Holds no more answers to requests whose line holds `what`, and
+    /// sends back the ones it held.
+    fn unpark_answers(&self, what: &str) {
+        self.answering.lock().unwrap().retain(|p| p != what);
+        let mut held = self.answers.lock().unwrap();
+        let (go, stay): (Vec<_>, Vec<_>) = held.drain(..).partition(|(l, _, _)| l.contains(what));
+        *held = stay;
+        drop(held);
+        for (_, answer, mut client) in go {
+            let _ = client.write_all(&answer);
+            let _ = client.shutdown(Shutdown::Both);
         }
     }
 
@@ -367,6 +428,23 @@ fn pass_on(client: TcpStream, target: &str, bytes: &[u8], open: &Mutex<Vec<TcpSt
     let (a, b) = (client.try_clone().unwrap(), server.try_clone().unwrap());
     std::thread::spawn(move || copy(a, b));
     std::thread::spawn(move || copy(server, client));
+}
+
+/// The node at `target`'s whole answer to the request `bytes`, asked to
+/// close after it.
+fn asked_of(target: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut server = TcpStream::connect(target).ok()?;
+    let line = bytes
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map_or(bytes.len(), |n| n + 2);
+    let mut sent = bytes[..line].to_vec();
+    sent.extend_from_slice(b"Connection: close\r\n");
+    sent.extend_from_slice(&bytes[line..]);
+    server.write_all(&sent).ok()?;
+    let mut answer = Vec::new();
+    server.read_to_end(&mut answer).ok()?;
+    Some(answer)
 }
 
 fn copy(mut from: TcpStream, mut to: TcpStream) {
@@ -526,6 +604,28 @@ fn admin(port: u16, tag: &str, method: &str, target: &str, body: &str) -> (u16, 
     let auth = format!("Bearer adm-{tag}");
     let (status, _, body) = request(port, method, target, body, &[("Authorization", &auth)]);
     (status, body)
+}
+
+/// An admin request of a body that is bytes -- an image -- and its answer's
+/// status and bytes.
+fn admin_bytes(port: u16, tag: &str, method: &str, target: &str, body: &[u8]) -> (u16, Vec<u8>) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let head = format!(
+        "{method} {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: Bearer \
+         adm-{tag}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    s.write_all(head.as_bytes()).unwrap();
+    s.write_all(body).unwrap();
+    let mut out = Vec::new();
+    s.read_to_end(&mut out).unwrap();
+    let status = String::from_utf8_lossy(&out[9..12]).parse().unwrap();
+    let end = out
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(out.len(), |n| n + 4);
+    (status, out[end..].to_vec())
 }
 
 fn query_body(sql: &str) -> String {
@@ -2266,8 +2366,7 @@ fn a_look_s_worker_points_a_replica_at_its_primary_as_it_reaches_it() {
 /// replica was bound to nothing, and its copy took any tenant of the name.
 /// The router asks the tenant's node for its lineage and records it, asks
 /// the copy's node for the copy's, and where they agree records it with
-/// the replica and tells the copy -- which then refuses a tenant made again
-/// under the name, on the very node, behind the router's back.
+/// the replica and tells the copy, which keeps it in `.follows`.
 #[test]
 fn a_tenant_and_its_read_replica_from_before_lineages_are_bound_to_one() {
     let tag = "legacy";
@@ -2344,128 +2443,502 @@ fn a_tenant_and_its_read_replica_from_before_lineages_are_bound_to_one() {
     });
     let follows = std::fs::read_to_string(nodes[1].dir.join("acme.follows")).unwrap();
     assert!(follows.contains(&format!("lineage {lineage}")), "{follows}");
-
-    // Made again on its node behind the router's back: the copy, told its
-    // lineage now, takes nothing of the new tenant, and goes.
-    let (status, body) = admin(eu1, "legacy-eu1", "DELETE", "/_admin/tenants/acme", "");
-    assert_eq!(status, 204, "{body}");
-    let (status, body) = admin(eu1, "legacy-eu1", "PUT", "/_admin/tenants/acme", "");
-    assert_eq!(status, 201, "{body}");
-    for sql in [
-        "create collection notes (body text)",
-        r#"put notes {body: "another owner's"}"#,
-    ] {
-        let (status, _, body) = request(eu1, "POST", "/t/acme/query", &query_body(sql), &[]);
-        assert_eq!(status, 200, "{body}");
-    }
-    let mut last = (0, String::new());
-    until("us1's copy deletes itself, or takes the new tenant", || {
-        last = request(
-            us1,
-            "POST",
-            "/t/acme/query",
-            &query_body("get notes select body"),
-            &[],
-        )
-        .map_two();
-        last.0 == 404 || last.1.contains("another owner's")
-    });
-    assert_eq!(last.0, 404, "{}", last.1);
 }
 
-/// A look's worker asks a region's router again where its tenants'
-/// primaries are only once the look's answer has aged, and then for every
-/// such replica it has left at once: asked again for each, a worker made
-/// a call to the region a replica, where the look made one a region. Here
-/// the worker is held at its node's door on the first of three replicas
-/// past that age; at most one call to the region names one tenant alone.
+/// A tenant's node and the router of a single directory near `us`, eu1
+/// reached through a proxy and us1 holding read replicas: for the tests
+/// of a primary of another lineage than the directory's.
+struct Near {
+    eu1: Node,
+    us1: Node,
+    link: Proxy,
+    router: Arc<Router>,
+    port: u16,
+}
+
+impl Near {
+    fn new(tag: &str, reader_timeout: Duration) -> Near {
+        let eu1 = node(&format!("{tag}-eu1"));
+        let us1 = node(&format!("{tag}-us1"));
+        let link = Proxy::to(eu1.port);
+        let mut cfg = config(Some("us"), None, None);
+        cfg.reader_timeout = reader_timeout;
+        let router = Router::new(Directory::in_memory(), cfg);
+        let port = serve(Arc::clone(&router));
+        for (name, addr, region) in [
+            ("eu1", link.addr.clone(), "eu"),
+            ("us1", format!("127.0.0.1:{}", us1.port), "us"),
+        ] {
+            let body =
+                format!(r#"{{"addr":"{addr}","token":"adm-{tag}-{name}","region":"{region}"}}"#);
+            let (status, answer) = shard(port, "PUT", &format!("/_shard/nodes/{name}"), &body);
+            assert_eq!(status, 201, "{name}: {answer}");
+        }
+        Near {
+            eu1,
+            us1,
+            link,
+            router,
+            port,
+        }
+    }
+
+    /// `tenant` made on eu1, a row in it, and its read replica on us1
+    /// holding the row.
+    fn tenant(&self, tenant: &str) -> String {
+        let make = r#"{"node":"eu1","schema":"create collection notes (body text)"}"#;
+        let (status, body) = shard(self.port, "PUT", &format!("/_shard/tenants/{tenant}"), make);
+        assert_eq!(status, 201, "{body}");
+        write(self.eu1.port, tenant, r#"put notes {body: "before"}"#);
+        let (status, body) = shard(
+            self.port,
+            "PUT",
+            &format!("/_shard/tenants/{tenant}/read-replicas/us"),
+            "",
+        );
+        assert_eq!(status, 201, "{body}");
+        until("the read replica holds the row", || {
+            marked(self.us1.port, tenant, "get notes select body", None)
+                .1
+                .contains(r#""before""#)
+        });
+        self.lineage(tenant)
+            .expect("a lineage recorded at its create")
+    }
+
+    fn lineage(&self, tenant: &str) -> Option<String> {
+        let body = format!(r#"{{"tenants":["{tenant}"]}}"#);
+        text_of(
+            &shard(self.port, "POST", "/_shard/placements", &body).1,
+            "lineage",
+        )
+    }
+
+    fn placed(&self, tenant: &str) -> String {
+        let body = format!(r#"{{"tenants":["{tenant}"]}}"#);
+        shard(self.port, "POST", "/_shard/placements", &body).1
+    }
+
+    fn listed(&self, tenant: &str) -> String {
+        let target = format!("/_shard/tenants/{tenant}/read-replicas");
+        shard(self.port, "GET", &target, "").1
+    }
+
+    /// `tenant` deleted on eu1 and made there again, behind the router:
+    /// a file of another lineage in its place, as one restored or put
+    /// there by hand is.
+    fn swapped(&self, tag: &str, tenant: &str) {
+        let tok = format!("{tag}-eu1");
+        let (status, body) = admin(
+            self.eu1.port,
+            &tok,
+            "DELETE",
+            &format!("/_admin/tenants/{tenant}"),
+            "",
+        );
+        assert_eq!(status, 204, "{body}");
+        let (status, body) = admin(
+            self.eu1.port,
+            &tok,
+            "PUT",
+            &format!("/_admin/tenants/{tenant}"),
+            "",
+        );
+        assert_eq!(status, 201, "{body}");
+        write(self.eu1.port, tenant, "create collection notes (body text)");
+        write(self.eu1.port, tenant, r#"put notes {body: "swapped"}"#);
+    }
+}
+
+/// A copy's delete after it refused a primary of another lineage is held
+/// to the copy that refused: one promoted meanwhile -- a primary now --
+/// and a tenant installed under the name in its place, as a move installs
+/// one, are kept. The delete asked whether the copy still followed before
+/// it took the slot, and either landing between the two had the primary
+/// deleted. Each refusal is held there here (`refusals::hold`) while the
+/// promotion and the install land.
 #[test]
-fn a_look_s_worker_asks_a_region_for_its_replicas_primaries_at_once() {
-    let tag = "batch";
-    let files = files(tag);
-    let names = ["eu1", "us1", "us2"];
-    let nodes = names.map(|n| node(&format!("{tag}-{n}")));
-    let eu_link = Proxy::to(nodes[0].port);
-    let global = global_router(&files.0.join("global.fenec"), None, "eu");
-    let upstream = format!("http://127.0.0.1:{global}");
-    let us = region_router("us", &files.0.join("us.fenec"), &upstream);
-    let us_link = Proxy::to(us);
-    let (status, body) = shard(
-        global,
-        "PUT",
-        "/_shard/regions/us",
-        &format!(r#"{{"routers":["{}"]}}"#, us_link.url()),
-    );
+fn a_refused_copy_promoted_or_installed_anew_before_its_delete_is_kept() {
+    let tag = "refused-held";
+    let eu1 = node(&format!("{tag}-eu1"));
+    let us1 = node(&format!("{tag}-us1"));
+    let (ea, ua) = (format!("{tag}-eu1"), format!("{tag}-us1"));
+    let from = format!("http://127.0.0.1:{}", eu1.port);
+    let names = ["refused-promoted", "refused-installed"];
+    for t in names {
+        let (status, body) = admin(eu1.port, &ea, "PUT", &format!("/_admin/tenants/{t}"), "");
+        assert_eq!(status, 201, "{body}");
+        write(eu1.port, t, "create collection notes (body text)");
+        write(eu1.port, t, r#"put notes {body: "theirs"}"#);
+        refusals::hold(t);
+        let (status, body) = admin(us1.port, &ua, "PUT", &format!("/_admin/tenants/{t}"), "");
+        assert_eq!(status, 201, "{body}");
+        // Told a lineage eu1's tenant is not of: it refuses at the hello.
+        let follow = format!(r#"{{"from":"{from}","lineage":"00000001"}}"#);
+        let target = format!("/_admin/tenants/{t}/follow");
+        let (status, body) = admin(us1.port, &ua, "POST", &target, &follow);
+        assert_eq!(status, 200, "{body}");
+        let held = refusals::wait_for(t, Stage::Waiting, Duration::from_secs(60));
+        assert!(held, "{t}'s copy never refused");
+    }
+    // Promoted: a primary of its own now, taking writes.
+    let target = "/_admin/tenants/refused-promoted/promote";
+    let (status, body) = admin(us1.port, &ua, "POST", target, "");
     assert_eq!(status, 200, "{body}");
-    for (i, (name, region)) in names.iter().zip(["eu", "us", "us"]).enumerate() {
-        let addr = match i {
-            0 => eu_link.addr.clone(),
-            _ => format!("127.0.0.1:{}", nodes[i].port),
-        };
-        let body = format!(r#"{{"addr":"{addr}","token":"adm-{tag}-{name}","region":"{region}"}}"#);
-        let (status, answer) = shard(global, "PUT", &format!("/_shard/nodes/{name}"), &body);
+    write(
+        us1.port,
+        "refused-promoted",
+        "create collection notes (body text)",
+    );
+    write(us1.port, "refused-promoted", r#"put notes {body: "kept"}"#);
+    // Deleted, and installed again from eu1's image as a move installs one.
+    let target = "/_admin/tenants/refused-installed";
+    let (status, body) = admin(us1.port, &ua, "DELETE", target, "");
+    assert_eq!(status, 204, "{body}");
+    let file = "/_admin/tenants/refused-installed/file";
+    let (status, image) = admin_bytes(eu1.port, &ea, "GET", file, b"");
+    assert_eq!(status, 200);
+    let (status, body) = admin_bytes(us1.port, &ua, "PUT", file, &image);
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    for t in names {
+        refusals::release(t);
+        assert!(
+            refusals::wait_for(t, Stage::Done, Duration::from_secs(60)),
+            "{t}"
+        );
+    }
+    for (t, row) in [
+        ("refused-promoted", "kept"),
+        ("refused-installed", "theirs"),
+    ] {
+        let (status, _, body) = request(
+            us1.port,
+            "POST",
+            &format!("/t/{t}/query"),
+            &query_body("get notes select body"),
+            &[],
+        );
+        assert_eq!(status, 200, "{t}: {body}");
+        assert!(body.contains(&format!("\"{row}\"")), "{t}: {body}");
+    }
+}
+
+/// A failover onto a standby that never took its tenant's first image
+/// promotes a file of a lineage of its own: the promoted primary is the
+/// tenant, recorded with the lineage the promotion answers, and its read
+/// replica is bound to it and follows it, its copy refusing nothing. Bound
+/// to the lineage before, its copy refused the promoted primary and deleted
+/// itself, was made again by the next look and refused again: a delete
+/// every look, for good.
+#[test]
+fn a_read_replica_follows_a_primary_promoted_from_a_copy_that_never_synced() {
+    let tag = "never-synced";
+    let eu1 = node(&format!("{tag}-eu1"));
+    let to_standby = Proxy::to(eu1.port);
+    let eu2 = node_standby(&format!("{tag}-eu2"), &to_standby.url());
+    let us1 = node(&format!("{tag}-us1"));
+    let link = Proxy::to(eu1.port);
+    let port = serve(Router::new(
+        Directory::in_memory(),
+        config(Some("us"), None, None),
+    ));
+    for (name, body) in [
+        (
+            "eu2",
+            format!(
+                r#"{{"addr":"127.0.0.1:{}","token":"adm-{tag}-eu2","region":"eu"}}"#,
+                eu2.port
+            ),
+        ),
+        (
+            "eu1",
+            format!(
+                r#"{{"addr":"{}","token":"adm-{tag}-eu1","region":"eu","standby":"eu2"}}"#,
+                link.addr
+            ),
+        ),
+        (
+            "us1",
+            format!(
+                r#"{{"addr":"127.0.0.1:{}","token":"adm-{tag}-us1","region":"us"}}"#,
+                us1.port
+            ),
+        ),
+    ] {
+        let (status, answer) = shard(port, "PUT", &format!("/_shard/nodes/{name}"), &body);
         assert_eq!(status, 201, "{name}: {answer}");
     }
-    until("us's copy of the global directory arrives", || {
-        shard(us, "GET", "/_shard/regions", "")
-            .1
-            .contains(r#""name":"us""#)
+    // The standby takes nothing of eu1's: its copy of the tenant never
+    // has its first image. Any refusal of the read replica's copy held
+    // where it would delete itself: none is to happen.
+    to_standby.cut();
+    refusals::hold("unsynced");
+    let make = r#"{"node":"eu1","schema":"create collection notes (body text)"}"#;
+    let (status, body) = shard(port, "PUT", "/_shard/tenants/unsynced", make);
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = shard(port, "PUT", "/_shard/tenants/unsynced/read-replicas/us", "");
+    assert_eq!(status, 201, "{body}");
+    let placed = |port| {
+        shard(
+            port,
+            "POST",
+            "/_shard/placements",
+            r#"{"tenants":["unsynced"]}"#,
+        )
+        .1
+    };
+    let before = text_of(&placed(port), "lineage").expect("its lineage");
+    until("the read replica takes its tenant's image", || {
+        let (status, body) = admin(
+            us1.port,
+            &format!("{tag}-us1"),
+            "GET",
+            "/_admin/tenants/unsynced/lineage",
+            "",
+        );
+        status == 200
+            && body.contains(&format!(r#""lineage":"{before}""#))
+            && body.contains(r#""ready":true"#)
     });
-    let tenants = ["t1", "t2", "t3"];
-    for t in tenants {
-        let make = r#"{"node":"us1","region":"us","schema":"create collection notes (body text)"}"#;
-        let (status, body) = shard(global, "PUT", &format!("/_shard/tenants/{t}"), make);
-        assert_eq!(status, 201, "{t}: {body}");
-        until("the global router places its read replica in eu", || {
-            shard(
-                global,
-                "PUT",
-                &format!("/_shard/tenants/{t}/read-replicas/eu"),
-                "",
-            )
-            .0 == 201
-        });
-    }
-    us_link.park("a request no one sends");
-    eu_link.park("t1/follow");
-    let (status, body) = shard(us, "POST", "/_shard/nodes/us1/failover", "");
+    link.cut();
+    let (status, body) = shard(port, "POST", "/_shard/nodes/eu1/failover", "");
     assert_eq!(status, 200, "{body}");
-    until("the worker waits at eu1's door on t1's follow", || {
-        !eu_link.parked("t1/follow").is_empty()
+    let after = text_of(&placed(port), "lineage").expect("its lineage");
+    assert_ne!(after, before, "the standby's own lineage");
+    assert!(
+        placed(port).contains(&format!(r#""was":["{before}"]"#)),
+        "{}",
+        placed(port)
+    );
+    let eu2_url = format!("http://127.0.0.1:{}", eu2.port);
+    until(
+        "the read replica follows the promoted primary, bound to its lineage",
+        || {
+            let listed = shard(port, "GET", "/_shard/tenants/unsynced/read-replicas", "").1;
+            listed.contains(&format!(r#""lineage":"{after}""#)) && listed.contains(&eu2_url)
+        },
+    );
+    until("its copy holds the promoted primary's history", || {
+        let (status, body) = admin(
+            us1.port,
+            &format!("{tag}-us1"),
+            "GET",
+            "/_admin/tenants/unsynced/lineage",
+            "",
+        );
+        status == 200
+            && body.contains(&format!(r#""lineage":"{after}""#))
+            && body.contains(r#""ready":true"#)
     });
-    // The look's answer aged past what a worker takes as it stands.
-    std::thread::sleep(Duration::from_millis(1500));
-    eu_link.unpark("t1/follow");
-    let us2 = format!("127.0.0.1:{}", nodes[2].port);
-    for t in tenants {
-        until("each read replica follows its new primary", || {
-            shard(
-                global,
-                "GET",
-                &format!("/_shard/tenants/{t}/read-replicas"),
-                "",
-            )
+    let refused = refusals::wait_for("unsynced", Stage::Waiting, Duration::ZERO);
+    refusals::release("unsynced");
+    assert!(
+        !refused,
+        "the read replica's copy refused the promoted primary"
+    );
+}
+
+/// A tenant's file put in its place on its node by hand -- an older one
+/// restored, another swapped in -- is the tenant: every read and write of
+/// it goes there. The router asks the node which lineage it is of once
+/// the read replica's copy is lost, records it, the one before kept as one
+/// the tenant was, and binds the replica to it. Bound to the lineage
+/// before, the copy refused the file and deleted itself at every look.
+#[test]
+fn a_read_replica_follows_its_tenant_s_file_put_in_place_by_hand() {
+    let tag = "put-in-place";
+    let w = Near::new(tag, readers_call());
+    let before = w.tenant("acme");
+    w.swapped(tag, "acme");
+    until("the read replica holds the file put in place", || {
+        // A marked read through the router finds the copy gone and has the
+        // look come now, as the check every few seconds does.
+        let _ = marked(w.port, "acme", "get notes select body", None);
+        marked(w.us1.port, "acme", "get notes select body", None)
             .1
-            .contains(&us2)
-        });
+            .contains(r#""swapped""#)
+    });
+    let after = w.lineage("acme").expect("its lineage");
+    assert_ne!(after, before);
+    let placed = w.placed("acme");
+    assert!(
+        placed.contains(&format!(r#""was":["{before}"]"#)),
+        "{placed}"
+    );
+    let listed = w.listed("acme");
+    assert!(
+        listed.contains(&format!(r#""lineage":"{after}""#)),
+        "{listed}"
+    );
+}
+
+/// A read replica whose copy is lost again and again -- refusing a
+/// primary of a lineage the router cannot learn, its node not answering
+/// what it is of -- is made again three times in a row, and then no more:
+/// left recorded and without a copy, said in its list and counted. Made
+/// again at every look, its copy refused and deleted itself for good.
+#[test]
+fn a_read_replica_whose_copy_keeps_refusing_is_given_up_on() {
+    let tag = "given-up";
+    let w = Near::new(tag, Duration::from_millis(300));
+    w.tenant("acme");
+    // What its file is of is asked of eu1 and never answered.
+    w.link.park("acme/lineage");
+    w.swapped(tag, "acme");
+    until("the read replica is given up on", || {
+        let _ = marked(w.port, "acme", "get notes select body", None);
+        w.listed("acme").contains(r#""given_up":true"#)
+    });
+    let metrics = shard(w.port, "GET", "/_metrics", "").1;
+    let given_up = metrics
+        .lines()
+        .find(|l| l.starts_with("fenec_router_read_replicas_given_up "))
+        .and_then(|l| l.rsplit(' ').next()?.parse::<u64>().ok());
+    assert!(given_up.is_some_and(|n| n >= 1), "{metrics}");
+    // Placed again by an operator, it is a replica as any.
+    let (status, body) = shard(
+        w.port,
+        "DELETE",
+        "/_shard/tenants/acme/read-replicas/us",
+        "",
+    );
+    assert_eq!(status, 204, "{body}");
+    assert!(!w.listed("acme").contains("given_up"));
+    w.link.unpark("acme/lineage");
+    drop(w.router);
+}
+
+/// A read replica placed before its tenant's lineage was known, whose copy
+/// has not taken its first image as the lineage is backfilled, stays, and
+/// is bound once it has: a copy not caught up is of a lineage of its own,
+/// a new file's, and was taken for another tenant's -- a healthy replica
+/// taken off as it caught up.
+#[test]
+fn a_read_replica_not_caught_up_is_bound_once_it_is() {
+    let tag = "bind-unsynced";
+    let eu1 = node(&format!("{tag}-eu1"));
+    let us1 = node(&format!("{tag}-us1"));
+    let (to_eu1, to_us1) = (Proxy::to(eu1.port), Proxy::to(us1.port));
+    let (status, body) = admin(
+        eu1.port,
+        &format!("{tag}-eu1"),
+        "PUT",
+        "/_admin/tenants/acme",
+        "",
+    );
+    assert_eq!(status, 201, "{body}");
+    write(eu1.port, "acme", "create collection notes (body text)");
+    let mut dir = Directory::in_memory();
+    for (name, addr, region) in [("eu1", &to_eu1.addr, "eu"), ("us1", &to_us1.addr, "us")] {
+        let n = fenec_shard::directory::Node {
+            addr: addr.clone(),
+            token: format!("adm-{tag}-{name}"),
+            region: region.into(),
+            ..Default::default()
+        };
+        dir.set_node(name, n).unwrap();
     }
-    // The looks ask for all three; the worker, its answer aged, for those
-    // it has left at once -- one alone only where the failover's last
-    // promotion missed the look its other two met. Asked again for each,
-    // it made a call a replica, three of one tenant.
-    let asked = us_link.seen("/_shard/placements");
-    assert!(!asked.is_empty());
-    let alone: Vec<&String> = asked
-        .iter()
-        .filter(|a| {
-            tenants
-                .iter()
-                .filter(|t| a.contains(&format!("\"{t}\"")))
-                .count()
-                == 1
-        })
-        .collect();
-    assert!(alone.len() <= 1, "calls for one tenant alone: {alone:?}");
+    dir.place("acme", "eu1", fenec_shard::directory::State::Active)
+        .unwrap();
+    let port = serve(Router::new(dir, config(Some("us"), None, None)));
+    // Its copy's stream held: it never takes its first image meanwhile.
+    to_eu1.park("acme/_replication");
+    to_us1.park("a request no one sends");
+    let (status, body) = shard(port, "PUT", "/_shard/tenants/acme/read-replicas/us", "");
+    assert_eq!(status, 201, "{body}");
+    let mut lineage = None;
+    until("the router has the tenant's lineage from its node", || {
+        let placed = shard(
+            port,
+            "POST",
+            "/_shard/placements",
+            r#"{"tenants":["acme"]}"#,
+        )
+        .1;
+        lineage = text_of(&placed, "lineage");
+        lineage.is_some()
+    });
+    let lineage = lineage.unwrap();
+    until("the router asks the copy what it is of", || {
+        !to_us1.seen("acme/lineage").is_empty()
+    });
+    to_eu1.unpark("acme/_replication");
+    until("the read replica is bound to its tenant's lineage", || {
+        shard(port, "GET", "/_shard/tenants/acme/read-replicas", "")
+            .1
+            .contains(&format!(r#""lineage":"{lineage}""#))
+    });
+}
+
+/// The lineage a node said is recorded only where the directory still
+/// has none: a tenant deleted and made again while its node was asked
+/// records its own at its create, which the answer, of the one before,
+/// wrote over -- every read replica placed after bound to a lineage no
+/// primary is of. Here the node's answer is held until the name is made
+/// again.
+#[test]
+fn a_lineage_backfilled_late_writes_over_none_recorded_since() {
+    let tag = "backfill-late";
+    let eu1 = node(&format!("{tag}-eu1"));
+    let link = Proxy::to(eu1.port);
+    let (status, body) = admin(
+        eu1.port,
+        &format!("{tag}-eu1"),
+        "PUT",
+        "/_admin/tenants/acme",
+        "",
+    );
+    assert_eq!(status, 201, "{body}");
+    let mut dir = Directory::in_memory();
+    let n = fenec_shard::directory::Node {
+        addr: link.addr.clone(),
+        token: format!("adm-{tag}-eu1"),
+        region: "eu".into(),
+        ..Default::default()
+    };
+    dir.set_node("eu1", n).unwrap();
+    dir.place("acme", "eu1", fenec_shard::directory::State::Active)
+        .unwrap();
+    let router = Router::new(dir, config(Some("eu"), None, None));
+    let port = serve(Arc::clone(&router));
+    link.park_answers("acme/lineage");
+    let placed = |port| {
+        shard(
+            port,
+            "POST",
+            "/_shard/placements",
+            r#"{"tenants":["acme"]}"#,
+        )
+        .1
+    };
+    assert_eq!(text_of(&placed(port), "lineage"), None);
+    until("the node's answer is held", || {
+        link.answers_held("acme/lineage") > 0
+    });
+    let asked = router.lineages_asked();
+    let (status, body) = shard(port, "DELETE", "/_shard/tenants/acme", "");
+    assert_eq!(status, 204, "{body}");
+    let (status, body) = shard(port, "PUT", "/_shard/tenants/acme", r#"{"node":"eu1"}"#);
+    assert_eq!(status, 201, "{body}");
+    let made = text_of(&placed(port), "lineage").expect("recorded at its create");
+    link.unpark_answers("acme/lineage");
+    until("the backfill takes the answer held", || {
+        router.lineages_asked() > asked
+    });
+    assert_eq!(text_of(&placed(port), "lineage"), Some(made.clone()));
+    let (_, body) = admin(
+        eu1.port,
+        &format!("{tag}-eu1"),
+        "GET",
+        "/_admin/tenants/acme/lineage",
+        "",
+    );
+    assert!(body.contains(&format!(r#""lineage":"{made}""#)), "{body}");
+}
+
+/// The router's own bound on a call of a read replica's upkeep.
+fn readers_call() -> Duration {
+    fenec_shard::readers::CALL
 }
 
 /// A tenant's quota reaches its read replicas, as its standby and its

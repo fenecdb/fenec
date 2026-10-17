@@ -1690,13 +1690,23 @@ rows do not outlive it on the node either
 replica's tenant of another lineage takes it off rather than point it
 anywhere. So does every other way a record outlives its tenant —
 <code>?forget</code> of a node that comes back, a router lost between a
-<code>follow</code> and the record. A tenant made before lineages were kept
-has its lineage asked of its node at the next check, and each of its read
-replicas is bound to it where its copy's node says the copy is of it —
-taken off where the copy is another tenant's. A failover keeps the
-lineage, on any build: it is the top half of the history's first id, which
-every promotion keeps. Mixed versions protect less and break nothing: a
-node from before lineages ignores
+<code>follow</code> and the record. A primary of another lineage than the
+directory's, on the node the directory places its tenant on, is the
+tenant: a standby that never took its first image promoted by a failover,
+an older file restored, a file put in place by hand. A failover records
+the lineage the promotion answers, and a read replica's copy lost has the
+primary's node asked which lineage it is of; the directory takes its
+word, keeping the lineage before as one the tenant was, and the read
+replicas bound to that one are bound to the new one rather than taken
+off. A copy lost three times in a row anyway is made again no more —
+<code>"given_up": true</code> in its list, counted in
+<code>fenec_router_read_replicas_given_up</code> — until its primary or
+lineage changes or it is placed again. A tenant made before lineages were
+kept has its lineage asked of its node at the next check, and each of its
+read replicas is bound to it where its copy's node says the copy holds
+its primary's history and is of it — taken off where the copy is another
+tenant's, asked again later where it has not caught up. Mixed versions
+protect less and break nothing: a node from before lineages ignores
 <code>"lineage"</code> in a <code>follow</code> and has no
 <code>/_admin/tenants/&lt;t&gt;/lineage</code>, and a router from before
 them ignores <code>lineages</code> — no copy refuses on their word, until

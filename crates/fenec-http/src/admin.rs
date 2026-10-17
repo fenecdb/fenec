@@ -124,9 +124,20 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             version: None,
         }),
         // A router recording the lineage of a tenant made before it kept
-        // any, to bind its read replicas to.
+        // any, to bind its read replicas to, or asking the primary it
+        // places a tenant on which lineage it is of. `ready`: whether the
+        // file holds its primary's history -- a copy that has not taken its
+        // first image is of a lineage of its own, a new file's, and says
+        // nothing of the tenant it copies.
         (Method::Get, ["tenants", t, "lineage"]) => tenants.get(t).map(|tenant| {
-            Response::json(200, format!("{{\"lineage\":{}}}", lineage_json(&tenant)))
+            Response::json(
+                200,
+                format!(
+                    "{{\"lineage\":{},\"ready\":{}}}",
+                    lineage_json(&tenant),
+                    tenant.ready()
+                ),
+            )
         }),
         (Method::Put, ["tenants", t, "file"]) => tenants
             .import(t, &req.body)
@@ -146,9 +157,15 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Post, ["tenants", t, "promote"]) => superseded(tenants, req)
             .and_then(|_| tenants.promote(t))
             .map(|(seq, id)| {
+                // Its lineage, which the router records: a copy that never
+                // took its first image is promoted into one of its own.
+                let lineage = tenants.get(t).map_or("null".into(), |t| lineage_json(&t));
                 Response::json(
                     200,
-                    format!("{{\"promoted\":\"{t}\",\"seq\":{seq},\"history\":\"{id:016x}\"}}"),
+                    format!(
+                        "{{\"promoted\":\"{t}\",\"seq\":{seq},\"history\":\"{id:016x}\",\
+                         \"lineage\":{lineage}}}"
+                    ),
                 )
             }),
         // The other way: a node rejoining as the standby has its tenants

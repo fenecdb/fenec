@@ -203,6 +203,11 @@ pub struct Router {
     /// The tenants this directory places whose lineage is to be had from
     /// their node ([`Router::backfill_lineages`]).
     lineage_wanted: Mutex<HashSet<String>>,
+    /// The nodes' answers [`Router::backfill_lineages`] has taken.
+    lineage_answers: std::sync::atomic::AtomicU64,
+    /// How many times in a row each read replica's lost copy was made
+    /// again ([`Router::may_remake`]), by `<tenant>/<node>`.
+    reader_remade: Mutex<std::collections::HashMap<String, u32>>,
     /// The quotas the read replicas are to be sent, and the nodes a sender
     /// is under way to ([`readers::QuotaQueue`]).
     reader_quota_queue: Mutex<readers::QuotaQueue>,
@@ -275,6 +280,8 @@ impl Router {
             reader_quotas: Mutex::new(Default::default()),
             lookers: Mutex::new(HashSet::new()),
             lineage_wanted: Mutex::new(HashSet::new()),
+            lineage_answers: std::sync::atomic::AtomicU64::new(0),
+            reader_remade: Mutex::new(std::collections::HashMap::new()),
             reader_quota_queue: Mutex::new(Default::default()),
             quotas_soon: (Mutex::new(false), std::sync::Condvar::new()),
             resting: Mutex::new(Default::default()),
@@ -2001,7 +2008,7 @@ impl Router {
                 self.quota_after_failover(&tenant, &to);
             }
             match answer {
-                Ok((200, _)) => match self.write_dir().place(&tenant, &to, State::Active) {
+                Ok((200, body)) => match self.promoted(&tenant, &to, &body) {
                     Ok(()) => promoted.push(quote(&tenant)),
                     Err(e) => failed.push(format!(
                         "{{\"tenant\":{},\"why\":{}}}",
@@ -2094,12 +2101,11 @@ impl Router {
                 .pool
                 .call_with(&node.addr, "POST", &target, &node.token, &named, b"")
             {
-                Ok((200, _)) => {
+                Ok((200, body)) => {
                     self.quota_after_failover(&tenant, &to);
-                    let mut dir = self.write_dir();
-                    match dir
-                        .place(&tenant, &to, State::Active)
-                        .and_then(|_| dir.set_replica(&tenant, None))
+                    match self
+                        .promoted(&tenant, &to, &body)
+                        .and_then(|_| self.write_dir().set_replica(&tenant, None))
                     {
                         Ok(()) => promoted.push(format!(
                             "{{\"tenant\":{},\"to\":{}}}",
@@ -2846,6 +2852,26 @@ fn expect(got: std::io::Result<(u16, Vec<u8>)>, want: u16, node: &str) -> Outcom
             format!("node `{node}`: {}", String::from_utf8_lossy(&body)),
         )),
         Err(e) => Err(Fail(502, format!("node `{node}` did not answer: {e}"))),
+    }
+}
+
+impl Router {
+    /// Records `tenant` promoted on `to`, and the lineage its node says the
+    /// promoted file is of (`"lineage"`): the tenant's own as a promotion
+    /// keeps it -- or, promoted from a copy that never took its first
+    /// image, one of its own, which the tenant is of from then on, the one
+    /// before kept as one it was so that its read replicas are bound to it
+    /// again rather than refuse it. A tenant whose lineage was not known
+    /// is of the one said; a node from before lineages says none.
+    fn promoted(&self, tenant: &str, to: &str, answer: &[u8]) -> fenec_core::error::Result<()> {
+        let lineage = lineage_in(answer);
+        let mut dir = self.write_dir();
+        dir.place(tenant, to, State::Active)?;
+        match (lineage, dir.lineage(tenant)) {
+            (Some(l), None) => dir.set_lineage(tenant, Some(&l)),
+            (Some(l), Some(known)) if known != l => dir.succeed_lineage(tenant, &l),
+            _ => Ok(()),
+        }
     }
 }
 
