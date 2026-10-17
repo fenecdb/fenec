@@ -36,7 +36,6 @@ public final class FenecRemote: @unchecked Sendable {
     private final class Shared: @unchecked Sendable {
         let lock = NSLock()
         var token: String?
-        var seq: Int?
         /// The furthest position an answer from home named, which a read
         /// near is sent after: an answer that arrives late is not the last.
         var at: Position?
@@ -76,14 +75,13 @@ public final class FenecRemote: @unchecked Sendable {
         return shared.token
     }
 
-    /// The change the last write through this connection, or a copy of it,
-    /// left the database at (`Fenec-Seq`); nil before any. A read near's
-    /// answer, which may be a replica's, moves it not.
-    public var seq: Int? {
-        shared.lock.lock()
-        defer { shared.lock.unlock() }
-        return shared.seq
-    }
+    /// The furthest change an answer from home -- a write's, a read-only
+    /// batch's -- left the database at (`Fenec-Seq`), through this
+    /// connection or a copy of it; nil before any. Answers arriving out of
+    /// order do not move it back, a read near's answer, which may be a
+    /// replica's, moves it not, and a read near's 504 sets it to where home
+    /// says it stands, as Go's `Seq()` and .NET's `Seq` are.
+    public var seq: Int? { position()?.seq }
 
     /// A copy whose writes -- `run`, `batch` and the builder's -- carry
     /// `key` as their `Idempotency-Key`: sent again after a timeout, a write
@@ -195,7 +193,9 @@ public final class FenecRemote: @unchecked Sendable {
         // connection, which the replica waits for -- that change of that
         // history.
         var near = reading && reads == .nearest
-        let sent = near ? position() : nil
+        // A position of change 0 is none: nothing to wait for, as Go and
+        // .NET send none.
+        let sent = near ? position().flatMap { $0.seq > 0 ? $0 : nil } : nil
         if near {
             req.setValue("replica", forHTTPHeaderField: "fenec-read")
             if let sent {
@@ -246,7 +246,6 @@ public final class FenecRemote: @unchecked Sendable {
     // Out of the async function: an NSLock is not to be taken in one.
     private func note(_ p: Position) {
         shared.lock.lock()
-        shared.seq = p.seq
         if p.isPast(shared.at) { shared.at = p }
         shared.lock.unlock()
     }

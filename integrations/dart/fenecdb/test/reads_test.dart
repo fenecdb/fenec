@@ -415,6 +415,8 @@ void main() {
       expect(await db.from('t').count(), 2);
       await db.query('get t count');
       await db.asRead().batch([db.from('t').toFenecQL()]);
+      // The furthest of the three writes, and not the read near's 15.
+      expect(db.seq, 12);
       expect((await db.withWait(const Duration(seconds: 1)).from('t').rows()).length, 1);
       await db.from('t').rows();
 
@@ -439,6 +441,55 @@ void main() {
       expect(seen[9]['fenec-after'], '10');
       expect(seen[9]['fenec-history'], h2);
       expect(db.seq, 10);
+    } finally {
+      db.close();
+      await sent.close();
+    }
+  });
+
+  // `seq` is the furthest position home named, as Go's `Seq()` and .NET's
+  // `Seq` are: a write answered late does not move it back, and a read
+  // near's 504 sets it to where home says it stands. A position of change 0
+  // marks a read near and names no change to wait for.
+  test('seq is the furthest position home named', () async {
+    const h3 = '3-00000000000000cc';
+    final held = Completer<void>();
+    final sent = await Wire.start(script: [
+      const Scripted(body: '{"results":[]}', seq: '0', history: h1),
+      const Scripted(),
+      Scripted(body: '{"affected":1}', seq: '101', history: h2, gate: held.future),
+      written('102', h2),
+      const Scripted(),
+      refused(7, h3),
+      const Scripted(),
+      const Scripted(),
+    ]);
+    final db = Fenec.connect(sent.url, reads: Reads.nearest);
+    try {
+      await db.batch([db.from('t').toFenecQL()]);
+      expect(db.seq, 0);
+      await db.from('t').rows();
+      expect(sent.last['fenec-read'], 'replica');
+      expect(sent.last['fenec-after'], isNull);
+      expect(sent.last['fenec-history'], isNull);
+
+      // Two writes, the first answered after the second.
+      final first = db.execute('put t {n: 1}');
+      await eventually('the first write sent', () => sent.heads.length == 3);
+      await db.execute('put t {n: 2}');
+      expect(db.seq, 102);
+      held.complete();
+      await first;
+      expect(db.seq, 102);
+      await db.from('t').rows();
+      expect(sent.last['fenec-after'], '102');
+
+      // A 504 naming a later term's 7: home's word, lower or not.
+      await db.from('t').rows();
+      expect(db.seq, 7);
+      await db.from('t').rows();
+      expect(sent.last['fenec-after'], '7');
+      expect(sent.last['fenec-history'], h3);
     } finally {
       db.close();
       await sent.close();

@@ -139,6 +139,8 @@
             #expect(try await db.from("t").count() == 2)
             _ = try await db.query("get t count")
             _ = try await db.asRead().batch([try db.from("t").toFenecQL()])
+            // The furthest of the three writes, and not the read near's 15.
+            #expect(db.seq == 12)
             #expect(try await db.withWait(1).from("t").rows().count == 1)
             _ = try await db.from("t").rows()
 
@@ -156,6 +158,45 @@
             // failover.
             #expect(seen[9]["fenec-after"] == "10" && seen[9]["fenec-history"] == h2)
             #expect(db.seq == 10)
+        }
+
+        /// `seq` is the furthest position home named, as Go's `Seq()` and
+        /// .NET's `Seq` are: a write answered late does not move it back,
+        /// and a read near's 504 sets it to where home says it stands. A
+        /// position of change 0 marks a read near and names no change to
+        /// wait for.
+        @Test func seqIsTheFurthestPositionHomeNamed() async throws {
+            let h3 = "3-00000000000000cc"
+            let held = Once<Bool>()
+            var late = written("101", h2)
+            late.gate = held
+            let sent = Wire.Log(script: [
+                Scripted(body: #"{"results":[]}"#, seq: "0", history: h1), Scripted(),
+                late, written("102", h2), Scripted(), refused(7, h3), Scripted(), Scripted(),
+            ])
+            let db = connection("http://seq.invalid", reads: .nearest, log: sent)
+            _ = try await db.batch([try db.from("t").toFenecQL()])
+            #expect(db.seq == 0)
+            _ = try await db.from("t").rows()
+            #expect(sent.last["fenec-read"] == "replica" && sent.last["fenec-after"] == nil)
+            #expect(sent.last["fenec-history"] == nil)
+
+            // Two writes, the first answered after the second.
+            let first = Task { try await db.execute("put t {n: 1}") }
+            try await eventually("the first write sent") { sent.all.count == 3 }
+            try await db.execute("put t {n: 2}")
+            #expect(db.seq == 102)
+            held.set(true)
+            _ = try await first.value
+            #expect(db.seq == 102)
+            _ = try await db.from("t").rows()
+            #expect(sent.last["fenec-after"] == "102")
+
+            // A 504 naming a later term's 7: home's word, lower or not.
+            _ = try await db.from("t").rows()
+            #expect(db.seq == 7)
+            _ = try await db.from("t").rows()
+            #expect(sent.last["fenec-after"] == "7" && sent.last["fenec-history"] == h3)
         }
 
         /// A read near's 504 sets the position back only over the one the

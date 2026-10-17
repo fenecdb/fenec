@@ -7,7 +7,6 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * A fenec-server over HTTP, with no file on the device: every query goes to
@@ -51,8 +50,6 @@ class FenecRemote private constructor(
     enum class Reads { HOME, NEAREST }
 
     private class Shared(@Volatile var token: String?, val reads: Reads) {
-        val seq = AtomicReference<Long?>(null)
-
         /** The furthest position an answer from home named, which a read near is sent after: an answer that arrives late is not the last. */
         private var at: Position? = null
 
@@ -60,7 +57,6 @@ class FenecRemote private constructor(
 
         /** An answer from home named [p]. */
         @Synchronized fun answered(p: Position) {
-            seq.set(p.seq)
             if (p.isPast(at)) at = p
         }
 
@@ -92,11 +88,14 @@ class FenecRemote private constructor(
     }
 
     /**
-     * The change the last write through this connection, or a copy of it,
-     * left the database at (`Fenec-Seq`); null before any. A read near's
-     * answer, which may be a replica's, moves it not.
+     * The furthest change an answer from home -- a write's, a read-only
+     * batch's -- left the database at (`Fenec-Seq`), through this
+     * connection or a copy of it; null before any. Answers arriving out of
+     * order do not move it back, a read near's answer, which may be a
+     * replica's, moves it not, and a read near's 504 sets it to where home
+     * says it stands, as Go's `Seq()` and .NET's `Seq` are.
      */
-    val seq: Long? get() = shared.seq.get()
+    val seq: Long? get() = shared.position()?.seq
 
     /**
      * A copy whose writes -- [run], [batch] and the builder's -- carry [key]
@@ -239,14 +238,16 @@ class FenecRemote private constructor(
      */
     private inline fun sending(request: (Near?) -> Reply): Triple<Any, Long?, Boolean> {
         if (!reading || shared.reads != Reads.NEAREST) return finish(request(null), near = false)
-        val sent = shared.position()
+        // A position of change 0 is none: nothing to wait for, as Go and
+        // .NET send none.
+        val sent = shared.position()?.takeIf { it.seq > 0 }
         val reply = request(Near(sent))
         // 504: no copy holds that write in the wait -- home had none
         // either, lost in a failover. Home says where it stands, which the
         // connection takes as its position, lower or not (`told`); asked
         // home again with no mark, the read is answered with what home holds.
         if (reply.status == 504 && sent != null) {
-            val home = runCatching { Json.parse(reply.body) as? Row }.getOrNull()
+            val home = reply.v as? Row
             val at = home?.long("seq")
             if (home != null && at != null) shared.told(sent, Position(at, home.string("history")))
             return finish(request(null), near = false)
@@ -257,8 +258,14 @@ class FenecRemote private constructor(
     /** A read near's mark: the position it is sent after, null for none. */
     private class Near(val after: Position?)
 
-    /** An answer as it came: its status, body and the head it is read by. */
-    private class Reply(val status: Int, val body: String, val c: HttpURLConnection)
+    /**
+     * An answer as it came: its status, its body read as JSON (null where
+     * empty or not JSON) and the head it is read by. Read where the
+     * exchange ran -- on `Dispatchers.IO` for a suspending call -- so a
+     * large answer is never parsed on the caller's thread, an app's main
+     * thread among them.
+     */
+    private class Reply(val status: Int, val v: Any?, val c: HttpURLConnection)
 
     private fun open(path: String, type: String, key: String?, near: Near?): HttpURLConnection {
         val c = URL("$url$path").openConnection() as HttpURLConnection
@@ -281,19 +288,22 @@ class FenecRemote private constructor(
         return c
     }
 
-    private fun exchange(c: HttpURLConnection, payload: String): Reply = try {
-        c.outputStream.use { it.write(payload.encodeToByteArray()) }
-        val status = c.responseCode
-        Reply(status, (if (status >= 400) c.errorStream else c.inputStream)?.use { String(it.readBytes(), Charsets.UTF_8) } ?: "", c)
-    } catch (e: IOException) {
-        throw FenecException(FenecException.Code.IO, "the server could not be reached: ${e.message}")
+    private fun exchange(c: HttpURLConnection, payload: String): Reply {
+        val (status, body) = try {
+            c.outputStream.use { it.write(payload.encodeToByteArray()) }
+            val status = c.responseCode
+            status to ((if (status >= 400) c.errorStream else c.inputStream)?.use { String(it.readBytes(), Charsets.UTF_8) } ?: "")
+        } catch (e: IOException) {
+            throw FenecException(FenecException.Code.IO, "the server could not be reached: ${e.message}")
+        }
+        parsing?.invoke()
+        return Reply(status, runCatching { if (body.isEmpty()) null else Json.parse(body) }.getOrNull(), c)
     }
 
     private fun finish(reply: Reply, near: Boolean): Triple<Any, Long?, Boolean> {
         val status = reply.status
-        val body = reply.body
+        val v = reply.v
         val c = reply.c
-        val v = runCatching { if (body.isEmpty()) null else Json.parse(body) }.getOrNull()
         if (status !in 200..299) throw refused(status, v as? Row, c.getHeaderField("retry-after"))
         v ?: throw FenecException(FenecException.Code.IO, "the server did not answer JSON ($status)")
         val seq = c.getHeaderField("fenec-seq")?.toLongOrNull()
@@ -304,6 +314,13 @@ class FenecRemote private constructor(
     }
 
     internal companion object {
+        /**
+         * Called on the thread an answer is about to be parsed on: the tests'
+         * probe that a suspending call parses on `Dispatchers.IO`, not on its
+         * caller's thread. Null, as it always is outside them.
+         */
+        @Volatile internal var parsing: (() -> Unit)? = null
+
         /**
          * A refusal as the error it is: its status and message, where a batch stopped, and where a
          * tenant's quota refused it the quota and how many seconds to wait -- to the millisecond where

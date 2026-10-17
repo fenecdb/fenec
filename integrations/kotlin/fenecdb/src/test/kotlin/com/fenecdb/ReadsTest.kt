@@ -2,6 +2,7 @@ package com.fenecdb
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -11,10 +12,14 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.URL
 import java.nio.file.Files
+import java.util.Collections
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -34,20 +39,32 @@ class Daemon(binary: String, args: List<String>) {
     val port: Int
 
     init {
-        val err = process.errorStream.bufferedReader()
-        val seen = StringBuilder()
-        var found = 0
-        while (found == 0) {
-            val line = err.readLine() ?: run {
-                process.destroyForcibly()
-                throw IllegalStateException("$binary did not start: $seen")
+        // Its stderr read on a thread of its own to its end, the rest of its
+        // output going nowhere; a binary that never says where it listens
+        // is given up on after 20 s, as Swift's and Dart's harnesses do,
+        // rather than hold the run on a `readLine` for good.
+        val found = CompletableFuture<Int>()
+        Thread {
+            val seen = StringBuilder()
+            runCatching {
+                process.errorStream.bufferedReader().forEachLine { line ->
+                    if (!found.isDone) {
+                        seen.appendLine(line)
+                        Regex("listening on: http://127\\.0\\.0\\.1:(\\d+) ").find(line)?.let { found.complete(it.groupValues[1].toInt()) }
+                    }
+                }
             }
-            seen.appendLine(line)
-            Regex("listening on: http://127\\.0\\.0\\.1:(\\d+) ").find(line)?.let { found = it.groupValues[1].toInt() }
+            found.completeExceptionally(IllegalStateException("$binary did not start: $seen"))
+        }.apply { isDaemon = true }.start()
+        port = try {
+            found.get(20, TimeUnit.SECONDS)
+        } catch (e: TimeoutException) {
+            process.destroyForcibly()
+            throw IllegalStateException("$binary did not say where it listens in 20 s", e)
+        } catch (e: ExecutionException) {
+            process.destroyForcibly()
+            throw e.cause ?: e
         }
-        port = found
-        // The rest of its output goes nowhere.
-        Thread { runCatching { err.readText() } }.apply { isDaemon = true }.start()
     }
 
     /** Killed, as a crash would; returns once it is gone. */
@@ -360,6 +377,8 @@ class ReadsTest {
             assertEquals(2L, db.from("t").count())
             db.query("get t count")
             db.asRead().batch(listOf(db.from("t").toFenecQL()))
+            // The furthest of the three writes, and not the read near's 15.
+            assertEquals(12L, db.seq)
             assertEquals(1, db.withWait(1000).from("t").rows().size)
             db.from("t").rows()
 
@@ -385,6 +404,79 @@ class ReadsTest {
             assertEquals("10", seen[9]["fenec-after"])
             assertEquals(h2, seen[9]["fenec-history"])
             assertEquals(10L, db.seq)
+        }
+    }
+
+    /**
+     * `seq` is the furthest position home named, as Go's `Seq()` and .NET's
+     * `Seq` are: a write answered late does not move it back, and a read
+     * near's 504 sets it to where home says it stands. A position of change
+     * 0 marks a read near and names no change to wait for.
+     */
+    @Test
+    fun seqIsTheFurthestPositionHomeNamed() = runBlocking {
+        val h3 = "3-00000000000000cc"
+        val held = CountDownLatch(1)
+        val script = listOf(
+            Scripted(body = """{"results":[]}""", seq = "0", history = h1), Scripted(),
+            written("101", h2).copy(gate = held), written("102", h2),
+            Scripted(), refused(7, h3), Scripted(), Scripted(),
+        )
+        Wire(null, script).use { sent ->
+            val db = Fenec.connect(sent.url, reads = FenecRemote.Reads.NEAREST)
+            db.batch(listOf(db.from("t").toFenecQL()))
+            assertEquals(0L, db.seq)
+            db.from("t").rows()
+            assertEquals("replica", sent.last["fenec-read"])
+            assertNull(sent.last["fenec-after"])
+            assertNull(sent.last["fenec-history"])
+
+            // Two writes, the first answered after the second.
+            val first = async { db.execute("put t {n: 1}") }
+            eventually("the first write sent") { sent.all.size == 3 }
+            db.execute("put t {n: 2}")
+            assertEquals(102L, db.seq)
+            held.countDown()
+            first.await()
+            assertEquals(102L, db.seq)
+            db.from("t").rows()
+            assertEquals("102", sent.last["fenec-after"])
+
+            // A 504 naming a later term's 7: home's word, lower or not.
+            db.from("t").rows()
+            assertEquals(7L, db.seq)
+            db.from("t").rows()
+            assertEquals("7", sent.last["fenec-after"])
+            assertEquals(h3, sent.last["fenec-history"])
+        }
+    }
+
+    /**
+     * A suspending call reads its answer on `Dispatchers.IO`, as the README
+     * says, never on its caller's thread -- an app's main thread among them.
+     * Parsed on the caller's, a large answer held a `viewModelScope` call's
+     * main thread for as long as it took.
+     */
+    @Test
+    fun anAnswerIsParsedOffTheCallersThread() {
+        val caller = Executors.newSingleThreadExecutor { r -> Thread(r, "the caller") }
+        val dispatcher = caller.asCoroutineDispatcher()
+        val parsedOn = Collections.synchronizedList(mutableListOf<String>())
+        FenecRemote.parsing = { parsedOn.add(Thread.currentThread().name) }
+        try {
+            Wire(null, listOf(written("1", h1), Scripted(body = """[{"n":1}]"""), refused(1, h1), Scripted())).use { sent ->
+                runBlocking(dispatcher) {
+                    val db = Fenec.connect(sent.url, reads = FenecRemote.Reads.NEAREST)
+                    db.execute("put t {n: 1}")
+                    db.from("t").rows()
+                    db.from("t").rows()
+                }
+            }
+            assertEquals(4, parsedOn.size, "$parsedOn")
+            assertTrue(parsedOn.none { it == "the caller" }, "$parsedOn")
+        } finally {
+            FenecRemote.parsing = null
+            dispatcher.close()
         }
     }
 

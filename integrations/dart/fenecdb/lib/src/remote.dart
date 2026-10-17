@@ -66,13 +66,12 @@ class _Position {
 
 /// What a connection and the copies [FenecRemote.withIdempotencyKey],
 /// [FenecRemote.withWait] and [FenecRemote.asRead] make of it share, as Go's
-/// and .NET's copies share theirs: the connections, the token, the last
-/// `Fenec-Seq` and the furthest position.
+/// and .NET's copies share theirs: the connections, the token and the
+/// furthest position.
 class _Shared {
   final HttpClient client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
   final Reads reads;
   String? token;
-  int? seq;
 
   /// The furthest position an answer from home named, which a read near is
   /// sent after: an answer that arrives late is not the last.
@@ -124,10 +123,13 @@ class FenecRemote {
   String? get token => _shared.token;
   set token(String? t) => _shared.token = t;
 
-  /// The change the last write through this connection, or a copy of it,
-  /// left the database at (`Fenec-Seq`); null before any. A read near's
-  /// answer, which may be a replica's, moves it not.
-  int? get seq => _shared.seq;
+  /// The furthest change an answer from home -- a write's, a read-only
+  /// batch's -- left the database at (`Fenec-Seq`), through this connection
+  /// or a copy of it; null before any. Answers arriving out of order do not
+  /// move it back, a read near's answer, which may be a replica's, moves it
+  /// not, and a read near's 504 sets it to where home says it stands, as
+  /// Go's `Seq()` and .NET's `Seq` are.
+  int? get seq => _shared.at?.seq;
 
   /// A copy whose writes -- [run], [batch] and the builder's -- carry [key]
   /// as their `Idempotency-Key`: sent again after a timeout, a write is
@@ -206,7 +208,10 @@ class FenecRemote {
     // region, after the furthest position home named to this connection,
     // which the replica waits for -- that change of that history.
     var near = _reading && _shared.reads == Reads.nearest;
-    final sent = near ? _shared.at : null;
+    // A position of change 0 is none: nothing to wait for, as Go and .NET
+    // send none.
+    final at = _shared.at;
+    final sent = near && at != null && at.seq > 0 ? at : null;
     var (status, body, headers) = await _send(path, type, payload, key, near, sent);
     // 504: no copy holds that write in the wait -- home had none either,
     // lost in a failover. Home says where it stands, which the connection
@@ -242,7 +247,6 @@ class FenecRemote {
     // A position from home alone: a read near's answer may be a replica's,
     // behind home or on a branch a failover left.
     if (seq != null && !near) {
-      _shared.seq = seq;
       final p = _Position(seq, headers.value('fenec-history'));
       if (p.isPast(_shared.at)) _shared.at = p;
     }
