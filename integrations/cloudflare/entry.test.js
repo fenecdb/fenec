@@ -157,23 +157,49 @@ test("an answer is a router's where it carries X-Request-Id, as every answer a r
   for (const s of [521, 523, 525, 526, 530]) assert.equal(judged(answer(s)), 'unrun', String(s));
 });
 
-/** Reads a stream's chunks until `done(text)` holds: the text read. */
-function readUntil(res, done, ms = 30_000) {
-  return new Promise((ok, fail) => {
-    let text = '';
-    const timer = setTimeout(() => fail(new Error(`waited ${ms} ms for the stream; read: ${text}`)), ms);
-    const read = (d) => {
-      text += d;
-      if (done(text)) {
-        clearTimeout(timer);
-        res.off('data', read);
-        ok(text);
-      }
-    };
-    res.setEncoding('utf8');
-    res.on('data', read);
-    res.once('end', () => fail(new Error(`the stream ended; read: ${text}`)));
+/**
+ * A stream's text, read as it arrives and kept from its first byte:
+ * `until(done)` waits for the text read so far to hold. One reader for the
+ * stream's life: a `data` listener taken off between two waits leaves the
+ * stream flowing, and what came meanwhile -- the change a test wrote while
+ * the stream was not listened to -- was dropped (CI: a stream's change
+ * reached it before its write's answer reached the test, and was never
+ * read).
+ */
+function reading(res) {
+  let text = '';
+  let ended = false;
+  const waiting = new Set();
+  res.setEncoding('utf8');
+  res.on('data', (d) => {
+    text += d;
+    for (const w of waiting) w();
   });
+  res.once('end', () => {
+    ended = true;
+    for (const w of waiting) w();
+  });
+  // An abort ends it with an error nobody waits for.
+  res.on('error', () => {});
+  return {
+    until(done, ms = 30_000) {
+      return new Promise((ok, fail) => {
+        const timer = setTimeout(() => {
+          waiting.delete(check);
+          fail(new Error(`waited ${ms} ms for the stream; read: ${text}`));
+        }, ms);
+        const check = () => {
+          if (!done(text) && !ended) return;
+          clearTimeout(timer);
+          waiting.delete(check);
+          if (done(text)) ok(text);
+          else fail(new Error(`the stream ended; read: ${text}`));
+        };
+        waiting.add(check);
+        check();
+      });
+    },
+  };
 }
 
 /** A router's count of the tenant requests it answered. */
@@ -312,12 +338,13 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     const s = await request(`${front.url}/t/live/notes/changes`, { headers: auth, signal: ac.signal, stream: true });
     assert.equal(s.status, 200);
     assert.match(s.header('content-type'), /text\/event-stream/);
-    await readUntil(s.res, (t) => t.includes('event: seed'));
+    const events = reading(s.res);
+    await events.until((t) => t.includes('event: seed'));
     // A change written elsewhere reaches the open stream: nothing waits for
-    // the stream to end.
+    // the stream to end. It may reach it before the write's answer reaches
+    // the test, which the reader keeps.
     assert.equal((await query(w.us.url, 'live', 'put notes {title: "streamed"}')).status, 200);
-    await readUntil(s.res, (t) => t.includes('streamed'));
-    s.res.on('error', () => {});
+    await events.until((t) => t.includes('streamed'));
     ac.abort();
     // One stream a tenant: the node takes another once the entry's has
     // gone -- the entry's fetch cancelled, the router's write and then the
@@ -325,6 +352,7 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     await until(async () => {
       const ac2 = new AbortController();
       const r = await request(`${w.us.url}/t/live/notes/changes`, { headers: auth, signal: ac2.signal, stream: true }).catch(() => null);
+      r?.res.on('error', () => {});
       ac2.abort();
       return r?.status === 200;
     }, 'the stream let go of at the node', 30_000);
@@ -728,10 +756,9 @@ describe('the entry in front of stand-in routers', { skip, timeout: 180_000 }, (
   test('a stream is let go of at the router as its client goes', async () => {
     const ac = new AbortController();
     const s = await request(`${front.url}/t/stream/notes/changes`, { signal: ac.signal, stream: true });
-    await readUntil(s.res, (t) => t.includes('event: seed'));
+    await reading(s.res).until((t) => t.includes('event: seed'));
     const streamed = stub.seen.at(-1);
     assert.equal(streamed.closed, false);
-    s.res.on('error', () => {});
     ac.abort();
     await until(() => streamed.closed, 'the stream closed at the router', 10_000);
   });
