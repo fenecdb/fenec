@@ -138,7 +138,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-294 KB of gzipped WebAssembly and a 57 KB gzipped client — no wasm-bindgen, no
+294 KB of gzipped WebAssembly and a 59 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
 `@fenecdb/web/client`, 9 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fenecdb.com/docs/javascript#packages)). With live
@@ -246,7 +246,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fenec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own |
-| **Runtime size** | 294 KB gzip wasm + 57 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
+| **Runtime size** | 294 KB gzip wasm + 59 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

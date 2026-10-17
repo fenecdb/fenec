@@ -773,7 +773,7 @@ impl Archive {
                 r.seq
             )));
         }
-        db.fork(fresh_id())
+        db.fork(crate::replication::fork_id(db.history(), fresh_id()))
             .and_then(|_| db.checkpoint())
             .map_err(|e| io::Error::other(e.to_string()))?;
         drop(db);
@@ -1203,7 +1203,8 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
             lineage,
             following: false,
         };
-        bytes.extend_from_slice(&history.forked(fresh_id(), seq).record());
+        let id = crate::replication::fork_id(&history, fresh_id());
+        bytes.extend_from_slice(&history.forked(id, seq).record());
         if let Some(key) = key {
             bytes = seal::seal_whole(key, &bytes);
         }

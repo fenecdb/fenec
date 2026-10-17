@@ -21,6 +21,15 @@ public sealed class FenecClientOptions
     /// <summary>Sends the requests through this client rather than one of its own, which is then not disposed.
     /// Its own Timeout, if it has one, also cuts a subscription short.</summary>
     public HttpClient? HttpClient { get; init; }
+
+    /// <summary>Marks the builder's reads, and an <see cref="FenecClient.AsRead"/> copy's requests, for a read
+    /// replica near the client (<c>Fenec-Read: replica</c>): a fenec-shard router near a region holding the
+    /// tenant's read replica answers them there, the rest go to the tenant's home. Each is sent after the furthest
+    /// position an answer from home named to this client -- the change and the history it is of
+    /// (<c>Fenec-After</c>, <c>Fenec-History</c>) -- so it reads nothing older than it wrote, nor a write a
+    /// failover replaced; one no copy holds that for -- the write lost in a failover of home -- is asked again at
+    /// home without it, and home's position, which its 504 names, is the client's from then.</summary>
+    public bool ReadsNearest { get; init; }
 }
 
 /// <summary>
@@ -39,24 +48,70 @@ public sealed partial class FenecClient : IDisposable
     readonly string _base;
     readonly string? _token;
     readonly TimeSpan _timeout;
-    readonly SeqBox _seq;
+    readonly Position _seq;
     readonly long _after;
     readonly string? _key;
     readonly TimeSpan _wait;
+    // Reads go near (ReadsNearest); this copy's requests only read (AsRead, the builder's reads).
+    readonly bool _near;
+    readonly bool _read;
 
-    sealed class SeqBox
+    // Where an answer from home left the database: its change (Fenec-Seq), the history that change is of
+    // (Fenec-History, <term>-<id>; none for a database that never had a replica) and that history's term, one
+    // more at each promotion. Shared by the copies.
+    sealed class Position
     {
+        readonly object _lock = new();
         long _value;
-        public long Value => Interlocked.Read(ref _value);
+        long _term;
+        string? _history;
 
-        // The highest change seen: writes answered out of order on several
+        public long Value { get { lock (_lock) return _value; } }
+
+        public (long, string?) Get() { lock (_lock) return (_value, _history); }
+
+        // The furthest seen -- of another lineage, home's word on a tenant made again under the name, whose terms
+        // start again; or a later term of the same, or further in one: answers arriving out of order on several
         // threads must not move it back.
-        public void Note(long n)
+        public void Note(long n, string? history)
         {
-            long old;
-            while (n > (old = Interlocked.Read(ref _value)))
-                if (Interlocked.CompareExchange(ref _value, n, old) == old)
-                    return;
+            var term = TermOf(history);
+            lock (_lock)
+                if (Another(history, _history) || term > _term || (term == _term && n > _value))
+                    (_value, _term, _history) = (n, term, history);
+        }
+
+        // Home's, lower or not, which a read near's 504 names when no copy held the one it was sent after
+        // (sent, sentHistory) -- a write lost in a failover: kept, every read near would wait it out for good.
+        // Taken only over the position sent -- a write answered meanwhile is further, and set back the next read
+        // near would miss it -- and never of an earlier term of the same lineage: a router whose copy of the
+        // directory lags a failover sends the read to the old primary, fenced, which names the branch it
+        // abandoned. Another lineage's is a tenant made again under the name, which starts again at term 1.
+        public void Told(long sent, string? sentHistory, long n, string? history)
+        {
+            var term = TermOf(history);
+            lock (_lock)
+                if (_value == sent && _history == sentHistory
+                    && (term >= TermOf(sentHistory) || Another(history, sentHistory)))
+                    (_value, _term, _history) = (n, term, history);
+        }
+
+        static long TermOf(string? history) =>
+            history is not null && long.TryParse(history.Split('-')[0], out var t) ? t : 0;
+
+        // A history's lineage: its id's top half, which every fork of the tenant keeps and a tenant made again
+        // under its name does not.
+        static string? LineageOf(string? history)
+        {
+            var dash = history?.IndexOf('-') ?? -1;
+            return dash >= 0 && history!.Length >= dash + 9 ? history.Substring(dash + 1, 8) : null;
+        }
+
+        // Whether history a is of another lineage than b.
+        static bool Another(string? a, string? b)
+        {
+            var (la, lb) = (LineageOf(a), LineageOf(b));
+            return la is not null && lb is not null && la != lb;
         }
     }
 
@@ -72,28 +127,35 @@ public sealed partial class FenecClient : IDisposable
         // Its own client has no timeout of its own: a subscription lasts as
         // long as it is read, and each request is bounded through its token.
         _http = options.HttpClient ?? new HttpClient { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
-        _seq = new SeqBox();
+        _seq = new Position();
+        _near = options.ReadsNearest;
     }
 
-    FenecClient(FenecClient from, long after, string? key, TimeSpan wait)
+    FenecClient(FenecClient from, long after, string? key, TimeSpan wait, bool read)
     {
-        (_http, _owns, _root, _base, _token, _timeout, _seq) =
-            (from._http, false, from._root, from._base, from._token, from._timeout, from._seq);
-        (_after, _key, _wait) = (after, key, wait);
+        (_http, _owns, _root, _base, _token, _timeout, _seq, _near) =
+            (from._http, false, from._root, from._base, from._token, from._timeout, from._seq, from._near);
+        (_after, _key, _wait, _read) = (after, key, wait, read);
     }
 
-    /// <summary>The change the last write through this client, or a copy of it, left the database at; 0 before any.</summary>
+    /// <summary>The furthest change an answer from home -- a write's, a read-only batch's -- left the database at,
+    /// through this client or a copy of it; 0 before any.</summary>
     public long Seq => _seq.Value;
 
     /// <summary>A copy whose requests the server answers only once it holds change <paramref name="seq"/> --
     /// a write's <see cref="ExecResult.Seq"/> on the primary, read on a replica -- or with a 504 after five seconds.
     /// Never from before the write.</summary>
-    public FenecClient After(long seq) => new(this, seq, _key, _wait);
+    public FenecClient After(long seq) => new(this, seq, _key, _wait, _read);
+
+    /// <summary>A copy whose requests only read: on a client with <see cref="FenecClientOptions.ReadsNearest"/> a
+    /// router near the tenant's read replica answers them there. The builder's reads are sent so on their own; a
+    /// statement the caller knows reads goes through this -- one that writes is refused (403), never landed.</summary>
+    public FenecClient AsRead() => new(this, _after, _key, _wait, true);
 
     /// <summary>A copy whose writes carry the key: sent again after a timeout, a write is answered as the first
     /// time and not made twice (<see cref="ExecResult.Replayed"/>). One key per write; the same key with another
     /// request is a 422.</summary>
-    public FenecClient WithIdempotencyKey(string key) => new(this, _after, key, _wait);
+    public FenecClient WithIdempotencyKey(string key) => new(this, _after, key, _wait, _read);
 
     /// <summary>A copy whose <c>set</c> and <c>del</c> statements -- <see cref="ExecAsync"/>, a batch's, the
     /// builder's <c>UpdateAsync</c> and <c>DeleteAsync</c> -- the server holds while they write nothing, until
@@ -104,7 +166,7 @@ public sealed partial class FenecClient : IDisposable
     public FenecClient WithWait(TimeSpan wait)
     {
         if (wait < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(wait), "a wait is not negative");
-        return new(this, _after, _key, wait);
+        return new(this, _after, _key, wait, _read);
     }
 
     /// <summary>The query builder over a collection: chain <c>Select</c>, <c>Where</c>, <c>Near</c>, <c>Order</c>,
@@ -120,6 +182,10 @@ public sealed partial class FenecClient : IDisposable
         var (body, _) = await RunAsync(query, parameters, cancellationToken).ConfigureAwait(false);
         return RowsOf(body);
     }
+
+    /// <summary>A builder's read: this client's own request, marked as one where it reads near.</summary>
+    internal Task<(byte[], Head)> RunReadAsync(string query, IReadOnlyList<object?>? parameters, CancellationToken ct) =>
+        (_near && !_read ? AsRead() : this).RunAsync(query, parameters, ct);
 
     /// <summary>Runs one FenecQL statement and maps its rows to <typeparamref name="T"/>, a record or a class,
     /// by property name, whatever its case. A <c>float[]</c> property reads a vector back as the f32s the server holds.</summary>
@@ -317,7 +383,15 @@ public sealed partial class FenecClient : IDisposable
     {
         var req = new HttpRequestMessage(method, url);
         if (_token is not null) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
-        if (_after > 0) req.Headers.TryAddWithoutValidation("Fenec-After", _after.ToString());
+        var near = _read && _near;
+        if (near) req.Headers.TryAddWithoutValidation("Fenec-Read", "replica");
+        if (_after > 0)
+            req.Headers.TryAddWithoutValidation("Fenec-After", _after.ToString());
+        else if (near && _seq.Get() is ( > 0 and var at, var history))
+        {
+            req.Headers.TryAddWithoutValidation("Fenec-After", at.ToString());
+            if (history is not null) req.Headers.TryAddWithoutValidation("Fenec-History", history);
+        }
         if (_key is not null) req.Headers.TryAddWithoutValidation("Idempotency-Key", _key);
         if (_wait > TimeSpan.Zero)
             req.Headers.TryAddWithoutValidation("Fenec-Wait", ((long)_wait.TotalMilliseconds).ToString());
@@ -338,14 +412,51 @@ public sealed partial class FenecClient : IDisposable
         }
         using var res = await _http.SendAsync(req, cts.Token).ConfigureAwait(false);
         var raw = await res.Content.ReadAsByteArrayAsync(cts.Token).ConfigureAwait(false);
+        // 504 to a read near: no copy the router reached holds the position it was sent after, home either -- the
+        // write lost in a failover of home, which says where it stands: the client's position from here on.
+        // Asked home with no mark, it is answered with what home holds.
+        var near = _read && _near;
+        if ((int)res.StatusCode == 504 && near && req.Headers.Contains("Fenec-After"))
+        {
+            if (_after == 0) Told(req, raw);
+            return await new FenecClient(this, 0, _key, _wait, false)
+                .SendAsync(method, path, contentType, body, extra, ct).ConfigureAwait(false);
+        }
         if (!res.IsSuccessStatusCode)
             throw FenecException.From((int)res.StatusCode, Encoding.UTF8.GetString(raw));
         long seq = 0;
+        // A read near's answer may be a replica's: it moves nothing.
         if (Header(res, "Fenec-Seq") is { } s && long.TryParse(s, out var n))
-            _seq.Note(seq = n);
+        {
+            seq = n;
+            if (!near) _seq.Note(n, Header(res, "Fenec-History"));
+        }
         long? next = Header(res, "Fenec-Next") is { } x && long.TryParse(x, out var m) ? m : null;
         return (raw, new Head(seq, Header(res, "Idempotent-Replayed") == "true", next));
     }
+
+    // Home's position, from a read near's 504: its seq and history, over the position `req` was sent after.
+    void Told(HttpRequestMessage req, byte[] raw)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var r = doc.RootElement;
+            if (r.ValueKind != JsonValueKind.Object || !r.TryGetProperty("seq", out var s)
+                || !s.TryGetInt64(out var n))
+                return;
+            var history = r.TryGetProperty("history", out var h) && h.ValueKind == JsonValueKind.String
+                ? h.GetString() : null;
+            long.TryParse(Sent(req, "Fenec-After"), out var sent);
+            _seq.Told(sent, Sent(req, "Fenec-History"), n, history);
+        }
+        catch (JsonException)
+        {
+        }
+    }
+
+    static string? Sent(HttpRequestMessage req, string name) =>
+        req.Headers.TryGetValues(name, out var v) ? v.FirstOrDefault() : null;
 
     static string? Header(HttpResponseMessage res, string name) =>
         res.Headers.TryGetValues(name, out var v) ? v.FirstOrDefault() : null;

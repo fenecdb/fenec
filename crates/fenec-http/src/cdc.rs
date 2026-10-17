@@ -185,7 +185,7 @@ fn forget(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str) -> Response {
 /// answer where writes are.
 fn write(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str, since: Option<i64>) -> Response {
     if cfg.read_only {
-        return Response::error(403, "this server takes no writes (--http-read-only)");
+        return crate::read_only_refused(cfg);
     }
     let key = Value::Text(name.into());
     let done = (|| -> Result<_> {

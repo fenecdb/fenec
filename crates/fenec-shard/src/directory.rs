@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 /// in a region keeping its own: `@` and the region.
 pub const HOME: char = '@';
 
-const SCHEMA: [&str; 7] = [
+const SCHEMA: [&str; 10] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
@@ -61,6 +61,37 @@ const SCHEMA: [&str; 7] = [
     // The region a regional directory holds: one row, none in the global
     // directory.
     "create collection if not exists scope (region text)",
+    // A tenant's read replicas: a follower of its primary on a node of
+    // another region, which a router near that region answers the reads
+    // its clients mark from. Kept in the directory holding the node -- a
+    // region keeping its own directory keeps its own -- and keyed
+    // `<tenant>/<node>`, one row a replica, since a tenant has one in each
+    // of several regions. `follows` is the primary's address it was last
+    // told to follow, which the router compares with where the primary is;
+    // `lineage` the tenant's it copies (`lineages`), which a primary of
+    // another -- the name made again -- it is taken off rather than
+    // pointed at.
+    "create collection if not exists readers \
+     (key text @hash, tenant text @hash, node text @hash, follows text, lineage text)",
+    // The regions keeping their own directory a read replica of a tenant's
+    // name may be kept in, as their routers said placing one -- the global
+    // directory's alone, keyed `<tenant>/<region>`. A create of the name
+    // asks those regions alone whether one is still kept: every region,
+    // one out of reach refused every create. A row outlives its replica
+    // where the router taking it off could not say so, and goes once the
+    // region says it keeps none. Read from the database where asked, never
+    // mapped: a create reads it, nothing routes by it.
+    "create collection if not exists traces (key text @hash, tenant text @hash, region text)",
+    // Each tenant's lineage, as its node said when it made the tenant or
+    // took its image in: the top half of its history's first id, 8 hex
+    // digits, which a failover and a move keep and a tenant made again
+    // under the name does not. Its read replicas are bound to it. `was`
+    // the lineages it succeeded, space-separated: where the tenant's
+    // primary came to be of another -- promoted from a copy that never
+    // took its first image, an older file restored, a file put in its
+    // place by hand -- the primary is the tenant, and the replicas bound to
+    // one it was are pointed at it, not taken off as another tenant's.
+    "create collection if not exists lineages (tenant text @hash, lineage text, was text)",
 ];
 
 /// The fields `nodes` took after directories were first written, added to
@@ -69,6 +100,32 @@ const SCHEMA: [&str; 7] = [
 /// `name, addr, token` as it always did -- it forwards every tenant where
 /// it is, and places without regard to regions.
 const NODE_FIELDS: [&str; 2] = ["region", "zone"];
+
+/// The fields `readers` took after it was first written: `lineage`, added
+/// to one written before it as `NODE_FIELDS` are. Selected only where the
+/// collection has it ([`reader_fields`]): asked of one without it, the
+/// select failed with the field not found, which read as an empty
+/// directory -- every read replica record forgotten.
+const READER_FIELDS: [&str; 1] = ["lineage"];
+
+/// A tenant's lineage, and the ones it succeeded, oldest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Lineage {
+    pub now: String,
+    pub was: Vec<String>,
+}
+
+impl Lineage {
+    fn of(row: &[Value]) -> Lineage {
+        Lineage {
+            now: text(&row[1]),
+            was: match row.get(2) {
+                Some(Value::Text(w)) => w.split_whitespace().map(str::to_string).collect(),
+                _ => Vec::new(),
+            },
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Node {
@@ -121,6 +178,17 @@ pub type Pairs = HashMap<String, String>;
 /// Which node holds a tenant's replica.
 pub type Replicas = HashMap<String, String>;
 
+/// A tenant's read replica: the node holding it, in a region other than
+/// the tenant's, and the primary's address it follows (`http://host:port`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reader {
+    pub node: String,
+    pub follows: String,
+    /// The lineage of the tenant it copies, where it was known as it was
+    /// placed (`lineages`).
+    pub lineage: Option<String>,
+}
+
 pub struct Directory {
     /// Shared, because a standby follows it: the follower thread applies the
     /// primary's writes to the same database (`fenec-shard --replica-of`).
@@ -142,6 +210,14 @@ pub struct Directory {
     replicas: Replicas,
     /// Each tenant's quota, where one is set: the JSON a node is sent.
     quotas: HashMap<String, String>,
+    /// Each tenant's read replicas on this directory's nodes, a region
+    /// each, sorted by node.
+    readers: HashMap<String, Vec<Reader>>,
+    /// Each tenant's lineage, where its node said it, and the ones it
+    /// succeeded (`lineages`): read by every look for every tenant with a
+    /// read replica, and by every placement another region asks for -- a
+    /// statement parsed and run each, read from the database.
+    lineages: HashMap<String, Lineage>,
     /// The regions keeping their own directory, and their routers.
     regions: BTreeMap<String, Vec<String>>,
     /// The region this directory holds, where it is a region's own.
@@ -158,7 +234,7 @@ pub struct Directory {
 }
 
 /// Document id -> key, one map a collection: nodes, tenants, pairs,
-/// replicas, quotas, regions, scope.
+/// replicas, quotas, regions, scope, readers.
 #[derive(Default)]
 struct Ids {
     nodes: HashMap<DocId, String>,
@@ -168,6 +244,8 @@ struct Ids {
     quotas: HashMap<DocId, String>,
     regions: HashMap<DocId, String>,
     scope: HashMap<DocId, String>,
+    readers: HashMap<DocId, String>,
+    lineages: HashMap<DocId, String>,
     kept: bool,
 }
 
@@ -193,10 +271,13 @@ impl Directory {
                 for sql in SCHEMA {
                     g.execute(&fenec_ql::parse_one(sql)?)?;
                 }
-                for f in NODE_FIELDS {
-                    if g.collection("nodes")?.schema.field_pos(f).is_none() {
-                        let sql = format!("alter collection nodes add field {f} text");
-                        g.execute(&fenec_ql::parse_one(&sql)?)?;
+                for (coll, fields) in [("nodes", &NODE_FIELDS[..]), ("readers", &READER_FIELDS[..])]
+                {
+                    for f in fields {
+                        if g.collection(coll)?.schema.field_pos(f).is_none() {
+                            let sql = format!("alter collection {coll} add field {f} text");
+                            g.execute(&fenec_ql::parse_one(&sql)?)?;
+                        }
                     }
                 }
             }
@@ -211,6 +292,8 @@ impl Directory {
             pairs: Pairs::new(),
             replicas: Replicas::new(),
             quotas: HashMap::new(),
+            readers: HashMap::new(),
+            lineages: HashMap::new(),
             regions: BTreeMap::new(),
             scope: None,
             arrived: false,
@@ -256,39 +339,50 @@ impl Directory {
         };
         let mut nodes = BTreeMap::new();
         let select = format!("get nodes select {}", node_fields(&g).join(", "));
-        for (id, row) in rows(&g, &select)? {
+        for (id, row) in rows(&g, "nodes", &select)? {
             ids.nodes.insert(id, text(&row[0]));
             nodes.insert(text(&row[0]), node_of(&row));
         }
         let (mut tenants, mut homes) = (HashMap::new(), HashMap::new());
-        for (id, row) in rows(&g, "get tenants select name, node, state")? {
+        for (id, row) in rows(&g, "tenants", "get tenants select name, node, state")? {
             ids.tenants.insert(id, text(&row[0]));
             put_tenant(&mut tenants, &mut homes, text(&row[0]), &row);
         }
         let mut pairs = Pairs::new();
-        for (id, row) in rows(&g, "get pairs select node, standby")? {
+        for (id, row) in rows(&g, "pairs", "get pairs select node, standby")? {
             ids.pairs.insert(id, text(&row[0]));
             pairs.insert(text(&row[0]), text(&row[1]));
         }
         let mut replicas = Replicas::new();
-        for (id, row) in rows(&g, "get replicas select tenant, node")? {
+        for (id, row) in rows(&g, "replicas", "get replicas select tenant, node")? {
             ids.replicas.insert(id, text(&row[0]));
             replicas.insert(text(&row[0]), text(&row[1]));
         }
         let mut quotas = HashMap::new();
-        for (id, row) in rows(&g, "get quotas select tenant, quota")? {
+        for (id, row) in rows(&g, "quotas", "get quotas select tenant, quota")? {
             ids.quotas.insert(id, text(&row[0]));
             quotas.insert(text(&row[0]), text(&row[1]));
         }
         let mut regions = BTreeMap::new();
-        for (id, row) in rows(&g, "get regions select name, routers")? {
+        for (id, row) in rows(&g, "regions", "get regions select name, routers")? {
             ids.regions.insert(id, text(&row[0]));
             regions.insert(text(&row[0]), routers_of(&row[1]));
         }
         let mut scope = None;
-        for (id, row) in rows(&g, "get scope select region")? {
+        for (id, row) in rows(&g, "scope", "get scope select region")? {
             ids.scope.insert(id, text(&row[0]));
             scope = Some(text(&row[0]));
+        }
+        let mut readers = HashMap::new();
+        let select = format!("get readers select {}", reader_fields(&g).join(", "));
+        for (id, row) in rows(&g, "readers", &select)? {
+            ids.readers.insert(id, text(&row[0]));
+            put_reader(&mut readers, &row);
+        }
+        let mut lineages = HashMap::new();
+        for (id, row) in rows(&g, "lineages", "get lineages select tenant, lineage, was")? {
+            ids.lineages.insert(id, text(&row[0]));
+            lineages.insert(text(&row[0]), Lineage::of(&row));
         }
         self.seq = g.change_seq();
         self.adopted = g.adoptions();
@@ -300,6 +394,8 @@ impl Directory {
         self.quotas = quotas;
         self.regions = regions;
         self.scope = scope;
+        self.readers = readers;
+        self.lineages = lineages;
         self.ids = ids;
         self.arrived = g.collection("tenants").is_ok();
         Ok(())
@@ -344,6 +440,8 @@ impl Directory {
             Some(quotas),
             Some(regions),
             Some(scope),
+            Some(readers),
+            Some(lineages),
         ) = (
             changes("nodes", &node_fields(&g))?,
             changes("tenants", &["name", "node", "state"])?,
@@ -352,6 +450,8 @@ impl Directory {
             changes("quotas", &["tenant", "quota"])?,
             optional("regions", &["name", "routers"])?,
             optional("scope", &["region"])?,
+            optional("readers", &reader_fields(&g))?,
+            optional("lineages", &["tenant", "lineage", "was"])?,
         )
         else {
             return Ok(false);
@@ -378,6 +478,18 @@ impl Directory {
             apply(&mut ids.scope, scope, |k, v| match v {
                 Some(_) => self.scope = Some(k.into()),
                 None => self.scope = None,
+            });
+        }
+        if let Some(readers) = readers {
+            apply(&mut ids.readers, readers, |k, v| match v {
+                Some(v) => put_reader(&mut self.readers, v),
+                None => drop_reader(&mut self.readers, k),
+            });
+        }
+        if let Some(lineages) = lineages {
+            apply(&mut ids.lineages, lineages, |k, v| match v {
+                Some(v) => drop(self.lineages.insert(k.into(), Lineage::of(v))),
+                None => drop(self.lineages.remove(k)),
             });
         }
         apply(&mut ids.pairs, pairs, |k, v| match v {
@@ -655,6 +767,172 @@ impl Directory {
             || self.replicas.values().any(|n| n == name)
             || self.pairs.contains_key(name)
             || self.is_standby(name)
+            || self.readers.values().flatten().any(|r| r.node == name)
+    }
+
+    /// A tenant's read replicas on this directory's nodes.
+    pub fn readers(&self, tenant: &str) -> &[Reader] {
+        self.readers.get(tenant).map_or(&[], Vec::as_slice)
+    }
+
+    /// A tenant's read replica on a node of `region`, if it has one here.
+    pub fn reader_in(&self, tenant: &str, region: &str) -> Option<&Reader> {
+        self.readers(tenant)
+            .iter()
+            .find(|r| self.region_of(&r.node) == region)
+    }
+
+    /// `(tenant, reader)` for every read replica this directory keeps,
+    /// sorted: what the router keeps following its tenants' primaries.
+    pub fn all_readers(&self) -> Vec<(String, Reader)> {
+        let mut out: Vec<(String, Reader)> = self
+            .readers
+            .iter()
+            .flat_map(|(t, rs)| rs.iter().map(move |r| (t.clone(), r.clone())))
+            .collect();
+        out.sort_by(|a, b| (&a.0, &a.1.node).cmp(&(&b.0, &b.1.node)));
+        out
+    }
+
+    /// The read replicas on each node, every node named.
+    pub fn readers_by_node(&self) -> BTreeMap<&str, usize> {
+        let mut by: BTreeMap<&str, usize> = self.nodes.keys().map(|n| (n.as_str(), 0)).collect();
+        for r in self.readers.values().flatten() {
+            *by.entry(r.node.as_str()).or_default() += 1;
+        }
+        by
+    }
+
+    /// Records a tenant's read replica on `node`, following `follows`, a
+    /// copy of the tenant of `lineage`.
+    pub fn set_reader(
+        &mut self,
+        tenant: &str,
+        node: &str,
+        follows: &str,
+        lineage: Option<&str>,
+    ) -> Result<()> {
+        let params = [
+            Value::Text(format!("{tenant}/{node}")),
+            Value::Text(tenant.into()),
+            Value::Text(node.into()),
+            Value::Text(follows.into()),
+            lineage.map_or(Value::Null, |l| Value::Text(l.into())),
+        ];
+        if self.readers(tenant).iter().any(|r| r.node == node) {
+            self.run(
+                "set readers {follows: $4, lineage: $5} where key = $1",
+                &params,
+            )?;
+        } else {
+            self.run(
+                "put readers {key: $1, tenant: $2, node: $3, follows: $4, lineage: $5}",
+                &params,
+            )?;
+        }
+        put_reader(&mut self.readers, &params);
+        Ok(())
+    }
+
+    /// `tenant`'s lineage, as its node said (`lineages`).
+    pub fn lineage(&self, tenant: &str) -> Option<String> {
+        self.lineages.get(tenant).map(|l| l.now.clone())
+    }
+
+    /// The lineages `tenant`'s succeeded ([`Directory::succeed_lineage`]),
+    /// oldest first.
+    pub fn former_lineages(&self, tenant: &str) -> &[String] {
+        self.lineages.get(tenant).map_or(&[], |l| &l.was[..])
+    }
+
+    /// Records `tenant`'s lineage, or that it has none known: a tenant
+    /// made, or its image taken in, which no lineage before it is.
+    pub fn set_lineage(&mut self, tenant: &str, lineage: Option<&str>) -> Result<()> {
+        let fresh = lineage.map(|l| Lineage {
+            now: l.to_string(),
+            was: Vec::new(),
+        });
+        self.put_lineage(tenant, fresh)
+    }
+
+    /// Records that `tenant`'s primary is of `lineage` now, the one it was
+    /// of kept among those it was: the same tenant, its primary promoted
+    /// from a copy that never took its first image, or an older file of it
+    /// put in its place.
+    pub fn succeed_lineage(&mut self, tenant: &str, lineage: &str) -> Result<()> {
+        let mut l = self.lineages.get(tenant).cloned().unwrap_or_default();
+        if l.now == lineage {
+            return Ok(());
+        }
+        if !l.now.is_empty() && !l.was.contains(&l.now) {
+            l.was.push(std::mem::take(&mut l.now));
+        }
+        l.was.retain(|w| w != lineage);
+        l.now = lineage.to_string();
+        self.put_lineage(tenant, Some(l))
+    }
+
+    fn put_lineage(&mut self, tenant: &str, lineage: Option<Lineage>) -> Result<()> {
+        self.run(
+            "del lineages where tenant = $1",
+            &[Value::Text(tenant.into())],
+        )?;
+        self.lineages.remove(tenant);
+        let Some(l) = lineage else {
+            return Ok(());
+        };
+        let was = match l.was.is_empty() {
+            true => Value::Null,
+            false => Value::Text(l.was.join(" ")),
+        };
+        self.run(
+            "put lineages {tenant: $1, lineage: $2, was: $3}",
+            &[Value::Text(tenant.into()), Value::Text(l.now.clone()), was],
+        )?;
+        self.lineages.insert(tenant.into(), l);
+        Ok(())
+    }
+
+    /// The regions a read replica of `tenant`'s name may be kept in
+    /// (`traces`), sorted.
+    pub fn traced_in(&self, tenant: &str) -> Result<Vec<String>> {
+        let g = read(&self.db);
+        let stmt = fenec_ql::parse_one("get traces select region where tenant = $1")?;
+        let mut out = match g.query(&stmt, &[Value::Text(tenant.into())]) {
+            Ok(Response::Rows(rs)) => rs.rows.into_iter().map(|r| text(&r.values[0])).collect(),
+            Ok(_) | Err(Error::NotFound(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// Notes that `region` may keep a read replica of `tenant`'s name.
+    pub fn set_trace(&mut self, tenant: &str, region: &str) -> Result<()> {
+        if self.traced_in(tenant)?.iter().any(|r| r == region) {
+            return Ok(());
+        }
+        let params = [
+            Value::Text(format!("{tenant}/{region}")),
+            Value::Text(tenant.into()),
+            Value::Text(region.into()),
+        ];
+        self.run("put traces {key: $1, tenant: $2, region: $3}", &params)
+    }
+
+    /// Notes that `region` keeps no read replica of `tenant`'s name.
+    pub fn remove_trace(&mut self, tenant: &str, region: &str) -> Result<()> {
+        let key = Value::Text(format!("{tenant}/{region}"));
+        self.run("del traces where key = $1", &[key])
+    }
+
+    /// Forgets a tenant's read replica on `node`.
+    pub fn remove_reader(&mut self, tenant: &str, node: &str) -> Result<()> {
+        let key = format!("{tenant}/{node}");
+        self.run("del readers where key = $1", &[Value::Text(key.clone())])?;
+        drop_reader(&mut self.readers, &key);
+        Ok(())
     }
 
     /// The node holding the copy a failover of `tenant` promotes -- its
@@ -766,6 +1044,20 @@ impl Directory {
                 "node `{name}` still holds tenant `{t}`: move or delete its tenants first"
             )));
         }
+        // A read replica's record let go of with its node left its copy
+        // following its primary with nothing to stop it, should the node
+        // come back: each is taken off first, or forgotten for a node gone.
+        if let Some((t, _)) = self
+            .readers
+            .iter()
+            .find(|(_, rs)| rs.iter().any(|r| r.node == name))
+        {
+            return Err(Error::Query(format!(
+                "node `{name}` still holds a read replica of `{t}`: DELETE \
+                 /_shard/tenants/{t}/read-replicas/<region> first, with ?forget for a node \
+                 gone for good"
+            )));
+        }
         self.run("del nodes where name = $1", &[Value::Text(name.into())])?;
         self.nodes.remove(name);
         // The pairs it was on either side of go with it.
@@ -810,10 +1102,15 @@ impl Directory {
         self.place(tenant, &format!("{HOME}{region}"), State::Active)
     }
 
+    /// Forgets a tenant: its placement or home, its quota and its replica.
+    /// Not its read replicas, whose files the router takes off their nodes
+    /// with them: a tenant leaving this directory for a region keeping its
+    /// own keeps the ones here, which follow it there.
     pub fn remove_tenant(&mut self, tenant: &str) -> Result<()> {
         self.run("del tenants where name = $1", &[Value::Text(tenant.into())])?;
         self.tenants.remove(tenant);
         self.homes.remove(tenant);
+        self.set_lineage(tenant, None)?;
         self.set_quota(tenant, None)?;
         self.set_replica(tenant, None)
     }
@@ -919,6 +1216,36 @@ fn put_tenant(
     }
 }
 
+/// A row of `readers` (`key, tenant, node, follows`) into the map, in the
+/// place of the one of its node.
+fn put_reader(readers: &mut HashMap<String, Vec<Reader>>, row: &[Value]) {
+    let (tenant, node) = (text(&row[1]), text(&row[2]));
+    let list = readers.entry(tenant).or_default();
+    list.retain(|r| r.node != node);
+    list.push(Reader {
+        node,
+        follows: text(&row[3]),
+        lineage: match row.get(4) {
+            Some(Value::Text(l)) => Some(l.clone()),
+            _ => None,
+        },
+    });
+    list.sort_by(|a, b| a.node.cmp(&b.node));
+}
+
+/// The read replica of `key` (`<tenant>/<node>`) out of the map.
+fn drop_reader(readers: &mut HashMap<String, Vec<Reader>>, key: &str) {
+    let Some((tenant, node)) = key.split_once('/') else {
+        return;
+    };
+    if let Some(list) = readers.get_mut(tenant) {
+        list.retain(|r| r.node != node);
+        if list.is_empty() {
+            readers.remove(tenant);
+        }
+    }
+}
+
 /// A region's routers as `regions` keeps them, comma-separated.
 fn routers_of(v: &Value) -> Vec<String> {
     text(v)
@@ -929,15 +1256,31 @@ fn routers_of(v: &Value) -> Vec<String> {
         .collect()
 }
 
-fn rows(db: &Database, sql: &str) -> Result<Vec<(DocId, Vec<Value>)>> {
+fn rows(db: &Database, coll: &str, sql: &str) -> Result<Vec<(DocId, Vec<Value>)>> {
     match db.query(&fenec_ql::parse_one(sql)?, &[]) {
         Ok(Response::Rows(rs)) => Ok(rs.rows.into_iter().map(|r| (r.id, r.values)).collect()),
         Ok(_) => Ok(Vec::new()),
-        // A standby's collections arrive with the primary's first writes.
-        // Until they do the directory is empty, not broken.
-        Err(Error::NotFound(_)) => Ok(Vec::new()),
+        // A standby's collections arrive with the primary's first writes:
+        // until they do the directory is empty, not broken. A collection
+        // that is there and answers not found -- a field it lacks -- is
+        // the error it is: read as empty, it forgot every row.
+        Err(Error::NotFound(_)) if db.collection(coll).is_err() => Ok(Vec::new()),
         Err(e) => Err(e),
     }
+}
+
+/// The fields of `readers` a select names: those the collection has, a
+/// standby's following a primary from before `lineage` among them.
+fn reader_fields(db: &Database) -> Vec<&'static str> {
+    let mut fields = vec!["key", "tenant", "node", "follows"];
+    if let Ok(c) = db.collection("readers") {
+        fields.extend(
+            READER_FIELDS
+                .iter()
+                .filter(|f| c.schema.field_pos(f).is_some()),
+        );
+    }
+    fields
 }
 
 fn text(v: &Value) -> String {
@@ -950,6 +1293,106 @@ fn text(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A database whose `readers` is the one an earlier build wrote, with
+    /// no `lineage`, holding one replica's record.
+    fn old_readers() -> Database {
+        let mut db = Database::new();
+        for sql in [
+            "create collection readers \
+             (key text @hash, tenant text @hash, node text @hash, follows text)",
+            r#"put readers {key: "acme/u1", tenant: "acme", node: "u1", follows: "http://e1"}"#,
+        ] {
+            db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+        }
+        db
+    }
+
+    /// A directory whose `readers` has no `lineage` keeps its records: the
+    /// field is added as an alter, and a standby's, following a primary
+    /// from before it, selects the fields it has. Asked of it, the select
+    /// failed with the field not found, read as an empty directory: every
+    /// read replica record forgotten.
+    #[test]
+    fn a_directory_from_before_readers_kept_lineage_keeps_its_records() {
+        let mut d = Directory::load(Arc::new(RwLock::new(old_readers()))).unwrap();
+        assert_eq!(d.readers("acme").len(), 1, "the record kept");
+        assert_eq!(d.readers("acme")[0].lineage, None);
+        d.set_reader("acme", "u1", "http://e2", Some("aaaaaaaa"))
+            .unwrap();
+        d.reload().unwrap();
+        assert_eq!(d.readers("acme")[0].lineage.as_deref(), Some("aaaaaaaa"));
+
+        let mut db = old_readers();
+        db.follow(Vec::new()).unwrap();
+        let standby = Directory::load(Arc::new(RwLock::new(db))).unwrap();
+        assert_eq!(standby.readers("acme").len(), 1, "a standby's kept too");
+    }
+
+    /// A field not found in a collection that is there is the error it is,
+    /// never an empty collection; only a collection not there yet -- a
+    /// standby's, before the primary's first writes -- reads as empty.
+    #[test]
+    fn a_field_not_found_is_not_an_empty_directory() {
+        let db = old_readers();
+        let missing = rows(&db, "readers", "get readers select key, lineage");
+        assert!(missing.is_err(), "{missing:?}");
+        let none = rows(&db, "scope", "get scope select region").unwrap();
+        assert!(none.is_empty());
+    }
+
+    /// A lineage succeeded keeps the one before among those the tenant was,
+    /// reloaded alike; a lineage recorded afresh -- a tenant made again --
+    /// keeps none.
+    #[test]
+    fn a_lineage_succeeded_keeps_the_one_before() {
+        let mut d = Directory::in_memory();
+        d.set_lineage("acme", Some("aaaaaaaa")).unwrap();
+        d.succeed_lineage("acme", "bbbbbbbb").unwrap();
+        d.succeed_lineage("acme", "bbbbbbbb").unwrap();
+        d.succeed_lineage("acme", "cccccccc").unwrap();
+        assert_eq!(d.lineage("acme").as_deref(), Some("cccccccc"));
+        assert_eq!(d.former_lineages("acme"), ["aaaaaaaa", "bbbbbbbb"]);
+        d.reload().unwrap();
+        assert_eq!(d.former_lineages("acme"), ["aaaaaaaa", "bbbbbbbb"]);
+        // Back to one it was: that one is no longer among them.
+        d.succeed_lineage("acme", "aaaaaaaa").unwrap();
+        assert_eq!(d.former_lineages("acme"), ["bbbbbbbb", "cccccccc"]);
+        d.set_lineage("acme", Some("dddddddd")).unwrap();
+        assert!(d.former_lineages("acme").is_empty());
+    }
+
+    /// Lineages are kept in the maps and follow the change ring, as
+    /// placements do: a standby's catch up, a tenant gone takes its own.
+    #[test]
+    fn lineages_follow_the_change_ring() {
+        let path = std::env::temp_dir().join(format!("fenec-dir-lin-{}.fenec", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut d = Directory::open(&path).unwrap();
+        d.set_node("n1", node("127.0.0.1:1")).unwrap();
+        d.place("acme", "n1", State::Active).unwrap();
+        d.set_lineage("acme", Some("aaaaaaaa")).unwrap();
+        assert_eq!(d.lineage("acme").as_deref(), Some("aaaaaaaa"));
+        d.reload().unwrap();
+        assert_eq!(d.lineage("acme").as_deref(), Some("aaaaaaaa"));
+        // A row written behind the maps, as a standby's follower writes
+        // the primary's: caught up from the ring.
+        {
+            let mut g = write(&d.db);
+            g.execute(
+                &fenec_ql::parse_one(r#"put lineages {tenant: "beta", lineage: "bbbbbbbb"}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+        d.ids.kept = true;
+        d.refresh().unwrap();
+        assert_eq!(d.lineage("beta").as_deref(), Some("bbbbbbbb"));
+        d.remove_tenant("acme").unwrap();
+        assert_eq!(d.lineage("acme"), None);
+        drop(d);
+        let _ = std::fs::remove_file(&path);
+    }
 
     fn node(addr: &str) -> Node {
         Node {
@@ -1034,12 +1477,13 @@ mod tests {
             d.replicas.iter().map(|(k, v)| format!("{k}@{v}")).collect();
         replicas.sort();
         format!(
-            "{:?} {:?} {pairs:?} {replicas:?} {:?} {:?} {:?}",
+            "{:?} {:?} {pairs:?} {replicas:?} {:?} {:?} {:?} {:?}",
             d.nodes(),
             d.tenants(),
             d.homes(),
             d.regions(),
-            d.scope()
+            d.scope(),
+            d.all_readers()
         )
     }
 
@@ -1085,6 +1529,11 @@ mod tests {
             r#"put scope {region: "us"}"#,
             r#"del scope where region = "us""#,
             r#"del regions where name = "us""#,
+            // Read replicas: two of one tenant, one re-pointed, one gone.
+            r#"put readers {key: "zeta/n4", tenant: "zeta", node: "n4", follows: "http://a1"}"#,
+            r#"put readers {key: "zeta/n2", tenant: "zeta", node: "n2", follows: "http://a1"}"#,
+            r#"set readers {follows: "http://a2"} where key = "zeta/n4""#,
+            r#"del readers where key = "zeta/n2""#,
         ] {
             underneath(&d, sql);
             assert!(d.stale());
@@ -1226,6 +1675,62 @@ mod tests {
         global.place("acme", "n1", State::Active).unwrap();
         assert_eq!(global.home("acme"), None);
         assert_eq!(global.primaries()["n1"], ["acme"]);
+    }
+
+    /// A tenant's read replicas are kept with the directory, one a node,
+    /// and go with the node that held them; a node holding one holds its
+    /// region in place.
+    #[test]
+    fn a_read_replica_is_kept_and_goes_with_its_node() {
+        let path = std::env::temp_dir().join(format!("fenec-dir-rr-{}.fenec", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut d = Directory::open(&path).unwrap();
+            for (n, region) in [("e1", "eu"), ("u1", "us"), ("a1", "ap")] {
+                let mut nd = node(n);
+                nd.region = region.into();
+                d.set_node(n, nd).unwrap();
+            }
+            d.place("acme", "e1", State::Active).unwrap();
+            d.place("beta", "e1", State::Active).unwrap();
+            d.set_reader("acme", "u1", "http://e1", Some("aaaaaaaa"))
+                .unwrap();
+            d.set_reader("acme", "a1", "http://e1", None).unwrap();
+            d.set_reader("beta", "u1", "http://e1", None).unwrap();
+            d.set_reader("acme", "u1", "http://e2", Some("aaaaaaaa"))
+                .unwrap();
+            assert!(d.holds("u1") && d.holds("a1"));
+        }
+        let mut d = Directory::open(&path).unwrap();
+        assert_eq!(
+            d.reader_in("acme", "us"),
+            Some(&Reader {
+                node: "u1".into(),
+                follows: "http://e2".into(),
+                lineage: Some("aaaaaaaa".into()),
+            })
+        );
+        assert_eq!(d.readers("acme").len(), 2);
+        assert_eq!(d.reader_in("acme", "eu"), None);
+        assert_eq!(d.readers_by_node()["u1"], 2);
+        // A tenant forgotten keeps them -- the router takes them off with
+        // their files -- and a node holding one is not removed until it is
+        // taken off, or a copy would follow on unrecorded.
+        d.remove_tenant("beta").unwrap();
+        assert_eq!(d.readers("beta").len(), 1);
+        d.remove_reader("beta", "u1").unwrap();
+        assert!(d.readers("beta").is_empty());
+        let refused = d.remove_node("a1").unwrap_err().to_string();
+        assert!(refused.contains("read replica of `acme`"), "{refused}");
+        assert!(d.node("a1").is_some());
+        d.remove_reader("acme", "a1").unwrap();
+        d.remove_node("a1").unwrap();
+        assert_eq!(d.reader_in("acme", "ap"), None);
+        d.remove_reader("acme", "u1").unwrap();
+        assert!(!d.holds("u1"));
+        let d = Directory::open(&path).unwrap();
+        assert!(d.all_readers().is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -9,7 +9,8 @@
 // marks never come from a client, and the client is named by the entry's
 // mark, bound to its address; a router gone -- or one a tunnel's connector
 // cannot reach -- is passed over for its standby, and a known home gone is
-// a 503 to come back from, never another region. Needs `npm ci` here
+// a 503 to come back from, never another region; a read marked for a
+// replica goes to the client's nearest region whatever the home. Needs `npm ci` here
 // (wrangler) and the debug binaries (cargo build -p fenec-server -p
 // fenec-shard).
 
@@ -240,6 +241,7 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
         ['fresh4', 'us'],
         ['fresh5', 'us'],
         ['fresh6', 'us'],
+        ['near', 'us'],
       ],
       schema: SCHEMA,
       // A silent stream writes a keep-alive every second, so a router and
@@ -249,12 +251,20 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     });
     state = await mkdtemp(join(tmpdir(), 'fenecdb-entry-state-'));
     const regions = { us: { routers: [w.us.url, w.usStandby.url] }, eu: { routers: [w.eu.url] } };
-    front = await serve('entry', state, {
-      REGIONS: JSON.stringify(regions),
-      DEFAULT_REGION: 'eu',
-      CORS: ORIGIN,
-      ENTRY_TOKEN: SECRET,
-    });
+    // Its clients are Europe's, eu that continent's region: a marked read
+    // goes to the client's continent's region alone, never the default.
+    const continents = { us: { ...regions.us, continents: ['NA'] }, eu: { ...regions.eu, continents: ['EU'] } };
+    front = await serve(
+      'entry',
+      state,
+      {
+        REGIONS: JSON.stringify(continents),
+        DEFAULT_REGION: 'eu',
+        CORS: ORIGIN,
+        ENTRY_TOKEN: SECRET,
+      },
+      { cf: { continent: 'EU', country: 'DE', colo: 'FRA' } },
+    );
     // An isolate that keeps no home of its own: every request one the
     // colo's cache answers, or a relay.
     shared = await serve('entry', join(state, 'shared'), {
@@ -300,6 +310,41 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     assert.equal(await forwarded(w.usStandby), standby);
     const count = await query(w.us.url, 'acme', 'get notes count');
     assert.deepEqual(count.json(), [{ count: 5 }]);
+  });
+
+  test("a read marked for a replica goes to the client's continent's region though its home is known, and is answered by its replica there", async () => {
+    // `near` lives in us; an unmarked write teaches the entry so.
+    assert.equal((await query(front.url, 'near', 'put notes {title: "here"}')).status, 200);
+    assert.equal((await query(front.url, 'near', 'put notes {title: "here"}')).status, 200);
+    // Its read replica in eu, the region of this client's continent.
+    const placed = await shard(w.eu.url, 'PUT', '/_shard/tenants/near/read-replicas/eu');
+    assert.equal(placed.status, 201, placed.text);
+    await until(async () => {
+      const r = await query(w.nodes.eu.url, 'near', 'get notes count', undefined, { 'Fenec-Read': 'replica' });
+      return r.status === 200 && r.json()[0]?.count === 2;
+    }, "near's read replica in eu");
+    const [eu, us] = [await forwarded(w.eu), await forwarded(w.us)];
+    for (let i = 0; i < 3; i++) {
+      const r = await query(front.url, 'near', 'get notes count', undefined, { 'Fenec-Read': 'replica' });
+      assert.equal(r.status, 200, r.text);
+      assert.deepEqual(r.json(), [{ count: 2 }]);
+    }
+    // eu's router answered them from its replica; us was asked none --
+    // sent to the known home, every one went there.
+    assert.equal(await forwarded(w.eu), eu + 3);
+    assert.equal(await forwarded(w.us), us);
+    // A write goes home alone.
+    assert.equal((await query(front.url, 'near', 'put notes {title: "home"}')).status, 200);
+    assert.equal(await forwarded(w.eu), eu + 3);
+    assert.equal(await forwarded(w.us), us + 1);
+    // One marked for a replica is sent as a marked read is, the entry
+    // reading no query, and runs read-only where it lands: eu's replica
+    // refuses it, and it is written nowhere.
+    const marked = await query(front.url, 'near', 'put notes {title: "marked"}', undefined, { 'Fenec-Read': 'replica' });
+    assert.equal(marked.status, 403, marked.text);
+    assert.equal(await forwarded(w.eu), eu + 4);
+    assert.equal(await forwarded(w.us), us + 1);
+    assert.deepEqual((await query(front.url, 'near', 'get notes count')).json(), [{ count: 3 }]);
   });
 
   test("a tenant's home is told nobody, a request refused for its token least of all", async () => {
@@ -550,7 +595,12 @@ function standIn(answer) {
  */
 function inNode(env) {
   const worker = entry();
-  return (path, init) => worker.fetch(new Request(`http://entry.test${path}`, init), env, { waitUntil() {} });
+  return (path, init, cf) => {
+    const request = new Request(`http://entry.test${path}`, init);
+    // What Cloudflare sets on every request, Node's have none of.
+    if (cf) Object.defineProperty(request, 'cf', { value: cf });
+    return worker.fetch(request, env, { waitUntil() {} });
+  };
 }
 
 test('a request held at its router is let go of with its client', async () => {
@@ -571,6 +621,61 @@ test('a request held at its router is let go of with its client', async () => {
     assert.equal((await answered).status, 499);
   } finally {
     stub.close();
+  }
+});
+
+test("a read marked for a replica goes to its continent's region, and home alone from a continent no region names", async () => {
+  const answering = (home) => (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Fenec-Shard': '1', 'Fenec-Home': home });
+    res.end('[]');
+  };
+  // eu's router names the tenant's home, us, as one that relays it does.
+  const [us, eu] = [await standIn(answering('us')), await standIn(answering('us'))];
+  try {
+    const fetchOf = inNode({
+      REGIONS: JSON.stringify({ us: { routers: [us.url], continents: ['NA'] }, eu: { routers: [eu.url], continents: ['EU'] } }),
+      DEFAULT_REGION: 'eu',
+      HOMES_CACHE: 'off',
+    });
+    const read = { method: 'POST', body: '{"query":"get notes"}', headers: { 'Fenec-Read': 'replica' } };
+    // Its home learnt.
+    assert.equal((await fetchOf('/t/acme/query', { method: 'POST', body: '{"query":"get notes"}' }, { continent: 'NA' })).status, 200);
+    const [atUs, atEu] = [us.seen.length, eu.seen.length];
+    // From Europe, eu's router first.
+    assert.equal((await fetchOf('/t/acme/query', read, { continent: 'EU' })).status, 200);
+    assert.equal(eu.seen.length, atEu + 1);
+    assert.equal(us.seen.length, atUs);
+    // From Asia, which no region names: home, never through the default.
+    assert.equal((await fetchOf('/t/acme/query', read, { continent: 'AS' })).status, 200);
+    assert.equal(eu.seen.length, atEu + 1, 'the default region not asked');
+    assert.equal(us.seen.length, atUs + 1);
+  } finally {
+    us.close();
+    eu.close();
+  }
+});
+
+test('a change of the global router marked for a replica that may have run is not sent to its standby', async () => {
+  // The router reads it whole and is gone before it answers.
+  const dying = await standIn((req, res) => res.socket.destroy());
+  const standby = await standIn((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Fenec-Shard': '1' });
+    res.end('{}');
+  });
+  try {
+    const fetchOf = inNode({ REGIONS: JSON.stringify({ eu: [standby.url] }), ADMIN: JSON.stringify([dying.url, standby.url]), HOMES_CACHE: 'off' });
+    const moved = await fetchOf('/_shard/tenants/acme/move', {
+      method: 'POST',
+      body: '{"region":"eu"}',
+      headers: { Authorization: 'Bearer admin', 'Fenec-Read': 'replica' },
+    });
+    assert.equal(moved.status, 502);
+    assert.match(await moved.text(), /may have run/);
+    assert.equal(dying.seen.length, 1);
+    assert.equal(standby.seen.length, 0, 'not sent again');
+  } finally {
+    dying.close();
+    standby.close();
   }
 });
 

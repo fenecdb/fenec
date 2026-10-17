@@ -118,19 +118,24 @@ impl Hub {
     /// whether it does. A replica's writes come through `notify` as they
     /// are applied, so a read sent with `Fenec-After` waits for the write
     /// its client made on the primary.
-    pub(crate) fn reached(&self, n: u64, seq: impl Fn() -> u64, until: std::time::Instant) -> bool {
+    /// `look` says whether to stop, and the change the database is at.
+    pub(crate) fn reached(
+        &self,
+        look: impl Fn() -> (bool, u64),
+        until: std::time::Instant,
+    ) -> bool {
         loop {
-            if seq() >= n {
+            let (done, seq) = look();
+            if done {
                 return true;
             }
             let now = std::time::Instant::now();
             if now >= until || self.is_closed() {
                 return false;
             }
-            self.wait(
-                n.saturating_sub(1),
-                (until - now).min(Duration::from_millis(100)),
-            );
+            // Past the change it looked at, or a tenth of a second: an
+            // image adopted at the same change moves no counter.
+            self.wait(seq, (until - now).min(Duration::from_millis(100)));
         }
     }
 

@@ -15,6 +15,9 @@ const ready = await Promise.all([
   access(new URL('node_modules/.bin/wrangler', import.meta.url)),
 ]).then(() => true, () => false);
 const skip = ready ? false : 'needs web/fenec.wasm (make wasm) and wrangler (npm ci)';
+// The entry Worker needs no module: wrangler alone.
+const wrangler = await access(new URL('node_modules/.bin/wrangler', import.meta.url)).then(() => true, () => false);
+const skipWrangler = wrangler ? false : 'needs wrangler (npm ci)';
 
 // A test cut short by its timeout runs no `finally`, and the wrangler it
 // started held the test process open for good.
@@ -70,6 +73,22 @@ test('wrangler dev that ends before it is ready fails the start, and one asked f
     const res = await fetch(`${w.url}/t/a/query`, { method: 'POST', body: JSON.stringify({ sql: 'create collection d (n int)' }) });
     assert.equal(res.status, 200);
     await w.stop();
+  } finally {
+    for (const child of running) process.kill(-child.pid, 'SIGKILL');
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
+test('wrangler devs started at once each start', { skip: skipWrangler, timeout: 120_000 }, async () => {
+  const state = await mkdtemp(join(tmpdir(), 'fenecdb-dev-'));
+  try {
+    // The entry, which needs no module: six at once, as `npm test`'s files start theirs.
+    const all = await Promise.allSettled(
+      Array.from({ length: 6 }, (_, i) => dev('entry', join(state, String(i)), { REGIONS: '{"us": ["https://x.example"]}' })),
+    );
+    for (const a of all) if (a.status === 'fulfilled') await a.value.stop();
+    const failed = all.filter((a) => a.status === 'rejected').map((a) => String(a.reason?.message).match(/bind\(\)[^\n]*/)?.[0] ?? a.reason);
+    assert.deepEqual(failed, []);
   } finally {
     for (const child of running) process.kill(-child.pid, 'SIGKILL');
     await rm(state, { recursive: true, force: true });

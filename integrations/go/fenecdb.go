@@ -20,7 +20,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -37,9 +37,87 @@ type Client struct {
 	wait    time.Duration
 	key     string
 	tag     string
-	// The change the last write left the database at (Fenec-Seq), shared
-	// by the copies: a read on a replica sent After it waits for the write.
-	seq *atomic.Uint64
+	// near: reads go to a read replica near the client where a router has
+	// one (WithReadsNearest); read: this copy's requests only read (Read,
+	// the builder's reads).
+	near bool
+	read bool
+	// The furthest position an answer from home named, shared by the
+	// copies: a read near is sent after it.
+	pos *position
+}
+
+// position is where an answer from home left the database: its change
+// (Fenec-Seq), the history that change is of (Fenec-History, <term>-<id>;
+// none for a database that never had a replica) and that history's term,
+// one more at each promotion.
+type position struct {
+	mu      sync.Mutex
+	seq     uint64
+	term    uint64
+	history string
+}
+
+// note keeps the furthest position seen -- a later term, or further in one:
+// answers arriving out of order on several goroutines must not move it back.
+// note takes the position an answer from home named where it is further:
+// of another lineage -- home's word on a tenant made again under the name,
+// whose terms start again -- or a later term of the same, or further in
+// one.
+func (p *position) note(seq uint64, history string) {
+	term := termOf(history)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if another(history, p.history) || term > p.term || (term == p.term && seq > p.seq) {
+		p.seq, p.term, p.history = seq, term, history
+	}
+}
+
+// told takes home's position, lower or not, which a read near's 504 names
+// when no copy held the one it was sent after (sentSeq, sentHistory) -- a
+// write lost in a failover: kept, every read near would wait it out for
+// good. Taken only over the position sent -- a write answered meanwhile is
+// further, and set back the next read near would miss it -- and never of
+// an earlier term of the same lineage: a router whose copy of the
+// directory lags a failover sends the read to the old primary, fenced,
+// which names the branch it abandoned. Another lineage's is a tenant made
+// again under the name, which starts again at term 1.
+func (p *position) told(sentSeq uint64, sentHistory string, seq uint64, history string) {
+	term := termOf(history)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.seq == sentSeq && p.history == sentHistory &&
+		(term >= termOf(sentHistory) || another(history, sentHistory)) {
+		p.seq, p.term, p.history = seq, term, history
+	}
+}
+
+func (p *position) get() (uint64, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.seq, p.history
+}
+
+func termOf(history string) uint64 {
+	term, _, _ := strings.Cut(history, "-")
+	n, _ := strconv.ParseUint(term, 10, 64)
+	return n
+}
+
+// lineageOf is a history's lineage: its id's top half, which every fork of
+// the tenant keeps and a tenant made again under its name does not.
+func lineageOf(history string) string {
+	_, id, ok := strings.Cut(history, "-")
+	if !ok || len(id) < 8 {
+		return ""
+	}
+	return id[:8]
+}
+
+// another is whether history a is of another lineage than b.
+func another(a, b string) bool {
+	la, lb := lineageOf(a), lineageOf(b)
+	return la != "" && lb != "" && la != lb
 }
 
 // Option sets up a Client.
@@ -65,6 +143,17 @@ func WithTenant(tenant string) Option {
 	return func(c *Client) { c.base += "/t/" + url.PathEscape(tenant) }
 }
 
+// WithReadsNearest marks the builder's reads, and a Read copy's requests,
+// for a read replica near the client (Fenec-Read: replica): a fenec-shard
+// router near a region holding the tenant's read replica answers them
+// there, the rest go to the tenant's home. Each is sent after the furthest
+// position an answer from home named to this client -- the change and its
+// history (Fenec-After, Fenec-History) -- so it reads nothing older than it
+// wrote, nor a write a failover replaced; one no copy holds that for --
+// the write lost in a failover of home -- is asked again at home without
+// it, and home's position, which its 504 names, is the client's from then.
+func WithReadsNearest() Option { return func(c *Client) { c.near = true } }
+
 // New is a client for the server at url, such as http://127.0.0.1:8080.
 func New(url string, opts ...Option) *Client {
 	root := strings.TrimRight(url, "/")
@@ -73,7 +162,7 @@ func New(url string, opts ...Option) *Client {
 		base:    root,
 		http:    &http.Client{},
 		timeout: 30 * time.Second,
-		seq:     new(atomic.Uint64),
+		pos:     &position{},
 	}
 	for _, o := range opts {
 		o(c)
@@ -87,6 +176,17 @@ func New(url string, opts ...Option) *Client {
 func (c *Client) After(seq uint64) *Client {
 	d := *c
 	d.after = seq
+	return &d
+}
+
+// Read is a copy of the client whose requests only read: on a client made
+// WithReadsNearest a router near the tenant's read replica answers them
+// there. The builder's reads are sent so on their own; a statement the
+// caller knows reads goes through Read -- one that writes is refused (403),
+// never landed.
+func (c *Client) Read() *Client {
+	d := *c
+	d.read = true
 	return &d
 }
 
@@ -130,9 +230,13 @@ func (c *Client) IfNoneMatch(tag string) *Client {
 	return &d
 }
 
-// Seq is the change the last write through this client, or a copy of it,
-// left the database at; 0 before any.
-func (c *Client) Seq() uint64 { return c.seq.Load() }
+// Seq is the furthest change an answer from home -- a write's, a read-only
+// Batch's -- left the database at, through this client or a copy of it; 0
+// before any.
+func (c *Client) Seq() uint64 {
+	seq, _ := c.pos.get()
+	return seq
+}
 
 // Row is one row of an answer, as encoding/json reads an object: a number
 // is a float64, a list a []any, a vector a []any of float64s.
@@ -454,6 +558,24 @@ func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte
 	if res.StatusCode == http.StatusNotModified && c.tag != "" {
 		return nil, head{etag: res.Header.Get("ETag"), notModified: true}, nil
 	}
+	// 504 to a read near: no copy the router reached holds the position it
+	// was sent after, home either -- the write lost in a failover of home,
+	// which says where it stands: the client's position from here on.
+	// Asked home with no mark, it is answered with what home holds.
+	near := c.read && c.near
+	if res.StatusCode == http.StatusGatewayTimeout && near && req.Header.Get("Fenec-After") != "" {
+		var told struct {
+			Seq     *uint64 `json:"seq"`
+			History string  `json:"history"`
+		}
+		if c.after == 0 && json.Unmarshal(raw, &told) == nil && told.Seq != nil {
+			sent, _ := strconv.ParseUint(req.Header.Get("Fenec-After"), 10, 64)
+			c.pos.told(sent, req.Header.Get("Fenec-History"), *told.Seq, told.History)
+		}
+		home := *c
+		home.read, home.after = false, 0
+		return home.do(ctx, method, path, ctype, body, extra)
+	}
 	if res.StatusCode >= 300 {
 		return nil, head{}, errorOf(res.StatusCode, raw)
 	}
@@ -461,7 +583,10 @@ func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte
 	h.etag = res.Header.Get("ETag")
 	if s := res.Header.Get("Fenec-Seq"); s != "" {
 		h.seq, _ = strconv.ParseUint(s, 10, 64)
-		c.noteSeq(h.seq)
+		// A read near's answer may be a replica's: it moves nothing.
+		if !near {
+			c.pos.note(h.seq, res.Header.Get("Fenec-History"))
+		}
 	}
 	h.replayed = res.Header.Get("Idempotent-Replayed") == "true"
 	if s := res.Header.Get("Fenec-Next"); s != "" {
@@ -475,8 +600,20 @@ func (c *Client) headers(req *http.Request) {
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	if c.after > 0 {
+	near := c.read && c.near
+	if near {
+		req.Header.Set("Fenec-Read", "replica")
+	}
+	switch {
+	case c.after > 0:
 		req.Header.Set("Fenec-After", strconv.FormatUint(c.after, 10))
+	case near:
+		if seq, history := c.pos.get(); seq > 0 {
+			req.Header.Set("Fenec-After", strconv.FormatUint(seq, 10))
+			if history != "" {
+				req.Header.Set("Fenec-History", history)
+			}
+		}
 	}
 	if c.tag != "" {
 		req.Header.Set("If-None-Match", c.tag)
@@ -486,17 +623,6 @@ func (c *Client) headers(req *http.Request) {
 	}
 	if c.wait > 0 {
 		req.Header.Set("Fenec-Wait", strconv.FormatInt(c.wait.Milliseconds(), 10))
-	}
-}
-
-// noteSeq keeps the highest change seen: writes answered out of order on
-// several goroutines must not move it back.
-func (c *Client) noteSeq(n uint64) {
-	for {
-		old := c.seq.Load()
-		if n <= old || c.seq.CompareAndSwap(old, n) {
-			return
-		}
 	}
 }
 

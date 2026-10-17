@@ -689,7 +689,8 @@ export class Query {
 
   /** Binds the query to an executor: a `Fenec` instance or a `(sql, params)` fn. */
   bind(exec) {
-    const fn = typeof exec === 'function' ? exec : (s, p) => exec.run(s, p);
+    // A read's mark and a write's `{ wait, signal }` go on, as from `from()`.
+    const fn = typeof exec === 'function' ? exec : (s, p, o) => (o ? exec.run(s, p, o) : exec.run(s, p));
     return this.#with({ exec: fn });
   }
 
@@ -1212,7 +1213,7 @@ export class Query {
   /** The raw response (`{columns, rows}`, and `facets` when asked). */
   async run() {
     const [sql, params] = this.toFenecQL();
-    return this.#exec(sql, params);
+    return this.#exec(sql, params, READ);
   }
 
   /**
@@ -1244,7 +1245,7 @@ export class Query {
    */
   async explain() {
     const [sql, params] = this.toFenecQL();
-    const r = await this.#exec(`explain ${sql}`, params);
+    const r = await this.#exec(`explain ${sql}`, params, READ);
     return (r.rows ?? []).map((row) => row.plan);
   }
 
@@ -1459,6 +1460,13 @@ export class Query {
     return held ? this.#s.exec(sql, params, held) : this.#s.exec(sql, params);
   }
 }
+
+/**
+ * What a query's reads hand `exec` beside their text: they only read, which
+ * `FenecHttp.run` marks for a read replica near the client. A database in
+ * the page, which has no other copy, passes it over.
+ */
+const READ = Object.freeze({ read: true });
 
 /** A write's `{ wait, signal }` for `FenecHttp.run`, null without either. */
 function heldOf(opts) {

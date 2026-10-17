@@ -3,7 +3,8 @@
 // counted one beside it (bench/).
 
 import { spawn } from 'node:child_process';
-import { resolve } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const here = new URL('.', import.meta.url).pathname;
 
@@ -43,19 +44,32 @@ export const running = new Set();
  * it says it is ready to `{url, inner, log(), stop()}`, and rejects with
  * what it printed when it ends, or cannot start, before that. `inner`,
  * the Worker's own socket past wrangler's proxy ({@link innerUrl}), is read
- * where `{ inner: true }` asks for it.
+ * where `{ inner: true }` asks for it. `{ cf }` is every request's
+ * `request.cf` (a file miniflare reads, `CLOUDFLARE_CF_FETCH_PATH`):
+ * otherwise miniflare's copy of Cloudflare's for this machine, its
+ * continent wherever the machine is.
  *
  * On port 0, the port read off the line saying it is ready: one found free
  * and handed over is free only until another suite on the machine takes it.
+ * The inspector's too: wrangler finds one free from 9229 up and hands it to
+ * workerd, so wranglers started at once -- `npm test` runs its files side by
+ * side -- took the same one, and all but one failed to start (`bind():
+ * Address already in use`), 25 starts of 30 six at a time.
  * In a process group of its own: wrangler starts workerd beside it, and
  * killing wrangler alone left those holding its output open, and the test
  * process with them. With no colour, the line plain to read.
  */
-export function serve(dir, state, vars = {}, { inner = false } = {}) {
+export function serve(dir, state, vars = {}, { inner = false, cf = null } = {}) {
+  const env = { ...process.env, WRANGLER_SEND_METRICS: 'false', FORCE_COLOR: '0', NO_COLOR: '1' };
+  if (cf) {
+    mkdirSync(state, { recursive: true });
+    env.CLOUDFLARE_CF_FETCH_PATH = join(state, 'cf.json');
+    writeFileSync(env.CLOUDFLARE_CF_FETCH_PATH, JSON.stringify(cf));
+  }
   const child = spawn(
     resolve(here, 'node_modules/.bin/wrangler'),
     [
-      'dev', '--config', 'wrangler.jsonc', '--port', '0', '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false',
+      'dev', '--config', 'wrangler.jsonc', '--port', '0', '--inspector-port', '0', '--ip', '127.0.0.1', '--persist-to', state, '--show-interactive-dev-session=false',
       ...(inner ? ['--log-level', 'debug'] : []),
       ...Object.entries(vars).flatMap(([k, v]) => ['--var', `${k}:${v}`]),
     ],
@@ -63,7 +77,7 @@ export function serve(dir, state, vars = {}, { inner = false } = {}) {
       cwd: resolve(here, dir),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
-      env: { ...process.env, WRANGLER_SEND_METRICS: 'false', FORCE_COLOR: '0', NO_COLOR: '1' },
+      env,
     },
   );
   running.add(child);

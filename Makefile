@@ -58,6 +58,9 @@ test:
 ##                     declares, the check at an open, migrations, fenec types --schema
 ##   fenec.client.test.js  @fenecdb/web/client: the modules it reaches hold no
 ##                     engine, and its live queries over a scripted server
+##   fenec.replicas.test.js  connect(url, { reads: 'nearest' }) against real
+##                     nodes and routers: reads answered by a read replica,
+##                     after the client's writes; skipped without the binaries
 ##   studio/test/statements.test.mjs  fenec studio's statements: every value a
 ##                     parameter, every name one FenecQL writes, its first load
 ##                     under 120 KB gzipped and holding nothing of the playground's
@@ -67,7 +70,7 @@ test:
 ##                     `web/fenec.wasm` or the binary is missing
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test --test-reporter=spec web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
+		node --test --test-reporter=spec web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js web/fenec.replicas.test.js studio/test/statements.test.mjs studio/test/transport.test.mjs; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi

@@ -270,7 +270,7 @@ impl Router {
     /// One call to `region`'s routers -- `""` the global directory's -- its
     /// whole answer: the status, the headers, the body. A router answering
     /// that it follows another ran nothing, and the next is asked.
-    fn call_routers(
+    pub(crate) fn call_routers(
         &self,
         region: &str,
         routers: &[String],
@@ -279,19 +279,28 @@ impl Router {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> std::result::Result<Whole, String> {
+        let call = (method, target, headers, body);
+        self.call_routers_by(&self.pool, region, routers, call)
+    }
+
+    /// [`Self::call_routers`] through `pool`, bounded by its timeout.
+    pub(crate) fn call_routers_by(
+        &self,
+        pool: &crate::upstream::Pool,
+        region: &str,
+        routers: &[String],
+        (method, target, headers, body): (&str, &str, &[(&str, &str)], &[u8]),
+    ) -> std::result::Result<Whole, String> {
         let start = self.first_router(region, routers);
         let mut last = String::from("no router is recorded");
         for k in 0..routers.len() {
             let i = (start + k) % routers.len();
             let url = &routers[i];
-            match self
-                .pool
-                .send_tried(host(url), method, target, headers, body, Duration::ZERO)
-            {
+            match pool.send_tried(host(url), method, target, headers, body, Duration::ZERO) {
                 Ok(a) => {
                     let (status, hs) = (a.status, a.headers.clone());
                     let body = a
-                        .read_body(&self.pool, false)
+                        .read_body(pool, false)
                         .map_err(|e| format!("{url} broke off: {e}"))?;
                     if status == 409 && contains(&body, b"follows another") {
                         last = format!("{url} follows another router");
@@ -310,7 +319,7 @@ impl Router {
     /// The headers of a call this router makes of another on its own: its
     /// `--token`, which the routers of a deployment share, and the mark of
     /// the global router.
-    fn own_headers(&self) -> (Option<String>, [(&'static str, &'static str); 1]) {
+    pub(crate) fn own_headers(&self) -> (Option<String>, [(&'static str, &'static str); 1]) {
         (
             self.cfg.token.as_ref().map(|t| format!("Bearer {t}")),
             [(GLOBAL_HEADER, "1")],
@@ -319,7 +328,7 @@ impl Router {
 
     /// A call this router makes of `region`'s routers on its own, as the
     /// global router: its whole answer, or the failure a client is told.
-    fn ask_region(
+    pub(crate) fn ask_region(
         &self,
         region: &str,
         method: &str,
@@ -445,6 +454,14 @@ impl Router {
             match (req.method, rest) {
                 // A name taken or given back is the global directory's.
                 (Method::Put | Method::Delete, ["tenants", _]) => false,
+                // A read replica is kept by the directory holding its node:
+                // this one's in this region, the global router's -- or
+                // another region's, through it -- elsewhere. Their list
+                // spans every directory, which the global router gathers.
+                (Method::Put | Method::Delete, ["tenants", _, "read-replicas", r]) => *r == own,
+                (Method::Get, ["tenants", _, "read-replicas"]) => false,
+                // The global directory's, which a create asks by.
+                (_, ["tenants", _, "traces", _]) => false,
                 (Method::Post, ["tenants", t, "move"]) => {
                     let to = field(&body, "to");
                     let region = place_field(&body, "region").ok().flatten();
@@ -490,6 +507,7 @@ impl Router {
             Relay(String),
             Across(String, String, Option<String>),
             Refuse(Fail),
+            Gather,
         }
         let body = body_fields(req).unwrap_or_default();
         let todo = {
@@ -544,6 +562,13 @@ impl Router {
                 (_, ["tenants", t]) | (_, ["tenants", t, "quota"]) => {
                     dir.home(t).map(|r| Do::Relay(r.to_string()))
                 }
+                // A read replica in a region keeping its own directory is
+                // that region's router's to place, whatever region its
+                // tenant lives in; their list is every directory's.
+                (Method::Put | Method::Delete, ["tenants", _, "read-replicas", r]) => {
+                    keeps(r).then(|| Do::Relay(r.to_string()))
+                }
+                (Method::Get, ["tenants", _, "read-replicas"]) => Some(Do::Gather),
                 (Method::Put, ["nodes", n]) if dir.node(n).is_none() => {
                     place_field(&body, "region")
                         .ok()
@@ -572,6 +597,7 @@ impl Router {
                 }
             }
             Do::Refuse(Fail(s, w)) => Response::error(s, &w),
+            Do::Gather => self.gather_readers(tenant),
         })
     }
 
@@ -587,6 +613,7 @@ impl Router {
         if self.read_dir().exists(tenant) {
             return Err(Fail(409, format!("tenant `{tenant}` already exists")));
         }
+        self.no_reader_traces(tenant)?;
         self.write_dir()
             .place_home(tenant, region)
             .map_err(internal)?;
@@ -612,7 +639,13 @@ impl Router {
     /// the region's router first, then its name given back. A region not
     /// reached deletes nothing.
     fn delete_homed(&self, req: &Request, tenant: &str, region: &str) -> Outcome<Response> {
+        // Its read replicas on this directory's nodes, which the region's
+        // router keeps no record of, held and taken off first, as a
+        // tenant of this directory's are ([`Router::delete`]): one that
+        // stays refuses the delete, 502, nothing else of it done.
+        let _held = self.hold_readers(tenant)?;
         let _claim = self.claim(tenant)?;
+        self.take_readers(tenant)?;
         let routers = self
             .read_dir()
             .routers(region)
@@ -812,6 +845,7 @@ impl Router {
                     content_type: "application/octet-stream",
                     extra: Vec::new(),
                     seq: None,
+                    history: None,
                     version: None,
                 };
                 resp = resp.header("Fenec-Node", &node);
@@ -922,7 +956,13 @@ impl Router {
 
     /// Installs `image` as `tenant` on the node `to` and gives it `quota`:
     /// nothing recorded. Taken back off where its quota is refused.
-    fn install(&self, tenant: &str, to: &str, image: &[u8], quota: Option<&str>) -> Outcome<()> {
+    fn install(
+        &self,
+        tenant: &str,
+        to: &str,
+        image: &[u8],
+        quota: Option<&str>,
+    ) -> Outcome<Option<String>> {
         let dst = self.node(to)?;
         let base = format!("/_admin/tenants/{tenant}");
         let put = |image: &[u8]| {
@@ -935,12 +975,13 @@ impl Router {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             installed = put(image);
         }
-        expect(installed, 201, to)?;
+        let answer = expect(installed, 201, to)?;
         if let Some(w) = quota.and_then(|q| self.put_quota(tenant, to, q)) {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             return Err(Fail(502, w));
         }
-        Ok(())
+        // The lineage its image is of, which the move keeps.
+        Ok(crate::lineage_in(&answer))
     }
 
     /// Takes `tenant` in from another region: its image installed on the
@@ -960,18 +1001,23 @@ impl Router {
             Some(n) => n.to_string(),
             None => self.least_loaded(self.cfg.region.as_deref(), None)?,
         };
+        // A read replica of it in the region it arrives in goes: its own
+        // copies there are nearer still, and it may sit on `to`.
+        let into = self.read_dir().region_of(&to).to_string();
+        let _arriving = self.readers_arriving(tenant, &into)?;
         if self.read_dir().is_standby(&to) {
             return Err(Fail(
                 409,
                 format!("`{to}` is a standby: its tenants follow another node's"),
             ));
         }
-        self.install(tenant, &to, image, quota)?;
+        let lineage = self.install(tenant, &to, image, quota)?;
         let base = format!("/_admin/tenants/{tenant}");
         let recorded = {
             let mut dir = self.write_dir();
             dir.place(tenant, &to, State::Active)
                 .and_then(|_| dir.set_quota(tenant, quota))
+                .and_then(|_| dir.set_lineage(tenant, lineage.as_deref()))
         };
         if let Err(e) = recorded {
             if let Ok(n) = self.node(&to) {
@@ -1133,8 +1179,8 @@ impl Router {
                     return Err(Fail(409, format!("`{to}` is a standby")));
                 }
                 drop(dir);
-                self.install(tenant, &to, &image, quota.as_deref())?;
-                Ok((to, String::new()))
+                let lineage = self.install(tenant, &to, &image, quota.as_deref())?;
+                Ok((to, String::new(), lineage))
             })(),
             true => (|| {
                 let mut target = format!("/_shard/tenants/{tenant}/file");
@@ -1167,10 +1213,10 @@ impl Router {
                             .map(|at| text[at..text.len() - 1].to_string())
                     })
                     .unwrap_or_default();
-                Ok((node, replica))
+                Ok((node, replica, None))
             })(),
         };
-        let (to, replica) = match landed {
+        let (to, replica, lineage) = match landed {
             Ok(l) => l,
             Err(f) => {
                 thaw();
@@ -1221,10 +1267,16 @@ impl Router {
                 return Err(f);
             }
         }
-        // The flip: one statement of the global directory.
-        let flipped = match keeps_into {
-            false => self.write_dir().place(tenant, &to, State::Active),
-            true => self.write_dir().place_home(tenant, into),
+        // The flip: one statement of the global directory, and the lineage
+        // where this directory now places the tenant -- its region's
+        // directory keeps it otherwise.
+        let flipped = {
+            let mut dir = self.write_dir();
+            match keeps_into {
+                false => dir.place(tenant, &to, State::Active),
+                true => dir.place_home(tenant, into),
+            }
+            .and_then(|_| dir.set_lineage(tenant, lineage.as_deref()))
         };
         if let Err(e) = flipped {
             fenec_http::log!(
@@ -1339,6 +1391,7 @@ fn response_of(status: u16, headers: &[(String, String)], body: Vec<u8>) -> Resp
         content_type,
         extra: Vec::new(),
         seq: None,
+        history: None,
         version: None,
     };
     for name in [

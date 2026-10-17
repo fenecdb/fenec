@@ -2327,12 +2327,21 @@ func (b *Builder) send(ctx context.Context, text string, params []any) ([]byte, 
 	return b.client.query(ctx, text, params)
 }
 
+// sendRead is send for a read: a client made WithReadsNearest marks it for
+// a read replica near it.
+func (b *Builder) sendRead(ctx context.Context, text string, params []any) ([]byte, head, error) {
+	if b.client == nil {
+		return b.send(ctx, text, params)
+	}
+	return b.client.Read().query(ctx, text, params)
+}
+
 func (b *Builder) answer(ctx context.Context) ([]byte, error) {
 	text, params, err := b.ToFenecQL()
 	if err != nil {
 		return nil, err
 	}
-	raw, _, err := b.send(ctx, text, params)
+	raw, _, err := b.sendRead(ctx, text, params)
 	return raw, err
 }
 
@@ -2392,7 +2401,7 @@ func (b *Builder) Explain(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, _, err := b.send(ctx, "explain "+text, params)
+	raw, _, err := b.sendRead(ctx, "explain "+text, params)
 	if err != nil {
 		return nil, err
 	}

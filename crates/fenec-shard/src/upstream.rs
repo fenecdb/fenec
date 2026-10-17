@@ -55,6 +55,10 @@ pub struct Pool {
 struct Idle {
     stream: TcpStream,
     read_timeout: Duration,
+    /// Set at the connect, and only by a read replica's read after
+    /// ([`Pool::send_within`]): the pool's timeout otherwise, so a request
+    /// sets it on no connection a replica's read has not used.
+    write_timeout: Duration,
 }
 
 pub struct Answer {
@@ -64,6 +68,7 @@ pub struct Answer {
     addr: String,
     reusable: bool,
     read_timeout: Duration,
+    write_timeout: Duration,
 }
 
 /// How far an exchange got before it failed, which is what decides whether
@@ -75,6 +80,9 @@ enum Stage {
     /// The request went out whole and the connection ended before the
     /// first byte of an answer: the node may have run it.
     Unanswered,
+    /// A write of the request timed out: the node took part of it and
+    /// stopped reading. Sent again, it would wait as long.
+    Unread,
     /// A timeout, or an answer cut short or malformed.
     Other,
 }
@@ -88,6 +96,17 @@ struct Failure(Stage, io::Error);
 pub enum Tried {
     Unrun(io::Error),
     MayHaveRun(io::Error),
+}
+
+/// How a read sent to a read replica failed ([`Pool::send_within`]):
+/// before the replica took the whole request -- not reached, or not
+/// reading -- which is the node's, or after, its answer not come in time
+/// or broken off, which may be that one read's own: its head comes once
+/// its query has run, and a read slower than the router's
+/// `--replica-timeout` looks just like a node that hangs.
+pub enum Near {
+    Unreached(io::Error),
+    Unanswered(io::Error),
 }
 
 impl Tried {
@@ -123,15 +142,17 @@ impl Pool {
         }
     }
 
-    fn connect(&self, addr: &str, within: Duration) -> io::Result<TcpStream> {
+    fn connect(&self, addr: &str, within: Duration, write: Duration) -> io::Result<TcpStream> {
         use std::net::ToSocketAddrs;
         let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
         for a in addr.to_socket_addrs()? {
             match TcpStream::connect_timeout(&a, within) {
                 Ok(s) => {
                     let _ = s.set_nodelay(true);
-                    // Once a connection: it is the same for every request.
-                    s.set_write_timeout(Some(self.timeout))?;
+                    // Once a connection: the same for every request but a
+                    // read replica's, which sets its own and is tracked
+                    // with the connection (`Idle::write_timeout`).
+                    s.set_write_timeout(Some(write))?;
                     return Ok(s);
                 }
                 Err(e) => last = e,
@@ -166,9 +187,8 @@ impl Pool {
         body: &[u8],
         held: Duration,
     ) -> io::Result<Answer> {
-        let replay = replayable(method, headers);
-        let times = (self.timeout + held, self.timeout);
-        self.send_timed(addr, method, target, headers, body, times, replay)
+        let times = (self.timeout + held, self.timeout, self.timeout);
+        self.send_timed(addr, method, target, headers, body, times, Replay::AsAsked)
     }
 
     /// [`Pool::send_held`], its failure told by whether `addr` may have run
@@ -183,13 +203,41 @@ impl Pool {
         body: &[u8],
         held: Duration,
     ) -> Result<Answer, Tried> {
-        let replay = replayable(method, headers);
-        let times = (self.timeout + held, self.timeout);
+        let times = (self.timeout + held, self.timeout, self.timeout);
+        let replay = Replay::AsAsked;
         match self.send_staged(addr, method, target, headers, body, times, replay) {
             Ok(a) => Ok(a),
             Err(Failure(Stage::Unsent, e)) => Err(Tried::Unrun(e)),
-            Err(Failure(Stage::Unanswered, e)) if replay => Err(Tried::Unrun(e)),
+            Err(Failure(Stage::Unanswered, e)) if replay.allows(method, headers) => {
+                Err(Tried::Unrun(e))
+            }
             Err(Failure(_, e)) => Err(Tried::MayHaveRun(e)),
+        }
+    }
+
+    /// [`Pool::send`] of a read its client marked (`Fenec-Read: replica`)
+    /// to a read replica, connected, written and its answer's head read
+    /// within `within` -- the wait its `Fenec-After` asks for and the
+    /// router's `--replica-timeout` -- not the pool's timeout: a replica
+    /// that does not answer by then is passed over for home, where the read
+    /// runs as any. The write too: a body past the sockets' buffers, sent
+    /// to a node that stopped reading, waited out the pool's. Sent again on a fresh connection where one ended before its
+    /// answer, as [`replayable`] lets a marked read be. A failure says
+    /// whether the replica took the whole request ([`Near`]).
+    pub fn send_within(
+        &self,
+        addr: &str,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        within: Duration,
+    ) -> Result<Answer, Near> {
+        let times = (within, within, within);
+        match self.send_staged(addr, method, target, headers, body, times, Replay::AsAsked) {
+            Ok(a) => Ok(a),
+            Err(Failure(Stage::Unsent | Stage::Unread, e)) => Err(Near::Unreached(e)),
+            Err(Failure(Stage::Unanswered | Stage::Other, e)) => Err(Near::Unanswered(e)),
         }
     }
 
@@ -208,12 +256,21 @@ impl Pool {
         deadline: Instant,
     ) -> io::Result<Answer> {
         let left = left_until(deadline)?.min(self.timeout);
-        self.send_timed(addr, "POST", target, headers, body, (left, left), true)
+        self.send_timed(
+            addr,
+            "POST",
+            target,
+            headers,
+            body,
+            (left, left, self.timeout),
+            Replay::Always,
+        )
     }
 
-    /// One request, its answer's head read within `times.0` a read and its
-    /// connection made within `times.1`; `replay` is whether it may go
-    /// again once sent whole (the module's comment).
+    /// One request, its answer's head read within `times.0` a read, its
+    /// connection made within `times.1` and each write of it bounded by
+    /// `times.2`; `replay` is whether it may go again once sent whole (the
+    /// module's comment).
     #[allow(clippy::too_many_arguments)]
     fn send_timed(
         &self,
@@ -222,8 +279,8 @@ impl Pool {
         target: &str,
         headers: &[(&str, &str)],
         body: &[u8],
-        times: (Duration, Duration),
-        replay: bool,
+        times: (Duration, Duration, Duration),
+        replay: Replay,
     ) -> io::Result<Answer> {
         self.send_staged(addr, method, target, headers, body, times, replay)
             .map_err(|Failure(_, e)| e)
@@ -238,10 +295,10 @@ impl Pool {
         target: &str,
         headers: &[(&str, &str)],
         body: &[u8],
-        times: (Duration, Duration),
-        replay: bool,
+        times: (Duration, Duration, Duration),
+        replay: Replay,
     ) -> Result<Answer, Failure> {
-        let (read_timeout, connect_within) = times;
+        let (read_timeout, connect_within, write_timeout) = times;
         let mut req = String::with_capacity(256);
         for part in [method, " ", target, " HTTP/1.1\r\nHost: ", addr, "\r\n"] {
             req.push_str(part);
@@ -289,34 +346,42 @@ impl Pool {
             if !open(&idle.stream) {
                 continue;
             }
-            let set = Some(idle.read_timeout);
-            match self.exchange(addr, idle.stream, set, head, body, read_timeout) {
+            let set = (Some(idle.read_timeout), idle.write_timeout);
+            let want = (read_timeout, write_timeout);
+            match self.exchange(addr, idle.stream, set, head, body, want) {
                 Ok(a) => return Ok(a),
                 Err(Failure(Stage::Unsent, _)) => break,
-                Err(Failure(Stage::Unanswered, _)) if replay => break,
+                Err(Failure(Stage::Unanswered, _)) if replay.allows(method, headers) => break,
                 Err(f) => return Err(f),
             }
         }
         let s = self
-            .connect(addr, connect_within)
+            .connect(addr, connect_within, write_timeout)
             .map_err(|e| Failure(Stage::Unsent, e))?;
-        self.exchange(addr, s, None, head, body, read_timeout)
+        let set = (None, write_timeout);
+        self.exchange(addr, s, set, head, body, (read_timeout, write_timeout))
     }
 
-    /// One request and the head of its answer over `s`, whose read timeout
-    /// is `set` where it is known, each read of the answer bounded by
-    /// `read_timeout`.
+    /// One request and the head of its answer over `s`, whose read and
+    /// write timeouts are `set` -- the read's where it is known -- each
+    /// read of the answer bounded by `want.0` and each write by `want.1`.
+    /// Each is set only where it is not already, a system call a request.
     fn exchange(
         &self,
         addr: &str,
         s: TcpStream,
-        set: Option<Duration>,
+        set: (Option<Duration>, Duration),
         head: &[u8],
         body: &[u8],
-        read_timeout: Duration,
+        want: (Duration, Duration),
     ) -> Result<Answer, Failure> {
-        if set != Some(read_timeout) {
+        let (read_timeout, write_timeout) = want;
+        if set.0 != Some(read_timeout) {
             s.set_read_timeout(Some(read_timeout))
+                .map_err(|e| Failure(Stage::Unsent, e))?;
+        }
+        if set.1 != write_timeout {
+            s.set_write_timeout(Some(write_timeout))
                 .map_err(|e| Failure(Stage::Unsent, e))?;
         }
         let mut w = &s;
@@ -329,7 +394,7 @@ impl Pool {
                 // Timed out, the node is there and not reading: sent again,
                 // it would wait as long.
                 let stage = if timed_out(&e) {
-                    Stage::Other
+                    Stage::Unread
                 } else {
                     Stage::Unsent
                 };
@@ -389,6 +454,7 @@ impl Pool {
             addr: addr.to_string(),
             reusable,
             read_timeout,
+            write_timeout,
         })
     }
 
@@ -425,14 +491,39 @@ impl Pool {
     }
 }
 
+/// Whether a request may go again once sent whole: always (a read across
+/// tenants), or as [`replayable`] says of it -- asked where a send failed
+/// alone: asked of every request, its scan of the headers was a cost of
+/// each one through the router, and grew a comparison a header with the
+/// read's mark.
+#[derive(Clone, Copy)]
+enum Replay {
+    Always,
+    AsAsked,
+}
+
+impl Replay {
+    fn allows(self, method: &str, headers: &[(&str, &str)]) -> bool {
+        match self {
+            Replay::Always => true,
+            Replay::AsAsked => replayable(method, headers),
+        }
+    }
+}
+
 /// Whether a request whose connection ended before its answer may be sent
 /// again: one a node never writes for, or a write the node makes once
-/// under its key, answering a second request with the first one's answer.
+/// under its key, answering a second request with the first one's answer
+/// -- or a request its client marked as a read (`Fenec-Read: replica`),
+/// which every node runs read-only on every route, a `POST /query` among
+/// them: the value [`fenec_http::read_marked`] takes, and no other, which
+/// a node refuses unrun.
 fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
     matches!(method, "GET" | "HEAD" | "OPTIONS")
-        || headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("idempotency-key"))
+        || headers.iter().any(|(k, v)| {
+            k.eq_ignore_ascii_case("idempotency-key")
+                || (k.eq_ignore_ascii_case(fenec_http::READ_HEADER) && fenec_http::marks_read(v))
+        })
 }
 
 fn timed_out(e: &io::Error) -> bool {
@@ -502,6 +593,32 @@ impl Answer {
         self.header("content-length")?.parse().ok()
     }
 
+    /// [`Answer::read_body`], the answer kept for its head: the connection
+    /// handed back to the pool as a copy of its descriptor, and this
+    /// answer's reader, read to its end, dropped with it. What reads a
+    /// read replica's whole answer before a byte of it goes to the client,
+    /// so that one broken off goes home instead.
+    pub fn read_body_kept(&mut self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
+        let Some(len) = self.content_length() else {
+            return Err(bad("a stream is read as it comes"));
+        };
+        let len = if head_only { 0 } else { len };
+        let mut body = vec![0u8; len];
+        self.reader.read_exact(&mut body)?;
+        if self.reusable && self.reader.buffer().is_empty() {
+            if let Ok(stream) = self.reader.get_ref().try_clone() {
+                let idle = Idle {
+                    stream,
+                    read_timeout: self.read_timeout,
+                    write_timeout: self.write_timeout,
+                };
+                pool.put(&self.addr, idle);
+            }
+        }
+        self.reusable = false;
+        Ok(body)
+    }
+
     /// Reads a `Content-Length` body and hands the connection back to the
     /// pool when the node keeps it open.
     pub fn read_body(mut self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
@@ -519,6 +636,7 @@ impl Answer {
             let idle = Idle {
                 stream: self.reader.into_inner(),
                 read_timeout: self.read_timeout,
+                write_timeout: self.write_timeout,
             };
             pool.put(&self.addr, idle);
         }
@@ -551,6 +669,7 @@ impl Answer {
             let idle = Idle {
                 stream: self.reader.into_inner(),
                 read_timeout: self.read_timeout,
+                write_timeout: self.write_timeout,
             };
             pool.put(&self.addr, idle);
         }
@@ -647,11 +766,12 @@ mod tests {
     /// the request not wholly sent rightly makes unsent.
     fn stage(pool: &Pool, s: TcpStream, set: Option<Duration>) -> &'static str {
         let head = b"DELETE /t/acme/notes/1 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
-        match pool.exchange("node", s, set, head, b"", pool.timeout) {
+        let (both, want) = ((set, pool.timeout), (pool.timeout, pool.timeout));
+        match pool.exchange("node", s, both, head, b"", want) {
             Ok(_) => "answered",
             Err(Failure(Stage::Unsent, _)) => "unsent",
             Err(Failure(Stage::Unanswered, _)) => "unanswered",
-            Err(Failure(Stage::Other, e)) => panic!("{e}"),
+            Err(Failure(Stage::Unread | Stage::Other, e)) => panic!("{e}"),
         }
     }
 

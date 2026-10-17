@@ -50,7 +50,7 @@ until one comes, couriers on a live map, and couriers' and customers'
 tokens held to their own rows, with the gaps it found listed.</p>
 
 <p>Beside a module the page loads <code>fenec.js</code> and the two modules it
-imports, 49 KB brotli as they are served with no build step; a bundler keeps
+imports, 50 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -183,6 +183,15 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
     gives it up (<a href="/docs/queues#wait">Waiting for a job</a>). A
     database in the page refuses it: there is no other worker to wait
     for.</li>
+  <li><b><code>connect(url, { reads: 'nearest' })</code> reads near:</b>
+    the builder's reads, and a <code>run</code> or <code>batch</code> given
+    <code>{ read: true }</code>, are answered by the tenant's read replica in
+    the router's region, each after the furthest position an answer from
+    home named to this client, its change and its history — it reads nothing
+    older than it wrote, nor a write a failover replaced; writes, live
+    queries and subscriptions go home (<a
+    href="/docs/sharding#read-replicas">Read replicas</a>). A write sent
+    with <code>{ read: true }</code> is refused, 403.</li>
 </ul>
 
 <h2>Opening a database</h2>

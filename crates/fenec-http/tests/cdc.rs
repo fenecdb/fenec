@@ -75,12 +75,24 @@ struct Answer {
 
 impl Node {
     fn call(&self, token: Option<&str>, method: &str, target: &str, body: &str) -> Answer {
+        self.call_with(token, method, target, body, "")
+    }
+
+    /// [`Self::call`] with `extra`, header lines each ended by `\r\n`.
+    fn call_with(
+        &self,
+        token: Option<&str>,
+        method: &str,
+        target: &str,
+        body: &str,
+        extra: &str,
+    ) -> Answer {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
         let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
         write!(
             s,
-            "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {}\r\n\
+            "{method} {target} HTTP/1.1\r\nHost: x\r\n{auth}{extra}Content-Length: {}\r\n\
              Connection: close\r\n\r\n{body}",
             body.len()
         )
@@ -411,6 +423,47 @@ fn a_consumer_reads_from_where_it_committed_and_again_what_it_did_not() {
         n.call(Some(ROOT), "GET", "/_changes/consumers", "").body,
         "[]"
     );
+}
+
+/// A consumer's commit and its let-go are writes: marked as a read
+/// (`Fenec-Read: replica`), as a router may send it to a replica, they are
+/// refused as every marked write is, and the cursor stays where it was.
+/// The change stream was served before the mark was read, and a marked
+/// commit moved the cursor on whichever copy it reached.
+#[test]
+fn a_consumer_s_commit_marked_as_a_read_is_refused() {
+    let n = start("marked-commit", replication::DEFAULT_BUFFER);
+    n.run("create collection a (t text)");
+    let marked = "Fenec-Read: replica\r\n";
+    let made = n.call_with(Some(ROOT), "POST", "/_changes/consumers/idx", "", marked);
+    assert_eq!(made.status, 403, "{}", made.body);
+    assert!(
+        made.body.contains("Fenec-Read: replica only reads"),
+        "{}",
+        made.body
+    );
+    assert_eq!(n.changes("consumer=idx").status, 404, "nothing was made");
+    assert_eq!(
+        n.call(Some(ROOT), "POST", "/_changes/consumers/idx", "")
+            .status,
+        200
+    );
+    n.run("put a {t: \"one\"}");
+    let next = n.changes("consumer=idx").next.unwrap();
+    let c = n.call_with(
+        Some(ROOT),
+        "POST",
+        "/_changes/consumers/idx",
+        &format!("{{\"since\": {next}}}"),
+        marked,
+    );
+    assert_eq!(c.status, 403, "{}", c.body);
+    let gone = n.call_with(Some(ROOT), "DELETE", "/_changes/consumers/idx", "", marked);
+    assert_eq!(gone.status, 403, "{}", gone.body);
+    // Still where it was, and the read is answered marked as any.
+    let again = n.call_with(Some(ROOT), "GET", "/_changes?consumer=idx", "", marked);
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert!(again.body.contains("one"), "{}", again.body);
 }
 
 /// A sink that commits after every answer, an empty one too, stays idle

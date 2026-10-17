@@ -18,6 +18,9 @@
 //!   * the same in a region keeping its own directory (`--region`), cut off
 //!     from the global router, at a lease of 1 s and of 5 s: the failover is
 //!     its own router's (`regions` alone)
+//!   * a read through the router of a region holding a tenant's read
+//!     replica: sent home, marked for the replica, and marked after the
+//!     client's write, the replica waiting for it (`reads` alone)
 
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::Directory;
@@ -153,6 +156,8 @@ fn started(tag: &str, follows: Option<&str>, sync: bool) -> (String, std::path::
 struct Client {
     reader: BufReader<TcpStream>,
     out: TcpStream,
+    /// The last answer's `Fenec-History`, where it had one.
+    history: Option<String>,
 }
 
 impl Client {
@@ -162,9 +167,14 @@ impl Client {
         Client {
             out: s.try_clone().unwrap(),
             reader: BufReader::new(s),
+            history: None,
         }
     }
 
+    /// A request and its status and body, read as before read replicas:
+    /// the latency's own client, which [`Client::send_with`]'s header
+    /// vector and its two more comparisons a line of the answer made
+    /// slower for the router's answers, which carry more lines.
     fn send(
         &mut self,
         method: &str,
@@ -204,6 +214,52 @@ impl Client {
         self.reader.read_exact(&mut body).unwrap();
         (status, body)
     }
+
+    /// A request with headers of its own: its status, body and `Fenec-Seq`.
+    fn send_with(
+        &mut self,
+        method: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> (u16, Vec<u8>, Option<u64>) {
+        let mut head = format!(
+            "{method} {target} HTTP/1.1\r\nHost: b\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        for (k, v) in headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
+        self.out.write_all(head.as_bytes()).unwrap();
+        self.out.write_all(body).unwrap();
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let (mut len, mut seq) = (0, None);
+        self.history = None;
+        loop {
+            line.clear();
+            self.reader.read_line(&mut line).unwrap();
+            let l = line.trim_end();
+            if l.is_empty() {
+                break;
+            }
+            match l.split_once(':') {
+                Some((k, v)) if k.eq_ignore_ascii_case("content-length") => {
+                    len = v.trim().parse().unwrap()
+                }
+                Some((k, v)) if k.eq_ignore_ascii_case("fenec-seq") => seq = v.trim().parse().ok(),
+                Some((k, v)) if k.eq_ignore_ascii_case("fenec-history") => {
+                    self.history = Some(v.trim().to_string())
+                }
+                _ => {}
+            }
+        }
+        let mut body = vec![0u8; len];
+        self.reader.read_exact(&mut body).unwrap();
+        (status, body, seq)
+    }
 }
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
@@ -230,9 +286,10 @@ fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // A word first runs one part: `latency` the forwarded request alone,
     // `fanout` the query across tenants alone, `standby` a request through
-    // a standby router against the primary.
+    // a standby router against the primary, `reads` a read answered by a
+    // read replica against one sent home.
     let only = match args.first().map(String::as_str) {
-        Some(w @ ("latency" | "fanout" | "standby" | "regions")) => Some(w.to_string()),
+        Some(w @ ("latency" | "fanout" | "standby" | "regions" | "reads")) => Some(w.to_string()),
         _ => None,
     };
     if only.is_some() {
@@ -240,6 +297,10 @@ fn main() {
     }
     if only.as_deref() == Some("fanout") {
         fanout();
+        return;
+    }
+    if only.as_deref() == Some("reads") {
+        reads();
         return;
     }
     if only.as_deref() == Some("regions") {
@@ -993,6 +1054,143 @@ fn standby() {
     }
     let _ = std::fs::remove_dir_all(node_dir);
     let _ = std::fs::remove_dir_all(files);
+}
+
+/// A read near a tenant's read replica against one sent home, through the
+/// router of the replica's region: the node of each region reached through
+/// a loopback proxy standing for the link to it. In turns over keep-alive
+/// connections, each request the same `get`: sent home (unmarked), marked
+/// for the replica, and marked after a write the replica already holds.
+/// Then a client's write home and its read after it -- the replica waiting
+/// for the write it names (`Fenec-After`) -- against a read sent home after
+/// the same write: what a client reading its own writes pays for reading
+/// near, the replication's catch-up in it.
+fn reads() {
+    let (eu1, eu_dir) = started("rr-eu1", None, true);
+    let (us1, us_dir) = started("rr-us1", None, true);
+    let (to_eu1, to_us1) = (Proxy::to(&eu1), Proxy::to(&us1));
+    let router = Router::new(
+        Directory::in_memory(),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(600),
+            near: Some("us".into()),
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let raddr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let mut r = Client::new(&raddr);
+    for (name, addr, region) in [("eu1", &to_eu1.addr, "eu"), ("us1", &to_us1.addr, "us")] {
+        let body = format!(r#"{{"addr":"{addr}","token":"adm","region":"{region}"}}"#);
+        let path = format!("/_shard/nodes/{name}");
+        assert_eq!(r.send("PUT", &path, None, body.as_bytes()).0, 201);
+    }
+    let schema = r#"{"node":"eu1","schema":"create collection docs (title text)"}"#;
+    assert_eq!(
+        r.send("PUT", "/_shard/tenants/acme", None, schema.as_bytes())
+            .0,
+        201
+    );
+    let (status, body) = r.send("PUT", "/_shard/tenants/acme/read-replicas/us", None, b"");
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+
+    let get = br#"{"query":"get docs select title limit 1"}"#;
+    let put = br#"{"query":"put docs {title: \"probe\"}"}"#;
+    let marked: &[(&str, &str)] = &[("Fenec-Read", "replica")];
+    let (status, _, seq) = r.send_with("POST", "/t/acme/query", &[], put);
+    assert_eq!(status, 200);
+    let seq = seq.unwrap().to_string();
+    let history = r.history.clone().expect("a write names its history");
+    let after: &[(&str, &str)] = &[
+        ("Fenec-Read", "replica"),
+        ("Fenec-After", &seq),
+        ("Fenec-History", &history),
+    ];
+    let kinds: [(&str, &[(&str, &str)]); 3] = [
+        ("home", &[]),
+        ("replica", marked),
+        ("replica, after", after),
+    ];
+    let mut clients: Vec<Client> = kinds.iter().map(|_| Client::new(&raddr)).collect();
+    for (c, (_, headers)) in clients.iter_mut().zip(&kinds) {
+        for _ in 0..500 {
+            assert_eq!(c.send_with("POST", "/t/acme/query", headers, get).0, 200);
+        }
+    }
+    let mut times: Vec<Vec<f64>> = vec![Vec::new(); kinds.len()];
+    for round in 0..ROUNDS {
+        for k in 0..kinds.len() {
+            let i = (k + round) % kinds.len();
+            let at = Instant::now();
+            let (status, _, _) = clients[i].send_with("POST", "/t/acme/query", kinds[i].1, get);
+            times[i].push(at.elapsed().as_secs_f64() * 1e6);
+            assert_eq!(status, 200);
+        }
+    }
+    println!(
+        "a read through the router of a read replica's region, {ROUNDS} x POST /t/acme/query in \
+         turns over keep-alive connections, each node behind a loopback proxy"
+    );
+    println!("                    p50       p95       p99");
+    for t in times.iter_mut() {
+        t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    }
+    for ((label, _), v) in kinds.iter().zip(&times) {
+        println!(
+            "  {label:<15} {:>6.1} us {:>6.1} us {:>6.1} us",
+            pct(v, 0.5),
+            pct(v, 0.95),
+            pct(v, 0.99)
+        );
+    }
+
+    // A write home, then the client's read of it: near, waiting for it on
+    // the replica, or home. In turns, a write before each read.
+    const PAIRS: usize = 1_000;
+    let mut w = Client::new(&raddr);
+    let mut after_write: [Vec<f64>; 2] = Default::default();
+    for round in 0..PAIRS {
+        for k in 0..2 {
+            let near = (k + round) % 2 == 0;
+            let (status, _, seq) = w.send_with("POST", "/t/acme/query", &[], put);
+            assert_eq!(status, 200);
+            let seq = seq.unwrap().to_string();
+            let history = w.history.clone().unwrap();
+            let headers: &[(&str, &str)] = match near {
+                true => &[
+                    ("Fenec-Read", "replica"),
+                    ("Fenec-After", &seq),
+                    ("Fenec-History", &history),
+                ],
+                false => &[],
+            };
+            let at = Instant::now();
+            let (status, _, _) = w.send_with("POST", "/t/acme/query", headers, get);
+            after_write[near as usize].push(at.elapsed().as_secs_f64() * 1e6);
+            assert_eq!(status, 200);
+        }
+    }
+    println!("a client's read of the write it was just answered, {PAIRS} x each, in turns");
+    for t in after_write.iter_mut() {
+        t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    }
+    for (label, v) in [
+        ("home", &after_write[0]),
+        ("replica, after", &after_write[1]),
+    ] {
+        println!(
+            "  {label:<15} {:>6.1} us {:>6.1} us {:>6.1} us",
+            pct(v, 0.5),
+            pct(v, 0.95),
+            pct(v, 0.99)
+        );
+    }
+    let _ = std::fs::remove_dir_all(eu_dir);
+    let _ = std::fs::remove_dir_all(us_dir);
 }
 
 /// A deterministic pseudo-random vector as FenecQL list text.

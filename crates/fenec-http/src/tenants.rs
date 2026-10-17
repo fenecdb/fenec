@@ -25,7 +25,7 @@
 use crate::lease::Lease;
 use crate::node_stream::NodeStreams;
 use crate::quota::{self, Held as QuotaHeld, Kind, Quota, Set};
-use crate::replication::{fresh_id, Follower, Replication};
+use crate::replication::{fresh_id, Follower, Replication, Said};
 use crate::sse::Hub;
 use fenec_core::history::History;
 use fenec_core::prelude::*;
@@ -100,11 +100,44 @@ pub struct Tenant {
     lease: Option<Arc<Lease>>,
     /// Its quota and what its requests hold of it now ([`crate::quota`]).
     pub quota: Arc<QuotaHeld>,
+    /// Whether its file is known to hold a prefix of its tenant's history:
+    /// a primary's always, a promoted copy's from its promotion; a
+    /// follower's once, since this open, the primary it follows has said
+    /// hello -- its image adopted, or its place in that history found. Not
+    /// kept past an open: a read replica made a moment ago is an empty file
+    /// of a history of its own, and answering a marked read from it told a
+    /// client the tenant had no collections; a file reopened, or pointed at
+    /// another node, may be one whose history the primary's does not
+    /// continue -- a copy left on a node gone for good while its tenant was
+    /// deleted and made again -- until the primary has said so.
+    ready: Arc<AtomicBool>,
+    /// Which open of its file this is, and of the follower started with
+    /// it: a refusal deletes the copy only while that open still holds the
+    /// slot ([`Tenants::delete_refused`]).
+    opened: u64,
 }
+
+/// The opens of tenants' files in this process, numbered.
+static OPENS: AtomicU64 = AtomicU64::new(1);
 
 impl Tenant {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether a read its client marked may be answered from this copy
+    /// ([`Self::ready`]'s field): one not ready is answered 503, which a
+    /// router takes to the tenant's home. A copy taking writes is always
+    /// ready, whatever made it a primary: asked only where the field says
+    /// no, which a following copy says until its primary's hello.
+    pub fn ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+            || !self
+                .db
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .history()
+                .following
     }
 
     pub fn is_frozen(&self) -> bool {
@@ -192,6 +225,20 @@ pub struct Tenants {
     /// replicates its tenants (`streams`), where an archiver can ask: up to
     /// [`DEPARTED_KEPT`] names, a few megabytes, for nothing elsewhere.
     departed: Mutex<Departed>,
+    /// The registry itself, once it is shared ([`Tenants::shared`]): what
+    /// a copy refusing another tenant's primary deletes itself through.
+    me: std::sync::OnceLock<std::sync::Weak<Tenants>>,
+}
+
+/// The copies that refused a primary of another lineage than the one they
+/// were told -- a tenant made again under their name -- and deleted
+/// themselves (`fenec_copies_refused_total`).
+static COPIES_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// How many copies refused another tenant's primary since the process
+/// started.
+pub fn copies_refused() -> u64 {
+    COPIES_REFUSED.load(Ordering::Relaxed)
 }
 
 /// The tenants that left, the last [`DEPARTED_KEPT`] of them: what an
@@ -266,7 +313,15 @@ impl Tenants {
             streams: None,
             closed: Mutex::new(HashMap::new()),
             departed: Mutex::new(Departed::default()),
+            me: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Notes the `Arc` the registry is served from, which a copy refusing
+    /// another tenant's primary deletes itself through
+    /// ([`crate::Server::with_tenants`]).
+    pub fn shared(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
     }
 
     /// When `name` was last deleted in this process, ms since the epoch by
@@ -509,15 +564,36 @@ impl Tenants {
     /// recorded by [`Self::follow`], or this node's standby upstream.
     fn upstream_of(&self, name: &str) -> Option<String> {
         let own = std::fs::read_to_string(self.follows_path(name)).ok();
-        match own.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
+        let first = own.and_then(|text| text.lines().next().map(|l| l.trim().to_string()));
+        match first.filter(|u| !u.is_empty()) {
             Some(url) => Some(url),
             None => self.repl.as_ref()?.upstream.clone(),
         }
     }
 
-    /// Records the node a tenant follows, whole or not at all: written
-    /// beside and renamed, as a tenant's file is installed.
+    /// The lineage a tenant was told its primary is of, which `.follows`
+    /// keeps on a line of its own after the address (`lineage <8 hex>`):
+    /// a restart keeps refusing another tenant of the name.
+    fn lineage_followed(&self, name: &str) -> Option<u32> {
+        let text = std::fs::read_to_string(self.follows_path(name)).ok()?;
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix("lineage "))
+            .and_then(|l| crate::replication::parse_lineage(l.trim()))
+    }
+
+    /// Records the node a tenant follows, and the lineage it is told that
+    /// node's tenant is of, whole or not at all: written beside and
+    /// renamed, as a tenant's file is installed.
     fn record_upstream(&self, name: &str, url: Option<&str>) -> std::io::Result<()> {
+        self.record_following(name, url, None)
+    }
+
+    fn record_following(
+        &self,
+        name: &str,
+        url: Option<&str>,
+        lineage: Option<u32>,
+    ) -> std::io::Result<()> {
         let path = self.follows_path(name);
         let Some(url) = url else {
             return match std::fs::remove_file(&path) {
@@ -525,11 +601,16 @@ impl Tenants {
                 _ => Ok(()),
             };
         };
+        let mut text = url.to_string();
+        if let Some(l) = lineage {
+            text.push_str("\nlineage ");
+            text.push_str(&crate::replication::lineage_text(l));
+        }
         let tmp = self.dir.join(format!("{name}.follows.writing"));
         std::fs::File::create(&tmp)
             .and_then(|mut f| {
                 use std::io::Write;
-                f.write_all(url.as_bytes())?;
+                f.write_all(text.as_bytes())?;
                 f.sync_all()
             })
             .and_then(|_| std::fs::rename(&tmp, &path))
@@ -668,7 +749,12 @@ impl Tenants {
         let t = self.get(name)?;
         // Promoted, it follows nobody: the record would have the next open
         // make it follow its old primary again.
+        // And it is ready: a promoted copy that never heard from its primary
+        // since it opened -- a standby's, which a node pair's restart left
+        // waiting for a hello no primary now sends -- answered every marked
+        // read 503 for as long as it stayed open.
         let forget = |done| {
+            t.ready.store(true, Ordering::SeqCst);
             self.record_upstream(name, None)
                 .map_err(|e| Refused(500, format!("tenant `{name}` promoted, but {e}")))?;
             Ok(done)
@@ -688,7 +774,7 @@ impl Tenants {
         if !g.history().following {
             return Err(Refused(409, format!("tenant `{name}` is not a replica")));
         }
-        let id = fresh_id();
+        let id = crate::replication::fork_id(g.history(), fresh_id());
         g.fork(id)
             .and_then(|_| g.sync())
             .map_err(|e| Refused(500, e.to_string()))?;
@@ -703,6 +789,18 @@ impl Tenants {
     /// writes that node took that were never sent are gone, the trade a
     /// failover makes.
     pub fn follow(&self, name: &str, from: Option<&str>) -> std::result::Result<(), Refused> {
+        self.follow_lineage(name, from, None)
+    }
+
+    /// [`Tenants::follow`], the tenant told the lineage its primary is of
+    /// (a router's read replica): kept in `.follows`, and a primary of
+    /// another taken nothing from ([`Follower::expect_lineage`]).
+    pub fn follow_lineage(
+        &self,
+        name: &str,
+        from: Option<&str>,
+        lineage: Option<u32>,
+    ) -> std::result::Result<(), Refused> {
         check_name(name)?;
         let Some(repl) = &self.repl else {
             return Err(Refused(
@@ -735,6 +833,26 @@ impl Tenants {
             let path = self.path(name);
             if let Held::Open(t) = &*held {
                 if t.read().history().following && self.upstream_of(name) == wanted {
+                    // Following that node already: its stream is begun again
+                    // and the copy is not ready until the node says hello.
+                    // The tenant there may be another than the one it heard
+                    // -- deleted and made again while this copy was cut off
+                    // -- and a router placing a read replica over a file it
+                    // found on the node asks for no more than this follow.
+                    self.record_following(name, from, lineage).map_err(|e| {
+                        Refused(
+                            500,
+                            format!("could not record the node tenant `{name}` follows: {e}"),
+                        )
+                    })?;
+                    if let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) {
+                        f.halt();
+                        f.expect_lineage(lineage);
+                        t.ready.store(false, Ordering::SeqCst);
+                        f.start(format!("fenec-replica-{name}")).map_err(|e| {
+                            Refused(500, format!("tenant `{name}` could not follow again: {e}"))
+                        })?;
+                    }
                     return Ok(());
                 }
                 // Closed first: one instance over the file, always. What it
@@ -751,7 +869,7 @@ impl Tenants {
             if !path.exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
             }
-            self.record_upstream(name, from).map_err(|e| {
+            self.record_following(name, from, lineage).map_err(|e| {
                 Refused(
                     500,
                     format!("could not record the node tenant `{name}` follows: {e}"),
@@ -881,6 +999,10 @@ impl Tenants {
         // The follower applies the primary node's writes for this tenant, and
         // holds the database -- not the tenant -- while it runs; `close`
         // therefore keeps a tenant with a running follower open.
+        // A primary's file holds its own history; a follower's a prefix of
+        // its primary's once that primary has said hello since this open.
+        let ready = Arc::new(AtomicBool::new(!following));
+        let opened = OPENS.fetch_add(1, Ordering::Relaxed);
         let mut follower = None;
         if let (Some(r), Some(url), true) = (&self.repl, &upstream, following) {
             let started = Follower::new(
@@ -892,6 +1014,19 @@ impl Tenants {
             )
             .map_err(|e| Refused(500, format!("tenant `{name}` cannot follow {url}: {e}")))
             .and_then(|f| {
+                // Ready at the primary's hello, for as long as this open
+                // lasts -- and no more where the primary is refused as
+                // another tenant of the name, whose image it never takes.
+                let seen = Arc::clone(&ready);
+                let (me, who) = (self.me.get().cloned(), name.to_string());
+                f.on_hello(Box::new(move |said| match said {
+                    Said::Taken => seen.store(true, Ordering::SeqCst),
+                    Said::Refused { expected } => {
+                        seen.store(false, Ordering::SeqCst);
+                        refused_copy(me.clone(), &who, opened, expected);
+                    }
+                }));
+                f.expect_lineage(self.lineage_followed(name));
                 f.start(format!("fenec-replica-{name}")).map_err(|e| {
                     Refused(
                         500,
@@ -924,6 +1059,8 @@ impl Tenants {
             last_used: AtomicU64::new(self.now()),
             lease: self.lease.clone(),
             quota: held,
+            ready,
+            opened,
         }))
     }
 
@@ -1275,47 +1412,85 @@ impl Tenants {
     /// Requests for this tenant wait meanwhile; other tenants do not notice.
     pub fn delete(&self, name: &str) -> std::result::Result<(), Refused> {
         check_name(name)?;
-        self.with_slot(name, |held| {
-            if let Held::Open(t) = &*held {
-                release(t, name)?;
-                // The last `Arc`: dropping it syncs, and the file is closed
-                // before it is removed.
-                *held = Held::Closed;
-            }
-            let path = self.path(name);
-            if !path.exists() {
-                return Err(Refused(404, format!("no tenant `{name}` on this node")));
-            }
-            std::fs::remove_file(&path)
-                .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
-            // Once the file is gone: a delete that failed is no departure --
-            // noted before, a removal refused had the archive say the tenant
-            // went and came back 62 ms later, and a restore between left out
-            // a tenant that never left. The stream, which looks for the file
-            // without the slot, may find it gone a moment first, and takes
-            // that moment.
-            if self.streams.is_some() {
-                let at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64);
-                self.departed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .note(name, at);
-            }
-            let _ = std::fs::remove_file(path.with_extension("fenec.compacting"));
-            // The sync log beside it (`fenec_core::fs`): a log names the
-            // file it was written for, and is kept from a tenant made
-            // again under the name that way too.
-            let _ = fenec_core::fs::forget_sync_log(&path);
-            let _ = std::fs::remove_file(self.follows_path(name));
-            // A tenant made again under the name starts at the node's quota;
-            // a router that keeps one sends it with the tenant.
-            let _ = std::fs::remove_file(self.quota_path(name));
-            self.forget_place(name);
-            Ok(())
-        })?;
+        self.with_slot(name, |held| self.delete_held(name, held))?;
         self.touch(name);
+        Ok(())
+    }
+
+    /// Deletes the copy `name` that refused a primary of another lineage
+    /// than `expected` -- and only where, under the slot's lock the delete
+    /// takes, it is still that copy: open as `opened`, the open whose
+    /// follower refused, still following, its follower still refusing,
+    /// `.follows` still naming `expected`. Checked before the slot was
+    /// taken, a promotion of the copy or a move installing the tenant
+    /// there landing between the check and the delete had the primary
+    /// deleted. Whether it was deleted.
+    pub(crate) fn delete_refused(
+        &self,
+        name: &str,
+        opened: u64,
+        expected: u32,
+    ) -> std::result::Result<bool, Refused> {
+        let deleted = self.with_slot(name, |held| {
+            let Held::Open(t) = &*held else {
+                return Ok(false);
+            };
+            let refusing = t.opened == opened
+                && t.read().history().following
+                && t.repl
+                    .as_ref()
+                    .and_then(|r| r.follower())
+                    .is_some_and(|f| f.refused())
+                && self.lineage_followed(name) == Some(expected);
+            if !refusing {
+                return Ok(false);
+            }
+            self.delete_held(name, held).map(|_| true)
+        })?;
+        if deleted {
+            self.touch(name);
+        }
+        Ok(deleted)
+    }
+
+    fn delete_held(&self, name: &str, held: &mut Held) -> std::result::Result<(), Refused> {
+        if let Held::Open(t) = &*held {
+            release(t, name)?;
+            // The last `Arc`: dropping it syncs, and the file is closed
+            // before it is removed.
+            *held = Held::Closed;
+        }
+        let path = self.path(name);
+        if !path.exists() {
+            return Err(Refused(404, format!("no tenant `{name}` on this node")));
+        }
+        std::fs::remove_file(&path)
+            .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
+        // Once the file is gone: a delete that failed is no departure --
+        // noted before, a removal refused had the archive say the tenant
+        // went and came back 62 ms later, and a restore between left out
+        // a tenant that never left. The stream, which looks for the file
+        // without the slot, may find it gone a moment first, and takes
+        // that moment.
+        if self.streams.is_some() {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            self.departed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note(name, at);
+        }
+        let _ = std::fs::remove_file(path.with_extension("fenec.compacting"));
+        // The sync log beside it (`fenec_core::fs`): a log names the
+        // file it was written for, and is kept from a tenant made
+        // again under the name that way too.
+        let _ = fenec_core::fs::forget_sync_log(&path);
+        let _ = std::fs::remove_file(self.follows_path(name));
+        // A tenant made again under the name starts at the node's quota;
+        // a router that keeps one sends it with the tenant.
+        let _ = std::fs::remove_file(self.quota_path(name));
+        self.forget_place(name);
         Ok(())
     }
 
@@ -1423,6 +1598,134 @@ fn sync_now(t: &Tenant) {
         }
         Ok(None) => {}
         Err(e) => crate::log!("sync error ({}): {e}", t.name),
+    }
+}
+
+/// A copy that refused a primary of another lineage -- its tenant deleted
+/// and made again under the name -- deletes itself, file and `.follows`:
+/// it is derived data, and its primary is another tenant's or gone.
+/// Stopped and kept, it held the deleted tenant's rows on a node of a
+/// region nobody had chosen for the new one, for anyone reading the node
+/// to find. On a thread of its own -- the follower calling this has to end
+/// before the delete can close the tenant -- and only where the tenant is
+/// still the copy that refused, as the delete finds it
+/// ([`Tenants::delete_refused`]).
+fn refused_copy(me: Option<std::sync::Weak<Tenants>>, name: &str, opened: u64, expected: u32) {
+    let Some(tenants) = me.and_then(|w| w.upgrade()) else {
+        crate::log!(
+            "tenant `{name}`'s copy here refused another tenant of its name, and stays until \
+             deleted"
+        );
+        return;
+    };
+    let who = name.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("fenec-refused-copy".into())
+        .spawn(move || {
+            refusals::pass(&who);
+            match tenants.delete_refused(&who, opened, expected) {
+                Ok(true) => {
+                    COPIES_REFUSED.fetch_add(1, Ordering::Relaxed);
+                    crate::log!(
+                        "tenant `{who}`'s copy here followed a primary of another lineage -- the \
+                         name made again -- and is deleted"
+                    )
+                }
+                // Promoted, installed anew, told another lineage or
+                // closed meanwhile: no longer the copy that refused.
+                Ok(false) => {}
+                Err(e) => crate::log!(
+                    "tenant `{who}`'s copy here refused another tenant of its name, and stayed: {}",
+                    e.1
+                ),
+            }
+            refusals::done(&who);
+        });
+    if let Err(e) = spawned {
+        crate::log!(
+            "tenant `{name}`'s copy here refused another tenant of its name, and stayed: {e}"
+        );
+    }
+}
+
+/// A test's hold on a refused copy's delete, by the tenant's name: the
+/// thread waits at [`pass`] until let go, so that a promotion or an install
+/// lands between the refusal and the delete. Names no test holds pass at
+/// once; tests hold names of their own, the process's being shared.
+#[doc(hidden)]
+pub mod refusals {
+    use std::collections::HashMap;
+    use std::sync::{Condvar, Mutex};
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Stage {
+        /// Held by a test, no copy of the name refused yet.
+        Held,
+        /// A refusal waits at the hold, its delete not asked.
+        Waiting,
+        /// Let go.
+        Let,
+        /// Its delete asked, done or not.
+        Done,
+    }
+
+    static STAGES: Mutex<Option<HashMap<String, Stage>>> = Mutex::new(None);
+    static MOVED: Condvar = Condvar::new();
+
+    fn set(name: &str, from: Option<Stage>, to: Stage) {
+        let mut g = STAGES.lock().unwrap_or_else(|e| e.into_inner());
+        let map = g.get_or_insert_with(HashMap::new);
+        if from.is_none() || map.get(name).copied() == from {
+            map.insert(name.to_string(), to);
+            MOVED.notify_all();
+        }
+    }
+
+    /// Holds the next refused copy of `name` before its delete.
+    pub fn hold(name: &str) {
+        set(name, None, Stage::Held);
+    }
+
+    /// Lets it go.
+    pub fn release(name: &str) {
+        set(name, None, Stage::Let);
+    }
+
+    /// Waits until `name`'s refusal reaches `stage`, up to `within`.
+    pub fn wait_for(name: &str, stage: Stage, within: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + within;
+        let mut g = STAGES.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if g.as_ref().and_then(|m| m.get(name)) == Some(&stage) {
+                return true;
+            }
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            g = MOVED
+                .wait_timeout(g, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    pub(crate) fn pass(name: &str) {
+        let mut g = STAGES.lock().unwrap_or_else(|e| e.into_inner());
+        let held = g.as_ref().and_then(|m| m.get(name)) == Some(&Stage::Held);
+        if !held {
+            return;
+        }
+        g.get_or_insert_with(HashMap::new)
+            .insert(name.to_string(), Stage::Waiting);
+        MOVED.notify_all();
+        while g.as_ref().and_then(|m| m.get(name)) == Some(&Stage::Waiting) {
+            g = MOVED.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    pub(crate) fn done(name: &str) {
+        set(name, Some(Stage::Let), Stage::Done);
     }
 }
 

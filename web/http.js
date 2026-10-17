@@ -33,6 +33,7 @@ export class FenecHttp {
 
   #key;
   #last;
+  #reads;
 
   constructor(url, opts = {}) {
     this.#url = String(url).replace(/\/+$/, '');
@@ -40,8 +41,15 @@ export class FenecHttp {
     this.#fetch = opts.fetch ?? globalThis.fetch;
     this.#key = opts.idempotencyKey ?? null;
     // Shared with every copy `withIdempotencyKey` makes, as Go's and
-    // .NET's clients share theirs.
-    this.#last = opts[LAST] ?? { seq: null };
+    // .NET's clients share theirs. `at` is the furthest position an answer
+    // from home named -- `Fenec-Seq` and the history it is a change of --
+    // which a marked read is sent after: an answer that arrives late is not
+    // the last.
+    this.#last = opts[LAST] ?? { seq: null, at: null };
+    this.#reads = opts.reads ?? 'home';
+    if (this.#reads !== 'home' && this.#reads !== 'nearest') {
+      throw new FenecError(`reads is 'home' or 'nearest' (got ${this.#reads})`);
+    }
     if (typeof this.#fetch !== 'function') {
       throw new FenecError('fetch not found: pass one via opts.fetch');
     }
@@ -69,6 +77,7 @@ export class FenecHttp {
       token: this.#token,
       fetch: this.#fetch,
       idempotencyKey: key,
+      reads: this.#reads,
       [LAST]: this.#last,
     });
     // The schema `connect` checked, and its relations, go with it.
@@ -85,7 +94,8 @@ export class FenecHttp {
    * that writes nothing at the server until it can -- a job enqueued, a
    * delayed one come due, a lease lapsed -- or for that long, at most
    * 30 000: a claim waiting for a job (`Fenec-Wait`). `{ signal }` gives
-   * it up, as any `fetch`.
+   * it up, as any `fetch`. `{ read: true }`: the text only reads, and goes
+   * near on a client reading near, as the builder's reads do.
    */
   async run(sql, params = [], opts = {}) {
     const { body, seq, replayed } = await this.#send(
@@ -120,7 +130,8 @@ export class FenecHttp {
    * write's `require` not met -- and `completed` how many stayed applied:
    * none, but for a batch holding a `compact`, whose statements run on
    * their own. `{ wait, signal }` as `run`'s: held while its `set`s and
-   * `del`s write nothing.
+   * `del`s write nothing. A batch of builder queries alone is a read, as is
+   * one given `{ read: true }`.
    */
   async batch(items, opts = {}) {
     if (!Array.isArray(items) || items.length === 0) {
@@ -130,13 +141,14 @@ export class FenecHttp {
       const [sql, params] = statementOf(item, i);
       return JSON.stringify({ query: sql, params: params.map((p) => normalize(p)) });
     });
+    const read = opts.read ?? items.every((item) => item instanceof Query);
     const { body, seq, replayed } = await this.#send(
       '/batch',
       'application/x-ndjson',
       lines.join('\n'),
       opts.idempotencyKey ?? this.#key,
       [],
-      opts,
+      { ...opts, read },
     );
     return { results: body?.results ?? [], seq, replayed };
   }
@@ -160,14 +172,49 @@ export class FenecHttp {
    * A POST: its JSON answer, the change a write left the database at, and
    * whether the answer is the one kept for `key`.
    */
-  async #send(path, type, payload, key, also = [], { wait, signal } = {}) {
+  async #send(path, type, payload, key, also = [], { wait, signal, read } = {}) {
     const headers = { 'content-type': type };
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
     if (key) headers['idempotency-key'] = key;
     if (wait !== undefined && wait !== null) headers['fenec-wait'] = String(held(wait));
+    // A read near: marked for the tenant's read replica in the router's
+    // region, after the furthest position home named to this client, which
+    // the replica waits for -- that change of that history.
+    let near = read === true && this.#reads === 'nearest';
+    const at = this.#last.at;
+    if (near) {
+      headers['fenec-read'] = 'replica';
+      if (at) {
+        headers['fenec-after'] = String(at.seq);
+        if (at.history) headers['fenec-history'] = at.history;
+      }
+    }
     const init = { method: 'POST', headers, body: payload };
     if (signal) init.signal = signal;
-    const res = await this.#request(`${this.#url}${path}`, init);
+    let res = await this.#request(`${this.#url}${path}`, init);
+    // 504: no copy holds that write in the wait -- home had none either,
+    // lost in a failover. Home says where it stands, which the client
+    // takes as its position, lower or not; asked home again with no mark,
+    // it reads what home holds. Taken only over the position this request
+    // was sent after -- a write answered meanwhile is further, and set back
+    // the next read near would miss it -- and never of an earlier term of
+    // the same lineage: a router whose copy of the directory lags a
+    // failover sends the read to the old primary, fenced, which names the
+    // branch it abandoned. Another lineage's is a tenant made again under
+    // the name, which starts again at term 1: refused, every read near
+    // waited its whole wait for good.
+    if (near && res.status === 504 && headers['fenec-after']) {
+      const told = await res.json().catch(() => null);
+      if (told && Number.isSafeInteger(told.seq)) {
+        const p = position(told.seq, typeof told.history === 'string' ? told.history : null);
+        if (this.#last.at === at && (p.term >= at.term || another(p, at))) this.#last.at = p;
+      }
+      delete headers['fenec-read'];
+      delete headers['fenec-after'];
+      delete headers['fenec-history'];
+      res = await this.#request(`${this.#url}${path}`, init);
+      near = false;
+    }
     const text = await res.text();
     let body;
     try {
@@ -185,7 +232,13 @@ export class FenecHttp {
     }
     const got = res.headers?.get?.('fenec-seq');
     const seq = got ? Number(got) : null;
-    if (seq !== null) this.#last.seq = seq;
+    // A position from home alone: a marked read's answer may be a
+    // replica's, behind home or on a branch a failover left.
+    if (seq !== null && !near) {
+      this.#last.seq = seq;
+      const p = position(seq, res.headers?.get?.('fenec-history') ?? null);
+      if (later(p, this.#last.at)) this.#last.at = p;
+    }
     return { body, seq, replayed: res.headers?.get?.('idempotent-replayed') === 'true' };
   }
 
@@ -505,6 +558,32 @@ function streamError(data) {
 
 /** The option a copy of a client is handed its original's `seq` under. */
 const LAST = Symbol('last');
+
+/**
+ * A position an answer named: its change, the history it is a change of
+ * (`<term>-<id>`, `Fenec-History`; none for a database that never had a
+ * replica), that history's term, one more at each promotion, and its
+ * lineage: the id's top half, which every fork of the tenant keeps and a
+ * tenant made again under its name does not.
+ */
+function position(seq, history) {
+  const [t, id] = history ? history.split('-') : [];
+  return { seq, history, term: Number(t) || 0, lineage: id ? id.slice(0, 8) : null };
+}
+
+/** Whether `p` is of another lineage than `q`: a tenant made again. */
+function another(p, q) {
+  return !!(p.lineage && q.lineage && p.lineage !== q.lineage);
+}
+
+/**
+ * Whether position `p` is past `q`: of another lineage -- home's word on a
+ * tenant made again, whose terms start again -- or a later term of the
+ * same, or further in one.
+ */
+function later(p, q) {
+  return !q || another(p, q) || p.term > q.term || (p.term === q.term && p.seq > q.seq);
+}
 
 /**
  * Connects to a remote fenecdb HTTP endpoint (`fenec-server --http`). With

@@ -36,6 +36,9 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
 - `WithIdempotencyKey(key)` makes a write once; `After(seq)` reads a write on a replica (`Fenec-After`);
   `WithWait(TimeSpan.FromSeconds(30))` holds a job queue's claim at the server until a job comes (`Fenec-Wait`),
   its cancellation token giving it up.
+- `new FenecClientOptions { ReadsNearest = true }` sends the builder's reads, and an `AsRead()` copy's, to the
+  tenant's read replica near the client through a fenec-shard router (`Fenec-Read: replica`), each after the
+  furthest position an answer from home named (`Fenec-After`, `Fenec-History`); writes go home.
 - `SubscribeAsync(collection, [new("year", "gte.2024")])` is an `IAsyncEnumerable<Event>` of `seed` and `change` events (SSE).
 - `ChangesAsync(since, wait)` reads every write on disk (`/_changes`); `HealthAsync()` asks `/_health`.
 - `FenecClientOptions` takes `Token`, `Tenant` (`/t/<tenant>/`), `Timeout` and an `HttpClient` of your own.

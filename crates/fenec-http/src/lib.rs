@@ -79,7 +79,7 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tenants::{Refused, Tenants};
+use tenants::Tenants;
 
 /// Stack of a connection's thread. `thread::spawn`'s default is 2 MiB; the
 /// deepest accepted expression (`fenec_ql::MAX_EXPR_DEPTH` = 512) needs
@@ -102,6 +102,11 @@ pub struct Config {
     pub cors: Option<String>,
     /// Turns off the write endpoints: for a read API open to the public net.
     pub read_only: bool,
+    /// Set for a request its client marked as a read (`Fenec-Read:
+    /// replica`), which runs read-only: its writes are refused in words
+    /// that say why ([`read_only_refused`]) rather than as a server taking
+    /// none. Never set on a server's own configuration.
+    pub marked: bool,
     /// Since there is no TLS, binding outside loopback without auth is refused.
     pub insecure: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
@@ -162,6 +167,7 @@ impl Default for Config {
             token: None,
             cors: None,
             read_only: false,
+            marked: false,
             insecure: false,
             max_connections: 100,
             max_body: 64 << 20,
@@ -254,6 +260,7 @@ impl Server {
         if cfg.access.is_some() {
             tenants.check_scoped_writes();
         }
+        tenants.shared();
         Server {
             backend: Backend::Tenants(tenants),
             cfg: Arc::new(cfg),
@@ -784,6 +791,58 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             (None, Backend::Single { db, hub, .. }) => (db, hub),
             (None, Backend::Tenants(_) | Backend::Metrics { .. }) => unreachable!("routed above"),
         };
+        // A read its client marked for a replica runs read-only on every
+        // route below ([`marked`]), and a copy of a tenant that has not
+        // caught up with its primary yet answers none: a read replica made
+        // a moment ago answered from an empty file of a history of its own,
+        // a tenant with no collections. Its 503 sends a router home.
+        let marked_cfg;
+        let cfg = match marked(cfg, &req) {
+            Ok(None) => cfg,
+            Ok(Some(read_only)) => {
+                let behind = tenant.as_ref().filter(|t| !t.ready()).map(|t| {
+                    Response::retry_after(
+                        503,
+                        &format!(
+                            "tenant `{}`'s copy here has not caught up with its primary yet: \
+                             a read sent without Fenec-Read is answered at its home",
+                            t.name()
+                        ),
+                        1,
+                    )
+                });
+                match behind {
+                    None => {
+                        marked_cfg = read_only;
+                        &marked_cfg
+                    }
+                    Some(refused) => {
+                        audit::http(&req, refused.status, peer);
+                        trace::end(refused.status);
+                        if cors(refused, cfg)
+                            .write(&mut out, keep_alive, head_only)
+                            .is_err()
+                            || !keep_alive
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                }
+            }
+            Err(refused) => {
+                audit::http(&req, refused.status, peer);
+                trace::end(refused.status);
+                if cors(refused, cfg)
+                    .write(&mut out, keep_alive, head_only)
+                    .is_err()
+                    || !keep_alive
+                {
+                    return;
+                }
+                continue;
+            }
+        };
         // A tenant's own replication, where the node replicates its tenants:
         // `/t/<tenant>/_replication` is the tenant's `/_replication`, and the
         // path was stripped above.
@@ -853,6 +912,12 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     Err(refused) => refused,
                 },
             };
+            // Its `Fenec-Seq` a change of the history the database is on,
+            // as every answer carrying one names it.
+            let mut resp = resp;
+            if resp.seq.is_some() {
+                resp.history = http::history_of(&held::read(db));
+            }
             if let Some(t) = &tenant {
                 quota::noted(&resp, t.name(), &req);
             }
@@ -1103,44 +1168,113 @@ fn rated_out(resp: &Response, quota: Option<&Arc<quota::Held>>) -> Option<Durati
 
 /// How long a request sent with `Fenec-After` waits for the write it names,
 /// unless `Fenec-Wait` says otherwise, and the longest it may.
-const AFTER_WAIT: Duration = Duration::from_secs(5);
-const AFTER_LONGEST: Duration = Duration::from_secs(30);
+pub const AFTER_WAIT: Duration = Duration::from_secs(5);
+pub const AFTER_LONGEST: Duration = Duration::from_secs(30);
 
 /// A request sent with `Fenec-After: <n>` is served once this database holds
 /// change `n` -- a replica, once it has applied the write its client made on
 /// the primary and was answered with `Fenec-Seq: <n>` -- or answered 504
-/// after the wait, never with what came before it.
+/// after the wait, never with what came before it. With `Fenec-History`,
+/// as the answer gave it, it is change `n` of that history: a failover
+/// forks the history where the copy promoted stood, and a copy left on the
+/// old branch holds a change `n` of its own -- on the seq alone it answered
+/// a write the client's had replaced. Such a copy waits until it is
+/// pointed at the new primary and takes its image. A primary that does not
+/// hold it never will -- the write was lost in a failover -- and answers
+/// 504 at once, where it stands, for the client to take that as its own.
 fn after(req: &Request, db: &RwLock<Database>, hub: &sse::Hub) -> Option<Response> {
     let n = req.header("fenec-after")?;
     let Ok(n) = n.trim().parse::<u64>() else {
         return Some(Response::error(400, "Fenec-After expects a change number"));
+    };
+    let of = match req.header("fenec-history") {
+        None => None,
+        Some(h) => match http::parse_history(h) {
+            Some(f) => Some(f.id.get()),
+            None => {
+                return Some(Response::error(
+                    400,
+                    "Fenec-History expects <term>-<id> as an answer's Fenec-History gave it",
+                ))
+            }
+        },
     };
     let wait = req
         .header("fenec-wait")
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map_or(AFTER_WAIT, Duration::from_millis)
         .min(AFTER_LONGEST);
-    let seq = || db.read().unwrap_or_else(|e| e.into_inner()).change_seq();
+    // Whether this copy holds the write, and whether it ever can: a
+    // primary's history grows by its own writes alone, so one that holds
+    // the write's history but not as its last -- or not at all -- never
+    // will. Of the history it is on, a change past its own is one it may
+    // yet reach, as before histories were named.
+    let look = || {
+        let g = db.read().unwrap_or_else(|e| e.into_inner());
+        let (now, h) = (g.change_seq(), g.history());
+        let holds = match of {
+            None => n <= now,
+            Some(id) => h.continues(id, n, now),
+        };
+        let never = !holds && !h.following && of.is_some_and(|id| id != h.current());
+        (holds, never, At::of(&g))
+    };
     let _waiting = trace::span("fenec.wait_for_write");
-    match hub.reached(n, seq, std::time::Instant::now() + wait) {
-        true => None,
-        false => Some(Response::json(
-            504,
-            format!(
-                "{{\"error\":\"change {n} has not reached this server in the wait\",\"seq\":{}}}",
-                seq()
-            ),
-        )),
+    let seen = std::cell::Cell::new(None);
+    hub.reached(
+        || {
+            let l = look();
+            seen.set(Some(l));
+            (l.0 || l.1, l.2.seq)
+        },
+        std::time::Instant::now() + wait,
+    );
+    let (holds, never, at) = seen.get().expect("looked once at least");
+    if holds {
+        return None;
     }
+    let mut body = format!(
+        "{{\"error\":\"change {n} {}\",\"seq\":{}",
+        match never {
+            true => "is not in this copy's history: a failover replaced it",
+            false => "has not reached this server in the wait",
+        },
+        at.seq
+    );
+    if let Some(h) = at.history {
+        body.push_str(",\"history\":\"");
+        http::push_history(&mut body, h);
+        body.push('"');
+    }
+    body.push('}');
+    Some(Response::json(504, body))
 }
 
 /// A write's answer, with the change it left the database at: a replica
 /// sent `Fenec-After` with it serves the read once it holds the write.
-fn with_seq(mut resp: Response, seq: Option<u64>) -> Response {
-    if resp.status < 300 {
-        resp.seq = seq;
+fn with_seq(mut resp: Response, at: Option<At>) -> Response {
+    if let (true, Some(at)) = (resp.status < 300, at) {
+        resp.seq = Some(at.seq);
+        resp.history = at.history;
     }
     resp
+}
+
+/// Where a database stands, as an answer says it: its change
+/// (`Fenec-Seq`) and the history that change is of (`Fenec-History`).
+#[derive(Clone, Copy)]
+struct At {
+    seq: u64,
+    history: Option<http::Fork>,
+}
+
+impl At {
+    fn of(db: &Database) -> At {
+        At {
+            seq: db.change_seq(),
+            history: http::history_of(db),
+        }
+    }
 }
 
 /// What the slow-statement log says a request was: its method and target,
@@ -1285,7 +1419,13 @@ fn route_tenant(
             .reaches(&name)
             .map_err(|why| Response::error(403, why))?;
     }
-    let t = tenants.get(&name).map_err(Refused::response)?;
+    // A tenant this node has no file of says so in a header besides the
+    // words: a router reading a read replica's 404 tells a copy gone from
+    // a row or a collection the read did not find, and asks home.
+    let t = tenants.get(&name).map_err(|r| match r.0 {
+        404 => r.response().header(ABSENT_HEADER, "absent"),
+        _ => r.response(),
+    })?;
     // Rebuilt from the segments rather than cut at an offset: `//t/acme`
     // has the same segments as `/t/acme` but not the same prefix length.
     req.path = format!("/{}", segs[2..].join("/"));
@@ -1317,6 +1457,11 @@ fn handle_tenant(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
 /// [`handle_tenant`], the request let in by its tenant's quota.
 fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
     let _held = t.enter();
+    // Read-only -- the server's mode, or a read its client marked
+    // ([`marked`]) -- a request passes a freeze and a lapsed lease, since
+    // it can only read: a marked write is refused in words of its own,
+    // never turned into the 503 below, or told to come back, the client
+    // would send it to the same replica again.
     if cfg.read_only {
         return handle(&t.db, cfg, req);
     }
@@ -1395,6 +1540,68 @@ fn admitted(cfg: &Config, req: &Request) -> bool {
     }
 }
 
+/// The header a client marks a request it knows only reads with
+/// (`Fenec-Read: replica`): a router may answer it from a tenant's read
+/// replica near it rather than from its home region (`fenec-shard`'s read
+/// replicas, `site/content/docs/sharding.html#read-replicas`), and every
+/// server runs it read-only.
+pub const READ_HEADER: &str = "fenec-read";
+
+/// Whether a [`READ_HEADER`] value marks a read: the one value a node runs
+/// read-only, which a router may so send twice.
+pub fn marks_read(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("replica")
+}
+
+/// `Fenec-Tenant: absent` on the 404 of a tenant a node has no file of.
+pub const ABSENT_HEADER: &str = "Fenec-Tenant";
+
+/// What [`READ_HEADER`] says, where a request carries it: `Ok(true)` a read
+/// marked for a replica, `Err` a value it does not take.
+pub fn read_marked(req: &Request) -> std::result::Result<bool, Response> {
+    match req.header(READ_HEADER).map(str::trim) {
+        None => Ok(false),
+        Some(v) if marks_read(v) => Ok(true),
+        Some(v) => Err(Response::error(
+            400,
+            &format!("Fenec-Read takes `replica` (got `{v}`)"),
+        )),
+    }
+}
+
+/// The configuration a request runs under: `cfg` read-only where its
+/// client marked it as a read, wherever it lands -- the tenant's home node
+/// as much as a replica -- so a write marked by mistake is refused the day
+/// it is written, not the day a region gains a replica, and in words that
+/// say why rather than as a node taking no write. A replica refuses writes
+/// anyway; on the primary the mark would otherwise let a write the client
+/// meant to send near land home, and teach it nothing. The one place the
+/// mark is read: every route of `serve_connection` past the tenant runs
+/// under what it gives -- the MCP endpoint, a consumer's commit, the
+/// tenant's freeze and lease, which a read alone may pass
+/// ([`handle_admitted`]). [`handle`] called on its own runs `cfg` as it is
+/// given. `None` for `cfg` as it is; a value the header does not take is
+/// 400.
+fn marked(cfg: &Config, req: &Request) -> std::result::Result<Option<Config>, Response> {
+    Ok(read_marked(req)?.then(|| Config {
+        read_only: true,
+        marked: true,
+        ..cfg.clone()
+    }))
+}
+
+/// A write refused by read-only mode, the server's or a marked read's.
+pub(crate) fn read_only_refused(cfg: &Config) -> Response {
+    match cfg.marked {
+        true => Response::error(
+            403,
+            "a request sent with Fenec-Read: replica only reads, and this one writes: send it \
+             without the header, which a router sends to the tenant's home",
+        ),
+        false => Response::error(403, "the server is in read-only mode"),
+    }
+}
+
 /// Turns a request into a response: auth, preflight, routing, execution.
 pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Response {
     // The MCP endpoint asks where a request comes from before its token,
@@ -1431,7 +1638,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // Read-only mode rejects before routing: whichever collection it is, the
     // answer is 403.
     if cfg.read_only && wants_write(req) {
-        return Response::error(403, "the server is in read-only mode");
+        return read_only_refused(cfg);
     }
 
     // The write path does its routing under the write lock too: if the lock
@@ -1594,7 +1801,7 @@ fn rest_run(
         }
         None => None,
     };
-    let seq = result.is_ok().then(|| guard.change_seq());
+    let seq = result.is_ok().then(|| At::of(&guard));
     let durability = match result {
         Ok(_) => match flush_for(cfg, &mut guard) {
             Ok(d) => d,
@@ -1773,7 +1980,7 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
         }
         (Method::Post, ["_schema", "apply"]) => {
             if cfg.read_only {
-                return Response::error(403, "the server is in read-only mode");
+                return read_only_refused(cfg);
             }
             return apply_schema(db, cfg, body);
         }
@@ -1878,7 +2085,7 @@ pub(crate) fn apply_schema(db: &Arc<RwLock<Database>>, cfg: &Config, body: &str)
         },
         _ => None,
     };
-    let seq = guard.change_seq();
+    let seq = At::of(&guard);
     drop(guard);
     if let Err(e) = await_durable(db, durability) {
         return error_response(&e);
@@ -1957,7 +2164,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     };
     let mask = mask.as_ref();
     if cfg.read_only && !stmt.is_read_only() {
-        return Response::error(403, "the server is in read-only mode");
+        return read_only_refused(cfg);
     }
     if !stmt.is_read_only() {
         metrics::wrote();
@@ -2127,7 +2334,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         let durability = match built {
             Ok(_) => {
                 let mut g = db.write().unwrap_or_else(|e| e.into_inner());
-                seq = Some(g.change_seq());
+                seq = Some(At::of(&g));
                 match flush_for(cfg, &mut g) {
                     Ok(d) => d,
                     Err(e) => return error_response(&e),
@@ -2157,7 +2364,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         if wait && waits::wrote_nothing(&stmt, &r) {
             waits::plan(&guard, &[(&stmt, &params)], before);
         }
-        seq = Some(guard.change_seq());
+        seq = Some(At::of(&guard));
         let durability = match r {
             Ok(_) => match flush_for(cfg, &mut guard) {
                 Ok(d) => d,
@@ -2330,13 +2537,12 @@ fn keyed_query(
     if wait && waits::wrote_nothing(stmt, &result) {
         guard.rollback();
         waits::plan(&guard, &[(stmt, params)], before);
-        let seq = guard.change_seq();
-        return with_seq(resp, Some(seq));
+        return with_seq(resp, Some(At::of(&guard)));
     }
     if let Err(e) = keyed(&mut guard, key, &resp, result.is_ok(), ttl) {
         return error_response(&e);
     }
-    let seq = result.is_ok().then(|| guard.change_seq());
+    let seq = result.is_ok().then(|| At::of(&guard));
     let durability = match result {
         Ok(_) => match flush_for(cfg, &mut guard) {
             Ok(d) => d,
@@ -2400,7 +2606,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Err(e) => return error_response(&e),
     };
     if cfg.read_only && stmts.iter().any(|(s, _)| !s.is_read_only()) {
-        return Response::error(403, "the server is in read-only mode");
+        return read_only_refused(cfg);
     }
     if stmts.iter().any(|(s, _)| !s.is_read_only()) {
         metrics::wrote();
@@ -2521,7 +2727,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     {
         guard.rollback();
         held_plan(&guard, before);
-        let seq = Some(guard.change_seq());
+        let seq = Some(At::of(&guard));
         return with_seq(api::render_batch(&results, fenec_core::VERSION), seq);
     }
     let kept = match &key {
@@ -2542,7 +2748,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
         Err(e) => return error_response(&e),
     };
-    let seq = Some(guard.change_seq());
+    let seq = Some(At::of(&guard));
     let durability = match flush_for(cfg, &mut guard) {
         Ok(d) => d,
         Err(e) => return error_response(&e),
@@ -2616,12 +2822,18 @@ fn read_batch(
     };
     let pairs: Vec<(&Statement, &[Value])> = stmts.iter().map(|(s, p)| (s, &p[..])).collect();
     if let Some(p) = pin.then(|| guard.pin(&pairs)).flatten() {
+        // The pin's own change, of the history the database is on: a pin
+        // holds the documents alone.
+        let at = At {
+            seq: p.change_seq(),
+            history: http::history_of(&guard),
+        };
         drop(guard);
         let running = trace::span("execute");
         running.attr("fenec.statements", stmts.len() as i64);
         running.attr("fenec.pinned", true);
         let shown = (who, masks, p.database());
-        if let Some(resp) = answer_reads(&pairs, shown, p.change_seq(), |s, ps| p.query(s, ps)) {
+        if let Some(resp) = answer_reads(&pairs, shown, at, |s, ps| p.query(s, ps)) {
             return resp;
         }
         // A statement reached for an index the pin left out: the whole
@@ -2686,7 +2898,7 @@ fn locked_reads(
 ) -> Response {
     let running = trace::span("execute");
     running.attr("fenec.statements", pairs.len() as i64);
-    let seq = guard.change_seq();
+    let seq = At::of(guard);
     answer_reads(pairs, (who, masks, guard), seq, |s, ps| {
         Some(guard.query(s, ps))
     })
@@ -2700,7 +2912,7 @@ fn locked_reads(
 fn answer_reads(
     pairs: &[(&Statement, &[Value])],
     (who, masks, db): (&Who, &[Option<access::Mask>], &Database),
-    seq: u64,
+    seq: At,
     run: impl Fn(
         &Statement,
         &[Value],

@@ -50,6 +50,17 @@ request would stall:
     async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
         rows = await db.query("get articles near embed $1 limit 5", [[0.1, 0.2, 0.3]])
 
+A client far from a tenant's home reads near itself where the tenant has a
+read replica there (`fenec-shard`'s read replicas): with `reads="nearest"`
+the builder's reads, and a statement given `read=True`, are marked
+(`Fenec-Read: replica`) for a router near a replica to answer, each sent
+after the furthest position an answer from home named to this client
+(`Fenec-After` and `Fenec-History`: the change, and the history it is a
+change of) -- it reads nothing older than it wrote, nor a write a failover
+replaced. Writes go home:
+
+    db = Client("https://us.example.com/t/acme", token="...", reads="nearest")
+
 `Client.follow` reads every write on the server's disk (`GET /_changes`,
 `fenec-server --cdc`) for a consumer whose cursor the server keeps, and
 commits each batch once the loop comes back for the next:
@@ -160,13 +171,102 @@ class Changes(NamedTuple):
 class _Shared:
     """What a client and the copies `with_idempotency_key` makes of it
     share, as Go's and .NET's copies share theirs: the change the last
-    write left the database at, and whether its answer was replayed."""
+    answer from home left the database at, whether it was replayed, and
+    the furthest position an answer from home named, which a read near
+    waits for -- an answer that arrives late is not the last."""
 
-    __slots__ = ("seq", "replayed")
+    __slots__ = ("seq", "replayed", "at", "_lock")
 
     def __init__(self) -> None:
         self.seq: int | None = None
         self.replayed = False
+        self.at: tuple | None = None
+        # A client's threads share its copies' position.
+        self._lock = threading.Lock()
+
+    def answered(self, seq: int, history: str | None) -> None:
+        """An answer from home named `seq`, of `history`."""
+        p = _position(seq, history)
+        with self._lock:
+            self.seq = seq
+            if _later(p, self.at):
+                self.at = p
+
+    def told(self, raw: bytes, sent: tuple) -> None:
+        """A read near's 504, the read sent after `sent`: no copy held it,
+        home either -- a write lost in a failover. Home's position, lower or
+        not, is the client's from now on: kept, every read near would wait
+        it out for good. Taken only over `sent` -- a write answered
+        meanwhile is further, and set back the next read near would miss
+        it -- and never of an earlier term of the same lineage: a router
+        whose copy of the directory lags a failover sends the read to the
+        old primary, fenced, which names the branch it abandoned. Another
+        lineage's is a tenant made again under the name, which starts again
+        at term 1."""
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return
+        if isinstance(body, dict) and isinstance(body.get("seq"), int):
+            history = body.get("history")
+            p = _position(body["seq"], history if isinstance(history, str) else None)
+            with self._lock:
+                if self.at is sent and (p[0] >= sent[0] or _another(p, sent)):
+                    self.at = p
+
+
+def _position(seq: int, history: str | None) -> tuple:
+    """`(term, seq, history)`: a change, the history it is of
+    (`<term>-<id>`; none for a database that never had a replica) and that
+    history's term, one more at each promotion."""
+    term = 0
+    if history:
+        try:
+            term = int(history.split("-", 1)[0])
+        except ValueError:
+            term = 0
+    return (term, seq, history)
+
+
+def _lineage(p: tuple) -> str | None:
+    """The lineage of position `p`: its history id's top half, which every
+    fork of the tenant keeps and a tenant made again under its name does
+    not."""
+    history = p[2]
+    if not history or "-" not in history:
+        return None
+    return history.split("-", 1)[1][:8] or None
+
+
+def _another(p: tuple, q: tuple) -> bool:
+    """Whether `p` is of another lineage than `q`: a tenant made again."""
+    a, b = _lineage(p), _lineage(q)
+    return a is not None and b is not None and a != b
+
+
+def _later(p: tuple, q: tuple | None) -> bool:
+    """Whether position `p` is past `q`: of another lineage -- home's word
+    on a tenant made again, whose terms start again -- or a later term of
+    the same, or further in one."""
+    return q is None or _another(p, q) or p[:2] > q[:2]
+
+
+def _reads(reads: str) -> str:
+    if reads not in ("home", "nearest"):
+        raise ValueError(f"reads is 'home' or 'nearest' (got {reads!r})")
+    return reads
+
+
+def _near(headers: dict, at: tuple | None, explicit: int | None) -> None:
+    """A read marked for a replica near the client, after `explicit` where
+    the caller named a change, and after its furthest position otherwise."""
+    headers["Fenec-Read"] = "replica"
+    if explicit is not None:
+        headers["Fenec-After"] = str(explicit)
+    elif at is not None:
+        headers["Fenec-After"] = str(at[1])
+        if at[2]:
+            headers["Fenec-History"] = at[2]
 
 
 class Client:
@@ -182,6 +282,7 @@ class Client:
         url: str = "http://127.0.0.1:8080",
         token: str | None = None,
         timeout: float = 30.0,
+        reads: str = "home",
     ):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme not in ("http", "https"):
@@ -189,6 +290,8 @@ class Client:
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        # "nearest": reads marked for a read replica near the client.
+        self.reads = _reads(reads)
         self.idempotency_key: str | None = None
         self._shared = _Shared()
         self._host = parts.hostname or "127.0.0.1"
@@ -241,15 +344,18 @@ class Client:
         after: int | None = None,
         idempotency_key: str | None = None,
         wait: float | None = None,
+        read: bool = False,
     ) -> Any:
         """Runs one FenecQL statement. Values go in as `$1`, `$2`, ... and
         never into the text. With `after` -- a primary's `seq` -- a replica
         answers once it holds that write. With `idempotency_key` a write
         runs once however often it is sent (`replayed`). With `wait` a
         `set` or `del` that writes nothing is held at the server until it
-        can, or that many seconds -- a claim waiting for a job. A read
-        answers its rows, a list; one with a `facet` clause a `Rows`, the
-        counts as its `facets`."""
+        can, or that many seconds -- a claim waiting for a job. `read=True`
+        says the statement only reads: on a client with `reads="nearest"`,
+        a router near the tenant's read replica answers it there, after
+        this client's writes. A read answers its rows, a list; one with a
+        `facet` clause a `Rows`, the counts as its `facets`."""
         body = {"query": fenecql, "params": list(params or [])}
         return _faceted(
             self._post(
@@ -259,6 +365,7 @@ class Client:
                 after,
                 key=idempotency_key,
                 wait=wait,
+                read=read,
             )
         )
 
@@ -268,6 +375,7 @@ class Client:
         *,
         idempotency_key: str | None = None,
         wait: float | None = None,
+        read: bool = False,
     ) -> Any:
         """Runs statements in order under one write lock, as one block:
         their writes -- a create, a drop or a `create index` among them --
@@ -279,7 +387,8 @@ class Client:
         leaves the change it wrote at in `seq`. With `idempotency_key` it
         lands once however often it is sent (`replayed`); a batch of reads
         alone takes no key. With `wait` one whose `set`s and `del`s write
-        nothing is held until they can, as `query`'s."""
+        nothing is held until they can, as `query`'s; `read=True`, a batch
+        of reads alone, goes near as `query`'s does."""
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
         return self._post(
             "/batch",
@@ -287,6 +396,7 @@ class Client:
             "application/x-ndjson",
             key=idempotency_key,
             wait=wait,
+            read=read,
         )
 
     def schema(
@@ -380,25 +490,46 @@ class Client:
         accept: int = 0,
         key: str | None = None,
         wait: float | None = None,
+        read: bool = False,
     ) -> Any:
         headers = {"Content-Type": content_type}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        if after is not None:
+        near = read and self.reads == "nearest"
+        if near:
+            sent = self._shared.at
+            _near(headers, sent, after)
+        elif after is not None:
             headers["Fenec-After"] = str(after)
         key = key or self.idempotency_key
         if key:
             headers["Idempotency-Key"] = key
         if wait:
             headers["Fenec-Wait"] = _wait_ms(wait)
-        status, seq, replayed, raw = self._send(
-            "POST", self._base + path, body, headers, self.timeout + (wait or 0)
+        timeout = self.timeout + (wait or 0)
+        status, seq, history, replayed, raw = self._send(
+            "POST", self._base + path, body, headers, timeout
         )
+        # 504: no copy the router reached holds that write in the wait --
+        # the write lost in a failover of home, which says where it stands
+        # now: the client's position from here on. Asked home with no mark,
+        # the read is answered with what home holds.
+        if near and status == 504 and "Fenec-After" in headers:
+            # A change the caller named is not the client's position.
+            if after is None and sent is not None:
+                self._shared.told(raw, sent)
+            for h in ("Fenec-Read", "Fenec-After", "Fenec-History"):
+                headers.pop(h, None)
+            near = False
+            status, seq, history, replayed, raw = self._send(
+                "POST", self._base + path, body, headers, timeout
+            )
         if 200 <= status < 300:
             # A replayed batch's answer carries no `Fenec-Seq`: `seq` stays
-            # where the last write that sent one left it.
-            if seq is not None:
-                self.seq = int(seq)
+            # where the last write that sent one left it. A read near's
+            # answer may be a replica's: it moves nothing.
+            if seq is not None and not near:
+                self._shared.answered(int(seq), history)
             self._shared.replayed = replayed
         # An answer that is no error: a schema's refusals (409).
         if status == accept:
@@ -409,7 +540,8 @@ class Client:
         self, method: str, path: str, body: bytes, headers: dict, timeout: float | None = None
     ) -> tuple:
         """A request over this thread's connection: its status, `Fenec-Seq`,
-        whether it was replayed (`Idempotent-Replayed`) and body. A kept connection the server closed while it was idle is
+        `Fenec-History`, whether it was replayed (`Idempotent-Replayed`)
+        and body. A kept connection the server closed while it was idle is
         found so before the request goes -- its socket reads as ready, the
         end of the stream -- and a new one is opened in its place. Nothing
         is sent again once sent: a write the server read and answered on a
@@ -439,7 +571,8 @@ class Client:
         else:
             self._local.conn = conn
         replayed = resp.getheader("Idempotent-Replayed") == "true"
-        return resp.status, resp.getheader("Fenec-Seq"), replayed, raw
+        seq, history = resp.getheader("Fenec-Seq"), resp.getheader("Fenec-History")
+        return resp.status, seq, history, replayed, raw
 
     def _connect(self) -> http.client.HTTPConnection:
         if self._tls:
@@ -532,6 +665,7 @@ class AsyncClient:
         url: str = "http://127.0.0.1:8080",
         token: str | None = None,
         timeout: float = 30.0,
+        reads: str = "home",
     ):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme not in ("http", "https"):
@@ -539,6 +673,7 @@ class AsyncClient:
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.reads = _reads(reads)
         self._host = parts.hostname or "127.0.0.1"
         self._port = parts.port or (443 if parts.scheme == "https" else 80)
         self._tls = ssl.create_default_context() if parts.scheme == "https" else None
@@ -579,13 +714,14 @@ class AsyncClient:
         *,
         idempotency_key: str | None = None,
         wait: float | None = None,
+        read: bool = False,
     ) -> Any:
         """One FenecQL statement, as `Client.query`; a held one is
         cancelled as any task is, its connection closed with it."""
         body = {"query": fenecql, "params": list(params or [])}
         return _faceted(
             await self._post(
-                "/query", json.dumps(body).encode(), "application/json", idempotency_key, wait
+                "/query", json.dumps(body).encode(), "application/json", idempotency_key, wait, read
             )
         )
 
@@ -595,11 +731,12 @@ class AsyncClient:
         *,
         idempotency_key: str | None = None,
         wait: float | None = None,
+        read: bool = False,
     ) -> Any:
         """Statements under one write lock, as one block, as `Client.batch`."""
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
         return await self._post(
-            "/batch", "\n".join(lines).encode(), "application/x-ndjson", idempotency_key, wait
+            "/batch", "\n".join(lines).encode(), "application/x-ndjson", idempotency_key, wait, read
         )
 
     async def close(self) -> None:
@@ -625,22 +762,36 @@ class AsyncClient:
         content_type: str,
         key: str | None = None,
         wait: float | None = None,
+        read: bool = False,
     ) -> Any:
         key = key or self.idempotency_key
         held = _wait_ms(wait) if wait else None
         async with self._s.lock:
+            # A read near, as `Client`'s: marked, after this client's
+            # furthest position, and asked home on a 504, taking home's.
+            near: dict = {}
+            if read and self.reads == "nearest":
+                sent = self._s.at
+                _near(near, sent, None)
             # A kept connection the server closed meanwhile fails on its first
             # use: the request goes once more over a fresh one. A request
             # that failed over a fresh one says why.
             for fresh in (self._s.conn is None, True):
                 try:
                     status, headers, raw = await asyncio.wait_for(
-                        self._exchange(path, body, content_type, key, held),
+                        self._exchange(path, body, content_type, key, held, near),
                         self.timeout + (wait or 0),
                     )
+                    if status == 504 and "Fenec-After" in near:
+                        self._s.told(raw, sent)
+                        near = {}
+                        status, headers, raw = await asyncio.wait_for(
+                            self._exchange(path, body, content_type, key, held),
+                            self.timeout + (wait or 0),
+                        )
                     if 200 <= status < 300:
-                        if "fenec-seq" in headers:
-                            self._s.seq = int(headers["fenec-seq"])
+                        if "fenec-seq" in headers and not near:
+                            self._s.answered(int(headers["fenec-seq"]), headers.get("fenec-history"))
                         self._s.replayed = headers.get("idempotent-replayed") == "true"
                     return _answer(status, raw)
                 except (ConnectionError, asyncio.IncompleteReadError, OSError):
@@ -664,7 +815,13 @@ class AsyncClient:
             writer.close()
 
     async def _exchange(
-        self, path: str, body: bytes, content_type: str, key: str | None, held: str | None = None
+        self,
+        path: str,
+        body: bytes,
+        content_type: str,
+        key: str | None,
+        held: str | None = None,
+        extra: dict | None = None,
     ) -> tuple[int, dict, bytes]:
         if self._s.conn is None:
             self._s.conn = await asyncio.open_connection(
@@ -684,6 +841,8 @@ class AsyncClient:
             head.append(f"Idempotency-Key: {key}")
         if held:
             head.append(f"Fenec-Wait: {held}")
+        for name, value in (extra or {}).items():
+            head.append(f"{name}: {value}")
         writer.write(("\r\n".join(head) + "\r\n\r\n").encode() + body)
         await writer.drain()
 
@@ -709,16 +868,15 @@ class AsyncClient:
         return status, headers, raw
 
 
-class _AsyncShared:
+class _AsyncShared(_Shared):
     """An `AsyncClient`'s connection and what its copies share with it."""
 
-    __slots__ = ("conn", "lock", "seq", "replayed")
+    __slots__ = ("conn", "lock")
 
     def __init__(self) -> None:
+        super().__init__()
         self.conn: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None
         self.lock = asyncio.Lock()
-        self.seq: int | None = None
-        self.replayed = False
 
 
 def placeholders(start: int, n: int) -> str:

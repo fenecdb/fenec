@@ -333,6 +333,11 @@ pub struct Response {
     /// own rather than an `extra`, which cost every write two allocations
     /// and 2-3% of a put's rate over HTTP.
     pub seq: Option<u64>,
+    /// `Fenec-History`: the history `seq` is a change of ([`Fork`]), where
+    /// the database has a history of its own. A change number alone names no write once a failover
+    /// forks the history: a copy left on the old branch holds a change 3
+    /// of its own.
+    pub history: Option<Fork>,
     /// `X-Fenecdb-Version`, which every statement's answer carries: a field
     /// as `seq` is, where an `extra` was two allocations an answer.
     pub version: Option<&'static str>,
@@ -346,6 +351,7 @@ impl Response {
             content_type: "application/json; charset=utf-8",
             extra: Vec::new(),
             seq: None,
+            history: None,
             version: None,
         }
     }
@@ -381,6 +387,7 @@ impl Response {
             content_type: "application/json; charset=utf-8",
             extra: Vec::new(),
             seq: None,
+            history: None,
             version: None,
         }
     }
@@ -436,6 +443,11 @@ impl Response {
             push_number(&mut head, seq);
             head.push_str("\r\n");
         }
+        if let Some(history) = self.history {
+            head.push_str("Fenec-History: ");
+            push_history(&mut head, history);
+            head.push_str("\r\n");
+        }
         crate::request_id::with(|id| {
             if !id.is_empty() {
                 head.push_str("X-Request-Id: ");
@@ -446,22 +458,76 @@ impl Response {
         crate::audit::push_verified(&mut head);
         head.push_str("\r\n");
         let body: &[u8] = if head_only { &[] } else { &self.body };
-        let mut parts = [IoSlice::new(head.as_bytes()), IoSlice::new(body)];
-        let mut parts = &mut parts[..];
-        while !parts.is_empty() {
-            match out.write_vectored(parts) {
-                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-                Ok(n) => IoSlice::advance_slices(&mut parts, n),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-        out.flush()
+        write_parts(out, head.as_bytes(), body)
     }
 }
 
+/// `head` and `body` in one `writev`, as many as it takes, and flushed: the
+/// two written apart on a socket that sends at once (`TCP_NODELAY`) went in
+/// two packets, a send more an answer -- a node's, and a router's of a
+/// node's answer.
+pub fn write_parts(out: &mut impl Write, head: &[u8], body: &[u8]) -> std::io::Result<()> {
+    let mut parts = [IoSlice::new(head), IoSlice::new(body)];
+    let mut parts = &mut parts[..];
+    while !parts.is_empty() {
+        match out.write_vectored(parts) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => IoSlice::advance_slices(&mut parts, n),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    out.flush()
+}
+
+/// A history as `Fenec-History` names it
+/// ([`fenec_core::history::History`]): its id -- never the root's 0, the
+/// history of a database that never had a replica, which every such
+/// database shares and so names nothing -- and its term, the histories its
+/// lineage holds, one more at each promotion: of two positions a client
+/// was given, the one of the higher term is the later. A `NonZeroU64`, so
+/// an `Option` of it costs a [`Response`] 16 bytes, not 24 -- past 128 a
+/// `Result` carrying one is too large to return by value cheaply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fork {
+    pub term: u32,
+    pub id: std::num::NonZeroU64,
+}
+
+/// A history as `Fenec-History` writes it: `<term>-<id, 16 hex digits>`.
+pub fn push_history(out: &mut String, f: Fork) {
+    push_number(out, f.term as u64);
+    out.push('-');
+    let id = f.id.get();
+    for k in (0..16).rev() {
+        out.push(char::from(
+            b"0123456789abcdef"[(id >> (4 * k)) as usize & 15],
+        ));
+    }
+}
+
+/// The history a `Fenec-History` names.
+pub fn parse_history(text: &str) -> Option<Fork> {
+    let (term, id) = text.trim().split_once('-')?;
+    Some(Fork {
+        term: term.parse().ok()?,
+        id: std::num::NonZeroU64::new(u64::from_str_radix(id, 16).ok()?)?,
+    })
+}
+
+/// The history `db` is at, as `Fenec-History` names it: none for the root.
+pub fn history_of(db: &fenec_core::engine::Database) -> Option<Fork> {
+    let h = db.history();
+    let id = std::num::NonZeroU64::new(h.current())?;
+    Some(Fork {
+        term: h.lineage.len() as u32,
+        id,
+    })
+}
+
 /// `n` in decimal, onto `out`.
-fn push_number(out: &mut String, mut n: u64) {
+/// `n` in decimal onto `out`, with no formatting machinery.
+pub fn push_number(out: &mut String, mut n: u64) {
     let mut digits = [0u8; 20];
     let mut at = digits.len();
     loop {
@@ -502,6 +568,23 @@ pub fn reason(status: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_history_reads_back_as_it_was_written() {
+        let f = Fork {
+            term: 3,
+            id: std::num::NonZeroU64::new(0x00ab_0000_0000_00cd).unwrap(),
+        };
+        let mut out = String::new();
+        push_history(&mut out, f);
+        assert_eq!(out, "3-00ab0000000000cd");
+        assert_eq!(parse_history(&out), Some(f));
+        assert_eq!(parse_history(" 3-ab0000000000cd "), Some(f));
+        // The root names nothing, and a text that is not one is no history.
+        for bad in ["3-0000000000000000", "3", "x-ab", "3-xyz", ""] {
+            assert_eq!(parse_history(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn decodes_percent_and_plus() {

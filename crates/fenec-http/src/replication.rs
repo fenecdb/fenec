@@ -108,6 +108,48 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// The id of a history forked from `history` -- a promotion, a restore:
+/// `fresh`'s bottom half under the top half of the first history it took,
+/// which names its lineage, the database it was made as; a history begun
+/// from the root takes `fresh` whole, a lineage of its own. A client
+/// orders positions by their term within a lineage alone: a tenant
+/// deleted and made again under its name starts again at term 1, below
+/// the old one's, and a client that held the old position refused home's
+/// new one as a fenced primary's word on another branch, every read near
+/// waiting its whole wait for good. Never an id the lineage holds.
+pub fn fork_id(history: &fenec_core::history::History, fresh: u64) -> u64 {
+    let Some(&(first, _)) = history.lineage.first() else {
+        return fresh;
+    };
+    let mut low = (fresh & 0xffff_ffff).max(1);
+    loop {
+        let id = (first & !0xffff_ffff) | low;
+        if history.lineage.iter().all(|&(held, _)| held != id) {
+            return id;
+        }
+        low = (low % 0xffff_ffff) + 1;
+    }
+}
+
+/// The lineage of a history: the top half of its first id, which every
+/// fork keeps ([`fork_id`]) and a database made anew does not. `None` for
+/// the root, which names nothing.
+pub fn lineage_of(history: &fenec_core::history::History) -> Option<u32> {
+    history.lineage.first().map(|&(id, _)| (id >> 32) as u32)
+}
+
+/// A lineage as a router and a node pass it: 8 hex digits.
+pub fn lineage_text(lineage: u32) -> String {
+    format!("{lineage:08x}")
+}
+
+/// A lineage passed as 8 hex digits.
+pub fn parse_lineage(text: &str) -> Option<u32> {
+    (text.len() == 8)
+        .then(|| u32::from_str_radix(text, 16).ok())
+        .flatten()
+}
+
 /// A history id nobody else holds: 64 bits from the operating system's
 /// randomness (`RandomState` is seeded from it), never 0 -- the root's.
 pub fn fresh_id() -> u64 {
@@ -885,7 +927,7 @@ pub fn settle_history(
             crate::log!("--promote: {path} is not {role}; it opens as it is");
             return Ok(());
         }
-        let id = fresh_id();
+        let id = fork_id(db.history(), fresh_id());
         let r = db.fork(id).and_then(|_| db.sync());
         if r.is_ok() {
             crate::log!(
@@ -1479,6 +1521,17 @@ impl Receiver {
 
 /// A replica's side: connects to the primary, applies what it is sent, and
 /// connects again when the stream ends -- until it is promoted.
+/// What a follower tells of each hello.
+pub enum Said {
+    /// Taken: the replica holds a prefix of the primary's history.
+    Taken,
+    /// Refused as another tenant's: the primary is not of `expected`, the
+    /// lineage this copy was told it follows.
+    Refused { expected: u32 },
+}
+
+type Hello = Box<dyn Fn(Said) + Send + Sync>;
+
 pub struct Follower {
     upstream: Upstream,
     db: Arc<RwLock<Database>>,
@@ -1491,6 +1544,20 @@ pub struct Follower {
     stop: AtomicBool,
     conn: Mutex<Option<TcpStream>>,
     ended: (Mutex<bool>, Condvar),
+    /// Told each time the primary has said hello and the replica holds a
+    /// prefix of its history -- its image adopted, or its place in that
+    /// history found: a tenant's read replica answers marked reads from
+    /// then on ([`crate::tenants::Tenant::ready`]) -- and where the primary
+    /// is of another lineage than the one this copy was told it follows,
+    /// and refused ([`Said`]).
+    hello: Mutex<Option<Hello>>,
+    /// The lineage the primary must be of ([`Follower::expect_lineage`]):
+    /// another's is a tenant made again under the name, whose image this
+    /// copy never takes.
+    expect: Mutex<Option<u32>>,
+    /// Set once a primary of another lineage was refused: the follower
+    /// stops, the copy holding what it held, answering no marked read.
+    refused: AtomicBool,
 }
 
 #[derive(Clone, Default)]
@@ -1522,13 +1589,40 @@ impl Follower {
             conn: Mutex::new(None),
             // Nothing to wait for until `run` starts.
             ended: (Mutex::new(true), Condvar::new()),
+            hello: Mutex::new(None),
+            expect: Mutex::new(None),
+            refused: AtomicBool::new(false),
         }))
+    }
+
+    /// Has `f` called each time the primary says hello and the replica
+    /// holds a prefix of its history, before any of its writes is applied,
+    /// and where the primary is refused as of another lineage.
+    pub fn on_hello(&self, f: Hello) {
+        *lock(&self.hello) = Some(f);
+    }
+
+    /// Has the follower take nothing from a primary whose lineage is not
+    /// `lineage` -- a read replica told which tenant it copies: a tenant
+    /// deleted and made again under its name, on the very node it followed,
+    /// had the copy take the new one's image, another owner's data in a
+    /// region nobody had chosen for it. `None` takes any, as a node's
+    /// standby and a tenant's own replica do.
+    pub fn expect_lineage(&self, lineage: Option<u32>) {
+        *lock(&self.expect) = lineage;
+        self.refused.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether a primary of another lineage was refused.
+    pub fn refused(&self) -> bool {
+        self.refused.load(Ordering::SeqCst)
     }
 
     /// Follows until promoted. Every stream that ends is connected again,
     /// sooner after a clean end than after a failure.
     pub fn run(&self) {
         *lock(&self.ended.0) = false;
+        self.refused.store(false, Ordering::SeqCst);
         let mut force_image = false;
         let mut pause = Duration::from_millis(100);
         while !self.stop.load(Ordering::SeqCst) {
@@ -1552,6 +1646,13 @@ impl Follower {
                 .map(String::from);
             if let Some(f) = failed {
                 crate::log!("replica stopped: {f}");
+                break;
+            }
+            // Another tenant of the name: nothing it sends is this copy's.
+            if self.refused.load(Ordering::SeqCst) {
+                if let Err(e) = &r {
+                    crate::log!("replica stopped: {e}");
+                }
                 break;
             }
             if self.stop.load(Ordering::SeqCst) {
@@ -1594,6 +1695,22 @@ impl Follower {
         else {
             return Err(io::Error::other("the primary did not say hello"));
         };
+        let expected = *lock(&self.expect);
+        if let Some(want) = expected {
+            let theirs = lineage.first().map(|&(id, _)| (id >> 32) as u32);
+            if theirs != Some(want) {
+                self.refused.store(true, Ordering::SeqCst);
+                if let Some(hello) = lock(&self.hello).as_ref() {
+                    hello(Said::Refused { expected: want });
+                }
+                return Err(io::Error::other(format!(
+                    "the primary is of lineage {}, not {}: another tenant of the name, which \
+                     this copy takes nothing from",
+                    theirs.map_or("none".into(), lineage_text),
+                    lineage_text(want)
+                )));
+            }
+        }
         if image {
             let Message::Image(bytes) = stream.receive()? else {
                 return Err(io::Error::other("the primary promised an image"));
@@ -1626,6 +1743,9 @@ impl Follower {
             st.primary_durable = durable;
             st.contact = Some(Instant::now());
             st.error = None;
+        }
+        if let Some(hello) = lock(&self.hello).as_ref() {
+            hello(Said::Taken);
         }
 
         loop {
@@ -1696,11 +1816,14 @@ impl Follower {
         Ok(())
     }
 
-    /// Stops following and starts taking writes, on a history of its own:
-    /// `id`, forked where the replica stands. Returns that change and `id`.
-    pub fn promote(&self, id: u64) -> fenec_core::error::Result<(u64, u64)> {
+    /// Stops following and starts taking writes, on a history of its own,
+    /// forked where the replica stands: of its lineage, `fresh`'s bottom
+    /// half under its top half ([`fork_id`]). Returns that change and the
+    /// history's id.
+    pub fn promote(&self, fresh: u64) -> fenec_core::error::Result<(u64, u64)> {
         self.halt();
         let mut g = crate::held::write(&self.db);
+        let id = fork_id(g.history(), fresh);
         g.fork(id)?;
         g.sync()?;
         Ok((g.change_seq(), id))
@@ -1808,6 +1931,30 @@ pub(crate) fn u64_at(b: &[u8], at: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fork keeps the top half of the first history its database took:
+    /// its lineage, by which a client tells an older term of the same
+    /// tenant from a tenant made again under the name. One begun from the
+    /// root takes the fresh id whole, and no fork takes an id the lineage
+    /// holds.
+    #[test]
+    fn a_fork_keeps_its_lineage_and_a_history_from_the_root_starts_one() {
+        use fenec_core::history::History;
+        let root = History::default();
+        assert_eq!(fork_id(&root, 0x1234_5678_9abc_def0), 0x1234_5678_9abc_def0);
+        let made = root.forked(0xaaaa_bbbb_0000_0001, 0);
+        let promoted = fork_id(&made, 0x1111_2222_3333_4444);
+        assert_eq!(promoted, 0xaaaa_bbbb_3333_4444);
+        let again = made.forked(promoted, 10);
+        assert_eq!(fork_id(&again, 0x9999_9999_3333_4444) >> 32, 0xaaaa_bbbb);
+        // A bottom half the lineage holds already: the next one free.
+        assert_eq!(
+            fork_id(&again, 0x9999_9999_3333_4444),
+            0xaaaa_bbbb_3333_4445
+        );
+        // 0's bottom half is 1, which the first history holds.
+        assert_eq!(fork_id(&again, 0), 0xaaaa_bbbb_0000_0002);
+    }
 
     fn record(n: usize) -> Vec<u8> {
         // [kind][cid][length][body], the body one frame `n` bytes long:
