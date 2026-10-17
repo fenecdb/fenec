@@ -1520,8 +1520,10 @@ records no router's URL. The Swift, Kotlin and Dart remotes mark reads as
 Go's and .NET's clients do (`reads: .nearest`, `Reads.NEAREST`,
 `Reads.nearest`, and `asRead()`), the position shared by every copy, each
 held to a real global router, its standby near the replica and two nodes in
-its own tests. Not done: reads of a bounded staleness (a decision, not a
-detail), JavaScript's live queries and subscriptions near and the synced
+its own tests. JavaScript's `live` keeps its streams home and reads its
+runs near, each after the change a stream told of, and polls home
+(`FenecHttp.live`, below). Not done: reads of a bounded staleness (a
+decision, not a detail), JavaScript's `subscribe` near and the synced
 replicas' streams, which go home (Go's and .NET's read copies mark a
 subscription, held for its position as a read is, above).
 `tests/read_replicas.rs` holds a marked read answered with the rows only the
@@ -1583,7 +1585,7 @@ the JS client against real nodes and routers, eu1 killed, and its position
 taken from a 504 -- over its own alone, a write answered meanwhile and an
 earlier term's 504 left where they stand, another lineage's taken from a 504
 and an answer, its term lower -- as Go's, .NET's and Python's tests hold
-theirs. A marked read through the replica's region's router took
+theirs, and a live query's runs read near (below). A marked read through the replica's region's router took
 59.2-68.2 us p50 against 58.8-66.9 sent home, three runs at loads of 4.3-7.8,
 each node
 behind a loopback proxy, and 60.9-70.3 sent after a position the replica
@@ -4072,7 +4074,45 @@ holds none: the query is sent with `If-None-Match` and the server answers
 `unchanged` in `fenec-http`, the change ring's
 `changed_collections_since`; a read of rows that expire, calling `now()`
 or holding an inner `get` is never tagged), 54 us against 95 for a page
-of 24 run. `db.subscribe(collection, shape, onEvent, { onError, onState })`
+of 24 run. On a client reading near (`reads: 'nearest'`) the streams stay
+home, unmarked, and every run -- the first rows too -- is a read near, sent
+after the furthest of the client's position and the live query's own
+(`AFTER`, kept apart: another client's change is no write of this one's,
+which its other reads near would wait for), the furthest its streams named:
+each event's `seq` of the history the head names (`Fenec-History`; the
+seed's `seq` is at or past the head's `Fenec-Seq`), ordered as
+the client's (`later`), so a stream opened again after a failover names
+the later term and the old primary's moves nothing. The read replica
+answers a run once it holds the change that ran it, the router sends one it
+cannot hold in the wait home, and home's 504 -- the change lost in a
+failover -- sets back whichever position the run was sent after and asks
+home unmarked: the rows are never older than a change a stream told of,
+and a stream tells of every change home takes. The polls
+stay home: a tag is a change of the copy that answered, and a replica
+holding that change of its history (`Fenec-After`) judges it as home does
+up to where it stands -- behind, `unchanged` reads a tag past its change as
+changed and runs the query, rows older than those shown -- but nothing in a
+poll names a change home took since, as a stream's events do, so a replica
+behind or cut off from home would answer 304 to a write home holds.
+`web/fenec.replicas.test.js` holds it to two routers, two nodes and a read
+replica that follows its primary through a proxy parking what the primary
+sends (`parking`), the tenant's `streams` quota set so the replica's node
+counts a run held there (`usage.streams`): the first rows and a change's run
+held on the replica, answered by it once released
+(`fenec_router_replica_reads_total`'s `replica`), one never released sent
+home past the wait (`fallback`), the stream unmarked -- failing at once with
+the streams' position, its history or the mark taken out, a stream marked;
+and a scripted test the order: two streams' seeds and changes, one behind
+another's, the client's own write further, a stream reopened on the next
+term below the client's change, the old primary's change ignored, home's 504
+setting back the live query's position and not the client's, a client
+reading home unmarked -- failing with positions ordered by `seq` alone or
+the 504 taken as the client's. `useLiveQuery` passes the client through and
+needs nothing. An app's bundle of `connect`, rows and `live` went 29 684 ->
+29 897 bytes, 9 728 -> 9 822 brotli; `http.js` 26 412 -> 28 118, 7 787 ->
+8 275 brotli, which took the client the docs quote to 193 KB and the
+studio's first load to 66 KB gzipped.
+`db.subscribe(collection, shape, onEvent, { onError, onState })`
 keeps a shape over a server -- a seed, then each change -- opened again with
 backoff and seeding again, stopped by a 401; `sseEvents` is exported with
 it, the types beside (`ShapeFilter`, `ShapeEvent`, `SubscribeOptions`; a

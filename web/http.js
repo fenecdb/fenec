@@ -172,16 +172,18 @@ export class FenecHttp {
    * A POST: its JSON answer, the change a write left the database at, and
    * whether the answer is the one kept for `key`.
    */
-  async #send(path, type, payload, key, also = [], { wait, signal, read } = {}) {
+  async #send(path, type, payload, key, also = [], { wait, signal, read, [AFTER]: after } = {}) {
     const headers = { 'content-type': type };
     if (this.#token) headers.authorization = `Bearer ${this.#token}`;
     if (key) headers['idempotency-key'] = key;
     if (wait !== undefined && wait !== null) headers['fenec-wait'] = String(held(wait));
     // A read near: marked for the tenant's read replica in the router's
     // region, after the furthest position home named to this client, which
-    // the replica waits for -- that change of that history.
+    // the replica waits for -- that change of that history; a live
+    // query's run after its streams' position where that is further.
     let near = read === true && this.#reads === 'nearest';
-    const at = this.#last.at;
+    const of = after?.at && later(after.at, this.#last.at) ? after : this.#last;
+    const at = of.at;
     if (near) {
       headers['fenec-read'] = 'replica';
       if (at) {
@@ -202,12 +204,13 @@ export class FenecHttp {
     // failover sends the read to the old primary, fenced, which names the
     // branch it abandoned. Another lineage's is a tenant made again under
     // the name, which starts again at term 1: refused, every read near
-    // waited its whole wait for good.
+    // waited its whole wait for good. Whichever the read was sent after,
+    // the client's or a live query's, is the one set back.
     if (near && res.status === 504 && headers['fenec-after']) {
       const told = await res.json().catch(() => null);
       if (told && Number.isSafeInteger(told.seq)) {
         const p = position(told.seq, typeof told.history === 'string' ? told.history : null);
-        if (this.#last.at === at && (p.term >= at.term || another(p, at))) this.#last.at = p;
+        if (of.at === at && (p.term >= at.term || another(p, at))) of.at = p;
       }
       delete headers['fenec-read'];
       delete headers['fenec-after'];
@@ -287,20 +290,31 @@ export class FenecHttp {
    * way. A stream that ends is opened again (250 ms, doubling to 15 s), and
    * its seed runs the query, since writes may have come between.
    *
+   * Reading near, the streams stay home and each run is a read near, sent
+   * after the furthest position they named, or the client's own: a read
+   * replica answers it once it holds the change that ran it, or it goes
+   * home.
+   *
    * @param {{onError?: Function, params?: Array, collections?: string[]}} opts
    */
   live(query, cb, opts = {}) {
     if (typeof cb !== 'function') throw new FenecError('live(query, cb): cb must be a function');
+    const near = this.#reads === 'nearest';
+    // The furthest position the streams named, ordered as the client's:
+    // a stream opened again after a failover names the later term, and
+    // the old primary's moves nothing.
+    const seen = { at: null };
+    const marked = { read: true, [AFTER]: seen };
     let rows;
     let reads;
     if (query instanceof Query) {
-      const bound = query.plain().bind((sql, params) => this.run(sql, params));
+      const bound = query.plain().bind((sql, params) => this.run(sql, params, marked));
       rows = () => bound.rows();
       reads = query.reads;
     } else {
       const [sql, params] = typeof query === 'string' ? [query, opts.params ?? []] : Array.isArray(query) ? query : [];
       if (typeof sql !== 'string') throw new FenecError('live: a Query, a FenecQL text, or [text, params]');
-      rows = async () => rowsOf(await this.run(sql, params ?? []));
+      rows = async () => rowsOf(await this.run(sql, params ?? [], marked));
       reads = null;
     }
     if (opts.poll !== undefined) return this.#poll(query, cb, opts);
@@ -348,9 +362,15 @@ export class FenecHttp {
         try {
           const res = await this.#request(url, { headers, signal: stop.signal });
           if (!res.ok || !res.body) throw await refusal(res, collection);
+          // The history each event's `seq` is of, as the head names it: a
+          // number alone names no write across a failover. The seed's
+          // `seq` is at or past the head's `Fenec-Seq`.
+          const history = res.headers.get('fenec-history');
           for await (const ev of sseEvents(res)) {
             if (stop.signal.aborted) return;
             if (ev.name === 'error') throw streamError(ev.data);
+            const p = near && position(JSON.parse(ev.data).seq, history);
+            if (p?.seq > 0 && later(p, seen.at)) seen.at = p;
             attempt = 0;
             if (ev.name === 'seed' && !seeded) {
               seeded = true;
@@ -448,6 +468,12 @@ export class FenecHttp {
    * server thread and a wake-up at every write (60 streams took a write's
    * p50 from 0.26 to 0.94 ms, 500 to 3.1). A read of rows that expire,
    * or calling `now()`, is run every time.
+   *
+   * Home on a client reading near too: sent after its tag's change, a
+   * read replica would judge the tag as home does up to where it stands,
+   * but nothing names a change home has since, as a stream's events do --
+   * behind, or cut off, it would answer 304 while home holds a write the
+   * query reads.
    */
   #poll(query, cb, opts) {
     const [sql, params] =
@@ -558,6 +584,12 @@ function streamError(data) {
 
 /** The option a copy of a client is handed its original's `seq` under. */
 const LAST = Symbol('last');
+
+/**
+ * The option a live query's run is handed its streams' position under:
+ * kept apart from the client's, which its other reads near wait for.
+ */
+const AFTER = Symbol('after');
 
 /**
  * A position an answer named: its change, the history it is a change of

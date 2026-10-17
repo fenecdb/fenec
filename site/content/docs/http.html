@@ -583,7 +583,9 @@ the rows matching your filter, then each change to them as it happens.</p>
     database that never had a replica). A read sent after an event's
     <code>seq</code> to another copy goes with both (<a
     href="replication.html#read-your-writes">Reading your own
-    writes</a>): a number alone names no write across a failover.</li>
+    writes</a>): a number alone names no write across a failover.
+    <code>FenecHttp.live</code> on a client reading near sends its runs
+    so.</li>
   <li><b>In the browser,</b> <a href="sync.html">Sync</a> builds on this
     stream.</li>
 </ul>
@@ -677,6 +679,11 @@ by key and 95 for a page of 24 run; the round trip is most of either. A
 browser keeps its connection between polls, so a public page polls through
 the site's own server or a proxy, which keeps few connections to
 fenec-server however many viewers it has.</p>
+<p>A tag is a change of the copy that answered. A read replica holding that
+change of its history (<code>Fenec-After</code>) judges it as home does, but
+only up to where it stands: behind home it answers 304 to a write home holds,
+so <code>FenecHttp.live</code> polls home on a client reading near (<a
+href="sharding.html#read-replicas">Read replicas</a>).</p>
 </details>
 
 <h2 id="changes">Change data capture</h2>
