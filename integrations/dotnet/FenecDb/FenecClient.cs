@@ -273,8 +273,19 @@ public sealed partial class FenecClient : IDisposable
         using var res = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
             .ConfigureAwait(false);
         if (!res.IsSuccessStatusCode)
-            throw FenecException.From((int)res.StatusCode,
-                await res.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+        {
+            var raw = await res.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            // A stream near waits for the client's position as a read does, and a 504 is a read near's: no copy
+            // holds it, home either -- the write lost in a failover of home, which says where it stands, the
+            // client's position from here on -- and the stream opens home with no mark. Taken as an error, every
+            // stream near after it was refused for good.
+            if (!SentHome(req, (int)res.StatusCode, raw))
+                throw FenecException.From((int)res.StatusCode, Encoding.UTF8.GetString(raw));
+            await foreach (var ev in new FenecClient(this, 0, _key, _wait, false)
+                               .SubscribeAsync(collection, filter, cancellationToken).ConfigureAwait(false))
+                yield return ev;
+            yield break;
+        }
         using var reader = new StreamReader(
             await res.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), Encoding.UTF8);
         string? name = null;
@@ -412,16 +423,11 @@ public sealed partial class FenecClient : IDisposable
         }
         using var res = await _http.SendAsync(req, cts.Token).ConfigureAwait(false);
         var raw = await res.Content.ReadAsByteArrayAsync(cts.Token).ConfigureAwait(false);
-        // 504 to a read near: no copy the router reached holds the position it was sent after, home either -- the
-        // write lost in a failover of home, which says where it stands: the client's position from here on.
-        // Asked home with no mark, it is answered with what home holds.
+        // Asked home with no mark after a read near's 504, it is answered with what home holds.
         var near = _read && _near;
-        if ((int)res.StatusCode == 504 && near && req.Headers.Contains("Fenec-After"))
-        {
-            if (_after == 0) Told(req, raw);
+        if (SentHome(req, (int)res.StatusCode, raw))
             return await new FenecClient(this, 0, _key, _wait, false)
                 .SendAsync(method, path, contentType, body, extra, ct).ConfigureAwait(false);
-        }
         if (!res.IsSuccessStatusCode)
             throw FenecException.From((int)res.StatusCode, Encoding.UTF8.GetString(raw));
         long seq = 0;
@@ -433,6 +439,17 @@ public sealed partial class FenecClient : IDisposable
         }
         long? next = Header(res, "Fenec-Next") is { } x && long.TryParse(x, out var m) ? m : null;
         return (raw, new Head(seq, Header(res, "Idempotent-Replayed") == "true", next));
+    }
+
+    // Whether an answer is a 504 to a request near sent after the client's position: no copy the router reached
+    // holds it, home either -- the write lost in a failover of home, which says where it stands, taken here as the
+    // client's position from then on (one the caller named with After is not the client's to take). The request
+    // goes home with no mark.
+    bool SentHome(HttpRequestMessage req, int status, byte[] raw)
+    {
+        if (status != 504 || !(_read && _near) || !req.Headers.Contains("Fenec-After")) return false;
+        if (_after == 0) Told(req, raw);
+        return true;
     }
 
     // Home's position, from a read near's 504: its seq and history, over the position `req` was sent after.

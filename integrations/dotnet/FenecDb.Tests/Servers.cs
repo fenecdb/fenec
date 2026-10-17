@@ -86,5 +86,86 @@ public sealed class Servers : IDisposable
     }
 }
 
+/// <summary>
+/// A TCP proxy to a server: cut, it closes what it carries and every connection it takes until healed -- a
+/// replica's link to its primary, held while a write is made, so the replica cannot hold that write however soon it
+/// would have caught up.
+/// </summary>
+public sealed class Link : IDisposable
+{
+    readonly System.Net.Sockets.TcpListener _listener = new(System.Net.IPAddress.Loopback, 0);
+    readonly string _host;
+    readonly int _port;
+    readonly List<System.Net.Sockets.TcpClient> _open = [];
+    bool _cut;
+
+    public Link(string url)
+    {
+        var target = new Uri(url);
+        (_host, _port) = (target.Host, target.Port);
+        _listener.Start();
+        _ = Task.Run(AcceptAll);
+    }
+
+    public string Url => $"http://127.0.0.1:{((System.Net.IPEndPoint)_listener.LocalEndpoint).Port}";
+
+    async Task AcceptAll()
+    {
+        while (true)
+        {
+            System.Net.Sockets.TcpClient client;
+            try { client = await _listener.AcceptTcpClientAsync(); }
+            catch (Exception) { return; }
+            var upstream = new System.Net.Sockets.TcpClient();
+            try { await upstream.ConnectAsync(_host, _port); }
+            catch (System.Net.Sockets.SocketException)
+            {
+                client.Dispose();
+                upstream.Dispose();
+                continue;
+            }
+            lock (_open)
+            {
+                if (_cut)
+                {
+                    client.Dispose();
+                    upstream.Dispose();
+                    continue;
+                }
+                _open.Add(client);
+                _open.Add(upstream);
+            }
+            _ = Pipe(client, upstream);
+            _ = Pipe(upstream, client);
+        }
+    }
+
+    static async Task Pipe(System.Net.Sockets.TcpClient from, System.Net.Sockets.TcpClient to)
+    {
+        try { await from.GetStream().CopyToAsync(to.GetStream()); }
+        catch (Exception) { }
+        from.Dispose();
+        to.Dispose();
+    }
+
+    /// <summary>Cuts the link, closing every connection it carries, or heals it.</summary>
+    public void Cut(bool cut)
+    {
+        lock (_open)
+        {
+            _cut = cut;
+            if (!cut) return;
+            foreach (var c in _open) c.Dispose();
+            _open.Clear();
+        }
+    }
+
+    public void Dispose()
+    {
+        _listener.Stop();
+        Cut(true);
+    }
+}
+
 [CollectionDefinition("servers")]
 public sealed class ServersCollection : ICollectionFixture<Servers>;

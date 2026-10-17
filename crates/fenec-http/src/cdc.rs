@@ -256,6 +256,18 @@ fn unmoved(db: &Database, name: &str, since: i64) -> Result<bool> {
         .is_some_and(|names| names.iter().all(|n| n == CONSUMERS)))
 }
 
+/// How long a page of `req` may wait for a write (`wait`, [`LONGEST`] at
+/// most), as [`handle`] reads it: what holds a thread here as a stream
+/// does, and what a router asking a read replica for the page allows it
+/// besides its own bound.
+pub fn page_wait(req: &Request) -> Duration {
+    req.query
+        .iter()
+        .find(|(k, _)| k == "wait")
+        .and_then(|(_, v)| v.parse::<u64>().ok())
+        .map_or(Duration::ZERO, |ms| Duration::from_millis(ms).min(LONGEST))
+}
+
 pub fn handle(
     db: &Arc<RwLock<Database>>,
     feed: &Feed,

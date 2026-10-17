@@ -293,6 +293,16 @@ impl Server {
         }
     }
 
+    /// How many requests wait on a single database for a write they were
+    /// sent after (`Fenec-After`, [`sse::Hub::after_waiting`]); a tenant's
+    /// are its hub's.
+    pub fn after_waiting(&self) -> usize {
+        match &self.backend {
+            Backend::Single { hub, .. } => hub.after_waiting(),
+            Backend::Tenants(_) | Backend::Metrics { .. } => 0,
+        }
+    }
+
     /// What the writes held on a single database (`Fenec-Wait`) did.
     pub fn waits(&self) -> waits::Stats {
         match &self.backend {
@@ -906,11 +916,25 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     "this server keeps no change feed: start it with --cdc or --replication-token",
                 ),
                 // A wait for changes holds a thread as a stream does; one
-                // that does not wait is a request in flight.
-                (Ok(_), Some(feed)) => match admit(&tenant, cdc_waits(&req)) {
-                    Ok(_slot) => cdc::route(db, feed, cfg, &req),
-                    Err(refused) => refused,
-                },
+                // that does not wait is a request in flight. Sent after a
+                // write its client made elsewhere (`Fenec-After`), it waits
+                // for it as a read does, past its token and before its
+                // page: a replica behind answered a page ending before the
+                // write with a `Fenec-Seq` behind it too -- read as every
+                // write there is -- or a cursor from home 409, past its
+                // last write. `since` is no position: a cursor past the
+                // database is 409 as before, since a primary that lost
+                // writes in a failover never reaches it in this history.
+                (Ok(_), Some(feed)) => {
+                    let after_asked = req.header("fenec-after").is_some();
+                    match admit(&tenant, after_asked || cdc_waits(&req)) {
+                        Ok(_slot) => match after_asked.then(|| after(&req, db, hub)).flatten() {
+                            Some(refused) => refused,
+                            None => cdc::route(db, feed, cfg, &req),
+                        },
+                        Err(refused) => refused,
+                    }
+                }
             };
             // Its `Fenec-Seq` a change of the history the database is on,
             // as every answer carrying one names it.
@@ -959,7 +983,9 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 }
             };
             // A read timeout is meaningless during the stream: the client
-            // sends nothing, and the wait is on a Condvar.
+            // sends nothing, and the wait is on a Condvar. A stream sent
+            // with `Fenec-After` waits for that write in `serve`, past this
+            // slot and the database's own, before its head.
             let _ = out.set_read_timeout(None);
             sse::serve(&mut out, db, cfg, hub, &req, &who);
             return;
@@ -1182,6 +1208,10 @@ pub const AFTER_LONGEST: Duration = Duration::from_secs(30);
 /// pointed at the new primary and takes its image. A primary that does not
 /// hold it never will -- the write was lost in a failover -- and answers
 /// 504 at once, where it stands, for the client to take that as its own.
+/// Every route that reads asks it, once its token is taken: a request on
+/// `handle`'s way, a subscription before its head ([`sse::serve`]) and
+/// `/_changes` before its page -- on a read replica each was answered from
+/// before the client's write while the reads beside them waited.
 fn after(req: &Request, db: &RwLock<Database>, hub: &sse::Hub) -> Option<Response> {
     let n = req.header("fenec-after")?;
     let Ok(n) = n.trim().parse::<u64>() else {
@@ -1510,9 +1540,7 @@ fn admit(
 /// Whether a `/_changes` read waits for a write (`wait`), holding its
 /// thread as a stream does.
 fn cdc_waits(req: &Request) -> bool {
-    req.query
-        .iter()
-        .any(|(k, v)| k == "wait" && v.trim().parse::<u64>().is_ok_and(|ms| ms > 0))
+    !cdc::page_wait(req).is_zero()
 }
 
 /// `GET /<name>/changes`

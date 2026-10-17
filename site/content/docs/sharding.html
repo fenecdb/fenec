@@ -1651,8 +1651,9 @@ marked <code>Fenec-Read: replica</code> of a tenant with a read replica in
 that region — and not living in it — it forwards the request to the replica;
 every other request goes where it went. A marked read the replica does not
 answer — its node not reached, or the request not written or answered by
-the wait its <code>Fenec-After</code> asks and
-<code>--replica-timeout</code> past it (2 s); not caught up with its primary yet, or going down (<code>503</code>);
+the wait its <code>Fenec-After</code> asks, a <code>/_changes</code> page's
+own <code>wait</code> for a write, and <code>--replica-timeout</code> past
+them (2 s); not caught up with its primary yet, or going down (<code>503</code>);
 still behind the position it was sent after at the end of the wait
 (<code>504</code>); its file gone from the node (a <code>404</code> with
 <code>Fenec-Tenant: absent</code>) — is sent home, so the client is answered
@@ -1700,8 +1701,17 @@ answer from home named — a write's, a read-only <code>/batch</code>'s; of a
 later term, or further in one, so an answer arriving late is not the last —
 and sends it with every marked read, whose own answers move nothing: it reads
 its own writes and every write before them, and another client's writes after
-its own may or may not be there yet. A client that has written nothing reads
-the replica as it stands. Where the failover lost the client's last
+its own may or may not be there yet. A subscription and a
+<code>/_changes</code> page sent so wait for it as a read does, before their
+head, and go home on the replica's <code>504</code>: a stream is seeded with
+the client's write, never from the copy as it stood behind it, and a page's
+<code>Fenec-Seq</code> is never behind it. Go's <code>Read()</code> and
+.NET's <code>AsRead()</code> copies send the position on a subscription and
+<code>/_changes</code> too, and take a stream's <code>504</code> as a
+read's. A marked stream open on a copy that refuses its primary — the
+tenant deleted and made again under its name — ends as the copy deletes
+itself, as the reads after it are sent home. A client that has written
+nothing reads the replica as it stands. Where the failover lost the client's last
 acknowledged write, no copy holds its position: home answers
 <code>504</code> at once, naming where it stands and of what history, the SDK
 takes that as the client's position — only over the position that read was
@@ -1817,12 +1827,15 @@ and <code>{ read: true }</code> on <code>run</code> and <code>batch</code>
 <code>Fenec.connect(url, reads: Reads.nearest)</code>, each with
 <code>db.asRead()</code> (<a href="mobile.html#connect">Without a
 file</a>). Each marks the builder's reads and the copy's requests alone,
-and keeps one position for every copy of the client it makes. A stream is
-not held for <code>Fenec-After</code> yet: JavaScript's live queries and
-subscriptions go home unmarked, and a subscription opened through a Go
-<code>Read()</code> or a .NET <code>AsRead()</code> copy is marked and may be
-answered by the read replica as it stands, behind the client's own writes.
-A synced replica's streams, in the browser and in the native libraries, go
+and keeps one position for every copy of the client it makes. A
+subscription opened through a Go <code>Read()</code> or a .NET
+<code>AsRead()</code> copy, and its <code>/_changes</code> reads, are marked
+and sent after that position too, and a server holds a stream for
+<code>Fenec-After</code> as it holds a read: the read replica seeds it once
+it has the client's own writes, and where it cannot in the wait its
+<code>504</code> sends the stream home, so no stream is seeded from behind
+them. JavaScript's live queries and subscriptions go home unmarked. A
+synced replica's streams, in the browser and in the native libraries, go
 home; Python's client and the Swift, Kotlin and Dart remotes open none.</p>
 
 <p><b>What it costs.</b> A marked read through the router of the replica's

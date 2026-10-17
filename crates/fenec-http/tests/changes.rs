@@ -249,6 +249,28 @@ fn seed_carries_the_whole_shape() {
     assert_eq!(count(&data, "rows"), 3);
 }
 
+/// The head names where the database stood as the stream opened
+/// (`Fenec-Seq`), and a database with no history of its own no history, as
+/// every answer does; under `--http-cors` it carries every answer's CORS
+/// headers, so a page on another origin reads them.
+#[test]
+fn the_head_names_where_the_stream_opened() {
+    let h = start(Config {
+        cors: Some("*".into()),
+        ..Config::default()
+    });
+    let at = h.db.read().unwrap().change_seq();
+    let s = Sub::open(h.port, "/tasks/changes");
+    assert_eq!(s.status, 200);
+    let head = s.head_line().to_ascii_lowercase();
+    assert!(head.contains(&format!("fenec-seq: {at}\r\n")), "{head}");
+    assert!(!head.contains("\r\nfenec-history:"), "{head}");
+    assert!(
+        head.contains("access-control-expose-headers: fenec-seq, fenec-history"),
+        "{head}"
+    );
+}
+
 #[test]
 fn shape_filter_narrows_the_seed() {
     let h = start(Config::default());

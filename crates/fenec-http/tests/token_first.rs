@@ -1,7 +1,8 @@
 //! A request refused for its token is refused at once: nothing it asks to
-//! wait for -- a write to come (`Fenec-After`), a claim held until it can
-//! write (`Fenec-Wait`), `/_changes`'s `wait`, a subscription, the MCP
-//! endpoint -- is waited for before its token is taken, on a single
+//! wait for -- a write to come (`Fenec-After`, on a read, a subscription or
+//! `/_changes`), a claim held until it can write (`Fenec-Wait`),
+//! `/_changes`'s `wait`, a subscription, the MCP endpoint -- is waited for
+//! before its token is taken, on a single
 //! database or under a tenant's prefix, where the tenant its token names is
 //! asked first too. On a single database a `Fenec-After` wait ran before
 //! the token was looked at: a guessed one held a connection thread for up
@@ -66,8 +67,30 @@ fn ask(
         body.len()
     ));
     s.write_all(head.as_bytes()).unwrap();
-    let mut out = String::new();
-    let _ = s.read_to_string(&mut out);
+    // Read to the end of the body its head says, not to the connection's:
+    // a stream served where an answer was meant has no end, its keep-alive
+    // lines coming faster than any read timeout, and the test would hang
+    // rather than fail. A stream's head is its answer here.
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let text = String::from_utf8_lossy(&out);
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let length = head.lines().find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse::<usize>().ok())?
+            });
+            if length.is_none_or(|n| body.len() >= n) {
+                break;
+            }
+        }
+        match s.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let out = String::from_utf8_lossy(&out);
     let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
     Answer {
         status: head.get(9..12).and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -277,18 +300,28 @@ fn a_wait_for_changes_or_a_subscription_is_refused_at_once_without_its_token() {
     let n = single("changes");
     let since = n.seq();
     let target = format!("/_changes?since={since}&wait={LONGEST}");
+    // Each with and without a write to come (`Fenec-After`), which a
+    // stream and `/_changes` wait for as a read does: past the token alone.
+    let next = (since + 1).to_string();
+    let after = [("Fenec-After", next.as_str()), ("Fenec-Wait", LONGEST)];
+    let both: [&[(&str, &str)]; 2] = [&[], &after];
     for token in n.refused() {
-        let a = n.ask(token.as_deref(), "GET", &target, &[], "");
-        refused(&a, &format!("/_changes with {token:?}"));
-        // A subscription is refused before its head, and the connection
-        // ends with the refusal.
-        let a = n.ask(token.as_deref(), "GET", "/notes/changes", &[], "");
-        refused(&a, &format!("a subscription with {token:?}"));
+        for headers in both {
+            let a = n.ask(token.as_deref(), "GET", &target, headers, "");
+            refused(&a, &format!("/_changes with {token:?}, {headers:?}"));
+            // A subscription is refused before its head, and the
+            // connection ends with the refusal.
+            let a = n.ask(token.as_deref(), "GET", "/notes/changes", headers, "");
+            refused(&a, &format!("a subscription with {token:?}, {headers:?}"));
+        }
     }
     // A scoped token reads no change stream, and is told so at once.
     let alice = n.access.mint(r#"{"sub":"alice"}"#).unwrap();
-    let a = n.ask(Some(&alice), "GET", &target, &[], "");
-    assert_eq!(a.status, 403, "{}", a.body);
+    for headers in both {
+        let a = n.ask(Some(&alice), "GET", &target, headers, "");
+        assert_eq!(a.status, 403, "{}", a.body);
+        assert!(!a.body.contains("\"seq\""), "{}", a.body);
+    }
 
     assert_eq!(
         n.seq(),
@@ -296,9 +329,24 @@ fn a_wait_for_changes_or_a_subscription_is_refused_at_once_without_its_token() {
         "a write was made before the refusals were in"
     );
     n.run(r#"put notes {owner: "alice", title: "first"}"#);
-    let a = n.ask(Some(ROOT), "GET", &target, &[], "");
-    assert_eq!(a.status, 200, "{}", a.body);
-    assert!(a.body.contains("first"), "{}", a.body);
+    for headers in both {
+        let a = n.ask(Some(ROOT), "GET", &target, headers, "");
+        assert_eq!(a.status, 200, "{}", a.body);
+        assert!(a.body.contains("first"), "{}", a.body);
+    }
+    // A good token's stream and page wait for a write that has not come,
+    // and are answered by the wait: 504, and where the database stands.
+    let far = (since + 1000).to_string();
+    let soon = [("Fenec-After", far.as_str()), ("Fenec-Wait", "100")];
+    for target in [target.as_str(), "/notes/changes"] {
+        let a = n.ask(Some(ROOT), "GET", target, &soon, "");
+        assert_eq!(a.status, 504, "{target}: {}", a.body);
+        assert!(
+            a.body.contains(&format!("\"seq\":{}", since + 1)),
+            "{target}: {}",
+            a.body
+        );
+    }
 }
 
 #[test]
@@ -365,7 +413,9 @@ fn a_tenant_s_waits_come_after_its_token_and_its_tenant() {
                 ("POST", "/t/acme/query", &wait, CLAIM.to_string()),
                 ("POST", "/t/acme/batch", &wait, CLAIM.to_string()),
                 ("GET", &changes, &[], String::new()),
+                ("GET", &changes, &after, String::new()),
                 ("GET", "/t/acme/notes/changes", &[], String::new()),
+                ("GET", "/t/acme/notes/changes", &after, String::new()),
                 ("POST", "/t/acme/_mcp", &after, MCP_CALL.to_string()),
             ],
         };

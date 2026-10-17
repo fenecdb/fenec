@@ -10,7 +10,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -435,6 +438,103 @@ func TestAfterReadsYourWriteOnAReplica(t *testing.T) {
 	_, err := r.Exec(ctx, "put "+name+" {t: $1}", "refused")
 	if e := statusOf(t, err); e.Status != 403 {
 		t.Fatalf("a write to a replica: %+v", e)
+	}
+}
+
+// link is a TCP proxy to target: cut, it closes what it carries and every
+// connection it takes until healed -- a replica's link to its primary, held
+// while a write is made, so the replica cannot hold that write however soon
+// it would have caught up.
+type link struct {
+	ln     net.Listener
+	target string
+	mu     sync.Mutex
+	cut    bool
+	open   []net.Conn
+}
+
+func newLink(t *testing.T, target string) *link {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &link{ln: ln, target: target}
+	go l.serve()
+	t.Cleanup(func() {
+		ln.Close()
+		l.setCut(true)
+	})
+	return l
+}
+
+func (l *link) serve() {
+	for {
+		c, err := l.ln.Accept()
+		if err != nil {
+			return
+		}
+		l.mu.Lock()
+		u, err := net.Dial("tcp", l.target)
+		if l.cut || err != nil {
+			l.mu.Unlock()
+			c.Close()
+			if u != nil {
+				u.Close()
+			}
+			continue
+		}
+		l.open = append(l.open, c, u)
+		l.mu.Unlock()
+		go func() { io.Copy(u, c); u.Close(); c.Close() }()
+		go func() { io.Copy(c, u); c.Close(); u.Close() }()
+	}
+}
+
+func (l *link) setCut(cut bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cut = cut
+	if cut {
+		for _, c := range l.open {
+			c.Close()
+		}
+		l.open = nil
+	}
+}
+
+// A stream sent after a write waits for it on a replica as a read does. Its
+// link to the primary cut, the replica cannot hold the write: the stream is
+// answered by the wait, 504, never seeded from before it -- served at once,
+// it was. Healed, the stream is seeded with the write. The client's part,
+// a stream near going home on a 504 with home's position taken (toldBy), is
+// held by reads_test.go against a scripted server.
+func TestAStreamAfterAWriteWaitsForItOnAReplica(t *testing.T) {
+	ctx := context.Background()
+	l := newLink(t, strings.TrimPrefix(primary, "http://"))
+	replica, stop := serve("--file", filepath.Join(scratch, "held.fenec"),
+		"--replication-token", replToken, "--replica-of", "http://"+l.ln.Addr().String(), "--sync", "50")
+	defer stop()
+	db := root()
+	name := fresh("held")
+	must(db.Exec(ctx, "create collection "+name+" (t text)")).of(t)
+	first := must(db.Exec(ctx, "put "+name+" {t: $1}", "before")).of(t)
+	r := fenecdb.New(replica)
+	must(r.Wait(20*time.Second).After(first.Seq).Query(ctx, "get "+name)).of(t)
+	l.setCut(true)
+	w := must(db.Exec(ctx, "put "+name+" {t: $1}", "after")).of(t)
+	_, err := r.Wait(300*time.Millisecond).After(w.Seq).Subscribe(ctx, name, nil)
+	if e := statusOf(t, err); e.Status != 504 {
+		t.Fatalf("a stream after a write the replica cannot hold: %+v", e)
+	}
+	l.setCut(false)
+	sub, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	events := must(r.Wait(20*time.Second).After(w.Seq).Subscribe(sub, name, nil)).of(t)
+	if seed := <-events; seed.Type != "seed" || len(seed.Rows) != 2 || seed.Seq < w.Seq {
+		t.Fatalf("the replica's stream after %d: %+v", w.Seq, seed)
+	}
+	cancel()
+	for range events {
 	}
 }
 

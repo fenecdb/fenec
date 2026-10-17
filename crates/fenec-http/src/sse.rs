@@ -64,6 +64,10 @@ pub struct Hub {
     closed: AtomicBool,
     /// Writes held until they can write (`Fenec-Wait`): woken here too.
     waits: crate::waits::Waits,
+    /// Requests waiting here for a write their client made elsewhere
+    /// (`Fenec-After`, [`Hub::reached`]): what a test waits on before it
+    /// lets that write come.
+    after_waiting: AtomicUsize,
 }
 
 impl Watcher for Hub {
@@ -124,6 +128,7 @@ impl Hub {
         look: impl Fn() -> (bool, u64),
         until: std::time::Instant,
     ) -> bool {
+        let mut waiting = None;
         loop {
             let (done, seq) = look();
             if done {
@@ -133,10 +138,17 @@ impl Hub {
             if now >= until || self.is_closed() {
                 return false;
             }
+            waiting.get_or_insert_with(|| Counted::on(&self.after_waiting));
             // Past the change it looked at, or a tenth of a second: an
             // image adopted at the same change moves no counter.
             self.wait(seq, (until - now).min(Duration::from_millis(100)));
         }
+    }
+
+    /// How many requests wait here now for a write they were sent after
+    /// (`Fenec-After`) -- reads, subscriptions and `/_changes` alike.
+    pub fn after_waiting(&self) -> usize {
+        self.after_waiting.load(Ordering::SeqCst)
     }
 
     /// Ends every stream on this hub: each one writes an `error` event and
@@ -179,6 +191,22 @@ impl Hub {
     }
 }
 
+/// One more on a count for as long as it lives.
+struct Counted<'a>(&'a AtomicUsize);
+
+impl<'a> Counted<'a> {
+    fn on(count: &'a AtomicUsize) -> Counted<'a> {
+        count.fetch_add(1, Ordering::SeqCst);
+        Counted(count)
+    }
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct StreamSlot<'a>(&'a Hub);
 impl Drop for StreamSlot<'_> {
     fn drop(&mut self) {
@@ -203,10 +231,28 @@ pub fn serve(
     // the wait from the body, where plain text left it at its own backoff.
     let Some(_slot) = hub.reserve(cfg.max_streams) else {
         let refused = crate::http::Response::retry_after(503, "too many subscriptions", 1);
-        let _ = write_head(out, cfg, 503, refused.content_type, Some(1));
+        let _ = write_head(out, cfg, 503, refused.content_type, Some(1), None);
         let _ = out.write_all(&refused.body);
         return;
     };
+
+    // Sent after a write its client made elsewhere (`Fenec-After`), a
+    // stream waits for it here as a read does ([`crate::after`]): served
+    // from a copy that has not caught up, its seed was from before the
+    // client's own write -- a read replica a router sent it to, or one
+    // left on the branch a failover abandoned. After its token and its
+    // slots, so a refused one waits for nothing and one past the ceiling
+    // is told so at once; before the shape is read, since a collection
+    // the client made may not be here yet; before the head, so a 504
+    // says where the copy stands and a router sends the stream home. A
+    // stream resumed with `since` waits the same way, the header being
+    // the client's position and `since` only its cursor.
+    if req.header("fenec-after").is_some() {
+        if let Some(refused) = crate::after(req, db, hub) {
+            let _ = crate::cors(refused, cfg).write(out, false, false);
+            return;
+        }
+    }
 
     // Parsing needs the schema, and the schema needs a read lock. The lock is
     // released immediately: held for the whole stream it would stop all writes.
@@ -228,9 +274,17 @@ pub fn serve(
     //
     // A token whose rules read other collections has them bound under each
     // look's lock ([`Reach`]), from the shape as the subscriber sent it.
-    let sub = {
+    //
+    // Where the database stands is read under the same lock, for the head
+    // (`Fenec-Seq`, `Fenec-History`): a client running reads of its own
+    // after the changes the stream names -- near, on a read replica, while
+    // the stream stays home -- sends them after that history, which a seq
+    // alone does not name across a failover. Read here, it costs the
+    // stream no lock of its own.
+    let (sub, at) = {
         let guard = crate::held::read(db);
-        api::subscription(&guard, req).and_then(|mut sub| {
+        let at = crate::At::of(&guard);
+        let sub = api::subscription(&guard, req).and_then(|mut sub| {
             let mut quiet = false;
             let mut view = None;
             let mut reach = None;
@@ -249,7 +303,8 @@ pub fn serve(
                 sub.filter = scope.restrict(&sub.collection, shape)?;
             }
             Ok((sub, quiet, view, reach))
-        })
+        });
+        (sub, at)
     };
     let (mut sub, quiet, mut view, reach) = match sub {
         Ok(s) => s,
@@ -260,6 +315,7 @@ pub fn serve(
                 api::status_of(&e),
                 "application/json; charset=utf-8",
                 None,
+                None,
             );
             let mut body = String::from("{\"error\":");
             fenec_core::json::escape_into(&mut body, &e.to_string());
@@ -269,7 +325,7 @@ pub fn serve(
         }
     };
 
-    if write_head(out, cfg, 200, "text/event-stream", None).is_err() {
+    if write_head(out, cfg, 200, "text/event-stream", None, Some(at)).is_err() {
         return;
     }
     // A client stalled during the stream must not hold the thread forever:
@@ -858,12 +914,16 @@ fn event(out: &mut TcpStream, name: &str, data: &str) -> std::io::Result<()> {
     out.flush()
 }
 
+/// A stream's head, or a refusal's in its place; `at` where the database
+/// stood as the stream opened, which its head names: the change its seed is
+/// at or after, and the history every event's `seq` is a change of.
 fn write_head(
     out: &mut TcpStream,
     cfg: &Config,
     status: u16,
     content_type: &str,
     retry_after: Option<u64>,
+    at: Option<crate::At>,
 ) -> std::io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\n\
@@ -878,10 +938,22 @@ fn write_head(
     if status == 200 {
         head.push_str("X-Accel-Buffering: no\r\n");
     }
+    if let Some(at) = at {
+        head.push_str("Fenec-Seq: ");
+        crate::http::push_number(&mut head, at.seq);
+        head.push_str("\r\n");
+        // The root's history names nothing, as every answer's does.
+        if let Some(h) = at.history {
+            head.push_str("Fenec-History: ");
+            crate::http::push_history(&mut head, h);
+            head.push_str("\r\n");
+        }
+    }
+    // Every answer's CORS headers, not the origin alone: without
+    // `Access-Control-Expose-Headers` a page on another origin could not
+    // read the head's `Fenec-History`, nor a refusal's `Retry-After`.
     if let Some(origin) = &cfg.cors {
-        head.push_str(&format!(
-            "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n"
-        ));
+        crate::cors::push_into(&mut head, origin);
     }
     crate::request_id::with(|id| {
         if !id.is_empty() {

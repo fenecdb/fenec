@@ -32,6 +32,8 @@ const REPL: &str = "tenant-replication";
 struct Node {
     port: u16,
     dir: PathBuf,
+    /// Its tenants, which a test asks what a copy is doing.
+    tenants: Arc<Tenants>,
 }
 
 impl Drop for Node {
@@ -54,13 +56,14 @@ fn node_plain(tag: &str) -> Node {
         admin_token: Some(format!("adm-{tag}")),
         ..fenec_http::Config::default()
     };
-    let server = fenec_http::Server::with_tenants(Arc::new(Tenants::new(&dir).unwrap()), cfg);
+    let tenants = Arc::new(Tenants::new(&dir).unwrap());
+    let server = fenec_http::Server::with_tenants(Arc::clone(&tenants), cfg);
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
-    Node { port, dir }
+    Node { port, dir, tenants }
 }
 
 /// A node; `leased`, taking writes only under its router's lease.
@@ -92,13 +95,14 @@ fn node_of(tag: &str, leased: bool, upstream: Option<String>) -> Node {
         sync_on_write: true,
         ..fenec_http::Config::default()
     };
-    let server = fenec_http::Server::with_tenants(Arc::new(tenants), cfg);
+    let tenants = Arc::new(tenants);
+    let server = fenec_http::Server::with_tenants(Arc::clone(&tenants), cfg);
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
-    Node { port, dir }
+    Node { port, dir, tenants }
 }
 
 /// A TCP proxy: cut, it drops what it carries and refuses every connection
@@ -1076,6 +1080,109 @@ fn a_marked_read_near_a_read_replica_is_answered_there_and_never_older_than_its_
     assert_eq!(status, 200, "{body}");
 }
 
+/// A subscription's first event through `port` -- or, refused, its whole
+/// answer: the status and that text. A stream has no end to read to.
+fn first_event(port: u16, target: &str, headers: &[(&'static str, String)]) -> (u16, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let mut head = format!("GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n");
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    s.write_all(head.as_bytes()).unwrap();
+    let mut out = String::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some((head, body)) = out.split_once("\r\n\r\n") {
+            let blocks: Vec<&str> = body.split("\n\n").collect();
+            // Every block but the last is whole; a keep-alive is a comment.
+            let whole = &blocks[..blocks.len() - 1];
+            if let Some(event) = whole.iter().find(|b| b.trim_start().starts_with("event:")) {
+                return (head[9..12].parse().unwrap(), event.to_string());
+            }
+        }
+        match s.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.push_str(&String::from_utf8_lossy(&chunk[..n])),
+        }
+    }
+    let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+    (head[9..12].parse().unwrap(), body.to_string())
+}
+
+/// A subscription and `/_changes` marked for a read replica and sent after
+/// the client's write wait for it there, as a read does, and go home where
+/// the replica cannot catch up in the wait: neither is ever answered
+/// without the write. The replica answered both at once from what it held
+/// -- a seed and a page from before the write the client had just been
+/// answered -- and the router copied them to the client, a stream being
+/// sent near whatever its route.
+#[test]
+fn a_marked_stream_after_a_write_waits_on_the_replica_or_goes_home() {
+    let w = OneDirectory::new("streams");
+    w.tenant("acme");
+    let a = write(w.us, "acme", r#"put notes {body: "a"}"#);
+    w.holds("acme", r#""a""#);
+    // The replica made to follow home through a link of its own, answering
+    // once home has said hello over it, then the link cut: a write home is
+    // not on it, and it cannot catch up.
+    let us1 = w._nodes[2].port;
+    let own = Proxy::to(w._nodes[0].port);
+    let (status, body) = admin(
+        us1,
+        "streams-us1",
+        "POST",
+        "/_admin/tenants/acme/follow",
+        &format!(r#"{{"from":"{}"}}"#, own.url()),
+    );
+    assert_eq!(status, 200, "{body}");
+    w.holds("acme", r#""a""#);
+    own.cut();
+    let b = write(w.us, "acme", r#"put notes {body: "b"}"#);
+
+    // The replica's wait runs out, 504, and both go home, which holds it.
+    let mut short = mark(Some(&b));
+    short.push(("Fenec-Wait", "200".to_string()));
+    let (status, seed) = first_event(w.us, "/t/acme/notes/changes", &short);
+    assert_eq!(status, 200, "{seed}");
+    assert!(seed.contains("event: seed"), "{seed}");
+    assert!(
+        seed.contains(r#""a""#) && seed.contains(r#""b""#),
+        "a stream seeded without its write: {seed}"
+    );
+    let since = format!("/t/acme/_changes?since={}", a.seq);
+    let (status, page) = first_event(w.us, &since, &short);
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(r#""body":"b""#),
+        "a page without its write: {page}"
+    );
+
+    // Home out of the router's reach, a stream that waits long enough is
+    // answered by the replica once it catches up: seen waiting there, its
+    // link healed, seeded with the write -- which only the replica could
+    // have answered.
+    w.links[0].cut();
+    let mut long = mark(Some(&b));
+    long.push(("Fenec-Wait", "30000".to_string()));
+    let port = w.us;
+    let streaming = std::thread::spawn(move || first_event(port, "/t/acme/notes/changes", &long));
+    until("the stream waits for the write on the replica", || {
+        assert!(!streaming.is_finished(), "answered without waiting");
+        let copy = w._nodes[2].tenants.get("acme").unwrap();
+        copy.hub.after_waiting() == 1
+    });
+    own.heal();
+    let (status, seed) = streaming.join().unwrap();
+    assert_eq!(status, 200, "{seed}");
+    assert!(
+        seed.contains(r#""a""#) && seed.contains(r#""b""#),
+        "the replica seeded without the write: {seed}"
+    );
+    w.links[0].heal();
+}
+
 #[test]
 fn a_read_replica_follows_its_tenant_through_a_failover_and_a_move() {
     let w = OneDirectory::new("fail");
@@ -1507,6 +1614,38 @@ fn a_marked_read_passes_a_read_replica_that_does_not_answer_by_its_bound() {
         "the replica was asked again"
     );
     w.links[2].heal();
+}
+
+/// A marked `/_changes` page waiting for a write past the replica timeout
+/// -- a consumer's long poll of an idle tenant -- is given its `wait`
+/// besides the timeout, and answered near: cut at the timeout, it rested
+/// the tenant's copy as one that did not answer and was asked again home
+/// for the whole wait. Home cut off from the router shows both: a page or
+/// a read sent home would be its 502, and the copy, rested for longer than
+/// the test, would send the read after it home.
+#[test]
+fn a_marked_change_page_waiting_past_the_replica_timeout_is_answered_near() {
+    let mut us = config(Some("us"), None, None);
+    us.replica_timeout = Duration::from_secs(1);
+    us.replica_rest = Duration::from_secs(600);
+    let w = OneDirectory::with_us("page-wait", false, us);
+    w.tenant("acme");
+    let a = write(w.us, "acme", r#"put notes {body: "a"}"#);
+    w.holds("acme", r#""a""#);
+    w.links[0].cut();
+    let (status, _, page) = request(
+        w.us,
+        "GET",
+        &format!("/t/acme/_changes?since={}&wait=2000", a.seq),
+        "",
+        &[("Fenec-Read", "replica")],
+    );
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page, "", "an idle tenant's page");
+    let (status, body) = marked(w.us, "acme", "get notes select body", None);
+    assert_eq!(status, 200, "the copy was let be: {body}");
+    assert!(body.contains(r#""a""#), "{body}");
+    w.links[0].heal();
 }
 
 /// A read replica's node without its file -- wiped, or the file deleted by
@@ -2204,6 +2343,41 @@ fn a_read_replica_s_copy_refusing_another_tenant_of_its_name_deletes_itself() {
             .1
             .contains(r#""old""#)
     });
+    // A marked stream open on the copy is a read begun before it refused:
+    // it ends as the copy deletes itself, as the reads after it are
+    // answered 404, and is sent nothing of the new tenant's.
+    let streams: Vec<_> = ["acme", "orphan"]
+        .map(|t| {
+            let (seeded, seed) = std::sync::mpsc::channel();
+            let stream = std::thread::spawn(move || {
+                let mut s = TcpStream::connect(("127.0.0.1", us1)).unwrap();
+                s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+                write!(
+                    s,
+                    "GET /t/{t}/notes/changes HTTP/1.1\r\nHost: x\r\nFenec-Read: replica\r\n\r\n"
+                )
+                .unwrap();
+                let mut heard = String::new();
+                let mut chunk = [0u8; 4096];
+                let mut told = false;
+                loop {
+                    if !told && heard.contains("event: seed") && heard.ends_with("\n\n") {
+                        told = seeded.send(()).is_ok();
+                    }
+                    match s.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => heard.push_str(&String::from_utf8_lossy(&chunk[..n])),
+                    }
+                }
+                drop(seeded);
+                heard
+            });
+            // Its seed in before the tenants go: opened after, it would
+            // be refused, which the reads below hold already.
+            let _ = seed.recv();
+            stream
+        })
+        .into();
     let (status, body) = shard(
         w.primary,
         "DELETE",
@@ -2238,6 +2412,15 @@ fn a_read_replica_s_copy_refusing_another_tenant_of_its_name_deletes_itself() {
         });
         assert_eq!(last.0, 404, "{t}: {}", last.1);
         assert!(!w._nodes[2].dir.join(format!("{t}.follows")).exists());
+    }
+    for (t, stream) in ["acme", "orphan"].into_iter().zip(streams) {
+        let heard = stream.join().unwrap();
+        assert!(
+            heard.contains("event: seed") && heard.contains(r#""old""#),
+            "{t}: {heard}"
+        );
+        assert!(heard.contains("event: error"), "{t}: {heard}");
+        assert!(!heard.contains("another owner's"), "{t}: {heard}");
     }
     let (_, held) = admin(us1, "lineage-copy-us1", "GET", "/_admin/tenants", "");
     assert!(!held.contains("acme") && !held.contains("orphan"), "{held}");
