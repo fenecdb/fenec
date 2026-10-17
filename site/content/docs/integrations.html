@@ -278,9 +278,12 @@ dotnet add package FenecDb</pre>
 <ul>
   <li><b>The same surface in both:</b> a statement and its rows, typed
     rows, writes with the change they left the database at, atomic batches,
-    an idempotency key, a read that waits for a write on a replica, a
-    subscription, the change stream, a tenant, the health check, and a typed
-    error carrying the status.</li>
+    an idempotency key, a read that waits for a write on a replica, reads
+    sent to a tenant's read replica near the client, after its own writes
+    (<code>WithReadsNearest()</code>, <code>ReadsNearest</code>; <a
+    href="sharding.html#read-replicas">Read replicas</a>), a subscription,
+    the change stream, a tenant, the health check, and a typed error
+    carrying the status.</li>
   <li><b>The query builder,</b> as Python's and JavaScript's have it:
     <code>db.From("docs").Where("year", "&gt;=", 2024).Near("embed",
     v).Limit(5)</code>, immutable, ending in <code>Rows</code>,

@@ -84,9 +84,9 @@ const rows = await db.from('articles')
 it — in the browser, in the process, or as one small server — and search
 belongs in it rather than in a second system: an app that keeps its data
 offline, local and semantic search, RAG and agent memory, a service with a
-file per tenant. The scale limit is **the file image fitting in memory**: not
-just the vector arena, all of the records are in memory
-([Limits](https://fenecdb.com/docs/limits)).
+file per tenant, in one region or several. The scale limit is **the file
+image fitting in memory**: not just the vector arena, all of the records are
+in memory ([Limits](https://fenecdb.com/docs/limits)).
 
 **SQLite** when you need relational data, SQL with JOINs, several writers to
 one file and a mature toolchain. Also in very short-lived processes: for a tool that runs
@@ -178,6 +178,21 @@ follows. [Server](https://fenecdb.com/docs/server) ·
 [HTTP endpoint](https://fenecdb.com/docs/http) ·
 [Replication](https://fenecdb.com/docs/replication).
 
+Past one machine, a `--dir` node holds a file per tenant and `fenec-shard`
+routes each request to its tenant's node, gives each tenant a replica on
+another node, and fails a node over on a lease. Nodes have a region and a
+zone: a tenant lives in one region, its replica in another zone of it, and
+a region may keep its own directory, so it leases and fails over its own
+nodes while cut off from the rest. One Cloudflare Worker in front gives
+every tenant one URL, and a tenant's read replica in another region answers
+the reads a client there marks, which would each pay the trip home
+otherwise (Frankfurt to Singapore is 158 ms), never from before that
+client's own write.
+[Tenants and sharding](https://fenecdb.com/docs/sharding) ·
+[Regions](https://fenecdb.com/docs/sharding#regions) ·
+[One URL for every region](https://fenecdb.com/docs/sharding#global-entry) ·
+[Read replicas](https://fenecdb.com/docs/sharding#read-replicas).
+
 **Container.** 2.99 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
@@ -243,7 +258,8 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Agents** | an MCP server (`fenec-server --mcp`, `fenec mcp` over stdio): `schema`, `search` (words, an embedding, or both fused), `query`, `get`, and `write` and a memory (`remember`, `recall`) where asked for, held to the token's rules |
 | **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React, over a database in the page or a synced replica · SDKs for Python, JavaScript, Go and .NET · embedded in Swift, Kotlin and Dart/Flutter apps, live queries as SwiftUI observables, Flows and Streams |
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
-| **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
+| **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment, every tenant of a node over one connection · a file per tenant behind a router, failed over on a lease |
+| **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fenecdb.com/docs/sharding#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fenecdb.com/docs/sharding#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too ([read replicas](https://fenecdb.com/docs/sharding#read-replicas)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fenec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own |
 | **Runtime size** | 294 KB gzip wasm + 59 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
@@ -272,9 +288,9 @@ query; it is not a join and is not trying to be one.
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state, a schema declared in code |
 | [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
-| [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
+| [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE, a read marked for a replica |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
-| [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment |
+| [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment, every tenant of a node archived over one connection |
 | [Integrations](https://fenecdb.com/docs/integrations) | LangChain and LlamaIndex vector stores over HTTP, `useLiveQuery` for React, the Go and .NET SDKs |
 | [Agents and MCP](https://fenecdb.com/docs/mcp) | An agent's search and memory over the Model Context Protocol: `fenec-server --mcp` and `fenec mcp` for Claude Code, Cursor and Claude Desktop, each tool held to the token's rules, answers past a bound refused rather than cut |
 | [Monitoring](https://fenecdb.com/docs/monitoring) | `/_metrics` in Prometheus's format, the Grafana dashboard in `monitoring/`, the slow-statement log and a request id in every line |
@@ -285,7 +301,7 @@ query; it is not a join and is not trying to be one.
 | [Job queues](https://fenecdb.com/docs/queues) | Claims under a lease, acks, retries with a backoff, dead letters, delays and priorities, and a claim held at the server until a job comes |
 | [Points and distances](https://fenecdb.com/docs/geo) | A `geo` field: distances in metres, rows within a radius or a box, the nearest first, positions that expire |
 | [Analytics and market data](https://fenecdb.com/docs/analytics) | Rollups by the minute, distinct users, funnels and retention over events; bars, VWAP and the latest price over ticks |
-| [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places and moves them |
+| [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places, moves and fails them over; regions and zones, a region that keeps its own directory, one URL for every region, and read replicas near the client |
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |

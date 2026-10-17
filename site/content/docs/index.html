@@ -68,6 +68,10 @@ to.</p>
     <p>A local replica that reads without the network and writes optimistically.</p></li>
   <li><a href="server.html">Server</a>
     <p>Running <code>fenec-server</code>: flags, tokens, durability, limits, containers.</p></li>
+  <li><a href="replication.html">Replication</a>
+    <p>Read replicas, promotion, archives and backups restored to a moment, every tenant of a node archived at once.</p></li>
+  <li><a href="sharding.html">Tenants and sharding</a>
+    <p>A file per tenant behind a router that fails nodes over; regions, one URL for all of them, reads near the client.</p></li>
   <li><a href="integrations.html">Integrations</a>
     <p>LangChain, LlamaIndex, the Vercel AI SDK and React.</p></li>
   <li><a href="serverless.html">Serverless and Cloudflare</a>
@@ -106,7 +110,7 @@ should live.</p>
 <ul>
   <li><b>One writer.</b> Many readers, but one write or batch at a time.</li>
   <li><b>No SQL and no JOIN.</b> Every client speaks FenecQL, over HTTP or in process.</li>
-  <li><b>No nested objects or decimals.</b> Keep fields flat; store money as cents.</li>
+  <li><b>No decimals.</b> Store money as cents.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -124,11 +128,13 @@ than a roadmap.</p>
     uncorrelated <code>in (get …)</code>.</li>
   <li><b>No SQL.</b> FenecQL is the one language, in the page, in Rust and
     over HTTP.</li>
-  <li><b>No schema migration</b> and no multi-writer replication.</li>
+  <li><b>No multi-writer replication,</b> and no change of a field's type in
+    place: it would rewrite every document under the write lock.</li>
   <li><b>No decimal type.</b> <code>float</code> is binary floating point and
     unfit for money; the answer is an <code>int</code> in cents.</li>
-  <li><b>No nested objects.</b> A list is homogeneous and an object value is
-    refused. A field you want to filter on should be a field.</li>
+  <li><b>Objects only in a <code>json</code> field.</b> A typed field refuses
+    one and a list holds one type; a <code>json</code> field holds any value
+    JSON does, and a path reads into it.</li>
 </ul>
 
 <p>The full accounting, including every hard-coded ceiling, is in
