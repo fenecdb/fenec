@@ -80,14 +80,20 @@ the statement from 0. On a tenant node a quota names itself (`.quota`, and
 `retryAfter`, the seconds to wait, as a tenant being moved or failed over
 answers its writes 503. `run(text, params:, idempotencyKey:)` and
 `withIdempotencyKey(key)`, a copy whose every write carries the key, make a
-write once however often it is sent.
+write once however often it is sent. `Fenec.connect(url:token:reads:
+.nearest)` sends the builder's reads, and an `asRead()` copy's, to the
+tenant's read replica near the app through a fenec-shard router
+(`Fenec-Read: replica`), each after the furthest position an answer from
+home named to the connection or any copy of it (`Fenec-After`,
+`Fenec-History`); writes go home.
 
 ## Building and testing
 
 `make swift-test` builds the XCFramework's macOS slice for this machine
 (`integrations/swift/build-xcframework.sh --macos`) and runs `swift test`
 at the repository's root, where `Package.swift` is (the sync tests start a
-`fenec-server` it builds, macOS alone) -- SwiftPM fetches a
+`fenec-server` it builds, and the read-routing tests `fenec-shard` routers
+in front of two, macOS alone) -- SwiftPM fetches a
 package by its repository, so the manifest lives there. It takes the
 XCFramework from `integrations/swift/build/` when it is there and from the
 release's download otherwise. `build-xcframework.sh` alone builds every

@@ -24,6 +24,6 @@ export 'src/fenec.dart'
         SchemaRefusal,
         SchemaException,
         FenecSchema;
-export 'src/remote.dart' show BatchAnswer, FenecRemote;
+export 'src/remote.dart' show BatchAnswer, FenecRemote, Reads;
 export 'src/live.dart' show LiveQueries;
 export 'src/query.dart' show Query, Cond, Computed, SortKey, Statement;

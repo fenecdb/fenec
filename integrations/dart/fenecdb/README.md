@@ -70,6 +70,11 @@ tenant node a quota names itself (`FenecCode.quota`, and `quota`):
 failed over answers its writes 503.
 `withIdempotencyKey(key)` is a copy whose every write -- `run`, the
 builder's -- carries the key, so it lands once however often it is sent.
+`Fenec.connect(url, token:, reads: Reads.nearest)` sends the builder's
+reads, and an `asRead()` copy's, to the tenant's read replica near the app
+through a fenec-shard router (`Fenec-Read: replica`), each after the
+furthest position an answer from home named to the connection or any copy of
+it (`Fenec-After`, `Fenec-History`); writes go home.
 
 The query builder makes the text the JavaScript builder makes of the same
 chain, to the byte: `integrations/builder-golden.json` holds the chains,

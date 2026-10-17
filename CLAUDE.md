@@ -29,7 +29,7 @@ make ffi           # the native library for apps (crates/fenec-ffi) for this mac
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
 make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
 make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
-make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server), then again on one cooperative thread
+make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server, read-routing tests fenec-shard routers too), then again on one cooperative thread
 make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux (Docker unless Linux with Gradle)
 make dart-test     # the Dart package against the library for this machine, and the Flutter plugin where Flutter is installed
 make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGet) as a release publishes them, installed and used
@@ -1502,8 +1502,12 @@ it had left, which the move then deleted. A failover or a move
 it makes wakes the look (`follow_soon`) rather than call the replicas'
 nodes. Following through a router URL instead was rejected: a stream to a
 fenced but living old primary never ends, and a deployment of one directory
-records no router's URL. Not done: reads of a bounded staleness (a decision,
-not a detail), Swift, Kotlin and Dart, live queries and subscriptions near.
+records no router's URL. The Swift, Kotlin and Dart remotes mark reads as
+Go's and .NET's clients do (`reads: .nearest`, `Reads.NEAREST`,
+`Reads.nearest`, and `asRead()`), the position shared by every copy, each
+held to a real global router, its standby near the replica and two nodes in
+its own tests. Not done: reads of a bounded staleness (a decision, not a
+detail), live queries and subscriptions near.
 `tests/read_replicas.rs` holds a marked read answered with the rows only the
 replica held and while home is out of reach, a read after the client's write
 going home past the wait, a failover onto the replica of its own and a move

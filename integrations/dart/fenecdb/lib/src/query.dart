@@ -506,6 +506,8 @@ String _textOf(Object? v, String what) =>
 class Query {
   final String collection;
   final Exec? _exec;
+  // What runs the reads where they go elsewhere than the writes; null, _exec.
+  final Exec? _read;
   final List<Object>? _project; // each a name or a Computed
   final bool _aggregate;
   final List<Object>? _group; // each a name or a Computed
@@ -528,6 +530,7 @@ class Query {
 
   Query._(this.collection,
       {Exec? exec,
+      Exec? read,
       List<Object>? project,
       bool aggregate = false,
       List<Object>? group,
@@ -545,6 +548,7 @@ class Query {
       List<_Mark> marks = const [],
       List<_Facet> facets = const []})
       : _exec = exec,
+        _read = read,
         _project = project,
         _aggregate = aggregate,
         _group = group,
@@ -571,6 +575,7 @@ class Query {
 
   Query _with({
     Object? exec = _keep,
+    Object? read = _keep,
     Object? project = _keep,
     bool? aggregate,
     Object? group = _keep,
@@ -590,6 +595,7 @@ class Query {
   }) =>
       Query._(collection,
           exec: identical(exec, _keep) ? _exec : exec as Exec?,
+          read: identical(read, _keep) ? _read : read as Exec?,
           project: identical(project, _keep) ? _project : project as List<Object>?,
           aggregate: aggregate ?? _aggregate,
           group: identical(group, _keep) ? _group : group as List<Object>?,
@@ -607,8 +613,11 @@ class Query {
           marks: marks ?? _marks,
           facets: facets ?? _facets);
 
-  /// The query bound to whatever runs a text and its parameters.
-  Query bind(Exec exec) => _with(exec: exec);
+  /// The query bound to whatever runs a text and its parameters -- and,
+  /// given [read], its reads ([rows], [answer], [count], [first], [explain])
+  /// to that: a connection reading near hands its reads to a read replica
+  /// near it, its writes home (`Reads.nearest`).
+  Query bind(Exec exec, {Exec? read}) => _with(exec: exec, read: read);
 
   /// Every collection the query reads -- its own and each lookup's -- or null
   /// when a `raw` fragment may read one more: a live query runs again when
@@ -1182,8 +1191,10 @@ class Query {
 
   // ------------------------------------------------------------- running
 
-  Future<Answer> _run(Statement s) {
-    final exec = _exec;
+  // A statement through what the query is bound to: a read -- a `get`, an
+  // `explain` -- through its reads' where it has one.
+  Future<Answer> _run(Statement s, {bool read = false}) {
+    final exec = read ? _read ?? _exec : _exec;
     if (exec == null) {
       throw _refuse('query is not bound to a connection: use db.from(...) (toFenecQL() if you only want the text)');
     }
@@ -1192,11 +1203,11 @@ class Query {
 
   /// Runs the query and hands back its rows -- with what [facet] counted
   /// as their [Rows.facets].
-  Future<Rows> rows() async => (await _run(toFenecQL())).rows;
+  Future<Rows> rows() async => (await _run(toFenecQL(), read: true)).rows;
 
   /// Runs the query and hands back its whole answer: the rows, their
   /// columns, and the facets beside them.
-  Future<Answer> answer() => _run(toFenecQL());
+  Future<Answer> answer() => _run(toFenecQL(), read: true);
 
   /// The first row with `limit 1`, or null.
   Future<Map<String, Object?>?> first() async {
@@ -1213,7 +1224,7 @@ class Query {
   /// The path the query took, a line a step; the query runs to tell.
   Future<List<String>> explain() async {
     final s = toFenecQL();
-    final r = await _run((text: 'explain ${s.text}', params: s.params));
+    final r = await _run((text: 'explain ${s.text}', params: s.params), read: true);
     return [for (final row in r.rows) row['plan'] as String? ?? ''];
   }
 

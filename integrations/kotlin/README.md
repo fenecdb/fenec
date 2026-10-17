@@ -82,13 +82,19 @@ and `"write_bytes"` answer 429 with `retryAfter`, the seconds to wait, as a
 tenant being moved or failed over answers its writes 503. `runList(text, params,
 idempotencyKey = id)` and `withIdempotencyKey(key)`, a copy whose every
 write carries the key, make a write once however often it is sent.
+`Fenec.connect(url, token, reads = FenecRemote.Reads.NEAREST)` sends the
+builder's reads, and an `asRead()` copy's, to the tenant's read replica near
+the app through a fenec-shard router (`Fenec-Read: replica`), each after the
+furthest position an answer from home named to the connection or any copy of
+it (`Fenec-After`, `Fenec-History`); writes go home.
 
 ## Building and testing
 
 `make kotlin-test` builds the native library for Linux with its JNI
 functions and runs the JVM tests under Gradle -- the engine, the builder
 over every case of `integrations/builder-golden.json`, live queries, a
-replica against a `fenec-server` the tests start, kill and start again --
+replica against a `fenec-server` the tests start, kill and start again,
+reads near a read replica behind `fenec-shard` routers --
 in containers unless this is Linux with Gradle and Java.
 `integrations/kotlin/build-aar.sh` builds the AAR with the NDK for
 arm64-v8a, armeabi-v7a and x86_64 (`ANDROID_HOME`, `ANDROID_NDK_HOME`).

@@ -715,11 +715,12 @@ jobs:
         run: integrations/swift/build-xcframework.sh --dynamic --zip
 
       # Package.swift takes the XCFramework just built; the sync tests
-      # start a fenec-server, kill it and start it again.
+      # start a fenec-server, kill it and start it again, and the
+      # read-routing tests put fenec-shard routers in front of two.
       - name: Swift (macOS)
         timeout-minutes: 20
         run: |
-          cargo build -p fenec-server
+          cargo build -p fenec-server -p fenec-shard
           swift test
 
       # The same tests with Swift's cooperative pool cut to one thread: a

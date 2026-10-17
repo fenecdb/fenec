@@ -526,6 +526,8 @@ class Query private constructor(private val s: State) {
     private data class State(
         val collection: String,
         val exec: (suspend (String, List<Any?>) -> Answer)? = null,
+        // What runs the reads where they go elsewhere than the writes; null, exec.
+        val read: (suspend (String, List<Any?>) -> Answer)? = null,
         val project: List<Any>? = null, // each a name or a Computed
         val aggregate: Boolean = false,
         val group: List<Any>? = null, // each a name or a Computed
@@ -553,7 +555,16 @@ class Query private constructor(private val s: State) {
     val collection: String get() = s.collection
 
     /** The query bound to whatever runs a text and its parameters. */
-    fun bind(exec: suspend (String, List<Any?>) -> Answer): Query = Query(s.copy(exec = exec))
+    fun bind(exec: suspend (String, List<Any?>) -> Answer): Query = Query(s.copy(exec = exec, read = null))
+
+    /**
+     * The query bound to what runs its writes, [exec], and what runs its
+     * reads -- [rows], [answer], [count], [first], [explain] -- [read]: a
+     * connection reading near hands its reads to a read replica near it,
+     * its writes home ([FenecRemote.Reads]).
+     */
+    fun bind(exec: suspend (String, List<Any?>) -> Answer, read: suspend (String, List<Any?>) -> Answer): Query =
+        Query(s.copy(exec = exec, read = read))
 
     /**
      * Every collection the query reads -- its own and each lookup's -- or
@@ -1126,19 +1137,21 @@ class Query private constructor(private val s: State) {
 
     // ---------------------------------------------------------------- running
 
-    private suspend fun run(st: Statement): Answer {
-        val exec = s.exec ?: throw refuse("query is not bound to a connection: use db.from(...) (toFenecQL() if you only want the text)")
+    /** A statement through what the query is bound to: a read -- a `get`, an `explain` -- through its reads' where it has one. */
+    private suspend fun run(st: Statement, read: Boolean = false): Answer {
+        val exec = (if (read) s.read ?: s.exec else s.exec)
+            ?: throw refuse("query is not bound to a connection: use db.from(...) (toFenecQL() if you only want the text)")
         return exec(st.text, st.params)
     }
 
     /** Runs the query and hands back its rows, what [facet] counted as their [Rows.facets]. */
-    suspend fun rows(): Rows = run(toFenecQL()).page
+    suspend fun rows(): Rows = run(toFenecQL(), read = true).page
 
     /**
      * Runs the query and hands back its whole answer: the rows, and what
      * [facet] counted beside them as [Answer.facets].
      */
-    suspend fun answer(): Answer = run(toFenecQL())
+    suspend fun answer(): Answer = run(toFenecQL(), read = true)
 
     /** The first row with `limit 1`, or null. */
     suspend fun first(): Row? = limit(1).rows().firstOrNull()
@@ -1149,7 +1162,7 @@ class Query private constructor(private val s: State) {
     /** The path the query took, a line a step; the query runs to tell. */
     suspend fun explain(): List<String> {
         val st = toFenecQL()
-        return run(Statement("explain ${st.text}", st.params)).rows.map { it.string("plan") ?: "" }
+        return run(Statement("explain ${st.text}", st.params), read = true).rows.map { it.string("plan") ?: "" }
     }
 
     /**

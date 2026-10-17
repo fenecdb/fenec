@@ -290,8 +290,12 @@ class Fenec {
       _openSynced(url: url, token: token, shapes: shapes, path: path, flags: flags, tokenProvider: tokenProvider);
 
   /// A fenec-server over HTTP, with no local file: every query goes to the
-  /// server, through the same builder ([FenecRemote]).
-  static FenecRemote connect(String url, {String? token}) => FenecRemote(url, token: token);
+  /// server, through the same builder ([FenecRemote]). With `reads:
+  /// Reads.nearest` the builder's reads go to the tenant's read replica near
+  /// the app, where a fenec-shard router has one, after the app's own writes
+  /// ([Reads]).
+  static FenecRemote connect(String url, {String? token, Reads reads = Reads.home}) =>
+      FenecRemote(url, token: token, reads: reads);
 
   /// A database in memory alone.
   static Future<Fenec> memory() async {

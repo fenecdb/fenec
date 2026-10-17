@@ -36,11 +36,13 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
-    // The native library, the golden file and the fenec-server the sync
-    // tests start, as `make kotlin-test` passes them.
+    // The native library, the golden file, the fenec-server the sync tests
+    // start and the fenec-shard the read-routing tests put in front of it,
+    // as `make kotlin-test` passes them.
     System.getenv("FENEC_LIBRARY")?.let { systemProperty("fenec.library", it) }
     System.getenv("FENEC_GOLDEN")?.let { systemProperty("fenec.golden", it) }
     System.getenv("FENEC_SERVER")?.let { systemProperty("fenec.server", it) }
+    System.getenv("FENEC_SHARD")?.let { systemProperty("fenec.shard", it) }
     // A failure named in the log, with its assertion and stack: the report
     // is an HTML file on the runner. run-tests.sh runs Gradle with `-q`,
     // which logs at the quiet level, and that level's settings are its

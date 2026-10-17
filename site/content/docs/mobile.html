@@ -512,6 +512,25 @@ nothing, a worker's claim waiting there for a job
 (<a href="/docs/queues#wait">Waiting for a job</a>); cancelling the task or
 the coroutine gives it up.</p>
 
+<p>An app far from its tenant's home reads near itself where the tenant has
+a <a href="/docs/sharding#read-replicas">read replica</a> in the app's
+region: connected through that region's router with reads nearest, the
+builder's reads, and an <code>asRead()</code> copy's requests, are answered
+by the replica there, each after the furthest position an answer from home
+named to this connection -- its change and its history, shared by every
+copy -- so the app never reads older than it wrote; writes go home.</p>
+
+<pre data-lang="swift">let db = Fenec.connect(url: "https://ap.example.com/t/acme", token: jwt, reads: .nearest)
+try await db.from("orders").insert(["number": "SG-1"] as Value)   // home, in eu
+let mine = try await db.from("orders").rows()                      // ap's replica, after that write
+let n = try await db.asRead().query("get orders count")           // a text that only reads</pre>
+
+<p>Kotlin's is <code>Fenec.connect(url, token = jwt, reads =
+FenecRemote.Reads.NEAREST)</code>, Dart's <code>Fenec.connect(url, token:
+jwt, reads: Reads.nearest)</code>, and all three have
+<code>asRead()</code>. A write sent through <code>asRead()</code> is
+refused (status 403), never landed.</p>
+
 <h2 id="file">Where the file lives</h2>
 
 <p>Anywhere the app may write. On iOS the app's Application Support
