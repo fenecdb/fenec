@@ -504,13 +504,33 @@ try await db.withIdempotencyKey(orderID).from("orders").insert(order)</pre>
 <code>runList(text, params, idempotencyKey = id)</code>, Dart's
 <code>db.batch([...], idempotencyKey: id)</code>; all three have
 <code>withIdempotencyKey(key)</code>, a copy whose every write -- the
-builder's too -- carries the key, and <code>seq</code>, the change the last
-write left the server at. <code>withWait</code> -- Swift's in seconds,
+builder's too -- carries the key, and <code>seq</code>, the furthest change
+a write left the server at, through the connection or any copy of it.
+<code>withWait</code> -- Swift's in seconds,
 Kotlin's in milliseconds, Dart's a <code>Duration</code> -- is a copy whose
 <code>set</code>s and <code>del</code>s the server holds while they write
 nothing, a worker's claim waiting there for a job
 (<a href="/docs/queues#wait">Waiting for a job</a>); cancelling the task or
 the coroutine gives it up.</p>
+
+<p>An app far from its tenant's home reads near itself where the tenant has
+a <a href="/docs/sharding#read-replicas">read replica</a> in the app's
+region: connected through that region's router with reads nearest, the
+builder's reads, and an <code>asRead()</code> copy's requests, are answered
+by the replica there, each after the furthest position an answer from home
+named to this connection -- its change and its history, shared by every
+copy -- so the app never reads older than it wrote; writes go home.</p>
+
+<pre data-lang="swift">let db = Fenec.connect(url: "https://ap.example.com/t/acme", token: jwt, reads: .nearest)
+try await db.from("orders").insert(["number": "SG-1"] as Value)   // home, in eu
+let mine = try await db.from("orders").rows()                      // ap's replica, after that write
+let n = try await db.asRead().query("get orders count")           // a text that only reads</pre>
+
+<p>Kotlin's is <code>Fenec.connect(url, token = jwt, reads =
+FenecRemote.Reads.NEAREST)</code>, Dart's <code>Fenec.connect(url, token:
+jwt, reads: Reads.nearest)</code>, and all three have
+<code>asRead()</code>. A write sent through <code>asRead()</code> is
+refused (status 403), never landed.</p>
 
 <h2 id="file">Where the file lives</h2>
 

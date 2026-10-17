@@ -9,9 +9,10 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 "$ROOT/integrations/swift/build-xcframework.sh" --macos
-# The server the sync tests start, kill and start again.
+# The server the sync tests start, kill and start again, and the routers
+# the read-routing tests put in front of it.
 CARGO=${CARGO:-$(test -x "$HOME/.cargo/bin/cargo" && echo "$HOME/.cargo/bin/cargo" || echo cargo)}
-(cd "$ROOT" && "$CARGO" build -q -p fenec-server)
+(cd "$ROOT" && "$CARGO" build -q -p fenec-server -p fenec-shard)
 cd "$ROOT"
 DEV=$(xcode-select -p 2>/dev/null || true)
 case "$DEV" in

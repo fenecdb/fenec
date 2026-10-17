@@ -13,18 +13,11 @@
         /// `acme`; nil for a server over a file.
         private let tenantRows: Int?
         private(set) var port = 0
-        private var process: Process?
-        private var ended: Once<Bool>?
+        private var daemon: Daemon?
 
         var url: String { "http://127.0.0.1:\(port)" + (tenantRows == nil ? "" : "/t/acme") }
 
-        static var binary: String {
-            if let b = ProcessInfo.processInfo.environment["FENEC_SERVER"] { return b }
-            let root = URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .deletingLastPathComponent().deletingLastPathComponent()
-            return root.appendingPathComponent("target/debug/fenec-server").path
-        }
+        static var binary: String { Daemon.binary("fenec-server", env: "FENEC_SERVER") }
 
         /// A server over a file of its own, holding `tasks` -- or, given
         /// `tenantRows`, a tenant node (`--dir`) holding each tenant to that
@@ -50,26 +43,83 @@
         }
 
         /// Started on `port`, 0 for one of its own; waits for it to say where.
-        ///
-        /// Nothing here holds a thread of Swift's cooperative pool, which has
-        /// a thread a core -- three on GitHub's macOS runner. Its stderr is
-        /// read on a thread of its own until it closes, and its end is
-        /// awaited through `terminationHandler`. A kill was reaped with
-        /// `waitUntilExit()`, which waits in the calling thread's run loop:
-        /// called from a task on a process with no `terminationHandler`,
-        /// it now and then never came back -- a program doing only that hung
-        /// within 200 kills in three runs of four, the pool cut to one
-        /// thread or not -- and the run hung for hours. And a
-        /// `readabilityHandler` is called again and again once its pipe has
-        /// ended: each server killed left a thread spinning for the rest of
-        /// the run, five by the last tests.
         func start(port: Int) async throws {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: Server.binary)
-            p.arguments =
+            let d = try await Daemon.start(
+                Server.binary,
                 ["--http", "127.0.0.1:\(port)", "--sync", "always"]
-                + (tenantRows.map { ["--dir", file, "--admin-token", "adm", "--tenant-max-rows", "\($0)"] }
-                    ?? ["--file", file])
+                    + (tenantRows.map { ["--dir", file, "--admin-token", "adm", "--tenant-max-rows", "\($0)"] }
+                        ?? ["--file", file]))
+            daemon = d
+            self.port = d.port
+        }
+
+        /// Killed, as a crash would: no checkpoint, no goodbye. Returns once
+        /// it is gone, its file and its port let go of.
+        func kill() async {
+            let d = daemon
+            daemon = nil
+            await d?.kill()
+        }
+
+        /// Started again over its file, on the port it had.
+        func restart() async throws { try await start(port: port) }
+
+        /// Killed and not waited for: what a test's `defer` can do.
+        func stop() {
+            daemon?.stop()
+            daemon = nil
+        }
+
+        /// A statement on the server.
+        @discardableResult
+        func run(_ text: String) async throws -> Answer {
+            try await Fenec.connect(url: url).run(text, params: [])
+        }
+    }
+
+    /// A server binary started on a port of its own -- fenec-server's,
+    /// fenec-shard's -- found by the address its `listening on:` line
+    /// names, and killed.
+    ///
+    /// Nothing here holds a thread of Swift's cooperative pool, which has
+    /// a thread a core -- three on GitHub's macOS runner. Its stderr is
+    /// read on a thread of its own until it closes, and its end is
+    /// awaited through `terminationHandler`. A kill was reaped with
+    /// `waitUntilExit()`, which waits in the calling thread's run loop:
+    /// called from a task on a process with no `terminationHandler`,
+    /// it now and then never came back -- a program doing only that hung
+    /// within 200 kills in three runs of four, the pool cut to one
+    /// thread or not -- and the run hung for hours. And a
+    /// `readabilityHandler` is called again and again once its pipe has
+    /// ended: each server killed left a thread spinning for the rest of
+    /// the run, five by the last tests.
+    final class Daemon: @unchecked Sendable {
+        let port: Int
+        private let process: Process
+        private let ended: Once<Bool>
+
+        private init(_ process: Process, _ ended: Once<Bool>, port: Int) {
+            self.process = process
+            self.ended = ended
+            self.port = port
+        }
+
+        /// `name` as `cargo build` made it at the repository's root, or as
+        /// `env` names it.
+        static func binary(_ name: String, env: String) -> String {
+            if let b = ProcessInfo.processInfo.environment[env] { return b }
+            let root = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+            return root.appendingPathComponent("target/debug/\(name)").path
+        }
+
+        /// Started with `args`; waits for it to say where it listens.
+        static func start(_ binary: String, _ args: [String]) async throws -> Daemon {
+            let name = URL(fileURLWithPath: binary).lastPathComponent
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: binary)
+            p.arguments = args
             let err = Pipe()
             p.standardError = err
             p.standardOutput = FileHandle.nullDevice
@@ -77,8 +127,6 @@
             p.terminationHandler = { _ in exit.set(true) }
             let listening = Once<Result<Int, FenecError>>()
             try p.run()
-            process = p
-            ended = exit
             let reader = err.fileHandleForReading
             let thread = Thread {
                 var text = ""
@@ -98,48 +146,32 @@
                     }
                 }
                 try? reader.close()
-                listening.set(.failure(FenecError(code: .io, message: "fenec-server did not start: \(text)")))
+                listening.set(.failure(FenecError(code: .io, message: "\(name) did not start: \(text)")))
             }
             thread.start()
             let timeout = Task {
                 try await Task.sleep(nanoseconds: 20_000_000_000)
-                listening.set(.failure(FenecError(code: .io, message: "fenec-server did not say where in 20 s")))
+                listening.set(.failure(FenecError(code: .io, message: "\(name) did not say where in 20 s")))
             }
             defer { timeout.cancel() }
             switch await listening.value() {
-            case .success(let n): self.port = n
+            case .success(let n): return Daemon(p, exit, port: n)
             case .failure(let e):
-                await kill()
+                Darwin.kill(p.processIdentifier, SIGKILL)
+                _ = await exit.value()
                 throw e
             }
         }
 
         /// Killed, as a crash would: no checkpoint, no goodbye. Returns once
-        /// it is gone, its file and its port let go of.
+        /// it is gone, its files and its port let go of.
         func kill() async {
-            guard let p = process, let exit = ended else { return }
-            Darwin.kill(p.processIdentifier, SIGKILL)
-            process = nil
-            ended = nil
-            _ = await exit.value()
+            Darwin.kill(process.processIdentifier, SIGKILL)
+            _ = await ended.value()
         }
-
-        /// Started again over its file, on the port it had.
-        func restart() async throws { try await start(port: port) }
 
         /// Killed and not waited for: what a test's `defer` can do.
-        func stop() {
-            guard let p = process else { return }
-            Darwin.kill(p.processIdentifier, SIGKILL)
-            process = nil
-            ended = nil
-        }
-
-        /// A statement on the server.
-        @discardableResult
-        func run(_ text: String) async throws -> Answer {
-            try await Fenec.connect(url: url).run(text, params: [])
-        }
+        func stop() { Darwin.kill(process.processIdentifier, SIGKILL) }
     }
 
     /// A value set once, which tasks wait for without holding a thread.

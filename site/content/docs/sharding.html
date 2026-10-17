@@ -1811,8 +1811,19 @@ and <code>{ read: true }</code> on <code>run</code> and <code>batch</code>
 (a batch of builder queries alone is marked on its own); Python
 <code>Client(url, reads="nearest")</code> and <code>read=True</code>; Go
 <code>fenecdb.WithReadsNearest()</code> and <code>db.Read()</code>; .NET
-<code>ReadsNearest = true</code> and <code>db.AsRead()</code>. Live queries
-and subscriptions read home. Swift, Kotlin and Dart do not mark reads yet.</p>
+<code>ReadsNearest = true</code> and <code>db.AsRead()</code>; Swift
+<code>Fenec.connect(url:reads: .nearest)</code>, Kotlin
+<code>Fenec.connect(url, reads = FenecRemote.Reads.NEAREST)</code> and Dart
+<code>Fenec.connect(url, reads: Reads.nearest)</code>, each with
+<code>db.asRead()</code> (<a href="mobile.html#connect">Without a
+file</a>). Each marks the builder's reads and the copy's requests alone,
+and keeps one position for every copy of the client it makes. A stream is
+not held for <code>Fenec-After</code> yet: JavaScript's live queries and
+subscriptions go home unmarked, and a subscription opened through a Go
+<code>Read()</code> or a .NET <code>AsRead()</code> copy is marked and may be
+answered by the read replica as it stands, behind the client's own writes.
+A synced replica's streams, in the browser and in the native libraries, go
+home; Python's client and the Swift, Kotlin and Dart remotes open none.</p>
 
 <p><b>What it costs.</b> A marked read through the router of the replica's
 region costs what one sent home does: 67.0 to 67.8 µs p50 against 66.2 to

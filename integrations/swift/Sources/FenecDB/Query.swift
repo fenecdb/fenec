@@ -654,6 +654,9 @@ public struct Query: Sendable {
     var marks: [Mark] = []
     var facets: [(field: String, top: Int?, ranges: [String]?, disjunctive: Bool)] = []
     var exec: Exec?
+    /// What runs the query's reads where they go elsewhere than its writes
+    /// (`bind(_:read:)`); nil, `exec`.
+    var readExec: Exec?
 
     init(collection: String) { self.collection = collection }
 
@@ -666,6 +669,21 @@ public struct Query: Sendable {
     public func bind(_ exec: @escaping @Sendable (String, [Value]) async throws -> Answer) -> Query {
         var q = self
         q.exec = exec
+        q.readExec = nil
+        return q
+    }
+
+    /// The query bound to what runs its writes, `exec`, and what runs its
+    /// reads -- `rows`, `answer`, `count`, `first`, `explain` -- `read`: a
+    /// connection reading near hands its reads to a read replica near it,
+    /// its writes home (`FenecRemote.Reads`).
+    public func bind(
+        _ exec: @escaping @Sendable (String, [Value]) async throws -> Answer,
+        read: @escaping @Sendable (String, [Value]) async throws -> Answer
+    ) -> Query {
+        var q = self
+        q.exec = exec
+        q.readExec = read
         return q
     }
 
@@ -1334,8 +1352,10 @@ public struct Query: Sendable {
 
     // -------------------------------------------------------------- running
 
-    private func run(_ statement: (text: String, params: [Value])) async throws -> Answer {
-        guard let exec else {
+    /// A statement through what the query is bound to: a read -- a `get`,
+    /// an `explain` -- through its reads' executor where it has one.
+    private func run(_ statement: (text: String, params: [Value]), read: Bool = false) async throws -> Answer {
+        guard let exec = read ? readExec ?? exec : exec else {
             throw FenecError.builder(
                 "query is not bound to a connection: use db.from(...) (toFenecQL() if you only want the text)")
         }
@@ -1343,11 +1363,11 @@ public struct Query: Sendable {
     }
 
     /// Runs the query and hands back its rows.
-    public func rows() async throws -> [Row] { try await run(toFenecQL()).rows }
+    public func rows() async throws -> [Row] { try await run(toFenecQL(), read: true).rows }
 
     /// Runs the query and hands back its whole answer: the rows, and what
     /// `facet` counted beside them (`.facets`).
-    public func answer() async throws -> Answer { try await run(toFenecQL()) }
+    public func answer() async throws -> Answer { try await run(toFenecQL(), read: true) }
 
     /// Runs the query and decodes its rows as `T`, field by field.
     public func rows<T: Decodable>(as type: T.Type) async throws -> [T] { try decoded(try await rows()) }
@@ -1367,7 +1387,7 @@ public struct Query: Sendable {
     /// The path the query took, a line a step; the query runs to tell.
     public func explain() async throws -> [String] {
         let (text, params) = try toFenecQL()
-        return try await run(("explain \(text)", params)).rows.map { $0["plan"]?.string ?? "" }
+        return try await run(("explain \(text)", params), read: true).rows.map { $0["plan"]?.string ?? "" }
     }
 
     /// Puts a document, or a list of them: how many it wrote, which with
