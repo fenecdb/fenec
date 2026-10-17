@@ -180,22 +180,7 @@ impl Pool {
     }
 
     fn connect(&self, addr: &str, within: Duration, write: Duration) -> io::Result<TcpStream> {
-        use std::net::ToSocketAddrs;
-        let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
-        for a in addr.to_socket_addrs()? {
-            match TcpStream::connect_timeout(&a, within) {
-                Ok(s) => {
-                    let _ = s.set_nodelay(true);
-                    // Once a connection: the same for every request but a
-                    // read replica's, which sets its own and is tracked
-                    // with the connection (`Idle::write_timeout`).
-                    s.set_write_timeout(Some(write))?;
-                    return Ok(s);
-                }
-                Err(e) => last = e,
-            }
-        }
-        Err(last)
+        dial(addr, within, write)
     }
 
     /// Sends a request and reads the response head. `headers` must not
@@ -602,6 +587,27 @@ fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
         })
 }
 
+/// A connection to `addr`, each address it resolves to tried within
+/// `within`, its writes bounded by `write`.
+fn dial(addr: &str, within: Duration, write: Duration) -> io::Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+    let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
+    for a in addr.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&a, within) {
+            Ok(s) => {
+                let _ = s.set_nodelay(true);
+                // Once a connection: the same for every request but a read
+                // replica's, which sets its own and is tracked with the
+                // connection (`Idle::write_timeout`).
+                s.set_write_timeout(Some(write))?;
+                return Ok(s);
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 fn timed_out(e: &io::Error) -> bool {
     matches!(
         e.kind(),
@@ -869,6 +875,42 @@ impl Answer {
         self.reader.get_ref().set_read_timeout(None)?;
         Ok(self.reader)
     }
+}
+
+/// Whether the node at `addr` answers `GET /_health` within `within`, on a
+/// connection of its own, made for the question and closed after, as a
+/// client new to the node reaches it. Any status is an answer: a node
+/// answers it on the connection's own thread before any token, lock or
+/// routing, so one that answers at all takes connections and runs them
+/// ([`crate::readers::HEALTH_WAIT`]). Asked on a thread of its own, so the
+/// name's resolution, which `within` does not bound, holds up no request.
+pub fn answers_health(addr: &str, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    let Ok(mut s) = dial(addr, within, within) else {
+        return false;
+    };
+    let asked = format!("GET /_health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if s.write_all(asked.as_bytes()).is_err() {
+        return false;
+    }
+    // An answer's first bytes, each read bounded by what is left.
+    let mut head = [0u8; 5];
+    let mut got = 0;
+    while got < head.len() {
+        let Ok(left) = left_until(deadline) else {
+            return false;
+        };
+        if s.set_read_timeout(Some(left)).is_err() {
+            return false;
+        }
+        match s.read(&mut head[got..]) {
+            Ok(0) => return false,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    &head == b"HTTP/"
 }
 
 /// The `len` bytes of a body off `reader`, `before` run ahead of each read,

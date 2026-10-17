@@ -108,10 +108,13 @@ pub struct Config {
     /// its `Fenec-After` asks for (`--replica-timeout`): the connect, every
     /// write of the request and every read of its answer's head. One that
     /// does not is let be for [`readers::RESTING`] -- its node, not
-    /// reached, or its tenant's copy alone, its read slower than this, and
-    /// the node once a second tenant's copy is -- and the read goes home:
-    /// at `upstream_timeout` a hung replica's node held each marked read a
-    /// minute.
+    /// reached, or not answering its `/_health` either within
+    /// [`readers::HEALTH_WAIT`] (this where shorter); its tenant's copy
+    /// alone where the node answers, the read slower than this -- and the
+    /// read goes home: at `upstream_timeout` a hung replica's node held
+    /// each marked read a minute. A node that answers its health while
+    /// every query on it stalls, its disk stalled under them, costs each
+    /// tenant with a copy there one timeout a rest.
     pub replica_timeout: Duration,
     /// How long a read replica that did not answer a marked read is let be
     /// ([`readers::RESTING`] unless set).
@@ -234,7 +237,11 @@ pub struct Router {
     /// hangs would have every read wait its [`Config::replica_timeout`]
     /// first. One that answers, a 503 that it has not caught up among
     /// them, costs a read a hop alone.
-    resting: Mutex<std::collections::HashMap<String, Instant>>,
+    resting: Arc<Mutex<std::collections::HashMap<String, Instant>>>,
+    /// The read replicas' nodes being asked their `/_health` now, one
+    /// question a node at a time ([`Router::rest_unanswered`]): shared with
+    /// the thread asking it, as `resting` is.
+    probing: Arc<Mutex<HashSet<String>>>,
     /// What the read replicas' calls to their nodes go through: bounded by
     /// [`readers::CALL`], not `upstream_timeout`, so a node that does not
     /// answer holds a look over them up that long at most.
@@ -303,7 +310,8 @@ impl Router {
             reader_remade: Mutex::new(std::collections::HashMap::new()),
             reader_quota_queue: Mutex::new(Default::default()),
             quotas_soon: (Mutex::new(false), std::sync::Condvar::new()),
-            resting: Mutex::new(Default::default()),
+            resting: Arc::new(Mutex::new(Default::default())),
+            probing: Arc::new(Mutex::new(HashSet::new())),
             reader_pool: Pool::new(cfg.reader_timeout),
             follow_soon: (Mutex::new(false), std::sync::Condvar::new()),
             cfg,
@@ -1269,7 +1277,10 @@ impl Router {
                             Ok(body) => Some(body),
                             Err(e) => {
                                 forwarding.error(e.to_string());
-                                self.rest_copy(tenant, &rnode);
+                                // Its connection let go of first: the
+                                // question is the node's, on one of its own.
+                                drop(a);
+                                self.rest_unanswered(tenant, &rnode, &raddr);
                                 metrics::replica_read(metrics::ReplicaRead::Fallback);
                                 return None;
                             }
@@ -1291,18 +1302,18 @@ impl Router {
                     metrics::replica_read(metrics::ReplicaRead::Fallback);
                 }
                 // Taken and not answered in time, or its connection ended:
-                // this tenant's copy -- its read maybe slower than the
-                // timeout, or its query's panic dropping that connection
-                // alone. Resting the node sent every tenant's marked reads
-                // of it home, and one slow read every few seconds kept a
-                // region's replicas unread. A node that refuses connections
-                // is not reached by the next read, and rested then; one
-                // that takes them and answers nothing -- stopped,
-                // deadlocked -- is rested once a second tenant's copy is
-                // (`readers::rest_copy_in`).
+                // this tenant's copy at once -- its read maybe slower than
+                // the timeout, or its query's panic dropping that
+                // connection alone; resting the node sent every tenant's
+                // marked reads of it home, and one slow read every few
+                // seconds kept a region's replicas unread -- and the node
+                // where its `/_health`, asked on a thread of its own, goes
+                // unanswered too: one that takes connections and answers
+                // nothing, stopped or deadlocked
+                // (`readers::rest_unanswered`).
                 Err(upstream::Near::Unanswered(e)) => {
                     forwarding.error(e.to_string());
-                    self.rest_copy(tenant, &rnode);
+                    self.rest_unanswered(tenant, &rnode, &raddr);
                     metrics::replica_read(metrics::ReplicaRead::Fallback);
                 }
             }

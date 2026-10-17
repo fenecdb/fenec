@@ -1420,21 +1420,40 @@ and one that stopped reading a body past the sockets' buffers held the
 write as long. It goes home where the replica does not answer --
 and is let be for `RESTING` (5 s, `Config::replica_rest`), its reads going
 home at once: the node, where it was not reached or took no whole request
-(`upstream::Near::Unreached`), the tenant's copy alone where it took one and
-answered nothing in time (`Unanswered`, `rest_copy`), since the head comes
-once the query has run and a read slower than the timeout -- one every few
-seconds -- rested the node and sent every tenant's marked reads of the
-region home -- breaks its answer off (read whole before its head goes on,
-`read_body_kept`: answered 502 before; a stream goes on as it comes, and
-the tail `forward` shares took the body as a parameter: an unmarked
-request's added p50 20.6 us either way, main's 23.75, sixteen runs a side
-in turns); a node that takes connections and answers nothing -- stopped,
-deadlocked, its disk stalled: the kernel takes a small request -- looks
-like a slow read to each tenant, and resting a copy at a time had every
-tenant with a copy there wait out the timeout once a `RESTING`, so the
-node is rested too once a second tenant's copy there is
-(`readers::rest_copy_in`, tenants counted, not reads: one tenant's slow
-reads never rest the node),
+(`upstream::Near::Unreached`); where it took one and answered nothing in
+time (`Unanswered`) or broke its answer off (read whole before its head
+goes on, `read_body_kept`: answered 502 before; a stream goes on as it
+comes, and the tail `forward` shares took the body as a parameter: an
+unmarked request's added p50 20.6 us either way, main's 23.75, sixteen
+runs a side in turns), the tenant's copy is let be at once, the read going
+home, and the node is asked its `/_health` -- answered before any token,
+lock or routing -- on a thread of the router's own within `HEALTH_WAIT`
+(500 ms, the replica timeout where shorter; `Router::rest_unanswered`,
+`upstream::answers_health`), one question a node at a time and none while
+it rests (`probing`): unanswered, the node is let be too -- stopped,
+deadlocked: the kernel takes a small request -- so no other tenant waits
+it out, where resting a copy at a time had each wait the timeout once a
+`RESTING`; answered, the copy alone, since the head comes once the query
+has run and a read slower than the timeout -- one every few seconds --
+rested the node and sent every tenant's marked reads of the region home.
+Asked on the read's own path, a read sent home from a hung node waited the
+question out past its timeout, and every read timing out beside it asked
+again (`tests/read_replicas.rs`: eight timing out together ask once,
+failing with that rule back; `Router::replica_node_resting` and
+`health_questions` are what its tests wait on). Rested once a second
+tenant's copy there was, as before, the node was any client's to rest:
+one holding two tenants' tokens, or two tenants' slow analytics, sent
+every tenant's marked reads of the node home (a third tenant's reads held
+to its replica beside two slow ones, failing with that rule back). Left:
+a node that answers its health while every query on it stalls -- its disk
+stalled under the queries, or its tenant registry deadlocked -- costs
+each tenant with a copy there one timeout a `RESTING`. A question through
+the tenant path, the node's registry and no database's lock, was weighed
+and left: it would catch the registry deadlocked, a bug of the node's
+own, and nothing a disk does, a disk stalled under a write lock leaving
+the registry free; while a tenant's slot is held through its open,
+seconds for a large file, so a node opening one copy would read as hung
+and rest every tenant's. It goes home too where the replica
 answers 503 or 504, or a 404 with
 `Fenec-Tenant: absent` (the file gone, made again at the next look; every
 `CHECK_EVERY`, 10 s, a thread of its own asks each replica's node what it
