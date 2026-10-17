@@ -270,7 +270,8 @@ moment it would write something, or the end of the wait.</p>
     it could take and no others, and each run asks the token again — one
     that expired meanwhile is refused (401).</li>
   <li><b>A client gone</b> before a job came hands the job to the next
-    waiting worker, rather than leasing it to no one.</li>
+    waiting worker, rather than leasing it to no one — through the router
+    too, which passes its client's end on to the node.</li>
   <li><b>Tenants and the router.</b> Under <code>/t/&lt;t&gt;/</code> a
     held claim holds nothing of its tenant between its runs, so a move
     goes on; a tenant moved away or deleted answers its held claims 503
