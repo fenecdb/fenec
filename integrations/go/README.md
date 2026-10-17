@@ -37,7 +37,8 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
   `Wait(d)` beside it bounds how long the server holds the read for the change.
 - `New(url, fenecdb.WithReadsNearest())` sends the builder's reads, and a `Read()` copy's, to the tenant's read
   replica near the client through a fenec-shard router (`Fenec-Read: replica`), each after the furthest position
-  an answer from home named (`Fenec-After`, `Fenec-History`); writes go home.
+  an answer from home named (`Fenec-After`, `Fenec-History`); writes go home. A `Read()` copy's `Subscribe`
+  and `Changes` go so too, and the server holds the stream until a copy has the client's writes.
 - `QueryRaw` and `BatchRaw` hand the answer back as the server wrote it, its columns in the select list's order
   (a map loses it); `IfNoneMatch(r.ETag).QueryRaw(...)` is answered `NotModified` while nothing the statement
   reads was written. The tag names a change, not the statement: send it only with the request it came from.
