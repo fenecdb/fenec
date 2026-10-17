@@ -489,8 +489,10 @@ impl Router {
     /// network failing -- the sync layer and `FenecHttp.live` backed off
     /// from what was an answer -- while the node's answers through the
     /// router carried the node's.
+    /// The router's own answer as it goes out: its CORS headers, and its
+    /// mark ([`region::SHARD_HEADER`]).
     fn cors(&self, resp: Response) -> Response {
-        fenec_http::cors::apply(resp, self.cfg.cors.as_deref())
+        fenec_http::cors::apply(resp, self.cfg.cors.as_deref()).header(region::SHARD_HEADER, "1")
     }
 
     fn read_dir(&self) -> std::sync::RwLockReadGuard<'_, Directory> {
@@ -677,19 +679,30 @@ impl Router {
             fenec_http::trace::attr("fenec.tenant", tenant.to_string());
         }
         // The node holding the tenant, as this router's own directory has
-        // it; or, where that says nothing, the routers of the region the
-        // tenant lives in ([`region`]).
+        // it, with the node's region where the request asks for the
+        // tenant's home ([`region::HOME_HEADER`]); or, where that says
+        // nothing, the routers of the region the tenant lives in
+        // ([`region`]).
         let placed = {
             let dir = self.read_dir();
             dir.placement(tenant).and_then(|p| {
-                dir.node(&p.node)
-                    .map(|n| (p.node.clone(), n.addr.clone(), self.mark(&n.token)))
+                dir.node(&p.node).map(|n| {
+                    let home = region::home_asked(req, &n.region);
+                    (p.node.clone(), n.addr.clone(), self.mark(&n.token), home)
+                })
             })
         };
+        let mut home = None;
         let (node, addr, mark, routers) = match placed {
-            Some((node, addr, mark)) => (node, addr, Some(mark), None),
+            Some((node, addr, mark, h)) => {
+                home = h;
+                (node, addr, Some(mark), None)
+            }
             None => match self.elsewhere(tenant, relayed.is_some()) {
-                region::Target::Node(node, addr, mark) => (node, addr, Some(mark), None),
+                region::Target::Node(node, addr, mark, region) => {
+                    home = region::home_asked(req, &region);
+                    (node, addr, Some(mark), None)
+                }
                 region::Target::Region(region, routers) => {
                     let first = self.first_router(&region, &routers);
                     let addr = region::host(&routers[first]).to_string();
@@ -787,7 +800,7 @@ impl Router {
                          this one, and answers through its own: {e}"
                     ),
                 };
-                return reply(out, Response::error(502, &why));
+                return reply(out, region::homed(Response::error(502, &why), &home));
             }
         };
 
@@ -811,6 +824,7 @@ impl Router {
             } else if !hop_by_hop(k)
                 && !k.eq_ignore_ascii_case("content-length")
                 && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
+                && !k.eq_ignore_ascii_case(region::SHARD_HEADER)
                 && !(cors.is_some() && fenec_http::cors::is_cors_header(k, v))
             {
                 head.push_str(&format!("{k}: {v}\r\n"));
@@ -819,6 +833,12 @@ impl Router {
         if let Some(origin) = cors {
             fenec_http::cors::push_into(&mut head, origin);
         }
+        if let Some(home) = &home {
+            head.push_str("Fenec-Home: ");
+            head.push_str(home);
+            head.push_str("\r\n");
+        }
+        head.push_str("Fenec-Shard: 1\r\n");
         // A token the node verified starts the client's count again -- by
         // its own address, no other -- and the node's word is the only
         // thing that does: a status says nothing of the token, and a node
@@ -847,10 +867,8 @@ impl Router {
                     forwarding.error(e.to_string());
                     drop(forwarding);
                     metrics::unreachable(&node);
-                    return reply(
-                        out,
-                        Response::error(502, &format!("node `{node}` broke off: {e}")),
-                    );
+                    let broke = Response::error(502, &format!("node `{node}` broke off: {e}"));
+                    return reply(out, region::homed(broke, &home));
                 }
             };
             drop(forwarding);

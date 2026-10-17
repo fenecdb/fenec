@@ -55,14 +55,54 @@ use std::time::{Duration, Instant};
 /// be, and the request is carried out here and never relayed on.
 pub const GLOBAL_HEADER: &str = "fenec-global";
 
+/// The header a tenant's request asks for its home region with, and the
+/// answer names it in: `Fenec-Home: <region>`, written by the router that
+/// forwards the request to the tenant's node -- the node's region -- and
+/// passed through unchanged by a router that relayed it there. The global
+/// entry (`integrations/cloudflare/entry`) sends every request to the
+/// region it last heard for the tenant, and learns the region from this:
+/// a tenant it has not seen, or one moved across regions since, costs the
+/// one relay a router makes, and its next request goes home. Asked for,
+/// so a client that does not ask is told no home; never named by a
+/// relaying router, whose own region is not the tenant's; and named on the
+/// placing router's own 502 for a node it cannot reach ([`homed`]).
+pub const HOME_HEADER: &str = "fenec-home";
+
+/// The mark on every answer a router writes, its own and those it
+/// forwards (`Fenec-Shard: 1`; one it relays carries the relaying
+/// router's, the other router's dropped): a proxy in front of the routers
+/// -- the global entry -- tells a router's answer from one something
+/// between them wrote, a tunnel's connector answering 502 for a router it
+/// cannot reach, and sends a request a router never answered to the next.
+/// `X-Request-Id` could not tell them apart: a load balancer may write its
+/// own on its own 502.
+pub const SHARD_HEADER: &str = "Fenec-Shard";
+
+/// `resp` naming the tenant's home where it is known: a placing router's
+/// own failure -- a node it could not reach -- is the home's answer, which
+/// the entry passes on rather than try another region.
+pub(crate) fn homed(resp: Response, home: &Option<String>) -> Response {
+    match home {
+        Some(region) => resp.header("Fenec-Home", region),
+        None => resp,
+    }
+}
+
+/// The region to name in an answer's [`HOME_HEADER`]: the placing node's,
+/// where `req` asks and the node is in one -- the unnamed region is every
+/// router's, and there is nothing to learn.
+pub(crate) fn home_asked(req: &Request, region: &str) -> Option<String> {
+    (!region.is_empty() && req.header(HOME_HEADER).is_some()).then(|| region.to_string())
+}
+
 /// A whole answer from another router: its status, headers and body.
 type Whole = (u16, Vec<(String, String)>, Vec<u8>);
 
 /// Where a tenant this router's own directory does not place is.
 pub(crate) enum Target {
-    /// On a node the global directory places it on: its name, address and
-    /// mark.
-    Node(String, String, Arc<str>),
+    /// On a node the global directory places it on: its name, address,
+    /// mark and region.
+    Node(String, String, Arc<str>, String),
     /// At home in a region keeping its own directory: the region and its
     /// routers.
     Region(String, Vec<String>),
@@ -161,7 +201,8 @@ impl Router {
         let g = read(global);
         if let Some(p) = g.placement(tenant) {
             if let Some(n) = g.node(&p.node) {
-                return Target::Node(p.node.clone(), n.addr.clone(), self.mark(&n.token));
+                let mark = self.mark(&n.token);
+                return Target::Node(p.node.clone(), n.addr.clone(), mark, n.region.clone());
             }
         }
         if let Some(region) = g.home(tenant) {
