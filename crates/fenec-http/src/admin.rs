@@ -123,6 +123,11 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             history: None,
             version: None,
         }),
+        // A router recording the lineage of a tenant made before it kept
+        // any, to bind its read replicas to.
+        (Method::Get, ["tenants", t, "lineage"]) => tenants.get(t).map(|tenant| {
+            Response::json(200, format!("{{\"lineage\":{}}}", lineage_json(&tenant)))
+        }),
         (Method::Put, ["tenants", t, "file"]) => tenants
             .import(t, &req.body)
             .and_then(|_| tenants.get(t))

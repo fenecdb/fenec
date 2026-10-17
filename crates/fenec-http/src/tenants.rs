@@ -218,6 +218,20 @@ pub struct Tenants {
     /// replicates its tenants (`streams`), where an archiver can ask: up to
     /// [`DEPARTED_KEPT`] names, a few megabytes, for nothing elsewhere.
     departed: Mutex<Departed>,
+    /// The registry itself, once it is shared ([`Tenants::shared`]): what
+    /// a copy refusing another tenant's primary deletes itself through.
+    me: std::sync::OnceLock<std::sync::Weak<Tenants>>,
+}
+
+/// The copies that refused a primary of another lineage than the one they
+/// were told -- a tenant made again under their name -- and deleted
+/// themselves (`fenec_copies_refused_total`).
+static COPIES_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// How many copies refused another tenant's primary since the process
+/// started.
+pub fn copies_refused() -> u64 {
+    COPIES_REFUSED.load(Ordering::Relaxed)
 }
 
 /// The tenants that left, the last [`DEPARTED_KEPT`] of them: what an
@@ -292,7 +306,15 @@ impl Tenants {
             streams: None,
             closed: Mutex::new(HashMap::new()),
             departed: Mutex::new(Departed::default()),
+            me: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Notes the `Arc` the registry is served from, which a copy refusing
+    /// another tenant's primary deletes itself through
+    /// ([`crate::Server::with_tenants`]).
+    pub fn shared(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
     }
 
     /// When `name` was last deleted in this process, ms since the epoch by
@@ -988,7 +1010,13 @@ impl Tenants {
                 // lasts -- and no more where the primary is refused as
                 // another tenant of the name, whose image it never takes.
                 let seen = Arc::clone(&ready);
-                f.on_hello(Box::new(move |ok| seen.store(ok, Ordering::SeqCst)));
+                let (me, who) = (self.me.get().cloned(), name.to_string());
+                f.on_hello(Box::new(move |ok| {
+                    seen.store(ok, Ordering::SeqCst);
+                    if !ok {
+                        refused_copy(me.clone(), &who);
+                    }
+                }));
                 f.expect_lineage(self.lineage_followed(name));
                 f.start(format!("fenec-replica-{name}")).map_err(|e| {
                     Refused(
@@ -1522,6 +1550,47 @@ fn sync_now(t: &Tenant) {
         }
         Ok(None) => {}
         Err(e) => crate::log!("sync error ({}): {e}", t.name),
+    }
+}
+
+/// A copy that refused a primary of another lineage -- its tenant deleted
+/// and made again under the name -- deletes itself, file and `.follows`:
+/// it is derived data, and its primary is another tenant's or gone.
+/// Stopped and kept, it held the deleted tenant's rows on a node of a
+/// region nobody had chosen for the new one, for anyone reading the node
+/// to find. On a thread of its own: the follower calling this has to end
+/// before the delete can close the tenant -- and only while the tenant is
+/// still a copy told a lineage: placed here anew meanwhile, its `.follows`
+/// gone, it is no copy.
+fn refused_copy(me: Option<std::sync::Weak<Tenants>>, name: &str) {
+    COPIES_REFUSED.fetch_add(1, Ordering::Relaxed);
+    let Some(tenants) = me.and_then(|w| w.upgrade()) else {
+        crate::log!(
+            "tenant `{name}`'s copy here refused another tenant of its name, and stays until \
+             deleted"
+        );
+        return;
+    };
+    let who = name.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("fenec-refused-copy".into())
+        .spawn(move || match tenants.lineage_followed(&who).is_some() {
+            false => {}
+            true => match tenants.delete(&who) {
+                Ok(()) => crate::log!(
+                    "tenant `{who}`'s copy here followed a primary of another lineage -- the name \
+                 made again -- and is deleted"
+                ),
+                Err(e) => crate::log!(
+                    "tenant `{who}`'s copy here refused another tenant of its name, and stayed: {}",
+                    e.1
+                ),
+            },
+        });
+    if let Err(e) = spawned {
+        crate::log!(
+            "tenant `{name}`'s copy here refused another tenant of its name, and stayed: {e}"
+        );
     }
 }
 

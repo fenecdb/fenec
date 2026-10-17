@@ -1684,10 +1684,23 @@ move keep and a tenant made again does not, recorded by the directory as
 the tenant's node makes it or takes its image in — and its copy is told
 it with every <code>follow</code> and keeps it across restarts. A copy
 whose primary turns out to be of another lineage takes nothing from it and
-answers no marked read; a look finding a replica's tenant of another
-lineage takes it off rather than point it anywhere. So does every other
-way a record outlives its tenant — <code>?forget</code> of a node that
-comes back, a router lost between a <code>follow</code> and the record.
+deletes itself, file and <code>.follows</code>, so the deleted tenant's
+rows do not outlive it on the node either
+(<code>fenec_copies_refused_total</code> counts them); a look finding a
+replica's tenant of another lineage takes it off rather than point it
+anywhere. So does every other way a record outlives its tenant —
+<code>?forget</code> of a node that comes back, a router lost between a
+<code>follow</code> and the record. A tenant made before lineages were kept
+has its lineage asked of its node at the next check, and each of its read
+replicas is bound to it where its copy's node says the copy is of it —
+taken off where the copy is another tenant's. A failover keeps the
+lineage, on any build: it is the top half of the history's first id, which
+every promotion keeps. Mixed versions protect less and break nothing: a
+node from before lineages ignores
+<code>"lineage"</code> in a <code>follow</code> and has no
+<code>/_admin/tenants/&lt;t&gt;/lineage</code>, and a router from before
+them ignores <code>lineages</code> — no copy refuses on their word, until
+every node and router runs a build that keeps them.
 A marked read goes to no read replica of a tenant no directory places. One
 moved into a region holding its read replica takes that replica
 off — the tenant's own copies are nearer still — a change of it under way

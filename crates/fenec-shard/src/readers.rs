@@ -31,10 +31,12 @@
 //! **Bound to its tenant's lineage.** Each replica is a copy of one tenant,
 //! not of a name: its record keeps the lineage the directory recorded for
 //! the tenant (`lineages`), every `follow` tells the copy, and the copy
-//! takes nothing from a primary of another. A look finding the tenant's
-//! lineage another than the replica's takes the replica off. Whatever a
-//! router forgets or records late, a tenant made again under the name is
-//! never copied into a region nobody chose for it.
+//! takes nothing from a primary of another, and deletes itself. A look
+//! finding the tenant's lineage another than the replica's takes the
+//! replica off. Whatever a router forgets or records late, a tenant made
+//! again under the name is never copied into a region nobody chose for it.
+//! A tenant made before lineages were kept has its lineage asked of its
+//! node ([`Router::backfill_lineages`]), and its replicas are bound to it.
 //!
 //! **Never promoted.** A failover promotes a tenant's standby copy or its
 //! replica of its own, both in its home region, and reads nothing here:
@@ -117,6 +119,13 @@ pub const CALL: Duration = Duration::from_secs(10);
 /// router to answer the delete it relays: a wait of every call a change
 /// makes, one region after another, outlasted it.
 const CHANGE_WAIT_MOST: Duration = Duration::from_secs(15);
+
+/// How long a worker takes the primary a look resolved for a tenant at
+/// home in another region as it stands: past it, it asks that region's
+/// router again, for every such item it has left at once. Asked again for
+/// each item, a worker made one call to the region an item where the look
+/// made one a region.
+const PRIMARY_FRESH: Duration = Duration::from_secs(1);
 
 /// How long a read replica that did not answer a marked read is let be:
 /// every read of its region goes home meanwhile, rather than each wait out
@@ -1067,8 +1076,8 @@ impl Router {
                     "{} may keep a read replica of a tenant `{tenant}`, and whether it does is \
                      not known ({why}): the name is made once its router answers. For a region \
                      gone for good, DELETE /_shard/tenants/{tenant}/traces/{r} lets go of its \
-                     trace: a copy left there is of the old tenant's lineage, and takes nothing \
-                     from a new one",
+                     trace: a copy left there is of the old tenant's lineage, takes nothing \
+                     from a new one, and deletes itself",
                     region_name(r)
                 ),
             ));
@@ -1261,8 +1270,8 @@ impl Router {
     /// would have taken for the tenant.
     ///
     /// `lineage`, the tenant's where known, goes with the follow: the copy
-    /// takes nothing from a primary of another ([`fenec_http::replication::Follower::expect_lineage`]),
-    /// and keeps refusing it across a restart -- whatever this router
+    /// takes nothing from a primary of another ([`fenec_http::replication::Follower::expect_lineage`])
+    /// and deletes itself, refusing it across a restart -- whatever this router
     /// records or forgets, a tenant made again under the name, on the very
     /// node, is never copied into a region nobody chose for it.
     fn tell_follow(
@@ -1513,6 +1522,9 @@ impl Router {
             let found = dir
                 .placement(&t)
                 .and_then(|p| dir.node(&p.node).map(|n| (p, n)));
+            if found.is_some() && dir.lineage(&t).is_none() {
+                self.want_lineage(&t);
+            }
             items.push(match found {
                 Some((p, n)) => format!(
                     "{}:{{\"node\":{},\"addr\":{},\"region\":{},\"quota\":{},\"lineage\":{}}}",
@@ -1568,6 +1580,7 @@ impl Router {
         let mut tenants: Vec<String> = readers.iter().map(|(t, _)| t.clone()).collect();
         tenants.dedup();
         let primaries = self.primaries_of(&tenants);
+        let resolved = Instant::now();
         let due: Vec<(String, Reader, Primary)> = readers
             .into_iter()
             .filter_map(|(t, r)| {
@@ -1579,6 +1592,11 @@ impl Router {
                     true => self.primary_of(&t),
                     false => primaries.get(&t)?.clone(),
                 };
+                // Placed here with no lineage known -- made before any was
+                // kept: its node is asked for it ([`Self::backfill_lineages`]).
+                if here && self.read_dir().lineage(&t).is_none() {
+                    self.want_lineage(&t);
+                }
                 // Its quota, as the directory placing the tenant keeps it,
                 // which may be another region's: handed to its node's
                 // sender, never sent here.
@@ -1591,9 +1609,14 @@ impl Router {
                 self.due(&t, &r, &p).then_some((t, r, p))
             })
             .collect();
-        let mut by_node: BTreeMap<String, Vec<(String, Reader, Primary)>> = BTreeMap::new();
+        let mut by_node: BTreeMap<String, Vec<Item>> = BTreeMap::new();
         for (t, r, p) in due {
-            by_node.entry(r.node.clone()).or_default().push((t, r, p));
+            by_node.entry(r.node.clone()).or_default().push(Item {
+                tenant: t,
+                reader: r,
+                primary: p,
+                resolved,
+            });
         }
         for (node, items) in by_node {
             self.look_on(node, items);
@@ -1603,7 +1626,7 @@ impl Router {
     /// `items`, read replicas on `node` needing a call to it, looked at in
     /// turn on a thread of the node's -- unless one is under way there,
     /// whose node has not answered yet: they wait for the next look.
-    fn look_on(self: &Arc<Router>, node: String, items: Vec<(String, Reader, Primary)>) {
+    fn look_on(self: &Arc<Router>, node: String, items: Vec<Item>) {
         if !self
             .lookers
             .lock()
@@ -1629,8 +1652,11 @@ impl Router {
                     }
                 }
                 let done = Done(router, n);
-                for (t, r, p) in &items {
-                    done.0.look_at(t, r, p);
+                let mut items = items;
+                for i in 0..items.len() {
+                    done.0.fresh_primary(&mut items, i);
+                    let it = &items[i];
+                    done.0.look_at(&it.tenant, &it.reader, &it.primary);
                 }
             });
         if started.is_err() {
@@ -1732,6 +1758,7 @@ impl Router {
                 let dir = self.read_dir();
                 let n = dir.node(&r.node);
                 another_lineage(r, lineage.as_deref())
+                    || (r.lineage.is_none() && lineage.is_some())
                     || node.as_deref() == Some(r.node.as_str())
                     || n.is_some_and(|n| n.addr == *addr || n.region == *region)
                     || r.follows != format!("http://{addr}")
@@ -1746,13 +1773,45 @@ impl Router {
         }
     }
 
+    /// Where item `i`'s primary is as the worker reaches it: a node's
+    /// worker reaches an item after the ones before it on that node, tens
+    /// of seconds after the look where that node is slow, and a failover
+    /// meanwhile had the primary of the look's time, the old one, pointed
+    /// at until the next. Looked up again in this directory each time --
+    /// its maps alone; for one at home in another region only once the
+    /// look's answer is older than [`PRIMARY_FRESH`], and then for every
+    /// such item left at once, one call a region.
+    fn fresh_primary(&self, items: &mut [Item], i: usize) {
+        let here = |t: &str| self.read_dir().placement(t).is_some();
+        if here(&items[i].tenant) {
+            items[i].primary = self.primary_of(&items[i].tenant);
+            items[i].resolved = Instant::now();
+            return;
+        }
+        if items[i].resolved.elapsed() < PRIMARY_FRESH {
+            return;
+        }
+        let mut stale: Vec<String> = items[i..]
+            .iter()
+            .filter(|it| !here(&it.tenant) && it.resolved.elapsed() >= PRIMARY_FRESH)
+            .map(|it| it.tenant.clone())
+            .collect();
+        stale.sort();
+        stale.dedup();
+        let fresh = self.primaries_of(&stale);
+        let now = Instant::now();
+        for it in items[i..].iter_mut() {
+            if let Some(p) = fresh.get(&it.tenant) {
+                it.primary = p.clone();
+                it.resolved = now;
+            }
+        }
+    }
+
     /// [`Self::keep_following`] of one read replica, held for it: passed
-    /// over where a change of it is under way, and read again once held --
-    /// its record, and where its primary is: a node's worker reaches an
-    /// item after the ones before it on that node, tens of seconds after
-    /// the look where that node is slow, and a failover meanwhile had the
-    /// primary of the look's time, the old one, pointed at until the next.
-    fn look_at(&self, tenant: &str, r: &Reader, _seen: &Primary) {
+    /// over where a change of it is under way, and its record read again
+    /// once held; `p` where its primary is ([`Self::fresh_primary`]).
+    fn look_at(&self, tenant: &str, r: &Reader, p: &Primary) {
         let region = self.read_dir().region_of(&r.node).to_string();
         let Some(_hold) = self.hold_reader(tenant, &region) else {
             return;
@@ -1766,10 +1825,135 @@ impl Router {
         let Some(r) = now else {
             return;
         };
-        let p = self.primary_of(tenant);
-        if self.due(tenant, &r, &p) {
-            self.keep_following(tenant, &r, &p);
+        if self.due(tenant, &r, p) {
+            self.keep_following(tenant, &r, p);
         }
+    }
+
+    /// Binds the read replica `r` of `tenant`, recorded with no lineage, to
+    /// `lineage`, its tenant's: where its copy's node says the copy is of
+    /// it -- or says nothing of lineages, a node from before them -- the
+    /// record takes it and the copy is told it with a follow of the node
+    /// it follows. A copy of another lineage is another tenant's.
+    fn bind_reader(&self, tenant: &str, r: &Reader, lineage: &str) -> Bound {
+        let Some(n) = self.read_dir().node(&r.node).cloned() else {
+            return Bound::Unknown;
+        };
+        let target = format!("/_admin/tenants/{tenant}/lineage");
+        let copy = match self
+            .reader_pool
+            .call(&n.addr, "GET", &target, &n.token, b"")
+        {
+            Ok((200, body)) => crate::lineage_in(&body),
+            // A node from before lineages: nothing to ask, nothing it
+            // would refuse; the record is bound all the same.
+            Ok((404, body))
+                if String::from_utf8_lossy(&body).contains("no such admin endpoint") =>
+            {
+                None
+            }
+            _ => return Bound::Unknown,
+        };
+        if copy.as_deref().is_some_and(|c| c != lineage) {
+            return Bound::Other;
+        }
+        if let Err(w) = self.tell_follow(tenant, &r.node, &r.follows, false, Some(lineage)) {
+            fenec_http::log!(
+                "tenant `{tenant}`'s read replica on `{}` was not told its lineage yet: {w}",
+                r.node
+            );
+            return Bound::Unknown;
+        }
+        let recorded = self
+            .write_dir()
+            .set_reader(tenant, &r.node, &r.follows, Some(lineage));
+        if let Err(e) = recorded {
+            fenec_http::log!("tenant `{tenant}`'s read replica's lineage stayed unrecorded: {e}");
+            return Bound::Unknown;
+        }
+        Bound::Kept(Reader {
+            lineage: Some(lineage.to_string()),
+            ..r.clone()
+        })
+    }
+
+    /// Asks for `tenant`'s lineage to be had from its node, at the next
+    /// check ([`Self::backfill_lineages`]).
+    pub(crate) fn want_lineage(&self, tenant: &str) {
+        self.lineage_wanted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(tenant.to_string());
+    }
+
+    /// Records the lineage of each tenant this directory places and knows
+    /// none of -- made before lineages were kept, by a router or a node
+    /// from before them -- as its node says (`GET
+    /// /_admin/tenants/<t>/lineage`): unknown, its read replicas were bound
+    /// to nothing and took any tenant of the name. A node that does not
+    /// answer, or from before lineages, leaves it to the next check. On the
+    /// check's thread, a node at a time on [`LOOKERS`] threads at most.
+    pub(crate) fn backfill_lineages(&self) {
+        let wanted: Vec<String> = self
+            .lineage_wanted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .collect();
+        let mut by_node: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        {
+            let dir = self.read_dir();
+            if dir.following() {
+                return;
+            }
+            for t in wanted {
+                if dir.lineage(&t).is_some() {
+                    continue;
+                }
+                if let Some(p) = dir.placement(&t) {
+                    by_node.entry(p.node.clone()).or_default().push(t);
+                }
+            }
+        }
+        let nodes: Vec<(String, Vec<String>)> = by_node.into_iter().collect();
+        let each = nodes.len().div_ceil(LOOKERS).max(1);
+        std::thread::scope(|s| {
+            for part in nodes.chunks(each) {
+                s.spawn(move || {
+                    for (node, tenants) in part {
+                        let Some(n) = self.read_dir().node(node).cloned() else {
+                            continue;
+                        };
+                        for t in tenants {
+                            let target = format!("/_admin/tenants/{t}/lineage");
+                            let said = match self
+                                .reader_pool
+                                .call(&n.addr, "GET", &target, &n.token, b"")
+                            {
+                                Ok((200, body)) => crate::lineage_in(&body),
+                                _ => None,
+                            };
+                            let Some(l) = said else {
+                                self.want_lineage(t);
+                                continue;
+                            };
+                            // Placed elsewhere since, or made again: the
+                            // node's word is of another tenant.
+                            let still = self
+                                .read_dir()
+                                .placement(t)
+                                .is_some_and(|p| &p.node == node);
+                            if !still {
+                                continue;
+                            }
+                            if let Err(e) = self.write_dir().set_lineage(t, Some(&l)) {
+                                fenec_http::log!("tenant `{t}`'s lineage stayed unrecorded: {e}");
+                            }
+                        }
+                    }
+                });
+            }
+        });
     }
 
     /// The thread making [`Self::follow_round`] once a [`FOLLOW_EVERY`],
@@ -1801,6 +1985,7 @@ impl Router {
             .name("fenec-readers-check".into())
             .spawn(move || loop {
                 checker.check_copies();
+                checker.backfill_lineages();
                 std::thread::sleep(CHECK_EVERY);
             })?;
         let router = Arc::clone(self);
@@ -1830,6 +2015,36 @@ impl Router {
     /// is not known now -- a region cut off serves the state it last
     /// applied. Called with the replica held ([`Self::hold_reader`]).
     fn keep_following(&self, tenant: &str, r: &Reader, primary: &Primary) {
+        // A record bound to no lineage -- placed before lineages were kept
+        // -- whose tenant's is known now: bound to it where its copy is of
+        // it, and the copy told so; taken off where the copy is another
+        // tenant's of the name.
+        let bound;
+        let r = match (r.lineage.as_deref(), primary) {
+            (
+                None,
+                Primary::At {
+                    lineage: Some(l), ..
+                },
+            ) => match self.bind_reader(tenant, r, l) {
+                Bound::Kept(b) => {
+                    bound = b;
+                    &bound
+                }
+                Bound::Other => {
+                    if let Err(w) = self.take_reader(tenant, r) {
+                        fenec_http::log!(
+                            "tenant `{tenant}`'s read replica on `{}` copies another tenant of \
+                             its name, and stayed: {w}",
+                            r.node
+                        );
+                    }
+                    return;
+                }
+                Bound::Unknown => return,
+            },
+            _ => r,
+        };
         let key = format!("{tenant}/{}", r.node);
         let mut why = "";
         let failed = match primary {
@@ -1923,6 +2138,25 @@ impl Router {
     }
 }
 
+/// A read replica a look's worker reaches, with where its primary was and
+/// when that was found.
+struct Item {
+    tenant: String,
+    reader: Reader,
+    primary: Primary,
+    resolved: Instant,
+}
+
+/// What became of binding a read replica to its tenant's lineage.
+enum Bound {
+    /// Bound: the record as it is now.
+    Kept(Reader),
+    /// Its copy is another tenant's of the name.
+    Other,
+    /// Not now: its node not reached.
+    Unknown,
+}
+
 /// Whether the read replica `r` copies another tenant of its name than the
 /// primary of `lineage`: both known, and not the same.
 fn another_lineage(r: &Reader, lineage: Option<&str>) -> bool {
@@ -1959,10 +2193,11 @@ pub(crate) fn traced(fields: &[(String, Value)]) -> Traced {
 /// One read replica as `GET /_shard/tenants/<t>/read-replicas` lists it.
 fn reader_item(region: &str, r: &Reader) -> String {
     format!(
-        "{{\"region\":{},\"node\":{},\"follows\":{}}}",
+        "{{\"region\":{},\"node\":{},\"follows\":{},\"lineage\":{}}}",
         quote(region),
         quote(&r.node),
-        quote(&r.follows)
+        quote(&r.follows),
+        r.lineage.as_deref().map_or("null".into(), quote)
     )
 }
 

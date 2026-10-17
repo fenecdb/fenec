@@ -260,6 +260,7 @@ impl Server {
         if cfg.access.is_some() {
             tenants.check_scoped_writes();
         }
+        tenants.shared();
         Server {
             backend: Backend::Tenants(tenants),
             cfg: Arc::new(cfg),

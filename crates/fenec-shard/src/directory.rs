@@ -97,6 +97,13 @@ const SCHEMA: [&str; 10] = [
 /// it is, and places without regard to regions.
 const NODE_FIELDS: [&str; 2] = ["region", "zone"];
 
+/// The fields `readers` took after it was first written: `lineage`, added
+/// to one written before it as `NODE_FIELDS` are. Selected only where the
+/// collection has it ([`reader_fields`]): asked of one without it, the
+/// select failed with the field not found, which read as an empty
+/// directory -- every read replica record forgotten.
+const READER_FIELDS: [&str; 1] = ["lineage"];
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Node {
     pub addr: String,
@@ -183,6 +190,11 @@ pub struct Directory {
     /// Each tenant's read replicas on this directory's nodes, a region
     /// each, sorted by node.
     readers: HashMap<String, Vec<Reader>>,
+    /// Each tenant's lineage, where its node said it (`lineages`): read by
+    /// every look for every tenant with a read replica, and by every
+    /// placement another region asks for -- a statement parsed and run
+    /// each, read from the database.
+    lineages: HashMap<String, String>,
     /// The regions keeping their own directory, and their routers.
     regions: BTreeMap<String, Vec<String>>,
     /// The region this directory holds, where it is a region's own.
@@ -210,6 +222,7 @@ struct Ids {
     regions: HashMap<DocId, String>,
     scope: HashMap<DocId, String>,
     readers: HashMap<DocId, String>,
+    lineages: HashMap<DocId, String>,
     kept: bool,
 }
 
@@ -235,10 +248,13 @@ impl Directory {
                 for sql in SCHEMA {
                     g.execute(&fenec_ql::parse_one(sql)?)?;
                 }
-                for f in NODE_FIELDS {
-                    if g.collection("nodes")?.schema.field_pos(f).is_none() {
-                        let sql = format!("alter collection nodes add field {f} text");
-                        g.execute(&fenec_ql::parse_one(&sql)?)?;
+                for (coll, fields) in [("nodes", &NODE_FIELDS[..]), ("readers", &READER_FIELDS[..])]
+                {
+                    for f in fields {
+                        if g.collection(coll)?.schema.field_pos(f).is_none() {
+                            let sql = format!("alter collection {coll} add field {f} text");
+                            g.execute(&fenec_ql::parse_one(&sql)?)?;
+                        }
                     }
                 }
             }
@@ -254,6 +270,7 @@ impl Directory {
             replicas: Replicas::new(),
             quotas: HashMap::new(),
             readers: HashMap::new(),
+            lineages: HashMap::new(),
             regions: BTreeMap::new(),
             scope: None,
             arrived: false,
@@ -299,44 +316,50 @@ impl Directory {
         };
         let mut nodes = BTreeMap::new();
         let select = format!("get nodes select {}", node_fields(&g).join(", "));
-        for (id, row) in rows(&g, &select)? {
+        for (id, row) in rows(&g, "nodes", &select)? {
             ids.nodes.insert(id, text(&row[0]));
             nodes.insert(text(&row[0]), node_of(&row));
         }
         let (mut tenants, mut homes) = (HashMap::new(), HashMap::new());
-        for (id, row) in rows(&g, "get tenants select name, node, state")? {
+        for (id, row) in rows(&g, "tenants", "get tenants select name, node, state")? {
             ids.tenants.insert(id, text(&row[0]));
             put_tenant(&mut tenants, &mut homes, text(&row[0]), &row);
         }
         let mut pairs = Pairs::new();
-        for (id, row) in rows(&g, "get pairs select node, standby")? {
+        for (id, row) in rows(&g, "pairs", "get pairs select node, standby")? {
             ids.pairs.insert(id, text(&row[0]));
             pairs.insert(text(&row[0]), text(&row[1]));
         }
         let mut replicas = Replicas::new();
-        for (id, row) in rows(&g, "get replicas select tenant, node")? {
+        for (id, row) in rows(&g, "replicas", "get replicas select tenant, node")? {
             ids.replicas.insert(id, text(&row[0]));
             replicas.insert(text(&row[0]), text(&row[1]));
         }
         let mut quotas = HashMap::new();
-        for (id, row) in rows(&g, "get quotas select tenant, quota")? {
+        for (id, row) in rows(&g, "quotas", "get quotas select tenant, quota")? {
             ids.quotas.insert(id, text(&row[0]));
             quotas.insert(text(&row[0]), text(&row[1]));
         }
         let mut regions = BTreeMap::new();
-        for (id, row) in rows(&g, "get regions select name, routers")? {
+        for (id, row) in rows(&g, "regions", "get regions select name, routers")? {
             ids.regions.insert(id, text(&row[0]));
             regions.insert(text(&row[0]), routers_of(&row[1]));
         }
         let mut scope = None;
-        for (id, row) in rows(&g, "get scope select region")? {
+        for (id, row) in rows(&g, "scope", "get scope select region")? {
             ids.scope.insert(id, text(&row[0]));
             scope = Some(text(&row[0]));
         }
         let mut readers = HashMap::new();
-        for (id, row) in rows(&g, "get readers select key, tenant, node, follows, lineage")? {
+        let select = format!("get readers select {}", reader_fields(&g).join(", "));
+        for (id, row) in rows(&g, "readers", &select)? {
             ids.readers.insert(id, text(&row[0]));
             put_reader(&mut readers, &row);
+        }
+        let mut lineages = HashMap::new();
+        for (id, row) in rows(&g, "lineages", "get lineages select tenant, lineage")? {
+            ids.lineages.insert(id, text(&row[0]));
+            lineages.insert(text(&row[0]), text(&row[1]));
         }
         self.seq = g.change_seq();
         self.adopted = g.adoptions();
@@ -349,6 +372,7 @@ impl Directory {
         self.regions = regions;
         self.scope = scope;
         self.readers = readers;
+        self.lineages = lineages;
         self.ids = ids;
         self.arrived = g.collection("tenants").is_ok();
         Ok(())
@@ -394,6 +418,7 @@ impl Directory {
             Some(regions),
             Some(scope),
             Some(readers),
+            Some(lineages),
         ) = (
             changes("nodes", &node_fields(&g))?,
             changes("tenants", &["name", "node", "state"])?,
@@ -402,7 +427,8 @@ impl Directory {
             changes("quotas", &["tenant", "quota"])?,
             optional("regions", &["name", "routers"])?,
             optional("scope", &["region"])?,
-            optional("readers", &["key", "tenant", "node", "follows", "lineage"])?,
+            optional("readers", &reader_fields(&g))?,
+            optional("lineages", &["tenant", "lineage"])?,
         )
         else {
             return Ok(false);
@@ -435,6 +461,12 @@ impl Directory {
             apply(&mut ids.readers, readers, |k, v| match v {
                 Some(v) => put_reader(&mut self.readers, v),
                 None => drop_reader(&mut self.readers, k),
+            });
+        }
+        if let Some(lineages) = lineages {
+            apply(&mut ids.lineages, lineages, |k, v| match v {
+                Some(v) => drop(self.lineages.insert(k.into(), text(&v[1]))),
+                None => drop(self.lineages.remove(k)),
             });
         }
         apply(&mut ids.pairs, pairs, |k, v| match v {
@@ -781,15 +813,7 @@ impl Directory {
 
     /// `tenant`'s lineage, as its node said (`lineages`).
     pub fn lineage(&self, tenant: &str) -> Option<String> {
-        let g = read(&self.db);
-        let stmt = fenec_ql::parse_one("get lineages select lineage where tenant = $1").ok()?;
-        match g.query(&stmt, &[Value::Text(tenant.into())]) {
-            Ok(Response::Rows(rs)) => rs.rows.into_iter().find_map(|r| match r.values.first() {
-                Some(Value::Text(l)) => Some(l.clone()),
-                _ => None,
-            }),
-            _ => None,
-        }
+        self.lineages.get(tenant).cloned()
     }
 
     /// Records `tenant`'s lineage, or that it has none known.
@@ -798,13 +822,16 @@ impl Directory {
             "del lineages where tenant = $1",
             &[Value::Text(tenant.into())],
         )?;
+        self.lineages.remove(tenant);
         let Some(l) = lineage else {
             return Ok(());
         };
         self.run(
             "put lineages {tenant: $1, lineage: $2}",
             &[Value::Text(tenant.into()), Value::Text(l.into())],
-        )
+        )?;
+        self.lineages.insert(tenant.into(), l.into());
+        Ok(())
     }
 
     /// The regions a read replica of `tenant`'s name may be kept in
@@ -1170,15 +1197,31 @@ fn routers_of(v: &Value) -> Vec<String> {
         .collect()
 }
 
-fn rows(db: &Database, sql: &str) -> Result<Vec<(DocId, Vec<Value>)>> {
+fn rows(db: &Database, coll: &str, sql: &str) -> Result<Vec<(DocId, Vec<Value>)>> {
     match db.query(&fenec_ql::parse_one(sql)?, &[]) {
         Ok(Response::Rows(rs)) => Ok(rs.rows.into_iter().map(|r| (r.id, r.values)).collect()),
         Ok(_) => Ok(Vec::new()),
-        // A standby's collections arrive with the primary's first writes.
-        // Until they do the directory is empty, not broken.
-        Err(Error::NotFound(_)) => Ok(Vec::new()),
+        // A standby's collections arrive with the primary's first writes:
+        // until they do the directory is empty, not broken. A collection
+        // that is there and answers not found -- a field it lacks -- is
+        // the error it is: read as empty, it forgot every row.
+        Err(Error::NotFound(_)) if db.collection(coll).is_err() => Ok(Vec::new()),
         Err(e) => Err(e),
     }
+}
+
+/// The fields of `readers` a select names: those the collection has, a
+/// standby's following a primary from before `lineage` among them.
+fn reader_fields(db: &Database) -> Vec<&'static str> {
+    let mut fields = vec!["key", "tenant", "node", "follows"];
+    if let Ok(c) = db.collection("readers") {
+        fields.extend(
+            READER_FIELDS
+                .iter()
+                .filter(|f| c.schema.field_pos(f).is_some()),
+        );
+    }
+    fields
 }
 
 fn text(v: &Value) -> String {
@@ -1191,6 +1234,85 @@ fn text(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A database whose `readers` is the one an earlier build wrote, with
+    /// no `lineage`, holding one replica's record.
+    fn old_readers() -> Database {
+        let mut db = Database::new();
+        for sql in [
+            "create collection readers \
+             (key text @hash, tenant text @hash, node text @hash, follows text)",
+            r#"put readers {key: "acme/u1", tenant: "acme", node: "u1", follows: "http://e1"}"#,
+        ] {
+            db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+        }
+        db
+    }
+
+    /// A directory whose `readers` has no `lineage` keeps its records: the
+    /// field is added as an alter, and a standby's, following a primary
+    /// from before it, selects the fields it has. Asked of it, the select
+    /// failed with the field not found, read as an empty directory: every
+    /// read replica record forgotten.
+    #[test]
+    fn a_directory_from_before_readers_kept_lineage_keeps_its_records() {
+        let mut d = Directory::load(Arc::new(RwLock::new(old_readers()))).unwrap();
+        assert_eq!(d.readers("acme").len(), 1, "the record kept");
+        assert_eq!(d.readers("acme")[0].lineage, None);
+        d.set_reader("acme", "u1", "http://e2", Some("aaaaaaaa"))
+            .unwrap();
+        d.reload().unwrap();
+        assert_eq!(d.readers("acme")[0].lineage.as_deref(), Some("aaaaaaaa"));
+
+        let mut db = old_readers();
+        db.follow(Vec::new()).unwrap();
+        let standby = Directory::load(Arc::new(RwLock::new(db))).unwrap();
+        assert_eq!(standby.readers("acme").len(), 1, "a standby's kept too");
+    }
+
+    /// A field not found in a collection that is there is the error it is,
+    /// never an empty collection; only a collection not there yet -- a
+    /// standby's, before the primary's first writes -- reads as empty.
+    #[test]
+    fn a_field_not_found_is_not_an_empty_directory() {
+        let db = old_readers();
+        let missing = rows(&db, "readers", "get readers select key, lineage");
+        assert!(missing.is_err(), "{missing:?}");
+        let none = rows(&db, "scope", "get scope select region").unwrap();
+        assert!(none.is_empty());
+    }
+
+    /// Lineages are kept in the maps and follow the change ring, as
+    /// placements do: a standby's catch up, a tenant gone takes its own.
+    #[test]
+    fn lineages_follow_the_change_ring() {
+        let path = std::env::temp_dir().join(format!("fenec-dir-lin-{}.fenec", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut d = Directory::open(&path).unwrap();
+        d.set_node("n1", node("127.0.0.1:1")).unwrap();
+        d.place("acme", "n1", State::Active).unwrap();
+        d.set_lineage("acme", Some("aaaaaaaa")).unwrap();
+        assert_eq!(d.lineage("acme").as_deref(), Some("aaaaaaaa"));
+        d.reload().unwrap();
+        assert_eq!(d.lineage("acme").as_deref(), Some("aaaaaaaa"));
+        // A row written behind the maps, as a standby's follower writes
+        // the primary's: caught up from the ring.
+        {
+            let mut g = write(&d.db);
+            g.execute(
+                &fenec_ql::parse_one(r#"put lineages {tenant: "beta", lineage: "bbbbbbbb"}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+        d.ids.kept = true;
+        d.refresh().unwrap();
+        assert_eq!(d.lineage("beta").as_deref(), Some("bbbbbbbb"));
+        d.remove_tenant("acme").unwrap();
+        assert_eq!(d.lineage("acme"), None);
+        drop(d);
+        let _ = std::fs::remove_file(&path);
+    }
 
     fn node(addr: &str) -> Node {
         Node {

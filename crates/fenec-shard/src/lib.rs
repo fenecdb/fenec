@@ -200,6 +200,9 @@ pub struct Router {
     /// The read replicas' nodes a look's worker is under way on
     /// ([`Router::follow_round`]): one a node at a time.
     lookers: Mutex<HashSet<String>>,
+    /// The tenants this directory places whose lineage is to be had from
+    /// their node ([`Router::backfill_lineages`]).
+    lineage_wanted: Mutex<HashSet<String>>,
     /// The quotas the read replicas are to be sent, and the nodes a sender
     /// is under way to ([`readers::QuotaQueue`]).
     reader_quota_queue: Mutex<readers::QuotaQueue>,
@@ -271,6 +274,7 @@ impl Router {
             reader_lost: Mutex::new(HashSet::new()),
             reader_quotas: Mutex::new(Default::default()),
             lookers: Mutex::new(HashSet::new()),
+            lineage_wanted: Mutex::new(HashSet::new()),
             reader_quota_queue: Mutex::new(Default::default()),
             quotas_soon: (Mutex::new(false), std::sync::Condvar::new()),
             resting: Mutex::new(Default::default()),
@@ -1092,7 +1096,8 @@ impl Router {
     ///                                       by hand lets the name be made again
     ///                                       with r gone for good: a copy left
     ///                                       there takes nothing from another
-    ///                                       tenant of the name (its lineage)
+    ///                                       tenant of the name (its lineage),
+    ///                                       and deletes itself
     /// POST   /_shard/placements {tenants}     {"<t>": {node, addr, region,
     ///                                       quota, lineage} | null}: where this
     ///                                       directory places each, another

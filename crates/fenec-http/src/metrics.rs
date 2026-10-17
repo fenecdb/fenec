@@ -513,6 +513,16 @@ fn render(source: Source) -> String {
                     crate::quota::refused(k),
                 );
             }
+            out.family(
+                "fenec_copies_refused_total",
+                "counter",
+                "Copies of a tenant that refused a primary of another lineage -- its name made again -- and deleted themselves.",
+            );
+            out.sample(
+                "fenec_copies_refused_total",
+                &[],
+                crate::tenants::copies_refused(),
+            );
             unlinked(&mut out, s.unlinked);
             if let Some(n) = s.node_streams {
                 out.family(

@@ -1169,17 +1169,54 @@ tenant's lineage (`lineages`, recorded from the node's answer to a create
 or an import, `"lineage"` in `POST /_shard/placements`; the record's
 `lineage`), which every `follow` tells the copy and `.follows` keeps
 (`lineage <8 hex>`, `Follower::expect_lineage`): a copy whose primary is of
-another lineage takes nothing from it, answers no marked read, and its
-follower stops, and a look finding a replica's tenant of another lineage
-takes it off (`another_lineage`). With only the trace to go by, the trace
+another lineage takes nothing from it and deletes itself, file and
+`.follows`, through the registry it is served from (`refused_copy`,
+`Tenants::shared`, `fenec_copies_refused_total`) -- stopped and kept, it
+held the deleted tenant's rows on the node for anyone to read -- and a look
+finding a replica's tenant of another lineage takes it off
+(`another_lineage`). Deleting is safe where a copy is told a lineage at
+all: only a read replica is, never promoted, and a tenant's own replica and
+a node's standby copies are told none; a copy that never had its first
+image holds nothing to lose. A tenant's file replaced by hand with another
+lineage's has its read replicas refuse it and go, made again by each check
+and taking nothing, until the tenant is made again through the router,
+which records the new file's lineage -- the directory still names the old
+one, and a copy keeping the old rows meanwhile would be the leak this
+closes. A tenant with no lineage known --
+made before they were kept -- has it asked of its node at the next check
+(`want_lineage`, `backfill_lineages`, `GET /_admin/tenants/<t>/lineage`,
+wanted by a look over a tenant of this directory and by a placement asked
+of one), and each of its read replicas recorded with none is bound once
+its copy's node says the copy is of it, the copy told with a follow of the
+node it follows, and taken off where the copy is another's (`bind_reader`).
+A promotion changes nothing, on any build: the lineage is the top half of
+the history's first id, which every fork keeps, a node from before
+lineages' too -- the fork's own id, which only `fork_id` keeps under it,
+taken for it would have bound every replica to a lineage a node from
+before drew at random. Mixed versions protect less and
+break nothing: a node from before lineages ignores `"lineage"` and has no
+`lineage` endpoint, a router from before them ignores `lineages`, and no
+copy refuses on their word. Lineages are kept in the directory's maps
+from the change ring (`lineages`), read by every look and placement: read
+from the database, each was a statement parsed and run. `readers` took
+`lineage` as an alter, as `nodes` took its fields (`READER_FIELDS`), and
+is selected by the fields it has (`reader_fields`): the select naming one
+a directory from before lacked failed not found, which `rows` read as an
+empty collection, every record forgotten -- now only a collection not
+there reads as empty. With only the trace to go by, the trace
 let go of and the name made again on the very node, the look found
 nothing to change and the copy's follower took the new tenant's image; a
 `?forget` of a node that came back, and a router lost between the
 `follow` and the record, did the same. A trace names a tenant the global
 directory holds, under its claim (`set_trace`, 404 otherwise). A node's
 worker looks again where a tenant's primary is as it reaches the replica
-(`look_at`), not where the look saw it: reached after a slow node's
+(`fresh_primary`), not where the look saw it: reached after a slow node's
 earlier calls, it pointed the replica at the primary a failover had left.
+This directory's own it reads each time, from its maps; one at home in
+another region only once the look's answer is a `PRIMARY_FRESH` (1 s) old,
+and then for every such replica it has left at once, one call a region --
+asked again for each, the worker made a call an item where the look made
+one a region.
 A failover reads `pairs` and
 `replicas` alone, so none is ever promoted. Each is held to its tenant's
 quota wherever it is recorded: `POST /_shard/placements` answers the quota
@@ -1345,12 +1382,19 @@ request), a move onto a replica's node waiting out a look's `follow` held
 there, and a failover keeping the tenant's lineage where a tenant made
 again starts another (`readers::tests` a refused hold keeping the other's,
 no marked read to a tenant gone, the quota queue's order;
-`replication::tests` the fork's id), a copy taking nothing from another
+`replication::tests` the fork's id; `directory::tests` a directory
+whose `readers` lacks `lineage` keeping its records, a field not found
+never an empty collection, lineages following the ring), a copy taking nothing from another
 tenant of its name made again on its very node, a replica of a tenant made
 again taken off where its trace was let go of by hand, a trace of a name no
 tenant holds refused, a look's worker pointing a replica at the primary as
 it reaches it (the parking proxy holding one tenant's `follow` as the other
-moves), a create asking only the regions that
+moves), a copy refusing another tenant of its name deleting itself (an
+orphan told its lineage by hand, and a `?forget`'s), a tenant and its read
+replica from before lineages bound to one and the copy then refusing the
+name made again behind the router's back, a worker asking a region for its
+replicas' primaries at once (at most one call names one tenant alone; the proxy
+records what it reads while parking), a create asking only the regions that
 may keep a replica of its name -- one out of reach refusing those names
 alone, a name no region traced made with every region cut off -- a router
 following a region's saying `changing: null`, a placement the directory

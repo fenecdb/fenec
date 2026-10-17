@@ -121,6 +121,8 @@ struct Proxy {
     parking: Arc<Mutex<Vec<String>>>,
     /// The requests it holds: each one's bytes, and its client.
     parked: Parked,
+    /// Every request it read while parking, held or passed on, as text.
+    seen: Arc<Mutex<Vec<String>>>,
 }
 
 type Parked = Arc<Mutex<Vec<(Vec<u8>, TcpStream)>>>;
@@ -143,6 +145,8 @@ impl Proxy {
             Arc::clone(&asked),
         );
         let (holding, held) = (Arc::clone(&parking), Arc::clone(&parked));
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let saw = Arc::clone(&seen);
         std::thread::spawn(move || {
             for client in listener.incoming() {
                 let Ok(client) = client else { continue };
@@ -167,16 +171,20 @@ impl Proxy {
                     continue;
                 }
                 if !holding.lock().unwrap().is_empty() {
-                    let (holding, held, streams, target) = (
+                    let (holding, held, streams, target, saw) = (
                         Arc::clone(&holding),
                         Arc::clone(&held),
                         Arc::clone(&streams),
                         target.clone(),
+                        Arc::clone(&saw),
                     );
                     std::thread::spawn(move || {
                         let Some(bytes) = first_request(&client) else {
                             return;
                         };
+                        saw.lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&bytes).into_owned());
                         let line = String::from_utf8_lossy(&bytes)
                             .lines()
                             .next()
@@ -211,7 +219,19 @@ impl Proxy {
             asked,
             parking,
             parked,
+            seen,
         }
+    }
+
+    /// The requests it read while parking whose line holds `what`, as text.
+    fn seen(&self, what: &str) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| t.lines().next().is_some_and(|l| l.contains(what)))
+            .cloned()
+            .collect()
     }
 
     /// Holds every request whose line holds `what` from now on, its
@@ -576,6 +596,17 @@ fn request_with(
 ) -> (u16, String, String) {
     let borrowed: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
     request(port, "POST", target, &query_body(sql), &borrowed)
+}
+
+/// A request's status and body, its head left out.
+trait TwoOfThree {
+    fn map_two(self) -> (u16, String);
+}
+
+impl TwoOfThree for (u16, String, String) {
+    fn map_two(self) -> (u16, String) {
+        (self.0, self.2)
+    }
 }
 
 /// A read through the router, unmarked: its status and body.
@@ -2004,20 +2035,51 @@ fn a_read_replica_s_silent_node_holds_up_no_other_s_re_pointing() {
     w.links[2].heal();
 }
 
-/// A read replica's copy takes nothing from another tenant of its name: a
-/// tenant deleted and made again on the very node its copy followed --
-/// the record forgotten by hand (`?forget`, a node thought gone for good),
-/// or never written (a router lost between the follow and the record) --
-/// had the copy's follower, reconnecting to the same address, take the new
-/// one's image: another owner's data in a region nobody chose for it. The
-/// copy was told its tenant's lineage, keeps it across restarts, refuses a
-/// primary of another, and answers no marked read after.
+/// A read replica's copy takes nothing from another tenant of its name,
+/// and keeps none of the one it copied: a tenant deleted and made again on
+/// the very node its copy followed -- the record forgotten by hand
+/// (`?forget`, a node thought gone for good), or never written (a router
+/// lost between the follow and the record, here a copy made and told to
+/// follow by hand) -- had the copy's follower, reconnecting to the same
+/// address, take the new one's image: another owner's data in a region
+/// nobody chose for it. Told its tenant's lineage, the copy refuses a
+/// primary of another; stopped and kept, it still answered the deleted
+/// tenant's rows to anyone reading the node, so it deletes itself, file
+/// and `.follows` (`fenec_copies_refused_total`).
 #[test]
-fn a_read_replica_s_copy_takes_nothing_from_another_tenant_of_its_name() {
+fn a_read_replica_s_copy_refusing_another_tenant_of_its_name_deletes_itself() {
     let w = OneDirectory::new("lineage-copy");
     w.tenant("acme");
-    write(w.primary, "acme", r#"put notes {body: "theirs before"}"#);
-    w.holds("acme", r#""theirs before""#);
+    w.made("orphan");
+    write(w.primary, "acme", r#"put notes {body: "old"}"#);
+    write(w.primary, "orphan", r#"put notes {body: "old"}"#);
+    w.holds("acme", r#""old""#);
+    let us1 = w._nodes[2].port;
+    // The orphan: a copy made and told to follow, with its tenant's
+    // lineage, as a placement does before it records it.
+    let (_, placed) = shard(
+        w.primary,
+        "POST",
+        "/_shard/placements",
+        r#"{"tenants":["orphan"]}"#,
+    );
+    let lineage = text_of(&placed, "lineage").expect("the router knows its lineage");
+    let (status, body) = admin(us1, "lineage-copy-us1", "PUT", "/_admin/tenants/orphan", "");
+    assert_eq!(status, 201, "{body}");
+    let follow = format!(r#"{{"from":"{}","lineage":"{lineage}"}}"#, w.links[0].url());
+    let (status, body) = admin(
+        us1,
+        "lineage-copy-us1",
+        "POST",
+        "/_admin/tenants/orphan/follow",
+        &follow,
+    );
+    assert_eq!(status, 200, "{body}");
+    until("the orphan holds the old tenant's rows", || {
+        marked(us1, "orphan", "get notes select body", None)
+            .1
+            .contains(r#""old""#)
+    });
     let (status, body) = shard(
         w.primary,
         "DELETE",
@@ -2025,23 +2087,38 @@ fn a_read_replica_s_copy_takes_nothing_from_another_tenant_of_its_name() {
         "",
     );
     assert_eq!(status, 204, "{body}");
-    let (status, body) = shard(w.primary, "DELETE", "/_shard/tenants/acme", "");
-    assert_eq!(status, 204, "{body}");
-    let (status, body) = shard(
-        w.primary,
-        "PUT",
-        "/_shard/tenants/acme",
-        r#"{"node":"eu1","schema":"create collection notes (body text)"}"#,
-    );
-    assert_eq!(status, 201, "{body}");
-    write(w.primary, "acme", r#"put notes {body: "another owner's"}"#);
-    let us1 = w._nodes[2].port;
-    let mut last = (0, String::new());
-    until("us1's copy refuses the new tenant, or takes it", || {
-        last = marked(us1, "acme", "get notes select body", None);
-        last.0 == 503 || last.1.contains("another owner's")
-    });
-    assert_eq!(last.0, 503, "{}", last.1);
+    for t in ["acme", "orphan"] {
+        let (status, body) = shard(w.primary, "DELETE", &format!("/_shard/tenants/{t}"), "");
+        assert_eq!(status, 204, "{body}");
+        let (status, body) = shard(
+            w.primary,
+            "PUT",
+            &format!("/_shard/tenants/{t}"),
+            r#"{"node":"eu1","schema":"create collection notes (body text)"}"#,
+        );
+        assert_eq!(status, 201, "{body}");
+        write(w.primary, t, r#"put notes {body: "another owner's"}"#);
+    }
+    for t in ["acme", "orphan"] {
+        let mut last = (0, String::new());
+        until("us1's copy deletes itself, or takes the new tenant", || {
+            last = request(
+                us1,
+                "POST",
+                &format!("/t/{t}/query"),
+                &query_body("get notes select body"),
+                &[],
+            )
+            .map_two();
+            last.0 == 404 || last.1.contains("another owner's")
+        });
+        assert_eq!(last.0, 404, "{t}: {}", last.1);
+        assert!(!w._nodes[2].dir.join(format!("{t}.follows")).exists());
+    }
+    let (_, held) = admin(us1, "lineage-copy-us1", "GET", "/_admin/tenants", "");
+    assert!(!held.contains("acme") && !held.contains("orphan"), "{held}");
+    let (_, metrics) = admin(us1, "lineage-copy-us1", "GET", "/_metrics", "");
+    assert!(metrics.contains("fenec_copies_refused_total"), "{metrics}");
 }
 
 /// A read replica whose tenant's name was made again -- its record kept by
@@ -2182,6 +2259,213 @@ fn a_look_s_worker_points_a_replica_at_its_primary_as_it_reaches_it() {
         "beta's replica pointed elsewhere than eu3: {sent}"
     );
     w.links[2].unpark("/follow");
+}
+
+/// A tenant made before lineages were kept, and its read replica placed
+/// then, are bound to its lineage once a router keeps them: unknown, the
+/// replica was bound to nothing, and its copy took any tenant of the name.
+/// The router asks the tenant's node for its lineage and records it, asks
+/// the copy's node for the copy's, and where they agree records it with
+/// the replica and tells the copy -- which then refuses a tenant made again
+/// under the name, on the very node, behind the router's back.
+#[test]
+fn a_tenant_and_its_read_replica_from_before_lineages_are_bound_to_one() {
+    let tag = "legacy";
+    let files = files(tag);
+    let names = ["eu1", "us1"];
+    let nodes = names.map(|n| node(&format!("{tag}-{n}")));
+    let (eu1, us1) = (nodes[0].port, nodes[1].port);
+    // The tenant and its copy, made on the nodes by hand, as a router from
+    // before lineages made them: no lineage told the copy.
+    let (status, body) = admin(eu1, "legacy-eu1", "PUT", "/_admin/tenants/acme", "");
+    assert_eq!(status, 201, "{body}");
+    for sql in [
+        "create collection notes (body text)",
+        r#"put notes {body: "old"}"#,
+    ] {
+        let (status, _, body) = request(eu1, "POST", "/t/acme/query", &query_body(sql), &[]);
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, body) = admin(us1, "legacy-us1", "PUT", "/_admin/tenants/acme", "");
+    assert_eq!(status, 201, "{body}");
+    let follow = format!(r#"{{"from":"http://127.0.0.1:{eu1}"}}"#);
+    let (status, body) = admin(
+        us1,
+        "legacy-us1",
+        "POST",
+        "/_admin/tenants/acme/follow",
+        &follow,
+    );
+    assert_eq!(status, 200, "{body}");
+    until("the copy holds the tenant's rows", || {
+        marked(us1, "acme", "get notes select body", None)
+            .1
+            .contains(r#""old""#)
+    });
+    // The directory as such a router left it: the tenant and its read
+    // replica recorded, no lineage of either.
+    let (db, repl) = directory(&files.0.join("global.fenec"), None);
+    let mut dir = Directory::load(Arc::clone(&db)).unwrap();
+    for (name, region, port) in [("eu1", "eu", eu1), ("us1", "us", us1)] {
+        let n = fenec_shard::directory::Node {
+            addr: format!("127.0.0.1:{port}"),
+            token: format!("adm-{tag}-{name}"),
+            region: region.into(),
+            ..Default::default()
+        };
+        dir.set_node(name, n).unwrap();
+    }
+    dir.place("acme", "eu1", fenec_shard::directory::State::Active)
+        .unwrap();
+    dir.set_reader("acme", "us1", &format!("http://127.0.0.1:{eu1}"), None)
+        .unwrap();
+    let router = serve(Router::replicated(
+        dir,
+        config(Some("eu"), None, None),
+        repl,
+    ));
+
+    let mut lineage = None;
+    until("the router has the tenant's lineage from its node", || {
+        let (_, placed) = shard(
+            router,
+            "POST",
+            "/_shard/placements",
+            r#"{"tenants":["acme"]}"#,
+        );
+        lineage = text_of(&placed, "lineage");
+        lineage.is_some()
+    });
+    let lineage = lineage.unwrap();
+    until("the read replica is bound to it", || {
+        shard(router, "GET", "/_shard/tenants/acme/read-replicas", "")
+            .1
+            .contains(&format!(r#""lineage":"{lineage}""#))
+    });
+    let follows = std::fs::read_to_string(nodes[1].dir.join("acme.follows")).unwrap();
+    assert!(follows.contains(&format!("lineage {lineage}")), "{follows}");
+
+    // Made again on its node behind the router's back: the copy, told its
+    // lineage now, takes nothing of the new tenant, and goes.
+    let (status, body) = admin(eu1, "legacy-eu1", "DELETE", "/_admin/tenants/acme", "");
+    assert_eq!(status, 204, "{body}");
+    let (status, body) = admin(eu1, "legacy-eu1", "PUT", "/_admin/tenants/acme", "");
+    assert_eq!(status, 201, "{body}");
+    for sql in [
+        "create collection notes (body text)",
+        r#"put notes {body: "another owner's"}"#,
+    ] {
+        let (status, _, body) = request(eu1, "POST", "/t/acme/query", &query_body(sql), &[]);
+        assert_eq!(status, 200, "{body}");
+    }
+    let mut last = (0, String::new());
+    until("us1's copy deletes itself, or takes the new tenant", || {
+        last = request(
+            us1,
+            "POST",
+            "/t/acme/query",
+            &query_body("get notes select body"),
+            &[],
+        )
+        .map_two();
+        last.0 == 404 || last.1.contains("another owner's")
+    });
+    assert_eq!(last.0, 404, "{}", last.1);
+}
+
+/// A look's worker asks a region's router again where its tenants'
+/// primaries are only once the look's answer has aged, and then for every
+/// such replica it has left at once: asked again for each, a worker made
+/// a call to the region a replica, where the look made one a region. Here
+/// the worker is held at its node's door on the first of three replicas
+/// past that age; at most one call to the region names one tenant alone.
+#[test]
+fn a_look_s_worker_asks_a_region_for_its_replicas_primaries_at_once() {
+    let tag = "batch";
+    let files = files(tag);
+    let names = ["eu1", "us1", "us2"];
+    let nodes = names.map(|n| node(&format!("{tag}-{n}")));
+    let eu_link = Proxy::to(nodes[0].port);
+    let global = global_router(&files.0.join("global.fenec"), None, "eu");
+    let upstream = format!("http://127.0.0.1:{global}");
+    let us = region_router("us", &files.0.join("us.fenec"), &upstream);
+    let us_link = Proxy::to(us);
+    let (status, body) = shard(
+        global,
+        "PUT",
+        "/_shard/regions/us",
+        &format!(r#"{{"routers":["{}"]}}"#, us_link.url()),
+    );
+    assert_eq!(status, 200, "{body}");
+    for (i, (name, region)) in names.iter().zip(["eu", "us", "us"]).enumerate() {
+        let addr = match i {
+            0 => eu_link.addr.clone(),
+            _ => format!("127.0.0.1:{}", nodes[i].port),
+        };
+        let body = format!(r#"{{"addr":"{addr}","token":"adm-{tag}-{name}","region":"{region}"}}"#);
+        let (status, answer) = shard(global, "PUT", &format!("/_shard/nodes/{name}"), &body);
+        assert_eq!(status, 201, "{name}: {answer}");
+    }
+    until("us's copy of the global directory arrives", || {
+        shard(us, "GET", "/_shard/regions", "")
+            .1
+            .contains(r#""name":"us""#)
+    });
+    let tenants = ["t1", "t2", "t3"];
+    for t in tenants {
+        let make = r#"{"node":"us1","region":"us","schema":"create collection notes (body text)"}"#;
+        let (status, body) = shard(global, "PUT", &format!("/_shard/tenants/{t}"), make);
+        assert_eq!(status, 201, "{t}: {body}");
+        until("the global router places its read replica in eu", || {
+            shard(
+                global,
+                "PUT",
+                &format!("/_shard/tenants/{t}/read-replicas/eu"),
+                "",
+            )
+            .0 == 201
+        });
+    }
+    us_link.park("a request no one sends");
+    eu_link.park("t1/follow");
+    let (status, body) = shard(us, "POST", "/_shard/nodes/us1/failover", "");
+    assert_eq!(status, 200, "{body}");
+    until("the worker waits at eu1's door on t1's follow", || {
+        !eu_link.parked("t1/follow").is_empty()
+    });
+    // The look's answer aged past what a worker takes as it stands.
+    std::thread::sleep(Duration::from_millis(1500));
+    eu_link.unpark("t1/follow");
+    let us2 = format!("127.0.0.1:{}", nodes[2].port);
+    for t in tenants {
+        until("each read replica follows its new primary", || {
+            shard(
+                global,
+                "GET",
+                &format!("/_shard/tenants/{t}/read-replicas"),
+                "",
+            )
+            .1
+            .contains(&us2)
+        });
+    }
+    // The looks ask for all three; the worker, its answer aged, for those
+    // it has left at once -- one alone only where the failover's last
+    // promotion missed the look its other two met. Asked again for each,
+    // it made a call a replica, three of one tenant.
+    let asked = us_link.seen("/_shard/placements");
+    assert!(!asked.is_empty());
+    let alone: Vec<&String> = asked
+        .iter()
+        .filter(|a| {
+            tenants
+                .iter()
+                .filter(|t| a.contains(&format!("\"{t}\"")))
+                .count()
+                == 1
+        })
+        .collect();
+    assert!(alone.len() <= 1, "calls for one tenant alone: {alone:?}");
 }
 
 /// A tenant's quota reaches its read replicas, as its standby and its
