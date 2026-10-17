@@ -7,7 +7,8 @@
 // held write pass through whole, and a stream lets go when its client does;
 // the admin paths stay private however a path is spelled; the routers'
 // marks never come from a client, and the client is named by the entry's
-// mark, bound to its address; a router gone -- or one a tunnel's connector
+// mark, bound to its address, which the routers wait a refused token out
+// by; a router gone -- or one a tunnel's connector
 // cannot reach -- is passed over for its standby, and a known home gone is
 // a 503 to come back from, never another region; a read marked for a
 // replica goes to the client's nearest region whatever the home. Needs `npm ci` here
@@ -248,6 +249,10 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
       // a node learn of a client gone within one; one stream a tenant, so
       // a stream still held is a refused one.
       node: ['--http-keepalive', '1', '--http-max-streams', '1'],
+      // The routers read the client the entry names, and log whom they
+      // refused.
+      entryToken: SECRET,
+      audit: true,
     });
     state = await mkdtemp(join(tmpdir(), 'fenecdb-entry-state-'));
     const regions = { us: { routers: [w.us.url, w.usStandby.url] }, eu: { routers: [w.eu.url] } };
@@ -355,6 +360,50 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     const asked = await query(front.url, 'acme', 'get notes count', undefined, { 'Fenec-Home': '1' });
     assert.equal(asked.status, 200);
     assert.equal(asked.header('fenec-home'), undefined);
+  });
+
+  test("a refused token waits by the client the entry names, never by the entry's own address", async () => {
+    // Two clients, as Cloudflare's CF-Connecting-IP names them -- `wrangler
+    // dev` passes the request's through -- whose every request reaches the
+    // routers from the entry's one address.
+    const [a, b] = ['203.0.113.21', '203.0.113.22'];
+    const as = (ip, token, id) =>
+      query(front.url, 'acme', 'get notes count', undefined, {
+        Authorization: `Bearer ${token}`,
+        'CF-Connecting-IP': ip,
+        'X-Request-Id': id,
+      });
+    // acme's home heard first: every request below goes to us's router,
+    // whose counts these are -- a guessed region's router waits out the
+    // refusal it relays, by a count of its own.
+    assert.equal((await query(front.url, 'acme', 'get notes count')).status, 200);
+    // a's refusals wait 100, 200 and 400 ms at the router: doubled, by a.
+    for (const [i, least] of [100, 200, 400].entries()) {
+      const started = Date.now();
+      const r = await as(a, 'guessed', `named-a-${i}`);
+      assert.equal(r.status, 401, r.text);
+      assert.ok(Date.now() - started >= least, `refusal ${i} took ${Date.now() - started} ms`);
+    }
+    // b's good token, verified at the node, starts b's count again and not
+    // a's: by the entry's address, any client's good token through it
+    // started every client's again.
+    const good = await as(b, DATA, 'named-b-0');
+    assert.equal(good.status, 200, good.text);
+    const started = Date.now();
+    const r = await as(a, 'guessed', 'named-a-3');
+    assert.equal(r.status, 401, r.text);
+    assert.ok(Date.now() - started >= 800, `a's fourth refusal took ${Date.now() - started} ms: its count was started again`);
+    // Every router that refused a request of a's names a in its audit
+    // line, the entry's address -- or the router relaying it -- as `via`.
+    const lines = (await Promise.all([w.global, w.us, w.usStandby, w.eu].map((router) => w.audit(router))))
+      .flat()
+      .filter((l) => l.request_id?.startsWith('named-a-'));
+    assert.ok(lines.length >= 4, JSON.stringify(lines));
+    for (const l of lines) {
+      assert.equal(l.event, 'refused', JSON.stringify(l));
+      assert.equal(l.peer, a, JSON.stringify(l));
+      assert.match(l.via, /^127\.0\.0\.1:\d+$/, JSON.stringify(l));
+    }
   });
 
   test('a tenant moved across regions is relayed once, and then sent to its new home', async () => {

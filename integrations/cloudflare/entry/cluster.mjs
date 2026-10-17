@@ -4,7 +4,7 @@
 // process on port 0 and found by the address it says it took.
 
 import { spawn } from 'node:child_process';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -130,15 +130,19 @@ export async function until(ok, what, ms = 60_000) {
 /**
  * The world: the global router (keeping no node), us's router and its
  * standby, eu's router, a node in each region; `tenants` made, each
- * `[name, region]`, with `schema`. `node` adds flags to each node's.
+ * `[name, region]`, with `schema`. `node` adds flags to each node's;
+ * `entryToken` is every router's `--entry-token`, the entry's
+ * `ENTRY_TOKEN`; `audit` has each router write its audit log beside its
+ * directory, `w.audit(router)` its lines.
  */
-export async function world({ tenants = [], schema = 'create collection notes (title text)', node = [] } = {}) {
+export async function world({ tenants = [], schema = 'create collection notes (title text)', node = [], entryToken, audit = false } = {}) {
   const { server, shard: router } = binaries();
   const dir = await mkdtemp(join(tmpdir(), 'fenecdb-entry-'));
   const on = (name) => join(dir, name);
   const routerArgs = (file, more) => [
     '--listen', '127.0.0.1:0', '--directory', on(file), '--token', ROOT, '--replication-token', DIRS,
-    '--http-cors', ORIGIN, ...more,
+    '--http-cors', ORIGIN, ...(entryToken ? ['--entry-token', entryToken] : []),
+    ...(audit ? ['--audit', on(`${file}.audit`)] : []), ...more,
   ];
   const global = await start(router, routerArgs('global.fenec', []));
   const regional = (region, file, more = []) => start(router, routerArgs(file, ['--region', region, '--global', global.url, ...more]));
@@ -153,6 +157,8 @@ export async function world({ tenants = [], schema = 'create collection notes (t
     ]);
   }
   const w = { dir, global, us, usStandby, eu, nodes };
+  const files = new Map([[global, 'global.fenec'], [us, 'us.fenec'], [usStandby, 'us-standby.fenec'], [eu, 'eu.fenec']]);
+  w.audit = async (r) => (await readFile(on(`${files.get(r)}.audit`), 'utf8').catch(() => '')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
   try {
     for (const [region, routers] of [['us', [us.url, usStandby.url]], ['eu', [eu.url]]]) {
       const r = await shard(global.url, 'PUT', `/_shard/regions/${region}`, { routers });

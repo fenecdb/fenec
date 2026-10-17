@@ -1310,6 +1310,9 @@ cd integrations/cloudflare
 npx wrangler secret put ENTRY_TOKEN --config entry/wrangler.jsonc
 npx wrangler deploy --config entry/wrangler.jsonc
 
+# every router: the same token, so it believes the client the entry names
+FENEC_SHARD_ENTRY_TOKEN="$ENTRY_TOKEN" fenec-shard --token "$ROOT" ...
+
 curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
      -d '{"query":"get notes count"}'
 </pre>
@@ -1421,7 +1424,8 @@ the claim passes the job to the next.</p>
 nodes' lines carry it) — but the hop-by-hop headers, the routers' own marks
 (<code>Fenec-Router</code>, <code>Fenec-Global</code>,
 <code>Fenec-Verified</code>), which a router believes from another router
-alone, and every way a client names an address
+alone, a <code>Fenec-Client</code> of the client's own, and every way a
+client names an address
 (<code>X-Forwarded-For</code>, <code>X-Real-IP</code>,
 <code>Forwarded</code>, <code>True-Client-IP</code>,
 <code>CF-*</code>). <code>Fenec-Verified</code> and
@@ -1452,8 +1456,51 @@ believed from Cloudflare's addresses: a Worker sets
 request to an origin outside Cloudflare (Cloudflare's <a
 href="https://developers.cloudflare.com/fundamentals/reference/http-headers/">HTTP
 headers</a> page), so any account's Worker could claim any address from
-those ranges. The routers do not read it yet: until they take the mark, a
-refused token behind the entry waits by Cloudflare's address.</p>
+those ranges.</p>
+
+<p>A router started with the entry's token — <code>fenec-shard
+--entry-token</code>, or <code>FENEC_SHARD_ENTRY_TOKEN</code> — checks the mark against its own HMAC, in constant time, and
+the time within 60 seconds of its clock either way, and takes the address
+for that request's in the connection's place. A refused token waits by it,
+and a good one starts its count again and no other's; the audit log names
+it as <code>peer</code>, the entry's address beside it as <code>via</code>,
+and a trace as <code>client.address</code>, the connection's as
+<code>network.peer.address</code>; and it is the client the router names to
+the tenant's node, or to the home region's router it relays the request to,
+which names it to the node in turn. A header seen on the wire can be
+replayed for that minute, and names that one address: what the minute
+costs, where a mark of the token alone would name any address for good. A
+header that does not check, or a router without the flag, counts the
+connection's address, and <code>fenec_router_entry_clients_total</code>
+says which (<code>named</code>, <code>bad_mark</code>, <code>stale</code>,
+or <code>absent</code> for a tenant's request carrying none, as every one
+from an entry whose <code>ENTRY_TOKEN</code> is unset does), the router's
+log a minute apart at most of each kind not believed — not the audit log,
+which a header costing its sender nothing would fill at the router's
+request rate. On a router only the entry reaches, alert on all but
+<code>named</code> (<a href="monitoring.html#router">Monitoring</a>).
+Every router drops the header from what it forwards, flag or not, so a
+node never reads a client's claim. A mark costs a request one HMAC-SHA256,
+0.75 µs on this machine, which a round trip does not show: through a router
+with the flag and one without, in turns, a request the entry named its
+client in took 41.7 µs p50 against 42.1, and one with no header 42.0
+against 42.05 — a look among its headers and a count — the runs'
+differences a few tenths of a microsecond either way (<code>make
+shard-bench ARGS=latency</code>, eight runs). Without the flag the router's
+added p50 stayed 20.4 µs, as before.</p>
+
+<p><b>The entry's token is its own.</b> The Worker holds it, so a router
+refuses it where it holds it for anything else: equal to its
+<code>--token</code>, which moves and deletes tenants, to its
+<code>--replication-token</code>, whose stream carries every node's admin
+token, or to the admin token of a node in its directory, at the start and
+as a node is added. The nodes' data and replication tokens the router never
+sees: keep the entry's apart from those too. A router takes one entry token
+at a time. To change it, start each router with the new one, then put it
+in the Worker (<code>npx wrangler secret put ENTRY_TOKEN</code>): in
+between every request is served, and its client counted by Cloudflare's
+address, as <code>bad_mark</code> shows — a few minutes of the counting
+there was before, against a second token held by every router.</p>
 
 <p><b>When a router cannot be reached.</b> A region's routers are tried in
 turn from the one that answered last. Every answer a router writes carries

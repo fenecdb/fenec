@@ -27,6 +27,7 @@ const H0: [u32; 8] = [
 pub const SHA256_LEN: usize = 32;
 const BLOCK: usize = 64;
 
+#[derive(Clone)]
 pub struct Sha256 {
     h: [u32; 8],
     buf: [u8; BLOCK],
@@ -150,26 +151,54 @@ pub fn sha256(data: &[u8]) -> [u8; SHA256_LEN] {
 // --------------------------------------------------------------- HMAC/PBKDF2
 
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; SHA256_LEN] {
-    let mut k = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        k[..SHA256_LEN].copy_from_slice(&sha256(key));
-    } else {
-        k[..key.len()].copy_from_slice(key);
+    HmacKey::new(key).mac(&[msg])
+}
+
+/// HMAC-SHA256 under one key, its two padded blocks hashed once: a MAC of
+/// a short message is then two compressions where the key's blocks made it
+/// four. What a router checks the global entry's mark on a request with
+/// (`audit::EntryKey`): a mark checked, its parse and comparison included,
+/// in 0.73-0.78 us, where the HMAC alone took 1.28-1.36 with the key's
+/// blocks hashed each time (`make shard-bench ARGS=latency`'s `entry`
+/// part).
+#[derive(Clone)]
+pub struct HmacKey {
+    inner: Sha256,
+    outer: Sha256,
+}
+
+impl HmacKey {
+    pub fn new(key: &[u8]) -> HmacKey {
+        let mut k = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            k[..SHA256_LEN].copy_from_slice(&sha256(key));
+        } else {
+            k[..key.len()].copy_from_slice(key);
+        }
+        let mut ipad = [0x36u8; BLOCK];
+        let mut opad = [0x5cu8; BLOCK];
+        for i in 0..BLOCK {
+            ipad[i] ^= k[i];
+            opad[i] ^= k[i];
+        }
+        let mut inner = Sha256::new();
+        inner.update(&ipad);
+        let mut outer = Sha256::new();
+        outer.update(&opad);
+        HmacKey { inner, outer }
     }
-    let mut ipad = [0x36u8; BLOCK];
-    let mut opad = [0x5cu8; BLOCK];
-    for i in 0..BLOCK {
-        ipad[i] ^= k[i];
-        opad[i] ^= k[i];
+
+    /// The MAC of the message `parts` make, one after another.
+    pub fn mac(&self, parts: &[&[u8]]) -> [u8; SHA256_LEN] {
+        let mut inner = self.inner.clone();
+        for p in parts {
+            inner.update(p);
+        }
+        let inner = inner.finish();
+        let mut outer = self.outer.clone();
+        outer.update(&inner);
+        outer.finish()
     }
-    let mut inner = Sha256::new();
-    inner.update(&ipad);
-    inner.update(msg);
-    let inner = inner.finish();
-    let mut outer = Sha256::new();
-    outer.update(&opad);
-    outer.update(&inner);
-    outer.finish()
 }
 
 /// PBKDF2-HMAC-SHA256, a single 32-byte block of output (what SCRAM needs).

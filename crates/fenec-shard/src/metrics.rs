@@ -71,6 +71,10 @@ struct Shard {
     /// A forwarded request's from the moment it was sent to the node to the
     /// node's whole answer, or its head for a stream.
     upstream: Timings,
+    /// What the global entry's name for a request's client came to, by
+    /// [`EntryClient`]: behind the entry every request carries one, so it
+    /// is counted in the thread's shard as a request is.
+    entry: [AtomicU64; ENTRY_CLIENT.len()],
 }
 
 #[allow(clippy::declare_interior_mutable_const)]
@@ -80,6 +84,7 @@ const SHARD: Shard = Shard {
     requests: [ROW; ROUTES.len()],
     durations: [TIMINGS; ROUTES.len()],
     upstream: TIMINGS,
+    entry: [ZERO; ENTRY_CLIENT.len()],
 };
 
 static SHARDS: [Shard; SHARD_COUNT] = [SHARD; SHARD_COUNT];
@@ -122,6 +127,32 @@ pub enum ReplicaRead {
 }
 
 const REPLICA_READ: [&str; 3] = ["replica", "fallback", "home"];
+
+/// What a router with `--entry-token` made of a request's `Fenec-Client`
+/// header, the global entry's name for its client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryClient {
+    /// Its mark checked and its time was within a minute: the client named
+    /// is the request's.
+    Named = 0,
+    /// Its mark is not the entry's -- another token, or a client sending
+    /// the header itself -- and the connection's address counts.
+    BadMark = 1,
+    /// Its mark is the entry's, made more than a minute from this clock --
+    /// replayed, or a clock off -- and the connection's address counts.
+    Stale = 2,
+    /// A tenant's request (`/t/`) no other router relayed carried none: a
+    /// client reaching the router itself, or an entry whose `ENTRY_TOKEN`
+    /// is not set, which names no client at all.
+    Absent = 3,
+}
+
+const ENTRY_CLIENT: [&str; 4] = ["named", "bad_mark", "stale", "absent"];
+
+/// Counts what a request's `Fenec-Client` header came to.
+pub fn entry_client(how: EntryClient) {
+    SHARDS[shard()].entry[how as usize].fetch_add(1, Ordering::Relaxed);
+}
 
 /// Counts a read marked for a replica by where it was answered.
 pub fn replica_read(how: ReplicaRead) {
@@ -358,6 +389,22 @@ pub fn counters(out: &mut Text) {
             "fenec_router_replica_reads_total",
             &[("outcome", outcome)],
             REPLICA_READS[i].load(Ordering::Relaxed),
+        );
+    }
+    out.family(
+        "fenec_router_entry_clients_total",
+        "counter",
+        "What a router with --entry-token made of the Fenec-Client header -- the global entry's name for its client -- of the requests no other router relayed, by outcome: named (the mark checked, the address the request's), bad_mark (not the entry's mark: another token, or a client sending the header itself), stale (the entry's mark, made more than 60 s from this router's clock), absent (a tenant's request carrying none: a client reaching the router itself, or an entry with no ENTRY_TOKEN). All but named count by the connection's address.",
+    );
+    for (i, outcome) in ENTRY_CLIENT.iter().enumerate() {
+        let n: u64 = SHARDS
+            .iter()
+            .map(|s| s.entry[i].load(Ordering::Relaxed))
+            .sum();
+        out.sample(
+            "fenec_router_entry_clients_total",
+            &[("outcome", outcome)],
+            n,
         );
     }
     out.family(

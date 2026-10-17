@@ -45,3 +45,9 @@ path = "tests/request_id.rs"
 [[test]]
 name = "tracing"
 path = "tests/tracing.rs"
+
+# Apart: the counts of refusals, the audit log and tracing are the
+# process's, and the routers and nodes there share them.
+[[test]]
+name = "entry"
+path = "tests/entry.rs"
