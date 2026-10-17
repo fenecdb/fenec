@@ -304,6 +304,18 @@ test("a live query's runs read near after the change that ran them, its streams 
       return q.quota?.streams === 1000 ? q.usage.streams : -1;
     };
     await until(async () => (await waiting()) === 0, 'the quota reaches the read replica');
+    // Caught up with its primary before its link is parked: a copy whose
+    // primary has not said hello answers no read (503), and the router
+    // sends it home -- parked in that moment, the first session's hello
+    // was held and every run went home at once.
+    await until(async () => {
+      const res = await fetch(`${w.us1.url}/t/acme/query`, {
+        method: 'POST',
+        headers: { 'fenec-read': 'replica' },
+        body: JSON.stringify({ query: 'get notes count' }),
+      });
+      return res.ok;
+    }, 'the read replica caught up');
     const { sent, fetch: spy } = recording();
     const db = connect(w.url, { reads: 'nearest', fetch: spy });
     const home = connect(w.url);
