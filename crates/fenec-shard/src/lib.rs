@@ -766,7 +766,14 @@ impl Router {
                 }
             }
             let keep = match req.segments().first() {
-                Some(&"t") => self.forward(&req, &mut out, arrived, peer, relayed),
+                Some(&"t") => {
+                    // The client's socket, for a held request to watch: not
+                    // where the reader holds bytes of its next request, a
+                    // client that has gone having sent none (`upstream`'s
+                    // `answered_or_gone`).
+                    let watch = reader.buffer().is_empty().then(|| reader.get_ref());
+                    self.forward(&req, &mut out, arrived, peer, relayed, watch)
+                }
                 Some(&"_replication") => {
                     let Some(repl) = self.repl.clone() else {
                         let _ = self
@@ -833,7 +840,8 @@ impl Router {
     /// Forwards one request and copies the answer back, and counts it.
     /// Returns whether the client connection can carry another request.
     /// `relayed` is the client another router relayed it for, where it
-    /// came so ([`region`]).
+    /// came so ([`region`]); `watch` the client's socket, which a held
+    /// request watches ([`upstream::Pool::send_held`]).
     fn forward(
         &self,
         req: &Request,
@@ -841,6 +849,7 @@ impl Router {
         arrived: Instant,
         peer: Option<std::net::SocketAddr>,
         relayed: Option<std::net::IpAddr>,
+        watch: Option<&TcpStream>,
     ) -> bool {
         let head_only = req.method == Method::Head;
         // A forwarded request is traced, the rest of the router's are not:
@@ -963,13 +972,16 @@ impl Router {
             }
         }
         // A request the node may hold -- `Fenec-Wait`, for a claim or for
-        // `Fenec-After` -- is waited for as long besides the timeout.
+        // `Fenec-After` -- is waited for as long besides the timeout, and
+        // watches its client meanwhile: one gone has the node's connection
+        // let go of, so a claim's job goes to the next claim held.
         let held = req
             .header("fenec-wait")
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map_or(Duration::ZERO, |ms| {
                 Duration::from_millis(ms).min(fenec_http::waits::LONGEST)
             });
+        let watch = watch.filter(|_| !held.is_zero());
         let sending = match &routers {
             None => self.pool.send_held(
                 &addr,
@@ -978,13 +990,28 @@ impl Router {
                 &headers,
                 &req.body,
                 held,
+                watch,
             ),
             // A region's routers, in turn from the one that answered last,
             // as far as the request cannot have run.
-            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held),
+            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held, watch),
         };
         let answer = match sending {
             Ok(a) => a,
+            // Its client reset the connection: nobody is left to answer,
+            // and the node is no more out of reach than before. Nothing is
+            // written; the request is counted as `gone`, and the trace says
+            // 499, as nginx and Envoy name a request its client closed. A
+            // client gone with its end is not this: it reads as one that
+            // half-closed, its end is passed on and the node's answer
+            // written and counted as any (`upstream::answered_or_gone`).
+            Err(e) if upstream::client_gone(&e) => {
+                forwarding.error(e.to_string());
+                drop(forwarding);
+                metrics::gone(Route::Tenant, arrived.elapsed());
+                fenec_http::trace::end(499);
+                return false;
+            }
             Err(e) => {
                 forwarding.error(e.to_string());
                 drop(forwarding);

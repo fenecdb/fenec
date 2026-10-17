@@ -29,6 +29,20 @@
 //! `OPTIONS`, which a node never writes for, or a write under an
 //! `Idempotency-Key`, which it makes once. Anything else is the client's
 //! 502: retried here, a `put` that had landed was made twice.
+//!
+//! A request the node may hold (`Fenec-Wait`) watches its client while it
+//! waits for the head ([`answered_or_gone`]), and passes on to the node
+//! what the client did, as the node would read it from a client of its
+//! own: the client's end -- closed, or half-closed and still reading -- is
+//! the node's connection shut for writing, whose end the node's held claim
+//! sees before its next run and hands its row to the next claim, and the
+//! node's answer goes on to the client as any; a reset, which can read
+//! nothing more, lets go of the node's connection. Blocked in the head's
+//! read, the router never looked at its client, and a claim whose client
+//! had gone took the next job, leased to nobody until its lease ran out,
+//! where asked of the node itself it passed it on. Each hop does the same,
+//! so a region's router relaying such a request passes the end on to the
+//! home router, and the home router to the node.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -85,9 +99,32 @@ enum Stage {
     Unread,
     /// A timeout, or an answer cut short or malformed.
     Other,
+    /// The client of a held request reset its connection before the
+    /// answer began: the node's connection is let go of, and nothing is
+    /// sent again or written.
+    Abandoned,
 }
 
 struct Failure(Stage, io::Error);
+
+/// What a held request's failure is once its client has reset its
+/// connection ([`client_gone`]): nobody is left to answer, so the router
+/// writes nothing and counts no node as out of reach.
+#[derive(Debug)]
+struct ClientGone;
+
+impl std::fmt::Display for ClientGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the client reset its connection while its request was held")
+    }
+}
+
+impl std::error::Error for ClientGone {}
+
+/// Whether `e` is a held request's client gone ([`answered_or_gone`]).
+pub fn client_gone(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|e| e.is::<ClientGone>())
+}
 
 /// How a request to one of several routers failed (`Pool::send_tried`):
 /// whether the one asked cannot have run it, so that the next may be
@@ -171,13 +208,19 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> io::Result<Answer> {
-        self.send_held(addr, method, target, headers, body, Duration::ZERO)
+        self.send_held(addr, method, target, headers, body, Duration::ZERO, None)
     }
 
     /// [`Pool::send`] of a request the node may hold for `held` before it
     /// answers (`Fenec-Wait`): the answer is waited for that much longer.
     /// Cut at the timeout alone, a claim held longer was answered 502 here
     /// while the node went on to take a job for it, leased to no one.
+    /// `client`, the socket of the request's own client, is watched while
+    /// the head is waited for ([`answered_or_gone`]): its end is passed on
+    /// to the node, and its reset lets go of the node's connection, the
+    /// failure [`client_gone`]. `None` waits as an unheld request does,
+    /// with not a system call more.
+    #[allow(clippy::too_many_arguments)]
     pub fn send_held(
         &self,
         addr: &str,
@@ -186,14 +229,26 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
         held: Duration,
+        client: Option<&TcpStream>,
     ) -> io::Result<Answer> {
         let times = (self.timeout + held, self.timeout, self.timeout);
-        self.send_timed(addr, method, target, headers, body, times, Replay::AsAsked)
+        self.send_staged(
+            addr,
+            method,
+            target,
+            headers,
+            body,
+            times,
+            Replay::AsAsked,
+            client,
+        )
+        .map_err(|Failure(_, e)| e)
     }
 
     /// [`Pool::send_held`], its failure told by whether `addr` may have run
     /// the request ([`Tried`]): what a relay to a region's routers asks
-    /// before it asks the next.
+    /// before it asks the next. A client gone may have had it run.
+    #[allow(clippy::too_many_arguments)]
     pub fn send_tried(
         &self,
         addr: &str,
@@ -202,10 +257,11 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
         held: Duration,
+        client: Option<&TcpStream>,
     ) -> Result<Answer, Tried> {
         let times = (self.timeout + held, self.timeout, self.timeout);
         let replay = Replay::AsAsked;
-        match self.send_staged(addr, method, target, headers, body, times, replay) {
+        match self.send_staged(addr, method, target, headers, body, times, replay, client) {
             Ok(a) => Ok(a),
             Err(Failure(Stage::Unsent, e)) => Err(Tried::Unrun(e)),
             Err(Failure(Stage::Unanswered, e)) if replay.allows(method, headers) => {
@@ -234,10 +290,13 @@ impl Pool {
         within: Duration,
     ) -> Result<Answer, Near> {
         let times = (within, within, within);
-        match self.send_staged(addr, method, target, headers, body, times, Replay::AsAsked) {
+        let replay = Replay::AsAsked;
+        match self.send_staged(addr, method, target, headers, body, times, replay, None) {
             Ok(a) => Ok(a),
             Err(Failure(Stage::Unsent | Stage::Unread, e)) => Err(Near::Unreached(e)),
-            Err(Failure(Stage::Unanswered | Stage::Other, e)) => Err(Near::Unanswered(e)),
+            Err(Failure(Stage::Unanswered | Stage::Other | Stage::Abandoned, e)) => {
+                Err(Near::Unanswered(e))
+            }
         }
     }
 
@@ -282,11 +341,12 @@ impl Pool {
         times: (Duration, Duration, Duration),
         replay: Replay,
     ) -> io::Result<Answer> {
-        self.send_staged(addr, method, target, headers, body, times, replay)
+        self.send_staged(addr, method, target, headers, body, times, replay, None)
             .map_err(|Failure(_, e)| e)
     }
 
-    /// [`Self::send_timed`], its failure with how far it got.
+    /// [`Self::send_timed`], its failure with how far it got, `client`
+    /// watched while the head is waited for ([`Pool::send_held`]).
     #[allow(clippy::too_many_arguments)]
     fn send_staged(
         &self,
@@ -297,6 +357,7 @@ impl Pool {
         body: &[u8],
         times: (Duration, Duration, Duration),
         replay: Replay,
+        client: Option<&TcpStream>,
     ) -> Result<Answer, Failure> {
         let (read_timeout, connect_within, write_timeout) = times;
         let mut req = String::with_capacity(256);
@@ -348,7 +409,7 @@ impl Pool {
             }
             let set = (Some(idle.read_timeout), idle.write_timeout);
             let want = (read_timeout, write_timeout);
-            match self.exchange(addr, idle.stream, set, head, body, want) {
+            match self.exchange(addr, idle.stream, set, (head, body), want, client) {
                 Ok(a) => return Ok(a),
                 Err(Failure(Stage::Unsent, _)) => break,
                 Err(Failure(Stage::Unanswered, _)) if replay.allows(method, headers) => break,
@@ -359,21 +420,24 @@ impl Pool {
             .connect(addr, connect_within, write_timeout)
             .map_err(|e| Failure(Stage::Unsent, e))?;
         let set = (None, write_timeout);
-        self.exchange(addr, s, set, head, body, (read_timeout, write_timeout))
+        let want = (read_timeout, write_timeout);
+        self.exchange(addr, s, set, (head, body), want, client)
     }
 
-    /// One request and the head of its answer over `s`, whose read and
-    /// write timeouts are `set` -- the read's where it is known -- each
-    /// read of the answer bounded by `want.0` and each write by `want.1`.
-    /// Each is set only where it is not already, a system call a request.
+    /// One request, its head and body, and the head of its answer over
+    /// `s`, whose read and write timeouts are `set` -- the read's where it
+    /// is known -- each read of the answer bounded by `want.0` and each
+    /// write by `want.1`. Each is set only where it is not already, a
+    /// system call a request. `client` is watched until the answer begins
+    /// ([`answered_or_gone`]).
     fn exchange(
         &self,
         addr: &str,
         s: TcpStream,
         set: (Option<Duration>, Duration),
-        head: &[u8],
-        body: &[u8],
+        (head, body): (&[u8], &[u8]),
         want: (Duration, Duration),
+        client: Option<&TcpStream>,
     ) -> Result<Answer, Failure> {
         let (read_timeout, write_timeout) = want;
         if set.0 != Some(read_timeout) {
@@ -400,6 +464,17 @@ impl Pool {
                 };
                 Failure(stage, e)
             })?;
+        // The client's end, passed on as the node reads one from a client
+        // of its own: its held claim sees it before its next run, and its
+        // answer comes back as any. Shut for writing, the connection is
+        // not kept for another request.
+        let mut client_ended = false;
+        if let Some(client) = client {
+            if answered_or_gone(&s, client, read_timeout)? == Watched::Ended {
+                let _ = s.shutdown(std::net::Shutdown::Write);
+                client_ended = true;
+            }
+        }
 
         let mut reader = BufReader::new(s);
         let mut line = String::new();
@@ -444,9 +519,10 @@ impl Pool {
                 headers.push((k.trim().to_string(), v.trim().to_string()));
             }
         }
-        let reusable = !headers
-            .iter()
-            .any(|(k, v)| k.eq_ignore_ascii_case("connection") && v.eq_ignore_ascii_case("close"));
+        let reusable = !client_ended
+            && !headers.iter().any(|(k, v)| {
+                k.eq_ignore_ascii_case("connection") && v.eq_ignore_ascii_case("close")
+            });
         Ok(Answer {
             status,
             headers,
@@ -578,6 +654,122 @@ fn peek_now(s: &TcpStream) -> io::Result<usize> {
     let seen = s.peek(&mut [0u8]);
     s.set_nonblocking(false)?;
     seen
+}
+
+/// What became of a held request's client while its answer was waited for
+/// ([`answered_or_gone`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Watched {
+    /// The node's socket moved first.
+    Answering,
+    /// The client's end came: closed, or half-closed and still reading,
+    /// which read alike.
+    Ended,
+}
+
+/// Waits up to `within` for the node's answer on `node` to begin, watching
+/// `client` -- the held request's own client -- meanwhile: one `poll` of
+/// both until either moves. The node's socket moving, by an answer, a
+/// close or an error, is the head's read's to tell. The client's is looked
+/// at as a pooled connection is ([`peek_now`]): its end is
+/// [`Watched::Ended`], which the caller passes on to the node, and a reset
+/// the client gone. Taken for gone, an end let go of the node's
+/// connection, and a client that had half-closed after its request -- one
+/// a node answers as any, its first run checking nothing -- was answered
+/// nothing, its claim having taken a job on a busy queue all the same.
+/// Bytes there are a next request a client sent ahead, which a client
+/// that has gone sends none of: the client is let be, as the node lets a
+/// client be whose next request it holds, and the node alone is waited
+/// for. The `poll` is a `Fenec-Wait` request's alone: through the router a
+/// claim answered at once took 0.5 us more at the median here (macOS), 0.7
+/// on macOS and 1.2 on Linux in the review's measure, and one woken by a
+/// job 8 us more, a `poll` and then the read where it was the read. A
+/// watcher thread, prototyped in the review, was worse; the head read in
+/// slices with the client looked at between was left on its reasoning:
+/// every held claim -- a thousand of them -- woken each slice for nothing,
+/// and a client's end seen a slice late.
+///
+/// An end cannot be told from a half-close -- a client that sent its
+/// request and reads on -- so a client gone with its end, most timeouts and
+/// aborts, is passed on as one: its claim leaves at the node's next run or
+/// at its wait's end, as asked of the node itself, and its answer is
+/// written to nobody and counted by its status. Taken for gone instead, a
+/// half-closed client was answered nothing while its claim took a job; a
+/// reset alone says the client can read nothing more.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn answered_or_gone(
+    node: &TcpStream,
+    client: &TcpStream,
+    within: Duration,
+) -> Result<Watched, Failure> {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    // `nfds_t`: an `unsigned int` on Apple's systems and in Android's
+    // bionic, an `unsigned long` in glibc and musl.
+    #[cfg(any(target_vendor = "apple", target_os = "android"))]
+    type Nfds = std::ffi::c_uint;
+    #[cfg(all(target_os = "linux", not(target_vendor = "apple")))]
+    type Nfds = std::ffi::c_ulong;
+    extern "C" {
+        fn poll(fds: *mut PollFd, n: Nfds, timeout: i32) -> i32;
+    }
+    // The same on both: `<sys/poll.h>`'s and `<asm-generic/poll.h>`'s.
+    const POLLIN: i16 = 0x1;
+    let deadline = Instant::now() + within;
+    let mut watched = 2;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            let e = io::Error::new(io::ErrorKind::TimedOut, "the node did not answer in time");
+            return Err(Failure(Stage::Other, e));
+        }
+        // Rounded up: a wait of what rounds down to 0 ms would spin.
+        let ms = left.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
+        let mut fds = [
+            PollFd {
+                fd: node.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            },
+            PollFd {
+                fd: client.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: `watched` of the two entries, which outlive the call.
+        let n = unsafe { poll(fds.as_mut_ptr(), watched, ms) };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            // The wait is the head's read's, as it was before the watch.
+            return Ok(Watched::Answering);
+        }
+        if fds[0].revents != 0 {
+            return Ok(Watched::Answering);
+        }
+        if watched == 2 && fds[1].revents != 0 {
+            match peek_now(client) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Ok(1..) => watched = 1,
+                Ok(0) => return Ok(Watched::Ended),
+                Err(_) => return Err(Failure(Stage::Abandoned, io::Error::other(ClientGone))),
+            }
+        }
+    }
+}
+
+/// No `poll` declared here: the head is waited for as an unheld request's.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn answered_or_gone(_: &TcpStream, _: &TcpStream, _: Duration) -> Result<Watched, Failure> {
+    Ok(Watched::Answering)
 }
 
 impl Answer {
@@ -767,11 +959,11 @@ mod tests {
     fn stage(pool: &Pool, s: TcpStream, set: Option<Duration>) -> &'static str {
         let head = b"DELETE /t/acme/notes/1 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
         let (both, want) = ((set, pool.timeout), (pool.timeout, pool.timeout));
-        match pool.exchange("node", s, both, head, b"", want) {
+        match pool.exchange("node", s, both, (head, b""), want, None) {
             Ok(_) => "answered",
             Err(Failure(Stage::Unsent, _)) => "unsent",
             Err(Failure(Stage::Unanswered, _)) => "unanswered",
-            Err(Failure(Stage::Unread | Stage::Other, e)) => panic!("{e}"),
+            Err(Failure(Stage::Unread | Stage::Other | Stage::Abandoned, e)) => panic!("{e}"),
         }
     }
 
@@ -791,5 +983,68 @@ mod tests {
         drop(theirs);
         assert_eq!(arrived(&ours).unwrap(), 0);
         assert_eq!(stage(&pool, ours, Some(pool.timeout)), "unanswered");
+    }
+
+    /// What a held request's wait makes of its client: its end -- closed or
+    /// half-closed, which read alike -- is passed on, its reset is the
+    /// client gone, bytes it sends ahead are neither, and the node's answer
+    /// ends the wait whatever the client did.
+    #[test]
+    fn a_held_request_s_wait_tells_a_client_s_end_from_its_reset_and_bytes_sent_ahead() {
+        let long = Duration::from_secs(30);
+        // The client's end, closed and half-closed.
+        let (node, _node_end) = pair();
+        let (client, client_end) = pair();
+        drop(client_end);
+        assert_eq!(
+            answered_or_gone(&node, &client, long).ok(),
+            Some(Watched::Ended)
+        );
+        let (node, _node_end) = pair();
+        let (client, client_end) = pair();
+        client_end.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(
+            answered_or_gone(&node, &client, long).ok(),
+            Some(Watched::Ended)
+        );
+        // Its reset, left for the wait to find: Linux reports a reset to
+        // the first read that meets it and an end to every one after, so a
+        // reset looked at once already reads as an end.
+        let (node, _node_end) = pair();
+        let (mut client, client_end) = pair();
+        client.write_all(b"x").unwrap();
+        client_end
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        assert_eq!(client_end.peek(&mut [0u8]).unwrap(), 1);
+        drop(client_end);
+        let gone = |r: Result<Watched, Failure>| matches!(r, Err(Failure(Stage::Abandoned, _)));
+        assert!(gone(answered_or_gone(&node, &client, long)));
+        // Bytes of a next request, then its end: whichever the wait sees
+        // first, the bytes come before the end, and the node alone is
+        // waited for -- to the wait's end, a timeout, as with nothing from
+        // either.
+        let short = Duration::from_millis(50);
+        let timed = |r: Result<Watched, Failure>| matches!(&r, Err(Failure(Stage::Other, e)) if timed_out(e));
+        let (node, _node_end) = pair();
+        let (client, mut client_end) = pair();
+        client_end
+            .write_all(b"GET /t/acme/notes HTTP/1.1\r\n")
+            .unwrap();
+        drop(client_end);
+        assert!(timed(answered_or_gone(&node, &client, short)));
+        let (node, _node_end) = pair();
+        let (client, _client_end) = pair();
+        assert!(timed(answered_or_gone(&node, &client, short)));
+        // The node's answer ends the wait, its client gone or not.
+        let (node, mut node_end) = pair();
+        let (client, client_end) = pair();
+        node_end.write_all(b"HTTP/1.1 200 OK\r\n").unwrap();
+        assert_eq!(arrived(&node).unwrap(), 1);
+        drop(client_end);
+        assert_eq!(
+            answered_or_gone(&node, &client, long).ok(),
+            Some(Watched::Answering)
+        );
     }
 }

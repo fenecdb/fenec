@@ -1181,11 +1181,12 @@ head never reaches the Worker -- workerd notices a client only as it writes
 to it, past wrangler's own proxy Worker too -- so that case is held in Node,
 the handler over Node's `fetch`; a stream is let go of at a stand-in router
 2 s after its client, at a node through a router in 4 to 8. And a router
-waiting on a node's held answer does not watch its client (`upstream.rs`'s
-`exchange` blocks in `read_line`, `forward` reads nothing of the client): a
-claim whose client went through the router took the next job, leased to
-nobody, where asked of the node itself it passed it on -- the router's to
-fix, so cancellation reaches the router and stops there. `entry.test.js`
+waiting on a node's held answer watches its client and passes its end on
+to the node (`upstream::answered_or_gone`, below): blocked in the head's
+`read_line`, it had a claim whose client went through it take the next
+job, leased to nobody, where asked of the node itself the claim passed it
+on -- so cancellation reaches the node from the entry through every
+router on the way. `entry.test.js`
 runs the Worker under `wrangler dev` in front of real routers and nodes
 (`entry/cluster.mjs`: a global router, us with a standby, eu, each on port
 0) and of stand-ins (a tunnel's connector, Cloudflare's 522 and 530), each
@@ -5775,7 +5776,57 @@ two `setsockopt`s every exchange made, 0.67 us, are gone from a reused
 connection: the write timeout is set at the connect, the read timeout
 only when it changes (a `Fenec-Wait`), kept with the pooled connection.
 `make shard-bench`'s added p50 stayed 23.3 us against main's 23.3, six
-runs each in ABBA turns (23.1-24.8 and 20.0-24.4).
+runs each in ABBA turns (23.1-24.8 and 20.0-24.4). A request the node may
+hold (`Fenec-Wait`) watches its client while its head is waited for
+(`answered_or_gone`: one `poll` of the node's socket and the client's,
+declared by hand as `recv` is, `nfds_t` each system's own, until either
+moves), and passes on what the client did as the node would read it from
+a client of its own. The client's end -- closed, or half-closed and
+reading on, which read alike -- is the node's connection shut for
+writing, not pooled after: the node's held claim sees it before its next
+run and hands its row on, and the node's answer goes on to the client as
+any. A reset, which can read nothing more, is the client gone
+(`Stage::Abandoned`, `upstream::client_gone`): the node's connection let
+go of, nothing written, sent again or counted against the node, the
+request counted in `fenec_router_requests_total`'s `gone` class (counted
+nowhere before) and its trace ended 499. `gone` counts resets alone: an
+end cannot be told from a half-close, so a client gone with its end --
+most timeouts and aborts -- is passed on as one, its claim leaving at the
+node's next run or its wait's end and its answer counted by its status,
+as asked of the node itself, the job handed on all the same. Taken for
+gone as a reset is, an end let go of the node's connection, and a client
+that half-closed after its claim -- which the node answers as any, its
+first run looking at no client -- was answered nothing while its claim
+took a job on a busy queue. Bytes from the client
+are a next request sent ahead, after which the node alone is waited for,
+as the node lets a client be whose next request it holds; so is a client
+whose next request the router's reader holds already. Blocked in the
+head's `read_line`, a claim whose client went through the router took the
+next job, leased to nobody until the lease ran out. A router relaying the
+request watches its client the same way (`relay_send`), so the end goes on
+hop by hop. `tests/upstream.rs` holds two claims through one router,
+through a global router relaying to a region's, and through a region's
+router finding the node in its copy of the global directory
+(`Target::Node`), the first one's client closed or reset and the job put
+once the relay saw the router let go: the job is the second's, failing
+with either hop's watch taken out; and a half-closed claim on a busy queue
+answered its job through the router as straight to the node, failing with
+the end taken for gone. The `poll` is a `Fenec-Wait` request's alone: one
+with no such header passes no socket to watch and makes the system calls
+it made: with the body's buffer and the read replicas' health below,
+`make shard-bench ARGS=latency`'s added p50 stayed 20.5 us against main's
+20.5, sixteen runs a side in ABBA turns at loads of 2.7-2.9 (20.0-21.2 and
+19.8-23.0). A claim
+answered at once came through the router 61.3 us p50 against 60.8 on
+main, 0.3 us more past the node's answer at the median (27.4 against
+27.1), and a held claim woken by a job put straight to the node 332
+against 324 (70.1 against 61.8 past the node), eight runs a side in ABBA
+turns of 20 000 and 2 000 claims (a scratch bench), on macOS; the review
+measured 0.7 us there and 1.2 on Linux on a claim answered at once. A
+watcher thread, prototyped in the review, was worse; the head read in
+slices with the client looked at between was left on its reasoning, every
+one of a thousand held claims woken each slice for nothing and a client's
+end seen a slice late.
 
 **A query across tenants is the router's admin's, merged by what the
 request says** (`fenec-shard/src/fanout.rs`, `POST /_shard/query`). An

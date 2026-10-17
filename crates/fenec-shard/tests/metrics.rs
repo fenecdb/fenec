@@ -1,6 +1,7 @@
 //! `GET /_metrics` on the router: what it answered by route and status
-//! class, the nodes' time over what it forwarded, a node it could not
-//! reach, its moves done and failed, and what the directory holds.
+//! class, a held claim whose client reset its connection, the nodes' time
+//! over what it forwarded, a node it could not reach, its moves done and
+//! failed, and what the directory holds.
 //!
 //! The counters are the process's, as a router is one to a process, so
 //! this file holds one test: in a binary of its own nothing else counts.
@@ -13,8 +14,9 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// An in-process `--dir` node; its address and its directory.
-fn node(tag: &str) -> (String, std::path::PathBuf) {
+/// An in-process `--dir` node; its address, its directory and its
+/// tenants.
+fn node(tag: &str) -> (String, std::path::PathBuf, Arc<Tenants>) {
     let dir = std::env::temp_dir().join(format!(
         "fenec-shard-metrics-{tag}-{}-{:?}",
         std::process::id(),
@@ -26,13 +28,36 @@ fn node(tag: &str) -> (String, std::path::PathBuf) {
         admin_token: Some(format!("adm-{tag}")),
         ..fenec_http::Config::default()
     };
-    let server = fenec_http::Server::with_tenants(tenants, cfg);
+    let server = fenec_http::Server::with_tenants(Arc::clone(&tenants), cfg);
     let listener = server.bind().unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
-    (addr, dir)
+    (addr, dir, tenants)
+}
+
+/// `SO_LINGER` of zero: the socket's close resets the connection. The
+/// crate takes no `libc`, so the option's numbers are each system's.
+fn reset_on_close(s: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct Linger {
+        on: i32,
+        seconds: i32,
+    }
+    extern "C" {
+        fn setsockopt(fd: i32, level: i32, name: i32, value: *const Linger, len: u32) -> i32;
+    }
+    #[cfg(target_vendor = "apple")]
+    let (level, name) = (0xffff, 0x0080);
+    #[cfg(not(target_vendor = "apple"))]
+    let (level, name) = (1, 13);
+    let linger = Linger { on: 1, seconds: 0 };
+    let len = std::mem::size_of::<Linger>() as u32;
+    // SAFETY: the option's value lives through the call.
+    let rc = unsafe { setsockopt(s.as_raw_fd(), level, name, &linger, len) };
+    assert_eq!(rc, 0, "SO_LINGER: {}", std::io::Error::last_os_error());
 }
 
 fn call(port: u16, method: &str, target: &str, body: &str, auth: Option<&str>) -> (u16, String) {
@@ -64,8 +89,8 @@ fn sample<'a>(text: &'a str, line: &str) -> Option<&'a str> {
 
 #[test]
 fn the_router_counts_what_it_answered_forwarded_and_moved() {
-    let (a1, d1) = node("n1");
-    let (a2, d2) = node("n2");
+    let (a1, d1, n1) = node("n1");
+    let (a2, d2, _) = node("n2");
     // A node nothing listens on: what a crashed one looks like from here.
     let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let dead = gone.local_addr().unwrap().to_string();
@@ -120,6 +145,35 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         );
         assert_eq!(r.0, 200, "{}", r.1);
     }
+    // A claim held at the node whose client resets its connection: nobody
+    // is left to answer, and it is counted `gone`, where it was counted
+    // nowhere and an abandoned claim never showed.
+    let made = r#"{"query":"create collection jobs (run_at timestamp @sorted)"}"#;
+    let r = call(port, "POST", "/t/acme/query", made, None);
+    assert_eq!(r.0, 200, "{}", r.1);
+    let claim = r#"{"query":"set jobs {run_at: now() + 60000} where run_at <= now() order run_at limit 1 returning id"}"#;
+    let mut held = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        held,
+        "POST /t/acme/query HTTP/1.1\r\nHost: t\r\nFenec-Wait: 30000\r\n\
+         Content-Length: {}\r\n\r\n{claim}",
+        claim.len()
+    )
+    .unwrap();
+    let holds = || n1.get("acme").unwrap().hub.waits().stats().held;
+    let t = Instant::now();
+    while holds() < 1 {
+        assert!(t.elapsed() < Duration::from_secs(20), "never held");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    reset_on_close(&held);
+    drop(held);
+    let gone = "fenec_router_requests_total{route=\"tenant\",code=\"gone\"}";
+    let t = Instant::now();
+    while sample(&call(port, "GET", "/_metrics", "", Some("root")).1, gone) != Some("1") {
+        assert!(t.elapsed() < Duration::from_secs(20), "never counted gone");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(call(port, "GET", "/t/nosuch/", "", None).0, 404);
     assert_eq!(call(port, "GET", "/t/lost/", "", None).0, 502);
     assert_eq!(call(port, "GET", "/elsewhere", "", None).0, 404);
@@ -173,7 +227,11 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
     for (line, want) in [
         (
             "fenec_router_requests_total{route=\"tenant\",code=\"2xx\"}",
-            "3",
+            "4",
+        ),
+        (
+            "fenec_router_requests_total{route=\"tenant\",code=\"gone\"}",
+            "1",
         ),
         (
             "fenec_router_requests_total{route=\"tenant\",code=\"4xx\"}",
@@ -215,9 +273,9 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         ),
         (
             "fenec_router_request_duration_seconds_count{route=\"tenant\"}",
-            "5",
+            "7",
         ),
-        ("fenec_router_upstream_duration_seconds_count", "3"),
+        ("fenec_router_upstream_duration_seconds_count", "4"),
         ("fenec_router_upstream_errors_total{node=\"dead\"}", "1"),
         ("fenec_router_moves_total{outcome=\"done\"}", "1"),
         ("fenec_router_moves_total{outcome=\"failed\"}", "1"),
@@ -242,7 +300,7 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
             &text,
             "fenec_router_request_duration_seconds_bucket{route=\"tenant\",le=\"10\"}"
         ),
-        Some("5")
+        Some("7")
     );
     assert!(text.contains("fenec_build_info{version="), "{text}");
     let _ = std::fs::remove_dir_all(d1);

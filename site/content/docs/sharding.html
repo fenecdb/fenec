@@ -1411,11 +1411,14 @@ keep-alive is written, and at a node through a router in 4 to 8 s, each
 hop noticing at its next. A client gone before its answer's head is not
 told to the Worker there at all — workerd notices a client only as it
 writes to it, past wrangler's own proxy too — so that case is held in Node,
-the handler over Node's <code>fetch</code>. Past the entry it stops at the
-router: a router waiting on a node's held answer does not watch its client,
-so a claim whose client went stays held at the node, and the job it then
-takes is leased to nobody until its lease ends — asked of the node itself,
-the claim passes the job to the next.</p>
+the handler over Node's <code>fetch</code>. Past the entry it goes on to the
+node: a router waiting on a node's held answer watches its client and
+passes the client's end on, as the node would read it from a client of its
+own — a region's router relaying the request to the home router, which
+passes it to the node — so a claim whose client went hands its job to the
+next claim held, as it does asked of the node itself, rather than lease it
+to nobody; a client that only half-closed is answered as the node answers
+it.</p>
 
 <p><b>Headers.</b> Everything a client sends goes on —
 <code>Authorization</code>, <code>Idempotency-Key</code>,
