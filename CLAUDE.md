@@ -6306,6 +6306,21 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   it, the database's CORS names it -- takes a port the system picks held
   by a stand-in listener until the moment it starts (`examples/shop`,
   `examples/dispatch`'s `ci.sh`).
+- A change that adds or alters something a user meets says so where a user
+  looks, in the same pull request: its reference page under
+  `site/content/docs/`; README's feature table and the links beside it;
+  the home page (`site/content/index.html`) and the docs index when the
+  feature is one a visitor would pick fenecdb for; and the SDK lists --
+  `languages.html`, `mobile.html`, `sharding.html`'s SDK paragraph,
+  `integrations.html`'s -- when an SDK changes. Every reference page kept up
+  with regions, the global entry, the node's archive and read replicas
+  (#318 to #333) while README and the home page named none of them. A
+  section added or changed is found by its words alone until the site's
+  search vector cache has its vector: Workers AI runs in the `site` deploy
+  alone, which uploads the cache as it left it (the `search-embeddings`
+  artifact), so after sections change, the next deploy's artifact is
+  committed as `site/search-embeddings.json` (`gh run download <run> -n
+  search-embeddings`) where it differs.
 - Comments explain *why* a thing is the way it is — a measured cost, a trap that
   was hit, an alternative that was rejected. Match that when adding code.
 - All prose in the repo (comments, docs, README) is English.
