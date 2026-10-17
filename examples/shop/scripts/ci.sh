@@ -82,5 +82,16 @@ site=$!
 until_line "Local: +http://localhost:$shop_port( |\$)" "$dir/site.log" "$site"
 wait_for "$SHOP_URL/robots.txt" "$dir/site.log"
 npm test
-if [ -n "${SHOP_LIGHTHOUSE:-}" ]; then sh scripts/lighthouse.sh; fi
+if [ -n "${SHOP_LIGHTHOUSE:-}" ]; then
+    grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true
+    for mode in ${LH_MODES:-fixed calibrated}; do
+        echo "=== mode $mode"
+        if [ "$mode" = fixed ]; then
+            node scripts/cpu-slowdown.mjs >/dev/null || true
+            LHCI_CPU_SLOWDOWN=4 sh scripts/lighthouse.sh || echo "=== mode $mode failed"
+        else
+            LHCI_CPU_SLOWDOWN= sh scripts/lighthouse.sh || echo "=== mode $mode failed"
+        fi
+    done
+fi
 if [ -n "${SHOP_LOAD:-}" ]; then npm run -s timing && npm run -s load; fi
