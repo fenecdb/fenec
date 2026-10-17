@@ -9,7 +9,8 @@
 // marks never come from a client, and the client is named by the entry's
 // mark, bound to its address; a router gone -- or one a tunnel's connector
 // cannot reach -- is passed over for its standby, and a known home gone is
-// a 503 to come back from, never another region. Needs `npm ci` here
+// a 503 to come back from, never another region; a read marked for a
+// replica goes to the client's nearest region whatever the home. Needs `npm ci` here
 // (wrangler) and the debug binaries (cargo build -p fenec-server -p
 // fenec-shard).
 
@@ -240,6 +241,7 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
         ['fresh4', 'us'],
         ['fresh5', 'us'],
         ['fresh6', 'us'],
+        ['near', 'us'],
       ],
       schema: SCHEMA,
       // A silent stream writes a keep-alive every second, so a router and
@@ -300,6 +302,33 @@ describe('the entry in front of two regions', { skip, timeout: 300_000 }, () => 
     assert.equal(await forwarded(w.usStandby), standby);
     const count = await query(w.us.url, 'acme', 'get notes count');
     assert.deepEqual(count.json(), [{ count: 5 }]);
+  });
+
+  test("a read marked for a replica goes to the client's nearest region though its home is known, and is answered by its replica there", async () => {
+    // `near` lives in us; an unmarked write teaches the entry so.
+    assert.equal((await query(front.url, 'near', 'put notes {title: "here"}')).status, 200);
+    assert.equal((await query(front.url, 'near', 'put notes {title: "here"}')).status, 200);
+    // Its read replica in eu, the region nearest this client (the default).
+    const placed = await shard(w.eu.url, 'PUT', '/_shard/tenants/near/read-replicas/eu');
+    assert.equal(placed.status, 201, placed.text);
+    await until(async () => {
+      const r = await query(w.nodes.eu.url, 'near', 'get notes count', undefined, { 'Fenec-Read': 'replica' });
+      return r.status === 200 && r.json()[0]?.count === 2;
+    }, "near's read replica in eu");
+    const [eu, us] = [await forwarded(w.eu), await forwarded(w.us)];
+    for (let i = 0; i < 3; i++) {
+      const r = await query(front.url, 'near', 'get notes count', undefined, { 'Fenec-Read': 'replica' });
+      assert.equal(r.status, 200, r.text);
+      assert.deepEqual(r.json(), [{ count: 2 }]);
+    }
+    // eu's router answered them from its replica; us was asked none --
+    // sent to the known home, every one went there.
+    assert.equal(await forwarded(w.eu), eu + 3);
+    assert.equal(await forwarded(w.us), us);
+    // A write, marked or not, goes home alone.
+    assert.equal((await query(front.url, 'near', 'put notes {title: "home"}')).status, 200);
+    assert.equal(await forwarded(w.eu), eu + 3);
+    assert.equal(await forwarded(w.us), us + 1);
   });
 
   test("a tenant's home is told nobody, a request refused for its token least of all", async () => {

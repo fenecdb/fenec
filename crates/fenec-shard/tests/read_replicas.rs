@@ -2452,6 +2452,7 @@ struct Near {
     eu1: Node,
     us1: Node,
     link: Proxy,
+    us_link: Proxy,
     router: Arc<Router>,
     port: u16,
 }
@@ -2461,13 +2462,14 @@ impl Near {
         let eu1 = node(&format!("{tag}-eu1"));
         let us1 = node(&format!("{tag}-us1"));
         let link = Proxy::to(eu1.port);
+        let us_link = Proxy::to(us1.port);
         let mut cfg = config(Some("us"), None, None);
         cfg.reader_timeout = reader_timeout;
         let router = Router::new(Directory::in_memory(), cfg);
         let port = serve(Arc::clone(&router));
         for (name, addr, region) in [
             ("eu1", link.addr.clone(), "eu"),
-            ("us1", format!("127.0.0.1:{}", us1.port), "us"),
+            ("us1", us_link.addr.clone(), "us"),
         ] {
             let body =
                 format!(r#"{{"addr":"{addr}","token":"adm-{tag}-{name}","region":"{region}"}}"#);
@@ -2478,6 +2480,7 @@ impl Near {
             eu1,
             us1,
             link,
+            us_link,
             router,
             port,
         }
@@ -2775,8 +2778,11 @@ fn a_read_replica_follows_its_tenant_s_file_put_in_place_by_hand() {
 /// A read replica whose copy is lost again and again -- refusing a
 /// primary of a lineage the router cannot learn, its node not answering
 /// what it is of -- is made again three times in a row, and then no more:
-/// left recorded and without a copy, said in its list and counted. Made
-/// again at every look, its copy refused and deleted itself for good.
+/// left recorded and without a copy, said in its list and counted, and
+/// passed over by the marked reads of its region. Made again at every look,
+/// its copy refused and deleted itself for good; given up on and still
+/// asked, every marked read went to its node to be told the tenant was not
+/// there.
 #[test]
 fn a_read_replica_whose_copy_keeps_refusing_is_given_up_on() {
     let tag = "given-up";
@@ -2795,6 +2801,18 @@ fn a_read_replica_whose_copy_keeps_refusing_is_given_up_on() {
         .find(|l| l.starts_with("fenec_router_read_replicas_given_up "))
         .and_then(|l| l.rsplit(' ').next()?.parse::<u64>().ok());
     assert!(given_up.is_some_and(|n| n >= 1), "{metrics}");
+    // Its region's marked reads go home, its node not asked.
+    w.us_link.park("a request no one sends");
+    for _ in 0..5 {
+        let (status, body) = marked(w.port, "acme", "get notes select body", None);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#""swapped""#), "{body}");
+    }
+    assert!(
+        w.us_link.seen("/t/acme/").is_empty(),
+        "{:?}",
+        w.us_link.seen("/t/acme/")
+    );
     // Placed again by an operator, it is a replica as any.
     let (status, body) = shard(
         w.port,

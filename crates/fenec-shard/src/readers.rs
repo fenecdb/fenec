@@ -300,7 +300,9 @@ impl Router {
     /// there -- or no directory it reads places the tenant: a record
     /// another region's directory keeps outlives its tenant until that
     /// router's next look, and a marked read was answered from the deleted
-    /// tenant's copy meanwhile.
+    /// tenant's copy meanwhile. Nor one given up on ([`Self::may_remake`]),
+    /// which holds no copy: every marked read of its region went there,
+    /// was answered that the tenant was not on the node, and went home.
     pub(crate) fn reader_near(&self, tenant: &str) -> Option<(String, String, Arc<str>)> {
         let near = self.near()?;
         let dir = self.read_dir();
@@ -316,6 +318,9 @@ impl Router {
                 .as_ref()
                 .is_some_and(|g| crate::read(g).exists(tenant))
         {
+            return None;
+        }
+        if self.given_up(&format!("{tenant}/{}", r.node)) {
             return None;
         }
         let n = dir.node(&r.node)?;

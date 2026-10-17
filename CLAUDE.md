@@ -1018,6 +1018,18 @@ home's region) sends a read on to the next region; the placing router's own
 502 for a node it could not reach names the home (`region::homed`), and is
 the answer. A move across leaves the old region's router relaying
 the tenant and the answer naming the new home, a hop and never an error.
+A read marked for a replica (`Fenec-Read: replica`, the read replicas
+below; `marked`, `near`) goes to the client's nearest region first
+whatever the home, then to the home where that region fails or answers a
+5xx naming none: sent to the known home alone, every marked read went home
+once one unmarked request had taught the colo the home, and the replica
+near the client was never asked. It may go to two -- the mark has every
+router and node run it read-only, so `repeatable` takes it as the
+routers' `replayable` does -- while a write never leaves a known home; a
+nearest region found down is passed over for `DOWN_MS`, and where it
+keeps no replica its router relays home, a hop. `entry.test.js` holds a
+marked read of a tenant whose home was learned to eu's router and its
+replica, us asked none.
 Rejected: the global router asked at each miss (its `--token`, which moves
 and deletes every tenant, in the Worker, a round trip to its region, and
 every unknown name a client tries a question for that one router), and
@@ -1202,6 +1214,11 @@ in a row anyway -- refusing a primary whose lineage the router cannot
 learn -- is made again no more (`REMAKES`, `may_remake`): said once,
 `"given_up": true` in its list and `fenec_router_read_replicas_given_up`,
 until its primary or its lineage changes or an operator places it again.
+`reader_near` passes it by: still asked, every marked read of its region
+went to its node, was answered that the tenant was not there and went
+home, waking a look. The count is in memory alone -- a router started
+again makes the copy up to three times more, and a standby router knows
+nothing of it -- which is a loop bounded, not one stopped for good.
 A tenant with no lineage known -- made before they were kept -- has it
 asked of its node at the next check (`want_lineage`, `backfill_lineages`,
 `GET /_admin/tenants/<t>/lineage`, wanted by a look over a tenant of this
@@ -1444,15 +1461,33 @@ included, against 165-343 at home, run by run. `make requests-bench` in
 five ABBA quartets against main: a row by id 0.020-0.022 ms p50 either way,
 eight clients 135-146k a second against 132-145k (one branch run at a load
 of 8.4, 123k, left out), a put 0.023-0.025 ms against 0.023. The router's
-added p50 for a forward no client marks stayed inside main's
-spread: 24.1 us median (24.0-24.2, eight runs) against main's 23.8
-(23.5-24.3) and this PR's first commit's 23.95 (20.2-25.1), in turns of
-main, first, branch, branch, first, main at a load of 2.6; two ABBA rounds at
-loads of 4-8 before had the branch's medians 0.5-0.7 over main's (24.15 and
-24.3 against 23.6, main's runs 19.8-24.4). What the unmarked path does more:
-`Fenec-Read` looked for once on the router and once on the node, a request
-each, `Fenec-History` written where an answer names a history, and a
-`Response` 16 bytes larger.
+added p50 for a forward no client marks: `forward` is main's body with one
+check of the mark after its prologue, a marked read handed to
+`forward_near` (`#[cold]`, out of line) and the answer written by
+`answer_out` (`#[inline(always)]`, the tail both share). In one body with
+the replica's path the unmarked request ran 0.4-0.65 us slower at the
+median in ABBA turns against main (23.7 against 23.2 us), the work the
+same. Split, and with every per-request addition taken out besides --
+the mark looked for on neither side, no `Fenec-History`, no readers'
+threads -- builds still sat 0.2-0.5 us over main, and builds differing
+only off the path (the tail inlined or not, the threads started or not)
+0.1-0.3 us apart either way, so what was left was where the code lands:
+with every function aligned to 64 bytes the node's own time came level
+(+0.05 us). So the head the router writes is sized once with no `format!`
+a header, and goes out with its body in one `writev`
+(`http::write_parts`, which the node's answers share): written apart they
+were two sends, and the router's added p50 went 23.6 -> 20.6-20.8 us on
+main and on this branch alike. In 16 ABBA rounds against main with that
+change and nothing else, at loads of 2.0-2.1: 20.55 us median (20.5-20.8
+quartiles) against 20.7 (20.6-20.9), the branch's per-round difference
+-0.15 us and positive in 5 of 16; against main as it is, 20.6 against
+23.6, lower in all 20 rounds. A request straight to the node stays
+0.15-0.25 us over main's 21.3, which the aligned builds put on layout.
+What the unmarked path does more: `Fenec-Read` looked for once on the
+router and once on the node, `Fenec-History` written where an answer
+names a history, and a `Response` 16 bytes larger; the pool asks
+`replayable` only where a send failed (`Replay`), where every request
+scanned its headers for it before.
 The JS client grew 4.1 KB raw, 1.4 KB gzip, 1.2 brotli (59 KB gzip, 50
 brotli, as README and benchmarks.html quote), an app's minified bundle of
 `connect` and a query's rows 1 114 bytes, 406 brotli; the browser module not
@@ -5103,7 +5138,9 @@ out in one `writev`, its head written without `format!`: head and body
 apart put the head in a packet of its own on a socket that sends at once,
 and cost a second send each answer. One client asking a row by id over
 10 000 x 128 went 40.4k -> 47.1k requests a second, and eight 14 to 20%
-more (`make requests-bench`). FenecQL's lexer walks a text's bytes,
+more (`make requests-bench`). The router writes the answer it forwards
+the same way (`answer_out`, `http::write_parts`): its added p50 went 23.6
+-> 20.6-20.8 us (`make shard-bench ARGS=latency`). FenecQL's lexer walks a text's bytes,
 reading a character whole only outside ASCII and a number where it stands,
 and a list of numbers alone becomes its vector without an expression each
 (`numbers_in_brackets`): a query holding a 128-dim vector parsed in 16.9 us

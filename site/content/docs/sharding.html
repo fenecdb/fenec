@@ -442,21 +442,13 @@ query, and a tenant lives whole on one node, so the node's count is the
 tenant's. A quota a node does not take — a node down when it was set — is
 logged, and sent again as that copy is promoted.</p>
 
-<p><b>What it costs.</b> A marked read through the router of the replica's
-region costs what one sent home does: 59.2 to 68.2 µs p50 against 58.8 to
-66.9, three runs, with each node behind a loopback proxy standing for its
-link, and 60.9 to 70.3 sent after a position the replica holds already,
-its <code>Fenec-History</code> checked (<code>make shard-bench
-ARGS=reads</code>, nodes and router in one process). A client's read of the
-write it was just answered took 168 to 386 µs p50 on the replica — its wait
-for the write included — against 165 to 343 at home, run by run, both right
-after a durable write: under <code>--sync always</code> the primary answers a
-write once its replicas' streams are sent it, and the replica's part is
-applying it. A request no client marks pays a header looked for: the router
-added 24.1 µs p50 to a request over the node's own against main's 23.8, eight
-runs each in turns, and a node's answers went as fast as before
-(<code>make requests-bench</code>). Between regions the read near saves the
-round trip to the tenant's home, every read.</p>
+<p><b>What it costs.</b> A tenant with no quota touches none of it: against
+the code before quotas, in turns, a request to a tenant took 19.5–21.7 µs
+straight to the node and 43.7–46.0 µs through the router, against
+19.9–21.8 and 43.6–45.7. A tenant with every quota answered as one with none
+over HTTP — reads 20.9 µs either way, writes 23.7 against 23.6 — and in
+process a <code>put</code> held to bytes and rows took 593 ns against 566,
+618 with a bytes-a-second bucket besides (<code>make quota-bench</code>).</p>
 </details>
 
 <h2>Moving a tenant</h2>
@@ -1332,6 +1324,15 @@ curl https://db.example.com/t/acme/query -H "Authorization: Bearer $TOKEN" \
   <li><b>A tenant moved to another region</b> is relayed by the router of
     the region it left, as any client's request is, and the answer names
     its new home: a stale home costs one hop, never an error.</li>
+  <li><b>A read marked for a replica</b> (<code>Fenec-Read: replica</code>,
+    <a href="#read-replicas">read replicas</a>) goes to the region nearest
+    the client first, whatever the tenant's home: its router answers it from
+    the tenant's read replica there, or relays it home — a hop, where the
+    region keeps none — and the home is asked where that region fails. A
+    marked read runs read-only wherever it lands, so it may go to two; a
+    write never leaves a known home. Sent to the home the entry had learned,
+    every marked read crossed to it, and the replica near the client was
+    never asked.</li>
   <li><b>Streams pass through as they come</b> — a subscription,
     <code>/_changes?wait</code>, a held write, a long <code>/batch</code>.
     A stream is let go of when its client goes; a held write is let go of at
@@ -1549,6 +1550,11 @@ const mine = await db.from('orders').rows();               // ap's replica, afte
     primary has said hello.</li>
 </ul>
 
+<p><b>Behind the global entry</b> (<a href="#global-entry">one URL for every
+region</a>) a marked read goes to the region nearest the client first,
+whatever the tenant's home, and its router answers it from the read replica
+there; every other request goes to the home the entry has learned.</p>
+
 <details class="deep"><summary>Details</summary>
 <p><b>Placing one.</b> <code>PUT
 /_shard/tenants/&lt;t&gt;/read-replicas/&lt;region&gt;</code> makes the tenant
@@ -1701,7 +1707,10 @@ replicas bound to that one are bound to the new one rather than taken
 off. A copy lost three times in a row anyway is made again no more —
 <code>"given_up": true</code> in its list, counted in
 <code>fenec_router_read_replicas_given_up</code> — until its primary or
-lineage changes or it is placed again. A tenant made before lineages were
+lineage changes or it is placed again; its region's marked reads pass it
+by meanwhile, rather than each meet its node's <code>404</code> and go home.
+The router keeps that in memory alone: started again, it makes the copy
+again up to three times more, and a standby router knows nothing of it. A tenant made before lineages were
 kept has its lineage asked of its node at the next check, and each of its
 read replicas is bound to it where its copy's node says the copy holds
 its primary's history and is of it — taken off where the copy is another
@@ -1746,9 +1755,12 @@ process). A client's read of the write it was just answered took 368 to 379
 at home, both right after a durable write: under <code>--sync always</code>
 the primary answers a write once its replicas' streams are sent it, and the
 replica's part is applying it. A request no client marks pays a header looked
-for: the router added 24.05 µs p50 to a request over the node's own against
-main's 24.0, eight runs a side in ABBA turns. Between regions the read near
-saves the round trip to the tenant's home, every read.</p>
+for: the router added 20.55 µs p50 to a request over the node's own against
+20.7 for the code before read replicas, sixteen runs a side in ABBA turns,
+both writing the node's answer in one <code>writev</code>, which took the
+router from 23.6 µs (<code>make shard-bench ARGS=latency</code>). Between
+regions the read near saves the round trip to the tenant's home, every
+read.</p>
 </details>
 
 <h2 id="tokens">Tokens</h2>

@@ -458,18 +458,26 @@ impl Response {
         crate::audit::push_verified(&mut head);
         head.push_str("\r\n");
         let body: &[u8] = if head_only { &[] } else { &self.body };
-        let mut parts = [IoSlice::new(head.as_bytes()), IoSlice::new(body)];
-        let mut parts = &mut parts[..];
-        while !parts.is_empty() {
-            match out.write_vectored(parts) {
-                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-                Ok(n) => IoSlice::advance_slices(&mut parts, n),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-        out.flush()
+        write_parts(out, head.as_bytes(), body)
     }
+}
+
+/// `head` and `body` in one `writev`, as many as it takes, and flushed: the
+/// two written apart on a socket that sends at once (`TCP_NODELAY`) went in
+/// two packets, a send more an answer -- a node's, and a router's of a
+/// node's answer.
+pub fn write_parts(out: &mut impl Write, head: &[u8], body: &[u8]) -> std::io::Result<()> {
+    let mut parts = [IoSlice::new(head), IoSlice::new(body)];
+    let mut parts = &mut parts[..];
+    while !parts.is_empty() {
+        match out.write_vectored(parts) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => IoSlice::advance_slices(&mut parts, n),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    out.flush()
 }
 
 /// A history as `Fenec-History` names it
@@ -518,7 +526,8 @@ pub fn history_of(db: &fenec_core::engine::Database) -> Option<Fork> {
 }
 
 /// `n` in decimal, onto `out`.
-fn push_number(out: &mut String, mut n: u64) {
+/// `n` in decimal onto `out`, with no formatting machinery.
+pub fn push_number(out: &mut String, mut n: u64) {
     let mut digits = [0u8; 20];
     let mut at = digits.len();
     loop {

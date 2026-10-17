@@ -166,9 +166,8 @@ impl Pool {
         body: &[u8],
         held: Duration,
     ) -> io::Result<Answer> {
-        let replay = replayable(method, headers);
         let times = (self.timeout + held, self.timeout);
-        self.send_timed(addr, method, target, headers, body, times, replay)
+        self.send_timed(addr, method, target, headers, body, times, Replay::AsAsked)
     }
 
     /// [`Pool::send_held`], its failure told by whether `addr` may have run
@@ -183,12 +182,14 @@ impl Pool {
         body: &[u8],
         held: Duration,
     ) -> Result<Answer, Tried> {
-        let replay = replayable(method, headers);
         let times = (self.timeout + held, self.timeout);
+        let replay = Replay::AsAsked;
         match self.send_staged(addr, method, target, headers, body, times, replay) {
             Ok(a) => Ok(a),
             Err(Failure(Stage::Unsent, e)) => Err(Tried::Unrun(e)),
-            Err(Failure(Stage::Unanswered, e)) if replay => Err(Tried::Unrun(e)),
+            Err(Failure(Stage::Unanswered, e)) if replay.allows(method, headers) => {
+                Err(Tried::Unrun(e))
+            }
             Err(Failure(_, e)) => Err(Tried::MayHaveRun(e)),
         }
     }
@@ -209,16 +210,8 @@ impl Pool {
         body: &[u8],
         within: Duration,
     ) -> io::Result<Answer> {
-        let replay = replayable(method, headers);
-        self.send_timed(
-            addr,
-            method,
-            target,
-            headers,
-            body,
-            (within, within),
-            replay,
-        )
+        let times = (within, within);
+        self.send_timed(addr, method, target, headers, body, times, Replay::AsAsked)
     }
 
     /// [`Pool::send`] of a read that must be answered by `deadline`: the
@@ -236,7 +229,15 @@ impl Pool {
         deadline: Instant,
     ) -> io::Result<Answer> {
         let left = left_until(deadline)?.min(self.timeout);
-        self.send_timed(addr, "POST", target, headers, body, (left, left), true)
+        self.send_timed(
+            addr,
+            "POST",
+            target,
+            headers,
+            body,
+            (left, left),
+            Replay::Always,
+        )
     }
 
     /// One request, its answer's head read within `times.0` a read and its
@@ -251,7 +252,7 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
         times: (Duration, Duration),
-        replay: bool,
+        replay: Replay,
     ) -> io::Result<Answer> {
         self.send_staged(addr, method, target, headers, body, times, replay)
             .map_err(|Failure(_, e)| e)
@@ -267,7 +268,7 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
         times: (Duration, Duration),
-        replay: bool,
+        replay: Replay,
     ) -> Result<Answer, Failure> {
         let (read_timeout, connect_within) = times;
         let mut req = String::with_capacity(256);
@@ -321,7 +322,7 @@ impl Pool {
             match self.exchange(addr, idle.stream, set, head, body, read_timeout) {
                 Ok(a) => return Ok(a),
                 Err(Failure(Stage::Unsent, _)) => break,
-                Err(Failure(Stage::Unanswered, _)) if replay => break,
+                Err(Failure(Stage::Unanswered, _)) if replay.allows(method, headers) => break,
                 Err(f) => return Err(f),
             }
         }
@@ -450,6 +451,26 @@ impl Pool {
         let status = a.status;
         let body = a.read_body(self, method == "HEAD")?;
         Ok((status, body))
+    }
+}
+
+/// Whether a request may go again once sent whole: always (a read across
+/// tenants), or as [`replayable`] says of it -- asked where a send failed
+/// alone: asked of every request, its scan of the headers was a cost of
+/// each one through the router, and grew a comparison a header with the
+/// read's mark.
+#[derive(Clone, Copy)]
+enum Replay {
+    Always,
+    AsAsked,
+}
+
+impl Replay {
+    fn allows(self, method: &str, headers: &[(&str, &str)]) -> bool {
+        match self {
+            Replay::Always => true,
+            Replay::AsAsked => replayable(method, headers),
+        }
     }
 }
 

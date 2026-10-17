@@ -768,17 +768,103 @@ impl Router {
         if fenec_http::trace::recording() {
             fenec_http::trace::attr("fenec.tenant", tenant.to_string());
         }
-        // The tenant's home region, where the request asks for it
-        // ([`region::HOME_HEADER`]): named by the router forwarding to the
-        // tenant's node -- the home path below -- never on an answer from a
-        // read replica, whose region is not the tenant's.
+        // A read its client marked (`Fenec-Read: replica`) goes to the
+        // tenant's read replica in this router's region first, where it has
+        // one ([`Self::forward_near`]); every other request asks the header
+        // alone and goes on as before replicas. Kept out of this body: in it,
+        // the path every unmarked request takes ran 0.4 to 0.65 us slower at
+        // the median (`make shard-bench ARGS=latency`, ABBA turns against
+        // main), the work the same.
+        if matches!(fenec_http::read_marked(req), Ok(true)) {
+            if let Some(kept) = self.forward_near(req, out, arrived, peer, relayed, tenant) {
+                return kept;
+            }
+        }
+        // The node holding the tenant, as this router's own directory has
+        // it, with the node's region where the request asks for the
+        // tenant's home ([`region::HOME_HEADER`]); or, where that says
+        // nothing, the routers of the region the tenant lives in
+        // ([`region`]).
+        let placed = {
+            let dir = self.read_dir();
+            dir.placement(tenant).and_then(|p| {
+                dir.node(&p.node).map(|n| {
+                    let home = region::home_asked(req, &n.region);
+                    (p.node.clone(), n.addr.clone(), self.mark(&n.token), home)
+                })
+            })
+        };
         let mut home = None;
+        let (node, addr, mark, routers) = match placed {
+            Some((node, addr, mark, h)) => {
+                home = h;
+                (node, addr, Some(mark), None)
+            }
+            None => match self.elsewhere(tenant, relayed.is_some()) {
+                region::Target::Node(node, addr, mark, region) => {
+                    home = region::home_asked(req, &region);
+                    (node, addr, Some(mark), None)
+                }
+                region::Target::Region(region, routers) => {
+                    let first = self.first_router(&region, &routers);
+                    let addr = region::host(&routers[first]).to_string();
+                    let mark = self.relay_mark.clone();
+                    (region::label(&region), addr, mark, Some((region, routers)))
+                }
+                region::Target::Answer(resp) => return reply(out, resp),
+            },
+        };
+        if fenec_http::trace::recording() {
+            fenec_http::trace::attr("fenec.node", node.clone());
+        }
         // The router's own context goes to the node in place of the
         // client's (`Pool::send`), while it traces.
         let traced = fenec_http::trace::propagating();
+
+        // The node believes the client's address from the router alone:
+        // what a client sent under this name is dropped, and the router's
+        // own put in its place.
+        // Borrowed, not cloned: a request's headers were copied into
+        // `String`s here and formatted one by one into the head, which with
+        // the router's own header made a request through it 1.5 us slower.
         // A router relaying names the client it was relayed for, as the
         // router before it did.
         let client = relayed.or(peer.map(|p| p.ip()));
+        let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
+        let mut headers: Vec<(&str, &str)> = req
+            .headers
+            .iter()
+            .filter(|(k, _)| {
+                !hop_by_hop(k)
+                    && !k.eq_ignore_ascii_case("host")
+                    && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
+                    && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
+                    && !(traced
+                        && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
+                            || k.eq_ignore_ascii_case(fenec_http::trace::TRACESTATE)))
+            })
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        if let Some(named) = &named {
+            headers.push((fenec_http::audit::ROUTER_HEADER, named));
+        }
+        let sent = Instant::now();
+        // The forward, to the node's whole answer or a stream's head: the
+        // node's server span is its child.
+        let forwarding = fenec_http::trace::span_of("forward", fenec_http::trace::Kind::Client);
+        if fenec_http::trace::recording() {
+            forwarding.attr("http.request.method", req.method.name());
+            forwarding.attr("fenec.node", node.clone());
+            match addr.rsplit_once(':') {
+                Some((host, port)) => {
+                    forwarding.attr("server.address", host.to_string());
+                    if let Ok(p) = port.parse::<i64>() {
+                        forwarding.attr("server.port", p);
+                    }
+                }
+                None => forwarding.attr("server.address", addr.clone()),
+            }
+        }
         // A request the node may hold -- `Fenec-Wait`, for a claim or for
         // `Fenec-After` -- is waited for as long besides the timeout.
         let held = req
@@ -787,33 +873,227 @@ impl Router {
             .map_or(Duration::ZERO, |ms| {
                 Duration::from_millis(ms).min(fenec_http::waits::LONGEST)
             });
-
-        // A read its client marked (`Fenec-Read: replica`) goes to the
-        // tenant's read replica in this router's region, where it has one
-        // ([`readers`]). One the replica cannot answer -- not reached, or not
-        // by its `Fenec-After`'s wait and `--replica-timeout` past it; not
-        // caught up with its primary, or going down (503); behind the write
-        // its `Fenec-After` names past the wait (504); its file gone from
-        // the node (a 404 saying so) -- goes home after all, as an unmarked
-        // one does: the client is answered either way, and from no copy
-        // older than its write. A replica that did not answer is let be for
-        // a few seconds ([`readers::RESTING`]), its region's reads going
-        // home at once meanwhile. An unmarked request asks the header alone.
-        let mut answered = None;
-        let near = match fenec_http::read_marked(req) {
-            Ok(true) => match self.reader_near(tenant) {
-                Some((rnode, ..)) if self.resting(&rnode) => {
-                    metrics::replica_read(metrics::ReplicaRead::Fallback);
-                    None
-                }
-                Some(near) => Some(near),
-                None => {
-                    metrics::replica_read(metrics::ReplicaRead::Home);
-                    None
-                }
-            },
-            _ => None,
+        let sending = match &routers {
+            None => self.pool.send_held(
+                &addr,
+                req.method.name(),
+                &req.target,
+                &headers,
+                &req.body,
+                held,
+            ),
+            // A region's routers, in turn from the one that answered last,
+            // as far as the request cannot have run.
+            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held),
         };
+        let answer = match sending {
+            Ok(a) => a,
+            Err(e) => {
+                forwarding.error(e.to_string());
+                drop(forwarding);
+                metrics::unreachable(&node);
+                // 502, as a node out of reach is: a client takes it to ask
+                // again, and a region cut off from this one answers its own
+                // clients all the while.
+                let why = match &routers {
+                    None => format!("node `{node}` ({addr}) did not answer: {e}"),
+                    Some((region, _)) => format!(
+                        "region `{region}`'s routers did not answer -- it may be cut off from \
+                         this one, and answers through its own: {e}"
+                    ),
+                };
+                return reply(out, region::homed(Response::error(502, &why), &home));
+            }
+        };
+        self.answer_out(
+            req, out, arrived, peer, &node, answer, sent, forwarding, &home,
+        )
+    }
+
+    /// The node's `answer` to `req`, forwarded to `node`, written to the
+    /// client: its head as the router writes it, and its body or stream.
+    /// `home` the tenant's region where the request asked for it. Inlined
+    /// where it is called, so the request every client sends compiles as it
+    /// did written out in [`Self::forward`].
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn answer_out(
+        &self,
+        req: &Request,
+        out: &mut TcpStream,
+        arrived: Instant,
+        peer: Option<std::net::SocketAddr>,
+        node: &str,
+        answer: upstream::Answer,
+        sent: Instant,
+        forwarding: fenec_http::trace::Span,
+        home: &Option<String>,
+    ) -> bool {
+        let head_only = req.method == Method::Head;
+        let reply = |out: &mut TcpStream, resp: Response| {
+            let resp = self.cors(resp);
+            let sent = resp.write(out, req.keep_alive, head_only).is_ok();
+            metrics::request(Route::Tenant, resp.status, arrived.elapsed());
+            fenec_http::trace::end(resp.status);
+            sent && req.keep_alive
+        };
+        let status = answer.status;
+        forwarding.attr("http.response.status_code", status);
+        if status >= 500 {
+            forwarding.error(status.to_string());
+        }
+        // Sized once and written into, never `format!`ed a header: grown
+        // from the status line's length and a `format!` for each header the
+        // node sent, it was allocated and copied again five times or so an
+        // answer.
+        let mut head = String::with_capacity(512);
+        head.push_str("HTTP/1.1 ");
+        http::push_number(&mut head, status as u64);
+        head.push(' ');
+        head.push_str(http::reason(status));
+        head.push_str("\r\n");
+        let cors = self.cfg.cors.as_deref();
+        let mut verified = false;
+        for (k, v) in &answer.headers {
+            // The node answers with the id it was sent; the router's own
+            // goes out in its place all the same, which a node from before
+            // the ids leaves out. So do the router's CORS headers, where it
+            // has its own: a page is told one rule, the one the router's
+            // preflight told it. Whether the node verified a token is the
+            // router's to know and no one else's.
+            if k.eq_ignore_ascii_case(fenec_http::audit::VERIFIED_HEADER) {
+                verified = true;
+            } else if !hop_by_hop(k)
+                && !k.eq_ignore_ascii_case("content-length")
+                && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
+                && !k.eq_ignore_ascii_case(region::SHARD_HEADER)
+                && !(cors.is_some() && fenec_http::cors::is_cors_header(k, v))
+            {
+                for part in [k.as_str(), ": ", v.as_str(), "\r\n"] {
+                    head.push_str(part);
+                }
+            }
+        }
+        if let Some(origin) = cors {
+            fenec_http::cors::push_into(&mut head, origin);
+        }
+        if let Some(home) = home {
+            head.push_str("Fenec-Home: ");
+            head.push_str(home);
+            head.push_str("\r\n");
+        }
+        head.push_str("Fenec-Shard: 1\r\n");
+        // A token the node verified starts the client's count again -- by
+        // its own address, no other -- and the node's word is the only
+        // thing that does: a status says nothing of the token, and a node
+        // answers a preflight, a body over its ceiling or a server asking
+        // no token without looking at one. Then a refusal waits here, by
+        // the client's address, before it is answered: the node waits none
+        // for what the router forwards.
+        if verified {
+            fenec_http::audit::verified();
+        }
+        // Relayed, it is the relaying router's to know, which keeps the
+        // client's count.
+        fenec_http::audit::push_verified(&mut head);
+        fenec_http::audit::http(req, status, peer);
+        fenec_http::request_id::with(|id| {
+            head.push_str(fenec_http::request_id::HEADER);
+            head.push_str(": ");
+            head.push_str(id);
+            head.push_str("\r\n");
+        });
+
+        if let Some(length) = answer.content_length() {
+            let body = match answer.read_body(&self.pool, head_only) {
+                Ok(b) => b,
+                Err(e) => {
+                    forwarding.error(e.to_string());
+                    drop(forwarding);
+                    metrics::unreachable(node);
+                    let broke = Response::error(502, &format!("node `{node}` broke off: {e}"));
+                    return reply(out, region::homed(broke, home));
+                }
+            };
+            drop(forwarding);
+            metrics::upstream(sent.elapsed());
+            // A HEAD answer states the length of the body it leaves out.
+            head.push_str("Content-Length: ");
+            http::push_number(
+                &mut head,
+                (if head_only { length } else { body.len() }) as u64,
+            );
+            head.push_str(match req.keep_alive {
+                true => "\r\nConnection: keep-alive\r\n\r\n",
+                false => "\r\nConnection: close\r\n\r\n",
+            });
+            // One `writev`: the head and the body written apart went in two
+            // packets, a send more every answer through the router.
+            let written = http::write_parts(out, head.as_bytes(), &body);
+            metrics::request(Route::Tenant, status, arrived.elapsed());
+            fenec_http::trace::end(status);
+            return written.is_ok() && req.keep_alive;
+        }
+
+        // No length: a stream. It is copied as it arrives until either side
+        // closes, and the client connection ends with it; it is counted,
+        // and timed to its head.
+        drop(forwarding);
+        metrics::upstream(sent.elapsed());
+        head.push_str("Connection: close\r\n\r\n");
+        let written = out.write_all(head.as_bytes());
+        metrics::request(Route::Tenant, status, arrived.elapsed());
+        fenec_http::trace::end(status);
+        if written.is_err() {
+            return false;
+        }
+        let _ = out.set_read_timeout(None);
+        if let Ok(mut stream) = answer.into_stream() {
+            let _ = std::io::copy(&mut stream, out);
+        }
+        false
+    }
+
+    /// [`Self::forward`] of a read its client marked (`Fenec-Read:
+    /// replica`): to the tenant's read replica in this router's region,
+    /// where it has one ([`readers`]), and its answer written out. One the
+    /// replica cannot answer -- not reached, or not by its `Fenec-After`'s
+    /// wait and `--replica-timeout` past it; not caught up with its
+    /// primary, or going down (503); behind the write its `Fenec-After`
+    /// names past the wait (504); its file gone from the node (a 404 saying
+    /// so) -- is `None`, and goes home after all, as an unmarked one does:
+    /// the client is answered either way, and from no copy older than its
+    /// write. A replica that did not answer is let be for a few seconds
+    /// ([`readers::RESTING`]), its region's reads going home at once
+    /// meanwhile. Cold: out of the way of the code every unmarked request
+    /// runs.
+    #[cold]
+    #[inline(never)]
+    fn forward_near(
+        &self,
+        req: &Request,
+        out: &mut TcpStream,
+        arrived: Instant,
+        peer: Option<std::net::SocketAddr>,
+        relayed: Option<std::net::IpAddr>,
+        tenant: &str,
+    ) -> Option<bool> {
+        let near = match self.reader_near(tenant) {
+            Some((rnode, ..)) if self.resting(&rnode) => {
+                metrics::replica_read(metrics::ReplicaRead::Fallback);
+                None
+            }
+            Some(near) => Some(near),
+            None => {
+                metrics::replica_read(metrics::ReplicaRead::Home);
+                None
+            }
+        };
+        // The router's own context goes to the node in place of the
+        // client's (`Pool::send`), while it traces; a router relaying
+        // names the client it was relayed for.
+        let traced = fenec_http::trace::propagating();
+        let client = relayed.or(peer.map(|p| p.ip()));
         if let Some((rnode, raddr, rmark)) = near {
             let named = client.map(|ip| format!("{ip} {rmark}"));
             let mut headers = forwarded_headers(req, traced);
@@ -849,7 +1129,14 @@ impl Router {
                 }
                 Ok(a) => {
                     metrics::replica_read(metrics::ReplicaRead::Replica);
-                    answered = Some((rnode, a, sent, forwarding));
+                    // A replica's region is not the tenant's: its answer
+                    // names no home.
+                    let home = None;
+                    return Some(
+                        self.answer_out(
+                            req, out, arrived, peer, &rnode, a, sent, forwarding, &home,
+                        ),
+                    );
                 }
                 Err(e) => {
                     forwarding.error(e.to_string());
@@ -860,197 +1147,7 @@ impl Router {
             }
         }
 
-        let (node, answer, sent, forwarding) = match answered {
-            Some(a) => a,
-            None => {
-                // The node holding the tenant, as this router's own
-                // directory has it, with the node's region where the
-                // request asks for the tenant's home; or, where that says
-                // nothing, the routers of the region the tenant lives in
-                // ([`region`]).
-                let placed = {
-                    let dir = self.read_dir();
-                    dir.placement(tenant).and_then(|p| {
-                        dir.node(&p.node).map(|n| {
-                            let home = region::home_asked(req, &n.region);
-                            (p.node.clone(), n.addr.clone(), self.mark(&n.token), home)
-                        })
-                    })
-                };
-                let (node, addr, mark, routers) = match placed {
-                    Some((node, addr, mark, h)) => {
-                        home = h;
-                        (node, addr, Some(mark), None)
-                    }
-                    None => match self.elsewhere(tenant, relayed.is_some()) {
-                        region::Target::Node(node, addr, mark, region) => {
-                            home = region::home_asked(req, &region);
-                            (node, addr, Some(mark), None)
-                        }
-                        region::Target::Region(region, routers) => {
-                            let first = self.first_router(&region, &routers);
-                            let addr = region::host(&routers[first]).to_string();
-                            let mark = self.relay_mark.clone();
-                            (region::label(&region), addr, mark, Some((region, routers)))
-                        }
-                        region::Target::Answer(resp) => return reply(out, resp),
-                    },
-                };
-                if fenec_http::trace::recording() {
-                    fenec_http::trace::attr("fenec.node", node.clone());
-                }
-                // The node believes the client's address from the router
-                // alone: what a client sent under this name is dropped, and
-                // the router's own put in its place.
-                let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
-                let mut headers = forwarded_headers(req, traced);
-                if let Some(named) = &named {
-                    headers.push((fenec_http::audit::ROUTER_HEADER, named));
-                }
-                let sent = Instant::now();
-                let forwarding = forward_span(req, &node, &addr);
-                let sending = match &routers {
-                    None => self.pool.send_held(
-                        &addr,
-                        req.method.name(),
-                        &req.target,
-                        &headers,
-                        &req.body,
-                        held,
-                    ),
-                    // A region's routers, in turn from the one that answered
-                    // last, as far as the request cannot have run.
-                    Some((region, routers)) => {
-                        self.relay_send(region, routers, req, &headers, held)
-                    }
-                };
-                match sending {
-                    Ok(a) => (node, a, sent, forwarding),
-                    Err(e) => {
-                        forwarding.error(e.to_string());
-                        drop(forwarding);
-                        metrics::unreachable(&node);
-                        // 502, as a node out of reach is: a client takes it
-                        // to ask again, and a region cut off from this one
-                        // answers its own clients all the while.
-                        let why = match &routers {
-                            None => format!("node `{node}` ({addr}) did not answer: {e}"),
-                            Some((region, _)) => format!(
-                                "region `{region}`'s routers did not answer -- it may be cut off \
-                                 from this one, and answers through its own: {e}"
-                            ),
-                        };
-                        return reply(out, region::homed(Response::error(502, &why), &home));
-                    }
-                }
-            }
-        };
-
-        let status = answer.status;
-        forwarding.attr("http.response.status_code", status);
-        if status >= 500 {
-            forwarding.error(status.to_string());
-        }
-        let mut head = format!("HTTP/1.1 {status} {}\r\n", http::reason(status));
-        let cors = self.cfg.cors.as_deref();
-        let mut verified = false;
-        for (k, v) in &answer.headers {
-            // The node answers with the id it was sent; the router's own
-            // goes out in its place all the same, which a node from before
-            // the ids leaves out. So do the router's CORS headers, where it
-            // has its own: a page is told one rule, the one the router's
-            // preflight told it. Whether the node verified a token is the
-            // router's to know and no one else's.
-            if k.eq_ignore_ascii_case(fenec_http::audit::VERIFIED_HEADER) {
-                verified = true;
-            } else if !hop_by_hop(k)
-                && !k.eq_ignore_ascii_case("content-length")
-                && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
-                && !k.eq_ignore_ascii_case(region::SHARD_HEADER)
-                && !(cors.is_some() && fenec_http::cors::is_cors_header(k, v))
-            {
-                head.push_str(&format!("{k}: {v}\r\n"));
-            }
-        }
-        if let Some(origin) = cors {
-            fenec_http::cors::push_into(&mut head, origin);
-        }
-        if let Some(home) = &home {
-            head.push_str("Fenec-Home: ");
-            head.push_str(home);
-            head.push_str("\r\n");
-        }
-        head.push_str("Fenec-Shard: 1\r\n");
-        // A token the node verified starts the client's count again -- by
-        // its own address, no other -- and the node's word is the only
-        // thing that does: a status says nothing of the token, and a node
-        // answers a preflight, a body over its ceiling or a server asking
-        // no token without looking at one. Then a refusal waits here, by
-        // the client's address, before it is answered: the node waits none
-        // for what the router forwards.
-        if verified {
-            fenec_http::audit::verified();
-        }
-        // Relayed, it is the relaying router's to know, which keeps the
-        // client's count.
-        fenec_http::audit::push_verified(&mut head);
-        fenec_http::audit::http(req, status, peer);
-        fenec_http::request_id::with(|id| {
-            head.push_str(fenec_http::request_id::HEADER);
-            head.push_str(": ");
-            head.push_str(id);
-            head.push_str("\r\n");
-        });
-
-        if let Some(length) = answer.content_length() {
-            let body = match answer.read_body(&self.pool, head_only) {
-                Ok(b) => b,
-                Err(e) => {
-                    forwarding.error(e.to_string());
-                    drop(forwarding);
-                    metrics::unreachable(&node);
-                    let broke = Response::error(502, &format!("node `{node}` broke off: {e}"));
-                    return reply(out, region::homed(broke, &home));
-                }
-            };
-            drop(forwarding);
-            metrics::upstream(sent.elapsed());
-            // A HEAD answer states the length of the body it leaves out.
-            head.push_str(&format!(
-                "Content-Length: {}\r\nConnection: {}\r\n\r\n",
-                if head_only { length } else { body.len() },
-                if req.keep_alive {
-                    "keep-alive"
-                } else {
-                    "close"
-                }
-            ));
-            let written = out
-                .write_all(head.as_bytes())
-                .and_then(|_| out.write_all(&body))
-                .and_then(|_| out.flush());
-            metrics::request(Route::Tenant, status, arrived.elapsed());
-            fenec_http::trace::end(status);
-            return written.is_ok() && req.keep_alive;
-        }
-
-        // No length: a stream. It is copied as it arrives until either side
-        // closes, and the client connection ends with it; it is counted,
-        // and timed to its head.
-        drop(forwarding);
-        metrics::upstream(sent.elapsed());
-        head.push_str("Connection: close\r\n\r\n");
-        let written = out.write_all(head.as_bytes());
-        metrics::request(Route::Tenant, status, arrived.elapsed());
-        fenec_http::trace::end(status);
-        if written.is_err() {
-            return false;
-        }
-        let _ = out.set_read_timeout(None);
-        if let Ok(mut stream) = answer.into_stream() {
-            let _ = std::io::copy(&mut stream, out);
-        }
-        false
+        None
     }
 
     // ------------------------------------------------------------------ admin

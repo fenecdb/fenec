@@ -171,6 +171,10 @@ impl Client {
         }
     }
 
+    /// A request and its status and body, read as before read replicas:
+    /// the latency's own client, which [`Client::send_with`]'s header
+    /// vector and its two more comparisons a line of the answer made
+    /// slower for the router's answers, which carry more lines.
     fn send(
         &mut self,
         method: &str,
@@ -178,12 +182,36 @@ impl Client {
         auth: Option<&str>,
         body: &[u8],
     ) -> (u16, Vec<u8>) {
-        let bearer = auth.map(|t| format!("Bearer {t}"));
-        let headers: Vec<(&str, &str)> = bearer
-            .iter()
-            .map(|b| ("Authorization", b.as_str()))
-            .collect();
-        let (status, body, _) = self.send_with(method, target, &headers, body);
+        let mut head = format!(
+            "{method} {target} HTTP/1.1\r\nHost: b\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        if let Some(t) = auth {
+            head.push_str(&format!("Authorization: Bearer {t}\r\n"));
+        }
+        head.push_str("\r\n");
+        self.out.write_all(head.as_bytes()).unwrap();
+        self.out.write_all(body).unwrap();
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let mut len = 0;
+        loop {
+            line.clear();
+            self.reader.read_line(&mut line).unwrap();
+            let l = line.trim_end();
+            if l.is_empty() {
+                break;
+            }
+            if let Some(v) = l
+                .split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            {
+                len = v.1.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0u8; len];
+        self.reader.read_exact(&mut body).unwrap();
         (status, body)
     }
 
