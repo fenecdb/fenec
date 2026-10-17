@@ -10,9 +10,19 @@ export default ts.config(
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
     },
   },
-  // Lighthouse CI's config and its summary run in Node as plain JavaScript.
+  // Lighthouse CI's config, its summary and the CPU's calibration run in
+  // Node as plain JavaScript.
   {
     files: ['**/*.cjs', '**/*.mjs'],
-    languageOptions: { globals: { process: 'readonly', module: 'writable', console: 'readonly', URL: 'readonly' } },
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        module: 'writable',
+        console: 'readonly',
+        URL: 'readonly',
+        fetch: 'readonly',
+        WebSocket: 'readonly',
+      },
+    },
   },
 );
