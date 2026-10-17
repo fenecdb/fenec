@@ -16,6 +16,7 @@ struct Node {
     port: u16,
     db: Arc<RwLock<Database>>,
     follower: Option<Arc<Follower>>,
+    server: Arc<Server>,
 }
 
 fn dir(name: &str) -> PathBuf {
@@ -25,7 +26,7 @@ fn dir(name: &str) -> PathBuf {
     d
 }
 
-fn serve(db: Arc<RwLock<Database>>, repl: Arc<Replication>) -> u16 {
+fn serve(db: Arc<RwLock<Database>>, repl: Arc<Replication>) -> (u16, Arc<Server>) {
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         // Every write is fsynced before it is answered: what a replica is
@@ -33,13 +34,14 @@ fn serve(db: Arc<RwLock<Database>>, repl: Arc<Replication>) -> u16 {
         sync_on_write: true,
         ..Config::default()
     };
-    let server = Server::new(db, cfg).with_replication(repl);
+    let server = Arc::new(Server::new(db, cfg).with_replication(repl));
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
+    let s = Arc::clone(&server);
     std::thread::spawn(move || {
-        let _ = server.serve_on(listener);
+        let _ = s.serve_on(listener);
     });
-    port
+    (port, server)
 }
 
 /// A primary over `file`, as `fenec-server --replication-token` starts one.
@@ -52,7 +54,7 @@ fn primary(file: &Path, buffer: usize) -> Node {
         db.fork(fresh_id()).unwrap();
     }
     let db = Arc::new(RwLock::new(db));
-    let port = serve(
+    let (port, server) = serve(
         Arc::clone(&db),
         Replication::new(Some(TOKEN.into()), Some(feed), None),
     );
@@ -60,6 +62,7 @@ fn primary(file: &Path, buffer: usize) -> Node {
         port,
         db,
         follower: None,
+        server,
     }
 }
 
@@ -83,7 +86,7 @@ fn replica(file: &Path, upstream: u16) -> Node {
     .unwrap();
     let f = Arc::clone(&follower);
     std::thread::spawn(move || f.run());
-    let port = serve(
+    let (port, server) = serve(
         Arc::clone(&db),
         Replication::new(Some(TOKEN.into()), Some(feed), Some(Arc::clone(&follower))),
     );
@@ -91,6 +94,7 @@ fn replica(file: &Path, upstream: u16) -> Node {
         port,
         db,
         follower: Some(follower),
+        server,
     }
 }
 
@@ -591,6 +595,173 @@ fn a_read_sent_after_a_write_waits_for_it_on_a_replica() {
         "{\"query\":\"get items count\"}",
     );
     assert_eq!(status, 400);
+}
+
+/// A subscription's first event, read on a connection of its own -- or,
+/// refused, its whole answer: the status and that text.
+fn first_event(port: u16, path: &str, headers: &str) -> (u16, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    // Closed after an answer that is not a stream, which a stream is anyway.
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: x\r\n{headers}Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut out = String::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some((head, body)) = out.split_once("\r\n\r\n") {
+            let blocks: Vec<&str> = body.split("\n\n").collect();
+            // Every block but the last is whole; a keep-alive is a comment.
+            let whole = &blocks[..blocks.len() - 1];
+            if let Some(event) = whole.iter().find(|b| b.trim_start().starts_with("event:")) {
+                return (head[9..12].parse().unwrap(), event.to_string());
+            }
+        }
+        match s.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.push_str(&String::from_utf8_lossy(&chunk[..n])),
+        }
+    }
+    let (head, body) = out.split_once("\r\n\r\n").unwrap_or((&out, ""));
+    (head[9..12].parse().unwrap(), body.to_string())
+}
+
+/// A put of a row named `name` on `node`: the change it left it at.
+fn put_named(node: &Node, name: &str) -> u64 {
+    let mut put = String::from("{\"query\":");
+    fenec_core::json::escape_into(
+        &mut put,
+        &format!("put items {{name: \"{name}\", n: 500, e: [1.0, 0.5, 2.0]}}"),
+    );
+    put.push('}');
+    let (status, head, body) = raw(node.port, "POST", "/query", "", &put);
+    assert_eq!(status, 200, "{body}");
+    head.lines()
+        .find_map(|l| l.strip_prefix("Fenec-Seq: "))
+        .expect("a write names its change")
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// A subscription and `/_changes` sent after a write their client made on
+/// the primary (`Fenec-After`) wait for it on a replica as a read does --
+/// before the stream's head and before the page -- and are answered with it
+/// once it lands, or 504 with where the replica stands at the end of the
+/// wait. Served at once, a stream on a replica behind seeded from before
+/// the client's write, a stream resumed with `since` was sent nothing of
+/// it, and `/_changes` answered a page ending before it with a `Fenec-Seq`
+/// behind it too. Each is seen waiting on the replica before the follower
+/// runs again: one served at once never is, and the test fails there
+/// rather than pass on a write that happened to land first.
+#[test]
+fn a_stream_and_changes_sent_after_a_write_wait_for_it_on_a_replica() {
+    let d = dir("streams-after");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    let r = replica(&d.join("r.fenec"), p.port);
+    query(&p, SCHEMA);
+    write_some(&p, 0, 3);
+    caught_up(&r, &p);
+    let cursor = seq(&r);
+    let f = r.follower.as_ref().unwrap();
+    let cases = [
+        (
+            "a stream",
+            "/items/changes?n=gte.500".to_string(),
+            "event: seed",
+        ),
+        (
+            "a resumed stream",
+            format!("/items/changes?since={cursor}"),
+            "event: change",
+        ),
+        (
+            "/_changes",
+            format!("/_changes?since={cursor}&wait=15000"),
+            "\"op\":\"put\"",
+        ),
+    ];
+    for (i, (what, target, kind)) in cases.into_iter().enumerate() {
+        f.halt();
+        let name = format!("held back {i}");
+        let written = put_named(&p, &name);
+        assert!(
+            seq(&r) < written,
+            "{what}: the replica holds the write already"
+        );
+        let port = r.port;
+        let headers = format!("Fenec-After: {written}\r\nFenec-Wait: 20000\r\n");
+        let changes = target.starts_with("/_changes");
+        let asking = std::thread::spawn(move || match changes {
+            // The page waits for the write to be here, and its `Fenec-Seq`
+            // says it is: behind it, a consumer read the page as every
+            // write there is. A write not on the replica's disk yet comes
+            // on a page after, as any write does -- only what an fsync
+            // covered is handed over.
+            true => {
+                let number = |head: &str, name: &str| {
+                    head.lines()
+                        .find_map(|l| l.strip_prefix(name))
+                        .map(|v| v.trim().parse::<u64>().unwrap())
+                };
+                let (status, head, mut body) = raw(port, "GET", &target, &headers, "");
+                if status != 200 {
+                    return (status, body);
+                }
+                let stands = number(&head, "Fenec-Seq: ").unwrap();
+                assert!(stands >= written, "a page at {stands}, after {written}");
+                let mut next = number(&head, "Fenec-Next: ").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while next < written {
+                    assert!(Instant::now() < deadline, "the write never came: {body}");
+                    let more = format!("/_changes?since={next}&wait=15000");
+                    let (_, head, page) = raw(port, "GET", &more, "", "");
+                    body.push_str(&page);
+                    next = number(&head, "Fenec-Next: ").unwrap();
+                }
+                (status, body)
+            }
+            false => first_event(port, &target, &headers),
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while r.server.after_waiting() == 0 {
+            assert!(
+                Instant::now() < deadline && !asking.is_finished(),
+                "{what} never waited for the write on the replica"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        f.start("replica".into()).unwrap();
+        let (status, body) = asking.join().unwrap();
+        assert_eq!(status, 200, "{what}: {body}");
+        assert!(body.contains(kind), "{what}: {body}");
+        assert!(
+            body.contains(&name),
+            "{what} was served without its write: {body}"
+        );
+    }
+    caught_up(&r, &p);
+
+    // A change that has not come: the wait, then 504 and where the replica
+    // stands, no head of a stream before it; a header it cannot read, 400.
+    let far = seq(&p) + 1000;
+    let stands = format!("\"seq\":{}", seq(&r));
+    for target in ["/items/changes", "/_changes?since=1"] {
+        let started = Instant::now();
+        let (status, body) = first_event(
+            r.port,
+            target,
+            &format!("Fenec-After: {far}\r\nFenec-Wait: 300\r\n"),
+        );
+        assert_eq!(status, 504, "{target}: {body}");
+        assert!(started.elapsed() >= Duration::from_millis(250), "{target}");
+        assert!(body.contains(&stands), "{target}: {body}");
+        let (status, body) = first_event(r.port, target, "Fenec-After: soon\r\n");
+        assert_eq!(status, 400, "{target}: {body}");
+    }
+    assert_eq!(r.server.after_waiting(), 0);
 }
 
 /// The primary sweeps the rows past their time (`@ttl`) and its replica

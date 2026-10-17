@@ -1403,7 +1403,15 @@ read-only `/batch`'s, `/_changes`'s where the SDK reads it: of another
 lineage, a later term of the same, or further in one, so one arriving late
 is not the last -- and send it with
 each marked read, whose own answers move nothing, since a replica's may be
-behind home or on an abandoned branch. The router parses no FenecQL, so a
+behind home or on an abandoned branch. A marked subscription and
+`/_changes` -- Go's `Read()` and .NET's `AsRead()` copies send the
+position on `Subscribe` and `Changes` too, and a router sends any marked
+request near whatever its route, a stream copied as it comes -- wait for
+it on the copy as a read does, and their 504 sends them home: both were
+answered before the wait, a stream seeded from the replica as it stood,
+behind the client's own write or on the branch a failover left, and a
+page whose `Fenec-Seq` said every write there was had been read (the
+`Fenec-After` paragraph below). The router parses no FenecQL, so a
 read goes near only where its client marked it: a `GET` alone was not taken
 for one, since a client that sends no `Fenec-After` would have lost reading
 its own writes. A router stands in a region (`--near`, or a region's
@@ -2684,7 +2692,50 @@ admin token -- and the router forwards what the node refuses at once
 30 s for a write made only once it is in, so one that waited would be the
 wait's 504, never 401). A request without the header asks nothing more:
 `make requests-bench` in ABBA turns against main kept every p50 and its
-rates within 0.5%.
+rates within 0.5%. A subscription and `/_changes` wait the same way: the
+stream in `sse::serve` once its token, its tenant's stream slot and the
+database's `--http-max-streams` slot are taken, and before the shape is
+read -- a collection the client made may not be on the copy yet -- and
+before the head, so its 504 is a read's and a router's replica path sends
+it home; `/_changes` once its token, a scoped token's 403 and a feed are
+asked, holding a stream slot as its `wait` does. Both came before the
+wait: on a single server `GET /t/changes` sent `Fenec-After: 999999` and
+`Fenec-Wait: 300` was seeded at once where `/query` was 504 after 0.31 s,
+and through a router a stream marked by Go's `Read()` or .NET's
+`AsRead()` -- a router sends a marked request near whatever its route --
+seeded from a read replica behind the client's own write, or left on the
+branch a failover abandoned, and a page's `Fenec-Seq` behind the write
+read as every write there is. A stream resumed with `since` waits too:
+`since` is the stream's cursor and the header the client's position, and
+`since` alone asks no wait -- a primary that lost writes in a failover
+never reaches a cursor of the old branch in its history, and reseeds as
+before. The server writes no `id:` line, so no client sends
+`Last-Event-ID`. A page waits for the change to be in the database, not
+on its disk: its `Fenec-Seq` is never behind the write, and the write
+comes on a later page once an fsync covers it (`/_changes`' own `wait`
+waits for writes after `since`). A marked stream on a copy that has not
+caught up, or refused another lineage's primary, is 503 before any of
+it, as a read is, and one open as the copy deletes itself ends with the
+hub (`release`). Go's `Subscribe` and .NET's `SubscribeAsync` take a
+stream's 504 near as a read's (`toldBy`, `SentHome`): home's position
+taken and the stream opened home unmarked -- an error, every stream near
+after a write lost in a failover was refused for good. `Hub::after_waiting`
+counts the requests in the wait, what the tests wait on before the write
+comes: `tests/replication.rs` holds a stream, a stream resumed and a page
+on a replica whose follower is halted, each seen waiting, then served
+with the write, and 504 past the wait; `tests/token_first.rs` each refused
+at once with the header; fenec-shard's
+`a_marked_stream_after_a_write_waits_on_the_replica_or_goes_home` a
+stream and a page going home past the replica's wait, and a stream
+answered by the replica once it catches up, home cut off -- each failing
+with its wait taken out. Without the header a stream and a page look for
+it once, as a read does: `make requests-bench` in three ABBA quartets
+against main, a row by id 0.021-0.022 ms p50 against 0.022, a put
+0.021-0.023 against 0.022-0.027, eight clients' rates inside main's
+spread (by id 136-147k a second against 126-145k); a subscription opened
+to its seed of a row, 1 000 opens a side in each of four ABBA runs a
+build, 240.5-253.9 us p50 against main's 248.0-256.9, and sent after a
+change the database holds already 240.8-249.3.
 
 **`insert` never writes over; `put` does.** `Statement::Put` carries
 `insert` (the parser sets it for the keyword, `POST /<name>` over REST):

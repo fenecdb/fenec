@@ -189,6 +189,63 @@ func TestReadsNearestAreMarkedAndSentAfterTheClientsWrites(t *testing.T) {
 	}
 }
 
+// A Read copy's subscription near is marked and sent after the client's
+// position, as its reads are, and the server holds it until a copy has
+// that write. Its 504 is a read near's: home's position, which it names, is
+// the client's from then, and the stream opens home with no mark. Taken as
+// an error, every stream near after a write lost in a failover was refused.
+func TestASubscriptionNearIsSentAfterTheClientsWritesAndGoesHomeOnA504(t *testing.T) {
+	const h1, h2 = "1-00000000000000aa", "2-00000000000000bb"
+	var mu sync.Mutex
+	var seen []http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Clone())
+		n := len(seen)
+		mu.Unlock()
+		switch {
+		case n == 1:
+			w.Header().Set("Fenec-Seq", "12")
+			w.Header().Set("Fenec-History", h1)
+			_, _ = w.Write([]byte(`{"affected":1}`))
+		case r.Header.Get("Fenec-Read") != "":
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = w.Write([]byte(`{"error":"change 12 is not in this copy's history","seq":10,"history":"` + h2 + `"}`))
+		default:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: seed\ndata: {\"seq\":10,\"rows\":[{\"n\":1}]}\n\n"))
+		}
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db := New(srv.URL, WithReadsNearest())
+	if _, err := db.Exec(ctx, "put t {n: 1}"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := db.Read().Subscribe(ctx, "t", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seed := <-events; seed.Type != "seed" || len(seed.Rows) != 1 || seed.Seq != 10 {
+		t.Fatalf("the seed: %+v", seed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 3 {
+		t.Fatalf("%d requests", len(seen))
+	}
+	if h := seen[1]; h.Get("Fenec-Read") != "replica" || h.Get("Fenec-After") != "12" || h.Get("Fenec-History") != h1 {
+		t.Fatalf("the stream near: %v", h)
+	}
+	if h := seen[2]; h.Get("Fenec-Read") != "" || h.Get("Fenec-After") != "" || h.Get("Fenec-History") != "" {
+		t.Fatalf("the stream home: %v", h)
+	}
+	if seq, h := db.pos.get(); seq != 10 || h != h2 {
+		t.Fatalf("after the 504: %d %s", seq, h)
+	}
+}
+
 func TestAClientReadsHomeUnlessItAsksForNearest(t *testing.T) {
 	var seen []http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

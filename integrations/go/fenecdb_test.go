@@ -432,6 +432,18 @@ func TestAfterReadsYourWriteOnAReplica(t *testing.T) {
 	if len(rows) != 1 || rows[0]["t"] != "written" {
 		t.Fatalf("the replica answered %v after %d", rows, w.Seq)
 	}
+	// A stream after the write waits for it as the read does: seeded with
+	// it, never from before it.
+	w = must(db.Exec(ctx, "put "+name+" {t: $1}", "streamed")).of(t)
+	sub, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	events := must(r.After(w.Seq).Subscribe(sub, name, url.Values{"t": {"eq.streamed"}})).of(t)
+	if seed := <-events; seed.Type != "seed" || len(seed.Rows) != 1 || seed.Seq < w.Seq {
+		t.Fatalf("the replica's stream after %d: %+v", w.Seq, seed)
+	}
+	cancel()
+	for range events {
+	}
 	_, err := r.Exec(ctx, "put "+name+" {t: $1}", "refused")
 	if e := statusOf(t, err); e.Status != 403 {
 		t.Fatalf("a write to a replica: %+v", e)

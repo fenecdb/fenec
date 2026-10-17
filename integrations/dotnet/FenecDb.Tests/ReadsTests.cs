@@ -214,6 +214,39 @@ public sealed class ReadsTests
         Assert.Equal(second, script.Seen[8]["fenec-history"]);
     }
 
+    /// <summary>An <see cref="FenecClient.AsRead"/> copy's subscription near is marked and sent after the client's
+    /// position, as its reads are, and the server holds it until a copy has that write. Its 504 is a read near's:
+    /// home's position, which it names, is the client's from then, and the stream opens home with no mark. Taken
+    /// as an error, every stream near after a write lost in a failover was refused.</summary>
+    [Fact]
+    public async Task ASubscriptionNearIsSentAfterTheClientsWritesAndGoesHomeOnA504()
+    {
+        var script = new Script(
+            (200, """{"affected":1}""", "12"),
+            (504, $$"""{"error":"change 12 is not in this copy's history","seq":10,"history":"{{H2}}"}""", null),
+            (200, "event: seed\ndata: {\"seq\":10,\"rows\":[{\"n\":1}]}\n\n", null));
+        using var db = new FenecClient("http://script.invalid",
+            new() { HttpClient = new HttpClient(script), ReadsNearest = true });
+        await db.ExecAsync("put t {n: 1}");
+        Event? seed = null;
+        await foreach (var ev in db.AsRead().SubscribeAsync("t"))
+        {
+            seed = ev;
+            break;
+        }
+        Assert.NotNull(seed);
+        Assert.Equal(("seed", 10L), (seed.Type, seed.Seq));
+        Assert.Single(seed.Rows);
+        var seen = script.Seen;
+        Assert.Equal(3, seen.Count);
+        Assert.Equal("replica", seen[1]["fenec-read"]);
+        Assert.Equal("12", seen[1]["fenec-after"]);
+        Assert.Equal(H1, seen[1]["fenec-history"]);
+        Assert.False(seen[2].ContainsKey("fenec-read") || seen[2].ContainsKey("fenec-after")
+            || seen[2].ContainsKey("fenec-history"));
+        Assert.Equal(10, db.Seq);
+    }
+
     [Fact]
     public async Task AClientReadsHomeUnlessItAsksForNearest()
     {

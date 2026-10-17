@@ -138,6 +138,9 @@ curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
 <ul>
   <li><b>It waits 5 seconds</b> unless <code>Fenec-Wait</code> says otherwise
     (in milliseconds, 30 s at most), then answers 504.</li>
+  <li><b>A subscription and <code>/_changes</code> wait too,</b> before
+    their head: a stream sent with the header is seeded with the write, and
+    a change-stream page's <code>Fenec-Seq</code> is never behind it.</li>
   <li><b>Across a failover, send <code>Fenec-History</code> too:</b> the
     answer names the history its change is of, which a promotion forks. A
     replica left on the old branch holds a change of that number of its

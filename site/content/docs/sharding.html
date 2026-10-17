@@ -1700,8 +1700,17 @@ answer from home named — a write's, a read-only <code>/batch</code>'s; of a
 later term, or further in one, so an answer arriving late is not the last —
 and sends it with every marked read, whose own answers move nothing: it reads
 its own writes and every write before them, and another client's writes after
-its own may or may not be there yet. A client that has written nothing reads
-the replica as it stands. Where the failover lost the client's last
+its own may or may not be there yet. A subscription and a
+<code>/_changes</code> page sent so wait for it as a read does, before their
+head, and go home on the replica's <code>504</code>: a stream is seeded with
+the client's write, never from the copy as it stood behind it, and a page's
+<code>Fenec-Seq</code> is never behind it. Go's <code>Read()</code> and
+.NET's <code>AsRead()</code> copies send the position on a subscription and
+<code>/_changes</code> too, and take a stream's <code>504</code> as a
+read's. A marked stream open on a copy that refuses its primary — the
+tenant deleted and made again under its name — ends as the copy deletes
+itself, as the reads after it are sent home. A client that has written
+nothing reads the replica as it stands. Where the failover lost the client's last
 acknowledged write, no copy holds its position: home answers
 <code>504</code> at once, naming where it stands and of what history, the SDK
 takes that as the client's position — only over the position that read was

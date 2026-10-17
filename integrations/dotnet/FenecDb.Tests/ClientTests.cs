@@ -326,6 +326,26 @@ public sealed class ClientTests(Servers servers)
         using var r = new FenecClient(replica);
         var rows = await r.After(w.Seq).QueryAsync($"get {name} select t");
         Assert.Equal("written", Assert.Single(rows).GetProperty("t").GetString());
+        // A stream after the write waits for it as the read does: seeded with it, never from before it.
+        w = await db.ExecAsync($"put {name} {{t: $1}}", ["streamed"]);
+        using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
+        {
+            var events = r.After(w.Seq).SubscribeAsync(name, [new("t", "eq.streamed")], cts.Token)
+                .GetAsyncEnumerator(cts.Token);
+            try
+            {
+                Assert.True(await events.MoveNextAsync());
+                var seed = events.Current;
+                Assert.Equal("seed", seed.Type);
+                Assert.Single(seed.Rows);
+                Assert.True(seed.Seq >= w.Seq);
+            }
+            finally
+            {
+                await cts.CancelAsync();
+                try { await events.DisposeAsync(); } catch (OperationCanceledException) { }
+            }
+        }
         var e = await Assert.ThrowsAsync<FenecException>(() => r.ExecAsync($"put {name} {{t: $1}}", ["refused"]));
         Assert.Equal(403, e.Status);
     }

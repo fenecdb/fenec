@@ -558,20 +558,10 @@ func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte
 	if res.StatusCode == http.StatusNotModified && c.tag != "" {
 		return nil, head{etag: res.Header.Get("ETag"), notModified: true}, nil
 	}
-	// 504 to a read near: no copy the router reached holds the position it
-	// was sent after, home either -- the write lost in a failover of home,
-	// which says where it stands: the client's position from here on.
-	// Asked home with no mark, it is answered with what home holds.
+	// Asked home with no mark after a read near's 504, it is answered with
+	// what home holds.
 	near := c.read && c.near
-	if res.StatusCode == http.StatusGatewayTimeout && near && req.Header.Get("Fenec-After") != "" {
-		var told struct {
-			Seq     *uint64 `json:"seq"`
-			History string  `json:"history"`
-		}
-		if c.after == 0 && json.Unmarshal(raw, &told) == nil && told.Seq != nil {
-			sent, _ := strconv.ParseUint(req.Header.Get("Fenec-After"), 10, 64)
-			c.pos.told(sent, req.Header.Get("Fenec-History"), *told.Seq, told.History)
-		}
+	if c.toldBy(req, res.StatusCode, raw) {
 		home := *c
 		home.read, home.after = false, 0
 		return home.do(ctx, method, path, ctype, body, extra)
@@ -594,6 +584,26 @@ func (c *Client) do(ctx context.Context, method, path, ctype string, body []byte
 		h.hasNext = true
 	}
 	return raw, h, nil
+}
+
+// toldBy says whether an answer is a 504 to a request near sent after the
+// client's position: no copy the router reached holds it, home either --
+// the write lost in a failover of home, which says where it stands, taken
+// here as the client's position from then on (one the caller named with
+// After is not the client's to take). The request goes home with no mark.
+func (c *Client) toldBy(req *http.Request, status int, raw []byte) bool {
+	if status != http.StatusGatewayTimeout || !(c.read && c.near) || req.Header.Get("Fenec-After") == "" {
+		return false
+	}
+	var told struct {
+		Seq     *uint64 `json:"seq"`
+		History string  `json:"history"`
+	}
+	if c.after == 0 && json.Unmarshal(raw, &told) == nil && told.Seq != nil {
+		sent, _ := strconv.ParseUint(req.Header.Get("Fenec-After"), 10, 64)
+		c.pos.told(sent, req.Header.Get("Fenec-History"), *told.Seq, told.History)
+	}
+	return true
 }
 
 func (c *Client) headers(req *http.Request) {

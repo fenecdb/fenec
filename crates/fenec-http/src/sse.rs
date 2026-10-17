@@ -64,6 +64,10 @@ pub struct Hub {
     closed: AtomicBool,
     /// Writes held until they can write (`Fenec-Wait`): woken here too.
     waits: crate::waits::Waits,
+    /// Requests waiting here for a write their client made elsewhere
+    /// (`Fenec-After`, [`Hub::reached`]): what a test waits on before it
+    /// lets that write come.
+    after_waiting: AtomicUsize,
 }
 
 impl Watcher for Hub {
@@ -124,6 +128,7 @@ impl Hub {
         look: impl Fn() -> (bool, u64),
         until: std::time::Instant,
     ) -> bool {
+        let mut waiting = None;
         loop {
             let (done, seq) = look();
             if done {
@@ -133,10 +138,17 @@ impl Hub {
             if now >= until || self.is_closed() {
                 return false;
             }
+            waiting.get_or_insert_with(|| Counted::on(&self.after_waiting));
             // Past the change it looked at, or a tenth of a second: an
             // image adopted at the same change moves no counter.
             self.wait(seq, (until - now).min(Duration::from_millis(100)));
         }
+    }
+
+    /// How many requests wait here now for a write they were sent after
+    /// (`Fenec-After`) -- reads, subscriptions and `/_changes` alike.
+    pub fn after_waiting(&self) -> usize {
+        self.after_waiting.load(Ordering::SeqCst)
     }
 
     /// Ends every stream on this hub: each one writes an `error` event and
@@ -179,6 +191,22 @@ impl Hub {
     }
 }
 
+/// One more on a count for as long as it lives.
+struct Counted<'a>(&'a AtomicUsize);
+
+impl<'a> Counted<'a> {
+    fn on(count: &'a AtomicUsize) -> Counted<'a> {
+        count.fetch_add(1, Ordering::SeqCst);
+        Counted(count)
+    }
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct StreamSlot<'a>(&'a Hub);
 impl Drop for StreamSlot<'_> {
     fn drop(&mut self) {
@@ -207,6 +235,24 @@ pub fn serve(
         let _ = out.write_all(&refused.body);
         return;
     };
+
+    // Sent after a write its client made elsewhere (`Fenec-After`), a
+    // stream waits for it here as a read does ([`crate::after`]): served
+    // from a copy that has not caught up, its seed was from before the
+    // client's own write -- a read replica a router sent it to, or one
+    // left on the branch a failover abandoned. After its token and its
+    // slots, so a refused one waits for nothing and one past the ceiling
+    // is told so at once; before the shape is read, since a collection
+    // the client made may not be here yet; before the head, so a 504
+    // says where the copy stands and a router sends the stream home. A
+    // stream resumed with `since` waits the same way, the header being
+    // the client's position and `since` only its cursor.
+    if req.header("fenec-after").is_some() {
+        if let Some(refused) = crate::after(req, db, hub) {
+            let _ = crate::cors(refused, cfg).write(out, false, false);
+            return;
+        }
+    }
 
     // Parsing needs the schema, and the schema needs a read lock. The lock is
     // released immediately: held for the whole stream it would stop all writes.

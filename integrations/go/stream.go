@@ -55,6 +55,17 @@ func (c *Client) Subscribe(ctx context.Context, collection string, filter url.Va
 	if res.StatusCode != http.StatusOK {
 		defer res.Body.Close()
 		raw, _ := io.ReadAll(res.Body)
+		// A stream near waits for the client's position as a read does,
+		// and a 504 is a read near's: no copy holds it, home either --
+		// the write lost in a failover of home, which says where it
+		// stands, the client's position from here on -- and the stream
+		// opens home with no mark. Taken as an error, every stream near
+		// after it was refused for good.
+		if c.toldBy(req, res.StatusCode, raw) {
+			home := *c
+			home.read, home.after = false, 0
+			return home.Subscribe(ctx, collection, filter)
+		}
 		return nil, errorOf(res.StatusCode, raw)
 	}
 	out := make(chan Event, 16)
