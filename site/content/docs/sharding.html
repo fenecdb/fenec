@@ -1826,12 +1826,15 @@ and <code>{ read: true }</code> on <code>run</code> and <code>batch</code>
 <code>Fenec.connect(url, reads: Reads.nearest)</code>, each with
 <code>db.asRead()</code> (<a href="mobile.html#connect">Without a
 file</a>). Each marks the builder's reads and the copy's requests alone,
-and keeps one position for every copy of the client it makes. A stream is
-not held for <code>Fenec-After</code> yet: JavaScript's live queries and
-subscriptions go home unmarked, and a subscription opened through a Go
-<code>Read()</code> or a .NET <code>AsRead()</code> copy is marked and may be
-answered by the read replica as it stands, behind the client's own writes.
-A synced replica's streams, in the browser and in the native libraries, go
+and keeps one position for every copy of the client it makes. A
+subscription opened through a Go <code>Read()</code> or a .NET
+<code>AsRead()</code> copy, and its <code>/_changes</code> reads, are marked
+and sent after that position too, and a server holds a stream for
+<code>Fenec-After</code> as it holds a read: the read replica seeds it once
+it has the client's own writes, and where it cannot in the wait its
+<code>504</code> sends the stream home, so no stream is seeded from behind
+them. JavaScript's live queries and subscriptions go home unmarked. A
+synced replica's streams, in the browser and in the native libraries, go
 home; Python's client and the Swift, Kotlin and Dart remotes open none.</p>
 
 <p><b>What it costs.</b> A marked read through the router of the replica's

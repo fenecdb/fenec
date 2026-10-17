@@ -1515,7 +1515,9 @@ Go's and .NET's clients do (`reads: .nearest`, `Reads.NEAREST`,
 `Reads.nearest`, and `asRead()`), the position shared by every copy, each
 held to a real global router, its standby near the replica and two nodes in
 its own tests. Not done: reads of a bounded staleness (a decision, not a
-detail), live queries and subscriptions near.
+detail), JavaScript's live queries and subscriptions near and the synced
+replicas' streams, which go home (Go's and .NET's read copies mark a
+subscription, held for its position as a read is, above).
 `tests/read_replicas.rs` holds a marked read answered with the rows only the
 replica held and while home is out of reach, a read after the client's write
 going home past the wait, a failover onto the replica of its own and a move
