@@ -23,7 +23,12 @@ SQL = [
     ("subquery in FROM", r"\bfrom\s*\("),
     ("EXISTS", r"\b(not\s+)?exists\s*\("),
     ("scalar subquery: = (SELECT ...)", r"(=|<|>)\s*\(\s*select\b"),
+    ("subquery in the select list", r"(^\s*select|,)\s*\(\s*select\b"),
+    ("column alias without AS",
+     r"\)\s+(?!(as|from|and|or|desc|asc|limit|where|order|group|having|offset|lookup|returning|on|is|in|not"
+     r"|then|else|end|when|select|require|match|union|join|left|inner)\b)[a-z_]\w*\s*(,|\bfrom\b)"),
     ("INSERT ... VALUES", r"\binsert\s+(into\s+)?\w+\s*\([\s\S]*?\)\s*values\b|\bvalues\s*\("),
+    ("INSERT ... SELECT", r"\binsert\s+(into\s+)?\w+\s*(\([^)]*\))?\s*select\b"),
     ("upsert (ON CONFLICT / MERGE)",
      r"\bon\s+conflict\b|\bon\s+duplicate\s+key\b|^\s*merge\b|\binsert\s+or\s+replace\b|^\s*replace\s+into\b|^\s*upsert\b"),
     ("several rows as {...}, {...} without [ ]", r"^(?![\s\S]*\[\s*\{)[\s\S]*?\}\s*,\s*\{"),
@@ -37,6 +42,7 @@ SQL = [
     ("IN (list)", r"\bin\s*\((?!\s*(get|select)\b)"),
     ("BETWEEN", r"\bbetween\b"),
     ("LIKE / ILIKE", r"\b(i?like)\b"),
+    ("match written inside where", r"\bwhere\s+match\b"),
     ("full-text search in WHERE (MATCH, @@)",
      r"\b\w+\s+match\s+(?=['\"$])|\bmatch\s*\(|@@|@search|\bto_tsvector\b|\bto_tsquery\b"),
     ("regex operators (=~, REGEXP, SIMILAR TO)", r"=~|!~|\bregexp\b|\brlike\b|\bsimilar\s+to\b"),
@@ -65,7 +71,7 @@ SQL = [
     ("<>", r"<>"),
     ("! for not", r"!(?!=)"),
     ("RETURNING", r"\breturning\b"),
-    ("rowid", r"\browid\b"),
+    ("rowid / _id", r"\b(rowid|_id|oid)\b"),
     ("table alias", r"\b(from|join)\s+\w+\s+(as\s+)?(?!(where|order|group|limit|lookup|join|left|right|inner|full|cross|on|offset|having|match|near|count|returning|facet|select|require|union)\b)[a-z_]\w*"),
     ("qualified name (t.col)", r"\b(?!meta\.)[a-z_]\w*\.[a-z_]\w*\b"),
     ("SELECT ... FROM", r"^\s*select\b[\s\S]*?\bfrom\b"),
@@ -163,18 +169,25 @@ FIRST = [
     (r"`count` counts rows or distinct values", "COUNT(column)"),
     (r"`count` cannot be used together with", "count beside select"),
     (r"expected a single statement", "several statements"),
+    # The SQL-spellings parser's (#356) word for a quoted name.
+    (r"double quotes make text here", "double-quoted identifier"),
+]
+# A construct the statement holds, where the error is one it brings about
+# away from where it stands.
+IMPLIED = [
+    ("column alias without AS", r"expected a command, found"),
+    ("subquery in the select list", r"expected a (name|command), found `\(`"),
 ]
 # The words, where no construct stands at the place.
 LATER = [
     (r"has no full-text index", "match over a field without @text"),
+    (r"`i?like` takes text, not object", "LIKE over a json field"),
     (r"^unknown function `(contains|ends_with|starts_with)`", "string functions (contains, ends_with, ...)"),
     (r"^unknown function `match`", "full-text search in WHERE (MATCH, @@)"),
     (r"^unknown function `json_", "JSON operators (->>, ['key'], json_extract)"),
     (r"^field `", "unknown field"),
     (r"^collection `", "unknown collection"),
     (r"refused: the \d+ statements", "out of attempts"),
-    # `'DE'` inside the shell's own single quotes: the tool's quoting, not SQL.
-    (r"unexpected character `\?`", "quotes lost in the shell"),
 ]
 
 
@@ -200,8 +213,16 @@ def blame(statement, status, body):
             pick = name
     # A lookup's clauses belong to the collection looked up: a field of the
     # other level, or the key named on the wrong side, is not found there.
-    if pick is None and re.search(r"\blookup\b", statement) and re.match(r"field `\w+\.\w+`", detail):
+    if pick is None and re.search(r"\blookup\b", statement) and re.match(r"field `[\w.]+`", detail):
         pick = "lookup: a field of the other level"
+    # `?` between letters is a quote the shell ate; alone, a placeholder.
+    if pick is None and re.search(r"unexpected character `\?`", detail):
+        pick = "quotes lost in the shell" if re.search(r"\?\w", statement) else "? placeholders"
+    # The parser stops where it lost its way, not at the habit: an alias
+    # with no AS is refused at the start of the list it sits in.
+    for construct, pattern in IMPLIED:
+        if pick is None and construct in names and re.search(pattern, detail):
+            pick = construct
     at = re.search(r"position (\d+)", error)
     if pick is None and at:
         p = int(at.group(1))
@@ -217,10 +238,15 @@ def blame(statement, status, body):
                 pick = name
                 break
         if pick == "unknown field":
-            for owner in ("qualified name (t.col)", "JSON operators (->>, ['key'], json_extract)", "rowid"):
+            for owner in ("qualified name (t.col)", "JSON operators (->>, ['key'], json_extract)", "rowid / _id"):
                 if owner in names:
                     pick = owner
                     break
+            else:
+                # `status in (paid, shipped)`: a value written bare is a name.
+                missing = re.match(r"field `(\w+)`", detail)
+                if missing and missing.group(1) not in NAMES:
+                    pick = "unquoted text value"
     if pick is None:
         pick = "other: " + re.sub(r"`[^`]*`|\"[^\"]*\"|\d+", "_", detail)[:70]
     for carrier, carried in CARRIES.items():
