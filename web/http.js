@@ -588,6 +588,8 @@ function refused(res, body, message) {
     ? ms / 1000
     : Number(res.headers?.get?.('retry-after') ?? body?.retry_after);
   if (Number.isFinite(wait) && wait > 0) e.retryAfter = wait;
+  // Answered after its lease lapsed: its position, never the client's.
+  if (body?.outcome === 'unknown') Object.assign(e, { outcome: 'unknown', seq: body.seq, history: body.history });
   return e;
 }
 

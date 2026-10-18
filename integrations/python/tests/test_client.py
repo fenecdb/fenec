@@ -65,6 +65,30 @@ def test_a_quota_names_itself_and_the_wait():
     assert (e.value.status, e.value.quota, e.value.retry_after) == (503, None, 1)
 
 
+def test_a_write_whose_outcome_is_unknown_says_so():
+    """A write a tenant's node answered after its lease lapsed, told apart
+    from the server's own error by its body's outcome, with where it left
+    the node's database; a 500 that says none is one as before."""
+    import fenecdb
+
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(
+            500,
+            b'{"error":"the write landed","outcome":"unknown","seq":7,'
+            b'"history":"1-00000000000000ab","completed":2,"at":3}',
+        )
+    assert (e.value.status, e.value.outcome, e.value.seq, e.value.history) == (
+        500,
+        "unknown",
+        7,
+        "1-00000000000000ab",
+    )
+    assert (e.value.completed, e.value.at) == (2, 3)
+    with pytest.raises(FenecError) as e:
+        fenecdb._answer(500, b'{"error":"sync error: disk full"}')
+    assert (e.value.outcome, e.value.seq) == (None, None)
+
+
 def test_a_write_that_does_not_write_its_count_is_refused_and_put_back(client):
     name = fresh("require")
     client.query(f"create collection {name} (name text, balance int)")

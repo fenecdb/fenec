@@ -999,13 +999,28 @@ suspended fails over later, never sooner.</p>
 answered. One that landed while the lease ran and is answered after it
 lapsed — its process stopped or starved between the two, its machine
 suspended, or its fsync or its wait for the replicas' streams outlasting
-the lease — is answered <code>500</code>: it is in the node's file, and
-its tenant may have been failed over without it or may still be on the
-node with it, which the node cannot know. Read it back through the router;
-or, where it was sent with an <code>Idempotency-Key</code>, send it again
-with the same key: a node still holding the tenant answers it as the write
-it made, and a new primary makes it once. Answered as a success, as it was,
-a failover lost it.</p>
+the lease — is answered <code>500</code> with <code>"outcome":
+"unknown"</code> (<a href="http.html#statuses">statuses</a>): it is in the
+node's file, and its tenant may have been failed over without it or may
+still be on the node with it, which the node cannot know. Sent with an
+<code>Idempotency-Key</code>, send it again with the same key: the node
+refuses it while its lease has lapsed, before it looks the key up, and once
+the tenant settles a node still holding the write answers it as made, and a
+new primary makes it once. Sent with none, read it back — but not at once:
+the node still answers reads, the write among them, and routers send them
+there until they fail the tenant over, a lease and a tenth
+(<code>--auto-failover</code> × 1.1) after the answer, while
+the copy promoted may lack it. After that, a read through the router
+decides it; so does one sent with <code>Fenec-After</code> and
+<code>Fenec-History</code> set to the <code>seq</code> and
+<code>history</code> the answer's body names, which a primary holding the
+write answers and one without it refuses 504. The body names them, not
+<code>Fenec-Seq</code>, which a client would take as its own position.
+Answered as a success, as it was, a failover lost it. A <code>/batch</code>
+holding a <code>compact</code>, whose statements run on their own, is
+answered so too where one of them landed before a later one was refused,
+with <code>completed</code> and <code>at</code>; it was told to come back,
+503, as if none had.</p>
 
 <p>What leases do not cover. A virtual machine stopped by its host is no
 suspend to its kernel. Under QEMU/KVM's defaults, x86 and arm64, a guest

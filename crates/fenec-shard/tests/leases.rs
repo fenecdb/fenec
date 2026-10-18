@@ -73,6 +73,11 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
                 assert!(body.contains("lease"), "{body}");
                 fenced.get_or_insert_with(|| cut.elapsed());
             }
+            // Landed while the lease ran, answered once it had lapsed --
+            // its fsync done, its wait for the replica's stream, cut, a
+            // second -- and so not a success: answered 200, it was a write
+            // acknowledged that the replica promoted never had.
+            500 => assert!(body.contains(r#""outcome":"unknown""#), "{body}"),
             other => panic!("n1 answered {other}: {body}"),
         }
         if promoted.is_none() {

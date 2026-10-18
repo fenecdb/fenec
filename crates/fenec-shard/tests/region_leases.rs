@@ -551,6 +551,10 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
                 );
                 fenced.get_or_insert_with(Instant::now);
             }
+            // Landed while the lease ran and answered once it had lapsed --
+            // its wait for the replica's cut stream a second -- so not a
+            // success, which the replica promoted may never have had.
+            500 => assert!(body.contains(r#""outcome":"unknown""#), "{body}"),
             other => panic!("us1 answered {other}: {body}"),
         }
         if promoted.is_none() && query(w.us, "acme", r#"put notes {title: "failed over"}"#).0 == 200

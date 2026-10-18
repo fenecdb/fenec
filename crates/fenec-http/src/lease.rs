@@ -41,8 +41,9 @@
 //! lease again.
 //!
 //! **It is measured on the boot clock** (`Moment`): `CLOCK_BOOTTIME` on
-//! Linux, `mach_continuous_time` on Apple's systems, which count the time
-//! the machine was suspended. On `Instant`'s clock, which does not, a node
+//! Linux, `mach_continuous_time` on Apple's systems (through
+//! `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`), which count the time the
+//! machine was suspended. On `Instant`'s clock, which does not, a node
 //! suspended while its lease ran woke with the lease left as it was and
 //! wrote beside its tenants' new primaries until it ran out.
 //!
@@ -165,14 +166,30 @@ impl Moment {
 
 /// The boot clock, declared by hand as the crate declares its other system
 /// calls (it takes no `libc`): a clock that counts the time the machine was
-/// suspended, and at the rate `Instant`'s does.
+/// suspended, and at the rate `Instant`'s does. It fails closed, as std's
+/// `Instant::now` does: a boot clock that stops answering ends the process
+/// rather than hand the lease a moment of another clock -- read in turn
+/// from two clocks, a lease is measured across both, and a timebase guessed
+/// at 1 / 1 on Apple silicon, whose ticks are 125 / 3 ns, made one 41.7
+/// times as long.
 mod boot {
     /// `clock_gettime(CLOCK_BOOTTIME)`: `CLOCK_MONOTONIC` and the time spent
     /// suspended, the same clock otherwise. Read through the vDSO as the
     /// monotonic clock is, since Linux 5.3's generic vDSO; a system call on
-    /// a kernel before it.
+    /// a kernel before it. A kernel with no boot clock (before 2.6.39)
+    /// refuses it from the first read, and the lease is measured on
+    /// `Instant` throughout, as it was; one that has it is held to it.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn now() -> u64 {
+        static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        match HAS.get_or_init(|| read().is_some()) {
+            true => read().expect("clock_gettime(CLOCK_BOOTTIME) failed"),
+            false => super::boot_fallback(),
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn read() -> Option<u64> {
         use std::ffi::c_long;
         // `time_t` and the nanoseconds are a `long` each on glibc, musl and
         // bionic, under the symbol declared here.
@@ -187,46 +204,32 @@ mod boot {
         const CLOCK_BOOTTIME: i32 = 7;
         let mut ts = Timespec { sec: 0, nsec: 0 };
         // SAFETY: the kernel writes one `timespec`, which outlives the call.
-        match unsafe { clock_gettime(CLOCK_BOOTTIME, &mut ts) } {
-            0 => (ts.sec as u64)
+        let ok = unsafe { clock_gettime(CLOCK_BOOTTIME, &mut ts) } == 0;
+        ok.then(|| {
+            (ts.sec as u64)
                 .saturating_mul(1_000_000_000)
-                .saturating_add(ts.nsec as u64),
-            // Before Linux 2.6.39, which has no boot clock: refused on every
-            // call, so the lease is measured on the one clock throughout.
-            _ => super::boot_fallback(),
-        }
+                .saturating_add(ts.nsec as u64)
+        })
     }
 
-    /// `mach_continuous_time`: `mach_absolute_time` -- what `Instant` reads
-    /// as `CLOCK_UPTIME_RAW` -- and the time spent asleep, in the same
-    /// ticks, made nanoseconds by the timebase as std makes them.
+    /// `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`: Libc's
+    /// `mach_continuous_time` -- `mach_absolute_time`, what `Instant` reads
+    /// as `CLOCK_UPTIME_RAW`, and the time spent asleep -- made nanoseconds
+    /// by Libc's own timebase. 21.6-21.9 ns a read on an M1, against
+    /// 23.2-25.7 for `mach_continuous_time` and a timebase of this crate's,
+    /// and 28-39 for std's `Instant::now`. It answers 0 for an error, a
+    /// timebase it could not read among them.
     #[cfg(target_vendor = "apple")]
     pub fn now() -> u64 {
-        #[repr(C)]
-        struct Timebase {
-            numer: u32,
-            denom: u32,
-        }
         extern "C" {
-            fn mach_continuous_time() -> u64;
-            fn mach_timebase_info(info: *mut Timebase) -> i32;
+            fn clock_gettime_nsec_np(clock: u32) -> u64;
         }
-        static BASE: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
-        let &(numer, denom) = BASE.get_or_init(|| {
-            let mut t = Timebase { numer: 0, denom: 0 };
-            // SAFETY: the kernel writes one `mach_timebase_info`.
-            match unsafe { mach_timebase_info(&mut t) } {
-                0 if t.numer != 0 && t.denom != 0 => (t.numer as u64, t.denom as u64),
-                _ => (1, 1),
-            }
-        });
-        // SAFETY: no arguments; it reads the commpage.
-        let ticks = unsafe { mach_continuous_time() };
-        // `ticks * numer / denom` with no overflow in u64: 125 / 3 on Apple
-        // silicon, 1 / 1 on Intel.
-        (ticks / denom)
-            .saturating_mul(numer)
-            .saturating_add(ticks % denom * numer / denom)
+        const CLOCK_MONOTONIC_RAW: u32 = 4;
+        // SAFETY: no pointers; it reads the commpage.
+        match unsafe { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) } {
+            0 => panic!("clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) failed"),
+            n => n,
+        }
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
@@ -1098,9 +1101,14 @@ mod tests {
 
     /// The boot clock is the system's, not `Instant`'s counted from the
     /// first read: ahead of the monotonic clock by the time the machine
-    /// slept since it started, never behind it. And it goes on at
-    /// `Instant`'s rate, read from below: a sleep never ends early, and the
-    /// boot clock's reads lie around `Instant`'s.
+    /// slept since it started, never behind it. It is read between two
+    /// reads of a boot clock the system says so of -- `/proc/uptime` on
+    /// Linux, `mach_continuous_time` on Apple's systems -- which a clock that
+    /// does not count a suspend falls out of: on a Mac that has slept, and
+    /// in a time namespace whose boot clock is offset from its monotonic one
+    /// (`unshare --time --boottime <s>`, which CI runs this in). And it goes
+    /// on at `Instant`'s rate, read from below: a sleep never ends early,
+    /// and the boot clock's reads lie around `Instant`'s.
     #[test]
     fn the_boot_clock_is_the_systems_and_runs_as_instant_does() {
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1131,18 +1139,39 @@ mod tests {
             // A microsecond of the timebase's rounding either way.
             assert!(boot + 1_000 >= up, "the boot clock {boot} is behind {up}");
         }
-        // `/proc/uptime` is the boot clock, read in hundredths: in a time
-        // namespace whose boot clock is offset from its monotonic one
-        // (`unshare --time --boottime <s>`), it tells the two apart, as no
-        // machine that never slept does.
+        // `/proc/uptime` is the boot clock, cut to hundredths.
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
+            let b0 = Moment::now().0 as f64 / 1e9;
             let text = std::fs::read_to_string("/proc/uptime").unwrap();
+            let b1 = Moment::now().0 as f64 / 1e9;
             let up: f64 = text.split_whitespace().next().unwrap().parse().unwrap();
-            let boot = Moment::now().0 as f64 / 1e9;
             assert!(
-                (boot - up).abs() < 1.0,
-                "the boot clock reads {boot} s, /proc/uptime {up} s"
+                b0 - 0.01 <= up && up <= b1 + 0.01,
+                "the boot clock reads {b0} and {b1} s around /proc/uptime's {up} s"
+            );
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            #[repr(C)]
+            struct Timebase {
+                numer: u32,
+                denom: u32,
+            }
+            extern "C" {
+                fn mach_continuous_time() -> u64;
+                fn mach_timebase_info(info: *mut Timebase) -> i32;
+            }
+            let mut t = Timebase { numer: 0, denom: 0 };
+            assert_eq!(unsafe { mach_timebase_info(&mut t) }, 0);
+            let ns = |ticks: u64| (ticks as u128 * t.numer as u128 / t.denom as u128) as u64;
+            let c0 = ns(unsafe { mach_continuous_time() });
+            let boot = Moment::now().0;
+            let c1 = ns(unsafe { mach_continuous_time() });
+            // A microsecond of each conversion's rounding either way.
+            assert!(
+                c0 <= boot + 1_000 && boot <= c1 + 1_000,
+                "the boot clock reads {boot} ns, mach_continuous_time {c0} and {c1}"
             );
         }
         let b0 = Moment::now();

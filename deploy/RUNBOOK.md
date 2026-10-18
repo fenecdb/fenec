@@ -944,6 +944,12 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   - Hyper-V's saved state, and Azure's freezes for maintenance, up to 30 s;
   - VMware's suspend and resume;
   - Firecracker's snapshot restore without `clock_realtime`;
+  - a container checkpointed and restored (CRIU: `podman container
+    checkpoint`, Kubernetes' checkpoint API): a time namespace keeps the
+    monotonic and boot clocks going on from where they were across a
+    restore, made so a program sees no jump -- whether CRIU sets the
+    offsets for that by default is not verified here, so take it that it
+    does;
   - anything a hypervisor does not document, an EC2 live update or
     migration and GCE's blackouts over 5 s among them.
 
@@ -967,16 +973,27 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
     where hardware fails, and at times only 30 s), GCE's `maintenance-event`
     metadata (60 s ahead, for a VM that migrates on maintenance and has
     read the key since the last event). EC2 announces no live migration.
+    Azure tells every VM of an availability set of each event: a watcher
+    stops its node only where the event's `Resources` names its own VM, or
+    every node of the set stands down for one VM's maintenance.
   - Where a pause cannot be ruled out, keep `--auto-failover` short: the
     overlap is the lease the node had left at the most.
 
 - **An answer sent after the lease lapsed.** A write is checked against the
   lease as it lands and again as its answer is ready; one whose lease
-  lapsed in between is answered 500 (it is in the node's file, and its
-  tenant may or may not have been failed over without it). A process
-  stopped after that second check sends a success whenever it runs again.
-  A client that must know reads its write back after a failover, or resends
-  it with the same `Idempotency-Key`.
+  lapsed in between is answered 500 with `"outcome": "unknown"`, and
+  `seq` and `history` in its body: it is in the node's file, and its
+  tenant may or may not have been failed over without it. Sent with an
+  `Idempotency-Key`, the client sends it again with the key -- refused
+  while the lease has lapsed, then replayed by a node still holding the
+  write or made once by a new primary. Sent with none, a read-back means
+  something only a lease and a tenth (`--auto-failover` x 1.1) after the
+  answer: until the tenant settles the node still answers reads with the
+  write in them, and routers send reads there, while the copy promoted
+  may lack it. After that a read with `Fenec-After` and `Fenec-History`
+  set to the body's `seq` and `history` decides it -- 200 it survived, 504
+  it was lost. A process stopped after the second check sends a success
+  whenever it runs again.
 
 - **No scrape-only token.** `/_metrics` takes a node's data or admin token,
   a router's `--token`.

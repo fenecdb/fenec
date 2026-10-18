@@ -508,7 +508,14 @@ tenant's quota names itself (<code>quota</code>, and the
 (<code>retry_after</code>, the seconds of its <code>Retry-After</code>
 header: a page on another origin, or an app's replica, reads the body; a
 quota's 429 says it to the millisecond as well, <code>retry_after_ms</code>,
-which is the one to wait). Every SDK's error carries all of them.</p>
+which is the one to wait). A write whose outcome the server cannot know
+says so (<code>"outcome": "unknown"</code>, a 500), with where it left the
+database in the body (<code>seq</code>, <code>history</code>) rather than in
+<code>Fenec-Seq</code>, which a client takes as its own position. Every
+SDK's error carries the rest; the outcome and its position are the Go,
+.NET, JavaScript and Python clients' (Go's and .NET's code
+<code>outcome_unknown</code>, JavaScript's and Python's
+<code>outcome</code>).</p>
 
 <div class="tbl">
 <table>
@@ -524,6 +531,8 @@ which is the one to wait). Every SDK's error carries all of them.</p>
 <tr><td class="n">413</td><td>a body past the ceiling, 64 MB</td><td>send less at once</td></tr>
 <tr><td class="n">422</td><td>an <code>Idempotency-Key</code> sent with another request</td><td>a new key for a new request</td></tr>
 <tr><td class="n">429</td><td>a tenant's quota of <code>streams</code>, <code>held</code>, <code>requests</code>, <code>writes</code> or <code>write_bytes</code></td><td>come back after <code>retry_after_ms</code></td></tr>
+<tr><td class="n">500</td><td>outcome unknown (<code>"outcome": "unknown"</code>): a write a tenant's node landed and answered after its lease from the router lapsed — its tenant may have been failed over without it, or still be there with it; a <code>/batch</code> that ran a statement at a time says how far it got</td><td>send it again with the same <code>Idempotency-Key</code>; without one, read it back a lease and a tenth (<code>--auto-failover</code> × 1.1) after the answer — or with <code>Fenec-After</code> and <code>Fenec-History</code> set to its <code>seq</code> and <code>history</code>, which a primary without it answers 504 — never at once: until the tenant settles the node answers reads with the write in them</td></tr>
+<tr><td class="n">500</td><td>an fsync that failed under <code>--sync always</code>: the write may or may not be on the disk, and the server takes no write until its file is opened again</td><td>restart the server, then read the write back, or send it again with the same <code>Idempotency-Key</code></td></tr>
 <tr><td class="n">503</td><td>too many connections or subscriptions; a tenant being moved or failed over; a node going down</td><td>come back after <code>Retry-After</code> seconds</td></tr>
 <tr><td class="n">504</td><td>a <code>Fenec-After</code> change, sent with a read, a subscription or a <code>/_changes</code> page, that did not reach a replica in the wait, or one a primary's history does not hold — lost in a failover; <code>seq</code> and <code>history</code> say where it stands</td><td>ask again, or ask the primary; take the primary's position as yours</td></tr>
 <tr><td class="n">507</td><td>past <code>--max-memory</code>, or a tenant's quota of <code>bytes</code> or <code>rows</code>; the write put back whole</td><td>delete, then write again: waiting does not help</td></tr>
@@ -540,7 +549,11 @@ Retry-After: 1
 HTTP/1.1 503 Service Unavailable
 Retry-After: 1
 
-{"error":"the tenant is being moved; retry shortly","retry_after":1}</pre>
+{"error":"the tenant is being moved; retry shortly","retry_after":1}
+
+HTTP/1.1 500 Internal Server Error
+
+{"error":"the write landed on this node, but by the time it was answered ...","outcome":"unknown","seq":4182,"history":"2-6d1f0c2a9b3e4471"}</pre>
 
 <p>A quota is a tenant node's (<code>fenec-server --dir</code>): what each
 bounds, how it is set and why the statuses are these is under

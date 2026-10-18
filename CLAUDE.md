@@ -896,36 +896,62 @@ before them ignores them (`Leases::unnumbered`, said once): leased the old
 way rather than refused or failed over never, so a rolling upgrade in
 either order keeps every node writing and failed over on its own, the late
 grant open where either side is old. The node's lease runs on the boot
-clock (`lease::Moment`: `CLOCK_BOOTTIME` on Linux, `mach_continuous_time`
-on Apple's systems, declared by hand), which counts a suspend: on
-`Instant`'s (`CLOCK_MONOTONIC`, `CLOCK_UPTIME_RAW`) a node suspended past
-its lease woke with the lease left as it was and wrote beside its tenants'
-new primaries. The router counts on `Instant`, which a suspend of its own
-machine stops: it fails over later, never sooner. It cost a write nothing:
-`Lease::allows`, which the fence is, went 69-75 -> 38 ns on an M1
-(`mach_continuous_time` against std's `clock_gettime`), a fenced put
-555-560 -> 548-552 ns, eight runs a side in ABBA turns (`make
-fence-bench`), and in Docker's Linux VM (musl), where `CLOCK_BOOTTIME`
-is read through the vDSO as `CLOCK_MONOTONIC` is, `allows` 99.8-117.0 ns
-against 99.7-118.3 and the fenced put 1 488-1 677 against 1 472-1 720,
-quartet by quartet the same at loads of 34-46 from other work. No runner
-suspends, so the clock's test
-asks `/proc/uptime` too, which CI runs in a time namespace whose boot clock
-is a day ahead of its monotonic one (`unshare --time --boottime`): reading
-`CLOCK_MONOTONIC` it fails there. And a write landed under the lease is not
-answered as a success once the lease has lapsed by the time it is answered
-(`handle_admitted`, 500, the outcome unknown, where it asked the lease
-again for a 403 already): a process stopped between the fence and the
-append, a suspend, or a durability that outlasted the lease -- a cut
-stream waits out `SENT_WAIT`, a second, where a lease's tenth is half of
-one at the default -- had it answered 200 and lost in the failover. What
+clock (`lease::Moment`: `CLOCK_BOOTTIME` on Linux, `mach_continuous_time` on
+Apple's systems through `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`,
+declared by hand), which counts a suspend: on `Instant`'s
+(`CLOCK_MONOTONIC`, `CLOCK_UPTIME_RAW`) a node suspended past its lease
+woke with the lease left as it was and wrote beside its tenants' new
+primaries. It fails closed, as std's `Instant::now` does: a boot clock that
+stops answering panics, Linux decides once whether it has one (before
+2.6.39, `Instant` throughout) -- a failure read past from call to call mixed
+two clocks' moments, and a timebase guessed at 1 / 1 made an Apple silicon
+lease 41.7 times as long. The router counts on `Instant`, which a suspend
+of its own machine stops: it fails over later, never sooner. It cost a
+write nothing: a fenced put 555-560 -> 548-552 ns on an M1, about 7 ns
+saved, eight runs a side in ABBA turns (`make fence-bench`), and in
+Docker's Linux VM (musl), where `CLOCK_BOOTTIME` is read through the vDSO as
+`CLOCK_MONOTONIC` is, 1 488-1 677 against 1 472-1 720, quartet by quartet
+the same at loads of 34-46 from other work; the clock as it stands, read
+again at loads of 50-88, lower in every M1 quartet (804-880 against
+821-1 114) and the same on Linux. No runner suspends, so the
+clock's test reads it between two reads of a boot clock the system vouches
+for -- `/proc/uptime`, `mach_continuous_time` -- which CI runs in a time
+namespace whose boot clock is a day ahead of its monotonic one (`unshare
+--time --boottime`, the test named whole and its one pass asked for):
+reading `CLOCK_MONOTONIC` it fails there, and reading `CLOCK_UPTIME_RAW` on
+a Mac that has slept. And a write landed under the lease is not answered as
+a success once the lease has lapsed by the time it is answered
+(`answered_under_lease`, from `handle_admitted`, the admin schema's route
+and a `/_changes` consumer's commit): a process stopped between the fence
+and the append, a suspend, or a durability that outlasted the lease -- a
+cut stream waits out `SENT_WAIT`, a second, where a lease's tenth is half
+of one at the default -- had it answered 200 and lost in the failover. It
+is answered 500 with `"outcome": "unknown"`, and `seq` and `history` in the
+body rather than in `Fenec-Seq`, which a client would take as its own (Go's
+and .NET's code `outcome_unknown`, JavaScript's and Python's `outcome`); a
+keyed one is told to send it again with its key, which the lapsed node
+refuses before the key is looked up and the tenant settled replays or
+makes once, and one with none that a read-back means something only a
+lease and a tenth after the answer, the node answering reads with the
+write in them until its tenant settles. What wrote is a statement that
+writes (`metrics::writing`, a keyed replay's too) or a block landed in the
+request (`metrics::landed`, set by `Hub::landed` on the committing thread):
+a `/batch` holding a compact, a put landed and a later statement fenced,
+was told 503 to come back as if nothing had. Both flags are cleared as each
+request begins (`metrics::begin_request`): cleared by `record` alone, they
+outlived the admin schema's answer, which records none, and the next read
+on its keep-alive connection was answered as a write once its lease
+lapsed under it (`tests/lease_answers.rs`, each failing with its part taken
+out). What
 leases do not cover: a VM stopped by its host is no suspend to the guest --
 under QEMU/KVM's defaults a `stop` and `cont` (QEMU sets the kvmclock back,
 on arm64 the virtual counter), and under any of its settings a save and
 restore or a live migration's blackout, leave every clock in the guest
 where it stopped, the boot clock too, as do Hyper-V's saved state, VMware's
-suspend and Firecracker's snapshot restore -- so a node paused so wakes with
-lease left and writes beside the new primary until it runs out or it reads
+suspend, Firecracker's snapshot restore and a container's CRIU restore,
+whose time namespace keeps the clocks going on from where they were -- so a
+node paused so wakes with lease left and writes beside the new primary
+until it runs out or it reads
 the router's first grant after the failover. Every signal inside the guest
 comes once it runs again and none is sound -- KVM's `PVCLOCK_GUEST_STOPPED`
 is the soft-lockup watchdog's, in no interface userspace has; the TSC
