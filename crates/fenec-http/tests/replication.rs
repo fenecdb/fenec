@@ -815,6 +815,48 @@ fn a_stream_s_head_names_the_history_of_its_changes() {
     }
 }
 
+/// A read its client marked names where the copy that answered it stood
+/// as it read (`Fenec-Seq`, `Fenec-History`), as a write's answer does: a
+/// live query reading near sends its next run after it, so a copy behind
+/// the rows it showed -- a run answered from home, past a change whose
+/// event had not reached the client -- never answers that run. Its JSON
+/// path and the rows' alike; a read nobody marked names nothing.
+#[test]
+fn a_marked_read_names_where_the_copy_that_answered_it_stood() {
+    let d = dir("read-position");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    let r = replica(&d.join("r.fenec"), p.port);
+    query(&p, SCHEMA);
+    let put = "{\"query\":\"put items {name: \\\"x\\\", n: 1, e: [1.0, 0.5, 2.0]}\"}";
+    let (status, written, body) = raw(p.port, "POST", "/query", "", put);
+    assert_eq!(status, 200, "{body}");
+    let history = header_of(&written, "Fenec-History").expect("a write names its history");
+    let seq = header_of(&written, "Fenec-Seq").unwrap();
+    caught_up(&r, &p);
+    for node in [&p, &r] {
+        for q in ["get items", "get items count"] {
+            let body = format!("{{\"query\":\"{q}\"}}");
+            let (status, head, rows) = raw(
+                node.port,
+                "POST",
+                "/query",
+                "Fenec-Read: replica\r\n",
+                &body,
+            );
+            assert_eq!(status, 200, "{rows}");
+            assert_eq!(header_of(&head, "Fenec-Seq"), Some(seq), "{q}: {head}");
+            assert_eq!(
+                header_of(&head, "Fenec-History"),
+                Some(history),
+                "{q}: {head}"
+            );
+            let (status, head, rows) = raw(node.port, "POST", "/query", "", &body);
+            assert_eq!(status, 200, "{rows}");
+            assert_eq!(header_of(&head, "Fenec-Seq"), None, "{q}: {head}");
+        }
+    }
+}
+
 /// The primary sweeps the rows past their time (`@ttl`) and its replica
 /// applies the deletes as any it is sent; the replica itself never sweeps,
 /// its writes being its primary's.

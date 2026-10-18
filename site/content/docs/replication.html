@@ -148,6 +148,11 @@ curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
   <li><b>Its token comes first:</b> a request the server refuses (401, or
     403 for another tenant's token) is answered at once, not after the
     wait, and learns nothing of where the replica stands.</li>
+  <li><b>A read marked <code>Fenec-Read: replica</code> names where it
+    read:</b> the answer carries the copy's <code>Fenec-Seq</code> and
+    <code>Fenec-History</code>, so a read sent after it never reads older
+    (<a href="sharding.html#read-replicas">Read replicas</a>). A read nobody
+    marked names nothing.</li>
   <li><b>The Python client</b> keeps the number for you:
     <code>client.seq</code>, sent with <code>query(..., after=...)</code>.</li>
 </ul>
@@ -183,7 +188,10 @@ client takes, its term lower or not.</p>
 
 <p>The wait is 5 seconds unless <code>Fenec-Wait</code> gives it in
 milliseconds, 30 seconds at most, and a replica waits on the same
-<code>Condvar</code> its subscriptions do, so nothing polls. Writing the
+<code>Condvar</code> its subscriptions do, so nothing polls. On a tenant node
+a wait takes one of the tenant's streams, but only once it must wait: a read
+after a write the node holds already takes none, as a tenant whose streams
+its own subscriptions fill still reads its writes. Writing the
 header costs the server nothing measurable; a client that parses every
 header, as Python's <code>http.client</code> does, reads one more.</p>
 </details>

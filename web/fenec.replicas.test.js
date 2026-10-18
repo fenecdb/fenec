@@ -95,16 +95,19 @@ async function until(check, what) {
  * link is parked, and passed on once released; every other connection
  * passes as it comes. The replica so held cannot have a write made
  * meanwhile until the test says, however soon it would have caught up, and
- * the primary is slowed by nothing: the proxy reads what it sends.
+ * the primary is slowed by nothing: the proxy reads what it sends. What
+ * every client sent through it is kept, for `asked` to count.
  */
 async function parking(url) {
   const { hostname, port } = new URL(url);
   let parked = false;
   const kept = [];
   const open = new Set();
+  let sent = '';
   const server = createServer((client) => {
     const upstream = dial(Number(port), hostname);
     open.add(client).add(upstream);
+    client.on('data', (d) => (sent += d.toString('latin1')));
     const end = () => {
       client.destroy();
       upstream.destroy();
@@ -138,6 +141,8 @@ async function parking(url) {
       parked = false;
       for (const [client, chunk] of kept.splice(0)) if (!client.destroyed) client.write(chunk);
     },
+    /** How many requests sent through it name `line`, a request line's start. */
+    asked: (line) => sent.split(line).length - 1,
     close: () => {
       server.close();
       for (const s of open) s.destroy();
@@ -149,7 +154,8 @@ async function parking(url) {
  * eu1 in eu and us1 in us, the global router near eu and its standby near
  * us; tenant `acme` on eu1 with its read replica on us1. `parked`: eu1 is
  * named to the routers by a `parking` proxy in front of it, which the read
- * replica follows it through too (`link`).
+ * replica follows it through too (`link`), and us1 by one of its own
+ * (`nearby`), which counts what the routers ask it.
  */
 async function world({ parked = false } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'fenec-replicas-'));
@@ -162,6 +168,7 @@ async function world({ parked = false } = {}) {
   const eu1 = await node('eu1');
   const us1 = await node('us1');
   const link = parked ? await parking(eu1.url) : null;
+  const nearby = parked ? await parking(us1.url) : null;
   const router = (file, extra) =>
     listening(
       shardBin,
@@ -181,7 +188,7 @@ async function world({ parked = false } = {}) {
     return text ? JSON.parse(text) : null;
   };
   await call(eu.url, 'PUT', '/_shard/nodes/eu1', { addr: link?.addr ?? new URL(eu1.url).host, token: 'adm', region: 'eu' });
-  await call(eu.url, 'PUT', '/_shard/nodes/us1', { addr: new URL(us1.url).host, token: 'adm', region: 'us' });
+  await call(eu.url, 'PUT', '/_shard/nodes/us1', { addr: nearby?.addr ?? new URL(us1.url).host, token: 'adm', region: 'us' });
   await call(eu.url, 'PUT', '/_shard/tenants/acme', { node: 'eu1', schema: 'create collection notes (body text)' });
   const placed = await call(eu.url, 'PUT', '/_shard/tenants/acme/read-replicas/us');
   assert.equal(placed.node, 'us1');
@@ -193,6 +200,7 @@ async function world({ parked = false } = {}) {
     eu1,
     us1,
     link,
+    nearby,
     call,
     eu: eu.url,
     us: us.url,
@@ -200,6 +208,7 @@ async function world({ parked = false } = {}) {
     close: async () => {
       for (const p of [us, eu, us1, eu1]) p.close();
       link?.close();
+      nearby?.close();
       await rm(dir, { recursive: true, force: true });
     },
   };
@@ -374,23 +383,77 @@ test("a live query's runs read near after the change that ran them, its streams 
       after = await replicaReads(w.us);
       assert.deepEqual(after, { replica: before.replica + 1, fallback: before.fallback });
 
-      // A replica that cannot have the change in the wait sends the run
-      // home, which has it: never the rows from before it.
+      // A replica that cannot have the change in its second sends the run
+      // home, which has it: never the rows from before it. And the router
+      // lets the copy be, so the changes after go home at once: a replica
+      // cut off costs one wait, not one a change.
       w.link.park();
       before = after;
+      const asked = () => w.nearby.asked('POST /t/acme/query ');
+      const reached = asked();
       const c = (await home.run('put notes {body: "c"}')).seq;
       await held(2, 'the run waits on a replica that will not have the change');
+      assert.equal(asked(), reached + 1);
       await until(() => got.length === 3, 'the rows after a change the replica never had');
       assert.deepEqual(got[2], ['a', 'b', 'c']);
       assert.equal(runs().at(-1).headers['fenec-after'], String(c));
+      assert.equal(runs().at(-1).headers['fenec-wait'], '1000');
+      for (const body of ['d', 'e']) {
+        await home.run(`put notes {body: "${body}"}`);
+        await until(() => got.at(-1).includes(body), `the rows after ${body}`);
+      }
+      assert.deepEqual(got.at(-1), ['a', 'b', 'c', 'd', 'e']);
+      assert.equal(asked(), reached + 1, 'a run after the first asked the replica cut off');
       after = await replicaReads(w.us);
-      assert.deepEqual(after, { replica: before.replica, fallback: before.fallback + 1 });
+      assert.equal(after.replica, before.replica);
+      assert.ok(after.fallback >= before.fallback + 3, `${JSON.stringify(after)} after ${JSON.stringify(before)}`);
       // One stream all along, unmarked.
       assert.equal(sent.filter((r) => r.path === '/t/acme/notes/changes').length, 1);
       assert.deepEqual(errors, []);
     } finally {
       stop();
       w.link.release();
+    }
+  } finally {
+    await w.close();
+  }
+});
+
+test("runs that reach home after a change it holds take none of the tenant's streams", { skip }, async () => {
+  const w = await world();
+  try {
+    // One stream for the tenant, which the live query's own subscription
+    // takes. Its runs -- through eu's router, the tenant's own region, home
+    // -- are sent after changes home holds already: each refused 429 for
+    // a stream it never waited in, the live query was handed nothing.
+    await w.call(w.eu, 'PUT', '/_shard/tenants/acme/quota', { streams: 1 });
+    await until(async () => {
+      const res = await fetch(`${w.eu1.url}/_admin/tenants/acme/quota`, { headers: { authorization: 'Bearer adm' } });
+      return (await res.json()).quota?.streams === 1;
+    }, 'the quota reaches home');
+    const home = connect(w.url);
+    await home.run('put notes {body: "a"}');
+    const db = connect(`${w.eu}/t/acme`, { reads: 'nearest' });
+    const got = [];
+    const errors = [];
+    const stop = db.live(db.from('notes').order('body'), (rows) => got.push(rows.map((r) => r.body)), {
+      onError: (e) => errors.push(e),
+    });
+    try {
+      await until(() => got.length === 1 || errors.length > 0, 'the first rows');
+      assert.deepEqual(errors, []);
+      assert.deepEqual(got[0], ['a']);
+      await home.run('put notes {body: "b"}');
+      await until(() => got.length === 2 || errors.length > 0, 'the rows after a change');
+      assert.deepEqual(errors, []);
+      assert.deepEqual(got[1], ['a', 'b']);
+      // A client's read near after its own write, beside them: home holds
+      // it, so it waits for nothing and takes no stream.
+      await db.run('put notes {body: "c"}');
+      assert.deepEqual((await db.from('notes').order('body').rows()).map((r) => r.body), ['a', 'b', 'c']);
+      assert.deepEqual(errors, []);
+    } finally {
+      stop();
     }
   } finally {
     await w.close();
@@ -538,17 +601,19 @@ test("a tenant made again under its name: home's position of another lineage is 
   assert.equal(sent.at(-1)['fenec-history'], third);
 });
 
-test("a live query's runs go after the furthest its streams named, a 504 sending them home", async () => {
-  const answer = (status, body, headers = {}) =>
-    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+
+/**
+ * A scripted server for a live query: each stream opened, by collection,
+ * its head the next of `heads`, events sent as the test says; each request
+ * to /query held until the test answers it.
+ */
+function scripted() {
   const tick = () => new Promise((r) => setTimeout(r, 1));
-  // Each stream opened, by collection, its head the next of `heads`; each
-  // request to /query held until the test answers it.
   const heads = { notes: [], tags: [] };
   const streams = { notes: [], tags: [] };
   const requests = [];
   const enc = new TextEncoder();
-  const fake = (url, init) => {
+  const fetch = (url, init) => {
     const c = new URL(url).pathname.match(/^\/(\w+)\/changes$/)?.[1];
     if (!c) return new Promise((resolve) => requests.push({ headers: { ...init.headers }, resolve }));
     let ctl;
@@ -569,46 +634,68 @@ test("a live query's runs go after the furthest its streams named, a 504 sending
     );
   };
   let taken = 0;
-  const next = async () => {
-    while (requests.length <= taken) await tick();
-    return requests[taken++];
-  };
-  const opened = async (c, n) => {
-    while (streams[c].length < n) await tick();
-    return streams[c][n - 1];
-  };
   const got = [];
-  const rows = async (n) => {
-    while (got.length < n) await tick();
+  return {
+    heads,
+    streams,
+    fetch,
+    got,
+    /** The next request sent to /query. */
+    next: async () => {
+      while (requests.length <= taken) await tick();
+      return requests[taken++];
+    },
+    /** The `n`th stream opened of collection `c`. */
+    opened: async (c, n) => {
+      while (streams[c].length < n) await tick();
+      return streams[c][n - 1];
+    },
+    /** Until the live query has been handed rows `n` times. */
+    rows: async (n) => {
+      while (got.length < n) await tick();
+    },
+    end: () => {
+      for (const s of [...streams.notes, ...streams.tags]) s.end();
+    },
   };
-  const unmarked = (headers) => {
-    for (const h of ['fenec-read', 'fenec-after', 'fenec-history']) assert.equal(headers[h], undefined, h);
-  };
+}
+
+const answer = (status, body, headers = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+const unmarked = (headers) => {
+  for (const h of ['fenec-read', 'fenec-after', 'fenec-history', 'fenec-wait']) assert.equal(headers[h], undefined, h);
+};
+
+test("a live query's runs go after the furthest its streams named, a 504 sending them home", async () => {
+  const s = scripted();
   /** The next run: near, after `seq` of `history`; answered, its rows the `n`th. */
-  const run = async (seq, history, n) => {
-    const r = await next();
+  const run = async (seq, history, n, head = {}) => {
+    const r = await s.next();
     assert.equal(r.headers['fenec-read'], 'replica');
     assert.equal(r.headers['fenec-after'], seq);
     assert.equal(r.headers['fenec-history'], history);
-    r.resolve(answer(200, []));
-    await rows(n);
+    // A second on a replica behind, then home.
+    assert.equal(r.headers['fenec-wait'], '1000');
+    r.resolve(answer(200, [], head));
+    await s.rows(n);
   };
   const h1 = '1-00000000000000aa';
   const h2 = '2-00000000000000aa';
   const h3 = '3-00000000000000aa';
+  const h4 = '4-00000000000000aa';
 
-  const db = connect('http://x', { reads: 'nearest', fetch: fake });
+  const db = connect('http://x', { reads: 'nearest', fetch: s.fetch });
   const wrote = async (seq, history) => {
     const w = db.run('put notes {body: "x"}');
-    (await next()).resolve(answer(200, { affected: 1 }, { 'fenec-seq': seq, 'fenec-history': history }));
+    (await s.next()).resolve(answer(200, { affected: 1 }, { 'fenec-seq': seq, 'fenec-history': history }));
     await w;
   };
   await wrote('7', h1);
-  heads.notes.push({ 'fenec-seq': '5', 'fenec-history': h1 });
-  heads.tags.push({ 'fenec-seq': '9', 'fenec-history': h1 });
-  const stop = db.live('get notes', (r) => got.push(r), { collections: ['notes', 'tags'] });
-  const notes = await opened('notes', 1);
-  const tags = await opened('tags', 1);
+  s.heads.notes.push({ 'fenec-seq': '5', 'fenec-history': h1 });
+  s.heads.tags.push({ 'fenec-seq': '9', 'fenec-history': h1 });
+  const stop = db.live('get notes', (r) => s.got.push(r), { collections: ['notes', 'tags'] });
+  const notes = await s.opened('notes', 1);
+  const tags = await s.opened('tags', 1);
   // The streams go home: no mark, no position.
   unmarked(notes.headers);
   unmarked(tags.headers);
@@ -632,9 +719,9 @@ test("a live query's runs go after the furthest its streams named, a 504 sending
   // copy, whose head names the later term at a lower change -- taken over
   // the client's write of the term before. The old primary's stream,
   // fenced, still names its term: it moves nothing.
-  heads.notes.push({ 'fenec-seq': '14', 'fenec-history': h2 });
+  s.heads.notes.push({ 'fenec-seq': '14', 'fenec-history': h2 });
   notes.end();
-  const again = await opened('notes', 2);
+  const again = await s.opened('notes', 2);
   unmarked(again.headers);
   again.send('seed', { seq: 14, rows: [] });
   await run('14', h2, 5);
@@ -642,38 +729,118 @@ test("a live query's runs go after the furthest its streams named, a 504 sending
   await run('14', h2, 6);
 
   // A run home answers 504 -- the change lost in another failover -- is
-  // asked home again with no mark, and the live query takes home's
-  // position as its own: the next run goes after it.
+  // asked near again after where home stands, which the live query takes
+  // as its own; that answer's position the next run goes after.
   again.send('change', { seq: 17, puts: [5], dels: [] });
-  const lost = await next();
+  const lost = await s.next();
   assert.equal(lost.headers['fenec-after'], '17');
   lost.resolve(answer(504, { error: 'not in this copy', seq: 3, history: h3 }));
-  const home = await next();
+  await run('3', h3, 7, { 'fenec-seq': '4', 'fenec-history': h3 });
+  tags.send('change', { seq: 18, puts: [6], dels: [] });
+  await run('4', h3, 8);
+  // One asked near again and answered 504 once more goes home unmarked.
+  tags.send('change', { seq: 19, puts: [7], dels: [] });
+  (await s.next()).resolve(answer(504, { error: 'not in this copy', seq: 2, history: h4 }));
+  const twice = await s.next();
+  assert.equal(twice.headers['fenec-after'], '2');
+  twice.resolve(answer(504, { error: 'not in this copy', seq: 1, history: h4 }));
+  const home = await s.next();
   unmarked(home.headers);
   home.resolve(answer(200, []));
-  await rows(7);
-  tags.send('change', { seq: 18, puts: [6], dels: [] });
-  await run('3', h3, 8);
+  await s.rows(9);
   stop();
-  for (const s of [...streams.notes, ...streams.tags]) s.end();
+  s.end();
   // The client's own position is its own: a read near goes after its
   // write still, not after what another's change set back.
   const read = db.from('notes').rows();
-  const r = await next();
+  const r = await s.next();
   assert.equal(r.headers['fenec-after'], '15');
   assert.equal(r.headers['fenec-history'], h1);
-  r.resolve(answer(200, []));
+  r.resolve(answer(200, [], { 'fenec-seq': '30', 'fenec-history': h1 }));
   await read;
+  // ...and a read near's answer moves nothing of it.
+  const after = db.from('notes').rows();
+  const r2 = await s.next();
+  assert.equal(r2.headers['fenec-after'], '15');
+  r2.resolve(answer(200, []));
+  await after;
+});
+
+test("a live query's rows never go back to before a run answered from home", async () => {
+  // A replica behind home, as a router sees it: a run after a change the
+  // replica holds is answered there, as it stands; one after a change it
+  // lacks, from home, which went on meanwhile. Rows of the notes `a`, `b`,
+  // `b2`, `c` at changes 1 to 4.
+  const s = scripted();
+  const h = '1-00000000000000aa';
+  const notes = ['a', 'b', 'b2', 'c'];
+  let replica = 1;
+  const home = 4;
+  const answered = async () => {
+    const r = await s.next();
+    const after = Number(r.headers['fenec-after']);
+    const at = after <= replica ? replica : home;
+    r.resolve(answer(200, notes.slice(0, at).map((body) => ({ body })), { 'fenec-seq': String(at), 'fenec-history': h }));
+    await s.rows(s.got.length + 1);
+  };
+  const db = connect('http://x', { reads: 'nearest', fetch: s.fetch });
+  s.heads.notes.push({ 'fenec-seq': '1', 'fenec-history': h });
+  const stop = db.live('get notes', (r) => s.got.push(r.map((n) => n.body)), { collections: ['notes'] });
+  const stream = await s.opened('notes', 1);
+  stream.send('seed', { seq: 1, rows: [] });
+  await answered();
+  // `b` told of: the replica lacks it, so home answers -- with `b2` and
+  // `c` too, written meanwhile, their events still on their way.
+  stream.send('change', { seq: 2, puts: [2], dels: [] });
+  await answered();
+  assert.deepEqual(s.got.at(-1), notes);
+  // The replica catches up to `b2`, not `c`; `b2`'s event comes. Sent
+  // after it alone, the run was answered by the replica without `c`.
+  replica = 3;
+  stream.send('change', { seq: 3, puts: [3], dels: [] });
+  await answered();
+  stream.send('change', { seq: 4, puts: [4], dels: [] });
+  replica = 4;
+  await answered();
+  for (let i = 1; i < s.got.length; i++) {
+    assert.ok(s.got[i].length >= s.got[i - 1].length, `rows went back: ${JSON.stringify(s.got)}`);
+  }
+  stop();
+  s.end();
+});
+
+test('a live query reads home where its stream names no history, and polls home', async () => {
+  const s = scripted();
+  const db = connect('http://x', { reads: 'nearest', fetch: s.fetch });
+  // A head naming no history: a server from before heads named one.
+  s.heads.notes.push({ 'fenec-seq': '20' });
+  const stop = db.live('get notes', (r) => s.got.push(r), { collections: ['notes'] });
+  (await s.opened('notes', 1)).send('seed', { seq: 20, rows: [] });
+  const run = await s.next();
+  unmarked(run.headers);
+  run.resolve(answer(200, []));
+  await s.rows(1);
+  stop();
+  s.end();
+
+  // A poll goes home, marked by nothing: a replica would answer 304 to a
+  // tag home has moved past.
+  const quit = db.live(db.from('notes'), (r) => s.got.push(r), { poll: 100 });
+  const poll = await s.next();
+  unmarked(poll.headers);
+  assert.equal(poll.headers['if-none-match'], '"0"');
+  quit();
+  poll.resolve(answer(200, []));
 
   // A client reading home: its runs unmarked, whatever its streams name.
-  heads.notes.push({ 'fenec-seq': '20', 'fenec-history': h3 });
-  const plain = connect('http://x', { fetch: fake });
-  const quit = plain.live('get notes', (rs) => got.push(rs), { collections: ['notes'] });
-  (await opened('notes', 3)).send('seed', { seq: 20, rows: [] });
-  const first = await next();
+  s.heads.notes.push({ 'fenec-seq': '20', 'fenec-history': '1-00000000000000aa' });
+  const plain = connect('http://x', { fetch: s.fetch });
+  const end = plain.live('get notes', (r) => s.got.push(r), { collections: ['notes'] });
+  (await s.opened('notes', 2)).send('seed', { seq: 20, rows: [] });
+  const first = await s.next();
   unmarked(first.headers);
   first.resolve(answer(200, []));
-  await rows(9);
-  quit();
-  streams.notes[2].end();
+  await s.rows(2);
+  end();
+  s.end();
 });

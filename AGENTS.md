@@ -1433,7 +1433,19 @@ that took connections and never answered held each marked read a minute,
 and one that stopped reading a body past the sockets' buffers held the
 write as long. It goes home where the replica does not answer --
 and is let be for `RESTING` (5 s, `Config::replica_rest`), its reads going
-home at once: the node, where it was not reached or took no whole request
+home at once: the tenant's copy where it answered 504, behind the position
+at the end of the wait it was given -- a copy following its primary never
+says a position is out of reach, it may yet be pointed there, so its 504 is
+always that -- for the reads sent after a position with no longer a wait
+(`rest_behind`, `behind`, the longest wait it missed kept): asked again at
+every read, a replica cut off from its primary held each its whole wait,
+every run of a live query reading near that late for the partition's
+length. A read naming no position, which the copy answers as it stands,
+and one willing to wait longer stay the copy's: rested whole, two of
+`tests/read_replicas.rs`'s were refused 502 with home out of the router's
+reach where the copy answered them
+(`a_read_replica_behind_its_wait_is_let_be_and_the_reads_after_go_home`);
+the node, where it was not reached or took no whole request
 (`upstream::Near::Unreached`); where it took one and answered nothing in
 time (`Unanswered`) or broke its answer off (read whole before its head
 goes on, `read_body_kept`: answered 502 before; a stream goes on as it
@@ -1585,10 +1597,10 @@ the JS client against real nodes and routers, eu1 killed, and its position
 taken from a 504 -- over its own alone, a write answered meanwhile and an
 earlier term's 504 left where they stand, another lineage's taken from a 504
 and an answer, its term lower -- as Go's, .NET's and Python's tests hold
-theirs, and a live query's runs read near (below). A marked read through the replica's region's router took
-59.2-68.2 us p50 against 58.8-66.9 sent home, three runs at loads of 4.3-7.8,
-each node
-behind a loopback proxy, and 60.9-70.3 sent after a position the replica
+theirs, and a live query's runs read near (below). A marked read through
+the replica's region's router took 59.2-68.2 us p50 against 58.8-66.9 sent
+home, three runs at loads of 4.3-7.8, each node behind a loopback proxy,
+and 60.9-70.3 sent after a position the replica
 held, `Fenec-History` and its check included, 1.8-3.4 us over home where
 the number alone was 1.4 (`make shard-bench ARGS=reads`); a client's read
 of the write it was just answered 168-386 us on the replica, its wait
@@ -1902,7 +1914,13 @@ always runs, and a file within a quarter of its quota is compacted by the
 node once an eighth of the quota is dead (`link::quota_policy`), where the
 policy every file has waits for 64 MB and a tenant at a 10 MB quota would
 have deleted to no avail. Streams (subscriptions, `/_changes` waits,
-`Fenec-After` waits), held writes (`held`, `Fenec-Wait`'s: a plan sizes how
+`Fenec-After` waits -- once `after` has looked and must wait, its `slot`
+taken then: taken for every request sent with the header, a tenant whose
+live queries' subscriptions filled its quota, 25 of a default node's
+connections, had every read after a write the node held refused 429, each
+run of a live query reading near and every SDK's read-your-writes read
+that reached home, `tests/quotas.rs` failing with the slot taken first),
+held writes (`held`, `Fenec-Wait`'s: a plan sizes how
 many workers wait apart from how many dashboards stream, and counted
 together forty couriers waiting left a dispatcher's map no stream to open)
 and requests in flight are counters a request takes in `serve_connection`,
@@ -4078,40 +4096,59 @@ of 24 run. On a client reading near (`reads: 'nearest'`) the streams stay
 home, unmarked, and every run -- the first rows too -- is a read near, sent
 after the furthest of the client's position and the live query's own
 (`AFTER`, kept apart: another client's change is no write of this one's,
-which its other reads near would wait for), the furthest its streams named:
+which its other reads near would wait for): the furthest its streams named,
 each event's `seq` of the history the head names (`Fenec-History`; the
-seed's `seq` is at or past the head's `Fenec-Seq`), ordered as
-the client's (`later`), so a stream opened again after a failover names
-the later term and the old primary's moves nothing. The read replica
-answers a run once it holds the change that ran it, the router sends one it
-cannot hold in the wait home, and home's 504 -- the change lost in a
-failover -- sets back whichever position the run was sent after and asks
-home unmarked: the rows are never older than a change a stream told of,
-and a stream tells of every change home takes. The polls
-stay home: a tag is a change of the copy that answered, and a replica
-holding that change of its history (`Fenec-After`) judges it as home does
-up to where it stands -- behind, `unchanged` reads a tag past its change as
-changed and runs the query, rows older than those shown -- but nothing in a
-poll names a change home took since, as a stream's events do, so a replica
-behind or cut off from home would answer 304 to a write home holds.
-`web/fenec.replicas.test.js` holds it to two routers, two nodes and a read
-replica that follows its primary through a proxy parking what the primary
-sends (`parking`), the tenant's `streams` quota set so the replica's node
-counts a run held there (`usage.streams`): the first rows and a change's run
-held on the replica, answered by it once released
-(`fenec_router_replica_reads_total`'s `replica`), one never released sent
-home past the wait (`fallback`), the stream unmarked -- failing at once with
-the streams' position, its history or the mark taken out, a stream marked;
-and a scripted test the order: two streams' seeds and changes, one behind
-another's, the client's own write further, a stream reopened on the next
-term below the client's change, the old primary's change ignored, home's 504
-setting back the live query's position and not the client's, a client
-reading home unmarked -- failing with positions ordered by `seq` alone or
-the 504 taken as the client's. `useLiveQuery` passes the client through and
-needs nothing. An app's bundle of `connect`, rows and `live` went 29 684 ->
-29 897 bytes, 9 728 -> 9 822 brotli; `http.js` 26 412 -> 28 118, 7 787 ->
-8 275 brotli, which took the client the docs quote to 193 KB and the
-studio's first load to 66 KB gzipped.
+seed's `seq` is at or past the head's `Fenec-Seq`), ordered as the client's
+(`later`), so a stream opened again after a failover names the later term
+and the old primary's moves nothing -- and the furthest its runs' answers
+named, since a marked `/query` read's answer carries where the copy that
+answered stood (`cfg.marked`, `At::of` under the read lock it reads under,
+at the pin for a pinned read; every SDK takes a marked answer's position
+for nothing of the client's): a run the router answered from home, past a
+change whose event was still on its way, showed rows the next run sent
+after the last event alone could have a replica behind answer without --
+`[a,b,b2,c]` -> `[a,b,b2]` -> `[a,b,b2,c]` in review. A run waits a second
+on the replica (`Fenec-Wait: 1000`), not the node's five: a replica has a
+write once home's fsync covers it, 283 ms behind at most under `--sync 250`,
+and a link later, and home answers in a region's round trip; a replica's 504
+rests the copy at the router (above), so a replica cut off costs a live
+query one second each `RESTING`, not five each change. Home's 504 -- the
+change lost in a failover -- sets back whichever position the run was sent
+after and asks near again after home's, home unmarked only where that fails
+too, since an unmarked answer names nothing. A head naming no history -- a
+server from before heads named one, or a database never replicated --
+sends the runs home: term-0 positions never pass the client's. The rows are
+never older than a change a stream told of or a run showed, and a stream
+tells of every change home takes. The polls stay home: a tag is a change of
+the copy that answered, and a replica holding that change of its history
+(`Fenec-After`) judges it as home does up to where it stands -- behind,
+`unchanged` reads a tag past its change as changed and runs the query, rows
+older than those shown -- but nothing in a poll names a change home took
+since, as a stream's events do, so a replica behind or cut off from home
+would answer 304 to a write home holds. `web/fenec.replicas.test.js` holds
+it to two routers, two nodes and a read replica that follows its primary
+through a proxy parking what the primary sends (`parking`, which counts
+what the routers ask the replica's node too), the tenant's `streams` quota
+set so the replica's node counts a run held there (`usage.streams`): the
+first rows and a change's run held on the replica, answered by it once
+released (`fenec_router_replica_reads_total`'s `replica`), one never
+released sent home after its second, and the changes after it home at once,
+the replica asked once for three (`fallback`), the stream unmarked --
+failing at once with the streams' position, its history or the mark taken
+out, a stream marked, or the router's rest; runs through the home region's
+router at a tenant whose one stream its live query holds answered, failing
+with the slot taken first; and scripted tests: two streams' seeds and
+changes, one behind another's, the client's own write further, a stream
+reopened on the next term, the old primary's change ignored, home's 504
+asked near again after home's position and home unmarked after a second, a
+marked answer moving the live query's position and not the client's; a
+replica behind home answering the run after a home answer -- failing with
+answers' positions left out as the review's rows did; a head with no
+history and a poll going home, unmarked. `useLiveQuery` passes the client
+through and needs nothing. An app's bundle of `connect`, rows and `live`
+went 29 684 -> 30 087 bytes, 9 728 -> 9 901 brotli; `http.js` 26 412 ->
+28 894, 7 787 -> 8 476 brotli, which took the client the docs quote to 194
+KB and the studio's first load to 66 KB gzipped.
 `db.subscribe(collection, shape, onEvent, { onError, onState })`
 keeps a shape over a server -- a seed, then each change -- opened again with
 backoff and seeding again, stopped by a 401; `sseEvents` is exported with

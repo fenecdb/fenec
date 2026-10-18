@@ -319,7 +319,7 @@ curl localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root'
 <tbody>
 <tr><td><code>bytes</code></td><td>the tenant's file, as written</td><td><b>507</b>, the write put back whole</td></tr>
 <tr><td><code>rows</code></td><td>the documents of its collections, together</td><td><b>507</b>, the write put back whole</td></tr>
-<tr><td><code>streams</code></td><td>subscriptions, <code>/_changes</code> waits and <code>Fenec-After</code> waits</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
+<tr><td><code>streams</code></td><td>subscriptions, <code>/_changes</code> waits and <code>Fenec-After</code> waits while they wait: a read after a write the node holds takes none</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
 <tr><td><code>held</code></td><td>writes held until they can write (<a href="queues.html#wait"><code>Fenec-Wait</code></a>): workers waiting for jobs</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
 <tr><td><code>requests</code></td><td>requests in flight</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
 <tr><td><code>writes</code></td><td>rows written a second, charged as each write lands</td><td><b>429</b>, <code>retry_after_ms</code> until a row's worth is back</td></tr>
@@ -1662,7 +1662,15 @@ breaks off before its end, the router reading a replica's answer whole
 before any of it goes to the client (a stream's goes on as it comes). A
 replica that did not answer is let be for 5 s, its reads going home at once
 meanwhile: the node's, every tenant's, where it was not reached or took no
-whole request. Where it took one and did not answer in time, the tenant's
+whole request. A tenant's copy that answered <code>504</code> could not
+reach the position in the wait it was given, and asked again at every read,
+a replica cut off from its primary held each one that long — every run of a
+live query reading near came the wait late for as long as the partition
+lasted: for 5 s the tenant's reads sent after a position, with no longer a
+wait, go home at once through that router, the trip home a region away in
+place of a wait. A read naming no position, which the copy answers as it
+stands, and one willing to wait longer still go to the copy, home out of
+reach or not. Where it took one and did not answer in time, the tenant's
 copy is let be at once and the read goes home, while the router asks the
 node's <code>/_health</code> — answered before any token, lock or routing —
 on a connection of its own, within 500 ms (<code>--replica-timeout</code>
@@ -1701,7 +1709,12 @@ answer from home named — a write's, a read-only <code>/batch</code>'s; of a
 later term, or further in one, so an answer arriving late is not the last —
 and sends it with every marked read, whose own answers move nothing: it reads
 its own writes and every write before them, and another client's writes after
-its own may or may not be there yet. A subscription and a
+its own may or may not be there yet. A marked <code>/query</code> read's
+answer names where the copy that answered it stood as it read
+(<code>Fenec-Seq</code>, <code>Fenec-History</code>), replica or home; the
+SDKs take nothing of it as the client's, since a replica may be behind home
+or on a branch a failover left, and a JavaScript live query sends its next run
+after it (below). A subscription and a
 <code>/_changes</code> page sent so wait for it as a read does, before their
 head, and go home on the replica's <code>504</code>: a stream is seeded with
 the client's write, never from the copy as it stood behind it, and a page's
@@ -1839,12 +1852,22 @@ sends each of its runs near: after the furthest of the client's position and
 the one its streams named — a stream's head says where home stood as it
 opened, <code>Fenec-Seq</code> and <code>Fenec-History</code>, and each
 event's <code>seq</code> is a change of that history; a stream opened again
-after a failover names the later term, and never sets the position back. The
-read replica answers a run once it holds the change that ran it, the router
-sends one it cannot hold in the wait home, and a <code>504</code> from home —
-the change lost in a failover — has the run asked home unmarked and the live
-query take home's position: the rows never come from before a change the
-streams told of, and the streams tell of every change home takes. Its polls
+after a failover names the later term, and never sets the position back. A
+run waits a second on the replica (<code>Fenec-Wait: 1000</code>), not five:
+the replica has a write once home's fsync covers it — 283 ms behind at most
+under <code>--sync 250</code> — and a link later, so one later than that is
+behind, and home answers in a region's round trip; the router then lets the
+copy be, so a replica cut off from home costs one second every 5 s, not one
+every change. The read replica answers a run once it holds the change that
+ran it and the router sends one it cannot hold home; each answer names where
+it read, and the next run goes after that too, so rows a run answered from
+home showed — a change whose event is still on its way — never go back. A
+<code>504</code> from home — the change lost in a failover — has the live query
+take home's position and the run asked near again after it, home unmarked if
+that fails too. A stream whose head names no history — a server from before
+heads named one — has the runs go home: its positions would pass none of the
+client's. The rows never come from before a change the streams told of, and
+the streams tell of every change home takes. Its polls
 (<code>{ poll }</code>) go home: sent after its tag's change, a replica would
 judge the tag as home does up to where it stands, but nothing in a poll names
 a change home took since, so a replica behind — or cut off from home — would

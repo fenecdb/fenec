@@ -925,14 +925,21 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 // last write. `since` is no position: a cursor past the
                 // database is 409 as before, since a primary that lost
                 // writes in a failover never reaches it in this history.
+                //
+                // The position is looked at first, and a stream of the
+                // tenant's taken only while it waits: a page after a write
+                // this copy holds is a request in flight.
                 (Ok(_), Some(feed)) => {
-                    let after_asked = req.header("fenec-after").is_some();
-                    match admit(&tenant, after_asked || cdc_waits(&req)) {
-                        Ok(_slot) => match after_asked.then(|| after(&req, db, hub)).flatten() {
-                            Some(refused) => refused,
-                            None => cdc::route(db, feed, cfg, &req),
+                    let refused = match req.header("fenec-after").is_some() {
+                        true => after(&req, db, hub, || admit(&tenant, true)),
+                        false => None,
+                    };
+                    match refused {
+                        Some(refused) => refused,
+                        None => match admit(&tenant, cdc_waits(&req)) {
+                            Ok(_slot) => cdc::route(db, feed, cfg, &req),
+                            Err(refused) => refused,
                         },
-                        Err(refused) => refused,
                     }
                 }
             };
@@ -997,11 +1004,16 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // every one `--max-connections` allows, and the 504 after told it
         // where the database stood. A request refused goes on to `handle`
         // at once, which refuses it as any other.
+        //
+        // The tenant's stream is taken only once it must wait: one taken
+        // for every request sent with the header refused, at a tenant
+        // whose quota of streams its live queries' subscriptions filled,
+        // every read after a write the node held already -- each run of a
+        // live query reading near that reached home was 429.
         let waits = req.header("fenec-after").is_some() && admitted(cfg, &req);
-        let refused = match waits.then(|| admit(&tenant, true)) {
-            None => None,
-            Some(Ok(_slot)) => after(&req, db, hub),
-            Some(Err(refused)) => Some(refused),
+        let refused = match waits {
+            true => after(&req, db, hub, || admit(&tenant, true)),
+            false => None,
         };
         if let Some(refusal) = refused {
             if let Some(t) = &tenant {
@@ -1212,7 +1224,16 @@ pub const AFTER_LONGEST: Duration = Duration::from_secs(30);
 /// `handle`'s way, a subscription before its head ([`sse::serve`]) and
 /// `/_changes` before its page -- on a read replica each was answered from
 /// before the client's write while the reads beside them waited.
-fn after(req: &Request, db: &RwLock<Database>, hub: &sse::Hub) -> Option<Response> {
+///
+/// `slot` is what holds the wait -- a tenant's stream, its quota's -- taken
+/// only where the first look finds the write neither held nor out of reach:
+/// a read after a write the copy holds, or never will, waits for nothing.
+fn after(
+    req: &Request,
+    db: &RwLock<Database>,
+    hub: &sse::Hub,
+    slot: impl FnOnce() -> std::result::Result<Option<quota::Slot>, Response>,
+) -> Option<Response> {
     let n = req.header("fenec-after")?;
     let Ok(n) = n.trim().parse::<u64>() else {
         return Some(Response::error(400, "Fenec-After expects a change number"));
@@ -1249,16 +1270,23 @@ fn after(req: &Request, db: &RwLock<Database>, hub: &sse::Hub) -> Option<Respons
         let never = !holds && !h.following && of.is_some_and(|id| id != h.current());
         (holds, never, At::of(&g))
     };
-    let _waiting = trace::span("fenec.wait_for_write");
-    let seen = std::cell::Cell::new(None);
-    hub.reached(
-        || {
-            let l = look();
-            seen.set(Some(l));
-            (l.0 || l.1, l.2.seq)
-        },
-        std::time::Instant::now() + wait,
-    );
+    let first = look();
+    let seen = std::cell::Cell::new(Some(first));
+    if !(first.0 || first.1) {
+        let _slot = match slot() {
+            Ok(slot) => slot,
+            Err(refused) => return Some(refused),
+        };
+        let _waiting = trace::span("fenec.wait_for_write");
+        hub.reached(
+            || {
+                let l = look();
+                seen.set(Some(l));
+                (l.0 || l.1, l.2.seq)
+            },
+            std::time::Instant::now() + wait,
+        );
+    }
     let (holds, never, at) = seen.get().expect("looked once at least");
     if holds {
         return None;
@@ -2237,6 +2265,14 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             // documents, under the read lock; anything else is answered as
             // rows and rendered after it.
             let guard = held::read(db);
+            // A read its client marked names where this copy stood as it
+            // read -- a pinned one, as at its pin -- as a write's answer
+            // does: a live query reading near sends its next run after it,
+            // which a copy behind this one then waits for, where its rows
+            // went back to before a write a run answered from home showed.
+            // Every client takes a marked answer's position for nothing of
+            // its own: it may be a replica's. An unmarked read names none.
+            let at = cfg.marked.then(|| At::of(&guard));
             // A token whose rules read other collections: held to them as
             // they answer under this lock, and its rows shown by them.
             let (rebound, rebound_mask, bound);
@@ -2310,7 +2346,8 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                     drop(running);
                     timing::lap(timing::Phase::Execute);
                     statements::rows(n as u64);
-                    let mut resp = Response::json(200, body).versioned(fenec_core::VERSION);
+                    let mut resp =
+                        with_seq(Response::json(200, body).versioned(fenec_core::VERSION), at);
                     if let Some(t) = &tag {
                         resp = resp.header("ETag", t);
                     }
@@ -2345,6 +2382,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             drop(running);
             timing::lap(timing::Phase::Execute);
             tagged = tag;
+            seq = at;
             break r;
         }
     } else if let Some(built) = {

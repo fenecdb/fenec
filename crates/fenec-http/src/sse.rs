@@ -248,7 +248,8 @@ pub fn serve(
     // stream resumed with `since` waits the same way, the header being
     // the client's position and `since` only its cursor.
     if req.header("fenec-after").is_some() {
-        if let Some(refused) = crate::after(req, db, hub) {
+        // The stream's own slot, taken above, holds the wait.
+        if let Some(refused) = crate::after(req, db, hub, || Ok(None)) {
             let _ = crate::cors(refused, cfg).write(out, false, false);
             return;
         }

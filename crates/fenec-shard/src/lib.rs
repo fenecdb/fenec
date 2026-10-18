@@ -238,6 +238,11 @@ pub struct Router {
     /// first. One that answers, a 503 that it has not caught up among
     /// them, costs a read a hop alone.
     resting: Arc<Mutex<std::collections::HashMap<String, Instant>>>,
+    /// Tenants' copies that answered a marked read 504, behind the position
+    /// it was sent after at the end of its wait (`<tenant>/<node>`): until
+    /// when, and the longest wait they could not meet
+    /// ([`Router::rest_behind`]).
+    behind: Mutex<std::collections::HashMap<String, (Instant, Duration)>>,
     /// The read replicas' nodes being asked their `/_health` now, one
     /// question a node at a time ([`Router::rest_unanswered`]): shared with
     /// the thread asking it, as `resting` is.
@@ -311,6 +316,7 @@ impl Router {
             reader_quota_queue: Mutex::new(Default::default()),
             quotas_soon: (Mutex::new(false), std::sync::Condvar::new()),
             resting: Arc::new(Mutex::new(Default::default())),
+            behind: Mutex::new(Default::default()),
             probing: Arc::new(Mutex::new(HashSet::new())),
             reader_pool: Pool::new(cfg.reader_timeout),
             follow_soon: (Mutex::new(false), std::sync::Condvar::new()),
@@ -1198,9 +1204,10 @@ impl Router {
     /// so) -- is `None`, and goes home after all, as an unmarked one does:
     /// the client is answered either way, and from no copy older than its
     /// write. A replica that did not answer is let be for a few seconds
-    /// ([`readers::RESTING`]), its region's reads going home at once
-    /// meanwhile. Cold: out of the way of the code every unmarked request
-    /// runs.
+    /// ([`readers::RESTING`]), its reads going home at once meanwhile, and
+    /// one that answered 504 so for the reads sent after a position with
+    /// no longer a wait. Cold: out of the way of the code every unmarked
+    /// request runs.
     #[cold]
     #[inline(never)]
     fn forward_near(
@@ -1212,8 +1219,12 @@ impl Router {
         relayed: Option<std::net::IpAddr>,
         tenant: &str,
     ) -> Option<bool> {
+        let waits = readers::after_wait(req);
         let near = match self.reader_near(tenant) {
-            Some((rnode, ..)) if self.resting(tenant, &rnode) => {
+            Some((rnode, ..))
+                if self.resting(tenant, &rnode)
+                    || waits.is_some_and(|w| self.behind(tenant, &rnode, w)) =>
+            {
                 metrics::replica_read(metrics::ReplicaRead::Fallback);
                 None
             }
@@ -1255,8 +1266,19 @@ impl Router {
                     forwarding.error("503");
                     metrics::replica_read(metrics::ReplicaRead::Fallback);
                 }
+                // Behind the position its read was sent after at the end of
+                // the wait it was given: a copy following its primary waits
+                // the wait out whatever the position -- it may yet be
+                // pointed where that is -- so its 504 says it is behind
+                // ([`Self::rest_behind`]). Asked again at each read, a
+                // replica cut off from its primary held every one its whole
+                // wait: each run of a live query reading near came that
+                // late, for as long as the partition lasted.
                 Ok(a) if a.status == 504 => {
                     forwarding.error("504");
+                    if let Some(w) = waits {
+                        self.rest_behind(tenant, &rnode, w);
+                    }
                     metrics::replica_read(metrics::ReplicaRead::Fallback);
                 }
                 Ok(a) if a.status == 404 && a.header(fenec_http::ABSENT_HEADER).is_some() => {

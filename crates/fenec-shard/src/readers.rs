@@ -443,6 +443,37 @@ impl Router {
         lock(&self.probing).len()
     }
 
+    /// `tenant`'s copy on `node` answered a marked read 504: it did not
+    /// reach the position the read was sent after in `waited`. For
+    /// [`RESTING`] the tenant's reads sent after a position with no longer
+    /// a wait go home at once ([`Self::behind`]), where each waited it out
+    /// on the copy first -- a replica cut off from its primary held every
+    /// run of a live query reading near its whole wait, for as long as the
+    /// partition lasted. A read naming no position, which the copy answers
+    /// as it stands, and one willing to wait longer, are still the copy's:
+    /// sent home, either was refused 502 where home was out of the router's
+    /// reach too, and the copy could have answered it.
+    pub(crate) fn rest_behind(&self, tenant: &str, node: &str, waited: Duration) {
+        let now = Instant::now();
+        let mut behind = lock(&self.behind);
+        behind.retain(|_, (until, _)| now < *until);
+        let key = format!("{tenant}/{node}");
+        let longest = behind.get(&key).map_or(waited, |(_, w)| waited.max(*w));
+        behind.insert(key, (now + self.cfg.replica_rest, longest));
+    }
+
+    /// Whether a read of `tenant` sent after a position with `wait` goes
+    /// home past its copy on `node`, behind ([`Self::rest_behind`]).
+    pub(crate) fn behind(&self, tenant: &str, node: &str, wait: Duration) -> bool {
+        let behind = lock(&self.behind);
+        if behind.is_empty() {
+            return false;
+        }
+        behind
+            .get(&format!("{tenant}/{node}"))
+            .is_some_and(|(until, waited)| Instant::now() < *until && wait <= *waited)
+    }
+
     /// Has `tenant`'s marked reads pass its read replica on `node` by for
     /// [`RESTING`], every other tenant's reads of the node going on.
     fn rest_copy(&self, tenant: &str, node: &str) {
@@ -467,12 +498,7 @@ impl Router {
     /// marked request asks waits on the node: a held write is refused
     /// there, and a stream's head comes once its `Fenec-After` is met.
     pub(crate) fn replica_within(&self, req: &Request) -> Duration {
-        let waits = req.header("fenec-after").is_some().then(|| {
-            req.header("fenec-wait")
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .map_or(fenec_http::AFTER_WAIT, Duration::from_millis)
-                .min(fenec_http::AFTER_LONGEST)
-        });
+        let waits = after_wait(req);
         let page = match req.segments().get(2) {
             Some(&"_changes") => fenec_http::cdc::page_wait(req),
             _ => Duration::ZERO,
@@ -2602,6 +2628,17 @@ pub(crate) fn traced(fields: &[(String, Value)]) -> Traced {
 
 /// Rests `key` in `resting` for `rest`, letting go of every rest that has
 /// run out ([`Router::rest_key`]).
+/// The wait a request's `Fenec-After` asks of a node -- `Fenec-Wait`, or
+/// the node's own -- or none without the header.
+pub(crate) fn after_wait(req: &Request) -> Option<Duration> {
+    req.header("fenec-after").is_some().then(|| {
+        req.header("fenec-wait")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(fenec_http::AFTER_WAIT, Duration::from_millis)
+            .min(fenec_http::AFTER_LONGEST)
+    })
+}
+
 fn rest_in(resting: &Mutex<HashMap<String, Instant>>, key: String, rest: Duration) {
     let now = Instant::now();
     let mut resting = lock(resting);
