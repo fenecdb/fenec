@@ -1,6 +1,6 @@
 <!--
 title: fenecdb — lives anywhere, hears everything
-description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server with no cache in front, and search by meaning. The engine compiles to 294 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
+description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server with no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 294 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
 -->
 
 <section class="hero">
@@ -45,8 +45,8 @@ description: One database from the screen to the server: state your screens foll
       <h1 class="hero-say reveal">Lives anywhere.<br> Hears everything.</h1>
       <p class="hero-sub reveal">One database from the screen to the server:
         state your screens follow live, a replica that syncs with your server,
-        a server with no cache in front of it, and search by meaning, built
-        in.</p>
+        a server with no cache in front of it, a file per tenant in every
+        region, and search built in.</p>
       <p class="hero-cta reveal">
         <a class="btn btn-fill" href="docs/quickstart.html">Start in five minutes</a>
         <a class="btn btn-line" href="playground.html">Try it in the browser</a>
@@ -132,7 +132,7 @@ description: One database from the screen to the server: state your screens foll
   <a href="#writers"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3h6l4 4v14H11z"/><path d="M17 3v4h4"/><path d="M2 8h6M2 12h6M2 16h6"/></svg><b>Many writers, one file</b><span>Writes in microseconds, disk syncs shared</span></a>
   <a href="#traffic"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><b>No cache in front</b><span>A row by id over HTTP in 0.022 ms</span></a>
   <a href="#tenants"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.01M8 16.5h.01"/></svg><b>Scale by tenant</b><span>A file each, failed over, in every region</span></a>
-  <a href="#search"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="16" r="1.5"/><circle cx="10" cy="7" r="1.5"/><circle cx="17" cy="11" r="1.5"/><circle cx="15" cy="18" r="1.5"/><circle cx="13" cy="13" r="5"/></svg><b>Search by meaning</b><span>Vectors, words, and the two fused</span></a>
+  <a href="#search"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="M15 15l6 6"/><path d="M7 8.5h6M7 11.5h4"/></svg><b>Search built in</b><span>Words, typos and facets, then meaning</span></a>
 </nav>
 
 <section class="band" id="state">
@@ -176,7 +176,7 @@ description: One database from the screen to the server: state your screens foll
     </figure>
 
     <p class="after rise">The browser's sync and the native one in Swift,
-      Kotlin and Dart are held to the same 58 scenarios: offline writes,
+      Kotlin and Dart are held to the same 71 scenarios: offline writes,
       retries, refusals, dropped streams, restarts. A server following your
       PostgreSQL hands a commit there to its subscribers 0.09 ms later at the
       median. <a href="docs/sync.html">Sync</a>,
@@ -251,8 +251,8 @@ description: One database from the screen to the server: state your screens foll
     </figure>
     <dl class="versus rise">
       <div><dt>A 58.7 MB tenant moved</dt><dd><b>under 0.3 s</b></dd></div>
-      <div><dt>Tenants failed over</dt><dd><b>20 in 60 ms</b></dd></div>
-      <div><dt>Replica behind the primary</dt><dd><b>0.20 ms</b><span>median</span></dd></div>
+      <div><dt>Tenants failed over onto a standby</dt><dd><b>20 in 63.5–79 ms</b><span>the medians of three rounds</span></dd></div>
+      <div><dt>A tenant's copy behind its primary</dt><dd><b>0.089 ms</b><span>median, p99 0.448</span></dd></div>
       <div><dt>Failed over inside a region cut off</dt><dd><b>1.30–1.56 s</b><span>10 tenants, a lease of 1 s</span></dd></div>
     </dl>
     <p class="after rise">Across regions a tenant lives in one, its copy in
@@ -276,22 +276,38 @@ description: One database from the screen to the server: state your screens foll
 
 <section class="band lit" id="search">
   <div class="band-in">
-    <h2 class="rise">Search by meaning, built in</h2>
-    <p class="lede rise">A vector is a field like any other. Mark it
-      <code>@hnsw</code> and <code>near</code> finds the nearest rows; mark a
-      text <code>@text</code> and <code>match</code> ranks it by BM25;
-      <code>fuse</code> puts the two rankings together. It is the same engine
-      in a browser tab, on a phone and on the server, and in the page it is
-      294 KB of gzipped WebAssembly with no dependencies.</p>
+    <h2 class="rise">Search, built in</h2>
+    <p class="lede rise">Mark a text <code>@text</code> and <code>match</code>
+      ranks it by BM25. <code>fuzzy</code> finds a word typed wrong and
+      <code>prefix</code> one half typed, as a search box sends them;
+      <code>highlight()</code> and <code>snippet()</code> mark what matched,
+      and <code>facet</code> counts each brand or colour over every match for
+      the sidebar, in the same query. A vector field adds search by meaning
+      with <code>near</code>, and <code>fuse</code> puts the two rankings
+      together. It is the same engine in a browser tab, on a phone and on the
+      server, and in the page it is 294 KB of gzipped WebAssembly with no
+      dependencies.</p>
 
     <figure class="motion rise" data-scenes="search">
-      <canvas role="img" aria-label="The question &ldquo;warm places to sleep outdoors&rdquo; lands among documents placed by meaning, and its five nearest light: near. The documents holding its words are ranked by them, the words lit: match. Then fuse adds one over sixty plus each rank from both lists, and the two documents both found rank first."></canvas>
+      <canvas role="img" aria-label="The question &ldquo;warm places to sleep outdoors&rdquo; is asked of the documents. The ones holding its words are ranked by them, the words lit: match. Then it lands among the documents placed by meaning, and its five nearest light: near. Then fuse adds one over sixty plus each rank from both lists, and the two documents both found rank first."></canvas>
     </figure>
 
-    <p class="after rise">At a million 128-dim vectors, fenec-server over HTTP
-      answers the nearest ten at 99.1% recall in 0.141 ms; PostgreSQL with
-      pgvector, with the same index settings, at 98.6% in 2.076 ms.
-      <a href="docs/benchmarks.html#scale">Method</a>, and fenecdb beside
+    <dl class="versus rise">
+      <div><dt>A <code>match</code> over 100 000 documents</dt><dd><b>0.06 ms</b><span>two words, the best ten</span></dd></div>
+      <div><dt>Words within a typo, among FiQA&rsquo;s 135 500</dt><dd><b>14 µs</b><span>one edit; 120 µs at two</span></dd></div>
+      <div><dt>A facet over every row, through <code>@hash</code></dt><dd><b>0.01 ms</b><span>100 000 rows</span></dd></div>
+    </dl>
+
+    <p class="after rise">In one process on an M1. A row&rsquo;s marks cost
+      1 to 3 µs more, and with a typo put into each of BEIR SciFact&rsquo;s
+      queries, <code>fuzzy</code> takes its nDCG@10 from 0.636 back to 0.663,
+      where the queries as written score 0.662.
+      <a href="docs/fenecql.html#the-text-clause">Text search</a>,
+      <a href="docs/fenecql.html#typos">typos and words begun</a>,
+      <a href="docs/fenecql.html#facets">facets</a>,
+      <a href="docs/fenecql.html#hybrid">words and meaning together</a> and
+      <a href="docs/benchmarks.html#retrieval-quality">how good the answers
+      are</a>; fenecdb beside
       <a href="docs/vs-postgres.html">PostgreSQL</a>,
       <a href="docs/vs-sqlite.html">SQLite</a> and
       <a href="docs/vs-pglite.html">PGlite</a>. The

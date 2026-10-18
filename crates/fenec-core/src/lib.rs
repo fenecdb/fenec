@@ -1,6 +1,6 @@
 //! # fenec-core
 //!
-//! A minimal, vector-native embedded database core that runs in WASM.
+//! A minimal embedded database core that runs in WASM.
 //!
 //! Design principles
 //! 1. **Zero dependencies.** The core uses only `std`; the WASM output stays

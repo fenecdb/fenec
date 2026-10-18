@@ -2,19 +2,76 @@
 
 [![ci](https://github.com/fenecdb/fenec/actions/workflows/ci.yml/badge.svg)](https://github.com/fenecdb/fenec/actions/workflows/ci.yml)
 
-An embedded document database with full-text and vector search built in.
-Documents, indexes, aggregates, atomic batches, BM25 and HNSW in one engine,
-written in Rust with no dependencies. It runs inside a web page as 294 KB of
+An embedded document database for an app's data, from the page to the
+server: state its screens follow live, a replica on the device that syncs
+with the server, many clients writing into one file through one writer
+and sharing their disk syncs, a server with no cache in front of it, a file
+per tenant in every region, and search built in --
+BM25 over text with typos, highlights and facets, and vectors for meaning.
+Written in Rust with no dependencies, it runs inside a web page as 294 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FenecQL**).
 
 **[fenecdb.com](https://fenecdb.com)** — the website and documentation. The
-home page boots the real WebAssembly module and builds an HNSW index in your
-browser, and races fenec-server, over HTTP, against pgvector over a million
-vectors.
+home page shows each part at work, and its playground runs the real
+WebAssembly module in your browser with fenec studio over it.
 Source in [`site/`](site/): `make site-serve` runs it locally, `make site-deploy`
 publishes it to Cloudflare Workers.
+
+```
+create collection orders (
+  customer  text      @hash,
+  status    text      @hash,
+  total     int,
+  placed    timestamp @sorted
+)
+
+get orders select id, total, placed
+  where customer = $1 and status = "open"
+  order placed desc
+  limit 20
+```
+
+The same query from JS, and kept live: a write that changes what it reads
+draws the screen again -- no ORM, no npm, no build step:
+
+```js
+const open = db.from('orders')
+  .select('id', 'total', 'placed')
+  .where('customer', customer)
+  .where('status', 'open')
+  .order('placed', 'desc')
+  .limit(20);
+
+const rows = await open.rows();      // once
+const stop = db.live(open, draw);    // and again after every write it reads
+```
+
+A write reads the row it writes, and can be made to find it. Sent as one
+`/batch`, a debit that finds too little money is refused (412, `unmet`,
+`"at": 0`) before the credit runs, and a credit to an account that is not
+there (`"at": 1`) puts the debit back:
+
+```
+set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1
+set accounts {balance: balance + $3} where name = $2 require 1
+```
+
+Search is in the same query: the words ranked by BM25, a typo and a word
+half typed found, what matched marked, and how many results each brand
+has -- for a results page and its filter sidebar:
+
+```
+get products select name, highlight(name, "<mark>", "</mark>")
+  match name $1 fuzzy prefix
+  where price < 500
+  facet brand top 10, color
+  limit 20
+```
+
+And by meaning, where a field holds an embedding: `near` finds the nearest
+rows, with a filter planned beside it:
 
 ```
 create collection articles (
@@ -31,16 +88,6 @@ get articles select title
   limit 10
 ```
 
-Lexical recall and an exact vector reordering on top of it — the second stage
-reads the stored vectors, so this path needs no HNSW graph at all:
-
-```
-get articles select title
-  match body $1
-  rerank embed $2 candidates 500
-  limit 10
-```
-
 Or both rankings at once: BM25 and the vectors each find their own
 candidates, and reciprocal rank fuses the two lists, so a document either one
 missed still counts:
@@ -53,27 +100,14 @@ get articles select title
   limit 10
 ```
 
-Where the words matched, and how many results each brand has — for a
-results page and its filter sidebar, from the same query:
+Lexical recall and an exact vector reordering on top of it — the second stage
+reads the stored vectors, so this path needs no HNSW graph at all:
 
 ```
-get products select name, highlight(name, "<mark>", "</mark>")
-  match name $1
-  where price < 500
-  facet brand top 10, color
-  limit 20
-```
-
-The same query from JS — no ORM, no npm, no build step:
-
-```js
-const rows = await db.from('articles')
-  .select('title')
-  .where('year', '>=', 2024)
-  .where('tags', 'has', 'rust')
-  .near('embed', queryVector)
-  .limit(10)
-  .rows();
+get articles select title
+  match body $1
+  rerank embed $2 candidates 500
+  limit 10
 ```
 
 ---
@@ -82,29 +116,33 @@ const rows = await db.from('articles')
 
 **fenecdb** makes sense when the database should run beside the code that uses
 it — in the browser, in the process, or as one small server — and search
-belongs in it rather than in a second system: an app that keeps its data
-offline, local and semantic search, RAG and agent memory, a service with a
-file per tenant, in one region or several. The scale limit is **the file
-image fitting in memory**: not just the vector arena, all of the records are
-in memory ([Limits](https://fenecdb.com/docs/limits)).
+belongs in it rather than in a second system: an app whose screens follow
+its data and keep it offline, a server many clients read and write with no
+cache in front, a service with a file per tenant in one region or several,
+and search over its own rows, a store's, a docs site's or an agent's
+memory. The scale limit is **the indexes fitting in memory**: the documents
+stay in the mapped file, so a server's memory follows its indexes, not its
+data ([Limits](https://fenecdb.com/docs/limits#memory-and-scale)).
 
-**SQLite** when you need relational data, SQL with JOINs, several writers to
-one file and a mature toolchain. Also in very short-lived processes: for a tool that runs
+**SQLite** when you need relational data, SQL with JOINs and a mature
+toolchain. Also in very short-lived processes: for a tool that runs
 fewer than five queries and exits, fenecdb's open cost never amortises.
 
-**PostgreSQL + pgvector** for multi-writer systems shared over a network that
-need ACID. On maturity, concurrency and ecosystem the comparison is not even
+**PostgreSQL** (with pgvector for vectors) for multi-writer systems shared
+over a network that need ACID. On maturity, concurrency and ecosystem the comparison is not even
 worth making — fenecdb is not aiming at that job. A table can move the
 other way, though: `fenec import` copies one from PostgreSQL, and `--follow`
 keeps it following the table's commits.
 
 The numbers behind the comparison, and the method that produced them, are in
-[Benchmarks](https://fenecdb.com/docs/benchmarks) -- with `fenec-server` over
-HTTP against PostgreSQL and pgvector over its own protocol, at a million
-vectors ([At scale](https://fenecdb.com/docs/benchmarks#scale)). On YCSB's
+[Benchmarks](https://fenecdb.com/docs/benchmarks). On YCSB's
 workloads in process, fenecdb does B with 16 threads at 545 k operations a
 second against SQLite's 47.9 k, and C on one thread at 438 k against
-279 k, its file compacted on its own as updates grow it ([YCSB](https://fenecdb.com/docs/benchmarks#ycsb)).
+279 k, its file compacted on its own as updates grow it ([YCSB](https://fenecdb.com/docs/benchmarks#ycsb));
+over HTTP, `fenec-server` does B at 16 clients, durable, at 18.2 k against
+PostgreSQL's 13.0 k, both in Docker. At a million vectors it answers the
+nearest ten at 99.1% recall in 0.141 ms, against pgvector's 98.6% in 2.076
+([At scale](https://fenecdb.com/docs/benchmarks#scale)).
 
 ---
 
@@ -116,13 +154,13 @@ make test     # the Rust suite, then the JS suite
 make serve    # builds the wasm and serves the browser console on :8787
 ```
 
-Five minutes from clone to a vector query:
+Five minutes from clone to your first query:
 **[Quickstart](https://fenecdb.com/docs/quickstart)**.
 
 **[Examples](examples/)**: one small app, Notes, in every language -- the
 browser, React, Node, Python, Go, .NET, Rust, SwiftUI, Jetpack Compose and
-Flutter -- each a folder to open and run, with full-text and vector search,
-filters and a live list.
+Flutter -- each a folder to open and run, with a live list, filters, and
+full-text and vector search.
 
 **Shell.** `cargo build --release -p fenec-cli`, then:
 
@@ -242,26 +280,27 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | | |
 |---|---|
 | **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch landing whole |
+| **Atomic batches** | `POST /batch` and the browser's `run` of several statements land whole or not at all; an `Idempotency-Key` makes a write once |
+| **Live state and sync** | a query a screen follows: a write runs again every live query reading what it wrote (`db.live`, `useLiveQuery`, SwiftUI observables, Flows, Streams) · a replica in the page or the app that reads with no network, queues its writes in its file and sends each once under an `Idempotency-Key`, the server owning the data ([Sync](https://fenecdb.com/docs/sync)) |
 | **Schema** | `alter collection` adds, drops and renames a field without rewriting a document |
 | **Schema in code** | tables declared in TypeScript Drizzle's way, or a `schema.fenecql` in any SDK, checked at every open: what only adds is applied, a drop, a rename or a type change refused until a migration says, run once and recorded; `fenec types` writes TypeScript, Python, Go or C# from a database or a schema file |
-| **Expiry** | `seen timestamp @ttl(30m)` — a row gone that long after its time: out of every read at once, deleted by the server's sweeper as ordinary deletes |
-| **Atomic batches** | `POST /batch` and the browser's `run` of several statements land whole or not at all; an `Idempotency-Key` makes a write once |
-| **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`; imported from PostgreSQL's `jsonb`) `geo` (a point, `[lon, lat]`; imported from PostGIS) |
-| **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@ttl(30m)`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted`, `@geo`; `@hash`, `@unique` and `@sorted` on a path into a `json` field too |
-| **Metrics** | `cosine` `l2` `dot` |
+| **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`; imported from PostgreSQL's `jsonb`) `geo` (a point, `[lon, lat]`; imported from PostGIS) `vector<N[, f16]>` `sparse<N>` |
+| **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@sorted(a, b desc)` and `@unique(a, b)` over several fields, `@ttl(30m)`, `@text(k1=.., b=.., prefix=..)`, `@geo`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@inverted`; `@hash`, `@unique` and `@sorted` on a path into a `json` field too |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `in (get ...)` (another collection's rows, run once, up to 100 000 values), `is null` |
-| **Retrieval** | `near` (HNSW; exact by dot product over a `sparse<N>` such as SPLADE's), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed), `fuse` (`match` and `near` ranking together, by reciprocal rank), `near` over a point (nearest first, in metres) |
 | **Aggregates** | `count(*)` `sum` `avg` `min` `max`, whole or per `group`, ordered and paged by any of them |
+| **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, keyed by one field or several (`on (org, order) = (org, id)`), chainable to 8 levels |
+| **Expiry** | `seen timestamp @ttl(30m)` — a row gone that long after its time: out of every read at once, deleted by the server's sweeper as ordinary deletes |
 | **Collation** | `order name collate und` — Unicode's order for every script, as ICU's root orders it (PostgreSQL's `und-x-icu`); `collate tr` Turkish (`ç` after `c`, `ı` before `i`, `tr-x-icu`); a field declared in one pages by its last row; bytes otherwise |
 | **Case-insensitive text** | `email text nocase @unique` — compared by its Unicode case fold wherever it is compared (`=`, its indexes, `order`, `group`, `facet`), kept as written, PostgreSQL's `citext`; Turkish's `I`/`ı` and `İ`/`i` under `collate tr` |
-| **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, keyed by one field or several (`on (org, order) = (org, id)`), chainable to 8 levels |
-| **Places** | `distance(loc, p) <= 500` and `within(loc, [w, s, e, n])` over a `geo` field, through `@geo`, nearest first with `near` — Redis's `GEOSEARCH`, the metres its `GEODIST`'s ([Points and distances](https://fenecdb.com/docs/geo)) |
+| **Text search** | `match` ranked by BM25 over `@text` · `fuzzy` for a word typed wrong and `prefix` for one half typed · `highlight()` and `snippet()` marking what matched · `facet` counts beside the page, disjunctive and by ranges · Chinese, Japanese, Korean and Thai split into runs of characters |
+| **Places** | `distance(loc, p) <= 500` and `within(loc, [w, s, e, n])` over a `geo` field, through `@geo`, nearest first with `near` (in metres) — Redis's `GEOSEARCH`, the metres its `GEODIST`'s ([Points and distances](https://fenecdb.com/docs/geo)) |
 | **Instead of Redis** | counters (`set c {n: n + 1}`), rate limits (fixed and sliding windows, token buckets), locks with fencing tokens, sessions and caches under `@ttl`, leaderboards, sets, HyperLogLog, job queues with leases and a claim held until a job comes, delayed jobs, streams, pub/sub, idempotency keys — each a statement or two a test runs; no LRU eviction, no Lua ([Instead of Redis](https://fenecdb.com/docs/redis)) |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize distance within` + plugins |
+| **Vector search** | `near` over `vector<N[, f16]>` (HNSW, with `int8` and `bit` codes; exact by dot product over a `sparse<N>` such as SPLADE's), by `cosine`, `l2` or `dot` · `rerank` (exact vector reordering of `match` candidates, no graph needed) · `fuse` (`match` and `near` ranking together, by reciprocal rank) |
 | **Interfaces** | FenecQL · a query builder in seven languages · REST/JSON + SSE · WASM C ABI · a native C ABI for apps · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |
 | **Agents** | an MCP server (`fenec-server --mcp`, `fenec mcp` over stdio): `schema`, `search` (words, an embedding, or both fused), `query`, `get`, and `write` and a memory (`remember`, `recall`) where asked for, held to the token's rules |
-| **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React, over a database in the page or a synced replica · SDKs for Python, JavaScript, Go and .NET · embedded in Swift, Kotlin and Dart/Flutter apps, live queries as SwiftUI observables, Flows and Streams |
-| **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
+| **Integrations** | `useLiveQuery` for React, over a database in the page or a synced replica · SDKs for Python, JavaScript, Go and .NET · embedded in Swift, Kotlin and Dart/Flutter apps, live queries as SwiftUI observables, Flows and Streams · LangChain and LlamaIndex vector stores, each passing its framework's own tests |
+| **Access** | a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) and the fields each row shows · a refused token waiting longer each time · an audit log of refusals, schema changes and admin actions |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment, every tenant of a node over one connection · a file per tenant behind a router, failed over on a lease |
 | **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fenecdb.com/docs/sharding#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fenecdb.com/docs/sharding#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fenecdb.com/docs/sharding#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
@@ -287,15 +326,15 @@ query; it is not a join and is not trying to be one.
 
 | | |
 |---|---|
-| [Quickstart](https://fenecdb.com/docs/quickstart) | Build it, open a file, write a vector query |
-| [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, HNSW with a filter, half precision, and why there is no page cache and exactly one writer |
+| [Quickstart](https://fenecdb.com/docs/quickstart) | Build it, open a file, write a row and query it |
+| [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, the mapped file, why there is no page cache and exactly one writer, and HNSW with a filter |
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state, a schema declared in code |
 | [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
-| [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE, a read marked for a replica |
+| [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, raw FenecQL, batches, SSE, vector search over POST, a read marked for a replica |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment, every tenant of a node archived over one connection |
-| [Integrations](https://fenecdb.com/docs/integrations) | LangChain and LlamaIndex vector stores over HTTP, `useLiveQuery` for React, the Go and .NET SDKs |
+| [Integrations](https://fenecdb.com/docs/integrations) | `useLiveQuery` for React, the Go and .NET SDKs, and LangChain and LlamaIndex vector stores over HTTP |
 | [Agents and MCP](https://fenecdb.com/docs/mcp) | An agent's search and memory over the Model Context Protocol: `fenec-server --mcp` and `fenec mcp` for Claude Code, Cursor and Claude Desktop, each tool held to the token's rules, answers past a bound refused rather than cut |
 | [Monitoring](https://fenecdb.com/docs/monitoring) | `/_metrics` in Prometheus's format, the Grafana dashboard in `monitoring/`, the slow-statement log and a request id in every line |
 | [Datadog and others](https://fenecdb.com/docs/datadog) | The Datadog Agent's check, logs pipeline and dashboard in `monitoring/datadog/`; New Relic, Elastic and Grafana Cloud |
@@ -310,7 +349,7 @@ query; it is not a join and is not trying to be one.
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |
-| [Benchmarks](https://fenecdb.com/docs/benchmarks) | Against SQLite and pgvector on the same data in the same process, and fenec-server over HTTP against pgvector at scale |
+| [Benchmarks](https://fenecdb.com/docs/benchmarks) | YCSB against SQLite, PostgreSQL, MongoDB and Redis, writers beside readers, a request over HTTP and text search; then vectors, against SQLite and pgvector in process and fenec-server against pgvector at scale |
 | [Limits](https://fenecdb.com/docs/limits) | What it does not do, every hard-coded ceiling, memory and scale |
 
 The docs are the long-form reference; their source is

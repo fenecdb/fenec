@@ -2,7 +2,7 @@
 
 This file provides guidance to Codex and other coding agents when working with code in this repository. It is written from CLAUDE.md by `make agents-md`: edit that one.
 
-fenecdb — a minimal, vector-native embedded database in Rust. Compiles to WASM for
+fenecdb — a minimal embedded database in Rust. Compiles to WASM for
 the browser, has its own query language (FenecQL), and its server (`fenec-server`)
 speaks HTTP; every language reaches it that way, Python, JavaScript, Go,
 .NET, Swift, Kotlin and Dart through official clients. The docs under `site/content/docs/` are the long-form reference (design
@@ -987,7 +987,8 @@ third of a lease after it at most; a node without
 off stopped writing 697 ms after, its 10 tenants took writes again 1.29 to
 1.33 s after. A
 write is on the standby 0.089 ms after the primary answered it (p99 0.448),
-and 20 tenants failed over in 60 ms (`make shard-bench`). A standby waits
+and 20 tenants failed over in 63.5 to 79 ms, the medians of three rounds
+(`make shard-bench`). A standby waits
 idle and takes all of a node at once, so with `fenec-shard --replicas` a
 tenant on a node in no pair gets a replica of its own instead (the
 `replicas` collection): on the node holding the fewest replicas of its node,
