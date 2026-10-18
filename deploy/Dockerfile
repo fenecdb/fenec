@@ -9,13 +9,16 @@
 # units go, under a real systemd (deploy/test/units.py boots it).
 #
 # Built as the repository's Dockerfile builds fenec-server: statically with
-# musl, so the binaries run on any Linux, glibc or not, and on the same
-# cache mounts, so a build after it compiles only what it did not.
+# musl, so the binaries run on any Linux, glibc or not, and through
+# tools/image-cargo.sh on the same cache mount, so a build after it compiles
+# only what it did not -- and every binary is held to the sources this build
+# was given before it is copied out (the script says why: a branch's image
+# once carried main's fenec-shard).
 
 # ----------------------------------------------------------------- build
 FROM rust:alpine AS build
 
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev rsync
 
 WORKDIR /src
 COPY . .
@@ -24,16 +27,17 @@ COPY . .
 # here needs; the channel is "stable" already, so no pin is lost.
 RUN rm -f rust-toolchain.toml
 
+# /built, a path no build before the script copied from: BuildKit keyed
+# those COPYs by binaries a stale target/ had made, and could hand a
+# build of the same sources another tree's layer (the script says how).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release -p fenec-server -p fenec-shard -p fenec-cli && \
-    mkdir -p /out && \
-    cp target/release/fenec-server target/release/fenec-shard target/release/fenec /out/
+    --mount=type=cache,id=fenec-image-cargo,target=/work,sharing=locked \
+    tools/image-cargo.sh /built --release -p fenec-server -p fenec-shard -p fenec-cli
 
 # ------------------------------------------------------------------- kit
 FROM alpine:3 AS kit
 
-COPY --from=build /out/ /usr/local/bin/
+COPY --from=build /built/ /usr/local/bin/
 # The drill's containers run as root inside: their data are named volumes
 # the drill removes, and nothing here is a deployment's hardening -- that
 # is the units' (deploy/systemd/), which `systemd` below holds.
@@ -56,7 +60,7 @@ RUN apt-get update && \
         systemd-udevd-control.socket getty.target console-getty.service \
         systemd-logind.service systemd-modules-load.service
 
-COPY --from=build /out/ /usr/local/bin/
+COPY --from=build /built/ /usr/local/bin/
 # A machine's systemd makes / a shared mount as it boots; in a container it
 # finds it private and leaves it so, and LoadCredential= -- which mounts a
 # service's credentials in a namespace of its own and moves them into

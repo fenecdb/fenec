@@ -59,7 +59,7 @@ make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP 
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js and build.py's rules
 make grafana-check # monitoring/'s compose (Docker): both data dashboards, Infinity's and the Grafana plugin's (integrations/grafana), and its alert rule held to fenec-server
-make deploy-check  # deploy/: promtool over the alert rules and their tests, the tunnel's rules asked of cloudflared, then every systemd unit in two privileged containers booting systemd -- verified, started, used, the archive copied by real rclone, a standby router promoted by the units
+make deploy-check  # deploy/: promtool over the alert rules and their tests, the tunnel's rules asked of cloudflared, the images' build script (tools/image-cargo.sh) held to a tree older than its last build and to a unit compiled from other bytes, then every systemd unit in two privileged containers booting systemd -- verified, started, used, the archive copied by real rclone, a standby router promoted by the units
 make drill         # deploy/'s failover drill (Docker): two regions, a node cut off and killed and back, a router killed and its standby promoted, the global routers cut off, a restore; lost must be 0 (DRILL_LEASE, DRILL_KEEP=1)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)

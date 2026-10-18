@@ -14,7 +14,7 @@
 # ----------------------------------------------------------------- build
 FROM rust:alpine AS build
 
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev rsync
 
 WORKDIR /src
 COPY . .
@@ -30,11 +30,17 @@ RUN rm -f rust-toolchain.toml
 # out of the same Dockerfile. fenec-server is deliberately on the `release` profile
 # (unwind): a panicking connection thread takes down only its own session.
 # FEATURES: fenec-server's features, e.g. `timing` for `make roundtrip-bench`.
+# tools/image-cargo.sh builds in a tree it keeps in the cache mount, by
+# content, and holds the binary to this build's sources before it copies it
+# out: with target/ alone in the cache, a tree whose files were older than
+# the last build's compiled nothing and the image kept the binary before.
+# It lands in /built, a path no build before the script copied from: BuildKit
+# keyed those COPYs by binaries a stale target/ had made, and could hand a
+# build of the same sources another tree's layer (the script says how).
 ARG FEATURES=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release -p fenec-server ${FEATURES:+--features $FEATURES} && \
-    cp target/release/fenec-server /fenec-server
+    --mount=type=cache,id=fenec-image-cargo,target=/work,sharing=locked \
+    tools/image-cargo.sh /built --release -p fenec-server ${FEATURES:+--features $FEATURES}
 
 # The empty image has no shell to run `mkdir`: the data directory is prepared
 # here and copied over together with its ownership.
@@ -43,7 +49,7 @@ RUN mkdir -p /data
 # --------------------------------------------------------------- runtime
 FROM scratch
 
-COPY --from=build /fenec-server /usr/local/bin/fenec-server
+COPY --from=build /built/fenec-server /usr/local/bin/fenec-server
 # A named volume inherits this directory's ownership, so the non-root process
 # can write to it. With a bind mount the ownership comes from the host:
 #   docker run -v $PWD/data:/data --user $(id -u):$(id -g) ...
