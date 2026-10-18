@@ -144,11 +144,16 @@ const DROPPED = new Set([
 
 /**
  * Answer headers never sent back: hop by hop; whether a node verified a
- * token, which a router tells only a router relaying for a client; and the
+ * token, which a router tells only a router relaying for a client; the
  * tenant's home, which the entry asked for itself and a client did not --
- * a router names it on a refusal too, so to anyone with a tenant's name.
+ * a router names it on a refusal too, so to anyone with a tenant's name;
+ * and every cookie. No router or node sets one, but Cloudflare Access in
+ * front of a router's tunnel does, outside strict service token
+ * authentication: a `CF_Authorization` cookie for the service token's
+ * session, which passed on would let any client of the entry reach the
+ * router's hostname past Access without the token.
  */
-const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'fenec-verified', HOME];
+const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'fenec-verified', HOME, 'set-cookie'];
 
 /**
  * The headers fenec-http's `cors::headers` writes under `--http-cors`: the
@@ -210,6 +215,11 @@ function origin(url, what) {
  * - `DOWN_MS`: {@link DOWN_MS}.
  * - `ENTRY_TOKEN` (a secret): the key of the client's mark ({@link CLIENT});
  *   without it no client is named.
+ * - `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET` (secrets): a Cloudflare
+ *   Access service token, sent to every router as `CF-Access-Client-Id` and
+ *   `CF-Access-Client-Secret`. A router's tunnel hostname is public; with an
+ *   Access application on it that admits this token alone, nothing but the
+ *   entry reaches it. Both or neither.
  */
 export function configure(env) {
   const regions = new Map();
@@ -230,6 +240,20 @@ export function configure(env) {
   if (!Number.isInteger(homes) || homes < 0) throw new Error(`HOMES is a count of tenants: ${env.HOMES}`);
   const downMs = env.DOWN_MS === undefined || env.DOWN_MS === '' ? DOWN_MS : Number(env.DOWN_MS);
   if (!Number.isInteger(downMs) || downMs < 0) throw new Error(`DOWN_MS is milliseconds: ${env.DOWN_MS}`);
+  // One half of a service token would have Access refuse every request,
+  // which reads as every region down: refused here, where it says why.
+  if (!env.ACCESS_CLIENT_ID !== !env.ACCESS_CLIENT_SECRET) {
+    throw new Error('ACCESS_CLIENT_ID and ACCESS_CLIENT_SECRET are a service token together: set both or neither');
+  }
+  // The secret goes with every request: never in clear, to an address
+  // Access is not even in front of.
+  if (env.ACCESS_CLIENT_ID) {
+    const routers = [...regions.values()].flatMap((r) => r.routers.map((u) => [`REGIONS.${r.name}`, u]));
+    for (const u of [].concat(admin ?? [])) routers.push(['ADMIN', origin(u, 'ADMIN')]);
+    for (const [what, u] of routers) {
+      if (!u.startsWith('https:')) throw new Error(`${what}: ${u} is not https, and the Access service token would go to it in clear`);
+    }
+  }
   return {
     regions,
     byContinent,
@@ -242,6 +266,7 @@ export function configure(env) {
     token: env.ENTRY_TOKEN || null,
     // The token's HMAC key, imported at the first request naming a client.
     key: null,
+    access: env.ACCESS_CLIENT_ID ? { id: env.ACCESS_CLIENT_ID, secret: env.ACCESS_CLIENT_SECRET } : null,
   };
 }
 
@@ -267,11 +292,14 @@ export async function clientMark(key, address, seconds) {
 
 /**
  * The headers a request goes to a router with: `client` the {@link CLIENT}
- * header's value, where there is one. A header a client names in
- * `Connection` cannot be told apart here -- the runtime keeps `Connection`
- * from the Worker -- and goes on: a router reads no header it does not know.
+ * header's value, where there is one, and `access` the Access service
+ * token, where there is one -- a client's own `CF-Access-*` dropped with
+ * every `cf-*` header, so no client sends the entry's. A header a client
+ * names in `Connection` cannot be told apart here -- the runtime keeps
+ * `Connection` from the Worker -- and goes on: a router reads no header it
+ * does not know.
  */
-export function sentHeaders(incoming, client) {
+export function sentHeaders(incoming, client, access = null) {
   const out = new Headers();
   for (const [k, v] of incoming) {
     if (DROPPED.has(k) || k.startsWith('cf-')) continue;
@@ -279,6 +307,10 @@ export function sentHeaders(incoming, client) {
   }
   out.set(HOME, '1');
   if (client) out.set(CLIENT, client);
+  if (access) {
+    out.set('CF-Access-Client-Id', access.id);
+    out.set('CF-Access-Client-Secret', access.secret);
+  }
   // The router takes a client's request id, or makes one: Cloudflare's ray
   // id, which every Cloudflare log of the request carries, where the client
   // sent none.
@@ -451,7 +483,7 @@ async function readUpTo(stream, cap) {
  * whether the request may run twice.
  */
 async function prepare(request, cfg, tenant) {
-  const headers = sentHeaders(request.headers, await clientNamed(cfg, request.headers));
+  const headers = sentHeaders(request.headers, await clientNamed(cfg, request.headers), cfg.access);
   const method = request.method;
   let body = null;
   let again = true;
@@ -612,8 +644,8 @@ async function send(request, url, regions, cfg, state, tenant) {
   return own(cfg, request, 503, `region ${names}'s routers did not answer (${why})`, 1);
 }
 
-/** The answer as the client is given it: the router's, less its hops and its marks. */
-function passed(answer) {
+/** The answer as the client is given it: the router's, less its hops, its marks and any cookie. */
+export function passed(answer) {
   const out = new Response(answer.body, answer);
   for (const h of ANSWER_DROPPED) out.headers.delete(h);
   return out;

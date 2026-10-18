@@ -1,0 +1,93 @@
+# A region's router, keeping the region's own directory: its nodes, its
+# tenants, their leases and failovers (deploy/RUNBOOK.md).
+# Its addresses are in /etc/fenecdb/router.env, its tokens too: read by
+# systemd as root, 0600, and on no command line, which `ps` shows every user.
+#
+#   install -m 0644 fenec-router.service /etc/systemd/system/
+#   install -m 0600 ../env/router.env /etc/fenecdb/router.env   # then edit it
+#   systemctl enable --now fenec-router
+
+[Unit]
+Description=fenecdb region router (fenec-shard --region)
+Documentation=https://fenecdb.com/docs/sharding file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+# One process on the directory file at a time: two corrupt it.
+Conflicts=fenec-router-standby.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=fenec-router
+Group=fenec-router
+EnvironmentFile=/etc/fenecdb/router.env
+# --region keeps the region's nodes and tenants in this router's directory,
+# so it leases them and fails them over cut off from every other region;
+# --global is where every other tenant lives (the global router, then its
+# standby). --replicas gives each tenant a replica on a node of another
+# zone of the region; --auto-failover leases the nodes for FENEC_LEASE
+# seconds and fails over a node that lets its lease lapse.
+ExecStart=/usr/local/bin/fenec-shard \
+    --listen ${FENEC_LISTEN} \
+    --directory /var/lib/fenecdb/router/directory.fenec \
+    --region ${FENEC_REGION} \
+    --global ${FENEC_GLOBAL} \
+    --replicas \
+    --auto-failover ${FENEC_LEASE} \
+    --max-connections 1000 \
+    --upstream-timeout ${FENEC_UPSTREAM_TIMEOUT} \
+    --audit /var/log/fenecdb/router/audit.log \
+    $FENEC_ROUTER_FLAGS
+Restart=on-failure
+RestartSec=2s
+
+# The router writes and syncs each change of its directory before it acts
+# on it, so SIGTERM's default action loses nothing: it holds no write. What
+# it ends are the requests it was forwarding, which a client sends again.
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+
+# Descriptors: a client's connection each (--max-connections 1000) and a
+# pooled one to a node for each in flight, the directory's replication and
+# its standbys' streams -- 2 x 1000, with room. Raise with them.
+LimitNOFILE=8192
+# Threads: a connection each, under systemd's DefaultTasksMax unless set.
+TasksMax=4096
+# A core dump would hold every node's admin token.
+LimitCORE=0
+
+StateDirectory=fenecdb/router
+StateDirectoryMode=0700
+LogsDirectory=fenecdb/router
+ReadWritePaths=/var/lib/fenecdb/router
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

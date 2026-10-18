@@ -40,4 +40,13 @@
   // own, never one a router or a node holds for anything else. Changed by
   // starting the routers with the new one first, then putting it here:
   //   npx wrangler secret put ENTRY_TOKEN --config entry/wrangler.jsonc
+  //
+  // ACCESS_CLIENT_ID and ACCESS_CLIENT_SECRET, a Cloudflare Access service
+  // token the entry presents to every router: with an Access application on
+  // the routers' tunnel hostnames admitting it alone, only the entry reaches
+  // them (deploy/RUNBOOK.md, "The network"; turn on strict service token
+  // authentication there, and mind the token's expiry: expired, every region
+  // reads as down). Both secrets, or neither, and every router https:
+  //   npx wrangler secret put ACCESS_CLIENT_ID --config entry/wrangler.jsonc
+  //   npx wrangler secret put ACCESS_CLIENT_SECRET --config entry/wrangler.jsonc
 }

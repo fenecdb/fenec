@@ -466,6 +466,12 @@ comes up with an in-memory database. There is no shell in the image, so
 <code>docker logs</code> and <code>docker run --rm
 ghcr.io/fenecdb/fenec-server --help</code>.</p>
 
+<p>On machines of your own, the repository's <code>deploy/</code> has a
+systemd unit for a server of every role — a tenant node, a region's router,
+the global router, an archiver — with its tokens in an environment file,
+the alert rules and the operator's runbook (<a
+href="sharding.html#deploying">Deploying it</a>).</p>
+
 <p>Two containers loading the same file and writing it corrupt it. On
 Kubernetes that means a <code>StatefulSet</code> rather than a
 <code>Deployment</code>, <code>replicas: 1</code>, <code>strategy:

@@ -1,0 +1,72 @@
+# A node's archive copied to a bucket (S3, R2, any rclone remote), run by
+# fenec-archive-sync@<node>.timer. fenecdb speaks no TLS and no S3: rclone
+# does both, through ../bin/fenec-archive-sync, which says what a run does
+# and why: no first copy from a new disk over the bucket's archive,
+# `rclone copy --local-no-check-updated`, and the success written for
+# node_exporter.
+#
+#   apt install rclone          # or the release from rclone.org
+#   install -D -m 0755 ../bin/fenec-archive-sync /usr/local/libexec/fenecdb/fenec-archive-sync
+#   install -m 0600 rclone.conf /etc/fenecdb/rclone.conf     # the remote's keys
+#   install -m 0644 ../env/archive-sync.env /etc/fenecdb/archive-sync.env
+#   install -m 0644 fenec-archive-sync@.service fenec-archive-sync@.timer \
+#       /etc/systemd/system/
+#   setfacl -m u:fenec-sync:rwx /var/lib/prometheus/node-exporter   # the textfile collector
+#   systemctl enable --now fenec-archive-sync@eu-a.timer
+#
+# Give rclone a key that may write and not delete, on a bucket that keeps
+# what is written over (versioning, or Object Lock): RUNBOOK, "Archives and
+# restores".
+
+[Unit]
+Description=fenecdb archive of node %i to the bucket (rclone)
+Documentation=https://rclone.org/docs/ file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# A user of its own, in the archiver's group to read its files: neither it
+# nor anything else of the machine's reads the archiver's replication token,
+# which is in the archiver's environment and not in this unit's.
+User=fenec-sync
+Group=fenec-sync
+SupplementaryGroups=fenec-archive
+# The remote's name, no secret; the remote's keys are a credential this run
+# alone reads.
+EnvironmentFile=/etc/fenecdb/archive-sync.env
+LoadCredential=rclone.conf:/etc/fenecdb/rclone.conf
+ExecStart=/usr/local/libexec/fenecdb/fenec-archive-sync %i
+# Which archive it last copied from (copied-from): the archive directory's
+# filesystem and inode, so a disk replaced or the directory made again is a
+# new archive, whatever disk this note is on.
+StateDirectory=fenecdb/sync/%i
+CacheDirectory=fenecdb-rclone
+# Reads the archive, writes nothing of it.
+ReadOnlyPaths=/var/lib/fenecdb/archive/%i
+ReadWritePaths=-/var/lib/prometheus/node-exporter
+TimeoutStartSec=1h
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0077
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM

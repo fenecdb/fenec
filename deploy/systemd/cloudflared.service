@@ -1,0 +1,67 @@
+# Cloudflare Tunnel from this router's machine to Cloudflare's edge: the
+# global entry Worker reaches the router at an HTTPS hostname of the
+# tunnel's (integrations/cloudflare/entry's REGIONS), and the router needs
+# no public address, port or certificate -- fenecdb speaks no TLS, and a
+# Worker fetches no bare IP address. One on each router's machine, the
+# standby's too, each tunnel its own hostname.
+#
+# The tunnel is made on an operator's machine, not here: `tunnel login`
+# leaves cert.pem, the account's certificate that makes and deletes every
+# tunnel, in the home it ran in. Only the one tunnel's credentials come over:
+#
+#   (operator)  cloudflared tunnel login && cloudflared tunnel create router-1-eu
+#   (operator)  cloudflared tunnel route dns router-1-eu router-1.eu.example.com
+#   (operator)  scp ~/.cloudflared/<tunnel-id>.json router-1:/tmp/tunnel.json
+#   (router)    install -m 0600 /tmp/tunnel.json /etc/cloudflared/tunnel.json && rm /tmp/tunnel.json
+#   (router)    install -m 0644 ../cloudflared/config.yml /etc/cloudflared/config.yml
+#   (router)    systemctl enable --now cloudflared
+#
+# The hostname is public: put a Cloudflare Access application with a
+# service token in front of it, so only the entry Worker reaches it
+# (RUNBOOK, "The network"), and the config's path rules besides.
+#
+# cloudflared's own `service install` writes a unit with the tunnel's token
+# on its command line, which `ps` shows every user; here the credentials are
+# a file handed to this service alone. For a tunnel managed in the
+# dashboard, keep the token in an EnvironmentFile as TUNNEL_TOKEN (0600,
+# root's) and run `tunnel run` with neither --config nor --credentials-file.
+
+[Unit]
+Description=Cloudflare Tunnel to the fenecdb router
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/ file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# cloudflared says it is up once a connection to the edge is made.
+Type=notify
+TimeoutStartSec=0
+DynamicUser=yes
+LoadCredential=tunnel.json:/etc/cloudflared/tunnel.json
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --config /etc/cloudflared/config.yml \
+    run --credentials-file %d/tunnel.json
+Restart=on-failure
+RestartSec=5s
+LimitCORE=0
+
+# DynamicUser implies ProtectSystem=strict, ProtectHome, PrivateTmp and the
+# rest of a process that keeps nothing on disk.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

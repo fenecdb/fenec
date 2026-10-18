@@ -1,0 +1,82 @@
+#!/bin/sh
+# fenec-archive-sync <node>: a node's archive copied to the bucket, run by
+# fenec-archive-sync@<node>.service (deploy/systemd/), installed as
+# /usr/local/libexec/fenecdb/fenec-archive-sync. From the unit it reads
+# FENEC_ARCHIVE_REMOTE (archive-sync.env), and systemd's
+# CREDENTIALS_DIRECTORY (rclone.conf), STATE_DIRECTORY and CACHE_DIRECTORY.
+#
+# Three steps:
+#
+# 1. The first copy from an archive -- this disk's, told by its directory's
+#    filesystem and inode -- copies only where the bucket holds no file of
+#    the node's archive that the disk does not. A machine rebuilt, or the
+#    archive's disk replaced, starts a new archive at once, and the
+#    timer's first run would write its `history`, `began` and `presence`
+#    over the bucket's before anyone had looked; refused, the run fails,
+#    FenecArchiveSyncStale fires, and the bucket is as it was. The bucket
+#    copied back first (RUNBOOK, "The archiver's disk replaced") holds
+#    nothing the disk lacks, and passes.
+# 2. `rclone copy`, never `sync`: nothing is deleted from the bucket, so
+#    what --keep lets go of stays there until the bucket's lifecycle rule
+#    expires it. --local-no-check-updated, since a segment is appended to
+#    for as long as its tenant writes: rclone refuses by default a file
+#    that grows as it reads it, and a busy tenant's newest segment never
+#    reached the bucket. Copied as it stood, a segment cut short is what a
+#    crash leaves, read by a restore to its last whole record, and the next
+#    run copies it again.
+# 3. The success written for node_exporter's textfile collector
+#    (FenecArchiveSyncStale), by rename so it never reads half a file, and
+#    readable by node_exporter's own user: under the unit's UMask it was
+#    0600, node_exporter read nothing, and an absent series fires no alert.
+
+set -eu
+
+node=${1:?usage: fenec-archive-sync <node>}
+src=/var/lib/fenecdb/archive/$node
+dst=$FENEC_ARCHIVE_REMOTE/$node
+textfile=${FENEC_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}
+rc() { rclone --config "$CREDENTIALS_DIRECTORY/rclone.conf" --cache-dir "$CACHE_DIRECTORY" "$@"; }
+
+here="$(stat -f -c %i "$src") $(stat -c %i "$src")"
+mark=$STATE_DIRECTORY/copied-from
+if [ "$(cat "$mark" 2>/dev/null || true)" != "$here" ]; then
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    # Exit 3 is a remote with no such directory: nothing there yet.
+    set +e
+    rc lsf -R --fast-list --files-only "$dst" > "$tmp/bucket"
+    st=$?
+    set -e
+    case $st in
+        0) ;;
+        3) : > "$tmp/bucket" ;;
+        *) echo "fenec-archive-sync: could not list $dst (rclone exit $st)" >&2; exit "$st" ;;
+    esac
+    (cd "$src" && find . -type f | sed 's|^\./||') > "$tmp/here"
+    sort -o "$tmp/bucket" "$tmp/bucket"
+    sort -o "$tmp/here" "$tmp/here"
+    comm -23 "$tmp/bucket" "$tmp/here" > "$tmp/missing"
+    if [ -s "$tmp/missing" ]; then
+        echo "fenec-archive-sync: refusing to copy $src: the bucket holds $(wc -l < "$tmp/missing") files of node $node's archive that this disk does not, $(head -3 "$tmp/missing" | tr '\n' ' ')among them." >&2
+        echo "fenec-archive-sync: copy the bucket back first (RUNBOOK, \"The archiver's disk replaced\"), or, to copy over it after all, write \"$here\" into $mark." >&2
+        exit 1
+    fi
+    echo "$here" > "$mark"
+fi
+
+# --fast-list: the bucket listed a thousand names a request, rather than a
+# request a directory -- a tenant a run, whether it wrote or not.
+rc copy --fast-list --local-no-check-updated "$src" "$dst"
+
+f=$textfile/fenec-archive-sync-$node.prom
+if [ -d "$textfile" ] && [ -w "$textfile" ]; then
+    {
+        echo "# HELP fenec_archive_sync_last_success_timestamp_seconds When a copy of the node's archive to the bucket last succeeded."
+        echo "# TYPE fenec_archive_sync_last_success_timestamp_seconds gauge"
+        echo "fenec_archive_sync_last_success_timestamp_seconds{node=\"$node\"} $(date +%s)"
+    } > "$f.tmp"
+    chmod 0644 "$f.tmp"
+    mv "$f.tmp" "$f"
+else
+    echo "fenec-archive-sync: $textfile is not writable: no success written, and FenecArchiveSyncStale cannot see this one" >&2
+fi

@@ -772,7 +772,8 @@ fn the_entrys_name_never_reaches_a_node() {
     // A request, a held one and a stream, through a router that believes
     // the entry and one that reads none of it: the node is sent the
     // router's own name for the client -- d where the router believed the
-    // entry, 127.0.0.1 where it did not -- and never the entry's.
+    // entry, 127.0.0.1 where it did not -- and never the entry's, nor the
+    // Cloudflare Access service token the entry admits itself with.
     let requests: [(&str, &str, &str); 3] = [
         ("POST", "/t/acme/query", ""),
         ("POST", "/t/acme/query", "Fenec-Wait: 50\r\n"),
@@ -785,7 +786,11 @@ fn the_entrys_name_never_reaches_a_node() {
                 router,
                 method,
                 target,
-                &format!("{DATA}{name}{extra}"),
+                &format!(
+                    "{DATA}{name}{extra}CF-Access-Client-Id: id.access\r\n\
+                     CF-Access-Client-Secret: access-secret\r\n\
+                     Cf-Access-Jwt-Assertion: eyJ.jwt.sig\r\n"
+                ),
                 body,
             );
             assert_eq!(status, 200, "{out}");
@@ -793,6 +798,12 @@ fn the_entrys_name_never_reaches_a_node() {
             assert!(
                 header(&head, "fenec-client").is_empty(),
                 "the entry's name reached the node: {head}"
+            );
+            assert!(
+                header(&head, "cf-access-client-id").is_empty()
+                    && header(&head, "cf-access-client-secret").is_empty()
+                    && header(&head, "cf-access-jwt-assertion").is_empty(),
+                "the entry's Access token reached the node: {head}"
             );
             let routed = header(&head, "fenec-router");
             assert_eq!(routed.len(), 1, "{head}");

@@ -1,0 +1,408 @@
+# promtool's tests of fenecdb.rules.yml: the rules whose expression could
+# be quietly wrong, each over series shaped as the binaries export them.
+# `make deploy-check` runs them (promtool test rules, in Docker).
+rule_files:
+  - fenecdb.rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  # A node failed over: on the router that keeps its directory.
+  - interval: 15s
+    input_series:
+      - series: 'fenec_router_node_failed_over{instance="r1:8090",node="eu-a",region="eu"}'
+        values: '0 0 1 1 1'
+      - series: 'fenec_router_node_failed_over{instance="r1:8090",node="eu-b",region="eu"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: FenecNodeFailedOver
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "r1:8090", node: eu-a, region: eu}
+            exp_annotations:
+              summary: "Node eu-a (eu) was failed over and has not answered since"
+              runbook: deploy/RUNBOOK.md#a-node-lost
+
+  # A region of two nodes after one was lost: every tenant on the other,
+  # which holds no replica -- its count absent, not 0 -- and the standby
+  # router's copy of the same directory alerting nothing.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-b",region="eu"}'
+        values: '6x20'
+      - series: 'fenec_router_following{instance="r1:8090"}'
+        values: '0x20'
+      - series: 'fenec_router_tenants{instance="r2:8090",node="eu-b",region="eu"}'
+        values: '6x20'
+      - series: 'fenec_router_following{instance="r2:8090"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: FenecTenantsWithoutReplica
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090"}
+            exp_annotations:
+              summary: "6 tenants of r1:8090 have no replica"
+              runbook: deploy/RUNBOOK.md#a-node-back
+
+  # Every tenant replicated: nothing.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-a",region="eu"}'
+        values: '3x20'
+      - series: 'fenec_router_tenants{instance="r1:8090",node="eu-b",region="eu"}'
+        values: '3x20'
+      - series: 'fenec_router_replicas{instance="r1:8090",node="eu-a",region="eu"}'
+        values: '3x20'
+      - series: 'fenec_router_replicas{instance="r1:8090",node="eu-b",region="eu"}'
+        values: '3x20'
+      - series: 'fenec_router_following{instance="r1:8090"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: FenecTenantsWithoutReplica
+        exp_alerts: []
+
+  # No archiver connected: a count of 0, which still alerts.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_node_streams{instance="n1:8081"}'
+        values: '1 1 0x15'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FenecArchiverDisconnected
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "n1:8081"}
+            exp_annotations:
+              summary: "No archiver follows n1:8081: its writes reach no archive"
+              runbook: deploy/RUNBOOK.md#archives-and-restores
+
+  # The entry's marks refused, by outcome; named ones alert nothing.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_entry_clients_total{instance="r1:8090",outcome="named"}'
+        values: '0+600x20'
+      - series: 'fenec_router_entry_clients_total{instance="r1:8090",outcome="bad_mark"}'
+        values: '0+60x20'
+      - series: 'fenec_router_entry_clients_total{instance="r1:8090",outcome="stale"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: FenecEntryMarkRefused
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090", outcome: bad_mark}
+            exp_annotations:
+              summary: "r1:8090 does not believe the entry's client marks (bad_mark)"
+              runbook: deploy/RUNBOOK.md#the-entry-token
+
+  # 5xx past 1% of the tenants' requests.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_requests_total{instance="r1:8090",route="tenant",code="2xx"}'
+        values: '0+1000x20'
+      - series: 'fenec_router_requests_total{instance="r1:8090",route="tenant",code="5xx"}'
+        values: '0+50x20'
+      - series: 'fenec_router_requests_total{instance="r1:8090",route="shard",code="5xx"}'
+        values: '0+5000x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: FenecRouter5xx
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090"}
+            exp_annotations:
+              summary: "r1:8090 answers more than 1% of tenants' requests 5xx"
+              runbook: deploy/RUNBOOK.md#errors-and-refusals
+
+  # A directory no standby follows: a region's primary router's, not a
+  # standby's -- and never the global router's, whose count the regions'
+  # routers keep up (FenecStandbyRouterDown is its rule).
+  - interval: 1m
+    input_series:
+      - series: 'fenec_replicas{job="fenecdb-router",instance="r1:8090"}'
+        values: '1 0x15'
+      - series: 'fenec_router_following{job="fenecdb-router",instance="r1:8090"}'
+        values: '0x16'
+      - series: 'fenec_replicas{job="fenecdb-router",instance="r2:8090"}'
+        values: '0x16'
+      - series: 'fenec_router_following{job="fenecdb-router",instance="r2:8090"}'
+        values: '1x16'
+      - series: 'fenec_replicas{job="fenecdb-global",instance="g1:8090"}'
+        values: '0x16'
+      - series: 'fenec_router_following{job="fenecdb-global",instance="g1:8090"}'
+        values: '0x16'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FenecDirectoryUnreplicated
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090", job: fenecdb-router}
+            exp_annotations:
+              summary: "r1:8090 keeps a directory no standby follows"
+              runbook: deploy/RUNBOOK.md#a-router-lost
+
+  # A node that stops answering exports nothing: told by Prometheus's `up`.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="fenecdb-node",instance="n1:8081"}'
+        values: '1 1 0x10'
+      - series: 'up{job="fenecdb-node",instance="n2:8081"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: FenecNodeDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: FenecNodeDown
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "n1:8081", job: fenecdb-node}
+            exp_annotations:
+              summary: "Node n1:8081 does not answer: its router fails its tenants over as its lease lapses, and its replicas are gone"
+              runbook: deploy/RUNBOOK.md#a-node-lost
+
+  # Routers down, told apart by the role their last scrape gave: eu's
+  # primary (critical), its standby and the global router's standby
+  # (warning, after five minutes), and one never seen up.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="fenecdb-router",instance="r1:8090"}'
+        values: '1 1 0x40'
+      - series: 'fenec_router_following{job="fenecdb-router",instance="r1:8090"}'
+        values: '0 0 _x40'
+      - series: 'up{job="fenecdb-router",instance="r2:8090"}'
+        values: '1 1 0x40'
+      - series: 'fenec_router_following{job="fenecdb-router",instance="r2:8090"}'
+        values: '1 1 _x40'
+      - series: 'up{job="fenecdb-global",instance="g2:8090"}'
+        values: '1 1 0x40'
+      - series: 'fenec_router_following{job="fenecdb-global",instance="g2:8090"}'
+        values: '1 1 _x40'
+      - series: 'up{job="fenecdb-router",instance="r9:8090"}'
+        values: '0x42'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: FenecPrimaryRouterDown
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "r1:8090", job: fenecdb-router}
+            exp_annotations:
+              summary: "Router r1:8090 keeps its directory and does not answer: promote its standby"
+              runbook: deploy/RUNBOOK.md#a-router-lost
+      - eval_time: 2m
+        alertname: FenecStandbyRouterDown
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: FenecStandbyRouterDown
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r2:8090", job: fenecdb-router}
+            exp_annotations:
+              summary: "Standby router r2:8090 does not answer: its directory has no standby to promote"
+              runbook: deploy/RUNBOOK.md#a-router-lost
+          - exp_labels: {severity: warning, instance: "g2:8090", job: fenecdb-global}
+            exp_annotations:
+              summary: "Standby router g2:8090 does not answer: its directory has no standby to promote"
+              runbook: deploy/RUNBOOK.md#a-router-lost
+      - eval_time: 2m
+        alertname: FenecRouterDown
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "r9:8090", job: fenecdb-router}
+            exp_annotations:
+              summary: "Router r9:8090 does not answer, and has not in the hour"
+              runbook: deploy/RUNBOOK.md#a-router-lost
+
+  # A job Prometheus scrapes nothing of: the nodes' and the archivers'
+  # node_exporter here.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="fenecdb-router",instance="r1:8090"}'
+        values: '1x12'
+      - series: 'up{job="fenecdb-global",instance="g1:8090"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: FenecScrapeMissing
+        exp_alerts:
+          - exp_labels: {severity: warning, job: fenecdb-node}
+            exp_annotations:
+              summary: "Prometheus scrapes no target of job fenecdb-node: every alert over it is blind"
+              runbook: deploy/RUNBOOK.md#alerts
+          - exp_labels: {severity: warning, job: node-exporter}
+            exp_annotations:
+              summary: "Prometheus scrapes no target of job node-exporter: every alert over it is blind"
+              runbook: deploy/RUNBOOK.md#alerts
+
+  # Connections near a ceiling, a node's and a router's.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_connections{job="fenecdb-node",instance="n1:8081"}'
+        values: '3500x10'
+      - series: 'fenec_connections{job="fenecdb-node",instance="n2:8081"}'
+        values: '100x10'
+      - series: 'fenec_router_connections{job="fenecdb-router",instance="r1:8090"}'
+        values: '900x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: FenecConnectionsNearCeiling
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "n1:8081", job: fenecdb-node}
+            exp_annotations:
+              summary: "n1:8081 holds 3500 connections, near its --max-connections"
+              runbook: deploy/RUNBOOK.md#adding-a-node
+          - exp_labels: {severity: warning, instance: "r1:8090", job: fenecdb-router}
+            exp_annotations:
+              summary: "r1:8090 holds 900 connections, near its --max-connections"
+              runbook: deploy/RUNBOOK.md#adding-a-node
+
+  # A failover that left a tenant on its node: the review's sequence.
+  # eu-a's failover fails at 2m, one tenant left on it, and eu-a answers
+  # again at 20m; eu-c is failed over at 30m with a tenant left, failed over
+  # by hand at 40m (the runbook's fix) and stays failed over; eu-b is failed
+  # over whole at 60m, its tenants promoted within two minutes. Paged for
+  # eu-a and eu-c alone, each until its tenants were writable -- the count
+  # of failed failovers, which stays 1, paged again at 65m and after the fix.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_router_auto_failovers_total{job="fenecdb-router",instance="r1:8090",outcome="failed"}'
+        values: '0 0 1x29 2x69'
+      - series: 'fenec_router_auto_failovers_total{job="fenecdb-router",instance="r1:8090",outcome="done"}'
+        values: '0x59 1x41'
+      - series: 'fenec_router_tenants{job="fenecdb-router",instance="r1:8090",node="eu-a",region="eu"}'
+        values: '3 3 1x98'
+      - series: 'fenec_router_node_failed_over{job="fenecdb-router",instance="r1:8090",node="eu-a",region="eu"}'
+        values: '0 0 1x17 0x80'
+      - series: 'fenec_router_tenants{job="fenecdb-router",instance="r1:8090",node="eu-c",region="eu"}'
+        values: '1x39 0x60'
+      - series: 'fenec_router_node_failed_over{job="fenecdb-router",instance="r1:8090",node="eu-c",region="eu"}'
+        values: '0x29 1x70'
+      - series: 'fenec_router_tenants{job="fenecdb-router",instance="r1:8090",node="eu-b",region="eu"}'
+        values: '2x61 0x38'
+      - series: 'fenec_router_node_failed_over{job="fenecdb-router",instance="r1:8090",node="eu-b",region="eu"}'
+        values: '0x59 1x40'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: FenecAutoFailoverIncomplete
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: FenecAutoFailoverIncomplete
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "r1:8090", job: fenecdb-router, node: eu-a, region: eu}
+            exp_annotations:
+              summary: "Node eu-a (eu) was failed over with tenants still placed on it (1): they take no writes"
+              runbook: deploy/RUNBOOK.md#a-node-lost
+      - eval_time: 25m
+        alertname: FenecAutoFailoverIncomplete
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: FenecAutoFailoverIncomplete
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "r1:8090", job: fenecdb-router, node: eu-c, region: eu}
+            exp_annotations:
+              summary: "Node eu-c (eu) was failed over with tenants still placed on it (1): they take no writes"
+              runbook: deploy/RUNBOOK.md#a-node-lost
+      - eval_time: 45m
+        alertname: FenecAutoFailoverIncomplete
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: FenecAutoFailoverIncomplete
+        exp_alerts: []
+
+  # A late renewal seen at one scrape is held five minutes (eu-a); the
+  # scrapes before a failover marks its node (eu-b), and the five minutes
+  # after a failed-over node answers again (eu-c), are not this rule's.
+  - interval: 15s
+    input_series:
+      - series: 'fenec_router_lease_age_seconds{job="fenecdb-router",instance="r1:8090",node="eu-a",region="eu"}'
+        values: '0.5 1 4 1 0.5 1x40'
+      - series: 'fenec_router_node_failed_over{job="fenecdb-router",instance="r1:8090",node="eu-a",region="eu"}'
+        values: '0x45'
+      - series: 'fenec_router_lease_age_seconds{job="fenecdb-router",instance="r1:8090",node="eu-b",region="eu"}'
+        values: '1 1 4 6 21+15x41'
+      - series: 'fenec_router_node_failed_over{job="fenecdb-router",instance="r1:8090",node="eu-b",region="eu"}'
+        values: '0 0 0 1x42'
+      - series: 'fenec_router_lease_age_seconds{job="fenecdb-router",instance="r1:8090",node="eu-c",region="eu"}'
+        values: '1 10+15x8 1x35'
+      - series: 'fenec_router_node_failed_over{job="fenecdb-router",instance="r1:8090",node="eu-c",region="eu"}'
+        values: '0 1x8 0x35'
+    alert_rule_test:
+      # eu-b's last scrape before its failover marks it, and eu-a's late one.
+      - eval_time: 30s
+        alertname: FenecLeaseRenewalLate
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: FenecLeaseRenewalLate
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: FenecLeaseRenewalLate
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "r1:8090", job: fenecdb-router, node: eu-a, region: eu}
+            exp_annotations:
+              summary: "Node eu-a went 4 s without a lease in the last five minutes"
+              runbook: deploy/RUNBOOK.md#a-lease-late
+      - eval_time: 6m
+        alertname: FenecLeaseRenewalLate
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: FenecLeaseRenewalLate
+        exp_alerts: []
+
+  # The bucket sync: a run's success written every minute is fresh; one
+  # last written at the start is stale past half an hour.
+  - interval: 1m
+    input_series:
+      - series: 'fenec_archive_sync_last_success_timestamp_seconds{job="node-exporter",instance="a1:9100",node="eu-a"}'
+        values: '0x40'
+      - series: 'fenec_archive_sync_last_success_timestamp_seconds{job="node-exporter",instance="a1:9100",node="eu-b"}'
+        values: '0+60x40'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: FenecArchiveSyncStale
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: FenecArchiveSyncStale
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "a1:9100", job: node-exporter, node: eu-a}
+            exp_annotations:
+              summary: "Node eu-a's archive has not reached the bucket in 1860 s"
+              runbook: deploy/RUNBOOK.md#archives-and-restores
+
+  # node_exporter that cannot read a file of its collector says so: a1 for a
+  # quarter of an hour, a2 never.
+  - interval: 1m
+    input_series:
+      - series: 'node_textfile_scrape_error{job="node-exporter",instance="a1:9100"}'
+        values: '0 1x20'
+      - series: 'node_textfile_scrape_error{job="node-exporter",instance="a2:9100"}'
+        values: '0x21'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FenecTextfileUnread
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: FenecTextfileUnread
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "a1:9100", job: node-exporter}
+            exp_annotations:
+              summary: "node_exporter on a1:9100 cannot read a file of its textfile collector, the archive sync's success perhaps"
+              runbook: deploy/RUNBOOK.md#archives-and-restores
+
+  # No sync's success read anywhere for an hour; and none said while one is.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter",instance="a1:9100"}'
+        values: '1x70'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: FenecArchiveSyncUnreported
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: FenecArchiveSyncUnreported
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "No archive sync has reported a success to node_exporter in an hour"
+              runbook: deploy/RUNBOOK.md#archives-and-restores
+  - interval: 1m
+    input_series:
+      - series: 'fenec_archive_sync_last_success_timestamp_seconds{job="node-exporter",instance="a1:9100",node="eu-a"}'
+        values: '0+60x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: FenecArchiveSyncUnreported
+        exp_alerts: []

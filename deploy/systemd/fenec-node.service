@@ -1,0 +1,112 @@
+# A tenant node: fenec-server serving a directory of tenant files, one
+# machine of a region's zone (deploy/RUNBOOK.md). Its addresses and flags are
+# in /etc/fenecdb/node.env, its tokens too: the environment file is read by
+# systemd as root before the process starts, so it stays 0600 root's, and
+# no token is on the command line, which `ps` shows every user.
+#
+#   install -m 0644 fenec-node.service /etc/systemd/system/
+#   install -m 0600 ../env/node.env /etc/fenecdb/node.env   # then edit it
+#   systemctl enable --now fenec-node
+#
+# Changing a flag is a restart: `systemctl restart fenec-node`. Never
+# `reload`: fenec-server takes SIGHUP for a shutdown, as SIGTERM.
+
+[Unit]
+Description=fenecdb tenant node (fenec-server --dir)
+Documentation=https://fenecdb.com/docs/sharding file:/usr/local/share/doc/fenecdb/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+# Five failed starts in two minutes -- a flag it refuses, a disk gone -- and
+# systemd stops trying: a node failing at once would otherwise restart for
+# good, each start taking and dropping its lease.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=fenec-node
+Group=fenec-node
+EnvironmentFile=/etc/fenecdb/node.env
+# --sync always: a write is answered once it is on this disk and written
+# into the tenant's replica's stream. That survives this process killed --
+# the kernel delivers what the socket holds -- but not the machine lost with
+# bytes still in its send buffer, and a stream a second behind (lagging) is
+# not waited for at all. make drill cuts the node's network before it kills
+# it, the machine-loss case, and has lost no acknowledged write; see
+# deploy/RUNBOOK.md, "A node lost", for what is and is not promised.
+# --lease: it writes a tenant only while its region's router has leased it
+# that tenant, which is what lets the router fail it over by itself.
+# --max-connections: every connection is a thread and a descriptor, and
+# besides the clients' it counts one for each tenant whose replica follows
+# from this node (a follower connects per tenant) and one for each
+# archiver: past the ceiling a new tenant's follower cannot connect, and its
+# writes are acknowledged with no replica. Size it at the primaries a node
+# may hold, plus its clients, streams and held writes; LimitNOFILE and
+# TasksMax below follow it.
+ExecStart=/usr/local/bin/fenec-server \
+    --dir ${FENEC_DIR} \
+    --http ${FENEC_LISTEN} \
+    --sync always \
+    --lease \
+    --max-connections 4000 \
+    --audit /var/log/fenecdb/node/audit.log \
+    $FENEC_NODE_FLAGS
+Restart=on-failure
+RestartSec=2s
+
+# SIGTERM: held writes answered (2 s at most), every open tenant synced and
+# the ones with a vector graph checkpointed, which is what takes the time --
+# a few seconds a gigabyte of graph. A kill past the timeout loses no write
+# under --sync always, only the checkpoint: the graph is linked again on
+# the next open. Raise it for a node of many large graphs.
+KillSignal=SIGTERM
+TimeoutStopSec=120s
+
+# Descriptors: a connection each (--max-connections 4000), and each open
+# tenant's file, its sync log and its lock -- 4000 + 3 x the open tenants,
+# with room. Raise with them.
+LimitNOFILE=65536
+# Threads: a connection each, and a follower for each replica this node
+# holds, under systemd's DefaultTasksMax (15% of pid_max) unless set.
+TasksMax=16384
+# A core dump would hold the tokens and the tenants' rows.
+LimitCORE=0
+
+# The data and nothing else is writable; the files are the node's alone.
+StateDirectory=fenecdb/node
+StateDirectoryMode=0700
+# The audit log, 0600 under the UMask: a log shipper reads it through an
+# ACL (RUNBOOK, "Logs"), and rotates it by copytruncate, since SIGHUP shuts
+# the server down.
+LogsDirectory=fenecdb/node
+ReadWritePaths=/var/lib/fenecdb/node
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

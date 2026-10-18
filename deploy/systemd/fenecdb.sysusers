@@ -1,0 +1,17 @@
+# /etc/sysusers.d/fenecdb.conf: a user for each role, made by
+# `systemd-sysusers` (or at the next boot). A user each rather than one: a
+# process reads the environment of every other process of its own user
+# (/proc/<pid>/environ, which ProtectProc= hides only from other users), so
+# one user for all would let rclone read the archiver's replication token,
+# or a node the routers' tokens, where two roles share a machine. Users of
+# their own rather than DynamicUser: the data outlive the service, and a disk
+# mounted at /var/lib/fenecdb keeps one owner across reinstalls. None has a
+# shell or a login.
+#Type Name          ID  GECOS              Home                      Shell
+u     fenec-node    -   "fenecdb node"     /var/lib/fenecdb/node     /usr/sbin/nologin
+u     fenec-router  -   "fenecdb router"   /var/lib/fenecdb          /usr/sbin/nologin
+u     fenec-archive -   "fenecdb archive"  /var/lib/fenecdb/archive  /usr/sbin/nologin
+u     fenec-sync    -   "fenecdb sync"     /var/lib/fenecdb          /usr/sbin/nologin
+# The bucket sync reads the archives, group-readable, through the
+# archiver's group (fenec-archive-sync@.service's SupplementaryGroups=).
+m     fenec-sync    fenec-archive
