@@ -457,14 +457,24 @@ impl Router {
         // The read replicas this router keeps follow their tenants'
         // primaries wherever those go ([`readers`]).
         self.start_following()?;
+        // The directory read once, under one guard let go of before the
+        // line is written. Read twice in the line's arguments, both guards
+        // lived to its end: a writer queued between the two -- the leasing
+        // thread's first grant recording its lease, which starts beside
+        // this -- held the second read behind it and itself behind the
+        // first, for good, and the router neither served nor leased (a
+        // merge queue's CI run after #343 hung on it for its hour).
+        let (nodes, tenants) = {
+            let dir = self.read_dir();
+            (dir.nodes().len(), dir.tenants())
+        };
         fenec_http::log!(
-            "fenec-shard {} listening on: http://{}  [{} node(s), {} tenant(s)]",
+            "fenec-shard {} listening on: http://{}  [{nodes} node(s), {} tenant(s)]",
             fenec_core::VERSION,
             listener.local_addr()?,
-            self.read_dir().nodes().len(),
-            self.read_dir().tenants().len(),
+            tenants.len(),
         );
-        for (t, p) in self.read_dir().tenants() {
+        for (t, p) in tenants {
             if p.state == State::Moving {
                 fenec_http::log!(
                     "tenant `{t}` was being moved when the router stopped; it is served \
@@ -1325,12 +1335,26 @@ impl Router {
         fenec_http::cors::apply(resp, self.cfg.cors.as_deref()).header(region::SHARD_HEADER, "1")
     }
 
-    fn read_dir(&self) -> std::sync::RwLockReadGuard<'_, Directory> {
-        self.dir.read().unwrap_or_else(|e| e.into_inner())
+    /// The directory, read. Taken once a thread at most: in a debug build
+    /// a thread taking it again while it holds it panics ([`once`]).
+    fn read_dir(&self) -> DirRead<'_> {
+        #[cfg(debug_assertions)]
+        let taking = once::Taking::of(&self.dir);
+        let guard = self.dir.read().unwrap_or_else(|e| e.into_inner());
+        #[cfg(debug_assertions)]
+        let guard = taking.holds(guard);
+        guard
     }
 
-    fn write_dir(&self) -> std::sync::RwLockWriteGuard<'_, Directory> {
-        self.dir.write().unwrap_or_else(|e| e.into_inner())
+    /// The directory, to write. Taken once a thread at most, as
+    /// [`Self::read_dir`].
+    fn write_dir(&self) -> DirWrite<'_> {
+        #[cfg(debug_assertions)]
+        let taking = once::Taking::of(&self.dir);
+        let guard = self.dir.write().unwrap_or_else(|e| e.into_inner());
+        #[cfg(debug_assertions)]
+        let guard = taking.holds(guard);
+        guard
     }
 
     fn connection(&self, stream: TcpStream) {
@@ -4126,6 +4150,114 @@ fn internal(e: Error) -> Fail {
     Fail(500, format!("directory: {}", message(&e)))
 }
 
+/// The router's directory as [`Router::read_dir`] hands it out: the lock's
+/// guard, which a debug build notes as this thread's ([`once`]).
+#[cfg(not(debug_assertions))]
+type DirRead<'a> = std::sync::RwLockReadGuard<'a, Directory>;
+#[cfg(debug_assertions)]
+type DirRead<'a> = once::Held<std::sync::RwLockReadGuard<'a, Directory>>;
+
+/// The router's directory as [`Router::write_dir`] hands it out.
+#[cfg(not(debug_assertions))]
+type DirWrite<'a> = std::sync::RwLockWriteGuard<'a, Directory>;
+#[cfg(debug_assertions)]
+type DirWrite<'a> = once::Held<std::sync::RwLockWriteGuard<'a, Directory>>;
+
+/// The directory's lock taken once a thread at most, held to in a debug
+/// build -- the tests' -- and left out of a release build, which takes the
+/// lock as it always did.
+///
+/// std's `RwLock` holds a new reader behind a writer that waits, on Linux
+/// and macOS alike, so a thread that reads the directory while it holds it
+/// waits for good once a writer comes between its two reads: the writer
+/// waits for the first read to end, the second for the writer. Most of
+/// the time no writer comes between, and the second read goes through:
+/// `serve_on` read it twice in one line's arguments, and a router started
+/// with automatic failover hung at its start once in a while, its leasing
+/// thread's first grant writing the lease record between the two (a merge
+/// queue's CI run after #343, an hour). Here a second take panics at once,
+/// whether a writer came between or not, so a test meeting the path fails
+/// every time rather than hang once in hundreds of runs.
+#[cfg(debug_assertions)]
+mod once {
+    use std::cell::RefCell;
+    use std::ops::{Deref, DerefMut};
+
+    thread_local! {
+        /// The directory locks this thread holds, by address.
+        static HELD: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// A take of the lock at `lock`, asked before the lock is: taken again
+    /// by a thread holding it, the take would wait for good.
+    pub(super) struct Taking(usize);
+
+    impl Taking {
+        pub(super) fn of<T>(lock: &std::sync::RwLock<T>) -> Taking {
+            let at = lock as *const std::sync::RwLock<T> as usize;
+            HELD.with(|held| {
+                let mut held = held.borrow_mut();
+                assert!(
+                    !held.contains(&at),
+                    "the router's directory taken by a thread that holds it: with a writer \
+                     waiting between the two takes, std's RwLock holds this one behind the \
+                     writer and the writer behind the first, for good"
+                );
+                held.push(at);
+            });
+            Taking(at)
+        }
+
+        pub(super) fn holds<G>(self, guard: G) -> Held<G> {
+            let at = self.0;
+            std::mem::forget(self);
+            Held { guard, at }
+        }
+    }
+
+    /// The take let go of before the lock was held: a panic in between.
+    impl Drop for Taking {
+        fn drop(&mut self) {
+            let_go(self.0);
+        }
+    }
+
+    /// The lock's guard, noted as this thread's until it is dropped.
+    pub(super) struct Held<G> {
+        guard: G,
+        at: usize,
+    }
+
+    impl<G: Deref> Deref for Held<G> {
+        type Target = G::Target;
+
+        fn deref(&self) -> &G::Target {
+            &self.guard
+        }
+    }
+
+    impl<G: DerefMut> DerefMut for Held<G> {
+        fn deref_mut(&mut self) -> &mut G::Target {
+            &mut self.guard
+        }
+    }
+
+    impl<G> Drop for Held<G> {
+        fn drop(&mut self) {
+            let_go(self.at);
+        }
+    }
+
+    fn let_go(at: usize) {
+        let _ = HELD.try_with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(i) = held.iter().rposition(|h| *h == at) {
+                held.remove(i);
+            }
+        });
+    }
+}
+
 fn read(d: &RwLock<Directory>) -> std::sync::RwLockReadGuard<'_, Directory> {
     d.read().unwrap_or_else(|e| e.into_inner())
 }
@@ -4148,6 +4280,38 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thread taking the router's directory while it holds it panics in
+    /// a debug build ([`once`]): a read then a write waits for good at
+    /// once, and a read then a read once a writer comes between them.
+    /// Taken one after the other, it is taken as often as asked.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_directory_taken_by_the_thread_holding_it_panics() {
+        let router = Router::new(Directory::in_memory(), Config::default());
+        for _ in 0..3 {
+            drop(router.read_dir());
+            drop(router.write_dir());
+        }
+        for second in [false, true] {
+            let router = Arc::clone(&router);
+            let twice = std::thread::spawn(move || {
+                let _held = router.read_dir();
+                match second {
+                    false => drop(router.read_dir()),
+                    true => drop(router.write_dir()),
+                }
+            });
+            let panic = twice.join().expect_err("the second take went through");
+            let said = match panic.downcast_ref::<&str>() {
+                Some(s) => s.to_string(),
+                None => panic.downcast_ref::<String>().cloned().unwrap_or_default(),
+            };
+            assert!(said.contains("taken by a thread that holds it"), "{said}");
+        }
+        // Let go of, on the threads that panicked too.
+        drop(router.write_dir());
+    }
 
     /// What a read sent to a read replica carries ([`Router::forward_near`]):
     /// the client's headers, less those that are the connection's or the
