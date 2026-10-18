@@ -275,18 +275,57 @@ pub struct Router {
     follow_soon: (Mutex<bool>, std::sync::Condvar),
 }
 
-/// The `left_ms` of a node's answer to a grant: `None` where it holds no
-/// lease, or the answer names none.
-fn left_ms(answer: &[u8]) -> Option<u64> {
-    let at = answer.windows(10).position(|w| w == b"\"left_ms\":")? + 10;
-    let digits = answer[at..]
-        .iter()
-        .take_while(|b| b.is_ascii_digit())
-        .count();
-    std::str::from_utf8(&answer[at..at + digits])
-        .ok()?
-        .parse()
-        .ok()
+/// What a node said of a grant it answered 200 (`fenec_http::admin`'s
+/// `lease`: `took`, `ran`, then the lease as `GET /_admin/lease` describes
+/// it), read as the object it is. Searched for as bytes, `"ran":true` --
+/// ten of them -- was looked for in windows of eleven and never found: no
+/// node ran a lease of this router's as far as it knew, each counted by
+/// the longest lease recorded until the record came down, and a router
+/// restarted at 3 s over a record of 10 s failed a node it had cut off
+/// over 11 s after it led, not 3.3 s after the node's last answer
+/// (`late_grants.rs`'
+/// `a_node_that_ran_the_router_s_lease_is_counted_by_it_not_the_record`).
+/// A node from before names none of `took`, `ran`, `term` and `grant`, and
+/// took it; so does an answer that is no object.
+#[derive(Debug, PartialEq)]
+struct Granted {
+    /// It names a term: a node from before terms does not.
+    termed: bool,
+    /// It names the newest grant it answered: a node from before numbered
+    /// grants does not.
+    numbered: bool,
+    /// It took the grant: `"took": false`, it kept the lease and the list
+    /// it held.
+    took: bool,
+    /// It ran its lease from this router's answer (`"ran": true`).
+    ran: bool,
+    /// The milliseconds its lease has left: `None` where it holds none.
+    left_ms: Option<u64>,
+}
+
+impl Granted {
+    fn of(answer: &[u8]) -> Granted {
+        let fields =
+            fenec_core::json::parse_object(&String::from_utf8_lossy(answer)).unwrap_or_default();
+        let mut said = Granted {
+            termed: false,
+            numbered: false,
+            took: true,
+            ran: false,
+            left_ms: None,
+        };
+        for (k, v) in fields {
+            match (k.as_str(), v) {
+                ("term", _) => said.termed = true,
+                ("grant", _) => said.numbered = true,
+                ("took", Value::Bool(took)) => said.took = took,
+                ("ran", Value::Bool(ran)) => said.ran = ran,
+                ("left_ms", Value::Int(left)) => said.left_ms = u64::try_from(left).ok(),
+                _ => {}
+            }
+        }
+        said
+    }
 }
 
 /// Ends a round's grant to a node however the grant ends, a panic in it
@@ -1030,27 +1069,24 @@ impl Router {
             let (mut left, mut answered_number, mut ran) = (None, false, false);
             let answer =
                 match pool.call(&n.addr, "POST", "/_admin/lease", &n.token, body.as_bytes()) {
-                    // A node from before terms answers without one. Under the
-                    // global directory it is leased as before; a region's
-                    // router, which another router may be promoted over,
-                    // does not count on a fence the node does not have.
-                    Ok((200, b))
-                        if !holder.authority.is_empty()
-                            && !b.windows(7).any(|w| w == b"\"term\":") =>
-                    {
-                        lease::Answer::Unfenced
-                    }
-                    Ok((200, b)) => {
-                        left = left_ms(&b);
-                        answered_number = b.windows(8).any(|w| w == b"\"grant\":");
-                        ran = b.windows(11).any(|w| w == b"\"ran\":true");
-                        // A node from before says nothing, and took it.
-                        const KEPT: &[u8] = b"\"took\":false";
-                        match b.windows(KEPT.len()).any(|w| w == KEPT) {
-                            true => lease::Answer::Kept,
-                            false => lease::Answer::Taken,
+                    Ok((200, b)) => match Granted::of(&b) {
+                        // A node from before terms answers without one. Under
+                        // the global directory it is leased as before; a
+                        // region's router, which another router may be
+                        // promoted over, does not count on a fence the node
+                        // does not have.
+                        Granted { termed: false, .. } if !holder.authority.is_empty() => {
+                            lease::Answer::Unfenced
                         }
-                    }
+                        said => {
+                            (left, answered_number, ran) = (said.left_ms, said.numbered, said.ran);
+                            // A node from before says nothing, and took it.
+                            match said.took {
+                                true => lease::Answer::Taken,
+                                false => lease::Answer::Kept,
+                            }
+                        }
+                    },
                     Ok((412, _)) => lease::Answer::NeedsList,
                     Ok((409, b)) if b.windows(9).any(|w| w == b"\"held_by\"") => {
                         lease::Answer::Superseded
@@ -4291,6 +4327,62 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A grant's answer read as the object it is: `"ran": true` found
+    /// where the node writes it -- searched for as bytes, in windows one
+    /// too long, it never was -- and a lease kept, a node from before terms
+    /// or numbers, spacing the node does not write and an answer that is
+    /// no object each read for what they say.
+    #[test]
+    fn a_grant_s_answer_says_what_the_node_did() {
+        let ran = br#"{"took":true,"ran":true,"epoch":"00ff","primaries":2,"left_ms":2999,"authority":"","term":1,"history":"00000000000000a1","grant":"00000000000000b2"}"#;
+        let all = Granted {
+            termed: true,
+            numbered: true,
+            took: true,
+            ran: true,
+            left_ms: Some(2999),
+        };
+        assert_eq!(Granted::of(ran), all);
+        let spaced = br#"{ "took": true, "ran": true, "left_ms": 2999, "term": 1, "grant": "b2" }"#;
+        assert_eq!(Granted::of(spaced), all);
+        let kept = br#"{"took":false,"ran":false,"epoch":"00ff","primaries":2,"left_ms":9000,"authority":"us","term":2,"history":"00000000000000a1","grant":"00000000000000b2"}"#;
+        assert_eq!(
+            Granted::of(kept),
+            Granted {
+                took: false,
+                ran: false,
+                left_ms: Some(9000),
+                ..all
+            }
+        );
+        // The list alone, its lease lapsed: none left, none run.
+        let list = br#"{"took":true,"ran":false,"epoch":"00ff","primaries":2,"left_ms":0,"authority":"","term":1,"history":"00000000000000a1","grant":"00000000000000b2"}"#;
+        assert_eq!(
+            Granted::of(list),
+            Granted {
+                ran: false,
+                left_ms: Some(0),
+                ..all
+            }
+        );
+        let before = br#"{"epoch":"00ff","primaries":2,"left_ms":3000}"#;
+        let old = Granted {
+            termed: false,
+            numbered: false,
+            took: true,
+            ran: false,
+            left_ms: Some(3000),
+        };
+        assert_eq!(Granted::of(before), old);
+        assert_eq!(
+            Granted::of(b"ok"),
+            Granted {
+                left_ms: None,
+                ..old
+            }
+        );
+    }
 
     /// A thread taking the router's directory while it holds it panics in
     /// a debug build ([`once`]): a read then a write waits for good at

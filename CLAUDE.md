@@ -915,7 +915,15 @@ every start to ride in -- and sent to the standbys before any grant, as a
 move's flip is, `SENT_WAIT` at most); a router counts a node by that record
 (`Leases::inherited`, read as it leads) until the node has run a lease from
 one of its grants (`Held::own`, set by `Leases::ran` on the node's
-`"ran":true`, never by `Kept`, never by a take of the list alone), and
+`"ran":true`, never by `Kept`, never by a take of the list alone -- the
+answer read as the object it is, `Granted`: looked for as bytes,
+`"ran":true` was sought in windows a byte too long and never found, so
+every node was counted by the record until it came down, and a router
+restarted at 3 s over a record of 10 s failed a node it had cut off over
+11 s after it led, not 3.3 s after the node's last answer --
+`late_grants.rs`'
+`a_node_that_ran_the_router_s_lease_is_counted_by_it_not_the_record`;
+#343's tests held only the other side), and
 lowers it to its own once it has led a lease and a tenth of it
 (`Leases::lowerable`): every lease granted before it led has run out, and
 one started after it counts by what may still run. Never lowered, one 20 s
@@ -949,8 +957,13 @@ the global router's leasing to a region's is counted by the region's alone
 (the RUNBOOK says how to lower a lease and move a node). A router from
 before the record writes and reads none (`late_grants.rs`'
 `..._waits_out_a_node_it_never_reaches`, a restart and a standby promoted
-at 1 s after 10 s, each failing with the record ignored or never written,
+at 3 s after 10 s, each failing with the record ignored or never written,
 and `a_router_that_cannot_record_its_lease_grants_no_longer_than_the_record`).
+Those tests' shorter lease is 3 s, as the other lease tests' is: at 1 s,
+once a node that ran it was counted by it, the healthy nodes beside the one
+cut off -- each grant bounded by a third of the lease, 333 ms -- went
+unrenewed past 1.1 s at background QoS and were failed over, the replica
+their failover dropped leaving the cut-off node's tenant nowhere to go.
 Cut off, a node
 stops about a round sooner, its lease run from the grant before the last it
 read: at a lease of a second it stopped 386-406 ms after the cut against
