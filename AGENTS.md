@@ -1919,8 +1919,13 @@ taken then: taken for every request sent with the header, a tenant whose
 live queries' subscriptions filled its quota, 25 of a default node's
 connections, had every read after a write the node held refused 429, each
 run of a live query reading near and every SDK's read-your-writes read
-that reached home, `tests/quotas.rs` failing with the slot taken first),
-held writes (`held`, `Fenec-Wait`'s: a plan sizes how
+that reached home, `tests/quotas.rs` failing with the slot taken first;
+a request without the header looks once as before: `make requests-bench`
+in three ABBA quartets under the bench lock at loads of 3.4-4.9, a row by
+id 0.022 ms p50 in every run either way, eight clients 143.6-147.2k a
+second against main's 143.9-147.4k, a put 0.022-0.023 ms and 124.9-129.2k
+against 0.022-0.023 and 127.5-128.6k, one branch run at a load of 4.7 left
+out), held writes (`held`, `Fenec-Wait`'s: a plan sizes how
 many workers wait apart from how many dashboards stream, and counted
 together forty couriers waiting left a dispatcher's map no stream to open)
 and requests in flight are counters a request takes in `serve_connection`,
