@@ -17,9 +17,11 @@ export { StatementError };
 // read the parameters panel. A statement is never rewritten.
 
 /**
- * The statements of a text: each `;` outside a string or a `--` comment
- * ends one, and a piece holding nothing but blanks and comments is no
+ * The statements of a text: each `;` outside a string or a comment ends
+ * one, and a piece holding nothing but blanks and comments is no
  * statement. Each is `{text, at}`, `at` the offset its text starts at.
+ * Strings and comments as FenecQL's lexer reads them: a string runs over
+ * lines to its quote, and `#` starts a comment as `--` does.
  */
 export function splitStatements(source) {
   const text = String(source);
@@ -36,14 +38,12 @@ export function splitStatements(source) {
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (quote) {
-      // A string ends at its quote, or at the line's end, where the lexer
-      // refuses it: the `;` after is not swallowed into it.
       if (c === '\\') i++;
-      else if (c === quote || c === '\n') quote = null;
+      else if (c === quote) quote = null;
       continue;
     }
     if (c === '"' || c === "'") quote = c;
-    else if (c === '-' && text[i + 1] === '-') {
+    else if (c === '#' || (c === '-' && text[i + 1] === '-')) {
       const nl = text.indexOf('\n', i);
       i = nl < 0 ? text.length : nl;
     } else if (c === ';') {
@@ -55,9 +55,9 @@ export function splitStatements(source) {
   return out;
 }
 
-/** Whether a piece of text holds only blanks and `--` comments. */
+/** Whether a piece of text holds only blanks and comments. */
 function blank(piece) {
-  return piece.replace(/--[^\n]*/g, '').trim() === '';
+  return piece.replace(/(--|#)[^\n]*/g, '').trim() === '';
 }
 
 /**

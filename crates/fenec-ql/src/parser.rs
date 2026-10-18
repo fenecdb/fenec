@@ -205,14 +205,18 @@ pub enum Rest {
 pub struct Refusal {
     /// Where the text refused begins, in bytes. Where what was refused
     /// begins no statement -- an unknown command, `where` on a line of its
-    /// own -- it may go on with the statement before it, which no `;`
-    /// ended: that statement is refused with it, since run alone it could
-    /// be a write wider than the one written (`del notes`, then `wher id =
-    /// 3`).
+    /// own, a clause written past a `;` -- it may go on with the statement
+    /// before it: that statement is refused with it, since run alone it
+    /// could be a write wider than the one written (`del notes`, then
+    /// `wher id = 3`; `del notes; where id = 3`).
     pub at: usize,
     /// Where what begins no statement is, in bytes, when that is what was
     /// refused.
     pub begins: Option<usize>,
+    /// Where the parser stood as it refused, in bytes: the place the
+    /// error's `position` names, which a reader that lets go of the text
+    /// before `at` moves with the rest, as the error's words cannot be.
+    pub place: usize,
     pub error: Error,
     /// Refused at the end of the text: what comes after may make it read.
     pub end: bool,
@@ -221,18 +225,24 @@ pub struct Refusal {
 impl Refusal {
     /// Whether this refusal stands whatever follows: `later`, the same
     /// text read with more after it, is refused where this one was, for
-    /// the same reason, and not at its end. Its words are compared without
-    /// the position they lead with, which more text moves where an error is
-    /// placed at the token after the one refused (a `limit "x"` is placed
-    /// past the `"x"`); a refusal at the end is never one that stands,
-    /// since a line more may go on with it -- `get notes select a + b`
-    /// answers under no name until a line says `as total`.
+    /// the same reason, and not at its end. A refusal at the end is placed
+    /// at the token after the one refused (a `limit "x"` past the `"x"`),
+    /// which more text moves, so its words are compared without the
+    /// position they lead with; one before the end keeps its place, or the
+    /// same check refusing the next item would stand for the one before --
+    /// `select topic + 1` answers under no name until `as a`, and then
+    /// `topic + 2` until `as b`, each line a refusal of the same words. A
+    /// refusal at the end of `later` never stands, since a line more may
+    /// go on with it.
     pub fn stands(&self, later: &Refusal) -> bool {
         let same = match (&self.error, &later.error) {
             (Error::Query(a), Error::Query(b)) => unplaced(a) == unplaced(b),
             (a, b) => a == b,
         };
-        same && !later.end && self.at == later.at && self.begins == later.begins
+        same && !later.end
+            && self.at == later.at
+            && self.begins == later.begins
+            && (self.end || self.place == later.place)
     }
 
     /// Whether this refusal of `src` stands with no next line to ask -- a
@@ -281,6 +291,7 @@ pub fn reading(src: &str) -> Reading {
             let r = Refusal {
                 at: 0,
                 begins: None,
+                place: 0,
                 error,
                 end,
             };
@@ -300,29 +311,39 @@ pub fn reading(src: &str) -> Reading {
     };
     // In characters, as tokens are placed: each statement read whole, by
     // where it starts, and the one just read, which what follows decides,
-    // with whether the end of the text cut its SQL list short.
+    // with whether the end of the text cut its SQL list short and whether
+    // a `;` ended it. Ended, it is whole where the text ends or a statement
+    // begins after it, and is held back still by a word that begins none:
+    // `del notes; where id = 3` on one line is refused, as `-c` and
+    // `POST /query` refuse it, where pushed as whole at its `;` it was
+    // every row's delete.
     let mut whole: Vec<usize> = Vec::new();
-    let mut last: Option<(usize, Statement, bool)> = None;
+    let mut last: Option<(usize, Statement, bool, bool)> = None;
     let rest = loop {
-        // A `;` ends the one before.
         if p.semis() {
-            whole.extend(last.take().map(|(at, ..)| at));
+            if let Some((.., ended)) = &mut last {
+                *ended = true;
+            }
         }
         if p.at_eof() {
             break match last {
-                Some((at, s, _)) => Rest::Last(at, Box::new(s)),
+                Some((at, _, _, true)) => {
+                    whole.push(at);
+                    Rest::Nothing
+                }
+                Some((at, s, ..)) => Rest::Last(at, Box::new(s)),
                 None => Rest::Nothing,
             };
         }
         let (start, first) = (p.pos(), p.i);
         p.cut = false;
         match p.statement() {
-            Ok(s) => whole.extend(last.replace((start, s, p.cut)).map(|(at, ..)| at)),
+            Ok(s) => whole.extend(last.replace((start, s, p.cut, false)).map(|(at, ..)| at)),
             Err(error) => {
                 let mut end = p.at_eof() || p.cut;
                 let begins = (p.i == first).then_some(start);
                 let at = match (begins, last.take()) {
-                    (Some(_), Some((at, _, cut))) => {
+                    (Some(_), Some((at, _, cut, _))) => {
                         end |= cut;
                         at
                     }
@@ -334,6 +355,7 @@ pub fn reading(src: &str) -> Reading {
                 break Rest::Refused(Refusal {
                     at,
                     begins,
+                    place: p.pos(),
                     error,
                     end,
                 });
@@ -358,7 +380,13 @@ pub fn reading(src: &str) -> Reading {
         Rest::Refused(r) => {
             let at = bytes(r.at);
             let begins = r.begins.map(&mut bytes);
-            Rest::Refused(Refusal { at, begins, ..r })
+            let place = bytes(r.place);
+            Rest::Refused(Refusal {
+                at,
+                begins,
+                place,
+                ..r
+            })
         }
     };
     let next = match &rest {
@@ -405,6 +433,8 @@ pub struct SelectList {
 /// A select list on its own -- `status, sum(total), count(*)` -- as `get
 /// ... select` reads one: the fields, or the aggregates when it has any.
 /// For a caller that assembles a select from parts, such as a query string.
+/// A `;` after it reads as it did while a `;` was white space: a query
+/// string's list ends no statement (and so do `group=` and `facet=`'s).
 pub fn parse_select_list(src: &str) -> Result<SelectList> {
     let mut p = Parser {
         toks: tokenize(src)?,
@@ -415,7 +445,7 @@ pub fn parse_select_list(src: &str) -> Result<SelectList> {
         cut: false,
     };
     let list = p.select_list()?;
-    if !p.at_eof() {
+    if !p.ended() {
         return p.err("a select list ends where the text does");
     }
     Ok(list)
@@ -433,7 +463,7 @@ pub fn parse_group_list(src: &str) -> Result<Vec<Expr>> {
         cut: false,
     };
     let list = p.group_list()?;
-    if !p.at_eof() {
+    if !p.ended() {
         return p.err("a group list ends where the text does");
     }
     Ok(list)
@@ -451,7 +481,7 @@ pub fn parse_facet_list(src: &str) -> Result<Vec<Facet>> {
         cut: false,
     };
     let list = p.facet_list()?;
-    if !p.at_eof() {
+    if !p.ended() {
         return p.err("a facet list ends where the text does");
     }
     Ok(list)
@@ -2384,11 +2414,27 @@ mod tests {
                 ..
             }
         ));
-        // A `;` ends a statement: no clause goes on past it.
+        // A `;` ends a statement: no clause goes on past it, and one written
+        // past it holds the statement back, as `-c` refuses the two.
         let r = reading("del notes; where id = 3");
-        assert_eq!(r.whole, [(0, 11)]);
-        assert_eq!((refusal(&r).at, refusal(&r).begins), (11, Some(11)));
+        assert!(r.whole.is_empty());
+        assert_eq!((refusal(&r).at, refusal(&r).begins), (0, Some(11)));
         assert!(parse("del notes; where id = 3").is_err());
+        let r = reading("del notes;; get notes");
+        assert_eq!(r.whole, [(0, 12)]);
+        assert!(matches!(r.rest, Rest::Last(12, _)));
+        // Inside brackets a `;` is refused; and `select`, a clause and a
+        // statement, begins a statement after one.
+        assert!(parse("get a where x in (get b select y;)").is_err());
+        let two = parse("get a lookup b on k; select z").unwrap();
+        assert!(
+            matches!(&two[..], [Statement::Select(_), Statement::Select(s)] if s.collection == "z")
+        );
+        // A query string's list keeps the `;` after it, and refuses one
+        // inside it.
+        assert!(parse_select_list("a, b;").is_ok());
+        assert!(parse_select_list("a; b").is_err());
+        assert!(parse_group_list("a;").is_ok() && parse_facet_list("a top 3;").is_ok());
         // `wher` begins no statement: it may go on with `del notes`, which
         // is refused with it rather than run as every row's delete.
         let r = reading("del notes\nwher id = 3");
@@ -2465,6 +2511,7 @@ mod tests {
         "get notes select topic, count(*) as n group topic having n > 1 order n desc limit 5",
         "get e select bucket(at, 1d, 'Europe/Berlin') as day, count(*) group day",
         "get notes select a + b as total, case when a > 1 then 'x' else 'y' end as k",
+        "get notes select topic + 1 as a, topic + 2 as b",
         "get orders lookup lines on order_id required select sku limit 3",
         "get shops lookup orders on (org, shop) = (org, id) order at desc limit 3",
         "get products facet brand top 5 disjunctive, price ranges [0, 2500, 5000] limit 20",
@@ -2603,6 +2650,8 @@ mod tests {
                 "get e select bucket(at, 1d, 'Europe/Berlin')",
                 "get notes select a + b",
                 "get notes select a + b as total, case when a > 1 then 'x' else 'y' end",
+                "get notes select topic + 1",
+                "get notes select topic + 1 as a, topic + 2",
                 // The SQL order's list, before its `from`.
                 "select a,",
                 "select a, b",

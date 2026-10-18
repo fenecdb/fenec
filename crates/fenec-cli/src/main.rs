@@ -100,7 +100,8 @@ Statements over several lines
   read over several lines, wait for the next line, which may go on with them
   (where, order, and ...): an empty line runs them, and so does a `;` after
   them; a `.` command leaves them waiting. Piped or pasted, a statement runs
-  once the next one begins; -c reads its text whole.
+  once the next one begins, and a `.` command waits behind it; -c reads its
+  text whole. A `;` ends a statement: no clause goes on past one.
 
 Shell commands
   .help        this text
@@ -279,7 +280,16 @@ fn main() {
 ///   the end of the input leaves them unrun, said so.
 ///
 /// A paste is read as a pipe is: its next line is waiting already
-/// ([`pending`]). Rejected: running at `;` alone, as `psql` and `sqlite3`
+/// ([`pending`]), and an empty line that was waiting so is white space.
+/// In a script or a paste a `.` command read while a statement waits waits
+/// behind it, and runs once it has run or been refused.
+///
+/// Adding to FenecQL: a statement form is placed in [`kind`] (every one
+/// is named, so a write cannot run at Enter by default), and its other
+/// obligations -- `Parser::cut`, `lexer::Unclosed`, the corpus of
+/// `a_statement_written_over_lines_reads_as_one` -- are fenec-ql's.
+///
+/// Rejected: running at `;` alone, as `psql` and `sqlite3`
 /// do, which every typed read would pay for with a `;`; and running
 /// every whole statement at Enter, holding back only a write with no
 /// `where` -- `del notes where kind = 1` with `order at limit 1` on the next
@@ -297,6 +307,16 @@ struct Reader {
     held: Held,
     /// Whether another line is waiting already, asked once a line.
     more: Option<bool>,
+    /// A line was waiting already when this one's statement was left
+    /// waiting: an empty line read next is a paste's white space, not
+    /// Enter typed. Asked of the empty line itself, a paste that came in
+    /// pieces -- iTerm2 paces one about 15 ms apart, a link adds its own
+    /// -- had its blank line run `del notes` before the `where` came.
+    waiting: bool,
+    /// `.` commands of a script or a paste read while a statement waited,
+    /// run once it has run or been refused: run at once, `.tables` between
+    /// `del notes` and its `where` ran the `del` alone first.
+    deferred: Vec<String>,
     /// A statement ran as this line ended, typed; and as the line before
     /// it did, which a line that begins no statement may have gone on
     /// with.
@@ -314,8 +334,13 @@ enum Held {
     /// A statement read whole, waiting for the next line.
     Whole,
     /// A statement refused as far as the text goes: whether that stands is
-    /// for the next line to say (`Refusal::stands`).
-    Refused(fenec_ql::Refusal),
+    /// for the next line to say (`Refusal::stands`), and where in `buf` the
+    /// text refused ends. Taken from where the latest line began, the lines
+    /// read inside a string or a bracket since were dropped with the
+    /// refusal, and the last of them run alone -- `put notes {body: "a
+    /// note of two lines:` then `del notes -- the end"}` after a refused
+    /// statement deleted every row.
+    Refused(fenec_ql::Refusal, usize),
 }
 
 impl Reader {
@@ -326,6 +351,8 @@ impl Reader {
             gate: Default::default(),
             held: Held::Nothing,
             more: None,
+            waiting: false,
+            deferred: Vec::new(),
             ran: false,
             ran_before: false,
             told: false,
@@ -343,28 +370,44 @@ impl Reader {
     fn line(&mut self, db: &mut Database, line: &str) -> bool {
         self.more = None;
         self.ran_before = std::mem::take(&mut self.ran);
+        let queued = std::mem::take(&mut self.waiting);
+        let go_on = self.step(db, line, queued);
+        // Asked once a statement waits: typed with nothing after it, a
+        // write had asked it already, for the hint.
+        self.waiting = self.typed && !matches!(self.held, Held::Nothing) && self.more();
+        go_on
+    }
+
+    fn step(&mut self, db: &mut Database, line: &str, queued: bool) -> bool {
         let t = line.trim();
         // A `.` command where no string or bracket is open; inside one it
         // is text. Typed, it leaves what waits waiting, as `psql`'s do --
         // `del notes`, then `.tables` to look a name up, then its `where`
-        // -- and `.quit` leaves it unrun. In a script or a paste what
-        // waits was written before it, and runs first.
+        // -- and `.quit` leaves it unrun. In a script or a paste it waits
+        // in turn behind what waits, and runs once that has run or been
+        // refused; a quit runs what waits first.
         if t.starts_with('.') && !self.gate.is_open() {
-            // One call: from two, `meta` went out of line, 2.2 KB more.
             let typed = self.typed && !self.more();
+            let leaving = t.split_whitespace().next().is_some_and(quits);
             if !typed {
+                if !leaving && !self.buf.trim().is_empty() {
+                    self.deferred.push(t.to_string());
+                    return true;
+                }
                 self.finish(db);
             }
-            let go_on = meta(db, t);
-            if !go_on {
-                self.abandon();
-            }
-            return go_on;
+            self.deferred.push(t.to_string());
+            return self.settled(db);
         }
         if t.is_empty() {
             // An empty line typed runs what waits, or says why it is
-            // refused; pasted or piped it is white space.
-            if !self.gate.is_open() && !matches!(self.held, Held::Nothing) && !self.more() {
+            // refused; pasted or piped it is white space, and so is one
+            // that was waiting already as the line before was judged.
+            if !self.gate.is_open()
+                && !matches!(self.held, Held::Nothing)
+                && !queued
+                && !self.more()
+            {
                 self.finish(db);
             } else if !self.buf.is_empty() {
                 self.buf.push_str(line);
@@ -372,33 +415,34 @@ impl Reader {
             }
             return true;
         }
-        let from = self.buf.len();
         self.buf.push_str(line);
         self.gate.feed(line);
         if !self.gate.is_open() {
-            self.read(db, from);
+            self.read(db);
         }
         true
     }
 
-    /// `buf` read again, its last line from `from`.
-    fn read(&mut self, db: &mut Database, mut from: usize) {
+    /// `buf` read again, a line or more added to it.
+    fn read(&mut self, db: &mut Database) {
         loop {
             let r = fenec_ql::reading(&self.buf);
-            // A refusal held from the lines before stands where this line
-            // leaves it as it was: it is told, and the line read alone.
-            if let (Held::Refused(before), Rest::Refused(now)) = (&self.held, &r.rest) {
-                if from > 0 && before.stands(now) {
-                    let Held::Refused(before) = std::mem::replace(&mut self.held, Held::Nothing)
+            // A refusal held from the lines before stands where the lines
+            // since leave it as it was: it is told, and they are read
+            // without it.
+            if let (Held::Refused(before, len), Rest::Refused(now)) = (&self.held, &r.rest) {
+                if before.stands(now) {
+                    let len = *len;
+                    let Held::Refused(before, _) = std::mem::replace(&mut self.held, Held::Nothing)
                     else {
                         unreachable!()
                     };
-                    self.refused(&before, &self.buf[..from]);
-                    self.keep(from);
-                    if self.gate.is_open() {
+                    self.refused(&before, &self.buf[..len]);
+                    self.keep(len);
+                    self.settled(db);
+                    if self.gate.is_open() || self.buf.trim().is_empty() {
                         return;
                     }
-                    from = 0;
                     continue;
                 }
             }
@@ -406,19 +450,38 @@ impl Reader {
         }
     }
 
+    /// The `.` commands that waited behind a statement, run now that it
+    /// has run or been refused; `false` where one quits.
+    fn settled(&mut self, db: &mut Database) -> bool {
+        for cmd in std::mem::take(&mut self.deferred) {
+            if !meta(db, &cmd) {
+                self.abandon();
+                return false;
+            }
+        }
+        true
+    }
+
     /// What a reading of `buf` found: the whole statements run, and what is
     /// left kept, run, or told as refused.
     fn take(&mut self, db: &mut Database, r: Reading) {
+        // The first statement is the one that waited, whose `.` commands
+        // come after it and before the rest.
         for &(a, b) in &r.whole {
             run(db, &self.buf[a..b]);
+            self.settled(db);
         }
         match r.rest {
-            Rest::Nothing => self.clear(),
+            Rest::Nothing => {
+                self.clear();
+                self.settled(db);
+            }
             Rest::Last(at, s) => {
                 self.keep(at);
                 if self.runs_now(&s) {
                     run(db, &self.buf);
                     self.clear();
+                    self.settled(db);
                     self.ran = true;
                     return;
                 }
@@ -428,10 +491,9 @@ impl Reader {
                     println!(
                         "-- {} waits for the next line, which may go on with it: an empty line \
                          runs it, and so does a `;` after it",
-                        if writes(&s) {
-                            "a write"
-                        } else {
-                            "a statement over several lines"
+                        match kind(&s) {
+                            Kind::Write => "a write",
+                            _ => "a statement over several lines",
                         }
                     );
                 }
@@ -442,25 +504,29 @@ impl Reader {
                 let f = Refusal {
                     at: 0,
                     begins: f.begins.map(|b| b - at),
+                    place: f.place - at,
                     ..f
                 };
                 if !self.more() && f.stands_alone(&self.buf) {
                     self.refused(&f, &self.buf);
                     self.clear();
+                    self.settled(db);
                 } else {
-                    self.held = Held::Refused(f);
+                    self.held = Held::Refused(f, self.buf.len());
                 }
             }
         }
     }
 
     /// Whether a statement read whole runs as its line ends: typed, with
-    /// nothing more waiting, and neither a write nor a read over several
-    /// lines.
+    /// nothing more waiting, and a change of schema or a read on one line.
     fn runs_now(&mut self, s: &Statement) -> bool {
         self.typed
-            && !writes(s)
-            && !(s.is_read_only() && self.buf.trim_end().contains('\n'))
+            && match kind(s) {
+                Kind::Write => false,
+                Kind::Read => !self.buf.trim_end().contains('\n'),
+                Kind::Schema => true,
+            }
             && !self.more()
     }
 
@@ -471,6 +537,7 @@ impl Reader {
             let r = fenec_ql::reading(&self.buf);
             for &(a, b) in &r.whole {
                 run(db, &self.buf[a..b]);
+                self.settled(db);
             }
             match &r.rest {
                 Rest::Nothing => {}
@@ -481,12 +548,16 @@ impl Reader {
             }
         }
         self.clear();
+        self.settled(db);
     }
 
     /// Typed, the end of the session: what waits is not run, and said so.
     fn abandon(&mut self) {
         if !self.buf.trim().is_empty() {
             eprintln!("not run: {}", one_line(&self.buf));
+        }
+        for cmd in std::mem::take(&mut self.deferred) {
+            eprintln!("not run: {cmd}");
         }
         self.clear();
     }
@@ -539,20 +610,42 @@ fn one_line(text: &str) -> String {
     out
 }
 
-/// A write: what waits for the next line when typed.
-fn writes(s: &Statement) -> bool {
-    matches!(
-        s,
-        Statement::Put { .. } | Statement::Update { .. } | Statement::Delete { .. }
-    )
+/// What a statement typed whole does at Enter: a write waits for the next
+/// line, a read runs where it is on one line, a change of schema runs.
+enum Kind {
+    Write,
+    Read,
+    Schema,
+}
+
+/// Every statement named, none by a wildcard: a statement form added to
+/// FenecQL has to be placed here, or a new write would run at Enter.
+fn kind(s: &Statement) -> Kind {
+    match s {
+        Statement::Put { .. } | Statement::Update { .. } | Statement::Delete { .. } => Kind::Write,
+        Statement::Select(_)
+        | Statement::Explain(_)
+        | Statement::ListCollections
+        | Statement::Describe(_) => Kind::Read,
+        Statement::CreateCollection { .. }
+        | Statement::DropCollection { .. }
+        | Statement::CreateIndex { .. }
+        | Statement::CreateComposite { .. }
+        | Statement::DropComposite { .. }
+        | Statement::AlterCollection { .. }
+        | Statement::Compact(_) => Kind::Schema,
+    }
 }
 
 /// Whether a line is waiting to be read already -- a paste, or a line typed
 /// ahead while a statement ran: the shell then reads on before it judges a
 /// statement whole, as it does a file. A paste comes in one write, or in
-/// pieces close together over a slow link: 10 ms is long enough for those,
-/// and no one types a line in it. A terminal hands a line at a time to a
-/// read, so stdin's own buffer holds nothing past it.
+/// pieces: iTerm2 paces one about 15 ms apart, and a link adds jitter, so
+/// 40 ms, which no one types a line and Enter in, and which a read typed
+/// on one line waits once before it runs. A paste in pieces further apart
+/// is read as typed; bracketed paste, the terminal marking a paste's ends,
+/// would need the terminal out of its line mode. A terminal hands a line at
+/// a time to a read, so stdin's own buffer holds nothing past it.
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn pending() -> bool {
     #[repr(C)]
@@ -576,7 +669,7 @@ fn pending() -> bool {
         revents: 0,
     };
     // SAFETY: one entry, which outlives the call.
-    unsafe { poll(&mut fd, 1, 10) > 0 }
+    unsafe { poll(&mut fd, 1, 40) > 0 }
 }
 
 /// No `poll` declared here: typed lines are judged as they end.
@@ -585,10 +678,15 @@ fn pending() -> bool {
     false
 }
 
+/// The `.` commands that end the session.
+fn quits(word: &str) -> bool {
+    matches!(word, ".quit" | ".exit" | ".q")
+}
+
 fn meta(db: &mut Database, cmd: &str) -> bool {
     let mut parts = cmd.splitn(2, char::is_whitespace);
     match parts.next().unwrap_or("") {
-        ".quit" | ".exit" | ".q" => return false,
+        w if quits(w) => return false,
         ".help" | ".h" => println!("{HELP}{IMPORT_HELP}{TYPES_HELP}{SHELL_HELP}"),
         ".tables" => {
             let names = db.collection_names();

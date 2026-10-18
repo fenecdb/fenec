@@ -98,8 +98,14 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     over several lines: the parser reads where each ends. A
     <code>;</code> ends the statement before it, so no clause goes on past
     one — <code>del notes; where id = 3</code> is refused, not read as one
-    statement. How the shell runs statements written over lines is in
-    <a href="quickstart.html#in-the-shell">In the shell</a>.</li>
+    statement, and so is a <code>;</code> inside brackets, <code>in (get
+    … ;)</code>. A clause that is a statement too begins one after it:
+    <code>get a lookup b on k; select z</code> is two statements, the
+    second a read of <code>z</code>. A query string's <code>select=</code>,
+    <code>group=</code> and <code>facet=</code> take a <code>;</code> after
+    their list as they always did. How the shell runs statements written
+    over lines is in <a href="quickstart.html#in-the-shell">In the
+    shell</a>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>

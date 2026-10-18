@@ -107,6 +107,14 @@ fn a_read_written_over_lines_is_read_whole() {
     );
     assert_eq!(text(&out.stderr), "");
     assert_eq!(tables(&text(&out.stdout)), [["e", "c", "a"]]);
+    // Each line but the last refused by the same check, at its own item:
+    // a refusal before the end stands only where it stays in its place.
+    let out = piped(
+        &f,
+        "get notes select topic + 1\n  as a, topic + 2\n  as b\n  order topic limit 1\n",
+    );
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(tables(&text(&out.stdout)), [["4 5"]]);
 }
 
 #[test]
@@ -201,6 +209,170 @@ fn a_word_that_begins_no_statement_holds_back_the_one_before() {
     assert_eq!(count(&f, ""), 6);
 }
 
+/// After a refused statement, a statement whose string runs over lines is
+/// read whole: the refusal ended where its own text did, and the lines read
+/// inside the string were dropped with it, the last run alone as `del
+/// notes`.
+#[test]
+fn a_string_over_lines_after_a_refusal_is_read_whole() {
+    let d = Dir::new("refused-string");
+    let f = d.notes();
+    let out = piped(
+        &f,
+        "get notes limit \"x\"\nput notes {body: \"a note of two lines:\ndel notes -- the end\"}\n",
+    );
+    assert!(text(&out.stderr).contains("`limit` takes a whole number"));
+    assert_eq!(count(&f, ""), 6);
+    assert_eq!(count(&f, "where body ~ \"the end\""), 1);
+}
+
+/// A `;` ends a statement, and a clause written past it holds the
+/// statement back, as `-c` refuses the two: `del notes; where id = 3` on
+/// one line deletes nothing, piped (here), typed and pasted (below).
+#[test]
+fn a_clause_past_a_semicolon_holds_its_statement_back() {
+    let d = Dir::new("semicolon");
+    let f = d.notes();
+    let out = piped(&f, "del notes; where id = 3\nget notes count\n");
+    let said = text(&out.stderr);
+    assert!(said.contains("unknown command `where`"), "{said}");
+    assert!(said.contains("not run either"), "{said}");
+    assert_eq!(tables(&text(&out.stdout)), [["5"]]);
+    // A `;` at a line's end ends the statement there: it runs.
+    let out = piped(&f, "get notes count;\nget notes where id = 3 count\n");
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(tables(&text(&out.stdout)), [["5"], ["1"]]);
+}
+
+/// A `.` command between a write and the line that goes on with it waits
+/// behind the write in a script, as it does typed: the `del` deletes one
+/// row, and `.tables` answers after it.
+#[test]
+fn a_dot_command_in_a_script_waits_behind_the_write_it_interrupts() {
+    let d = Dir::new("dot");
+    let f = d.notes();
+    let out = piped(&f, "del notes\n.tables\n  where id = 3\nget notes count\n");
+    assert_eq!(text(&out.stderr), "");
+    let said = text(&out.stdout);
+    let (del, tables_at) = (
+        said.find("1 records").unwrap(),
+        said.find("notes\n").unwrap(),
+    );
+    assert!(del < tables_at, "{said}");
+    assert_eq!(tables(&said), [["4"]]);
+}
+
+/// Scripts generated from statements of every kind, each written over
+/// lines cut between its words -- with blank lines, comments holding `;`
+/// and quotes, strings over lines holding `;`, `--` and keywords, `.`
+/// commands between the lines -- and statements refused for what they
+/// read between them: piped, the database ends as `-c` leaves it given the
+/// same statements less the refused ones.
+#[test]
+fn a_script_piped_writes_what_minus_c_writes() {
+    let d = Dir::new("fuzz");
+    let seed = d.notes();
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let mut rnd = |n: usize| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x % n as u64) as usize
+    };
+    let bits = [
+        "a",
+        ";",
+        " where id = 3",
+        " -- x",
+        "'",
+        "\n",
+        "del notes",
+        "#",
+        " ",
+    ];
+    // FENEC_SHELL_CASES=5000 for a wider look.
+    let cases = std::env::var("FENEC_SHELL_CASES").map_or(200, |n| n.parse().unwrap());
+    for case in 0..cases {
+        let (mut piped_text, mut whole_text) = (String::new(), String::new());
+        for _ in 0..1 + rnd(6) {
+            let refused = rnd(5) == 0;
+            let words: Vec<String> = match (refused, rnd(5)) {
+                (true, 0..=2) => ["get", "notes", "limit", "\"x\""].map(String::from).into(),
+                (true, _) => ["set", "notes", "{topic: 1}", "where", "id", "=", "=", "2"]
+                    .map(String::from)
+                    .into(),
+                (false, 0) => {
+                    let s: String = (0..rnd(6)).map(|_| bits[rnd(bits.len())]).collect();
+                    let doc = format!("{{body: \"{s}\", topic: {}}}", rnd(5));
+                    vec!["put".into(), "notes".into(), doc]
+                }
+                (false, 1) => ["set", "notes", &format!("{{topic: {}}}", rnd(5))]
+                    .into_iter()
+                    .map(String::from)
+                    .chain(["where", "id", "=", &rnd(9).to_string()].map(String::from))
+                    .collect(),
+                (false, 2) => ["del", "notes", "where", "id", "=", &rnd(9).to_string()]
+                    .map(String::from)
+                    .into(),
+                (false, 3) => [
+                    "del",
+                    "notes",
+                    "where",
+                    "topic",
+                    "=",
+                    &rnd(5).to_string(),
+                    "order",
+                    "posted",
+                    "limit",
+                    "1",
+                ]
+                .map(String::from)
+                .into(),
+                (false, _) => ["get", "notes", "select", "body", "where", "topic", "="]
+                    .into_iter()
+                    .map(String::from)
+                    .chain([rnd(5).to_string()])
+                    .collect(),
+            };
+            // The statement over lines, with what goes between them.
+            let mut unit = String::new();
+            for (i, w) in words.iter().enumerate() {
+                if i > 0 {
+                    unit.push_str(match rnd(8) {
+                        0 => "\n  ",
+                        1 => "\n\n  ",
+                        2 => " -- it's; del notes\n  ",
+                        3 => "\n.tables\n  ",
+                        _ => " ",
+                    });
+                }
+                unit.push_str(w);
+            }
+            piped_text.push_str(&unit);
+            piped_text.push('\n');
+            if !refused {
+                let kept: Vec<&str> = unit.lines().filter(|l| *l != ".tables").collect();
+                whole_text.push_str(&kept.join("\n"));
+                whole_text.push_str(["\n", ";\n", " "][rnd(3)]);
+            }
+        }
+        let (a, b) = (d.0.join("a.fenec"), d.0.join("b.fenec"));
+        std::fs::copy(&seed, &a).unwrap();
+        std::fs::copy(&seed, &b).unwrap();
+        piped(&a, &piped_text);
+        if !whole_text.trim().is_empty() {
+            let out = c(&b, &whole_text);
+            assert!(out.status.success(), "{whole_text}\n{}", text(&out.stderr));
+        }
+        let rows = |f: &Path| text(&c(f, "get notes select id, body, topic order id").stdout);
+        assert_eq!(
+            tables(&rows(&a)),
+            tables(&rows(&b)),
+            "case {case}, piped:\n{piped_text}\n-c:\n{whole_text}"
+        );
+    }
+}
+
 /// `-c` reads its text whole, as `POST /query` does -- a statement over
 /// lines is one -- and a `;` ends a statement there too: no clause goes on
 /// past it, so a `del notes;` with a `where` after it is refused rather
@@ -281,6 +453,64 @@ fn pasted_statements_over_lines_run_as_written() {
     assert_eq!(tables(&out)[0], ["e", "c", "a"], "{out}");
     assert_eq!(count(&f, ""), 4);
     assert_eq!(count(&f, "where id = 2"), 0);
+}
+
+/// `del notes; where id = 3` typed or pasted on one line deletes nothing,
+/// as piped; and a paste's `.` command between a write and the line that
+/// goes on with it waits behind the write.
+#[cfg(unix)]
+#[test]
+fn pasted_or_typed_a_clause_past_a_semicolon_and_a_dot_command_hold() {
+    let d = Dir::new("pasted-holds");
+    let f = d.notes();
+    let mut t = pty::Shell::start(&f);
+    t.typed("del notes; where id = 3\n");
+    t.pasted("del notes; where id = 3\nget notes count\n");
+    t.pasted("del notes\n.tables\n  where id = 4\n");
+    t.typed("\n");
+    t.typed("get notes count\n");
+    t.wait_for("(1 rows", 2);
+    t.typed(".quit\n");
+    let out = t.end();
+    assert_eq!(out.matches("not run either").count(), 2, "{out}");
+    let counts: Vec<Vec<String>> = tables(&out)
+        .into_iter()
+        .filter(|t| t.len() == 1 && t[0].parse::<i64>().is_ok())
+        .collect();
+    assert_eq!(counts, [["5"], ["4"]], "{out}");
+    let (del, listed) = (
+        out.find("1 records").unwrap(),
+        out.rfind("\nnotes\n").unwrap(),
+    );
+    assert!(del < listed, "{out}");
+    assert_eq!(count(&f, "where id = 4"), 0);
+}
+
+/// A paste that comes in pieces: the blank line that came with `del
+/// notes` is white space, though the piece holding its `where` comes only
+/// once the shell has read the blank line and found nothing after it --
+/// iTerm2 paces a paste so. Asked of the blank line alone, it was Enter
+/// typed, and every row was deleted. And after a refused statement, a
+/// pasted string over lines is read whole.
+#[cfg(unix)]
+#[test]
+fn a_paste_in_pieces_keeps_its_blank_line_white_space() {
+    let d = Dir::new("pieces");
+    let f = d.notes();
+    let mut t = pty::Shell::start(&f);
+    t.pasted("del notes\n\n");
+    t.pasted("  where id = 3\n");
+    t.typed("\n");
+    t.pasted(
+        "get notes limit \"x\"\nput notes {body: \"a note of two lines:\ndel notes -- the end\"}\n",
+    );
+    t.typed("\n");
+    t.typed(".quit\n");
+    let out = t.end();
+    assert!(out.contains("1 records"), "{out}");
+    assert_eq!(count(&f, ""), 5);
+    assert_eq!(count(&f, "where id = 3"), 0);
+    assert_eq!(count(&f, "where body ~ \"the end\""), 1);
 }
 
 /// A pseudo-terminal the shell is started on, as a user's terminal: lines
