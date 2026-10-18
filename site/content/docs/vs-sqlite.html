@@ -1,6 +1,6 @@
 <!--
 title: fenecdb and SQLite — fenecdb
-description: When to choose SQLite, with sqlite-vec, FTS5 and its official WebAssembly build, and when fenecdb, feature by feature, with what is measured and what is not.
+description: When to choose SQLite, with FTS5, its official WebAssembly build and sqlite-vec, and when fenecdb, feature by feature, with what is measured and what is not.
 -->
 
 <h1>fenecdb and SQLite</h1>
@@ -45,8 +45,8 @@ and is alpha software.</p>
   <li><b>Many threads write at once:</b> durable writes share their disk
     syncs, 516 a second from 16 writers against SQLite's 258, and readers
     keep reading beside them (<a href="#measured">measured below</a>).</li>
-  <li><b>A search box needs typos, highlights and facets</b> in the query
-    that ranks the words (<a href="fenecql.html#typos">Typos and words
+  <li><b>A search box needs typos and facets</b> in the query that ranks
+    the words (<a href="fenecql.html#typos">Typos and words
     begun</a>, <a href="fenecql.html#facets">Facets</a>).</li>
   <li><b>You want an approximate vector index:</b> HNSW with
     quantization and filtered search

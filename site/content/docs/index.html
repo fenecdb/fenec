@@ -10,12 +10,12 @@ any language over HTTP, a file per tenant; search is built in.</p>
 
 <h2>What it is</h2>
 
-<p>Your documents and their indexes live together in one file. You query
+<p>Your documents live in one file, indexed as you declare, and you query
 them with one language, FenecQL — in the page, in an app, from Rust, or over
 HTTP from a server. A screen's live query runs again when a write changes
 what it reads, a replica on the device syncs with the server, and the
-server takes many writers into the one file and many tenants into a file
-each.</p>
+server takes many clients' writes into the one file through one writer,
+their disk syncs shared, and many tenants into a file each.</p>
 
 <pre data-lang="fenecql">create collection articles (
   title     text  @text,
@@ -35,10 +35,12 @@ get articles select title, highlight(title)
 </pre>
 
 <details class="deep"><summary>Details</summary>
-<p>fenecdb stores documents and their indexes in one file — hash, unique,
-ordered, text, points and vectors — and answers queries from inside a
-browser tab, in an app, or from a server any language reaches over
-HTTP.</p>
+<p>fenecdb keeps its documents in one file and indexes them — hash,
+unique, ordered, text, points and vectors. The indexes are held in memory
+and built from the documents, the first time a query reads each, and a
+vector graph is saved in the file too, so an open need not build it again.
+It answers queries from inside a browser tab, in an app, or from a server
+any language reaches over HTTP.</p>
 
 <p>Everything in these docs describes the engine as it is built today. Where
 something costs you a capability, that cost is stated next to the feature
@@ -90,7 +92,7 @@ to.</p>
   <li><a href="embedding.html">Embedded Rust</a>
     <p><code>fenec-core</code> as a library inside your own program.</p></li>
   <li><a href="benchmarks.html">Benchmarks</a>
-    <p>YCSB against SQLite, PostgreSQL and MongoDB, writers beside readers, requests and search, each with its method.</p></li>
+    <p>YCSB against SQLite, PostgreSQL, MongoDB and Redis, writers beside readers, requests and search, each with its method.</p></li>
   <li><a href="compare.html">Compare</a>
     <p>Beside PostgreSQL, SQLite and PGlite: when to choose each.</p></li>
   <li><a href="limits.html">Limits</a>

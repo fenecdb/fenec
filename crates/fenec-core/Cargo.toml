@@ -1,6 +1,6 @@
 [package]
 name = "fenec-core"
-description = "fenecdb storage engine: zero-buffer-pool segments, native vectors, plugin registry"
+description = "fenecdb storage engine: zero-buffer-pool segments, derived indexes, text and vector search, plugin registry"
 version.workspace = true
 edition.workspace = true
 autotests = false

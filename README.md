@@ -4,8 +4,9 @@
 
 An embedded document database for an app's data, from the page to the
 server: state its screens follow live, a replica on the device that syncs
-with the server, many writers into one file, a server with no cache in
-front of it, a file per tenant in every region, and search built in --
+with the server, many clients writing into one file through one writer
+and sharing their disk syncs, a server with no cache in front of it, a file
+per tenant in every region, and search built in --
 BM25 over text with typos, highlights and facets, and vectors for meaning.
 Written in Rust with no dependencies, it runs inside a web page as 294 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
@@ -47,9 +48,10 @@ const rows = await open.rows();      // once
 const stop = db.live(open, draw);    // and again after every write it reads
 ```
 
-A write reads the row it writes, and can be made to find it: a transfer's
-debit that finds too little money puts the whole `/batch` back, credit
-and all:
+A write reads the row it writes, and can be made to find it. Sent as one
+`/batch`, a debit that finds too little money is refused (412, `unmet`,
+`"at": 0`) before the credit runs, and a credit to an account that is not
+there (`"at": 1`) puts the debit back:
 
 ```
 set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1
@@ -122,8 +124,8 @@ memory. The scale limit is **the indexes fitting in memory**: the documents
 stay in the mapped file, so a server's memory follows its indexes, not its
 data ([Limits](https://fenecdb.com/docs/limits#memory-and-scale)).
 
-**SQLite** when you need relational data, SQL with JOINs, several writers to
-one file and a mature toolchain. Also in very short-lived processes: for a tool that runs
+**SQLite** when you need relational data, SQL with JOINs and a mature
+toolchain. Also in very short-lived processes: for a tool that runs
 fewer than five queries and exits, fenecdb's open cost never amortises.
 
 **PostgreSQL** (with pgvector for vectors) for multi-writer systems shared
@@ -139,7 +141,7 @@ second against SQLite's 47.9 k, and C on one thread at 438 k against
 279 k, its file compacted on its own as updates grow it ([YCSB](https://fenecdb.com/docs/benchmarks#ycsb));
 over HTTP, `fenec-server` does B at 16 clients, durable, at 18.2 k against
 PostgreSQL's 13.0 k, both in Docker. At a million vectors it answers the
-nearest ten in 0.141 ms against pgvector's 2.076
+nearest ten at 99.1% recall in 0.141 ms, against pgvector's 98.6% in 2.076
 ([At scale](https://fenecdb.com/docs/benchmarks#scale)).
 
 ---
@@ -329,7 +331,7 @@ query; it is not a join and is not trying to be one.
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state, a schema declared in code |
 | [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
-| [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, raw FenecQL, batches, SSE, search over POST, a read marked for a replica |
+| [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, raw FenecQL, batches, SSE, vector search over POST, a read marked for a replica |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment, every tenant of a node archived over one connection |
 | [Integrations](https://fenecdb.com/docs/integrations) | `useLiveQuery` for React, the Go and .NET SDKs, and LangChain and LlamaIndex vector stores over HTTP |

@@ -4,9 +4,9 @@ description: fenecdb against SQLite, PostgreSQL, MongoDB and Redis on YCSB, writ
 -->
 
 <h1>Benchmarks</h1>
-<p class="kicker">How fenecdb compares with SQLite, PostgreSQL and MongoDB
-as a database first, then at search, measured by make targets you can run
-yourself.</p>
+<p class="kicker">How fenecdb compares with SQLite, PostgreSQL, MongoDB and
+Redis as a database first, then at search, measured by make targets you can
+run yourself.</p>
 
 <h2 id="at-a-glance">At a glance</h2>
 
@@ -81,9 +81,9 @@ failover and a move take, and what a synced change costs the device
 <tbody>
 <tr><td>a write readable on a replica after the primary answered it, p50, <code>--sync always</code></td><td class="n"><b>0.04 ms</b></td></tr>
 <tr><td>a write on a tenant's standby after the router answered it, p50 (p99 0.448 ms)</td><td class="n"><b>0.089 ms</b></td></tr>
-<tr><td>20 tenants failed over onto the standby, the median of three rounds</td><td class="n"><b>63.5–79 ms</b></td></tr>
+<tr><td>20 tenants failed over onto the standby, the medians of three rounds</td><td class="n"><b>63.5–79 ms</b></td></tr>
 <tr><td>a 58.7 MB tenant moved to another node</td><td class="n"><b>under 0.3 s</b></td></tr>
-<tr><td>a synced change of one row applied on the device (the same put alone 7.1 µs)</td><td class="n"><b>18.4 µs</b></td></tr>
+<tr><td>a synced change of one row applied by a replica's sync core, in process (the same put alone 7.1 µs)</td><td class="n"><b>18.4 µs</b></td></tr>
 </tbody>
 </table>
 </div>
@@ -1209,8 +1209,8 @@ href="concepts.html#sparse-vectors">How it works</a>).</p>
 
 <h2 id="against-sqlite-and-pgvector">Against SQLite and pgvector</h2>
 
-<p>From here on, search by meaning: vectors, their index and what it
-costs. The same 100 000 rows of 128 dimensions in fenecdb, SQLite and
+<p>The next sections are search by meaning: vectors, their index and what
+it costs; the sizes and the module's features follow them. The same 100 000 rows of 128 dimensions in fenecdb, SQLite and
 PostgreSQL with pgvector, with the same index settings. fenecdb writes
 fastest, searches 10 to 330 times faster and uses the least disk; SQLite
 opens faster.</p>

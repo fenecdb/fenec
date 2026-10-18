@@ -1,6 +1,6 @@
 <!--
 title: fenecdb — lives anywhere, hears everything
-description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server with no cache in front, many writers to one file, a file per tenant in every region, and search built in. The engine compiles to 294 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
+description: One database from the screen to the server: state your screens follow live, a replica that syncs with your server, a server with no cache in front, many clients writing to one file through one writer, a file per tenant in every region, and search built in. The engine compiles to 294 KB of gzipped WebAssembly and runs as a server any language reaches over HTTP.
 -->
 
 <section class="hero">
@@ -251,7 +251,7 @@ description: One database from the screen to the server: state your screens foll
     </figure>
     <dl class="versus rise">
       <div><dt>A 58.7 MB tenant moved</dt><dd><b>under 0.3 s</b></dd></div>
-      <div><dt>Tenants failed over onto a standby</dt><dd><b>20 in 63.5–79 ms</b><span>the median, over three rounds</span></dd></div>
+      <div><dt>Tenants failed over onto a standby</dt><dd><b>20 in 63.5–79 ms</b><span>the medians of three rounds</span></dd></div>
       <div><dt>A tenant's copy behind its primary</dt><dd><b>0.089 ms</b><span>median, p99 0.448</span></dd></div>
       <div><dt>Failed over inside a region cut off</dt><dd><b>1.30–1.56 s</b><span>10 tenants, a lease of 1 s</span></dd></div>
     </dl>
@@ -294,7 +294,7 @@ description: One database from the screen to the server: state your screens foll
 
     <dl class="versus rise">
       <div><dt>A <code>match</code> over 100 000 documents</dt><dd><b>0.06 ms</b><span>two words, the best ten</span></dd></div>
-      <div><dt>A typo&rsquo;s words among 135 500</dt><dd><b>14 µs</b><span>one edit; 120 µs at two</span></dd></div>
+      <div><dt>Words within a typo, among FiQA&rsquo;s 135 500</dt><dd><b>14 µs</b><span>one edit; 120 µs at two</span></dd></div>
       <div><dt>A facet over every row, through <code>@hash</code></dt><dd><b>0.01 ms</b><span>100 000 rows</span></dd></div>
     </dl>
 
