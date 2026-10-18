@@ -113,10 +113,12 @@ fn the_router_counts_what_it_answered_forwarded_and_moved() {
         .unwrap();
     }
     dir.place("lost", "dead", State::Active).unwrap();
+    // The upstream timeout is the default minute: it bounds every answer
+    // and every step of the move through the router, and at 2 s a node
+    // under load could miss it, while the dead node refuses at once.
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: Some("root".into()),
-        upstream_timeout: Duration::from_secs(2),
         ..Config::default()
     };
     let router = Router::new(dir, cfg);

@@ -391,17 +391,18 @@ impl Router {
     /// whole and did not answer it in time, or broke its answer off: the
     /// tenant's copy is let be for [`RESTING`] at once, the read going
     /// home, and the node is asked its `/_health` on a thread of its own,
-    /// within [`HEALTH_WAIT`] (the replica timeout where shorter) -- one
-    /// question a node at a time, and none while it rests -- and let be
-    /// too where it does not answer. A replica's head comes once its query
-    /// has run, so a read slower than [`crate::Config::replica_timeout`] --
-    /// a client's own, one every few seconds -- looks just like a node that
-    /// hangs: resting the node sent every tenant's marked reads of the
-    /// region home, and resting the copy alone had every tenant with a copy
-    /// on a hung node wait the timeout out once a rest. Counted by tenants
-    /// instead -- the node rested once a second tenant's copy was -- a
-    /// client holding two tenants' tokens, or two tenants' slow analytics,
-    /// rested the node for every tenant.
+    /// within [`crate::Config::health_wait`] ([`HEALTH_WAIT`] unless set,
+    /// the replica timeout where shorter) -- one question a node at a
+    /// time, and none while it rests -- and let be too where it does not
+    /// answer. A replica's head comes once its query has run, so a read
+    /// slower than [`crate::Config::replica_timeout`] -- a client's own,
+    /// one every few seconds -- looks just like a node that hangs: resting
+    /// the node sent every tenant's marked reads of the region home, and
+    /// resting the copy alone had every tenant with a copy on a hung node
+    /// wait the timeout out once a rest. Counted by tenants instead -- the
+    /// node rested once a second tenant's copy was -- a client holding two
+    /// tenants' tokens, or two tenants' slow analytics, rested the node for
+    /// every tenant.
     pub(crate) fn rest_unanswered(&self, tenant: &str, node: &str, addr: &str) {
         self.rest_copy(tenant, node);
         let fresh = || lock(&self.probing).insert(node.to_string());
@@ -410,7 +411,7 @@ impl Router {
         }
         let (resting, probing) = (Arc::clone(&self.resting), Arc::clone(&self.probing));
         let (name, addr) = (node.to_string(), addr.to_string());
-        let within = self.cfg.replica_timeout.min(HEALTH_WAIT);
+        let within = self.cfg.replica_timeout.min(self.cfg.health_wait);
         let rest = self.cfg.replica_rest;
         let asking = std::thread::Builder::new()
             .name("fenec-health".into())
