@@ -897,14 +897,24 @@ fn a_router_started_beside_its_first_lease_round_answers_and_leases() {
     }
 }
 
+/// The lease of a router restarted or promoted over a longer one, which
+/// the tests below ask only to be shorter than the record by seconds. A
+/// node that ran one of its grants is counted by it -- a lease and a tenth
+/// -- and so is every healthy node beside the one a test is about, its
+/// grants bounded by a third of it: at 1 s, 333 ms a grant, a healthy node
+/// went unrenewed past 1.1 s at background QoS beside busy loops and was
+/// failed over (2 runs of 9), once `"ran"` was read at all. 3 s is the
+/// lease the other lease tests run ([`nodes::TERM`]).
+const SHORTER: Duration = Duration::from_secs(3);
+
 /// A router restarted over its directory -- the same holder -- with a
-/// shorter lease, 20 s then 1 s, and the node then cut off. A newer grant
+/// shorter lease, 20 s then 3 s, and the node then cut off. A newer grant
 /// was judged by the lease it would run, so none of the new router's cut
-/// the 20 s one short: it failed n1 over 1.1 s after n1's last answer, and
-/// n1 took acme's writes beside the new primary, which, its own grants not
-/// taken either, refused them (the review of #343). The new router's
-/// first grant is answered as not taken, the one acknowledging it goes at
-/// once and runs the node's lease from it, 1 s.
+/// the 20 s one short: it failed n1 over a lease and a tenth after n1's
+/// last answer, and n1 took acme's writes beside the new primary, which,
+/// its own grants not taken either, refused them (the review of #343). The
+/// new router's first grant is answered as not taken, the one
+/// acknowledging it goes at once and runs the node's lease from it, 3 s.
 #[test]
 fn a_router_restarted_with_a_shorter_lease_fails_over_a_node_on_the_shorter_one() {
     let db = Arc::new(RwLock::new(Database::new()));
@@ -933,16 +943,17 @@ fn a_router_restarted_with_a_shorter_lease_fails_over_a_node_on_the_shorter_one(
     round(&before);
     let lease = || call(nodes[0].port, "GET", "/_admin/lease", "", Some("adm-shl1")).1;
     let left = number_after(&lease(), "\"left_ms\":");
-    // Longer than the 1 s router can give, with 19 s to spare.
-    assert!(left > 1_000.0, "n1 holds no 20 s lease: {}", lease());
+    // Longer than the 3 s router can give, with 17 s to spare.
+    let shorter = SHORTER.as_millis() as f64;
+    assert!(left > shorter, "n1 holds no 20 s lease: {}", lease());
 
-    // Restarted with a lease of a second: one round, and n1 is cut off.
-    let (after, port) = router_on(&db, Duration::from_secs(1));
+    // Restarted with the shorter lease: one round, and n1 is cut off.
+    let (after, port) = router_on(&db, SHORTER);
     round(&after);
     let left = number_after(&lease(), "\"left_ms\":");
     assert!(
-        left <= 1_000.0,
-        "the 20 s lease runs on under the 1 s router: {}",
+        left <= shorter,
+        "the 20 s lease runs on under the {SHORTER:?} router: {}",
         lease()
     );
     nodes[0].proxy.cut();
@@ -956,8 +967,8 @@ fn a_router_restarted_with_a_shorter_lease_fails_over_a_node_on_the_shorter_one(
     assert_ne!(
         direct,
         200,
-        "two primaries: n1 took acme's write after the 1 s router failed it over ({body}); \
-         n1's lease: {}",
+        "two primaries: n1 took acme's write after the {SHORTER:?} router failed it over \
+         ({body}); n1's lease: {}",
         lease()
     );
     // The new primary takes them: the grants naming acme there are taken.
@@ -1003,9 +1014,9 @@ fn waits_out_the_long_lease(router: &Arc<Router>, port: u16, nodes: &[Node], gra
 }
 
 /// A router restarted over its directory with a shorter lease -- 10 s, then
-/// 1 s -- and n1 cut off across the restart: the new router never reaches
+/// 3 s -- and n1 cut off across the restart: the new router never reaches
 /// it, and n1 holds the 10 s lease the router before granted, and writes.
-/// Counted by its own lease, the new router failed it over 1.1 s after it
+/// Counted by its own lease, the new router failed it over 3.3 s after it
 /// started, two primaries for the rest of the 10 s; it counts a node that
 /// has taken none of its grants by the longest lease the directory
 /// recorded, and once it has led that long lowers the record to its own.
@@ -1020,11 +1031,73 @@ fn a_router_restarted_with_a_shorter_lease_waits_out_a_node_it_never_reaches() {
     nodes[0].proxy.cut();
     assert_eq!(record_of(&db), Some(LONG));
 
-    let (after, port) = router_on(&db, Duration::from_secs(1));
+    let (after, port) = router_on(&db, SHORTER);
     waits_out_the_long_lease(&after, port, &nodes, granted);
     // Led a lease and a tenth of the one recorded: no node holds it now.
     round(&after);
-    assert_eq!(record_of(&db), Some(Duration::from_secs(1)));
+    assert_eq!(record_of(&db), Some(SHORTER));
+}
+
+/// A router restarted with a shorter lease -- 10 s, then 3 s -- whose
+/// grant n1 runs: its first answered as not taken, the 10 s lease running,
+/// the one acknowledging it sent at once and run (`"ran": true`). n1 is
+/// the router's own from then on, counted by its 3 s: cut off, its tenant
+/// is failed over a lease and a tenth past its last answer, where the
+/// record would hold it until 11 s past the router's first round at the
+/// soonest -- and n1, whose own lease ran from an answer before that one,
+/// has stopped writing by then. The router looked for `"ran":true`, ten
+/// bytes, in windows of eleven, and never found it: every node was counted
+/// by the record until it came down, and n1 was failed over 11 s after the
+/// router led at the soonest. #343's tests held only the other side, a
+/// node that ran none counted by the record.
+#[test]
+fn a_node_that_ran_the_router_s_lease_is_counted_by_it_not_the_record() {
+    let db = Arc::new(RwLock::new(Database::new()));
+    let (nodes, before, port) = registered("own", &db, LONG);
+    round(&before);
+    acme_on_n1(port, &nodes);
+    round(&before);
+    assert_eq!(record_of(&db), Some(LONG));
+
+    let (after, port) = router_on(&db, SHORTER);
+    // Before its first round, which every node is counted from: by the
+    // record, none lapses before this and a record and a tenth.
+    let led = Instant::now();
+    round(&after);
+    let (left, _) = n1_lease(&nodes, "own");
+    assert!(
+        left.is_some_and(|left| left <= SHORTER.as_millis() as f64),
+        "n1 runs no lease of the router's: {}",
+        lease_of(&nodes, "own")
+    );
+    nodes[0].proxy.cut();
+    // When the round that failed acme over had ended: a failover made
+    // before then, and so no later.
+    let moved = loop {
+        round(&after);
+        let ended = Instant::now();
+        if placed(port, "acme").0 != "n1" {
+            break ended;
+        }
+        assert!(
+            led.elapsed() < LONG * 4,
+            "acme was never failed over: {}",
+            lease_of(&nodes, "own")
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let record = led + fenec_shard::lease::lapse(LONG);
+    assert!(
+        moved < record,
+        "n1 ran the router's lease of {SHORTER:?} and was counted by the record of {LONG:?}: \
+         failed over {:?} after the router led",
+        moved - led
+    );
+    let (direct, body) = n1_writes_acme(&nodes);
+    assert_ne!(
+        direct, 200,
+        "two primaries: n1 took acme's write after its failover on the router's own lease: {body}"
+    );
 }
 
 /// A router of a directory file of its own leasing for `term`, its rounds
@@ -1081,7 +1154,7 @@ fn standing(
 
 const DIRS: &str = "directory-secret";
 
-/// A standby router with a shorter lease than its primary's -- 1 s against
+/// A standby router with a shorter lease than its primary's -- 3 s against
 /// 10 s -- promoted with n1 cut off from both: the record its primary wrote
 /// came with the directory, and the promoted router waits out the 10 s
 /// lease for n1 as a restarted one does.
@@ -1093,11 +1166,7 @@ fn a_promoted_standby_with_a_shorter_lease_waits_out_a_node_it_never_reaches() {
     let nodes = [1, 2].map(|i| node(&format!("stb{i}"), true));
     let (a, a_port, _) = standing(&files.join("a.fenec"), None, LONG);
     let upstream = format!("http://127.0.0.1:{a_port}");
-    let (b, b_port, b_db) = standing(
-        &files.join("b.fenec"),
-        Some(&upstream),
-        Duration::from_secs(1),
-    );
+    let (b, b_port, b_db) = standing(&files.join("b.fenec"), Some(&upstream), SHORTER);
     for (i, n) in nodes.iter().enumerate() {
         let body = format!(
             r#"{{"addr":"{}","token":"adm-stb{}"}}"#,
@@ -1153,20 +1222,25 @@ fn a_promoted_standby_with_a_shorter_lease_waits_out_a_node_it_never_reaches() {
     let _ = std::fs::remove_dir_all(&files);
 }
 
-/// A router restarted with a shorter lease, 9 s then 1 s, whose first grant
-/// to n1 comes after n1's lease from the router before has lapsed: taken
-/// for its list alone, running no lease, which n1 says (`"ran": false`). A
-/// grant of the router before, held on its way and read after it,
-/// acknowledges an answer n1 kept, later than the one its lapsed lease came
-/// from: newer, and it runs the 9 s lease again. Counted by the new
-/// router's 1 s from that take -- `own` set on any `Taken` -- n1, cut off,
-/// was failed over 1.1 s after its last answer and took acme's writes
-/// beside the new primary (the review of #343's
-/// `r2_a_late_grant_of_the_router_before_outlives_a_list_only_take`). A
-/// node is the router's own once it ran a lease from it.
+/// A router restarted with a shorter lease, 13 s then 3 s, whose first
+/// grant to n1 comes after n1's lease from the router before has lapsed:
+/// taken for its list alone, running no lease, which n1 says (`"ran":
+/// false`). A grant of the router before, held on its way and read after
+/// it, acknowledges an answer n1 kept, later than the one its lapsed lease
+/// came from: newer, and it runs the 13 s lease again, 5.5 s past the
+/// lapse. Counted by the new router's 3 s from that take -- `own` set on
+/// any `Taken` -- n1, cut off, was failed over 3.3 s after its last answer
+/// and took acme's writes beside the new primary (the review of #343's
+/// `r2_a_late_grant_of_the_router_before_outlives_a_list_only_take`, 9 s
+/// then 1 s, B 4 s after A). At 1 s the new router failed its healthy
+/// nodes over under load once a node that ran its lease was counted by
+/// it ([`SHORTER`]); at 3 s the late lease must run past the take by more
+/// than 3.3 s for n1 to be found writing where it was counted so, and B
+/// must come under half the lease after A. A node is the router's own
+/// once it ran a lease from it.
 #[test]
 fn a_take_of_the_list_alone_leaves_a_node_counted_by_the_longest_lease() {
-    const OLD: Duration = Duration::from_secs(9);
+    const OLD: Duration = Duration::from_secs(13);
     let db = Arc::new(RwLock::new(Database::new()));
     let nodes = [1, 2, 3].map(|i| node(&format!("rtk{i}"), true));
     let stall = Stall::to(format!("127.0.0.1:{}", nodes[0].port));
@@ -1183,11 +1257,12 @@ fn a_take_of_the_list_alone_leaves_a_node_counted_by_the_longest_lease() {
     }
     round(&r1);
     acme_on_n1(p1, &nodes);
-    // Round A, then round B 4 s later -- under half the lease, so B's
-    // answer is not short and no grant follows it: n1's lease runs from
-    // A's answer. Round C acknowledges B, and is held on its way.
+    // Round A, then round B 5.5 s later -- under half the lease by a
+    // second, so B's answer is not short and no grant follows it: n1's
+    // lease runs from A's answer. Round C acknowledges B, and is held on
+    // its way.
     round(&r1);
-    std::thread::sleep(Duration::from_secs(4));
+    std::thread::sleep(Duration::from_millis(5_500));
     round(&r1);
     stall.take_next(b"POST /_admin/lease");
     round(&r1);
@@ -1199,9 +1274,9 @@ fn a_take_of_the_list_alone_leaves_a_node_counted_by_the_longest_lease() {
         assert!(Instant::now() < deadline, "{}", lease_of(&nodes, "rtk"));
         std::thread::sleep(Duration::from_millis(20));
     }
-    // Restarted with a lease of a second; its grant acknowledging the
-    // first is lost.
-    let (r2, p2) = router_on(&db, Duration::from_secs(1));
+    // Restarted with the shorter lease; its grant acknowledging the first
+    // is lost.
+    let (r2, p2) = router_on(&db, SHORTER);
     stall.take_next(br#""acked":""#);
     round(&r2);
     assert_eq!(
@@ -1209,7 +1284,7 @@ fn a_take_of_the_list_alone_leaves_a_node_counted_by_the_longest_lease() {
         2,
         "the new router's second grant was not held"
     );
-    // Round C's grant is read now, and runs the 9 s lease again.
+    // Round C's grant is read now, and runs the 13 s lease again.
     let (status, answer) = deliver(nodes[0].port, &late[0]);
     assert_eq!(status, 200, "{answer}");
     assert!(answer.contains("\"ran\":true"), "{answer}");
@@ -1224,8 +1299,8 @@ fn a_take_of_the_list_alone_leaves_a_node_counted_by_the_longest_lease() {
     assert_ne!(
         direct,
         200,
-        "two primaries: n1 took acme's write after the 1 s router failed it over ({body}); \
-         n1's lease: {}",
+        "two primaries: n1 took acme's write after the {SHORTER:?} router failed it over \
+         ({body}); n1's lease: {}",
         lease_of(&nodes, "rtk")
     );
 }
