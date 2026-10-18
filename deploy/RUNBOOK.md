@@ -925,14 +925,58 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
 
 ## Known gaps
 
-- **A node paused or suspended.** A node measures its lease on the
-  system's monotonic clock, which stands still while its virtual machine is
-  paused (KVM's clock across a stop and a continue) or the machine is
-  suspended. Woken, it has lease left, and writes beside its tenants' new
-  primaries until that runs out -- two primaries for up to a lease -- and a
-  write that passed the lease's check just before its process stopped lands
-  once it resumes. Do not pause or suspend a node's machine; stop the node
-  (`systemctl stop fenec-node`) first.
+- **A node's virtual machine paused by its host.** A node measures its
+  lease on its machine's boot clock (`CLOCK_BOOTTIME` on Linux,
+  `mach_continuous_time` on macOS), which counts a suspend its own kernel
+  makes: a machine's suspend or hibernation, a guest that suspends itself,
+  EC2's hibernation. Woken past its lease, the node holds none, and a write
+  it was answering as it slept is answered 500 rather than as a success.
+  Where the hypervisor keeps the guest's clock running across a pause, the
+  lease counts the pause as well: Xen's `xl pause`, Firecracker's pause on x86,
+  QEMU/KVM's `stop` and `cont` with `-cpu ...,+invtsc` (the guest on the
+  `tsc` clocksource) or, on arm64, `kvm-no-adjvtime=on` -- read from their
+  sources, not tried. What it does not cover is a pause the guest's kernel
+  never sees, which leaves every clock in the guest where it stopped, the
+  boot clock too:
+  - QEMU/KVM's defaults, x86 and arm64: `virsh suspend` and `resume` (QEMU's
+    `stop` and `cont`); and with any of its settings, `virsh save` and
+    `restore`, a snapshot loaded, a live migration's blackout;
+  - Hyper-V's saved state, and Azure's freezes for maintenance, up to 30 s;
+  - VMware's suspend and resume;
+  - Firecracker's snapshot restore without `clock_realtime`;
+  - anything a hypervisor does not document, an EC2 live update or
+    migration and GCE's blackouts over 5 s among them.
+
+  The node wakes with the lease it had left and writes its tenants beside
+  the new primaries the router promoted meanwhile until the lease runs out
+  or it reads the router's first grant after the failover, which names none
+  of them -- whichever comes first -- and so does a request the router was
+  still waiting on when it resumed. No signal inside the guest tells a
+  pause soundly, and every one there is comes after the guest runs again:
+  KVM's flag for a guest QEMU stopped (`PVCLOCK_GUEST_STOPPED`) is the
+  soft-lockup watchdog's, cleared within seconds and in no interface
+  userspace has; the TSC against the monotonic clock tells a stop and a
+  continue under one VMM's settings and not a migration; and the wall clock
+  is set right by an agent once the guest runs -- if one is set up to -- or
+  slewed by NTP, never seen to jump. So:
+  - Stop the node before its machine is paused, saved, snapshotted or
+    migrated (`systemctl stop fenec-node`; its tenants fail over a lease
+    and a tenth later), and start it after.
+  - Where the cloud says ahead, do the same when it does: Azure's Scheduled
+    Events `Freeze` (at least 15 minutes ahead, `NotBefore` kept; none
+    where hardware fails, and at times only 30 s), GCE's `maintenance-event`
+    metadata (60 s ahead, for a VM that migrates on maintenance and has
+    read the key since the last event). EC2 announces no live migration.
+  - Where a pause cannot be ruled out, keep `--auto-failover` short: the
+    overlap is the lease the node had left at the most.
+
+- **An answer sent after the lease lapsed.** A write is checked against the
+  lease as it lands and again as its answer is ready; one whose lease
+  lapsed in between is answered 500 (it is in the node's file, and its
+  tenant may or may not have been failed over without it). A process
+  stopped after that second check sends a success whenever it runs again.
+  A client that must know reads its write back after a failover, or resends
+  it with the same `Idempotency-Key`.
 
 - **No scrape-only token.** `/_metrics` takes a node's data or admin token,
   a router's `--token`.

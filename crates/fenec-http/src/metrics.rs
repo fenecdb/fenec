@@ -164,6 +164,12 @@ pub fn wrote() {
     WROTE.with(|w| w.set(true));
 }
 
+/// Whether the statement this thread is running writes ([`wrote`]): what a
+/// tenant's answer is asked after a lease that lapsed under it.
+pub fn writing() -> bool {
+    WROTE.with(Cell::get)
+}
+
 /// Statements that took `ms` or longer are logged with their text: `--slow-ms`.
 /// 0 logs every statement, as PostgreSQL's `log_min_duration_statement`
 /// does: a log collector's pipeline is tried out on what a server answers

@@ -984,13 +984,49 @@ can still outlast a failover until every router is upgraded. A node from
 before them is leased as before too, and the router says so once in its
 log.</p>
 
-<p>What leases do not cover. A node measures its lease on the system's
-monotonic clock, which stands still while a virtual machine is paused
-(KVM's clock across a stop and a continue) or a machine is suspended: a
-node paused so wakes with lease left and writes beside its tenants' new
-primaries until the lease runs out, with no late grant needed; and a write
-that passed the lease's check just before its process stopped lands once it
-resumes. A stall of sixteen rounds or more can leave a node without the
+<p>A node measures its lease on its machine's boot clock —
+<code>CLOCK_BOOTTIME</code> on Linux, <code>mach_continuous_time</code> on
+macOS — which counts the time the machine was suspended. A node woken from
+a suspend that outlasted its lease holds none, and the grant it reads on
+waking acknowledges an answer from before the suspend, which runs nothing
+past that answer's lease. Measured on the monotonic clock, as it was, a
+suspend did not count: the node woke with the lease it had left and wrote
+beside its tenants' new primaries until it ran out. The router counts on
+its own monotonic clock, which its machine's suspend stops, so a router
+suspended fails over later, never sooner.</p>
+
+<p>A write is checked against the lease as it lands, and again as it is
+answered. One that landed while the lease ran and is answered after it
+lapsed — its process stopped or starved between the two, its machine
+suspended, or its fsync or its wait for the replicas' streams outlasting
+the lease — is answered <code>500</code>: it is in the node's file, and
+its tenant may have been failed over without it or may still be on the
+node with it, which the node cannot know. Read it back through the router;
+or, where it was sent with an <code>Idempotency-Key</code>, send it again
+with the same key: a node still holding the tenant answers it as the write
+it made, and a new primary makes it once. Answered as a success, as it was,
+a failover lost it.</p>
+
+<p>What leases do not cover. A virtual machine stopped by its host is no
+suspend to its kernel. Under QEMU/KVM's defaults, x86 and arm64, a guest
+stopped and continued (<code>virsh suspend</code> and <code>resume</code>)
+finds every clock where it stopped, the boot clock too, and so does a guest
+saved and restored or live-migrated under any of its settings; so do
+Hyper-V's saved state and Azure's freezes for maintenance, VMware's suspend
+and Firecracker's snapshot restore. A node paused so wakes with lease left
+and writes beside its tenants' new primaries until the lease runs out or it
+reads the router's first grant after the failover, which names none of them
+— with no late grant needed — and nothing inside the guest tells it soundly
+that it was paused: every signal there is comes once it runs again. Stop
+the node before its machine is paused, saved or migrated (<code>systemctl
+stop fenec-node</code>), on a cloud's notice where it gives one (Azure's
+Scheduled Events, GCE's <code>maintenance-event</code>), and where a host
+may pause it unannounced, keep the lease short: two primaries last no
+longer than the lease the node had left. The
+<a href="https://github.com/fenecdb/fenec/blob/main/deploy/RUNBOOK.md#known-gaps">runbook's
+known gaps</a> say which pauses are counted and which are not. An answer that passed the second
+check just before its process stopped still goes out whenever the process
+runs again. A stall of sixteen rounds or more can leave a node without the
 answer its next grant acknowledges, holding no lease until the grant after
 it, which the router sends at once. Two directories leasing one node — a
 misconfiguration — can take it in turns as each other's lease lapses,

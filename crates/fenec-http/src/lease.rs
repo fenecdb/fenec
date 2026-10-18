@@ -40,16 +40,30 @@
 //! router before it, acknowledging an answer kept here, may run the longer
 //! lease again.
 //!
-//! **What it does not cover.** The lease is measured on [`Instant`] --
-//! `CLOCK_MONOTONIC` on Linux, `CLOCK_UPTIME_RAW` on macOS -- which stands
-//! still while a virtual machine is stopped (KVM's kvmclock across a stop
-//! and a continue) or a machine suspended: a node paused so wakes with
-//! lease left, and writes beside the new primary until it runs out, no
-//! late grant needed. A write that passed the fence just before its
-//! process stopped lands once it resumes. A stall of `ANSWERED` (16)
-//! rounds or more can push the acknowledgement out of the grants kept: the
-//! node then holds no lease until the router's next grant, which it sends
-//! at once.
+//! **It is measured on the boot clock** (`Moment`): `CLOCK_BOOTTIME` on
+//! Linux, `mach_continuous_time` on Apple's systems, which count the time
+//! the machine was suspended. On `Instant`'s clock, which does not, a node
+//! suspended while its lease ran woke with the lease left as it was and
+//! wrote beside its tenants' new primaries until it ran out.
+//!
+//! **What it does not cover.** A virtual machine stopped by its host is no
+//! suspend to the guest's kernel: under QEMU/KVM's defaults a guest's
+//! `stop` and `cont` (QEMU saves the kvmclock and sets it back; on arm64 the
+//! virtual counter), and under any of its settings a save and restore or a
+//! live migration's blackout, leave every clock in the guest where it
+//! stopped, the boot clock too -- and Hyper-V's saved state, VMware's
+//! suspend and Firecracker's snapshot restore alike. A node paused so wakes
+//! with lease left and writes beside the new primary until it runs out or
+//! it reads the router's first grant after the failover, no late grant
+//! needed. Every signal inside the guest comes once it runs again, and none
+//! is sound (`deploy/RUNBOOK.md`, Known gaps). A write that passed the
+//! fence just before its process stopped lands once it resumes; it is not
+//! answered as a success once the lease has lapsed by then
+//! (`handle_admitted`), but it is in the file, and an answer that passed
+//! that check is sent whenever the process runs again. A stall of
+//! `ANSWERED` (16) rounds or more can push the acknowledgement out of the
+//! grants kept: the node then holds no lease until the router's next grant,
+//! which it sends at once.
 //! Two directories leasing one node -- a misconfiguration -- can take it in
 //! turns as each other's lease lapses, neither holding one for long.
 //!
@@ -89,7 +103,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub struct Lease {
     state: RwLock<State>,
@@ -98,7 +112,7 @@ pub struct Lease {
 #[derive(Default)]
 struct State {
     /// `None` until the first grant.
-    until: Option<Instant>,
+    until: Option<Moment>,
     primaries: HashSet<String>,
     /// The name of the list held: the router's `epoch` it came with.
     epoch: Option<String>,
@@ -110,11 +124,124 @@ struct State {
     /// grants are numbered from a random start a process, and kept by
     /// number the ones of a router before its restart could have pushed
     /// out every one of its own.
-    answered: VecDeque<(u64, Instant)>,
+    answered: VecDeque<(u64, Moment)>,
     /// What the lease and the list held came from: when the answer their
     /// grant acknowledged was given, and that grant's number. `None` where
     /// no numbered grant ran them.
-    basis: Option<(Instant, u64)>,
+    basis: Option<(Moment, u64)>,
+}
+
+/// A moment on the clock a node's lease is measured on, in nanoseconds:
+/// the system's boot clock, which counts the time the machine was
+/// suspended ([`boot`]). On [`std::time::Instant`]'s clock --
+/// `CLOCK_MONOTONIC` on Linux, `CLOCK_UPTIME_RAW` on macOS, neither of
+/// which counts a suspend -- a node suspended while its lease ran woke with
+/// the lease left as it was, while the router's clock, on another machine,
+/// had gone on and failed its tenants over: the node wrote beside their
+/// new primaries until it ran out. On this one a suspend counts as the time
+/// it was, and a node woken past its lease holds none. The router counts
+/// on `Instant` still: a router suspended counts less, and fails over
+/// later, never sooner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Moment(u64);
+
+impl Moment {
+    /// Now, on the boot clock.
+    fn now() -> Moment {
+        Moment(boot::now())
+    }
+
+    /// `d` after this moment; the clock's end where that is past it.
+    fn after(self, d: Duration) -> Moment {
+        let nanos = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        Moment(self.0.saturating_add(nanos))
+    }
+
+    /// From this moment to `later`, nothing where `later` is not later.
+    fn until(self, later: Moment) -> Duration {
+        Duration::from_nanos(later.0.saturating_sub(self.0))
+    }
+}
+
+/// The boot clock, declared by hand as the crate declares its other system
+/// calls (it takes no `libc`): a clock that counts the time the machine was
+/// suspended, and at the rate `Instant`'s does.
+mod boot {
+    /// `clock_gettime(CLOCK_BOOTTIME)`: `CLOCK_MONOTONIC` and the time spent
+    /// suspended, the same clock otherwise. Read through the vDSO as the
+    /// monotonic clock is, since Linux 5.3's generic vDSO; a system call on
+    /// a kernel before it.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn now() -> u64 {
+        use std::ffi::c_long;
+        // `time_t` and the nanoseconds are a `long` each on glibc, musl and
+        // bionic, under the symbol declared here.
+        #[repr(C)]
+        struct Timespec {
+            sec: c_long,
+            nsec: c_long,
+        }
+        extern "C" {
+            fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+        }
+        const CLOCK_BOOTTIME: i32 = 7;
+        let mut ts = Timespec { sec: 0, nsec: 0 };
+        // SAFETY: the kernel writes one `timespec`, which outlives the call.
+        match unsafe { clock_gettime(CLOCK_BOOTTIME, &mut ts) } {
+            0 => (ts.sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(ts.nsec as u64),
+            // Before Linux 2.6.39, which has no boot clock: refused on every
+            // call, so the lease is measured on the one clock throughout.
+            _ => super::boot_fallback(),
+        }
+    }
+
+    /// `mach_continuous_time`: `mach_absolute_time` -- what `Instant` reads
+    /// as `CLOCK_UPTIME_RAW` -- and the time spent asleep, in the same
+    /// ticks, made nanoseconds by the timebase as std makes them.
+    #[cfg(target_vendor = "apple")]
+    pub fn now() -> u64 {
+        #[repr(C)]
+        struct Timebase {
+            numer: u32,
+            denom: u32,
+        }
+        extern "C" {
+            fn mach_continuous_time() -> u64;
+            fn mach_timebase_info(info: *mut Timebase) -> i32;
+        }
+        static BASE: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+        let &(numer, denom) = BASE.get_or_init(|| {
+            let mut t = Timebase { numer: 0, denom: 0 };
+            // SAFETY: the kernel writes one `mach_timebase_info`.
+            match unsafe { mach_timebase_info(&mut t) } {
+                0 if t.numer != 0 && t.denom != 0 => (t.numer as u64, t.denom as u64),
+                _ => (1, 1),
+            }
+        });
+        // SAFETY: no arguments; it reads the commpage.
+        let ticks = unsafe { mach_continuous_time() };
+        // `ticks * numer / denom` with no overflow in u64: 125 / 3 on Apple
+        // silicon, 1 / 1 on Intel.
+        (ticks / denom)
+            .saturating_mul(numer)
+            .saturating_add(ticks % denom * numer / denom)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    pub fn now() -> u64 {
+        super::boot_fallback()
+    }
+}
+
+/// `Instant`'s clock, counted from the first read: where there is no boot
+/// clock, the lease is measured as it was.
+#[cfg(not(target_vendor = "apple"))]
+fn boot_fallback() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(std::time::Instant::now);
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// How many answered grants a node keeps. The router acknowledges the one
@@ -268,8 +395,24 @@ impl Lease {
         primaries: Option<Vec<String>>,
         numbered: Option<Numbered>,
     ) -> Result<Took, Refusal> {
+        self.grant_at(holder, ms, epoch, primaries, numbered, Moment::now)
+    }
+
+    /// [`Self::grant_from`] on the clock `now` reads: the boot clock, or a
+    /// test's.
+    fn grant_at(
+        &self,
+        holder: &Holder,
+        ms: u64,
+        epoch: &str,
+        primaries: Option<Vec<String>>,
+        numbered: Option<Numbered>,
+        now: impl FnOnce() -> Moment,
+    ) -> Result<Took, Refusal> {
         let mut s = self.state.write().unwrap_or_else(|e| e.into_inner());
-        let now = Instant::now();
+        // Read under the lock: answers are noted in the order they were
+        // given.
+        let now = now();
         let running = s.until.is_some_and(|u| now < u);
         if let Some(held) = &s.holder {
             if holder.superseded_by(held, running) {
@@ -282,7 +425,7 @@ impl Lease {
         let Some(numbered) = numbered else {
             take_list(&mut s, epoch, primaries);
             s.holder = Some(holder.clone());
-            s.until = Some(now + Duration::from_millis(ms));
+            s.until = Some(now.after(Duration::from_millis(ms)));
             s.basis = None;
             return Ok(Took {
                 list: true,
@@ -329,7 +472,7 @@ impl Lease {
             take_list(&mut s, epoch, primaries);
         }
         if let (true, Some(at)) = (newer, from) {
-            s.until = Some(at + Duration::from_millis(ms));
+            s.until = Some(at.after(Duration::from_millis(ms)));
             s.basis = Some((at, numbered.grant));
         }
         if s.answered.len() == ANSWERED {
@@ -370,13 +513,20 @@ impl Lease {
 
     /// Whether `tenant` may take a write now, and why not.
     pub fn allows(&self, tenant: &str) -> Result<(), String> {
+        self.allows_at(tenant, Moment::now)
+    }
+
+    /// [`Self::allows`] on the clock `now` reads, read only where a lease
+    /// is held.
+    #[inline]
+    fn allows_at(&self, tenant: &str, now: impl FnOnce() -> Moment) -> Result<(), String> {
         let s = self.state.read().unwrap_or_else(|e| e.into_inner());
         match s.until {
             None => Err(
                 "this node holds no lease from its router yet, and takes no write until it does"
                     .into(),
             ),
-            Some(until) if Instant::now() >= until => Err(
+            Some(until) if now() >= until => Err(
                 "this node's lease from its router lapsed: its tenants may be failing over \
                  to other nodes; send the write through the router"
                     .into(),
@@ -395,12 +545,13 @@ impl Lease {
     /// this one where the lease is short, and the number's absence to tell
     /// a node from before numbered grants.
     pub fn describe(&self) -> String {
+        self.describe_at(Moment::now())
+    }
+
+    /// [`Self::describe`] at `now`.
+    fn describe_at(&self, now: Moment) -> String {
         let s = self.state.read().unwrap_or_else(|e| e.into_inner());
-        let left = s.until.map(|u| {
-            u.checked_duration_since(Instant::now())
-                .unwrap_or_default()
-                .as_millis()
-        });
+        let left = s.until.map(|u| now.until(u).as_millis());
         let mut epoch = String::new();
         match &s.epoch {
             Some(e) => fenec_core::json::escape_into(&mut epoch, e),
@@ -820,6 +971,187 @@ mod tests {
             .grant_from(&us, 60_000, "e2", list, numbered(3, Some(2)))
             .is_ok());
         assert!(l.allows("acme").is_err());
+    }
+
+    /// A machine's two clocks: the boot clock, which counts a suspend, and
+    /// the monotonic one -- `Instant`'s -- which does not. Their origins
+    /// differ, as a machine's do.
+    struct Clocks {
+        boot: Moment,
+        mono: Moment,
+    }
+
+    impl Clocks {
+        fn new() -> Clocks {
+            Clocks {
+                boot: Moment(7 << 40),
+                mono: Moment(3 << 30),
+            }
+        }
+
+        /// The machine runs `ms`: both clocks go on.
+        fn run(&mut self, ms: u64) {
+            let d = Duration::from_millis(ms);
+            (self.boot, self.mono) = (self.boot.after(d), self.mono.after(d));
+        }
+
+        /// The machine is suspended for `ms`: the boot clock alone counts it.
+        fn suspend(&mut self, ms: u64) {
+            self.boot = self.boot.after(Duration::from_millis(ms));
+        }
+    }
+
+    /// A node suspended while its lease runs wakes without one once the
+    /// suspend outlasted what was left, and with what was left less the
+    /// suspend otherwise: the lease is measured on the boot clock, which
+    /// counts it. A grant read on waking, acknowledging an answer given
+    /// before the suspend, runs nothing past that answer's lease; one
+    /// acknowledging an answer given since runs a lease again. The same
+    /// grants on the monotonic clock -- `Instant`, which the lease was
+    /// measured on -- left the lease running after the suspend for what it
+    /// had left before it: 7.5 s of writes beside the primaries the router
+    /// had promoted 11 s into the suspend.
+    #[test]
+    fn a_node_suspended_past_its_lease_wakes_without_one() {
+        let us = holder("us", 1, 7);
+        let list = || Some(vec!["acme".to_string()]);
+        for on_boot in [true, false] {
+            let l = Lease::new();
+            let mut c = Clocks::new();
+            let read = |c: &Clocks| if on_boot { c.boot } else { c.mono };
+            let grant = |c: &Clocks, list, n| {
+                l.grant_at(&us, 10_000, "e1", list, n, || read(c))
+                    .ok()
+                    .unwrap()
+            };
+            grant(&c, list(), numbered(1, None));
+            c.run(500);
+            grant(&c, None, numbered(2, Some(1)));
+            c.run(2_000);
+            assert!(l.allows_at("acme", || read(&c)).is_ok());
+            assert_eq!(left_at(&l, read(&c)), Some(7_500));
+            // A suspend shorter than what was left: counted, not ignored.
+            c.suspend(3_000);
+            let shorter = left_at(&l, read(&c));
+            // The lid closed for 30 s.
+            c.suspend(30_000);
+            let woken = l.allows_at("acme", || read(&c));
+            // Grant 3, sent before the router gave up, read on waking: it
+            // acknowledges the answer to 2, given before the suspend.
+            grant(&c, None, numbered(3, Some(2)));
+            let late = l.allows_at("acme", || read(&c));
+            if !on_boot {
+                assert_eq!(shorter, Some(7_500));
+                assert!(woken.is_ok() && late.is_ok(), "the hole closed on Instant?");
+                assert_eq!(left_at(&l, read(&c)), Some(8_000));
+                continue;
+            }
+            assert_eq!(shorter, Some(4_500), "the suspend was not counted");
+            assert!(woken.unwrap_err().contains("lapsed"));
+            assert!(late.unwrap_err().contains("lapsed"));
+            assert_eq!(left_at(&l, read(&c)), Some(0));
+            // Grant 4 acknowledges the answer to 3, given awake: a lease
+            // again, run from that answer.
+            c.run(100);
+            grant(&c, None, numbered(4, Some(3)));
+            assert!(l.allows_at("acme", || read(&c)).is_ok());
+            assert_eq!(left_at(&l, read(&c)), Some(9_900));
+        }
+    }
+
+    /// A lease from a router before numbered grants, run from when the
+    /// grant is read, lapses across a suspend as a numbered one does.
+    #[test]
+    fn an_unnumbered_lease_lapses_across_a_suspend() {
+        let l = Lease::new();
+        let mut c = Clocks::new();
+        let grant = |c: &Clocks| {
+            l.grant_at(
+                &Holder::default(),
+                5_000,
+                "e1",
+                Some(vec!["acme".into()]),
+                None,
+                || c.boot,
+            )
+        };
+        assert!(grant(&c).is_ok());
+        c.run(1_000);
+        assert!(l.allows_at("acme", || c.boot).is_ok());
+        c.suspend(4_000);
+        assert!(l
+            .allows_at("acme", || c.boot)
+            .unwrap_err()
+            .contains("lapsed"));
+        assert!(
+            l.allows_at("acme", || c.mono).is_ok(),
+            "the clocks did not part"
+        );
+    }
+
+    /// The milliseconds the lease has left at `now`, by `describe`.
+    fn left_at(l: &Lease, now: Moment) -> Option<u64> {
+        let d = l.describe_at(now);
+        let rest = d.split("\"left_ms\":").nth(1).unwrap();
+        rest.split([',', '}']).next().unwrap().parse().ok()
+    }
+
+    /// The boot clock is the system's, not `Instant`'s counted from the
+    /// first read: ahead of the monotonic clock by the time the machine
+    /// slept since it started, never behind it. And it goes on at
+    /// `Instant`'s rate, read from below: a sleep never ends early, and the
+    /// boot clock's reads lie around `Instant`'s.
+    #[test]
+    fn the_boot_clock_is_the_systems_and_runs_as_instant_does() {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let mono = || {
+            #[repr(C)]
+            struct Timespec {
+                sec: std::ffi::c_long,
+                nsec: std::ffi::c_long,
+            }
+            extern "C" {
+                fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+            }
+            let mut ts = Timespec { sec: 0, nsec: 0 };
+            assert_eq!(unsafe { clock_gettime(1, &mut ts) }, 0);
+            ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
+        };
+        #[cfg(target_vendor = "apple")]
+        let mono = || {
+            extern "C" {
+                fn clock_gettime_nsec_np(clock: u32) -> u64;
+            }
+            // `CLOCK_UPTIME_RAW`, `Instant`'s.
+            unsafe { clock_gettime_nsec_np(8) }
+        };
+        #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+        {
+            let (up, boot) = (mono(), Moment::now().0);
+            // A microsecond of the timebase's rounding either way.
+            assert!(boot + 1_000 >= up, "the boot clock {boot} is behind {up}");
+        }
+        // `/proc/uptime` is the boot clock, read in hundredths: in a time
+        // namespace whose boot clock is offset from its monotonic one
+        // (`unshare --time --boottime <s>`), it tells the two apart, as no
+        // machine that never slept does.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            let text = std::fs::read_to_string("/proc/uptime").unwrap();
+            let up: f64 = text.split_whitespace().next().unwrap().parse().unwrap();
+            let boot = Moment::now().0 as f64 / 1e9;
+            assert!(
+                (boot - up).abs() < 1.0,
+                "the boot clock reads {boot} s, /proc/uptime {up} s"
+            );
+        }
+        let b0 = Moment::now();
+        let i0 = std::time::Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        let i1 = std::time::Instant::now();
+        let b1 = Moment::now();
+        assert!(b0.until(b1) >= Duration::from_millis(20));
+        assert!(b0.until(b1) + Duration::from_micros(1) >= i1 - i0);
     }
 
     #[test]

@@ -72,6 +72,7 @@ make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part; ARGS=standby a standby router's request against the primary's; ARGS=regions a region's own failover cut off from the global router, leases of 1 and 5 s; ARGS=reads a read answered by a read replica against one sent home)
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
+make fence-bench         # a node's lease: a put in process with no fence and with the lease's, and Lease::allows alone
 make policy-bench        # a scoped set under a plain rule, a field list, a transition, answering its row and a rule reading another collection, and a read by id, against the server's token, in process and over HTTP (ARGS=streams|beats: writes beside scoped streams)
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make node-archive-bench  # every tenant of a node archived: 1 000 tenants and one of 64 MB, a stream each against the node's one stream (ARGS="tenants active seconds sync way big_mb"); the syncer's passes and a close beside it (PASSES="way seconds big_mb")
@@ -894,13 +895,46 @@ none and its grant runs from the reading, as before, and a node from
 before them ignores them (`Leases::unnumbered`, said once): leased the old
 way rather than refused or failed over never, so a rolling upgrade in
 either order keeps every node writing and failed over on its own, the late
-grant open where either side is old. What leases do not cover: the node's
-lease runs on `Instant` (`CLOCK_MONOTONIC`, macOS's `CLOCK_UPTIME_RAW`),
-which stands still while a VM is stopped (kvmclock across a stop and a
-continue) or a machine suspended, so a node paused so wakes with lease left
-and writes beside the new primary until it runs out, and a write that
-passed the fence just before its process stopped lands once it resumes
-(the RUNBOOK's known gaps); a stall of 16 rounds or more can push the
+grant open where either side is old. The node's lease runs on the boot
+clock (`lease::Moment`: `CLOCK_BOOTTIME` on Linux, `mach_continuous_time`
+on Apple's systems, declared by hand), which counts a suspend: on
+`Instant`'s (`CLOCK_MONOTONIC`, `CLOCK_UPTIME_RAW`) a node suspended past
+its lease woke with the lease left as it was and wrote beside its tenants'
+new primaries. The router counts on `Instant`, which a suspend of its own
+machine stops: it fails over later, never sooner. It cost a write nothing:
+`Lease::allows`, which the fence is, went 69-75 -> 38 ns on an M1
+(`mach_continuous_time` against std's `clock_gettime`), a fenced put
+555-560 -> 548-552 ns, eight runs a side in ABBA turns (`make
+fence-bench`), and in Docker's Linux VM (musl), where `CLOCK_BOOTTIME`
+is read through the vDSO as `CLOCK_MONOTONIC` is, `allows` 99.8-117.0 ns
+against 99.7-118.3 and the fenced put 1 488-1 677 against 1 472-1 720,
+quartet by quartet the same at loads of 34-46 from other work. No runner
+suspends, so the clock's test
+asks `/proc/uptime` too, which CI runs in a time namespace whose boot clock
+is a day ahead of its monotonic one (`unshare --time --boottime`): reading
+`CLOCK_MONOTONIC` it fails there. And a write landed under the lease is not
+answered as a success once the lease has lapsed by the time it is answered
+(`handle_admitted`, 500, the outcome unknown, where it asked the lease
+again for a 403 already): a process stopped between the fence and the
+append, a suspend, or a durability that outlasted the lease -- a cut
+stream waits out `SENT_WAIT`, a second, where a lease's tenth is half of
+one at the default -- had it answered 200 and lost in the failover. What
+leases do not cover: a VM stopped by its host is no suspend to the guest --
+under QEMU/KVM's defaults a `stop` and `cont` (QEMU sets the kvmclock back,
+on arm64 the virtual counter), and under any of its settings a save and
+restore or a live migration's blackout, leave every clock in the guest
+where it stopped, the boot clock too, as do Hyper-V's saved state, VMware's
+suspend and Firecracker's snapshot restore -- so a node paused so wakes with
+lease left and writes beside the new primary until it runs out or it reads
+the router's first grant after the failover. Every signal inside the guest
+comes once it runs again and none is sound -- KVM's `PVCLOCK_GUEST_STOPPED`
+is the soft-lockup watchdog's, in no interface userspace has; the TSC
+against the monotonic clock hangs on the VMM's settings and misses a
+migration; the wall clock is set by an agent after, or slewed -- so none is
+built; a cloud's notice comes ahead (Azure's Scheduled Events `Freeze`,
+GCE's `maintenance-event`), and the RUNBOOK's known gaps say which pauses
+count; an answer that passed the second check goes out
+whenever the process runs again; a stall of 16 rounds or more can push the
 acknowledgement out of `answered`, the node holding no lease until the
 grant after, sent at once; two directories leasing one node -- a
 misconfiguration -- can take it in turns as each other's lease lapses,

@@ -1551,17 +1551,63 @@ fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response
             handle(&t.db, &read_only, req)
         }
     };
-    match refused.or_else(|| refusal(t)) {
-        Some(why) if resp.status == 403 => Response::retry_after(503, &why, 1),
+    if let Some(why) = refused {
+        return match resp.status {
+            403 => Response::retry_after(503, &why, 1),
+            _ => resp,
+        };
+    }
+    // Asked again as the answer is ready: past the write's durability --
+    // its fsync, its wait for the replicas' streams -- and just before it is
+    // written out.
+    let lapsed = t.writable().err();
+    match resp.status {
+        403 => match refusal_after(t, lapsed) {
+            Some(why) => Response::retry_after(503, &why, 1),
+            None => resp,
+        },
+        // The write landed while the lease let it, and the lease lapsed
+        // before the answer: a process stopped or starved between the two,
+        // a machine suspended, or a durability that waited past the lapse
+        // -- a stream cut off with the router waits out `SENT_WAIT`, a
+        // second, where a lease's tenth is half of one at the default. Its
+        // tenant may have been promoted elsewhere meanwhile, the write not
+        // on the copy promoted, and answered as a success it was a write
+        // acknowledged and lost. Whether it was is not this node's to know:
+        // still the primary, it keeps the write. So it says neither, as an
+        // fsync that failed does. Only a statement that took the write
+        // lock: a read answered after the lapse is a read. An MCP write
+        // tool's call is answered so too, its transport's error rather than
+        // a tool's result, which would say the write was made.
+        s if s < 300 && metrics::writing() => match lapsed {
+            Some(why) => Response::error(500, &lapsed_under(&why)),
+            None => resp,
+        },
         _ => resp,
     }
 }
 
+/// The answer to a write that landed and whose lease lapsed before it was
+/// answered ([`handle_admitted`]).
+fn lapsed_under(why: &str) -> String {
+    format!(
+        "the write landed on this node, but by the time it was answered this node's lease no \
+         longer let it write the tenant ({why}): the tenant may have been failed over to \
+         another node without the write, or may still be here with it. Read it back through \
+         the router, or send it again with the same Idempotency-Key"
+    )
+}
+
 /// Why this node takes no write for `t` now, if it takes none.
 fn refusal(t: &tenants::Tenant) -> Option<String> {
+    refusal_after(t, t.writable().err())
+}
+
+/// [`refusal`], the lease's answer asked already.
+fn refusal_after(t: &tenants::Tenant, lapsed: Option<String>) -> Option<String> {
     match t.is_frozen() {
         true => Some("the tenant is being moved; retry shortly".to_string()),
-        false => t.writable().err(),
+        false => lapsed,
     }
 }
 
@@ -3227,6 +3273,101 @@ mod tests {
         assert!(body.contains("lapsed"), "{body}");
         assert!(body.ends_with(r#""retry_after":1}"#), "{body}");
         assert!(late.extra.iter().any(|(k, _)| k == "Retry-After"));
+        drop(t);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The lease runs out after a write landed and before it is answered:
+    /// the write is not answered as a success, which its tenant failed over
+    /// meanwhile would have lost, nor as a refusal, which it was not -- it
+    /// is in the file. A `/batch` holding a compact runs each statement on
+    /// its own, so the put lands before the read after it lapses the lease;
+    /// that read alone, after the lapse, is answered as the read it is.
+    #[test]
+    fn a_write_answered_after_its_lease_lapsed_is_not_a_success() {
+        struct Lapse(Arc<lease::Lease>);
+        impl fenec_core::plugin::ScalarFn for Lapse {
+            fn call(&self, _: &[Value]) -> fenec_core::error::Result<Value> {
+                self.0.grant(0, "e1", None).ok();
+                Ok(Value::Int(1))
+            }
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "fenec-lease-answer-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        let tenants = Tenants::new(&dir).unwrap().with_lease();
+        let lease = Arc::clone(tenants.lease().unwrap());
+        let held = Arc::clone(&lease);
+        let tenants = tenants.with_setup(move |db| {
+            db.registry_mut()
+                .register_fn("lapse", Arc::new(Lapse(Arc::clone(&held))))
+        });
+        let grant = || assert!(lease.grant(60_000, "e1", Some(vec!["acme".into()])).is_ok());
+        grant();
+        let t = tenants.create("acme").unwrap();
+        let cfg = Config::default();
+        let send = |path: &str, body: String| {
+            let req = Request {
+                method: Method::Post,
+                target: path.into(),
+                path: path.into(),
+                query: Vec::new(),
+                headers: Vec::new(),
+                body: body.into_bytes(),
+                keep_alive: false,
+            };
+            let resp = handle_tenant(&t, &cfg, &req);
+            // The thread's flags, as the connection resets them after each.
+            metrics::record(Duration::ZERO, false, None, String::new);
+            resp
+        };
+        let batch = |lines: &[&str]| {
+            let lines: Vec<String> = lines
+                .iter()
+                .map(|q| {
+                    let mut line = String::from("{\"query\":");
+                    fenec_core::json::escape_into(&mut line, q);
+                    line.push('}');
+                    line
+                })
+                .collect();
+            send("/batch", lines.join("\n"))
+        };
+        let ok = batch(&[
+            "create collection notes (title text)",
+            "put notes {title: \"a\"}",
+            "get notes select title limit 1",
+        ]);
+        assert_eq!(ok.status, 200, "{}", String::from_utf8_lossy(&ok.body));
+        let late = batch(&[
+            "compact notes",
+            "put notes {title: \"b\"}",
+            "get notes select lapse() as l limit 1",
+        ]);
+        let body = String::from_utf8_lossy(&late.body);
+        assert_eq!(late.status, 500, "{body}");
+        assert!(body.contains("landed") && body.contains("lapsed"), "{body}");
+        // It is in the file: the lease back, it reads there.
+        grant();
+        let read = send(
+            "/query",
+            r#"{"query":"get notes where title = \"b\" count"}"#.into(),
+        );
+        let read = String::from_utf8_lossy(&read.body);
+        assert!(read.contains(r#""count":1"#), "{read}");
+        // A read answered after the lapse is a read.
+        let after = send(
+            "/query",
+            r#"{"query":"get notes select lapse() as l limit 1"}"#.into(),
+        );
+        assert_eq!(
+            after.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&after.body)
+        );
         drop(t);
         let _ = std::fs::remove_dir_all(dir);
     }
