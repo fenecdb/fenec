@@ -192,9 +192,9 @@ pub fn fanned(how: Fanned, took: Duration, answered: u64, failed: u64) {
     FANOUT_TENANTS[1].fetch_add(failed, Ordering::Relaxed);
 }
 
-/// Counts a request answered `status` after `took`.
-pub fn request(route: Route, status: u16, took: Duration) {
-    counted(route, status);
+/// Times a request answered: from its arrival to its answer written, or a
+/// stream's head. Called once the answer is out, after [`counted`].
+pub fn timed(route: Route, took: Duration) {
     SHARDS[shard()].durations[route as usize].add(took);
 }
 
@@ -205,9 +205,18 @@ pub fn gone(route: Route, took: Duration) {
     SHARDS[shard()].durations[route as usize].add(took);
 }
 
-/// Counts a request and does not time it: a standby's replication stream,
-/// whose head the stream writes itself and which lasts as long as the
-/// standby stays connected.
+/// Counts a request answered `status`. Called before the answer is
+/// written, as a node records its statements
+/// (`fenec_http::metrics::record`), so a client holding its answer finds
+/// it counted; [`timed`] once it is written. Counted after the write, as
+/// it was, a scrape sent once the answer came could run before the thread
+/// that wrote it had counted it: the entry's tests read eu's router a
+/// request short after a relayed answer, and a request over once it landed
+/// (CI, `entry.test.js`). The count alone goes first: count, clock and
+/// histogram moved before the write took the router's added p50 0.1 us up
+/// (`make shard-bench ARGS=latency`, ABBA). A standby's replication
+/// stream, whose head the stream writes itself and which lasts as long as
+/// the standby stays connected, is counted as it ends and not timed.
 pub fn counted(route: Route, status: u16) {
     let code = match status {
         0..=299 => 0,

@@ -351,7 +351,10 @@ nodes. It counts what it answered and what the nodes took over it; what a
 tenant's statements did is its node's to count, and no label names a tenant.
 A request is timed from its arrival to its answer, the node's time included —
 a subscription to its head, since the stream lasts as long as its client
-stays; a standby router's replication stream is counted and not timed.</p>
+stays; a standby router's replication stream is counted and not timed. A
+request is counted before its answer is written, as a node counts its
+statements, so a client holding its answer finds it in the next scrape; its
+time ends once the answer is written.</p>
 
 <pre data-lang="text"># what the router adds, at the median, over five minutes
 histogram_quantile(0.5, sum by (le) (rate(fenec_router_request_duration_seconds_bucket{route="tenant"}[5m])))
