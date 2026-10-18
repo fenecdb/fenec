@@ -2090,7 +2090,12 @@ acknowledged write is read back from each tenant's primary and its replica,
 and the times are printed. A killed node's tenants write again a lease and
 a tenth after their last renewal, plus however long the replica's
 reconnection to the dead node takes to fail, its 5 s timeout at most: the
-2.5 and 5.0 s the runs measured. The runbook says what each alert means,
-the order to bring a deployment up in, how to rotate each token and
-upgrade with no downtime, and what is not measured yet.</p>
+2.5 and 5.0 s the runs measured. That holds for nodes recorded by address:
+the router leases a region's nodes in rounds and resolves a node's name
+with no bound of its own, so a dead node whose name its resolver is slow to
+refuse holds up every node's renewal -- 30 s to fail over and 18 s without
+a write for the region's other tenants in the drill on GitHub's runner. The
+runbook says what each alert means, the order to bring a deployment up in,
+how to rotate each token and upgrade with no downtime, and what is not
+measured yet.</p>
 </details>

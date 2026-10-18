@@ -6550,7 +6550,16 @@ s after the node's start; a region whose router was killed stopped writing
 promotion. The 5 s tail is `Follower::halt` in `promote` waiting out the
 replica's reconnection to the dead node (`replication::connect`'s 5 s
 timeout, a dead machine's address swallowing the SYN): reported, not worked
-around. CI's `deploy` job runs both.
+around. So is a worse one CI's run of the drill met: `Router::lease_round`
+checks for lapses only once every grant of its `thread::scope` has ended,
+and a grant's `upstream::dial` resolves the node's name unbounded
+(`to_socket_addrs`), so a dead node whose name its resolver is slow to
+refuse -- GitHub's Docker DNS for a removed container -- held the round up,
+the region's healthy nodes went unrenewed and stopped writing (18 s), and
+were failed over themselves; the dead node's tenants wrote again after 30 s
+(21 s and 8 s locally with the routers' unknown names sent to a resolver
+that never answers). The kit records nodes by address. CI's `deploy` job
+runs both checks.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-server` stays on `release`: a

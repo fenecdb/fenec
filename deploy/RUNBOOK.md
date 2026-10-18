@@ -268,7 +268,9 @@ between two answered writes, and none of 42 202 acknowledged writes lost.
 The lease and a tenth is the floor; the tail is the promotion waiting on
 the replica's attempt to reconnect to the dead node, bounded by that
 connection's 5 s timeout (Known gaps). With the default lease of 5 s, count
-6 to 11 s.
+6 to 11 s -- for nodes recorded by address: a node recorded by a name its
+resolver is slow to refuse once the machine is gone stalls the router's
+leasing of the whole region (Known gaps, measured at 30 s in CI).
 
 What to do:
 
@@ -567,6 +569,20 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   (`/t/<t>/_replication/status` on the primary's node has each), and **no
   archive lag**: `fenec archive` exports nothing, and the node's
   `fenec_node_streams` says only whether an archiver is connected.
+- **A dead node's name stalls its region's leases.** The router renews
+  every node's lease in one round and checks for lapses once every grant
+  of the round has ended, and a grant looks its node's address up with no
+  bound of its own. A node recorded by a name that its resolver is slow to
+  refuse once the machine is gone holds the round up: the region's other
+  nodes go unrenewed, stop writing as their leases lapse, and are failed
+  over themselves when the round ends; every failover and repair after it
+  waits on the same lookup. In CI's Docker (GitHub's runner, whose Docker
+  DNS is slow to refuse a removed container's name) `make drill` measured
+  a 30.2 s failover and 18.0 s without a write for the region's other
+  tenants, nothing acknowledged lost; locally, with the routers' unknown
+  names sent to a resolver that never answers, 21 s and 8 s, and the
+  router's log failing the healthy node over. Until the router bounds the
+  lookup, record nodes by address, as every example here does.
 - **A failover's tail.** Promoting a tenant waits for its replica's
   follower to stop, and a follower in the middle of reconnecting to the
   dead node stops only when that attempt fails -- up to its 5 s connect
