@@ -5,25 +5,35 @@ description: Build a collection from SQLite or a live PostgreSQL table in one co
 
 <h1>Import</h1>
 <p class="kicker">One command turns a SQLite file or a PostgreSQL table into a
-fenecdb collection, vectors and index included.</p>
+fenecdb collection, its fields typed and its indexes built, and can keep it
+following the table's changes.</p>
 
 <h2>Import a table</h2>
 
 <p>Name the source, the table and the collection to make. The schema is worked
-out for you, vector columns are recognised, and the index is built after the
-rows are in.</p>
+out from the table's columns, and each index you name is built once the rows
+are in.</p>
 
-<pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
-    --vector embed:384 --index "embed@hnsw(cosine)"
+<pre data-lang="bash">fenec import data.sqlite --table docs --into articles --index "category@hash"
 
 fenec import postgres://user@host:5432/database --table docs \
-    --into articles --index "embed@hnsw(cosine)"
+    --into articles --index "category@hash"
+</pre>
+
+<pre data-lang="text">$ fenec import data.sqlite --table docs --into articles --index "category@hash"
+source   data.sqlite -> docs
+target   articles.fenec -> articles
+3 records, articles.fenec (12.82ms)
+index    category @hash
 </pre>
 
 <details class="deep"><summary>Details</summary>
-<p>The import derives the schema, recognises vector columns and follows the
-bulk-load-then-index order by itself. Every option is in
-<code>fenec import --help</code>.</p>
+<p>The import derives the schema, the table's integer key becoming each
+document's id, writes the rows in batches and builds the indexes after the
+last, rather than keep them up a row at a time. The collection goes into
+<code>&lt;into&gt;.fenec</code> unless <code>--file</code> names another. A
+column of embeddings comes across too (<a href="#vector-columns">Vector
+columns</a>). Every option is in <code>fenec import --help</code>.</p>
 </details>
 
 <h2>Look before you write</h2>
@@ -31,19 +41,20 @@ bulk-load-then-index order by itself. Every option is in
 <p><code>--dry-run</code> prints the schema it would make, and any warnings,
 and writes nothing.</p>
 
-<pre data-lang="text">$ fenec import data.sqlite --table docs --into articles --vector embed:3 --dry-run
+<pre data-lang="text">$ fenec import data.sqlite --table docs --into articles --index "category@hash" --dry-run
 source   data.sqlite -> docs
 target   articles.fenec -> articles
 
 create collection articles (
-  title     text           &lt;- text
-  category  text           &lt;- text
-  score     int            &lt;- int
-  published timestamp      &lt;- datetime
-  embed     vector&lt;3&gt;      &lt;- blob
+  title      text           &lt;- text
+  category   text           &lt;- text
+  score      int            &lt;- int
+  published  timestamp      &lt;- datetime
 )
   id  &lt;- id (INTEGER PRIMARY KEY)
-create index on articles (embed) @hnsw(cosine, m=16, ef_construction=200, ef_search=100)
+create index on articles (category) @hash
+
+nothing was written (--dry-run); use --count for the row count
 </pre>
 
 <ul>
@@ -165,13 +176,16 @@ the source. Both can be used together.</p>
 applying the PostgreSQL table's changes as they commit. Run the same command
 again and it picks up where it stopped.</p>
 
-<pre data-lang="bash">fenec import postgres://app@db:5432/app --table docs --into articles \
-    --index "embed@hnsw(cosine)" --follow
+<pre data-lang="text">$ fenec import postgres://app@db:5432/app --table docs --into articles \
+    --index "category@hash" --follow
+source   app@db:5432/app -> docs
+target   articles.fenec -> articles
 follow   slot fenec_articles (created), publication fenec_articles (created)
+note     the slot keeps the server's WAL until this follower confirms it; to stop following for good: select pg_drop_replication_slot('fenec_articles')
 copying  there is none yet
-100000 records, articles.fenec (3.1s)
+100000 records, articles.fenec (339.37ms)
 following docs: ctrl-c stops, and the same command resumes
-42 transactions, 57 changes, at 0/1B0E7F0
+42 transactions, 57 changes, at 0/2BEA458
 </pre>
 
 <ul>
@@ -257,12 +271,18 @@ row.</p>
 <p><code>fenec-server --follow</code> runs the follower inside the server, so the
 table is served over HTTP and subscriptions while it follows.</p>
 
-<pre data-lang="bash">fenec-server --file articles.fenec --http 0.0.0.0:8080 --http-token "$TOKEN" \
+<pre data-lang="text">$ fenec-server --file articles.fenec --http 0.0.0.0:8080 --http-token "$TOKEN" \
     --follow postgres://app@db:5432/app --follow-table docs --follow-into articles \
-    --follow-index "embed@hnsw(cosine)"
+    --follow-index "category@hash"
+opened: articles.fenec
+following: docs
+fenec-server 0.1.10: articles.fenec  [sync=250 ms]
+fenec-http 0.1.10 listening on: http://0.0.0.0:8080  [token]
 follow: docs: slot fenec_articles (created), publication fenec_articles (created)
+follow: the slot keeps the server's WAL until this server confirms it; to stop following for good: select pg_drop_replication_slot('fenec_articles')
 follow: copying docs: there is none yet
-follow: docs copied, 100000 rows in 3.1s
+follow: 2000 rows of docs copied
+follow: docs copied, 100000 rows in 160.10ms
 follow: docs: streaming its changes
 </pre>
 
@@ -317,6 +337,47 @@ under an HNSW index, a subscriber reading <code>/changes</code> over HTTP
 machine. Killed while the table took a row a transaction, the server was up
 again in 75 ms and held every one of the table's 14 063 rows 370 ms after it
 started. The follower adds 178 KB to <code>fenec-server</code>.</p>
+</details>
+
+<h2 id="vector-columns">Vector columns</h2>
+
+<p>A column of embeddings becomes a <code>vector</code> field, and an
+<code>@hnsw</code> index named with <code>--index</code> is built once every
+row is in. pgvector's columns are recognised with their dimensions; a
+SQLite BLOB of little-endian <code>f32</code>s is named with
+<code>--vector</code>.</p>
+
+<pre data-lang="bash">fenec import data.sqlite --table passages --into passages \
+    --vector embed:384 --index "embed@hnsw(cosine)"
+
+fenec import postgres://user@host:5432/database --table passages \
+    --into passages --index "embed@hnsw(cosine)"
+</pre>
+
+<pre data-lang="text">$ fenec import data.sqlite --table passages --into passages --vector embed:384 --dry-run
+source   data.sqlite -> passages
+target   passages.fenec -> passages
+
+create collection passages (
+  text    text           &lt;- text
+  source  text           &lt;- text
+  embed   vector&lt;384&gt;    &lt;- blob
+)
+  id  &lt;- id (INTEGER PRIMARY KEY)
+
+nothing was written (--dry-run); use --count for the row count
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>The graph is built after the copy, over every vector at once and on
+every core, which is the order a bulk load wants (<a
+href="concepts.html#bulk-load-first-index-after">Bulk load first, index
+after</a>). pgvector's <code>vector</code>, <code>halfvec</code> and
+<code>sparsevec</code> columns become <code>vector&lt;N&gt;</code>,
+<code>vector&lt;N, f16&gt;</code> and <code>sparse&lt;N&gt;</code> with
+nothing named; <code>--follow</code> keeps them in step as any column, an
+untouched vector taken from the collection rather than resent (<a
+href="#following">Following changes</a>).</p>
 </details>
 
 <h2>Speed and testing</h2>

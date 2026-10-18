@@ -65,12 +65,13 @@ const hits = db.rows('get notes select title match title $1 fuzzy', ['oasys']);
 // [{ title: 'Night at the oasis', _score: 0.62... }]</pre>
   </li>
   <li>
-    <p>Keep the rows on the page as they change: a live query runs again
-    after every write to what it reads.</p>
+    <p>Keep the rows in step as they change: a live query hands its
+    function the rows now, and again after every write to what it
+    reads.</p>
 <pre data-lang="js">db.live(db.from('notes').where('year', '&gt;=', 2020).order('year', 'desc'), (rows) =&gt; {
-  document.querySelector('#notes').textContent = rows.map((n) =&gt; n.title).join(', ');
+  console.log(rows.map((n) =&gt; n.title));   // draw the list here
 });
-db.run('put notes {title: $1, year: $2}', ['Sand and stars', 2023]);   // the list is drawn again</pre>
+db.run('put notes {title: $1, year: $2}', ['Sand and stars', 2023]);   // logged again, the new row in it</pre>
   </li>
   <li>
     <p>Serve the page over HTTP — it does not open from <code>file://</code>.</p>
@@ -179,8 +180,9 @@ href="sharding.html#deploying">Deploying it</a>.</p>
 
 <ol class="steps-doc">
   <li>
-    <p>Open a file in the shell.</p>
-<pre data-lang="bash">./target/release/fenec data.fenec</pre>
+    <p>Open a file of its own in the shell — not the server's
+    <code>data.fenec</code>, which two processes would corrupt.</p>
+<pre data-lang="bash">./target/release/fenec notes.fenec</pre>
   </li>
   <li>
     <p>Create a collection, each field typed and the ones you filter,
@@ -207,26 +209,30 @@ put notes [ ... 100 000 more ... ]</pre>
 </ol>
 
 <details class="deep"><summary>Details</summary>
-<pre data-lang="bash">./target/release/fenec data.fenec              # interactive
-./target/release/fenec data.fenec -c 'get notes limit 5'
-echo 'get notes' | ./target/release/fenec data.fenec
+<pre data-lang="bash">./target/release/fenec notes.fenec              # interactive
+./target/release/fenec notes.fenec -c 'get notes limit 5'
+echo 'get notes' | ./target/release/fenec notes.fenec
 </pre>
 
 <p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
 <code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>
 <code>.quit</code>.</p>
 
-<p>The shell runs a statement once its line ends with its parentheses and
-braces closed, so a <code>create collection</code> may span lines and a
-<code>get</code> goes on one.</p>
+<p>The shell runs a statement once a line ends with its parentheses,
+braces and brackets closed and no string open, so a <code>create
+collection</code> may span lines and a <code>get</code> goes on one. A
+statement broken after its first line runs that line alone: a
+<code>get</code> reads every row, unfiltered, and a <code>del notes</code>
+on a line of its own deletes every row.</p>
 
 <p>Fields and indexes can come later too, with no row rewritten:
 <code>alter collection notes add field mood text</code>, then
 <code>create index on notes (mood) @hash</code> over the rows already there
 (<a href="fenecql.html#changing-a-collection">Changing a collection</a>).
-<code>prefix</code> finds a word half typed, and <code>highlight()</code>
-and <code>snippet()</code> mark what matched (<a
-href="fenecql.html#typos">Typos and words begun</a>).</p>
+<code>prefix</code> finds a word half typed (<a
+href="fenecql.html#typos">Typos and words begun</a>), and
+<code>highlight()</code> and <code>snippet()</code> mark what matched (<a
+href="fenecql.html#highlights">Highlights and snippets</a>).</p>
 </details>
 
 <h2>Search by meaning</h2>
@@ -234,12 +240,19 @@ href="fenecql.html#typos">Typos and words begun</a>).</p>
 <p>A vector field adds search by meaning beside the words: <code>near</code>
 ranks the rows by how close their embedding is to a query's, and
 <code>fuse</code> puts that ranking together with <code>match</code>'s. The
-vectors come from your embedding model, as parameters.</p>
+vectors come from your embedding model. In the shell, on the notes above,
+each is written out as its list of 384 numbers, since the shell binds no
+parameters:</p>
 
 <pre data-lang="fenecql">alter collection notes add field embed vector&lt;384&gt;
-put notes {body: "hnsw is a navigable small world graph", topic: 3, posted: now(), embed: $1}
+put notes {body: "hnsw is a navigable small world graph", topic: 3, posted: now(), embed: [0.12, -0.03, …]}
 create index on notes (embed) @hnsw(cosine)
-get notes select body where topic = 3 near embed $1 limit 10</pre>
+get notes select body where topic = 3 near embed [0.11, -0.02, …] limit 10</pre>
+
+<p>Over <code>POST /query</code> the statement says <code>near embed
+$1</code> instead and the vector goes in <code>params</code>, as every
+value does there; in the page, through <code>db.run</code>, it is a
+<code>Float32Array</code> among the parameters.</p>
 
 <details class="deep"><summary>Details</summary>
 <p>Load the vectors first and build the index after, not before: the
@@ -251,8 +264,9 @@ href="concepts.html#bulk-load-first-index-after">How it works</a>.</p>
 session, a checkpoint is written so the graph is not rebuilt on the next
 open. A one-shot <code>-c</code> call does not write one.</p>
 
-<p>In the page the same statements go through <code>db.run</code>, the
-vector a <code>Float32Array</code>, or the builder:
+<p>To serve the shell's notes, quit the shell and start
+<code>fenec-server --file notes.fenec</code>: one process holds a file at a
+time. In the page the builder writes the search too:
 <code>db.from('notes').near('embed', queryVector).limit(5).rows()</code>.
 Every clause is on <a href="fenecql.html#the-vector-clause">FenecQL</a>, and
 words and meaning together on <a href="fenecql.html#hybrid">Hybrid
@@ -264,23 +278,25 @@ search</a>.</p>
 <p><code>fenec import</code> copies a SQLite file or a PostgreSQL table into a
 collection, its schema and indexes included.</p>
 
-<pre data-lang="bash">fenec import data.sqlite --table docs --into articles --index "category@hash"</pre>
+<pre data-lang="bash">./target/release/fenec import data.sqlite --table docs --into articles --index "category@hash"</pre>
 
 <details class="deep"><summary>Details</summary>
 <p><code>fenec import</code> derives the schema from the table's columns and
-builds the indexes you name once the rows are in. <code>--follow</code>
+builds the indexes you name once the rows are in, into
+<code>articles.fenec</code> unless <code>--file</code> names another.
+<code>--follow</code>
 keeps a PostgreSQL table's copy in step, applying each change as it
 commits.</p>
 
-<pre data-lang="bash">fenec import postgres://user@host:5432/database --table docs \
+<pre data-lang="bash">./target/release/fenec import postgres://user@host:5432/database --table docs \
     --into articles --index "category@hash" --follow
 </pre>
 
 <p><code>--dry-run</code> prints the derived schema and any warnings without
 writing anything. A vector column comes across too, with
 <code>--vector embed:384</code> for a SQLite blob and <code>--index
-"embed@hnsw(cosine)"</code>. Full flag list in <a
-href="import.html">Import</a>.</p>
+"embed@hnsw(cosine)"</code> (<a href="import.html#vector-columns">Vector
+columns</a>). Full flag list in <a href="import.html">Import</a>.</p>
 </details>
 
 <h2>Generate TypeScript from the file</h2>
@@ -288,7 +304,7 @@ href="import.html">Import</a>.</p>
 <p>Generate TypeScript types from the schema already in your file, so your
 code and the database cannot drift apart.</p>
 
-<pre data-lang="bash">./target/release/fenec types data.fenec > web/fenec-schema.d.ts
+<pre data-lang="bash">./target/release/fenec types articles.fenec > web/fenec-schema.d.ts
 </pre>
 
 <details class="deep"><summary>Details</summary>
@@ -299,8 +315,8 @@ TypeScript — it is generated, and the two cannot drift.</p>
 import type { FenecSchema } from './fenec-schema.js';
 
 const db = await Fenec.open&lt;FenecSchema&gt;('./fenec.wasm');
-const rows = await db.from('articles').select('title', 'year').rows();
-//    rows: { title: string | null; year: number | null }[]
+const rows = await db.from('articles').select('title', 'category').rows();
+//    rows: { title: string | null; category: string | null }[]
 </pre>
 </details>
 

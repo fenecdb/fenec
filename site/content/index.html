@@ -585,14 +585,17 @@ nothing was written (--dry-run); use --count for the row count
 </pre>
 </li>
 <li data-name="PostgreSQL" data-mark="pg" data-file="shell" data-shell data-group="Your data">
-<pre class="typed" data-lang="bash" data-bare>
+<pre class="typed" data-lang="text" data-bare>
 $ fenec import postgres://app@db:5432/app --table docs --into articles \
     --index "category@hash" --follow
+source   app@db:5432/app -&gt; docs
+target   articles.fenec -&gt; articles
 follow   slot fenec_articles (created), publication fenec_articles (created)
+note     the slot keeps the server's WAL until this follower confirms it; to stop following for good: select pg_drop_replication_slot('fenec_articles')
 copying  there is none yet
-100000 records, articles.fenec (3.1s)
+100000 records, articles.fenec (339.37ms)
 following docs: ctrl-c stops, and the same command resumes
-42 transactions, 57 changes, at 0/1B0E7F0
+42 transactions, 57 changes, at 0/2BEA458
 </pre>
 </li>
 <li data-name="LangChain" data-mark="lc" data-file="store.py" data-group="Your AI code">

@@ -60,8 +60,11 @@ try:
     db.query("get nowhere")
 except FenecError as e:
     print(e.status, e)   # 404 collection `nowhere`</pre>
-<p>Or let the <a href="#builder">query builder</a> write the statement: the
-same text, every value a parameter, every name checked.</p>
+<p>Or let the <a href="#builder">query builder</a> write the statement,
+every value a parameter, every name checked: the read's text to the byte,
+and the search as <code>match title $1 fuzzy 2</code>, two edits at most,
+which is what a plain <code>fuzzy</code> allows a word anyway, so the rows
+are the same.</p>
 <pre data-lang="python" data-label="builder">docs = db.collection("docs")
 docs.insert({"title": "Night at the oasis", "year": 2024})
 
