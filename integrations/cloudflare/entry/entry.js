@@ -144,11 +144,16 @@ const DROPPED = new Set([
 
 /**
  * Answer headers never sent back: hop by hop; whether a node verified a
- * token, which a router tells only a router relaying for a client; and the
+ * token, which a router tells only a router relaying for a client; the
  * tenant's home, which the entry asked for itself and a client did not --
- * a router names it on a refusal too, so to anyone with a tenant's name.
+ * a router names it on a refusal too, so to anyone with a tenant's name;
+ * and every cookie. No router or node sets one, but Cloudflare Access in
+ * front of a router's tunnel does, outside strict service token
+ * authentication: a `CF_Authorization` cookie for the service token's
+ * session, which passed on would let any client of the entry reach the
+ * router's hostname past Access without the token.
  */
-const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'fenec-verified', HOME];
+const ANSWER_DROPPED = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'fenec-verified', HOME, 'set-cookie'];
 
 /**
  * The headers fenec-http's `cors::headers` writes under `--http-cors`: the
@@ -239,6 +244,15 @@ export function configure(env) {
   // which reads as every region down: refused here, where it says why.
   if (!env.ACCESS_CLIENT_ID !== !env.ACCESS_CLIENT_SECRET) {
     throw new Error('ACCESS_CLIENT_ID and ACCESS_CLIENT_SECRET are a service token together: set both or neither');
+  }
+  // The secret goes with every request: never in clear, to an address
+  // Access is not even in front of.
+  if (env.ACCESS_CLIENT_ID) {
+    const routers = [...regions.values()].flatMap((r) => r.routers.map((u) => [`REGIONS.${r.name}`, u]));
+    for (const u of [].concat(admin ?? [])) routers.push(['ADMIN', origin(u, 'ADMIN')]);
+    for (const [what, u] of routers) {
+      if (!u.startsWith('https:')) throw new Error(`${what}: ${u} is not https, and the Access service token would go to it in clear`);
+    }
   }
   return {
     regions,
@@ -630,8 +644,8 @@ async function send(request, url, regions, cfg, state, tenant) {
   return own(cfg, request, 503, `region ${names}'s routers did not answer (${why})`, 1);
 }
 
-/** The answer as the client is given it: the router's, less its hops and its marks. */
-function passed(answer) {
+/** The answer as the client is given it: the router's, less its hops, its marks and any cookie. */
+export function passed(answer) {
   const out = new Response(answer.body, answer);
   for (const h of ANSWER_DROPPED) out.headers.delete(h);
   return out;

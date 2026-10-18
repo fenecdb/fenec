@@ -6536,13 +6536,33 @@ in front says who: the entry sends a service token
 (`ACCESS_CLIENT_ID`/`ACCESS_CLIENT_SECRET`, both or neither) and the router
 drops `CF-Access-Client-*` before a node (`forwarded_headers`, which
 `forward` now shares with `forward_near`: its own copy of the filter kept
-the token once only the shared one dropped it). The bucket copy is `rclone
-copy` (never `sync`: a lost archive takes nothing from the bucket, whose
-lifecycle rule expires what `--keep` let go of) with
-`--local-no-check-updated` -- rclone refused a segment growing as it read
-it, so a busy tenant's newest segment never reached the bucket, every run
-failing in the test -- and each success written into node_exporter's
-textfile collector, which `FenecArchiveSyncStale` reads. The rules read
+the token once only the shared one dropped it). The bucket copy is
+`deploy/bin/fenec-archive-sync`, `rclone copy` (never `sync`: a lost
+archive takes nothing from the bucket, whose lifecycle rule expires what
+`--keep` let go of) with `--local-no-check-updated` -- rclone refused a
+segment growing as it read it, so a busy tenant's newest segment never
+reached the bucket, every run failing in the test -- and `--fast-list`;
+it refuses a first copy from an archive it has not copied before (the
+directory's filesystem and inode, noted in its state directory) where the
+bucket holds a file the disk does not, since a rebuilt machine's new
+archive rewrote the bucket's `history`, `began` and `presence` within the
+timer's first five minutes; and writes each success into node_exporter's
+textfile collector 0644 -- under the unit's `UMask` it was 0600,
+node_exporter read nothing and `FenecArchiveSyncStale` could never fire,
+so the test scrapes a real node_exporter (`FenecTextfileUnread`,
+`FenecArchiveSyncUnreported` over the absent case). Access outside strict
+service token authentication answers a service token's request with a
+`CF_Authorization` cookie for the hostname, so the entry drops `Set-Cookie`
+from every answer (no router or node sets one), the router drops every
+`Cf-Access-*` header (the JWT Access adds too), and the entry refuses an
+`http://` router with a token set. `FenecAutoFailoverIncomplete` is read
+off the directory -- `fenec_router_tenants > 0` on a node
+`fenec_router_node_failed_over` -- since the count of failed failovers,
+reset only by a restart, held it after the fix and paged again at the next
+node failed over whole; `FenecLeaseRenewalLate` passes over a node failed
+over in the last ten minutes (its five-minute window held the outage
+after the node came back) and holds a minute (the scrape before a failover
+marks its node). The rules read
 Prometheus's `up` by job for processes that export nothing because they
 are down, a router's role (primary, standby) taken from its last
 `fenec_router_following`; `tests/datadog.rs` passes over `job` and
@@ -6576,11 +6596,14 @@ killed alone, its kernel closed its sockets and delivered what they held --
 and starts it again, kills a region's router and promotes its standby as
 the runbook does, restores a tenant from its node's archive to a moment it
 marked, and reads every acknowledged write back from each primary and its
-replica. Three runs at a lease of 2 s: 44 563 acknowledged, 0 lost; the
-node's tenants wrote again 4.86-4.92 s after the kill, the tenant whose
-replica it held lost 20 ms at most, every other tenant 22; the repair
-0.5-0.8 s after the node's start; a region whose router was killed stopped
-writing 1.64-1.67 s after and wrote again 0.25-0.48 s after its standby's
+replica. Three runs at a lease of 2 s, what they saw and not bounds (a
+reviewer's machine saw a repair of 1.07 s, writes stopping 1.31 s after a
+router's kill, gaps of 28-30 ms and 4.94 s): 44 563 acknowledged, 0 lost;
+the node's tenants wrote again 4.86, 4.92 and 4.89 s after the kill, the
+tenant whose replica it held lost 20, 17 and 16 ms at most, every other
+tenant 22, 19 and 18; the repair 0.64, 0.79 and 0.54 s after the node's
+start; a region whose router was killed stopped writing 1.65, 1.64 and
+1.67 s after and wrote again 0.25-0.48 s after its standby's
 promotion. The 5 s tail is `Follower::halt` in `promote` waiting out the
 replica's reconnection to the dead node (`replication::connect`'s 5 s
 timeout, a dead machine's address swallowing the SYN): reported, not worked

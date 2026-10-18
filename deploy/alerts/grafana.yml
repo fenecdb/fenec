@@ -140,7 +140,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: absent(up{job="fenecdb-node"}) or absent(up{job="fenecdb-router"}) or absent(up{job="fenecdb-global"})
+              expr: absent(up{job="fenecdb-node"}) or absent(up{job="fenecdb-router"}) or absent(up{job="fenecdb-global"}) or absent(up{job="node-exporter"})
           - refId: B
             datasourceUid: __expr__
             model:
@@ -221,7 +221,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: fenec_router_auto_failovers_total{outcome="failed"} > 0 and on (instance) max by (instance) (fenec_router_node_failed_over) == 1
+              expr: fenec_router_tenants > 0 and on (instance, node) fenec_router_node_failed_over == 1
           - refId: B
             datasourceUid: __expr__
             model:
@@ -230,11 +230,11 @@ groups:
               expression: is_number($A)
         noDataState: OK
         execErrState: Error
-        for: 0s
+        for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "{{ $labels.instance }} failed a node over and left a tenant unpromoted"
+          summary: "Node {{ $labels.node }} ({{ $labels.region }}) was failed over with tenants still placed on it ({{ $values.A.Value }}): they take no writes"
           runbook: deploy/RUNBOOK.md#a-node-lost
       - uid: fenec-auto-failover
         title: FenecAutoFailover
@@ -275,7 +275,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: max_over_time(fenec_router_lease_age_seconds[5m]) > 3 unless on (instance, node) fenec_router_node_failed_over == 1
+              expr: max_over_time(fenec_router_lease_age_seconds[5m]) > 3 unless on (instance, node) max_over_time(fenec_router_node_failed_over[10m]) == 1
           - refId: B
             datasourceUid: __expr__
             model:
@@ -284,11 +284,11 @@ groups:
               expression: is_number($A)
         noDataState: OK
         execErrState: Error
-        for: 0s
+        for: 1m
         labels:
           severity: warning
         annotations:
-          summary: "Node {{ $labels.node }} took its last lease {{ $values.A.Value }} s ago"
+          summary: "Node {{ $labels.node }} went {{ $values.A.Value }} s without a lease in the last five minutes"
           runbook: deploy/RUNBOOK.md#a-lease-late
       - uid: fenec-tenants-without-replica
         title: FenecTenantsWithoutReplica
@@ -775,6 +775,60 @@ groups:
           severity: warning
         annotations:
           summary: "Node {{ $labels.node }}'s archive has not reached the bucket in {{ $values.A.Value }} s"
+          runbook: deploy/RUNBOOK.md#archives-and-restores
+      - uid: fenec-textfile-unread
+        title: FenecTextfileUnread
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: node_textfile_scrape_error{job="node-exporter"} == 1
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node_exporter on {{ $labels.instance }} cannot read a file of its textfile collector, the archive sync's success perhaps"
+          runbook: deploy/RUNBOOK.md#archives-and-restores
+      - uid: fenec-archive-sync-unreported
+        title: FenecArchiveSyncUnreported
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: absent(fenec_archive_sync_last_success_timestamp_seconds)
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No archive sync has reported a success to node_exporter in an hour"
           runbook: deploy/RUNBOOK.md#archives-and-restores
       - uid: fenec-archiver-disconnected
         title: FenecArchiverDisconnected

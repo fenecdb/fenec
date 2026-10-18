@@ -1,30 +1,22 @@
 # A node's archive copied to a bucket (S3, R2, any rclone remote), run by
 # fenec-archive-sync@<node>.timer. fenecdb speaks no TLS and no S3: rclone
-# does both.
+# does both, through ../bin/fenec-archive-sync, which says what a run does
+# and why: no first copy from a new disk over the bucket's archive,
+# `rclone copy --local-no-check-updated`, and the success written for
+# node_exporter.
 #
 #   apt install rclone          # or the release from rclone.org
+#   install -D -m 0755 ../bin/fenec-archive-sync /usr/local/libexec/fenecdb/fenec-archive-sync
 #   install -m 0600 rclone.conf /etc/fenecdb/rclone.conf     # the remote's keys
 #   install -m 0644 ../env/archive-sync.env /etc/fenecdb/archive-sync.env
 #   install -m 0644 fenec-archive-sync@.service fenec-archive-sync@.timer \
 #       /etc/systemd/system/
+#   setfacl -m u:fenec-sync:rwx /var/lib/prometheus/node-exporter   # the textfile collector
 #   systemctl enable --now fenec-archive-sync@eu-a.timer
 #
-# `copy`, not `sync`: a copy never deletes from the bucket, so an archive
-# lost with its disk -- and an archiver started afresh on a new one -- cannot
-# take the bucket's history with it at the next run. What the archive's
-# --keep lets go of stays in the bucket until the bucket's own lifecycle
-# rule expires it (RUNBOOK, "Archives and restores": --keep and a day).
-#
-# A segment is appended in place for as long as its tenant writes (an hour
-# at most, --image-every), so rclone finds it growing as it reads it and, by
-# default, refuses the file and fails the run: a busy tenant's newest
-# segment never reached the bucket. --local-no-check-updated takes the file
-# as it stood when read; a segment cut short is what a crash leaves, and a
-# restore reads it to its last whole record. The next run copies it again.
-#
-# Each run that succeeds writes when it did into node_exporter's textfile
-# collector, for the alert FenecArchiveSyncStale (deploy/alerts/); a run
-# that fails writes nothing, and the alert fires.
+# Give rclone a key that may write and not delete, on a bucket that keeps
+# what is written over (versioning, or Object Lock): RUNBOOK, "Archives and
+# restores".
 
 [Unit]
 Description=fenecdb archive of node %i to the bucket (rclone)
@@ -40,17 +32,15 @@ Type=oneshot
 User=fenec-sync
 Group=fenec-sync
 SupplementaryGroups=fenec-archive
-# The remote's name and the textfile directory, no secret; the remote's keys
-# are a credential this run alone reads.
+# The remote's name, no secret; the remote's keys are a credential this run
+# alone reads.
 EnvironmentFile=/etc/fenecdb/archive-sync.env
 LoadCredential=rclone.conf:/etc/fenecdb/rclone.conf
-ExecStart=/usr/bin/rclone copy --local-no-check-updated \
-    --config %d/rclone.conf --cache-dir %C/fenecdb-rclone \
-    /var/lib/fenecdb/archive/%i ${FENEC_ARCHIVE_REMOTE}/%i
-# Written by rename, so node_exporter never reads half a file; ignored where
-# the directory is not there or not writable -- the alert then fires, as for
-# a run that failed.
-ExecStartPost=-/bin/sh -c 'd=/var/lib/prometheus/node-exporter; f=$$d/fenec-archive-sync-%i.prom; echo "fenec_archive_sync_last_success_timestamp_seconds{node=\\\"%i\\\"} $$(date +%%s)" > $$f.tmp && mv $$f.tmp $$f'
+ExecStart=/usr/local/libexec/fenecdb/fenec-archive-sync %i
+# Which archive it last copied from (copied-from): the archive directory's
+# filesystem and inode, so a disk replaced or the directory made again is a
+# new archive, whatever disk this note is on.
+StateDirectory=fenecdb/sync/%i
 CacheDirectory=fenecdb-rclone
 # Reads the archive, writes nothing of it.
 ReadOnlyPaths=/var/lib/fenecdb/archive/%i

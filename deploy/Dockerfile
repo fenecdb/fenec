@@ -42,11 +42,14 @@ CMD ["fenec-server", "--help"]
 # --------------------------------------------------------------- systemd
 # Debian, since systemd: python3 is the checks' HTTP client, procps their
 # `ps`, rclone the bucket sync's own (its stand-in passed a run real rclone
-# failed: a segment growing as it read it).
+# failed: a segment growing as it read it), node_exporter what reads the
+# sync's success (a file it could not read passed a check made as root),
+# acl the runbook's setfacl.
 FROM python:3.13-slim AS systemd
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends systemd systemd-sysv procps rclone && \
+    apt-get install -y --no-install-recommends systemd systemd-sysv procps rclone \
+        prometheus-node-exporter acl && \
     rm -rf /var/lib/apt/lists/* && \
     # Nothing a container boots needs these, and some wait for hardware.
     systemctl mask systemd-udevd.service systemd-udevd-kernel.socket \

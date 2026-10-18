@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { running, serve } from './dev.mjs';
 import * as cluster from './entry/cluster.mjs';
-import { BUFFER_AT, State, clientMark, configure, corsHeaders, entry, judged, markKey, percentDecode, segments, sentHeaders } from './entry/entry.js';
+import { BUFFER_AT, State, clientMark, configure, corsHeaders, entry, judged, markKey, passed, percentDecode, segments, sentHeaders } from './entry/entry.js';
 
 const { DATA, ORIGIN, ROOT, query, request, shard, until } = cluster;
 
@@ -108,6 +108,11 @@ test('the configuration is read, and refused where it names nothing to send to',
   assert.deepEqual(both.access, { id: 'id.access', secret: 's' });
   assert.throws(() => configure({ REGIONS: '{"us": ["https://x"]}', ACCESS_CLIENT_ID: 'id.access' }), /both or neither/);
   assert.throws(() => configure({ REGIONS: '{"us": ["https://x"]}', ACCESS_CLIENT_SECRET: 's' }), /both or neither/);
+  // The secret never goes to a router in clear.
+  const token = { ACCESS_CLIENT_ID: 'id.access', ACCESS_CLIENT_SECRET: 's' };
+  assert.throws(() => configure({ REGIONS: '{"us": ["https://x", "http://y"]}', ...token }), /REGIONS\.us: http:\/\/y is not https/);
+  assert.throws(() => configure({ REGIONS: '{"us": ["https://x"]}', ADMIN: '"http://g"', ...token }), /ADMIN: http:\/\/g is not https/);
+  assert.equal(configure({ REGIONS: '{"us": ["http://y"]}' }).access, null);
 });
 
 test('a home is forgotten first-heard first past the bound, and moved on a change', () => {
@@ -161,6 +166,26 @@ test('a request goes on less its hops, the marks and every address a client clai
   const withToken = sentHeaders(forged, null, { id: 'id.access', secret: 's' });
   assert.equal(withToken.get('cf-access-client-id'), 'id.access');
   assert.equal(withToken.get('cf-access-client-secret'), 's');
+});
+
+test("an answer goes back less its hops, the router's marks and any cookie Access set", () => {
+  const answer = new Response('[]', {
+    status: 200,
+    headers: [
+      ['Content-Type', 'application/json'],
+      ['Fenec-Home', 'eu'],
+      ['Fenec-Verified', '1'],
+      ['Fenec-Seq', '7'],
+      ['Set-Cookie', 'CF_Authorization=eyJ.jwt.sig; Path=/; Secure; HttpOnly'],
+      ['Set-Cookie', 'other=1'],
+    ],
+  });
+  const out = passed(answer);
+  assert.equal(out.headers.get('set-cookie'), null);
+  assert.equal(out.headers.get('fenec-home'), null);
+  assert.equal(out.headers.get('fenec-verified'), null);
+  assert.equal(out.headers.get('fenec-seq'), '7');
+  assert.equal(out.headers.get('content-type'), 'application/json');
 });
 
 test("an answer is a router's where it carries the router's mark, as every answer a router writes does", () => {

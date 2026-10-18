@@ -27,8 +27,10 @@ What it holds:
     are there after the start; the archiver stops clean, its sealed archive
     verifies with the key the unit hands it; the bucket sync, with real
     rclone, copies the archive while rows are written to its tenant -- the
-    copy verifying as an archive -- and says when it last succeeded, for
-    the alert; the tunnel finds its credentials (cloudflared is a stand-in:
+    copy verifying as an archive -- and node_exporter, scraped, reads when
+    it last succeeded; a new disk's archive is refused over the bucket's,
+    and copied once the bucket is copied back as the runbook does it; the
+    tunnel finds its credentials (cloudflared is a stand-in:
     deploy/test/stub.py; its rules are deploy/test/ingress.py's);
   - the runbook's router promotion, by the units: the standby promoted, its
     unit switched, the old router back as its standby.
@@ -157,14 +159,16 @@ def install(m, files):
           "cp /kit/systemd/*.service /kit/systemd/*.timer /etc/systemd/system/ && "
           "cp /kit/RUNBOOK.md /usr/local/share/doc/fenecdb/ 2>/dev/null; "
           "install -m 0755 /kit/test/stub.py /usr/bin/cloudflared && "
+          "install -D -m 0755 /kit/bin/fenec-archive-sync /usr/local/libexec/fenecdb/fenec-archive-sync && "
           # The bucket: a directory, rclone's `local` remote standing for S3,
           # writable by the sync alone, through a drop-in of the test's.
           "install -d -o fenec-sync -g fenec-sync -m 0700 /srv/bucket && "
           "mkdir -p '/etc/systemd/system/fenec-archive-sync@.service.d' && "
           "printf '[Service]\\nReadWritePaths=/srv/bucket\\n' "
           "> '/etc/systemd/system/fenec-archive-sync@.service.d/test-bucket.conf' && "
-          # node_exporter's textfile collector, writable by the sync.
-          "install -d -o root -g fenec-sync -m 0775 /var/lib/prometheus/node-exporter")
+          # node_exporter's textfile collector (Debian's, read by its
+          # prometheus user), writable by the sync as the runbook makes it.
+          "setfacl -m u:fenec-sync:rwx /var/lib/prometheus/node-exporter")
     for path, text in files.items():
         # Secrets 0600 root's; cloudflared's config, which names none, is
         # read by its DynamicUser and so 0644, as the unit says.
@@ -386,15 +390,57 @@ def archive_checks():
     check(writer.returncode == 0 and int(out.strip() or 0) > 10, f"the writes beside the sync: {out} {err}")
     copied = sh("m2", "FENEC_KEY_FILE=/etc/fenecdb/archive.key fenec verify --tenants /srv/bucket/eu/eu-a")
     check("acme" in copied, f"the bucket's copy does not verify as an archive: {copied}")
-    stamp = sh("m2", "cat /var/lib/prometheus/node-exporter/fenec-archive-sync-eu-a.prom")
-    m_ = re.fullmatch(r'fenec_archive_sync_last_success_timestamp_seconds\{node="eu-a"\} (\d+)\n', stamp)
-    check(m_ and abs(int(m_.group(1)) - int(sh("m2", "date +%s"))) < 120,
-          f"the sync's success, for node_exporter: {stamp!r}")
+    # The success as node_exporter scrapes it, as its own user: written
+    # 0600 under the unit's UMask, it was absent here though root read it.
+    metrics = node_metrics("m2")
+    m_ = re.search(r'^fenec_archive_sync_last_success_timestamp_seconds\{node="eu-a"\} (\S+)$', metrics, re.M)
+    check(m_ and abs(float(m_.group(1)) - int(sh("m2", "date +%s"))) < 120,
+          "the sync's success is not among node_exporter's metrics: "
+          + "\n".join(l for l in metrics.splitlines() if "textfile" in l or "fenec_" in l))
+    check(re.search(r"^node_textfile_scrape_error 0$", metrics, re.M), "node_exporter could not read a textfile")
+
+    # A disk replaced: the archiver begins a new archive at once, the
+    # bucket holding the old one. The first copy is refused, and the bucket
+    # is as it was.
+    sh("m2", "systemctl stop fenec-archive@eu-a && mv /var/lib/fenecdb/archive/eu-a /var/lib/fenecdb/eu-a.lost "
+             "&& systemctl start fenec-archive@eu-a")
+    until(lambda: "acme" in sh("m2", "ls /var/lib/fenecdb/archive/eu-a 2>/dev/null || true"), "a new archive of eu-a")
+    sums = "cd /srv/bucket/eu/eu-a && find . -type f -exec sha256sum {} + | sort"
+    before = sh("m2", sums)
+    sh("m2", "systemctl start fenec-archive-sync@eu-a.service", check_=False)
+    refused = show("m2", "fenec-archive-sync@eu-a.service", "Result")
+    j = journal("m2", "fenec-archive-sync@eu-a.service")
+    check(refused != "success" and "refusing to copy" in j, f"a new archive copied over the bucket's: {refused}\n{j[-2000:]}")
+    check(sh("m2", sums) == before, "the bucket changed under a refused copy")
+    # The runbook's way back: the bucket copied back, and the archiver goes
+    # on in the same archive, which the next copy takes.
+    sh("m2", "systemctl stop fenec-archive@eu-a && rm -rf /var/lib/fenecdb/archive/eu-a && "
+             "rclone copy test-remote:/srv/bucket/eu/eu-a /var/lib/fenecdb/archive/eu-a --config /etc/fenecdb/rclone.conf && "
+             "chown -R fenec-archive:fenec-archive /var/lib/fenecdb/archive/eu-a && "
+             "chmod -R u=rwX,g=rX,o= /var/lib/fenecdb/archive/eu-a && "
+             "FENEC_KEY_FILE=/etc/fenecdb/archive.key fenec verify --tenants /var/lib/fenecdb/archive/eu-a && "
+             "systemctl start fenec-archive@eu-a")
+    write("m1", 2000, 5)
+    sh("m2", "systemctl start fenec-archive-sync@eu-a.service", check_=False)
+    result = show("m2", "fenec-archive-sync@eu-a.service", "Result")
+    check(result == "success", f"the copy after the bucket came back: {result}\n"
+                               f"{journal('m2', 'fenec-archive-sync@eu-a.service')[-2000:]}")
+    copied = sh("m2", "FENEC_KEY_FILE=/etc/fenecdb/archive.key fenec verify --tenants /srv/bucket/eu/eu-a")
+    check("acme" in copied, f"the bucket's copy after the way back: {copied}")
     sh("m2", "systemctl enable --now fenec-archive-sync@eu-a.timer")
     check(active("m2", "fenec-archive-sync@eu-a.timer") == "active", "the sync's timer")
     say(f"archive: sealed, verified with the key and refused without it; the archiver stopped clean in "
         f"{took:.2f} s; rclone copied it to the bucket three times while it was written, the copy "
-        f"verifying, and the sync's success written for node_exporter")
+        f"verifying, and node_exporter read the sync's success; a new disk's archive refused over the "
+        f"bucket's, the bucket unchanged, and copied once the bucket was copied back")
+
+
+def node_metrics(m):
+    """node_exporter's metrics on `m`, scraped as Prometheus would."""
+    if active(m, "prometheus-node-exporter") != "active":
+        sh(m, "systemctl start prometheus-node-exporter")
+    return sh(m, "python3 -c 'import urllib.request as u; "
+                 "print(u.urlopen(\"http://127.0.0.1:9100/metrics\", timeout=10).read().decode())'")
 
 
 def tunnel():

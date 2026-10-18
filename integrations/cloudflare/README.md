@@ -257,9 +257,15 @@ a Cloudflare Access application on each, admitting a service token, and
 hand the token to the entry (`ACCESS_CLIENT_ID` and
 `ACCESS_CLIENT_SECRET`, both or neither): it sends them as
 `CF-Access-Client-Id` and `CF-Access-Client-Secret` with every request to
-a router, a client's own copies dropped, and the router drops them before
-a node. The tunnel's own rules (`deploy/cloudflared/config.yml`) let only a
-tenant's paths through, a tenant's replication stream not among them.
+a router, a client's own copies dropped, and the router drops every
+`Cf-Access-*` header before a node. Turn on strict service token
+authentication: without it Access answers with a `CF_Authorization` cookie
+for the hostname, a session past Access -- the entry drops every
+`Set-Cookie` of a router's answer, but Access should make none. The entry
+refuses a token beside a router named `http://`, and an expired token is
+every region down: `deploy/RUNBOOK.md` says how to renew and rotate it. The
+tunnel's own rules (`deploy/cloudflared/config.yml`) let only a tenant's
+paths through, a tenant's replication stream not among them.
 
 - **Where a tenant lives** is learnt from the routers, not asked of
   anyone: each request carries `Fenec-Home: 1`, and the router that

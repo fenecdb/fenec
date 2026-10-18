@@ -788,7 +788,8 @@ fn the_entrys_name_never_reaches_a_node() {
                 target,
                 &format!(
                     "{DATA}{name}{extra}CF-Access-Client-Id: id.access\r\n\
-                     CF-Access-Client-Secret: access-secret\r\n"
+                     CF-Access-Client-Secret: access-secret\r\n\
+                     Cf-Access-Jwt-Assertion: eyJ.jwt.sig\r\n"
                 ),
                 body,
             );
@@ -800,7 +801,8 @@ fn the_entrys_name_never_reaches_a_node() {
             );
             assert!(
                 header(&head, "cf-access-client-id").is_empty()
-                    && header(&head, "cf-access-client-secret").is_empty(),
+                    && header(&head, "cf-access-client-secret").is_empty()
+                    && header(&head, "cf-access-jwt-assertion").is_empty(),
                 "the entry's Access token reached the node: {head}"
             );
             let routed = header(&head, "fenec-router");

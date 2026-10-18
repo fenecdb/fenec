@@ -426,8 +426,12 @@ const FROM_ELSEWHERE: [(&str, &str); 1] = [(
     // A run of the bucket sync that succeeded, into node_exporter's
     // textfile collector.
     "fenec_archive_sync_last_success_timestamp_seconds",
-    "../../deploy/systemd/fenec-archive-sync@.service",
+    "../../deploy/bin/fenec-archive-sync",
 )];
+
+/// node_exporter's own metrics a rule reads, beside Prometheus's `up`:
+/// deploy/test/units.py scrapes a real node_exporter for them.
+const NODE_EXPORTER: [&str; 1] = ["node_textfile_scrape_error"];
 
 #[test]
 fn the_alert_rules_read_only_what_the_servers_expose() {
@@ -460,8 +464,10 @@ fn the_alert_rules_read_only_what_the_servers_expose() {
         // Prometheus's own `up` is what a process that answers nothing
         // leaves to read.
         assert!(
-            !found.is_empty() || expr.contains("up{"),
-            "{alert} reads neither a fenec_ metric nor `up`: `{expr}`"
+            !found.is_empty()
+                || expr.contains("up{")
+                || NODE_EXPORTER.iter().any(|m| expr.contains(m)),
+            "{alert} reads neither a fenec_ metric, `up` nor node_exporter's: `{expr}`"
         );
         for job in jobs(expr) {
             assert!(

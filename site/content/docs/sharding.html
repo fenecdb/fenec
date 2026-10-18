@@ -2054,18 +2054,22 @@ make drill          # two regions: a node killed and back, a router killed, the 
     and the bucket copy each their own, so none reads another's tokens --
     its tokens in an environment file only root reads. The tunnel lets a
     tenant's paths alone through, and Cloudflare Access with a service
-    token the entry holds says who.</li>
+    token the entry holds says who; the entry passes no cookie Access sets
+    on to its clients, and the routers no Access header on to a node. The
+    bucket copy refuses a new disk's first copy over the bucket's
+    archive.</li>
   <li><b>Alerts</b> for Prometheus and for Grafana: nodes and routers
     down, a region's primary router told from a standby, failovers and late
     leases, tenants without a replica, copies in their primary's zone, read
     replicas given up, connections near their ceiling, the bucket copy gone
-    stale, quota refusals, the entry's marks not believed, refusals and
-    errors.</li>
-  <li><b>The drill's figures</b>, lease 2 s, three runs: a node cut off the
-    network and killed, as a machine lost, had its tenants writing again
-    4.9 s after the kill, none of 44 563 acknowledged writes was lost, and
-    a tenant restored from its node's archive held exactly the rows
-    acknowledged by the moment it was restored to.</li>
+    stale or unreadable by node_exporter, quota refusals, the entry's marks
+    not believed, refusals and errors.</li>
+  <li><b>The drill's figures</b>, lease 2 s, three runs on one laptop --
+    what they saw, not bounds: a node cut off the network and killed, as a
+    machine lost, had its tenants writing again 4.86 to 4.92 s after the
+    kill, none of 44 563 acknowledged writes was lost, and a tenant
+    restored from its node's archive held exactly the rows acknowledged by
+    the moment it was restored to.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -2078,8 +2082,10 @@ command line or in an environment another role's user can read, the limits
 and the sandbox in force (<code>systemd-analyze security</code> puts each
 unit at 1.2), a node's stop syncing within its timeout, a sealed archive
 verified with the key the unit hands its archiver and copied to a bucket
-by real rclone while its tenant is written, and a standby router promoted
-and its unit switched as the runbook does it. cloudflared's own matcher is
+by real rclone while its tenant is written, a real node_exporter scraped
+for the copy's success, a new disk's archive refused over the bucket's and
+copied once the bucket is copied back, and a standby router promoted and
+its unit switched as the runbook does it. cloudflared's own matcher is
 asked where the tunnel sends 28 paths, every spelling of a tenant's
 replication stream among them. promtool checks the alert rules and runs
 their tests, and a test of fenec-shard holds every metric and label value
@@ -2101,8 +2107,11 @@ acknowledged write is read back from each tenant's primary and its replica,
 and the times are printed. A killed node's tenants write again a lease and
 a tenth after their last renewal, plus however long the replica's
 reconnection to the dead node takes to fail, its 5 s timeout at most,
-which a dead machine's address makes it wait out: 4.9 s in every run. The
-tenants whose replica it held lost 20 ms at most, the rest 22. That holds for nodes recorded by address:
+which a dead machine's address makes it wait out: 4.86, 4.92 and 4.89 s
+in the three runs. The tenants whose replica it held went 16 to 20 ms
+between two answered writes at most, the rest 18 to 22; a reviewer's runs
+on another machine saw 4.94 s and 28-30 ms, so these are what three runs
+saw, not bounds. That holds for nodes recorded by address:
 the router leases a region's nodes in rounds and resolves a node's name
 with no bound of its own, so a dead node whose name its resolver is slow to
 refuse holds up every node's renewal -- 30 s to fail over and 18 s without

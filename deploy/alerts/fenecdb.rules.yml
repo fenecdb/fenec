@@ -26,11 +26,12 @@
 # --token: no token reads metrics alone (RUNBOOK, "Alerts").
 #
 # crates/fenec-shard/tests/datadog.rs holds every metric and label value
-# here to a scrape of every kind of process -- but Prometheus's own `up`, and
+# here to a scrape of every kind of process -- but Prometheus's own `up`,
 # fenec_archive_sync_last_success_timestamp_seconds, which the bucket sync
-# writes into node_exporter's textfile collector -- and grafana.yml's rules
-# to these, expression for expression; fenecdb.rules.test.yml is promtool's
-# tests of them.
+# writes into node_exporter's textfile collector, and node_exporter's own
+# node_textfile_scrape_error, both of which make deploy-check reads off a
+# real node_exporter -- and grafana.yml's rules to these, expression for
+# expression; fenecdb.rules.test.yml is promtool's tests of them.
 #
 # Not here, for want of a metric: a tenant's replica lag on a node (a --dir
 # node exports none by tenant; /t/<t>/_replication/status has it), how far
@@ -82,7 +83,7 @@ groups:
           summary: "Router {{ $labels.instance }} does not answer, and has not in the hour"
           runbook: deploy/RUNBOOK.md#a-router-lost
       - alert: FenecScrapeMissing
-        expr: absent(up{job="fenecdb-node"}) or absent(up{job="fenecdb-router"}) or absent(up{job="fenecdb-global"})
+        expr: absent(up{job="fenecdb-node"}) or absent(up{job="fenecdb-router"}) or absent(up{job="fenecdb-global"}) or absent(up{job="node-exporter"})
         for: 10m
         labels:
           severity: warning
@@ -111,16 +112,21 @@ groups:
         annotations:
           summary: "Node {{ $labels.node }} ({{ $labels.region }}) was failed over and has not answered since"
           runbook: deploy/RUNBOOK.md#a-node-lost
-      # Held while the router has failed a failover since it started and a
-      # node of it stays failed over: the tenant left unpromoted is
-      # unwritable until that node answers again or the failover is run
-      # again by hand. A count over ten minutes cleared while it stayed so.
+      # A node failed over that tenants are still placed on: their
+      # promotion failed -- no replica answered, or none to promote -- and
+      # they take no writes until the node answers again or they are failed
+      # over by hand. Read off the directory, for the node itself: it clears
+      # the moment either happens. The count of failed failovers, which only
+      # a restart resets, held it after the fix, and paged again at the next
+      # node failed over whole. Two minutes: a failover's promotions take
+      # seconds, a stalled lease round half a minute.
       - alert: FenecAutoFailoverIncomplete
-        expr: fenec_router_auto_failovers_total{outcome="failed"} > 0 and on (instance) max by (instance) (fenec_router_node_failed_over) == 1
+        expr: fenec_router_tenants > 0 and on (instance, node) fenec_router_node_failed_over == 1
+        for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "{{ $labels.instance }} failed a node over and left a tenant unpromoted"
+          summary: "Node {{ $labels.node }} ({{ $labels.region }}) was failed over with tenants still placed on it ({{ $value }}): they take no writes"
           runbook: deploy/RUNBOOK.md#a-node-lost
       - alert: FenecAutoFailover
         expr: increase(fenec_router_auto_failovers_total{outcome="done"}[10m]) > 0
@@ -133,14 +139,18 @@ groups:
       # 5.5 s. Past 3 s a renewal did not land. Set it to three fifths of
       # your lease. A scrape sees the age at one moment of a renewal's
       # cycle, so the rule holds the worst of five minutes rather than wait
-      # for one that lasts -- a node late for longer than a lease is failed
-      # over, and then FenecNodeFailedOver says so instead.
+      # for one that lasts. A node failed over in the last ten minutes is
+      # FenecNodeFailedOver's: its age only grows until it is, and the five
+      # minutes after it answers again still hold the outage. The minute's
+      # `for` passes over the scrapes before a failover marks the node --
+      # seconds, or half a minute in a stalled lease round.
       - alert: FenecLeaseRenewalLate
-        expr: max_over_time(fenec_router_lease_age_seconds[5m]) > 3 unless on (instance, node) fenec_router_node_failed_over == 1
+        expr: max_over_time(fenec_router_lease_age_seconds[5m]) > 3 unless on (instance, node) max_over_time(fenec_router_node_failed_over[10m]) == 1
+        for: 1m
         labels:
           severity: warning
         annotations:
-          summary: "Node {{ $labels.node }} took its last lease {{ $value }} s ago"
+          summary: "Node {{ $labels.node }} went {{ $value }} s without a lease in the last five minutes"
           runbook: deploy/RUNBOOK.md#a-lease-late
       # With --replicas, every tenant keeps one. A node's replica count is
       # absent where it holds none -- every node of a region of two once one
@@ -305,6 +315,26 @@ groups:
           severity: warning
         annotations:
           summary: "Node {{ $labels.node }}'s archive has not reached the bucket in {{ $value }} s"
+          runbook: deploy/RUNBOOK.md#archives-and-restores
+      # A series node_exporter cannot read is absent, and an absent series
+      # fires nothing above: a file of its collector it could not open --
+      # the sync's success written 0600 did exactly that -- is said here,
+      # and no success read anywhere for an hour below.
+      - alert: FenecTextfileUnread
+        expr: node_textfile_scrape_error{job="node-exporter"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node_exporter on {{ $labels.instance }} cannot read a file of its textfile collector, the archive sync's success perhaps"
+          runbook: deploy/RUNBOOK.md#archives-and-restores
+      - alert: FenecArchiveSyncUnreported
+        expr: absent(fenec_archive_sync_last_success_timestamp_seconds)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No archive sync has reported a success to node_exporter in an hour"
           runbook: deploy/RUNBOOK.md#archives-and-restores
       - alert: FenecArchiverDisconnected
         expr: fenec_node_streams < 1

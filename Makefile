@@ -659,8 +659,9 @@ grafana-check:
 ## a tenant made through the global router, its tokens on no command line
 ## and no environment readable by another role, its limits and sandbox in
 ## force, a stop that syncs, a sealed archive copied to a bucket by real
-## rclone while written, the standby router promoted by the units -- then
-## both removed
+## rclone while written and the copy's success read off a real
+## node_exporter, a new disk's archive refused over the bucket's, the
+## standby router promoted by the units -- then both removed
 PROMTOOL = docker run --rm -v "$(CURDIR)/deploy/alerts:/a:ro" -w /a --entrypoint promtool prom/prometheus:v3.15.0
 deploy-check:
 	$(PROMTOOL) check rules fenecdb.rules.yml

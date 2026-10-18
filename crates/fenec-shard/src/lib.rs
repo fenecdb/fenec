@@ -3788,9 +3788,11 @@ fn hop_by_hop(name: &str) -> bool {
 /// router's own name for its client -- what a client sent under it is
 /// dropped, and the router's put in its place, which the node believes
 /// from the router alone -- nor the global entry's, which is this
-/// router's to read, nor the entry's Cloudflare Access service token, which
-/// admitted the request at the edge and is no node's to see, nor the
-/// request id the router sends, nor,
+/// router's to read, nor any of Cloudflare Access's (`Cf-Access-*`): the
+/// entry's service token, which admitted the request at the edge, and the
+/// JWT Access adds for it (`Cf-Access-Jwt-Assertion`), a credential for the
+/// router's hostname that is no node's to see -- nor the request id the
+/// router sends, nor,
 /// while it traces, the client's trace context, which the router's own
 /// replaces. Borrowed, not cloned: a request's headers were copied into
 /// `String`s here and formatted one by one into the head, which with the
@@ -3803,8 +3805,10 @@ fn forwarded_headers(req: &Request, traced: bool) -> Vec<(&str, &str)> {
                 && !k.eq_ignore_ascii_case("host")
                 && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
                 && !k.eq_ignore_ascii_case(fenec_http::audit::CLIENT_HEADER)
-                && !k.eq_ignore_ascii_case("cf-access-client-id")
-                && !k.eq_ignore_ascii_case("cf-access-client-secret")
+                && !k
+                    .as_bytes()
+                    .get(..10)
+                    .is_some_and(|p| p.eq_ignore_ascii_case(b"cf-access-"))
                 && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
                 && !(traced
                     && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
@@ -4008,6 +4012,8 @@ mod tests {
                 header("Connection", "keep-alive"),
                 header("CF-Access-Client-Id", "id.access"),
                 header("cf-access-client-secret", "access-secret"),
+                header("Cf-Access-Jwt-Assertion", "eyJ.jwt.sig"),
+                header("Cf-Access", "not Access's"),
             ],
             body: Vec::new(),
             keep_alive: true,
@@ -4016,6 +4022,6 @@ mod tests {
             .into_iter()
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(sent, ["Authorization", "Fenec-Read"]);
+        assert_eq!(sent, ["Authorization", "Fenec-Read", "Cf-Access"]);
     }
 }
