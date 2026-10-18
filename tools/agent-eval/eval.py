@@ -78,9 +78,9 @@ CONDITIONS = {
 CONDITIONS["C"] = CONDITIONS["B"]
 
 
-def brief():
-    """LLMS_BRIEF as site/build.py writes it into /llms.txt."""
-    tree = ast.parse((ROOT / "site" / "build.py").read_text(encoding="utf-8"))
+def brief(build_py=ROOT / "site" / "build.py"):
+    """LLMS_BRIEF as a site/build.py writes it into /llms.txt."""
+    tree = ast.parse(Path(build_py).read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 getattr(t, "id", None) == "LLMS_BRIEF" for t in node.targets):
@@ -292,7 +292,7 @@ def run_one(job):
     db = rd / "db.fenec"
     shutil.copyfile(a.work / "fixture.fenec", db)
     server = Server(a.server, db, rd / "server.log")
-    record = {"date": dt.date.today().isoformat(), "condition": cond, "model": model,
+    record = {"date": dt.date.today().isoformat(), "condition": cond, "build": a.build, "model": model,
               "task": task["id"], "area": task["area"], "kind": task["kind"], "rep": rep}
     try:
         calls_log = rd / "calls.jsonl"
@@ -346,7 +346,7 @@ def run_one(job):
 def run(a):
     a.work = a.work.resolve()
     schema = (a.work / "schema.fenecql").read_text()
-    base = brief()
+    base = brief(a.brief)
     a.prompts = {c: COMMON + "\n" + CONDITIONS[c].format(brief=base, schema=schema) for c in CONDITIONS}
     wanted = set(a.tasks.split(",")) if a.tasks else None
     todo = [t for t in tasklib.tasks() if not wanted or t["id"] in wanted]
@@ -354,9 +354,9 @@ def run(a):
     if a.out.exists():
         for line in a.out.read_text().splitlines():
             r = json.loads(line)
-            done.add((r["condition"], r["model"], r["task"], r["rep"]))
+            done.add((r["condition"], r.get("build") or "main", r["model"], r["task"], r["rep"]))
     jobs = [(c, m, t, rep, a) for rep in range(1, a.reps + 1) for m in a.models.split(",")
-            for c in a.condition.split(",") for t in todo if (c, m, t["id"], rep) not in done]
+            for c in a.condition.split(",") for t in todo if (c, a.build, m, t["id"], rep) not in done]
     print(f"{len(jobs)} runs, {a.jobs} at a time", flush=True)
     lock = threading.Lock()
     spent = 0.0
@@ -409,7 +409,7 @@ def check(a):
 
 # --- the report ------------------------------------------------------------------
 
-TSV_COLUMNS = ["date", "condition", "model", "model_id", "task", "area", "kind", "rep", "success",
+TSV_COLUMNS = ["date", "condition", "build", "model", "model_id", "task", "area", "kind", "rep", "success",
                "first_try", "failure", "n_calls", "blame", "sql", "fenecql", "turns", "cost_usd",
                "seconds", "state_ok", "answer_ok", "handpicked", "tokens", "reply", "calls"]
 
@@ -503,13 +503,16 @@ def rescore(r, task):
 
 def report(a):
     by_id = {t["id"]: t for t in tasklib.tasks()}
-    runs = [rescore(r, by_id[r["task"]]) for r in read_runs(a.runs)]
+    runs = [rescore(r, by_id[r["task"]]) for path in a.runs for r in read_runs(path)]
+    for r in runs:
+        r["build"] = r.get("build") or "main"
+    cell = lambda r: f"{r['condition']} {r['build']}"
     pct = lambda n, d: f"{100 * n / d:.0f}%" if d else "-"
     print("| condition | model | runs | first try | within 3 | mean statements | cost |")
     print("|---|---|---:|---:|---:|---:|---:|")
     groups = {}
     for r in runs:
-        groups.setdefault((r["condition"], r["model"]), []).append(r)
+        groups.setdefault((cell(r), r["model"]), []).append(r)
     for (c, m), rs in sorted(groups.items()):
         n = len(rs)
         print(f"| {c} | {m} | {n} | {sum(r['first_try'] for r in rs)} ({pct(sum(r['first_try'] for r in rs), n)}) "
@@ -528,16 +531,18 @@ def report(a):
             cells.append(f"{sum(r['success'] for r in rs)}/{len(rs)}")
         print(f"| {area} | " + " | ".join(cells) + " |")
 
-    for cond in sorted({r["condition"] for r in runs}):
-        rs = [r for r in runs if r["condition"] == cond]
+    for cond in sorted({cell(r) for r in runs}):
+        rs = [r for r in runs if cell(r) == cond]
         blamed = {}
         held = {}
         for r in rs:
             key = (r["model"], r["task"], r["rep"])
             for i, c in enumerate(r["calls"]):
                 if c["blame"]:
-                    b = blamed.setdefault(c["blame"], {"calls": 0, "first": set(), "runs": set(), "lost": set()})
+                    b = blamed.setdefault(c["blame"], {"calls": 0, "next": 0, "first": set(), "runs": set(),
+                                                       "lost": set()})
                     b["calls"] += 1
+                    b["next"] += i + 1 < len(r["calls"]) and ok(r["calls"][i + 1])
                     b["runs"].add(key)
                     if i == 0:
                         b["first"].add(key)
@@ -548,13 +553,14 @@ def report(a):
         print(f"\nCondition {cond}: refusals by what they are put down to "
               f"({sum(b['calls'] for b in blamed.values())} refused statements in {len(rs)} runs). "
               "First refused: runs whose first statement it refused; runs failed: of the runs it "
-              "refused a statement of, those that ended wrong. In refused: refused statements "
-              "holding it at all, blamed or not.\n")
-        print("| construct | refused statements | first refused | runs hit | runs failed | in refused |")
-        print("|---|---:|---:|---:|---:|---:|")
+              "refused a statement of, those that ended wrong. Next ran: refused statements the "
+              "agent's next statement ran after. In refused: refused statements holding it at all, "
+              "blamed or not.\n")
+        print("| construct | refused statements | first refused | runs hit | runs failed | next ran | in refused |")
+        print("|---|---:|---:|---:|---:|---:|---:|")
         for name, b in sorted(blamed.items(), key=lambda kv: (-len(kv[1]["lost"]), -kv[1]["calls"])):
             print(f"| {name} | {b['calls']} | {len(b['first'])} | {len(b['runs'])} | {len(b['lost'])} "
-                  f"| {held.get(name, '')} |")
+                  f"| {b['next']} | {held.get(name, '')} |")
         reached = {}
         for r in rs:
             for k in r["sql"]:
@@ -607,8 +613,12 @@ def main():
     r.add_argument("--max-usd", type=float, default=0, help="stop once the runs have spent this much")
     r.add_argument("--timeout", type=int, default=300)
     r.add_argument("--keep", action="store_true", help="keep each run's directory")
+    r.add_argument("--build", default="main",
+                   help="what the --server binary was built from, recorded with each run: main, a branch")
+    r.add_argument("--brief", type=Path, default=ROOT / "site" / "build.py",
+                   help="the site/build.py whose LLMS_BRIEF condition A is given (another checkout's)")
     s = sub.add_parser("report")
-    s.add_argument("runs", type=Path)
+    s.add_argument("runs", type=Path, nargs="+", help="run's JSONL or report's TSV files, read together")
     s.add_argument("--tsv", type=Path)
     a = p.parse_args()
     if a.cmd == "fixture":
