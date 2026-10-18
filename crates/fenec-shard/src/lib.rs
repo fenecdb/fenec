@@ -1239,24 +1239,29 @@ impl Router {
             if req.method == Method::Options
                 && fenec_http::cors::allows(self.cfg.cors.as_deref(), &req)
             {
+                let route = route_of(&req);
+                metrics::counted(route, 204);
                 let sent = self
                     .cors(Response::empty(204))
                     .write(&mut out, req.keep_alive, false)
                     .is_ok();
-                metrics::request(route_of(&req), 204, arrived.elapsed());
+                metrics::timed(route, arrived.elapsed());
                 if !(sent && req.keep_alive) {
                     return;
                 }
                 continue;
             }
             // Everything but a forwarded request is counted here, as it is
-            // answered; `forward` counts its own, a stream at its head.
+            // answered -- before it is written, as every request is
+            // ([`metrics::counted`]) -- and timed once it is; `forward`
+            // counts its own, a stream at its head.
             let answer = |out: &mut TcpStream, route: Route, resp: Response| {
                 fenec_http::audit::http(&req, resp.status, peer);
+                metrics::counted(route, resp.status);
                 let sent = resp
                     .write(out, req.keep_alive, req.method == Method::Head)
                     .is_ok();
-                metrics::request(route, resp.status, arrived.elapsed());
+                metrics::timed(route, arrived.elapsed());
                 sent && req.keep_alive
             };
             // A standby's directory moves as the primary's writes arrive:
@@ -1285,13 +1290,14 @@ impl Router {
                 }
                 Some(&"_replication") => {
                     let Some(repl) = self.repl.clone() else {
+                        metrics::counted(Route::Replication, 404);
                         let _ = self
                             .cors(Response::error(
                                 404,
                                 "this router has no --replication-token",
                             ))
                             .write(&mut out, false, false);
-                        metrics::request(Route::Replication, 404, arrived.elapsed());
+                        metrics::timed(Route::Replication, arrived.elapsed());
                         return;
                     };
                     // The directory's database, not the router's lock: a
@@ -1368,8 +1374,9 @@ impl Router {
         // 404, a node's 502.
         let reply = |out: &mut TcpStream, resp: Response| {
             let resp = self.cors(resp);
+            metrics::counted(Route::Tenant, resp.status);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
-            metrics::request(Route::Tenant, resp.status, arrived.elapsed());
+            metrics::timed(Route::Tenant, arrived.elapsed());
             fenec_http::trace::end(resp.status);
             sent && req.keep_alive
         };
@@ -1552,8 +1559,9 @@ impl Router {
         let head_only = req.method == Method::Head;
         let reply = |out: &mut TcpStream, resp: Response| {
             let resp = self.cors(resp);
+            metrics::counted(Route::Tenant, resp.status);
             let sent = resp.write(out, req.keep_alive, head_only).is_ok();
-            metrics::request(Route::Tenant, resp.status, arrived.elapsed());
+            metrics::timed(Route::Tenant, arrived.elapsed());
             fenec_http::trace::end(resp.status);
             sent && req.keep_alive
         };
@@ -1647,10 +1655,12 @@ impl Router {
                 true => "\r\nConnection: keep-alive\r\n\r\n",
                 false => "\r\nConnection: close\r\n\r\n",
             });
+            // Counted before a byte of it goes out ([`metrics::counted`]).
+            metrics::counted(Route::Tenant, status);
             // One `writev`: the head and the body written apart went in two
             // packets, a send more every answer through the router.
             let written = http::write_parts(out, head.as_bytes(), &body);
-            metrics::request(Route::Tenant, status, arrived.elapsed());
+            metrics::timed(Route::Tenant, arrived.elapsed());
             fenec_http::trace::end(status);
             return written.is_ok() && req.keep_alive;
         }
@@ -1661,8 +1671,9 @@ impl Router {
         drop(forwarding);
         metrics::upstream(sent.elapsed());
         head.push_str("Connection: close\r\n\r\n");
+        metrics::counted(Route::Tenant, status);
         let written = out.write_all(head.as_bytes());
-        metrics::request(Route::Tenant, status, arrived.elapsed());
+        metrics::timed(Route::Tenant, arrived.elapsed());
         fenec_http::trace::end(status);
         if written.is_err() {
             return false;

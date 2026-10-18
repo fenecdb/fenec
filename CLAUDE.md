@@ -5590,7 +5590,14 @@ forwarded one's time at its node, the nodes it could not reach and its moves,
 never a tenant in a label -- 13.3 ns a request with eight threads counting,
 beside the 17 µs the router adds. A subscription is timed to its head, and a
 standby's replication stream only counted: both last as long as their
-client.
+client. The node and the router alike count a request before its answer is
+written, so a client holding its answer finds it in the next scrape: the
+router counted after the write, and `entry.test.js` read eu's router a
+relayed request short and then one over (CI) -- 8 runs of 10 with the
+router's thread held 5 to 10 ms past the write, none once it counts first
+(`fenec_shard::metrics::counted`). The router times a request once its
+answer is written, as before: count, clock and histogram all moved ahead of
+the write took its added p50 up 0.1 us, the count alone nothing measurable.
 
 **`/_stats/statements` counts by shape, a tenant's apart.** Every
 statement is also counted by its text with each literal and parameter as

@@ -438,7 +438,8 @@ fn main() {
                 s.spawn(move || {
                     for i in 0..rounds {
                         let took = Duration::from_micros(20 + i % 50);
-                        metrics::request(Route::Tenant, 200, took);
+                        metrics::counted(Route::Tenant, 200);
+                        metrics::timed(Route::Tenant, took);
                         metrics::upstream(took);
                     }
                 });
