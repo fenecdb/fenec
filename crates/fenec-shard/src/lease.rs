@@ -13,12 +13,38 @@
 //! from it to be sure. What it cannot do is tell the two apart, which is
 //! why the node stops on its own rather than wait to be told.
 //!
+//! That holds of every grant whose answer came back, or that the node
+//! never read. One the router gave up on -- no answer within the lease
+//! pool's third of a lease, so [`Answer::Silent`] and `acked` left as it
+//! was -- the node still takes whenever it reads it, and grants carry no
+//! number it could refuse a late one by: a node stalled with a grant unread
+//! in its socket can take writes for a lease after its tenants were
+//! promoted elsewhere. That hole is older than everything here, and its fix
+//! is to come.
+//!
+//! No node waits for another. A round sends every node its grant on a
+//! thread of its own and judges the leases without waiting for any
+//! (`Router::round`): it waited for them all, and a grant that took long --
+//! to a node gone whose name its resolver was slow to refuse, the lookup
+//! bounded by nothing -- held up every other node's renewal until those
+//! leases lapsed too and the router failed the healthy nodes over (V5's
+//! drill). A node's grants go one at a time, in its turn ([`Leases::turn`]),
+//! a round sending none while one of its own is under way
+//! ([`Leases::begin_grant`]); its lapse, suspected by a round
+//! ([`Leases::suspects`]), is judged in that turn
+//! ([`Leases::confirm_lapse`]), when no grant to it that the router still
+//! waits on is in flight -- a grant it took runs its lease on from the
+//! moment it took it, and an answer saying so that comes back is counted
+//! -- and its failover keeps the turn until the node was sent the list the
+//! failover left.
+//!
 //! A router that starts leasing -- a restart, or a standby promoted --
 //! counts every node as granted at that moment: a lease its predecessor
 //! granted just before it stopped may run as long, and a failover before it
 //! lapsed would make two primaries. A standby keeps forgetting every lease
-//! for as long as it follows, so the moment is its promotion, not its
-//! start.
+//! for as long as it follows, and its first round once promoted counts
+//! from then ([`Leases::leading`]), not from its last round while it
+//! followed, nor from its start.
 //!
 //! A grant names its holder (`fenec_http::lease::Holder`): the directory
 //! the router leases from -- the global one, or a region's own -- and its
@@ -32,7 +58,7 @@
 //! terms.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -58,12 +84,25 @@ pub struct Leases {
     readings: AtomicU64,
     /// Grants waiting for their node's turn: what a test waits for.
     waiting: AtomicUsize,
+    /// Set by a round of a standby router ([`Leases::standby`]) and taken by
+    /// its first round once promoted ([`Leases::leading`]); set from the
+    /// start, so a router counts from its first round as the primary
+    /// whether it started as one or as a standby promoted before any round
+    /// of its own.
+    following: AtomicBool,
+    /// By node, the tenants a failover left on it, held by another
+    /// operation, that its grants name no more, and from when a promotion
+    /// of each may come ([`Leases::withhold`]).
+    withheld: Mutex<HashMap<String, HashMap<String, Instant>>>,
 }
 
 #[derive(Clone)]
 struct Held {
     /// When the answer to the last grant the node took came back.
     acked: Instant,
+    /// When the router last stopped waiting on a grant to it, answered or
+    /// not: a grant the node may take is one sent before then.
+    settled: Instant,
     /// The epoch of the list the node holds, as far as the router knows.
     epoch: Option<String>,
     /// Failed over: its tenants were promoted elsewhere, and when it answers
@@ -71,6 +110,12 @@ struct Held {
     lost: bool,
     /// It said it takes no lease, and is never failed over on its own.
     refuses: bool,
+    /// A round's grant to it is under way: the next round sends it none
+    /// ([`Leases::begin_grant`]).
+    granting: bool,
+    /// Its lease looked lapsed, and a failover of it waits for its turn to
+    /// judge again ([`Leases::suspects`]).
+    failing: bool,
 }
 
 /// What a grant to a node said back.
@@ -102,6 +147,8 @@ impl Leases {
             turns: Mutex::new(HashMap::new()),
             readings: AtomicU64::new(0),
             waiting: AtomicUsize::new(0),
+            following: AtomicBool::new(true),
+            withheld: Mutex::new(HashMap::new()),
         }
     }
 
@@ -143,11 +190,94 @@ impl Leases {
         self.waiting.load(Ordering::SeqCst)
     }
 
-    /// A standby router's: it leases nothing, and forgets what it knew, so
-    /// that its first round once promoted counts from then.
+    /// A standby router's round: it leases nothing, and forgets what it knew.
     pub fn standby(&self) {
         self.held().clear();
-        *self.started.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        self.withheld().clear();
+        self.following.store(true, Ordering::SeqCst);
+    }
+
+    /// A round of a router that leases: the first after following, its
+    /// promotion's, forgets what it knew and counts every node as granted
+    /// from now. Counted from its last round while it followed -- up to a
+    /// third of a lease before the promotion -- a node the router before it
+    /// renewed after that round could be failed over while that grant still
+    /// ran, two primaries.
+    pub fn leading(&self) {
+        if self.following.swap(false, Ordering::SeqCst) {
+            let now = Instant::now();
+            // Every node granted now, what was learnt of each kept: a router
+            // primary from its start may have heard a node say it takes no
+            // lease before its first round -- a create's grant -- and,
+            // forgetting it, failed over a node that fences nothing.
+            for h in self.held().values_mut() {
+                h.acked = h.acked.max(now);
+            }
+            self.withheld().clear();
+            *self.started.lock().unwrap_or_else(|e| e.into_inner()) = now;
+        }
+    }
+
+    fn withheld(&self) -> std::sync::MutexGuard<'_, HashMap<String, HashMap<String, Instant>>> {
+        self.withheld.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `tenant`, left on `node` by its failover, named by no grant to the
+    /// node from now: asked with the node's turn held, so no grant naming it
+    /// is in flight. Its promotion may come a lease and a tenth after the
+    /// router last stopped waiting on a grant to the node -- the last that
+    /// could name it -- and not before. Left in the node's list, every
+    /// grant the failover and the rounds after it sent the node while
+    /// another operation held the tenant named it, and a late one the node
+    /// took (the module comment's hole) ran the tenant's lease past its
+    /// promotion: minutes of a move's, where the failover's own window is a
+    /// lease and a tenth.
+    pub fn withhold(&self, node: &str, tenant: &str) {
+        let settled = {
+            let mut m = self.held();
+            self.entry(&mut m, node).settled
+        };
+        self.withheld()
+            .entry(node.to_string())
+            .or_default()
+            .insert(tenant.to_string(), settled + lapse(self.term));
+    }
+
+    /// From when `tenant`, withheld from `node`, may be promoted; `None`
+    /// where it is not withheld.
+    pub fn withheld_until(&self, node: &str, tenant: &str) -> Option<Instant> {
+        self.withheld()
+            .get(node)
+            .and_then(|t| t.get(tenant))
+            .copied()
+    }
+
+    /// `tenant` named by `node`'s grants again: promoted, gone, or left
+    /// where it is.
+    pub fn release(&self, node: &str, tenant: &str) {
+        let mut w = self.withheld();
+        if let Some(t) = w.get_mut(node) {
+            t.remove(tenant);
+            if t.is_empty() {
+                w.remove(node);
+            }
+        }
+    }
+
+    /// Takes the tenants withheld from each node out of its list.
+    pub fn withhold_from(&self, lists: &mut std::collections::BTreeMap<String, Vec<String>>) {
+        let w = self.withheld();
+        for (node, tenants) in w.iter() {
+            if let Some(list) = lists.get_mut(node) {
+                list.retain(|t| !tenants.contains_key(t));
+            }
+        }
+    }
+
+    /// Whether `node` was failed over on its own and has not answered a
+    /// grant since.
+    pub fn is_lost(&self, node: &str) -> bool {
+        self.held().get(node).is_some_and(|h| h.lost)
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, HashMap<String, Held>> {
@@ -158,10 +288,31 @@ impl Leases {
         let started = *self.started.lock().unwrap_or_else(|e| e.into_inner());
         m.entry(node.to_string()).or_insert_with(|| Held {
             acked: started,
+            settled: started,
             epoch: None,
             lost: false,
             refuses: false,
+            granting: false,
+            failing: false,
         })
+    }
+
+    /// Whether a round may send `node` a grant: none of a round's is under
+    /// way to it, which it now is. The rounds wait for no grant
+    /// ([`crate::Router::lease_round`]), so one to a node that takes its
+    /// whole bound to fail would otherwise be joined by another every
+    /// round, each waiting its turn behind the one before.
+    pub fn begin_grant(&self, node: &str) -> bool {
+        let mut m = self.held();
+        let h = self.entry(&mut m, node);
+        !std::mem::replace(&mut h.granting, true)
+    }
+
+    /// A round's grant to `node` has ended.
+    pub fn end_grant(&self, node: &str) {
+        if let Some(h) = self.held().get_mut(node) {
+            h.granting = false;
+        }
     }
 
     /// The epoch of the list `node` holds, as far as the router knows.
@@ -174,12 +325,20 @@ impl Leases {
     pub fn answered(&self, node: &str, epoch: &str, answer: &Answer, at: Instant) -> bool {
         let mut m = self.held();
         let h = self.entry(&mut m, node);
+        h.settled = h.settled.max(at);
         match answer {
             Answer::Taken => {
                 h.acked = at;
                 h.epoch = Some(epoch.to_string());
                 h.refuses = false;
-                std::mem::take(&mut h.lost)
+                let back = std::mem::take(&mut h.lost);
+                // Back, it holds the tenants still placed on it again,
+                // those a failover withheld from its list among them.
+                if back {
+                    drop(m);
+                    self.withheld().remove(node);
+                }
+                back
             }
             Answer::NeedsList => {
                 h.epoch = None;
@@ -209,18 +368,48 @@ impl Leases {
         }
     }
 
-    /// The nodes whose lease has certainly lapsed and that are not failed
-    /// over yet, now marked as failed over.
-    pub fn lapsed(&self, now: Instant) -> Vec<String> {
+    /// The nodes whose lease looks certainly lapsed, not failed over and
+    /// with no failover of theirs under way, now marked as under way: each
+    /// is judged again by [`Leases::confirm_lapse`] in its turn, once any
+    /// grant to it in flight has ended.
+    pub fn suspects(&self, now: Instant) -> Vec<String> {
         let mut m = self.held();
         let mut out = Vec::new();
         for (node, h) in m.iter_mut() {
-            if !h.refuses && !h.lost && now.duration_since(h.acked) > lapse(self.term) {
-                h.lost = true;
+            if !h.refuses && !h.lost && !h.failing && lapsed(h, now, self.term) {
+                h.failing = true;
                 out.push(node.clone());
             }
         }
         out
+    }
+
+    /// Whether `node`'s lease has certainly lapsed, now marked as failed
+    /// over where it has: asked with the node's turn held
+    /// ([`Leases::turn`]), so no grant to it that the router still waits on
+    /// is in flight -- one it took would run its lease on from the moment
+    /// it took it, and its answer, coming back after the suspicion, says it
+    /// did; one given up on is the module comment's hole. Ends the failover
+    /// [`Leases::suspects`] marked as under way either way.
+    pub fn confirm_lapse(&self, node: &str, now: Instant) -> bool {
+        let mut m = self.held();
+        let Some(h) = m.get_mut(node) else {
+            return false;
+        };
+        h.failing = false;
+        if h.refuses || h.lost || !lapsed(h, now, self.term) {
+            return false;
+        }
+        h.lost = true;
+        true
+    }
+
+    /// A failover [`Leases::suspects`] marked as under way that never
+    /// started (its thread could not be made): judged again next round.
+    pub fn unsuspect(&self, node: &str) {
+        if let Some(h) = self.held().get_mut(node) {
+            h.failing = false;
+        }
     }
 
     /// Makes sure every node the directory names is counted from the
@@ -247,6 +436,12 @@ impl Leases {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
+}
+
+/// Whether `h`'s lease has certainly lapsed by `now`: a lease and a tenth
+/// since its last grant's answer came back.
+fn lapsed(h: &Held, now: Instant, term: Duration) -> bool {
+    now.saturating_duration_since(h.acked) > lapse(term)
 }
 
 /// The name of a node's list: FNV-1a over its sorted names. A node holding
@@ -276,28 +471,96 @@ mod tests {
         l.know("n1");
         let after = Instant::now();
         // Counted as granted at the router's start: nothing lapses before.
-        assert!(l.lapsed(before).is_empty());
-        assert!(l.lapsed(before + Duration::from_millis(105)).is_empty());
-        assert_eq!(l.lapsed(after + Duration::from_millis(115)), ["n1"]);
+        assert!(l.suspects(before).is_empty());
+        assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
+        let late = after + Duration::from_millis(115);
+        assert_eq!(l.suspects(late), ["n1"]);
+        // Suspected once while its failover is under way.
+        assert!(l.suspects(late).is_empty());
+        assert!(l.confirm_lapse("n1", late));
         // Once: a node failed over is not failed over again.
-        assert!(l.lapsed(after + Duration::from_secs(5)).is_empty());
+        assert!(l.suspects(after + Duration::from_secs(5)).is_empty());
+        assert!(!l.confirm_lapse("n1", after + Duration::from_secs(5)));
         // It comes back, and says so once.
         assert!(l.answered("n1", "e", &Answer::Taken, Instant::now()));
         assert!(!l.answered("n1", "e", &Answer::Taken, Instant::now()));
         assert_eq!(l.epoch("n1").as_deref(), Some("e"));
+        // An answer that came back between the suspicion and the judgement,
+        // a grant that was in flight, keeps it: nothing is failed over, and
+        // it may be suspected again later.
+        let later = Instant::now() + Duration::from_millis(115);
+        assert_eq!(l.suspects(later), ["n1"]);
+        l.answered("n1", "e", &Answer::Taken, later);
+        assert!(!l.confirm_lapse("n1", later));
+        assert_eq!(l.suspects(later + Duration::from_millis(115)), ["n1"]);
+        l.unsuspect("n1");
         // A node that takes no lease is never failed over.
         l.answered("n2", "e", &Answer::Refuses, Instant::now());
         assert!(l
-            .lapsed(Instant::now() + Duration::from_secs(60))
+            .suspects(Instant::now() + Duration::from_secs(60))
             .iter()
             .all(|n| n != "n2"));
-        // A standby forgets, and counts from the moment it leases again:
-        // counted from its grant 120 ms before, n1 would have lapsed.
+        // A round's grant to a node is one at a time.
+        assert!(l.begin_grant("n1"));
+        assert!(!l.begin_grant("n1"));
+        l.end_grant("n1");
+        assert!(l.begin_grant("n1"));
+        l.end_grant("n1");
+        // A standby forgets, and counts from the moment it leases again --
+        // its first round once promoted, not its last round while it
+        // followed: counted from that round 120 ms before, n1 would have
+        // lapsed. A round of a router that never followed changes nothing.
+        l.standby();
         std::thread::sleep(Duration::from_millis(120));
         let before = Instant::now();
-        l.standby();
+        l.leading();
         l.know("n1");
-        assert!(l.lapsed(before + Duration::from_millis(105)).is_empty());
+        assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
+        let led = Instant::now();
+        l.leading();
+        l.know("n1");
+        assert_eq!(l.suspects(led + Duration::from_millis(115)), ["n1"]);
+    }
+
+    /// A tenant withheld from a node is out of every list sent it, may be
+    /// promoted a lease and a tenth past the last grant the router stopped
+    /// waiting on, answered or not, and is the node's again once released
+    /// or once the node answers after its failover.
+    #[test]
+    fn a_withheld_tenant_is_named_by_no_grant_until_released() {
+        let term = Duration::from_millis(100);
+        let l = Leases::new(term);
+        let given_up = Instant::now();
+        l.answered("n1", "e", &Answer::Silent, given_up);
+        l.withhold("n1", "t");
+        assert_eq!(l.withheld_until("n1", "t"), Some(given_up + lapse(term)));
+        let mut lists: std::collections::BTreeMap<String, Vec<String>> =
+            [("n1".into(), vec!["t".into(), "u".into()])].into();
+        l.withhold_from(&mut lists);
+        assert_eq!(lists["n1"], ["u"]);
+        l.release("n1", "t");
+        assert_eq!(l.withheld_until("n1", "t"), None);
+        // Back after its failover, it holds what is placed on it again.
+        l.withhold("n1", "t");
+        let late = Instant::now() + Duration::from_secs(1);
+        l.know("n1");
+        assert_eq!(l.suspects(late), ["n1"]);
+        assert!(l.confirm_lapse("n1", late));
+        assert!(l.answered("n1", "e", &Answer::Taken, late));
+        assert_eq!(l.withheld_until("n1", "t"), None);
+    }
+
+    /// A router counts from its first round as the primary even where no
+    /// round of its own came before -- a standby promoted before its first,
+    /// or a router primary from its start -- not from when it was made.
+    #[test]
+    fn a_first_round_counts_from_itself() {
+        let l = Leases::new(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(120));
+        let before = Instant::now();
+        l.leading();
+        l.know("n1");
+        assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
     }
 
     #[test]

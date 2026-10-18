@@ -617,7 +617,19 @@ no counter would leave every replica one change off. The
 history (record kind 8, `History`) moves none, as a graph a server keeps in
 the tail does, and neither is sent. A promotion forks the history, a replica is continued only from a position
 the primary's history passed through and sent an image otherwise, and a
-following database refuses writes (`Error::ReadOnly`, 403). A durable
+following database refuses writes (`Error::ReadOnly`, 403). A promotion
+halts the follower before it forks, and a follower reconnecting to a
+primary that is gone walks away from the dial at the halt
+(`fenec_http::dial::connect_unless`: the lookup and the connect on a
+thread of their own, the stop flag looked at every 10 ms, the stream
+handed to `halt` before its request goes out): waited for, the halt took
+the connect's 5 s where the dead machine's address swallowed packets, and
+as long as the resolver took to refuse its name -- the tail of a failover
+in V5's drill on CI; `tests/replication.rs` holds a promotion beside a
+lookup that never ends (30 s on main, the 5 s of the dial's bound with the
+dial not walked away from) and beside a primary that takes the connection
+and never answers (the follower's 10 s of silence where the stream reached
+`halt` only with the head). A durable
 write is answered once every stream has written it into its socket
 (`Feed::wait_sent` in the `Tee`'s durability, `SENT_WAIT` a second at
 most, a stream that missed it `lagging` and not waited for until it
@@ -832,7 +844,14 @@ lease (`fenec-shard --auto-failover`, nodes `fenec-server --dir --lease`;
 `fenec-shard/src/lease.rs`, `fenec-http/src/lease.rs`): a node stops
 writing as its lease lapses by its own clock -- measured from when the grant
 came in, where the router measures from when the answer came back, and
-waits a tenth more -- and only then are its tenants promoted. The fence is
+waits a tenth more -- and only then are its tenants promoted. One hole is
+older than all of this, and its fix is to come: a grant the router gave up
+on -- no answer within a third of a lease -- counts as no grant, yet the
+node takes it whenever it reads it, and grants carry no number a node could
+refuse a late one by; so a node stalled with one unread in its socket can
+take writes for a lease after the router promoted its tenants elsewhere
+(reproduced: a proxy holding grants back hands one to the node after the
+failover, and both copies answer writes 200). The fence is
 the engine's (`Database::set_fence`), asked in `commit` as a block lands and
 in `may_write` before a schema change or a maintenance, so every write path
 honours it; asked as a lone write started too, it took a `put` from 827 to
@@ -841,14 +860,127 @@ the node's primaries, not the node: a node back from a failover writes none
 of its stale copies before the repair its answer triggers has them follow.
 The list rides only when its epoch (FNV of the sorted names) changed, and a
 node that does not hold it answers 412; a create or a move grants the new
-list at once. Grants go out in parallel over a pool bounded by a third of
-the lease, or one silent node let the others' lapse -- but to one node one
-at a time, and never with a list read before the last one it was sent
+list at once. Grants go out each on a thread of its own over a pool
+bounded by a third of the lease, and a round waits for none of them
+(`Router::round`): it waited for every grant before it looked for a lapse,
+and in V5's drill a grant to a node gone, recorded by a name its resolver
+was slow to refuse -- the lookup bounded by nothing -- held the round up
+until the region's healthy nodes stopped writing (18 s in CI) and were
+failed over themselves, the dead node's tenants writing again 30 s after
+the kill. To one node a grant goes one at a time, a round sending none
+while one of its own is under way (`Leases::begin_grant`; sent anyway,
+one that took its whole bound had another queued behind it every round),
+and never with a list read before the last one it was sent
 (`Leases::turn`, each reading of the directory numbered): a round reads
 every list as it starts, and its grant, landing after the one a create
 sent at once, put the list from before the create back, the new tenant
-refused on its node (503) until the next round. A standby router forgets
-its leases while it follows and counts from its promotion; a node without
+refused on its node (503) until the next round. A lapse a round suspects
+(`Leases::suspects`) is judged again in the node's turn by a failover on a
+thread of its own (`fail_over_lapsed`, `Leases::confirm_lapse`): no grant
+to the node that the router still waits on is in flight then -- one it took
+runs its lease on from the moment it took it, and an answer saying so that
+comes back is counted, which the leasing thread had because it ran the
+failover between rounds; one the router gave up on is the hole above --
+and the turn is held
+until the node was sent the list the failover left, so no grant over a
+list read before it lands after; it is let go of before the other nodes'
+grants are waited for, or two nodes failed over at once waited on each
+other's turns for good. A repair runs on a thread of its own, one at a
+time (`repair_soon`): on the leasing thread, a node back from a failover
+had it call a node gone, 5 s a call for its name's lookup alone, 20 s with
+no lease renewed, and the healthy node it ran for failed over at its end;
+run in the grant that heard the node back, it held that node's renewals
+and had it failed over again. A tenant whose claim another operation held
+as its node failed over -- a repair, which runs beside the failovers now,
+a quota being set, a move -- is failed over once let go of
+(`fail_over_held`, waiting on the claims' condvar), in the node's turn and
+only while the node has answered nothing since: left, as a failover by hand
+leaves it to be asked again, it stayed on a node gone for good. It goes to
+the copy it had as the failover ran and to no other (`HeldTenant`, pinned
+then, and only while that copy is still its own): read again once let go
+of, the copy was the one the repair holding it had just attached,
+following the node gone, and the tenant went onto a file holding none of
+it, its rows wiped from its old node once that came back and followed it
+(the review's repro). It is out of the node's grants from the failover on
+(`Leases::withhold`) and promoted no sooner than a lease and a tenth past
+the router's last grant to the node, answered or given up: left in the
+list, every grant for as long as a move held it named it, and the
+late-grant hole stretched from the failover's lease and a tenth to the
+whole wait. The wait ends at `HELD_WAIT` (an hour), the node gone from the
+directory or this router demoted -- `promote_on` asks `following()` before
+every promotion -- the tenant left where it is and named again; and a pair
+ends once its node holds no tenant, promoted, moved or deleted alike. Two
+guards besides, older than all of it. A node refuses to promote a copy that
+is not its tenant as the router knows it (`tenants::Expected`, the
+promote's body: 409, the tenant left where its rows are until its node is
+back): of another lineage than the directory's -- a copy that never took
+its primary's image is of its own, a new file's or none on a standby, and
+so is a file put in its place by hand -- or lacking the history the
+tenant's primary forked at its last failover, which the router records from
+each promotion's answer (`lineages`' `history`, added as an alter, cleared
+where the lineage is succeeded) and not heard from the node it follows
+since it was last told to follow it: an old primary's copy a repair made
+follow the new primary, promoted before it heard from it, took back every
+write since that failover -- its lineage the tenant's and its change past
+0, so neither caught it. The hello is the copy's own word, kept in
+`.follows` (`heard`, written at the first hello after each `follow`, which
+halts the follower before it writes the file again: `mark_heard`,
+`heard_since_told`; renamed and removed durably, `fs::sync_dir`, or a power
+loss could bring back the file before), since the history alone goes stale: a primary's file
+restored in place to before that failover (`DELETE` and `PUT .../file`,
+`fenec restore --tenants`) keeps its lineage and lacks the fork, so does
+every copy that took it, and every failover after was refused, on a lease
+for good (the review's `restore_trap.rs`). Kept across a restart, where
+`ready` is not: a node restarted between a follow and its hello still
+refuses the copy, one restarted after it still promotes it. A copy never
+told to follow -- a standby's, made with its node -- keeps no word, and is
+held to the history alone. A tenant whose lineage the directory never learnt, or a
+call naming none, is held to the one copy known to hold nothing (no write
+and no hello since it opened or since it was told to follow). A file of
+another lineage put in its primary's place by hand still leaves every
+failover refused until the directory learns it (a read replica's look) or an
+operator forces one. Refused at change 0 as this first stood, a
+tenant not yet written could not fail over at all, its copy ready and of
+its lineage (the review's `empty_refused.rs`). `{"force": true}` on `POST
+/_admin/tenants/<t>/promote` or `POST /_shard/nodes/<n>/failover` promotes
+whatever the copy holds, an audit event on each (`promote_forced`,
+`failover_forced`), and `promoted()` then records the other file's lineage
+as the tenant's, the one before among those it was. And a repair gives no
+tenant a copy while its primary does not answer its `GET /_admin/tenants`
+-- one that ran between a node's death and its lapse attached a copy
+following nothing, which the failover promoted and the node's return wiped
+the tenant into, on main -- and runs again for those it passed over
+(`repair_later`, 2 s doubling to 60, eight times): a repair runs only when
+a node failed over answers again or an operator asks, so a primary slow at
+the one look left its tenant with no replica until then. A name is
+looked up within the call's own bound (`fenec_http::dial`, the
+router's connections below). In deploy-kit's drill at a lease of 2 s, the
+routers' unknown names sent to a resolver that never answers, us-a's
+failover was done 2.7-2.8 s after its kill in three runs against main's
+5.3, 5.8 and 15.7 s, the region's other tenants' longest gap 17-19 ms
+against 8.0-18.0 s, and no healthy node failed over against one or two in
+each of main's runs (us-a's tenants writing again 21-26 s after the kill,
+one run failing its repair); with every container's unknown names so, the
+follower's lookup of the dead primary hanging too, 2.1-3.3 s in three
+against 5.7; by names that resolve, 2.0-2.6 s either way. What the drill's writers
+waited past that is the router's `--upstream-timeout` on a request to the
+dead node, cut by their own 5 s: at `--upstream-timeout 2` they wrote
+again 1.96 s after the kill on both builds. `make shard-bench`'s failovers
+as they were, twelve runs a side in ABBA turns at loads under 3 with all
+of the above in, the lineage and history sent and recorded among it: a
+lease's last tenant writing again 1.28 s after the cut against 1.29
+(1.23-1.57 either way, the round's phase), a region's at a lease of 1 s
+1.59 against 1.60 and at 5 s 6.20 against 6.21, a pair's 20 tenants 63.5 ms
+either way, one node's 10 over their replicas 52 either way, the repair
+after it 241.5 against 238, the router's added p50 20.6 us against 20.4. A
+standby router forgets
+its leases while it follows and counts from its first round once promoted
+(`Leases::leading`): it counted from its last round while it followed, up
+to a third of a lease before the promotion, and a grant its primary sent
+after that round could still run as it failed the node over. `following`
+starts set, so one promoted before a round of its own counts from its first
+round too, and a router primary from its start from its first round, a
+third of a lease after it at most; a node without
 `--lease` is never failed over on its own. A lease of a second: a node cut
 off stopped writing 697 ms after, its 10 tenants took writes again 1.29 to
 1.33 s after. A
@@ -1270,10 +1402,13 @@ between had the primary deleted (`tenants::refusals` holds a refusal
 there for a test). Only a read replica is told a lineage, and a copy that
 never had its first image holds nothing to lose. A primary of another
 lineage than the directory's, where the directory places the tenant, is
-the tenant -- every read and write of it goes there: a copy that never
-took its first image promoted (a lineage of its own: `fork_id` keeps the
-first id's top half only where there is a first id), an older file
-restored, a file put in place by hand. A failover records the lineage the
+the tenant -- every read and write of it goes there: another file of it
+promoted by force (a lineage of its own: `fork_id` keeps the first id's top
+half only where there is a first id), an older file restored, a file put in
+place by hand. A copy of another lineage -- one that never took its first
+image among them -- is not promoted but by force: its node, told the
+directory's lineage, refuses it, where it was once promoted into an empty
+primary. A failover records the lineage the
 promotion answers (`promoted`, `"lineage"` of `.../promote`), and a read
 replica's copy lost with nothing else changed has the primary's node
 asked first (`verify_lineage`, through `verify_primary`; another region's
@@ -6015,7 +6150,32 @@ two `setsockopt`s every exchange made, 0.67 us, are gone from a reused
 connection: the write timeout is set at the connect, the read timeout
 only when it changes (a `Fenec-Wait`), kept with the pooled connection.
 `make shard-bench`'s added p50 stayed 23.3 us against main's 23.3, six
-runs each in ABBA turns (23.1-24.8 and 20.0-24.4). A request the node may
+runs each in ABBA turns (23.1-24.8 and 20.0-24.4). A connection's name is
+looked up within the bound its connect has (`dial` through
+`fenec_http::dial::resolve`, which every dial of the router's goes
+through: a forwarded request, a relay to a region's router, a query
+across tenants, a read replica's read and upkeep, a health probe, a lease
+grant): `getaddrinfo` takes no timeout, and a node recorded by a name its
+resolver was slow to refuse -- a container gone, whose name Docker's
+resolver forwards upstream -- held every dial to it for the resolver's 5
+s, a lease grant's among them. The lookup runs on a thread of its own
+that the caller walks away from at its bound; a caller asking a name
+whose lookup began under 500 ms before, or that has eight out, waits on
+the newest (`JOIN_WITHIN`, `MAX_IN_FLIGHT`), since every request to a dead
+node's tenants would otherwise leave a thread waiting out the resolver.
+Nothing is cached -- Docker hands a stopped container's address to the
+next one it starts, and kept, a node's old address would send its grant
+there -- and an address written out is read where it stands, with no
+thread: `make shard-bench ARGS=latency`'s added p50 stayed 20.7 us against
+main's 20.5, eight runs a side in ABBA turns at loads of 2.2-2.8
+(20.2-21.3 and 17.0-20.8), and the whole bench's 20.4 against 20.7.
+`fenec-shard`'s code grew 59.9 KB with the leasing beside it, the held
+tenants and the refusal's lineage and history -- 9.3 KB of it the promotion
+that sends them and records its answer in one block -- and
+`fenec-server`'s 14.5, 2.0 of it the copy's word of its primary's hello
+(aarch64-apple-darwin); the follower's dial answers
+through a slot and a condvar, an `mpsc` channel 13 KB more of each. A
+request the node may
 hold (`Fenec-Wait`) watches its client while its head is waited for
 (`answered_or_gone`: one `poll` of the node's socket and the client's,
 declared by hand as `recv` is, `nfds_t` each system's own, until either

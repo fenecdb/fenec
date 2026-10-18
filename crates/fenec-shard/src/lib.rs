@@ -160,6 +160,15 @@ impl Default for Config {
 }
 
 pub struct Router {
+    /// The router itself, for the work it hands to threads of their own
+    /// from wherever it is asked for: a lease grant, a failover, a repair.
+    me: std::sync::Weak<Router>,
+    /// A repair wanted, and whether its thread runs ([`Router::repair_soon`]).
+    repairs: Mutex<(bool, bool)>,
+    /// The repairs run again for tenants a repair passed over because
+    /// their primary did not answer, and whether one is waited for
+    /// ([`Router::repair_later`]).
+    again: Mutex<(u32, bool)>,
     dir: RwLock<Directory>,
     /// The directory's own replication: the feed a standby reads, and the
     /// follower a standby runs. `None` without --replication-token.
@@ -169,6 +178,9 @@ pub struct Router {
     /// Tenants with a create, move or delete in progress: a second
     /// operation on the same tenant is refused rather than interleaved.
     busy: Mutex<HashSet<String>>,
+    /// Told as a tenant's operation lets it go: what a failover on a lease
+    /// waits on for a tenant it had to leave ([`Router::fail_over_held`]).
+    freed: std::sync::Condvar,
     live: AtomicUsize,
     /// Each node's lease, under automatic failover, and the pool its grants
     /// go through: bounded by a third of the lease rather than by
@@ -257,6 +269,71 @@ pub struct Router {
     follow_soon: (Mutex<bool>, std::sync::Condvar),
 }
 
+/// Ends a round's grant to a node however the grant ends, a panic in it
+/// too: left marked as under way, the node would never be granted by a
+/// round again ([`lease::Leases::begin_grant`]).
+struct Granting<'a>(&'a Router, &'a str);
+
+impl Drop for Granting<'_> {
+    fn drop(&mut self) {
+        if let Some((leases, _)) = &self.0.leases {
+            leases.end_grant(self.1);
+        }
+    }
+}
+
+/// Takes the repair thread's mark off where a repair panicked -- left on,
+/// no repair would run again ([`Router::repair_soon`]) -- and starts another
+/// thread where a repair was wanted meanwhile, which the dying thread would
+/// have run. A thread that ends as it should takes the mark off itself,
+/// under the lock that found nothing wanted.
+struct Repairing<'a>(&'a Router);
+
+impl Drop for Repairing<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let again = {
+                let mut wanted = self.0.repairs.lock().unwrap_or_else(|e| e.into_inner());
+                wanted.1 = false;
+                wanted.0
+            };
+            if again {
+                self.0.repair_soon();
+            }
+        }
+    }
+}
+
+/// How long the first repair run again for a tenant whose primary did not
+/// answer waits ([`Router::repair_later`]), doubled for each more up to
+/// [`REPAIR_AGAIN_MOST`], [`REPAIR_AGAIN_TRIES`] of them: about four minutes
+/// in all. A repair is otherwise run only when a node failed over answers
+/// again or an operator asks (`POST /_shard/replicas`), so a primary that
+/// missed the one look left its tenant with no replica for good.
+const REPAIR_AGAIN_FIRST: Duration = Duration::from_secs(2);
+const REPAIR_AGAIN_MOST: Duration = Duration::from_secs(60);
+const REPAIR_AGAIN_TRIES: u32 = 8;
+
+/// How long a failover on a lease waits for the tenants another operation
+/// held through it ([`Router::fail_over_held`]): an operation is bounded by
+/// its calls' timeouts, a move of a large tenant among them, and one that
+/// never lets go -- a bug -- would keep a thread waking for good.
+const HELD_WAIT: Duration = Duration::from_secs(3600);
+
+/// A tenant a failover left because another operation held it, and the
+/// copy it would have been promoted on as the failover ran -- its node's
+/// standby, or its own replica (`own_replica`); `None` where it had none.
+/// Pinned then, and promoted on that copy alone ([`Router::fail_over_held`]):
+/// read again once the operation let the tenant go, the replica was the one
+/// a repair holding the tenant had just attached, following the node gone,
+/// and the tenant was promoted onto a copy that never took a byte -- its
+/// rows wiped from its old node once that came back and followed it.
+struct HeldTenant {
+    tenant: String,
+    to: Option<String>,
+    own_replica: bool,
+}
+
 /// An operation failure, shaped as an HTTP status and message.
 struct Fail(u16, String);
 
@@ -292,11 +369,15 @@ impl Router {
         let mut cfg = cfg;
         cfg.token = cfg.token.filter(|t| !t.is_empty());
         cfg.entry_token = cfg.entry_token.filter(|t| !t.is_empty());
-        Arc::new(Router {
+        Arc::new_cyclic(|me| Router {
+            me: me.clone(),
+            repairs: Mutex::new((false, false)),
+            again: Mutex::new((0, false)),
             dir: RwLock::new(dir),
             repl,
             pool: Pool::new(cfg.upstream_timeout),
             busy: Mutex::new(HashSet::new()),
+            freed: std::sync::Condvar::new(),
             marks: Mutex::new(Default::default()),
             live: AtomicUsize::new(0),
             leases: cfg
@@ -417,15 +498,36 @@ impl Router {
             .name("fenec-lease".into())
             .spawn(move || loop {
                 std::thread::sleep(every);
-                router.lease_round();
+                router.round(false);
             })?;
         Ok(())
     }
 
-    /// One round: every node's lease renewed, each on a thread of its own so
-    /// that one that does not answer holds up no other, then the nodes whose
-    /// lease has certainly lapsed failed over.
+    /// One round, waited for: every node's lease renewed, each on a thread
+    /// of its own, then a failover of each node whose lease has certainly
+    /// lapsed, each on a thread of its own too -- this returning once all
+    /// of them have ended. What a test runs; the leasing thread's rounds
+    /// wait for none of it (`round`).
     pub fn lease_round(&self) {
+        self.round(true);
+    }
+
+    /// One round: every node sent its grant on a thread of its own, and
+    /// every node whose lease has certainly lapsed failed over on a thread
+    /// of its own. `wait`: this returns once all of them have ended.
+    ///
+    /// The leasing thread's rounds wait for nothing. They waited for every
+    /// grant before they looked for a lapse, so a grant that took long held
+    /// up the next round's renewals and the lapse of every other node: a
+    /// node recorded by a name its resolver was slow to refuse once it was
+    /// gone -- the lookup bounded by nothing -- had the region's healthy
+    /// nodes go unrenewed until their leases lapsed (V5's drill: 18 s
+    /// without a write in CI), and the failovers and repairs that ran on
+    /// this thread after it waited on the same lookup. Now one node's grant
+    /// holds up nothing but its own next grant (a round sends a node none
+    /// while one of its own is under way, [`lease::Leases::begin_grant`])
+    /// and its own failover, which waits for it in the node's turn.
+    fn round(&self, wait: bool) {
         let Some((leases, _)) = &self.leases else {
             return;
         };
@@ -434,34 +536,302 @@ impl Router {
             leases.standby();
             return;
         }
+        leases.leading();
+        let Some(me) = self.me.upgrade() else {
+            return;
+        };
         let (lists, reading, holder) = self.primaries_read(leases);
-        std::thread::scope(|s| {
-            for (node, list) in &lists {
-                leases.know(node);
-                let holder = &holder;
-                s.spawn(move || self.grant(node, list, reading, holder));
+        let holder = Arc::new(holder);
+        let mut grants = Vec::new();
+        for (node, list) in lists {
+            leases.know(&node);
+            if !wait && !leases.begin_grant(&node) {
+                continue;
+            }
+            let (router, holder, name) = (Arc::clone(&me), Arc::clone(&holder), node.clone());
+            let spawned = std::thread::Builder::new()
+                .name("fenec-lease-grant".into())
+                .spawn(move || {
+                    // Ended however the grant ends, a panic in it too: left
+                    // set, the node would never be granted again.
+                    let _ended = (!wait).then(|| Granting(&router, &node));
+                    router.grant(&node, &list, reading, &holder);
+                });
+            match spawned {
+                Ok(h) => grants.push(h),
+                Err(e) => {
+                    if !wait {
+                        leases.end_grant(&name);
+                    }
+                    fenec_http::log!("no thread for a lease grant to `{name}`: {e}");
+                }
+            }
+        }
+        if wait {
+            for g in grants {
+                let _ = g.join();
+            }
+        }
+        let mut failovers = Vec::new();
+        for node in leases.suspects(Instant::now()) {
+            let router = Arc::clone(&me);
+            let name = node.clone();
+            let spawned = std::thread::Builder::new()
+                .name("fenec-failover".into())
+                .spawn(move || router.fail_over_lapsed(&node));
+            match spawned {
+                Ok(h) => failovers.push(h),
+                Err(e) => {
+                    leases.unsuspect(&name);
+                    fenec_http::log!("no thread for the failover of `{name}`: {e}");
+                }
+            }
+        }
+        if wait {
+            for f in failovers {
+                let _ = f.join();
+            }
+        }
+    }
+
+    /// Fails `node` over if, judged in its turn, its lease has certainly
+    /// lapsed. The turn is held through: a grant to it that the router still
+    /// waits on ends first, so the lapse is judged on every answer that came
+    /// back -- a grant the node took runs its lease on from the moment it
+    /// took it -- and no grant over a list read before the failover reaches
+    /// it after: the turn is let go of once it was sent the list the
+    /// failover left, so an older list queued behind is dropped
+    /// ([`lease::Leases::turn`]). The leasing thread ran the failover itself
+    /// once its round's grants had ended, so none of theirs was under way;
+    /// on a thread of its own, beside the rounds, the turn is what keeps a
+    /// grant and the failover apart. A grant the router gave up on is not
+    /// counted, though the node may still take it (the lease module's
+    /// comment).
+    fn fail_over_lapsed(&self, node: &str) {
+        let Some((leases, _)) = &self.leases else {
+            return;
+        };
+        let turn = leases.turn(node);
+        let sent = leases.wait_turn(&turn);
+        if !leases.confirm_lapse(node, Instant::now()) {
+            return;
+        }
+        // A router that follows another now leases nothing: the one it
+        // follows judges the node, and a promotion here would be a second.
+        if self.read_dir().following() {
+            return;
+        }
+        fenec_http::log!(
+            "node `{node}` renewed no lease in {:?}: failing its tenants over",
+            lease::lapse(leases.term)
+        );
+        let mut held = Vec::new();
+        let (status, why) = match self.failover(node, &mut held, false) {
+            Ok(r) => (r.status, String::from_utf8_lossy(&r.body).into_owned()),
+            Err(Fail(status, why)) => (status, why),
+        };
+        metrics::failed_over(status == 200);
+        fenec_http::log!("failover of `{node}`: {status} {why}");
+        // The tenants it left with a copy to go to, named by no grant to the
+        // node from the one below on, the turn still held.
+        held.retain(|h| match &h.to {
+            Some(_) => {
+                leases.withhold(node, &h.tenant);
+                true
+            }
+            None => {
+                fenec_http::log!(
+                    "failover of `{node}`: `{}` had no copy to go to as its node was failed \
+                     over, and stays there",
+                    h.tenant
+                );
+                false
             }
         });
-        for node in leases.lapsed(Instant::now()) {
-            fenec_http::log!(
-                "node `{node}` renewed no lease in {:?}: failing its tenants over",
-                lease::lapse(leases.term)
-            );
-            let (status, why) = match self.failover(&node) {
-                Ok(r) => (r.status, String::from_utf8_lossy(&r.body).into_owned()),
-                Err(Fail(status, why)) => (status, why),
-            };
-            metrics::failed_over(status == 200);
-            fenec_http::log!("failover of `{node}`: {status} {why}");
-            // The nodes its tenants went to take their writes now, not at
-            // the next round.
-            let (lists, reading, holder) = self.primaries_read(leases);
-            std::thread::scope(|s| {
-                for (node, list) in &lists {
+        if self.granted_after(node, sent) {
+            self.answers_again(node);
+        } else if !held.is_empty() {
+            self.fail_over_held(node, held);
+        }
+    }
+
+    /// After a failover of `node`, its turn held (`sent`): the node sent the
+    /// list the failover left -- first, in its turn -- and the nodes its
+    /// tenants went to granted now rather than at the next round, so they
+    /// take their writes. Its turn is let go of before the others' grants
+    /// are waited for: two nodes failed over at once, each holding its own
+    /// turn while waiting for the other's, would wait for good. Whether the
+    /// node answered.
+    fn granted_after(&self, node: &str, mut sent: std::sync::MutexGuard<'_, u64>) -> bool {
+        let Some((leases, _)) = &self.leases else {
+            return false;
+        };
+        let (lists, reading, holder) = self.primaries_read(leases);
+        let none = Vec::new();
+        let own = lists.get(node).unwrap_or(&none);
+        std::thread::scope(|s| {
+            for (other, list) in &lists {
+                if other != node {
                     let holder = &holder;
-                    s.spawn(move || self.grant(node, list, reading, holder));
+                    s.spawn(move || self.grant(other, list, reading, holder));
                 }
+            }
+            let back = self.grant_held(&mut sent, node, own, reading, &holder);
+            drop(sent);
+            back
+        })
+    }
+
+    /// The tenants a failover on a lease had to leave because another
+    /// operation held them -- a repair giving one a replica, a quota being
+    /// set, a move -- each failed over once it is let go of. A failover by
+    /// hand says which and is asked again; on a lease nobody asks again,
+    /// and such a tenant stayed on a node gone for good. More so once the
+    /// repair ran beside the failovers rather than after them on the
+    /// leasing thread.
+    ///
+    /// Each goes to the copy pinned as the failover ran and to no other
+    /// ([`HeldTenant`]), and only while that copy is still the one: a copy
+    /// attached meanwhile follows the node gone and holds nothing of it.
+    /// Withheld from the node's grants since the failover
+    /// ([`lease::Leases::withhold`]), each is promoted a lease and a tenth
+    /// past the last grant that could name it at the soonest, in the node's
+    /// turn as the failover was, and only while the node has answered no
+    /// grant since -- one that answers holds its tenants again, and their
+    /// copies follow by the repair its answer starts -- and while this
+    /// router leases. Given up after [`HELD_WAIT`], or once the node is
+    /// gone from the directory: what is left stays where it is, named by
+    /// the node's grants again.
+    fn fail_over_held(&self, node: &str, mut left: Vec<HeldTenant>) {
+        let Some((leases, _)) = &self.leases else {
+            return;
+        };
+        let holder = self.holder_header();
+        let until = Instant::now() + HELD_WAIT;
+        let give_up = |left: &[HeldTenant], why: &str| {
+            for h in left {
+                leases.release(node, &h.tenant);
+                fenec_http::log!(
+                    "failover of `{node}`: `{}` stays where it is ({why})",
+                    h.tenant
+                );
+            }
+        };
+        loop {
+            {
+                // Waited on while no tenant left may go yet: each held by
+                // another operation, or within its lease past the last grant
+                // that named it. Looked at again now and then besides: the
+                // node may answer, or a tenant go elsewhere, meanwhile.
+                let now = Instant::now();
+                let busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+                let ready = left.iter().any(|h| {
+                    !busy.contains(&h.tenant)
+                        && leases
+                            .withheld_until(node, &h.tenant)
+                            .is_none_or(|from| from <= now)
+                });
+                if !ready {
+                    let _ = self.freed.wait_timeout(busy, Duration::from_millis(100));
+                }
+            }
+            if !leases.is_lost(node) {
+                return;
+            }
+            if self.read_dir().node(node).is_none() {
+                return give_up(&left, "its node is gone from the directory");
+            }
+            if self.read_dir().following() {
+                return give_up(&left, "this router follows another now");
+            }
+            if Instant::now() > until {
+                return give_up(&left, "the operation holding it outlasted the wait");
+            }
+            let turn = leases.turn(node);
+            let sent = leases.wait_turn(&turn);
+            if !leases.is_lost(node) {
+                return;
+            }
+            let before = left.len();
+            let mut moved = false;
+            left.retain(|h| {
+                let tenant = h.tenant.as_str();
+                // Moved or deleted meanwhile: nothing of it is left here.
+                if self
+                    .read_dir()
+                    .placement(tenant)
+                    .is_none_or(|p| p.node != node)
+                {
+                    leases.release(node, tenant);
+                    return false;
+                }
+                if leases
+                    .withheld_until(node, tenant)
+                    .is_some_and(|from| from > Instant::now())
+                {
+                    return true;
+                }
+                let Ok(_claim) = self.claim(tenant) else {
+                    return true;
+                };
+                let Some(to) = &h.to else {
+                    return false;
+                };
+                // The copy pinned is still the one the failover would use.
+                let current = {
+                    let dir = self.read_dir();
+                    match h.own_replica {
+                        true => dir.replica(tenant) == Some(to.as_str()),
+                        false => dir.standby(node) == Some(to.as_str()),
+                    }
+                };
+                if !current {
+                    leases.release(node, tenant);
+                    fenec_http::log!(
+                        "failover of `{node}`: `{tenant}` stays where it is: its copy on `{to}` \
+                         is not the one it had as its node was failed over"
+                    );
+                    return false;
+                }
+                match self.promote_on(tenant, to, &holder, h.own_replica, false) {
+                    Ok(()) => {
+                        moved = true;
+                        fenec_http::log!(
+                            "failover of `{node}`: `{tenant}`, let go of by the operation that \
+                             held it, promoted on `{to}`"
+                        );
+                    }
+                    Err(e) => fenec_http::log!("failover of `{node}`: `{tenant}` stays: {e}"),
+                }
+                leases.release(node, tenant);
+                false
             });
+            if moved {
+                self.follow_soon();
+            }
+            if left.len() < before {
+                // The pair is over once no tenant is left on the node, as at
+                // the end of a failover that left none -- promoted, moved or
+                // deleted alike.
+                let empty = {
+                    let dir = self.read_dir();
+                    dir.standby(node).is_some() && dir.tenants().iter().all(|(_, p)| p.node != node)
+                };
+                if empty {
+                    if let Err(e) = self.write_dir().set_standby(node, None) {
+                        fenec_http::log!("failover of `{node}`: the pair stayed recorded: {e}");
+                    }
+                }
+                if self.granted_after(node, sent) {
+                    self.answers_again(node);
+                    return;
+                }
+            } else {
+                drop(sent);
+            }
+            if left.is_empty() {
+                return;
+            }
         }
     }
 
@@ -484,7 +854,9 @@ impl Router {
         fenec_http::lease::Holder,
     ) {
         let dir = self.read_dir();
-        (dir.primaries(), leases.reading(), self.holder_of(&dir))
+        let mut lists = dir.primaries();
+        leases.withhold_from(&mut lists);
+        (lists, leases.reading(), self.holder_of(&dir))
     }
 
     /// Who this router leases as: the directory it keeps -- the global one,
@@ -519,12 +891,12 @@ impl Router {
     }
 
     /// Sends `node` its lease over `primaries`, read from the directory's
-    /// `reading`: the list itself only when the node may not hold it, and
-    /// again with it when the node says it does not. One grant to a node at
-    /// a time, and none over a reading older than the last one sent, which
-    /// the node then holds the list of ([`lease::Leases::turn`]). A node
-    /// that answers after it was failed over has a repair run, which has its
-    /// copies follow its tenants' new primaries.
+    /// `reading`, in its turn: one grant to a node at a time, and none over
+    /// a reading older than the last one sent, which the node then holds
+    /// the list of ([`lease::Leases::turn`]). A node that answers after it
+    /// was failed over has a repair run on a thread of its own
+    /// ([`Self::repair_soon`]), which has its copies follow its tenants' new
+    /// primaries.
     fn grant(
         &self,
         node: &str,
@@ -532,16 +904,38 @@ impl Router {
         reading: u64,
         holder: &fenec_http::lease::Holder,
     ) {
-        let Some((leases, pool)) = &self.leases else {
-            return;
-        };
-        let Some(n) = self.read_dir().node(node).cloned() else {
+        let Some((leases, _)) = &self.leases else {
             return;
         };
         let turn = leases.turn(node);
         let mut sent = leases.wait_turn(&turn);
+        let back = self.grant_held(&mut sent, node, primaries, reading, holder);
+        drop(sent);
+        if back {
+            self.answers_again(node);
+        }
+    }
+
+    /// [`Self::grant`] with the node's turn held, `sent` the reading of the
+    /// newest list it was sent: whether the node answered after it was
+    /// failed over. The list itself goes only when the node may not hold
+    /// it, and again with it when the node says it does not.
+    fn grant_held(
+        &self,
+        sent: &mut u64,
+        node: &str,
+        primaries: &[String],
+        reading: u64,
+        holder: &fenec_http::lease::Holder,
+    ) -> bool {
+        let Some((leases, pool)) = &self.leases else {
+            return false;
+        };
+        let Some(n) = self.read_dir().node(node).cloned() else {
+            return false;
+        };
         if reading < *sent {
-            return;
+            return false;
         }
         *sent = reading;
         let epoch = lease::epoch_of(primaries);
@@ -589,15 +983,103 @@ impl Router {
                 _ => break,
             }
         }
-        // The repair calls on nodes for a while: no grant to this one waits
-        // for it.
-        drop(sent);
-        if back {
+        back
+    }
+
+    /// `node` answered a grant after it was failed over: a repair has its
+    /// copies follow its tenants' new primaries.
+    fn answers_again(&self, node: &str) {
+        fenec_http::log!(
+            "node `{node}` answers again: its copies are to follow the tenants' new primaries"
+        );
+        // Granted again at once: the grant it answered left out the tenants
+        // a failover withheld from it, which it holds again now.
+        self.lease_now(node);
+        self.repair_soon();
+    }
+
+    /// Has a repair ([`Self::repair`]) run on a thread of its own, and again
+    /// once it ends where another was wanted meanwhile: one at a time, none
+    /// waited for. A repair asks every node what it holds and attaches a
+    /// replica a tenant, each a call that waits as long as its node takes,
+    /// and ran on the leasing thread: a node back from a failover had the
+    /// repair call a node gone -- its name's lookup alone 5 s a call in V5's
+    /// drill -- for 20 s, no lease renewed meanwhile, and the healthy node it
+    /// ran for was failed over at its end.
+    fn repair_soon(&self) {
+        let mut wanted = self.repairs.lock().unwrap_or_else(|e| e.into_inner());
+        wanted.0 = true;
+        if wanted.1 {
+            return;
+        }
+        let Some(router) = self.me.upgrade() else {
+            return;
+        };
+        wanted.1 = true;
+        drop(wanted);
+        let spawned = std::thread::Builder::new()
+            .name("fenec-repair".into())
+            .spawn(move || {
+                let _panicked = Repairing(&router);
+                loop {
+                    {
+                        let mut wanted = router.repairs.lock().unwrap_or_else(|e| e.into_inner());
+                        // Its mark taken off under the lock that found no
+                        // repair wanted: a repair wanted after that starts
+                        // a thread of its own.
+                        if !std::mem::take(&mut wanted.0) {
+                            wanted.1 = false;
+                            return;
+                        }
+                    }
+                    let r = router.repair();
+                    fenec_http::log!("repair: {} {}", r.status, String::from_utf8_lossy(&r.body));
+                }
+            });
+        if let Err(e) = spawned {
+            self.repairs.lock().unwrap_or_else(|e| e.into_inner()).1 = false;
+            fenec_http::log!("no thread for a repair: {e}");
+        }
+    }
+
+    /// Runs a repair again in a while where this one passed over a tenant
+    /// whose primary did not answer -- slow, or gone between its death and
+    /// its lapse -- up to [`REPAIR_AGAIN_TRIES`] times, each wait twice the
+    /// last; one that passed over none ends the count. The thread waiting
+    /// holds the router weakly: a router let go of runs nothing again.
+    fn repair_later(&self, unanswered: bool) {
+        let mut again = self.again.lock().unwrap_or_else(|e| e.into_inner());
+        if !unanswered {
+            again.0 = 0;
+            return;
+        }
+        if again.1 {
+            return;
+        }
+        if again.0 >= REPAIR_AGAIN_TRIES {
+            again.0 = 0;
             fenec_http::log!(
-                "node `{node}` answers again: its copies are to follow the tenants' new primaries"
+                "repair: a tenant's primary has not answered {REPAIR_AGAIN_TRIES} repairs in a \
+                 row; POST /_shard/replicas gives it a replica once it does"
             );
-            let r = self.repair();
-            fenec_http::log!("repair: {} {}", r.status, String::from_utf8_lossy(&r.body));
+            return;
+        }
+        let wait = (REPAIR_AGAIN_FIRST * 2u32.pow(again.0)).min(REPAIR_AGAIN_MOST);
+        again.0 += 1;
+        again.1 = true;
+        let me = self.me.clone();
+        let spawned = std::thread::Builder::new()
+            .name("fenec-repair-later".into())
+            .spawn(move || {
+                std::thread::sleep(wait);
+                if let Some(router) = me.upgrade() {
+                    router.again.lock().unwrap_or_else(|e| e.into_inner()).1 = false;
+                    router.repair_soon();
+                }
+            });
+        if let Err(e) = spawned {
+            again.1 = false;
+            fenec_http::log!("no thread to run a repair again: {e}");
         }
     }
 
@@ -1474,7 +1956,17 @@ impl Router {
             (Method::Get, ["nodes"]) => Ok(self.list_nodes()),
             (Method::Put, ["nodes", n]) => self.set_node(n, &body),
             (Method::Delete, ["nodes", n]) => self.remove_node(n),
-            (Method::Post, ["nodes", n, "failover"]) => self.failover(n),
+            // `{"force": true}` promotes each tenant's copy whatever it
+            // holds: an operator's word, in the audit log.
+            (Method::Post, ["nodes", n, "failover"]) => forced(&body).and_then(|force| {
+                if force {
+                    fenec_http::audit::event(
+                        "failover_forced",
+                        &[("node", fenec_http::audit::Field::Text(n))],
+                    );
+                }
+                self.failover(n, &mut Vec::new(), force)
+            }),
             (Method::Post, ["replicas"]) => Ok(self.repair()),
             (Method::Get, ["tenants"]) => Ok(self.list_tenants(req)),
             (Method::Get, ["tenants", t]) => self.show_tenant(t),
@@ -2217,7 +2709,24 @@ impl Router {
                 .collect()
         };
         let (mut done, mut failed) = (Vec::new(), Vec::new());
+        let mut unanswered = false;
         for (tenant, primary) in wanting {
+            // A copy attached while its primary does not answer follows
+            // nothing it can take its first image from, and recorded as the
+            // tenant's replica it was promotable: a failover of the primary
+            // then moved the tenant onto a copy holding none of it, and the
+            // repair after the primary came back had its copy follow that
+            // one, the rows wiped. Its primary answering, it is asked again.
+            if !holding.iter().any(|(node, _)| *node == primary) {
+                unanswered = true;
+                failed.push(why(
+                    &tenant,
+                    &format!(
+                        "its primary `{primary}` does not answer, so a copy would follow nothing"
+                    ),
+                ));
+                continue;
+            }
             let Ok(_claim) = self.claim(&tenant) else {
                 failed.push(why(&tenant, "another operation is in progress"));
                 continue;
@@ -2236,6 +2745,7 @@ impl Router {
                 Err(e) => failed.push(why(&tenant, &e)),
             }
         }
+        self.repair_later(unanswered);
         Response::json(
             if failed.is_empty() { 200 } else { 502 },
             format!(
@@ -2251,7 +2761,10 @@ impl Router {
     /// directory points at it. One tenant at a time, because they are
     /// separate databases: there is nothing to make atomic between them, and
     /// one that will not promote leaves the others promoted and says so.
-    fn failover(&self, name: &str) -> Outcome<Response> {
+    /// A tenant another operation holds is left, said, and added to `busy`:
+    /// a failover by hand is answered at once, and one on a lease goes back
+    /// to those once they are let go of ([`Self::fail_over_held`]).
+    fn failover(&self, name: &str, busy: &mut Vec<HeldTenant>, force: bool) -> Outcome<Response> {
         if self.read_dir().node(name).is_none() {
             return Err(Fail(404, format!("no node `{name}`")));
         }
@@ -2274,19 +2787,17 @@ impl Router {
                     ),
                 ));
             }
-            return Ok(self.failover_replicas(name));
+            return Ok(self.failover_replicas(name, busy, force));
         }
-        let (to, standby) = {
+        let to = {
             let dir = self.read_dir();
             let s = dir
                 .standby(name)
                 .ok_or_else(|| Fail(409, format!("node `{name}` has no standby")))?
                 .to_string();
-            let n = dir
-                .node(&s)
-                .cloned()
+            dir.node(&s)
                 .ok_or_else(|| Fail(404, format!("no node `{s}`")))?;
-            (s, n)
+            s
         };
         let tenants: Vec<String> = self
             .read_dir()
@@ -2301,42 +2812,17 @@ impl Router {
         let (mut promoted, mut failed) = (Vec::new(), Vec::new());
         for tenant in tenants {
             let Ok(_claim) = self.claim(&tenant) else {
-                failed.push(format!(
-                    "{{\"tenant\":{},\"why\":\"another operation is in progress\"}}",
-                    quote(&tenant)
-                ));
+                failed.push(why(&tenant, "another operation is in progress"));
+                busy.push(HeldTenant {
+                    tenant,
+                    to: Some(to.clone()),
+                    own_replica: false,
+                });
                 continue;
             };
-            let target = format!("/_admin/tenants/{tenant}/promote");
-            let named = [(fenec_http::lease::HOLDER_HEADER, holder.as_str())];
-            let answer =
-                self.pool
-                    .call_with(&standby.addr, "POST", &target, &standby.token, &named, b"");
-            if matches!(answer, Ok((200, _))) {
-                self.quota_after_failover(&tenant, &to);
-            }
-            match answer {
-                Ok((200, body)) => match self.promoted(&tenant, &to, &body) {
-                    Ok(()) => promoted.push(quote(&tenant)),
-                    Err(e) => failed.push(format!(
-                        "{{\"tenant\":{},\"why\":{}}}",
-                        quote(&tenant),
-                        quote(&message(&e))
-                    )),
-                },
-                Ok((status, body)) => failed.push(format!(
-                    "{{\"tenant\":{},\"why\":{}}}",
-                    quote(&tenant),
-                    quote(&format!(
-                        "{status}: {}",
-                        String::from_utf8_lossy(&body).trim()
-                    ))
-                )),
-                Err(e) => failed.push(format!(
-                    "{{\"tenant\":{},\"why\":{}}}",
-                    quote(&tenant),
-                    quote(&format!("`{to}` did not answer: {e}"))
-                )),
+            match self.promote_on(&tenant, &to, &holder, false, force) {
+                Ok(()) => promoted.push(quote(&tenant)),
+                Err(e) => failed.push(why(&tenant, &e)),
             }
         }
         // Their read replicas follow the primaries they have now, from the
@@ -2367,12 +2853,82 @@ impl Router {
         ))
     }
 
+    /// Promotes `tenant` on `to` -- its node's standby, or its own replica
+    /// (`own_replica`, which then is its replica no more) -- and points the
+    /// directory there: each tenant of a failover, its claim held. The node
+    /// is told the tenant's lineage and the history its primary forked at
+    /// its last failover, and refuses a copy that is not the tenant as its
+    /// primary has it -- one that never took its primary's image, an old
+    /// primary's copy that never heard from the new one -- unless `force`.
+    fn promote_on(
+        &self,
+        tenant: &str,
+        to: &str,
+        holder: &str,
+        own_replica: bool,
+        force: bool,
+    ) -> std::result::Result<(), String> {
+        // Asked before each promotion: a router demoted since its failover
+        // began -- its directory following another's -- promotes nothing,
+        // where it went on until its next round noticed.
+        let (node, lineage, history) = {
+            let dir = self.read_dir();
+            if dir.following() {
+                return Err("this router follows another router now".into());
+            }
+            (
+                dir.node(to).cloned(),
+                dir.lineage(tenant),
+                dir.history(tenant),
+            )
+        };
+        let Some(node) = node else {
+            return Err(format!("no node `{to}`"));
+        };
+        let mut said = Vec::new();
+        for (key, value) in [("lineage", lineage), ("history", history)] {
+            if let Some(v) = value {
+                said.push(format!("{}:{}", quote(key), quote(&v)));
+            }
+        }
+        if force {
+            said.push("\"force\":true".into());
+        }
+        let body = format!("{{{}}}", said.join(","));
+        let target = format!("/_admin/tenants/{tenant}/promote");
+        let named = [(fenec_http::lease::HOLDER_HEADER, holder)];
+        match self.pool.call_with(
+            &node.addr,
+            "POST",
+            &target,
+            &node.token,
+            &named,
+            body.as_bytes(),
+        ) {
+            Ok((200, body)) => {
+                self.quota_after_failover(tenant, to);
+                self.promoted(tenant, to, &body)
+                    .and_then(|_| match own_replica {
+                        true => self.write_dir().set_replica(tenant, None),
+                        false => Ok(()),
+                    })
+                    .map_err(|e| message(&e))
+            }
+            Ok((status, body)) => Err(format!(
+                "{status}: {}",
+                String::from_utf8_lossy(&body).trim()
+            )),
+            Err(e) => Err(format!("`{to}` did not answer: {e}")),
+        }
+    }
+
     /// The failover of a node in no pair: each of its tenants promoted on
     /// its own replica and routed there, so its tenants spread over the
     /// nodes that held their replicas. One at a time, as a pair's are. The
     /// tenants whose replica it held have none now, and are named: a repair
-    /// gives them one.
-    fn failover_replicas(&self, name: &str) -> Response {
+    /// gives them one. A tenant another operation holds goes into `busy`,
+    /// as in [`Self::failover`].
+    fn failover_replicas(&self, name: &str, busy: &mut Vec<HeldTenant>, force: bool) -> Response {
         let (tenants, lost) = {
             let dir = self.read_dir();
             let tenants: Vec<(String, Option<String>)> = dir
@@ -2393,41 +2949,24 @@ impl Router {
         for (tenant, replica) in tenants {
             let Ok(_claim) = self.claim(&tenant) else {
                 failed.push(why(&tenant, "another operation is in progress"));
+                busy.push(HeldTenant {
+                    tenant,
+                    to: replica,
+                    own_replica: true,
+                });
                 continue;
             };
             let Some(to) = replica else {
                 failed.push(why(&tenant, "it has no replica"));
                 continue;
             };
-            let Some(node) = self.read_dir().node(&to).cloned() else {
-                failed.push(why(&tenant, &format!("no node `{to}`")));
-                continue;
-            };
-            let target = format!("/_admin/tenants/{tenant}/promote");
-            let named = [(fenec_http::lease::HOLDER_HEADER, holder.as_str())];
-            match self
-                .pool
-                .call_with(&node.addr, "POST", &target, &node.token, &named, b"")
-            {
-                Ok((200, body)) => {
-                    self.quota_after_failover(&tenant, &to);
-                    match self
-                        .promoted(&tenant, &to, &body)
-                        .and_then(|_| self.write_dir().set_replica(&tenant, None))
-                    {
-                        Ok(()) => promoted.push(format!(
-                            "{{\"tenant\":{},\"to\":{}}}",
-                            quote(&tenant),
-                            quote(&to)
-                        )),
-                        Err(e) => failed.push(why(&tenant, &message(&e))),
-                    }
-                }
-                Ok((status, body)) => failed.push(why(
-                    &tenant,
-                    &format!("{status}: {}", String::from_utf8_lossy(&body).trim()),
+            match self.promote_on(&tenant, &to, &holder, true, force) {
+                Ok(()) => promoted.push(format!(
+                    "{{\"tenant\":{},\"to\":{}}}",
+                    quote(&tenant),
+                    quote(&to)
                 )),
-                Err(e) => failed.push(why(&tenant, &format!("`{to}` did not answer: {e}"))),
+                Err(e) => failed.push(why(&tenant, &e)),
             }
         }
         self.follow_soon();
@@ -3147,6 +3686,7 @@ impl Drop for Claim<'_> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.tenant);
+        self.router.freed.notify_all();
     }
 }
 
@@ -3166,20 +3706,31 @@ fn expect(got: std::io::Result<(u16, Vec<u8>)>, want: u16, node: &str) -> Outcom
 impl Router {
     /// Records `tenant` promoted on `to`, and the lineage its node says the
     /// promoted file is of (`"lineage"`): the tenant's own as a promotion
-    /// keeps it -- or, promoted from a copy that never took its first
-    /// image, one of its own, which the tenant is of from then on, the one
-    /// before kept as one it was so that its read replicas are bound to it
-    /// again rather than refuse it. A tenant whose lineage was not known
-    /// is of the one said; a node from before lineages says none.
+    /// keeps it -- or, another file of it promoted by force, one of its
+    /// own, which the tenant is of from then on, the one before kept as one
+    /// it was so that its read replicas are bound to it again rather than
+    /// refuse it. A tenant whose lineage was not known is of the one said;
+    /// a node from before lineages says none. Then the history the
+    /// promotion forked (`"history"`), which the copy promoted at the next
+    /// failover must hold.
     fn promoted(&self, tenant: &str, to: &str, answer: &[u8]) -> fenec_core::error::Result<()> {
-        let lineage = lineage_in(answer);
+        let fields =
+            fenec_core::json::parse_object(&String::from_utf8_lossy(answer)).unwrap_or_default();
+        let said = |key: &str| {
+            fields.iter().find_map(|(k, v)| match v {
+                Value::Text(t) if k == key => Some(t.clone()),
+                _ => None,
+            })
+        };
         let mut dir = self.write_dir();
-        dir.place(tenant, to, State::Active)?;
-        match (lineage, dir.lineage(tenant)) {
-            (Some(l), None) => dir.set_lineage(tenant, Some(&l)),
-            (Some(l), Some(known)) if known != l => dir.succeed_lineage(tenant, &l),
-            _ => Ok(()),
+        // The lineage first, rarely another: the placement and the history
+        // then go in one block, one sync, as the placement alone did.
+        match (said("lineage"), dir.lineage(tenant)) {
+            (Some(l), None) => dir.set_lineage(tenant, Some(&l))?,
+            (Some(l), Some(known)) if known != l => dir.succeed_lineage(tenant, &l)?,
+            _ => {}
         }
+        dir.place_promoted(tenant, to, said("history").as_deref())
     }
 }
 
@@ -3374,6 +3925,15 @@ fn node_sample(
     match dir.region_of(node) {
         "" => out.sample(name, &[("node", node)], value),
         r => out.sample(name, &[("node", node), ("region", r)], value),
+    }
+}
+
+/// A failover's `"force"`: `true` promotes each copy whatever it holds.
+fn forced(body: &[(String, Value)]) -> Outcome<bool> {
+    match body.iter().find(|(k, _)| k == "force").map(|(_, v)| v) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(f)) => Ok(*f),
+        Some(_) => Err(Fail(400, "`force` is true or false".into())),
     }
 }
 

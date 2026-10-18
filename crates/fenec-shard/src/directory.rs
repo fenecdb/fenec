@@ -87,10 +87,13 @@ const SCHEMA: [&str; 10] = [
     // digits, which a failover and a move keep and a tenant made again
     // under the name does not. Its read replicas are bound to it. `was`
     // the lineages it succeeded, space-separated: where the tenant's
-    // primary came to be of another -- promoted from a copy that never
-    // took its first image, an older file restored, a file put in its
-    // place by hand -- the primary is the tenant, and the replicas bound to
-    // one it was are pointed at it, not taken off as another tenant's.
+    // primary came to be of another -- another file of it promoted by
+    // force (a node refuses a copy of another lineage otherwise), an older
+    // file restored, a file put in its place by hand -- the primary is the
+    // tenant, and the replicas bound to one it was are pointed at it, not
+    // taken off as another tenant's. `history` (`LINEAGE_FIELDS`) the
+    // history its primary forked at its last failover, 16 hex digits,
+    // which the copy promoted at the next must hold.
     "create collection if not exists lineages (tenant text @hash, lineage text, was text)",
 ];
 
@@ -108,11 +111,20 @@ const NODE_FIELDS: [&str; 2] = ["region", "zone"];
 /// directory -- every read replica record forgotten.
 const READER_FIELDS: [&str; 1] = ["lineage"];
 
+/// The fields `lineages` took after it was first written: `history`,
+/// added and selected as `READER_FIELDS` are. A router from before it
+/// writes a tenant's lineage without it, which leaves the next promotion
+/// held to the lineage alone.
+const LINEAGE_FIELDS: [&str; 1] = ["history"];
+
 /// A tenant's lineage, and the ones it succeeded, oldest first.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Lineage {
     pub now: String,
     pub was: Vec<String>,
+    /// The history the tenant's primary forked at its last failover, as
+    /// the promotion answered it ([`Directory::set_history`]).
+    pub history: Option<String>,
 }
 
 impl Lineage {
@@ -122,6 +134,10 @@ impl Lineage {
             was: match row.get(2) {
                 Some(Value::Text(w)) => w.split_whitespace().map(str::to_string).collect(),
                 _ => Vec::new(),
+            },
+            history: match row.get(3) {
+                Some(Value::Text(h)) => Some(h.clone()),
+                _ => None,
             },
         }
     }
@@ -271,8 +287,11 @@ impl Directory {
                 for sql in SCHEMA {
                     g.execute(&fenec_ql::parse_one(sql)?)?;
                 }
-                for (coll, fields) in [("nodes", &NODE_FIELDS[..]), ("readers", &READER_FIELDS[..])]
-                {
+                for (coll, fields) in [
+                    ("nodes", &NODE_FIELDS[..]),
+                    ("readers", &READER_FIELDS[..]),
+                    ("lineages", &LINEAGE_FIELDS[..]),
+                ] {
                     for f in fields {
                         if g.collection(coll)?.schema.field_pos(f).is_none() {
                             let sql = format!("alter collection {coll} add field {f} text");
@@ -380,7 +399,8 @@ impl Directory {
             put_reader(&mut readers, &row);
         }
         let mut lineages = HashMap::new();
-        for (id, row) in rows(&g, "lineages", "get lineages select tenant, lineage, was")? {
+        let select = format!("get lineages select {}", lineage_fields(&g).join(", "));
+        for (id, row) in rows(&g, "lineages", &select)? {
             ids.lineages.insert(id, text(&row[0]));
             lineages.insert(text(&row[0]), Lineage::of(&row));
         }
@@ -451,7 +471,7 @@ impl Directory {
             optional("regions", &["name", "routers"])?,
             optional("scope", &["region"])?,
             optional("readers", &reader_fields(&g))?,
-            optional("lineages", &["tenant", "lineage", "was"])?,
+            optional("lineages", &lineage_fields(&g))?,
         )
         else {
             return Ok(false);
@@ -845,20 +865,89 @@ impl Directory {
         self.lineages.get(tenant).map_or(&[], |l| &l.was[..])
     }
 
+    /// The history `tenant`'s primary forked at its last failover, as
+    /// the promotion answered it: the copy promoted at the next must hold
+    /// it among its own.
+    pub fn history(&self, tenant: &str) -> Option<String> {
+        self.lineages.get(tenant).and_then(|l| l.history.clone())
+    }
+
     /// Records `tenant`'s lineage, or that it has none known: a tenant
     /// made, or its image taken in, which no lineage before it is.
     pub fn set_lineage(&mut self, tenant: &str, lineage: Option<&str>) -> Result<()> {
         let fresh = lineage.map(|l| Lineage {
             now: l.to_string(),
-            was: Vec::new(),
+            ..Lineage::default()
         });
         self.put_lineage(tenant, fresh)
     }
 
+    /// Records the history `tenant`'s primary forked as it was promoted,
+    /// where its lineage is known: what the copy promoted then held of the
+    /// tenant says nothing of the copy promoted at the next failover.
+    pub fn set_history(&mut self, tenant: &str, history: &str) -> Result<()> {
+        match self.history_change(tenant, history) {
+            None => Ok(()),
+            Some(stmt) => self.write_block(&[stmt]),
+        }
+        .map(|_| self.history_noted(tenant, history))
+    }
+
+    /// Records `tenant` placed on `node` as a promotion there left it, and
+    /// the history that promotion forked ([`Self::set_history`]): one
+    /// block, one sync -- the history a statement of its own was a second
+    /// fsync for every tenant a failover promotes, under the router's
+    /// write lock.
+    pub fn place_promoted(
+        &mut self,
+        tenant: &str,
+        node: &str,
+        history: Option<&str>,
+    ) -> Result<()> {
+        let place = match self.exists(tenant) {
+            true => "set tenants {node: $2, state: $3} where name = $1",
+            false => "put tenants {name: $1, node: $2, state: $3}",
+        };
+        let params = vec![
+            Value::Text(tenant.into()),
+            Value::Text(node.into()),
+            Value::Text(State::Active.as_str().into()),
+        ];
+        let mut stmts = vec![(place, params.clone())];
+        stmts.extend(history.and_then(|h| self.history_change(tenant, h)));
+        self.write_block(&stmts)?;
+        put_tenant(&mut self.tenants, &mut self.homes, tenant.into(), &params);
+        if let Some(h) = history {
+            self.history_noted(tenant, h);
+        }
+        Ok(())
+    }
+
+    /// The statement recording `history` as `tenant`'s, where its lineage
+    /// is known, the history is another and the collection has the field
+    /// -- a standby router promoted where it stood, over a directory a
+    /// router from before it wrote, never added it.
+    fn history_change(&self, tenant: &str, history: &str) -> Option<(&'static str, Vec<Value>)> {
+        let l = self.lineages.get(tenant)?;
+        if l.history.as_deref() == Some(history) || lineage_fields(&read(&self.db)).len() <= 3 {
+            return None;
+        }
+        Some((
+            "set lineages {history: $2} where tenant = $1",
+            vec![Value::Text(tenant.into()), Value::Text(history.into())],
+        ))
+    }
+
+    /// `history` as `tenant`'s in the maps, where its lineage is known.
+    fn history_noted(&mut self, tenant: &str, history: &str) {
+        if let Some(l) = self.lineages.get_mut(tenant) {
+            l.history = Some(history.to_string());
+        }
+    }
+
     /// Records that `tenant`'s primary is of `lineage` now, the one it was
     /// of kept among those it was: the same tenant, its primary promoted
-    /// from a copy that never took its first image, or an older file of it
-    /// put in its place.
+    /// from an older file of it, or an older file of it put in its place.
     pub fn succeed_lineage(&mut self, tenant: &str, lineage: &str) -> Result<()> {
         let mut l = self.lineages.get(tenant).cloned().unwrap_or_default();
         if l.now == lineage {
@@ -869,6 +958,8 @@ impl Directory {
         }
         l.was.retain(|w| w != lineage);
         l.now = lineage.to_string();
+        // Another file's: the history the one before forked is not in it.
+        l.history = None;
         self.put_lineage(tenant, Some(l))
     }
 
@@ -885,10 +976,19 @@ impl Directory {
             true => Value::Null,
             false => Value::Text(l.was.join(" ")),
         };
-        self.run(
-            "put lineages {tenant: $1, lineage: $2, was: $3}",
-            &[Value::Text(tenant.into()), Value::Text(l.now.clone()), was],
-        )?;
+        let mut params = vec![Value::Text(tenant.into()), Value::Text(l.now.clone()), was];
+        // Written where the collection has the field: a standby router
+        // promoted where it stood, over a directory a router from before
+        // it wrote, never added it.
+        let kept = lineage_fields(&read(&self.db)).len() > 3;
+        let sql = match &l.history {
+            Some(h) if kept => {
+                params.push(Value::Text(h.clone()));
+                "put lineages {tenant: $1, lineage: $2, was: $3, history: $4}"
+            }
+            _ => "put lineages {tenant: $1, lineage: $2, was: $3}",
+        };
+        self.run(sql, &params)?;
         self.lineages.insert(tenant.into(), l);
         Ok(())
     }
@@ -1129,6 +1229,28 @@ impl Directory {
         self.ids.kept = false;
         Ok(())
     }
+
+    /// Statements as one block, then one sync, as [`Self::run`] runs one.
+    fn write_block(&mut self, stmts: &[(&str, Vec<Value>)]) -> Result<()> {
+        let parsed = stmts
+            .iter()
+            .map(|(sql, _)| fenec_ql::parse_one(sql))
+            .collect::<Result<Vec<_>>>()?;
+        let block: Vec<(&Statement, &[Value])> = parsed
+            .iter()
+            .zip(stmts)
+            .map(|(s, (_, params))| (s, &params[..]))
+            .collect();
+        let mut g = write(&self.db);
+        g.execute_block(&block).map_err(|(_, e)| e)?;
+        g.sync()?;
+        // The maps are updated by the caller, not their ids; the counter
+        // moved here.
+        self.seq = g.change_seq();
+        self.adopted = g.adoptions();
+        self.ids.kept = false;
+        Ok(())
+    }
 }
 
 fn read(db: &Arc<RwLock<Database>>) -> std::sync::RwLockReadGuard<'_, Database> {
@@ -1271,6 +1393,18 @@ fn rows(db: &Database, coll: &str, sql: &str) -> Result<Vec<(DocId, Vec<Value>)>
 
 /// The fields of `readers` a select names: those the collection has, a
 /// standby's following a primary from before `lineage` among them.
+fn lineage_fields(db: &Database) -> Vec<&'static str> {
+    let mut fields = vec!["tenant", "lineage", "was"];
+    if let Ok(c) = db.collection("lineages") {
+        fields.extend(
+            LINEAGE_FIELDS
+                .iter()
+                .filter(|f| c.schema.field_pos(f).is_some()),
+        );
+    }
+    fields
+}
+
 fn reader_fields(db: &Database) -> Vec<&'static str> {
     let mut fields = vec!["key", "tenant", "node", "follows"];
     if let Ok(c) = db.collection("readers") {
@@ -1392,6 +1526,61 @@ mod tests {
         assert_eq!(d.lineage("acme"), None);
         drop(d);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The history a tenant's primary forked at its last failover is kept
+    /// beside its lineage -- reloaded, and caught up from the ring as a
+    /// standby catches up -- and goes where the lineage is succeeded by
+    /// another file's, which does not hold it; with no lineage known it is
+    /// not kept. A directory whose `lineages` has no `history`, a router's
+    /// from before it, takes the field as an alter and keeps its rows.
+    #[test]
+    fn a_tenant_s_last_failover_history_is_kept_beside_its_lineage() {
+        let mut d = Directory::in_memory();
+        d.set_history("acme", "00000000000000aa").unwrap();
+        assert_eq!(d.history("acme"), None, "kept with no lineage known");
+        d.set_lineage("acme", Some("aaaaaaaa")).unwrap();
+        d.set_history("acme", "aaaaaaaa000000bb").unwrap();
+        assert_eq!(d.history("acme").as_deref(), Some("aaaaaaaa000000bb"));
+        d.reload().unwrap();
+        assert_eq!(d.history("acme").as_deref(), Some("aaaaaaaa000000bb"));
+        assert_eq!(d.lineage("acme").as_deref(), Some("aaaaaaaa"));
+        // A promotion's placement and history, in one block.
+        d.place_promoted("acme", "n2", Some("aaaaaaaa000000ff"))
+            .unwrap();
+        d.reload().unwrap();
+        assert_eq!(d.placement("acme").map(|p| p.node.as_str()), Some("n2"));
+        assert_eq!(d.history("acme").as_deref(), Some("aaaaaaaa000000ff"));
+        {
+            let mut g = write(&d.db);
+            g.execute(
+                &fenec_ql::parse_one(
+                    r#"put lineages {tenant: "beta", lineage: "bbbbbbbb", history: "bbbbbbbb000000cc"}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        d.ids.kept = true;
+        d.refresh().unwrap();
+        assert_eq!(d.history("beta").as_deref(), Some("bbbbbbbb000000cc"));
+        d.succeed_lineage("acme", "dddddddd").unwrap();
+        assert_eq!(d.history("acme"), None, "kept past another file's lineage");
+        d.reload().unwrap();
+        assert_eq!(d.history("acme"), None);
+
+        let mut db = Database::new();
+        for sql in [
+            "create collection lineages (tenant text @hash, lineage text, was text)",
+            r#"put lineages {tenant: "acme", lineage: "aaaaaaaa"}"#,
+        ] {
+            db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+        }
+        let mut d = Directory::load(Arc::new(RwLock::new(db))).unwrap();
+        assert_eq!(d.lineage("acme").as_deref(), Some("aaaaaaaa"));
+        d.set_history("acme", "aaaaaaaa000000ee").unwrap();
+        d.reload().unwrap();
+        assert_eq!(d.history("acme").as_deref(), Some("aaaaaaaa000000ee"));
     }
 
     fn node(addr: &str) -> Node {

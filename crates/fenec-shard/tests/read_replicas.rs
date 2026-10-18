@@ -2891,6 +2891,12 @@ fn a_refused_copy_promoted_or_installed_anew_before_its_delete_is_kept() {
         refusals::hold(t);
         let (status, body) = admin(us1.port, &ua, "PUT", &format!("/_admin/tenants/{t}"), "");
         assert_eq!(status, 201, "{body}");
+        // Rows of its own, as an older file of the tenant holds: a copy that
+        // took no write and heard no hello is refused a promotion naming no
+        // lineage (the node's, for an operator to force), and the promotion
+        // here is of one that holds something.
+        write(us1.port, t, "create collection notes (body text)");
+        write(us1.port, t, r#"put notes {body: "mine"}"#);
         // Told a lineage eu1's tenant is not of: it refuses at the hello.
         let follow = format!(r#"{{"from":"{from}","lineage":"00000001"}}"#);
         let target = format!("/_admin/tenants/{t}/follow");
@@ -2903,11 +2909,6 @@ fn a_refused_copy_promoted_or_installed_anew_before_its_delete_is_kept() {
     let target = "/_admin/tenants/refused-promoted/promote";
     let (status, body) = admin(us1.port, &ua, "POST", target, "");
     assert_eq!(status, 200, "{body}");
-    write(
-        us1.port,
-        "refused-promoted",
-        "create collection notes (body text)",
-    );
     write(us1.port, "refused-promoted", r#"put notes {body: "kept"}"#);
     // Deleted, and installed again from eu1's image as a move installs one.
     let target = "/_admin/tenants/refused-installed";
@@ -2941,15 +2942,20 @@ fn a_refused_copy_promoted_or_installed_anew_before_its_delete_is_kept() {
     }
 }
 
-/// A failover onto a standby that never took its tenant's first image
-/// promotes a file of a lineage of its own: the promoted primary is the
-/// tenant, recorded with the lineage the promotion answers, and its read
+/// A failover onto a standby that never took its tenant's first image is
+/// refused by the standby, told the tenant's lineage: promoted, the copy
+/// was a file of a lineage of its own holding none of the tenant -- its
+/// schema and rows on eu1 alone, and wiped from eu1 once it came back and
+/// followed the copy. The tenant stays on eu1, its lineage as it was, and
+/// its read replica refuses nothing. Forced by the operator, the copy is
+/// promoted: the promoted primary is the tenant, recorded with the lineage
+/// the promotion answers, the one before kept as one it was, and its read
 /// replica is bound to it and follows it, its copy refusing nothing. Bound
 /// to the lineage before, its copy refused the promoted primary and deleted
 /// itself, was made again by the next look and refused again: a delete
 /// every look, for good.
 #[test]
-fn a_read_replica_follows_a_primary_promoted_from_a_copy_that_never_synced() {
+fn a_standby_that_never_synced_is_promoted_by_force_alone_and_its_read_replica_follows() {
     let tag = "never-synced";
     let eu1 = node(&format!("{tag}-eu1"));
     let to_standby = Proxy::to(eu1.port);
@@ -3020,6 +3026,26 @@ fn a_read_replica_follows_a_primary_promoted_from_a_copy_that_never_synced() {
     });
     link.cut();
     let (status, body) = shard(port, "POST", "/_shard/nodes/eu1/failover", "");
+    assert_eq!(status, 502, "a copy that never synced was promoted: {body}");
+    assert!(
+        body.contains(&format!("not {before}, the tenant's")) && body.contains("force"),
+        "{body}"
+    );
+    // The tenant stays on eu1, its lineage and its read replica's as they
+    // were.
+    assert_eq!(text_of(&placed(port), "lineage"), Some(before.clone()));
+    let listed = shard(port, "GET", "/_shard/tenants/unsynced/read-replicas", "").1;
+    assert!(
+        listed.contains(&format!(r#""lineage":"{before}""#)),
+        "{listed}"
+    );
+    // The operator's word: promoted whatever it holds.
+    let (status, body) = shard(
+        port,
+        "POST",
+        "/_shard/nodes/eu1/failover",
+        r#"{"force":true}"#,
+    );
     assert_eq!(status, 200, "{body}");
     let after = text_of(&placed(port), "lineage").expect("its lineage");
     assert_ne!(after, before, "the standby's own lineage");
@@ -3052,7 +3078,7 @@ fn a_read_replica_follows_a_primary_promoted_from_a_copy_that_never_synced() {
     refusals::release("unsynced");
     assert!(
         !refused,
-        "the read replica's copy refused the promoted primary"
+        "the read replica's copy refused its primary or the promoted one"
     );
 }
 
@@ -3538,8 +3564,12 @@ fn a_tenant_s_quota_reaches_its_read_replicas() {
 /// since it opened -- and from its promotion, whatever it heard. A node
 /// pair's standby keeps no record of having heard from its primary, so
 /// after a restart its copies wait for a hello; one promoted before it came
-/// -- here, the standby never reaching its primary at all -- answered every
-/// marked read 503 for as long as it stayed open, at the tenant's home.
+/// answered every marked read 503 for as long as it stayed open, at the
+/// tenant's home. Here the standby's copy takes the tenant's image, then is
+/// made to follow again with its primary out of reach, as a restart would
+/// leave it, waiting for a hello that never comes. (A copy that never took
+/// its first image is not promoted at all: the node refuses, and the
+/// tenant's rows stay where they are.)
 #[test]
 fn a_promoted_copy_answers_marked_reads_though_its_primary_never_said_hello() {
     let tag = "promoted";
@@ -3562,7 +3592,6 @@ fn a_promoted_copy_answers_marked_reads_though_its_primary_never_said_hello() {
     );
     let (status, answer) = shard(router, "PUT", "/_shard/nodes/eu1", &body);
     assert_eq!(status, 201, "{answer}");
-    own.cut();
     let (status, answer) = shard(
         router,
         "PUT",
@@ -3570,6 +3599,26 @@ fn a_promoted_copy_answers_marked_reads_though_its_primary_never_said_hello() {
         r#"{"node":"eu1","schema":"create collection notes (body text)"}"#,
     );
     assert_eq!(status, 201, "{answer}");
+    let standby = format!("{tag}-eu2");
+    let lineage = |p| admin(p, &standby, "GET", "/_admin/tenants/acme/lineage", "").1;
+    until("the standby's copy takes the tenant's image", || {
+        lineage(eu2.port).contains(r#""ready":true"#)
+    });
+    // Out of its primary's reach, and following again: no hello comes.
+    own.cut();
+    let (status, answer) = admin(
+        eu2.port,
+        &standby,
+        "POST",
+        "/_admin/tenants/acme/follow",
+        "{}",
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert!(
+        lineage(eu2.port).contains(r#""ready":false"#),
+        "{}",
+        lineage(eu2.port)
+    );
     link.cut();
     let (status, answer) = shard(router, "POST", "/_shard/nodes/eu1/failover", "");
     assert_eq!(status, 200, "{answer}");

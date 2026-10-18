@@ -30,6 +30,14 @@
 //! `Idempotency-Key`, which it makes once. Anything else is the client's
 //! 502: retried here, a `put` that had landed was made twice.
 //!
+//! A connection's name is looked up within the time its connect may take
+//! ([`fenec_http::dial::resolve`]), on a thread of its own that the dial
+//! walks away from past it: `getaddrinfo` takes no timeout, and a node
+//! recorded by a name its resolver was slow to refuse -- a container gone
+//! -- held every dial to it for the resolver's 5 s, a lease grant's among
+//! them, whatever the pool's timeout said. An address written out is read
+//! where it stands, with no thread.
+//!
 //! A request the node may hold (`Fenec-Wait`) watches its client while it
 //! waits for the head ([`answered_or_gone`]), and passes on to the node
 //! what the client did, as the node would read it from a client of its
@@ -587,12 +595,18 @@ fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
         })
 }
 
-/// A connection to `addr`, each address it resolves to tried within
-/// `within`, its writes bounded by `write`.
+/// A connection to `addr`, its name looked up within `within` and each
+/// address it stands for tried within `within`, its writes bounded by
+/// `write`. The lookup is bounded as the connect is ([`fenec_http::dial`]):
+/// left to the system's resolver, a node recorded by a name its resolver
+/// was slow to refuse -- a container gone -- held every dial to it for the
+/// resolver's 5 s and more, a lease grant among them, whatever the pool's
+/// timeout said. Every dial goes through here: a forwarded request, a
+/// relay to a region's router, a query across tenants, a read replica's
+/// read and its upkeep, a health probe, a lease grant.
 fn dial(addr: &str, within: Duration, write: Duration) -> io::Result<TcpStream> {
-    use std::net::ToSocketAddrs;
     let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
-    for a in addr.to_socket_addrs()? {
+    for a in fenec_http::dial::resolve(addr, within)? {
         match TcpStream::connect_timeout(&a, within) {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
@@ -898,7 +912,8 @@ impl Answer {
 /// answers it on the connection's own thread before any token, lock or
 /// routing, so one that answers at all takes connections and runs them
 /// ([`crate::readers::HEALTH_WAIT`]). Asked on a thread of its own, so the
-/// name's resolution, which `within` does not bound, holds up no request.
+/// question, the name's lookup within `within` among it, holds up no
+/// request.
 pub fn answers_health(addr: &str, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     let Ok(mut s) = dial(addr, within, within) else {

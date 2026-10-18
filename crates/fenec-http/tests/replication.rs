@@ -1102,3 +1102,122 @@ fn a_held_claim_on_a_replica_is_refused_at_once() {
         started.elapsed()
     );
 }
+
+/// A replica's file following `upstream`, its follower started: what a
+/// promotion is asked of.
+fn following(tag: &str, upstream: &str) -> (Arc<RwLock<Database>>, Arc<Follower>) {
+    let d = dir(tag);
+    let (mut db, feed) = replication::open(
+        d.join("r.fenec").to_str().unwrap(),
+        replication::DEFAULT_BUFFER,
+    )
+    .unwrap();
+    let lineage = db.history().lineage.clone();
+    db.follow(lineage).unwrap();
+    let db = Arc::new(RwLock::new(db));
+    let follower =
+        Follower::new(upstream, TOKEN.into(), Arc::clone(&db), Some(feed), true).unwrap();
+    follower.start(tag.into()).unwrap();
+    (db, follower)
+}
+
+/// A promotion halts the follower first, and the follower may be in the
+/// middle of reconnecting to a primary that is gone: the halt waited for
+/// that attempt to fail -- its connect's 5 s where the dead machine's
+/// address swallows packets, the tail of a failover in V5's drill, and as
+/// long as the system's resolver took where the primary's name was slow to
+/// be refused. Here the primary's name is never answered until the test
+/// ends: the promotion is done while its lookup still hangs, and well
+/// inside the 5 s the dial is bounded by, which a halt waiting for the dial
+/// would have waited out.
+#[test]
+fn a_promotion_does_not_wait_out_a_reconnect_in_flight() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Condvar, Mutex};
+    // The lookup, asked and held until let go; let go at the latest 30 s
+    // on, so a build whose halt waits for it ends, failing.
+    let name = "gone.halt.replication.test:1";
+    let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    let g = Arc::clone(&gate);
+    fenec_http::dial::stand_in(name, move || {
+        let (state, moved) = &*g;
+        let mut s = state.lock().unwrap();
+        s.0 = true;
+        moved.notify_all();
+        while !s.1 {
+            s = moved.wait(s).unwrap();
+        }
+        Err(std::io::Error::other("the resolver gave up"))
+    });
+    let released = Arc::new(AtomicBool::new(false));
+    let (ended, ending) = mpsc::channel::<()>();
+    let letting_go = {
+        let (gate, released) = (Arc::clone(&gate), Arc::clone(&released));
+        std::thread::spawn(move || {
+            let _ = ending.recv_timeout(Duration::from_secs(30));
+            released.store(true, Ordering::SeqCst);
+            gate.0.lock().unwrap().1 = true;
+            gate.1.notify_all();
+        })
+    };
+    let (db, follower) = following("halt-lookup", &format!("http://{name}"));
+    {
+        let (state, moved) = &*gate;
+        let mut s = state.lock().unwrap();
+        while !s.0 {
+            s = moved.wait(s).unwrap();
+        }
+    }
+    let asked = Instant::now();
+    let promoted = follower.promote(fresh_id());
+    let took = asked.elapsed();
+    let waited = released.load(Ordering::SeqCst);
+    drop(ended);
+    letting_go.join().unwrap();
+    assert!(promoted.is_ok(), "{:?}", promoted.err());
+    assert!(
+        !waited && took < Duration::from_millis(2500),
+        "the promotion waited {took:?} for the follower's dial of a primary that is gone"
+    );
+    assert!(!db.read().unwrap().history().following);
+    assert!(!follower.running());
+}
+
+/// The connection to the primary is handed to the halt before the request
+/// goes out: handed over once the primary's head had come, a primary that
+/// took the connection and never answered -- stopped, or its machine
+/// stalled -- held a promotion for the 10 s the follower waits for a word.
+/// Here the primary takes the connection, reads the request and says
+/// nothing.
+#[test]
+fn a_promotion_does_not_wait_for_a_primary_that_never_answers() {
+    use std::sync::mpsc;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (read, asked) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            let mut buf = [0u8; 1024];
+            if conn.read(&mut buf).unwrap_or(0) > 0 {
+                let _ = read.send(());
+            }
+            held.push(conn);
+        }
+    });
+    let (db, follower) = following("halt-silent", &format!("http://{addr}"));
+    asked
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the follower never asked its primary");
+    let started = Instant::now();
+    let promoted = follower.promote(fresh_id());
+    let took = started.elapsed();
+    assert!(promoted.is_ok(), "{:?}", promoted.err());
+    assert!(
+        took < Duration::from_secs(5),
+        "the promotion waited {took:?} for a primary that never answers (the follower's \
+         silence is 10 s)"
+    );
+    assert!(!db.read().unwrap().history().following);
+}
