@@ -342,8 +342,8 @@ another screen (`flow`); sixteen writers through one lock into one file, an
 fsync covering several writes, readers going on beside them (`writers`);
 requests straight to the server and its mapped file, the cache crossed out
 (`traffic`); tenants moved and failed over onto their copies (`scale`); and a
-question finding its documents by meaning and by its words, the two lists
-fused (`search`). What moves is the mark's own light, the teal with its glow,
+question finding its documents by its words and then by meaning, the two
+lists fused (`search`). What moves is the mark's own light, the teal with its glow,
 so the scenes and the logo read as one.
 
 `motion.js` draws any moment of a scene from the scene's time alone, so a

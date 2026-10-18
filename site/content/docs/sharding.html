@@ -823,7 +823,8 @@ the audit log records.</p>
 one process on loopback: a write through the router is answered in 2.93 ms
 (<code>--sync always</code> on the primary, which is an fsync a write) and is
 on the standby 0.089 ms later, 0.448 ms at p99 — timed by reading the
-standby's own copy. A failover of 20 tenants took 60 ms, 3.0 ms each, and the
+standby's own copy. A failover of 20 tenants took 63.5 to 79 ms at the
+median over three rounds of four to twelve runs, 3 to 4 ms each, and the
 first write on the promoted node 0.18 ms.</p>
 
 <p>A promoted tenant's history forks where the replica stood, so what the

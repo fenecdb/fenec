@@ -4,10 +4,10 @@ description: When to choose SQLite, with sqlite-vec, FTS5 and its official WebAs
 -->
 
 <h1>fenecdb and SQLite</h1>
-<p class="kicker">SQLite is an embedded SQL database in one file; sqlite-vec
-adds vector search to it and FTS5 full-text search. fenecdb is an embedded
-document database with vector and full-text search built in, which also
-runs as a server over HTTP.</p>
+<p class="kicker">SQLite is an embedded SQL database in one file; FTS5 adds
+full-text search to it and sqlite-vec vector search. fenecdb is an embedded
+document database, which also runs as a server over HTTP, with full-text
+and vector search built in.</p>
 
 <p>The facts about SQLite, sqlite-vec and FTS5 on this page were checked on
 2026-10-02 against the pages each one links to. fenecdb is at version 0.1.8,
@@ -38,16 +38,22 @@ and is alpha software.</p>
 <p><b>Choose fenecdb when</b></p>
 
 <ul>
+  <li><b>The page or app should stay in step with a server:</b> a replica
+    with live queries and offline writes (<a href="sync.html">Sync</a>).</li>
+  <li><b>The same file should also be served</b> to other languages over
+    HTTP, with replicas (<a href="server.html">Server</a>).</li>
+  <li><b>Many threads write at once:</b> durable writes share their disk
+    syncs, 516 a second from 16 writers against SQLite's 258, and readers
+    keep reading beside them (<a href="#measured">measured below</a>).</li>
+  <li><b>A search box needs typos, highlights and facets</b> in the query
+    that ranks the words (<a href="fenecql.html#typos">Typos and words
+    begun</a>, <a href="fenecql.html#facets">Facets</a>).</li>
   <li><b>You want an approximate vector index:</b> HNSW with
     quantization and filtered search
     (<a href="fenecql.html#the-vector-clause">The vector clause</a>).
     sqlite-vec's approximate indexes are in its alpha releases.</li>
   <li><b>You search by meaning and by words in one query,</b> fused by
     rank (<a href="fenecql.html#hybrid">Hybrid search</a>).</li>
-  <li><b>The page or app should stay in step with a server:</b> a replica
-    with live queries and offline writes (<a href="sync.html">Sync</a>).</li>
-  <li><b>The same file should also be served</b> to other languages over
-    HTTP, with replicas (<a href="server.html">Server</a>).</li>
 </ul>
 
 <h2 id="features">Feature by feature</h2>
@@ -68,27 +74,9 @@ and is alpha software.</p>
 <tr><td>Query language</td>
   <td>FenecQL; builders in JS, Python, Go, .NET, Swift, Kotlin, Dart (<a href="fenecql.html">FenecQL</a>)</td>
   <td>SQL</td></tr>
-<tr><td>Vector index</td>
-  <td>HNSW (<a href="fenecql.html#the-vector-clause">The vector clause</a>)</td>
-  <td>sqlite-vec's <code>vec0</code>; ANN indexes (rescore, DiskANN) in the v0.1.10 alpha releases, "pre-v1, so expect breaking changes" (<a href="https://github.com/asg017/sqlite-vec/releases">releases</a>, <a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
-<tr><td>Quantization</td>
-  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql.html#quantized">Quantized indexes</a>)</td>
-  <td>float, int8 and binary vectors (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
-<tr><td>Filtered vector search</td>
-  <td>Planned with the filter, an exact fallback when the filter leaves too few (<a href="concepts.html#a-filter-and-a-vector-together">A filter and a vector together</a>)</td>
-  <td>Up to 16 metadata columns and 4 partition keys, filtered inside the KNN query (<a href="https://alexgarcia.xyz/sqlite-vec/features/vec0.html">vec0</a>)</td></tr>
-<tr><td>Full text</td>
-  <td>BM25 (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
-  <td>FTS5 with <code>bm25()</code>; unicode61, ascii, porter and trigram tokenizers (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
-<tr><td>Highlights and snippets</td>
-  <td><code>highlight()</code> and <code>snippet()</code>, as UTF-16 offsets or between tags, by the index's own tokenizer (<a href="fenecql.html#highlights">Highlights and snippets</a>)</td>
-  <td>FTS5's <code>highlight()</code> and <code>snippet()</code>, the marked text between tags (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
-<tr><td>Facets</td>
-  <td><code>facet</code>, each value's count over every match, beside the page (<a href="fenecql.html#facets">Facets</a>)</td>
-  <td>None built in; a <code>GROUP BY</code> a facet, a query each</td></tr>
-<tr><td>Hybrid search</td>
-  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
-  <td>None built in; FTS5's page has no vector search (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
+<tr><td>Clients</td>
+  <td>JS/TS, Python, Go, .NET, Swift, Kotlin, Dart; any language over HTTP (<a href="languages.html">Your language</a>)</td>
+  <td>Bindings in nearly every language; sqlite-vec packages for Python, Node.js, Ruby, Go and Rust (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
 <tr><td>Transactions</td>
   <td>One writer a file; a batch lands whole or not at all; no transaction held open across statements (<a href="concepts.html#single-writer">Single writer</a>)</td>
   <td><code>BEGIN</code> … <code>COMMIT</code>, savepoints (<a href="https://sqlite.org/lang_transaction.html">transactions</a>); one writer at a time, readers beside it in WAL mode (<a href="https://sqlite.org/wal.html">WAL</a>)</td></tr>
@@ -101,9 +89,27 @@ and is alpha software.</p>
 <tr><td>Schema and migrations</td>
   <td>Typed schema, <code>alter collection</code>, a schema declared in code and checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
   <td>SQL DDL; migrations by your own code or tools</td></tr>
-<tr><td>Clients</td>
-  <td>JS/TS, Python, Go, .NET, Swift, Kotlin, Dart; any language over HTTP (<a href="languages.html">Your language</a>)</td>
-  <td>Bindings in nearly every language; sqlite-vec packages for Python, Node.js, Ruby, Go and Rust (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
+<tr><td>Full text</td>
+  <td>BM25 (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
+  <td>FTS5 with <code>bm25()</code>; unicode61, ascii, porter and trigram tokenizers (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
+<tr><td>Highlights and snippets</td>
+  <td><code>highlight()</code> and <code>snippet()</code>, as UTF-16 offsets or between tags, by the index's own tokenizer (<a href="fenecql.html#highlights">Highlights and snippets</a>)</td>
+  <td>FTS5's <code>highlight()</code> and <code>snippet()</code>, the marked text between tags (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
+<tr><td>Facets</td>
+  <td><code>facet</code>, each value's count over every match, beside the page (<a href="fenecql.html#facets">Facets</a>)</td>
+  <td>None built in; a <code>GROUP BY</code> a facet, a query each</td></tr>
+<tr><td>Vector index</td>
+  <td>HNSW (<a href="fenecql.html#the-vector-clause">The vector clause</a>)</td>
+  <td>sqlite-vec's <code>vec0</code>; ANN indexes (rescore, DiskANN) in the v0.1.10 alpha releases, "pre-v1, so expect breaking changes" (<a href="https://github.com/asg017/sqlite-vec/releases">releases</a>, <a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
+<tr><td>Quantization</td>
+  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql.html#quantized">Quantized indexes</a>)</td>
+  <td>float, int8 and binary vectors (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
+<tr><td>Filtered vector search</td>
+  <td>Planned with the filter, an exact fallback when the filter leaves too few (<a href="concepts.html#a-filter-and-a-vector-together">A filter and a vector together</a>)</td>
+  <td>Up to 16 metadata columns and 4 partition keys, filtered inside the KNN query (<a href="https://alexgarcia.xyz/sqlite-vec/features/vec0.html">vec0</a>)</td></tr>
+<tr><td>Hybrid search</td>
+  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
+  <td>None built in; FTS5's page has no vector search (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
 <tr><td>Browser module, brotli</td>
   <td>244 KB (<a href="#size">below</a>)</td>
   <td>341 KB, without sqlite-vec (<a href="#size">below</a>)</td></tr>
@@ -118,19 +124,6 @@ and is alpha software.</p>
 </div>
 
 <details class="deep"><summary>Details</summary>
-<p>sqlite-vec's first stable release, v0.1.0, searched by brute force
-(<a href="https://alexgarcia.xyz/blog/2024/sqlite-vec-stable-release/index.html">announcement</a>).
-Its ANN indexes arrived in v0.1.10-alpha.1 on 2026-03-31: rescore and
-DiskANN, with IVF "experimental, not enabled"; the latest is
-v0.1.10-alpha.4, from 2026-05-18
-(<a href="https://github.com/asg017/sqlite-vec/releases">releases</a>).</p>
-
-<p>FTS5's <code>bm25()</code> has its constants fixed at k1 = 1.2 and
-b = 0.75 (<a href="https://sqlite.org/fts5.html">FTS5</a>). fenecdb's
-<code>@text</code> also splits Chinese, Japanese, Korean and Thai text into
-character runs and can index word prefixes
-(<a href="fenecql.html#the-text-clause">The text clause</a>).</p>
-
 <p>Of the official build's browser storage, <code>opfs-sahpool</code>
 needs no COOP/COEP headers but "does not support multiple simultaneous
 connections to the same database"
@@ -138,26 +131,35 @@ connections to the same database"
 fenecdb's <code>openFile</code> also holds its file for one worker; other
 tabs reach it through the one that holds it, or share a synced replica
 (<a href="sync.html#multiple-tabs-share-one-stream">Multiple tabs</a>).</p>
+
+<p>FTS5's <code>bm25()</code> has its constants fixed at k1 = 1.2 and
+b = 0.75 (<a href="https://sqlite.org/fts5.html">FTS5</a>). fenecdb's
+<code>@text</code> also splits Chinese, Japanese, Korean and Thai text into
+character runs and can index word prefixes
+(<a href="fenecql.html#the-text-clause">The text clause</a>).</p>
+
+<p>sqlite-vec's first stable release, v0.1.0, searched by brute force
+(<a href="https://alexgarcia.xyz/blog/2024/sqlite-vec-stable-release/index.html">announcement</a>).
+Its ANN indexes arrived in v0.1.10-alpha.1 on 2026-03-31: rescore and
+DiskANN, with IVF "experimental, not enabled"; the latest is
+v0.1.10-alpha.4, from 2026-05-18
+(<a href="https://github.com/asg017/sqlite-vec/releases">releases</a>).</p>
 </details>
 
 <h2 id="measured">Measured</h2>
 
-<p>SQLite against fenecdb in one process, 100 000 rows of 128 dimensions,
-SQLite with no vector extension: its rows are read back and scored by
-fenecdb's own code. We measured these on one laptop; the method is
-below.</p>
+<p>YCSB's core workloads over a million records, fenecdb and SQLite in
+one process, operations a second, the median of three runs (<a
+href="benchmarks.html#ycsb">every cell</a>). We measured these on one
+laptop; the method is below.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>100 000 × 128</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
+<thead><tr><th>YCSB, 1 000 000 records</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
 <tbody>
-<tr><td>data write, no index</td><td class="n"><b>936 k rows/s</b></td><td class="n">430 k/s</td></tr>
-<tr><td>disk size</td><td class="n"><b>59.3 MB</b></td><td class="n">59.8 MB</td></tr>
-<tr><td>scalar filter, indexed</td><td class="n"><b>1.25 ms</b></td><td class="n">14.1 ms</td></tr>
-<tr><td>vector top-10, exact</td><td class="n"><b>2.9 ms</b></td><td class="n">30.2 ms</td></tr>
-<tr><td>vector top-10, approximate</td><td class="n"><b>0.091 ms</b></td><td class="n">not measured</td></tr>
-<tr><td>open, then a read by id</td><td class="n">6.0 ms</td><td class="n"><b>0.46 ms</b></td></tr>
-<tr><td>open, then a vector top-10</td><td class="n"><b>6.1 ms</b></td><td class="n">30.5 ms, exact</td></tr>
+<tr><td>B, 95% reads, 16 threads, buffered</td><td class="n"><b>545 k</b></td><td class="n">47.9 k</td></tr>
+<tr><td>A, 50% updates, 16 threads, durable</td><td class="n"><b>3.22 k</b></td><td class="n">0.45 k</td></tr>
+<tr><td>C, reads, one thread, after the updates</td><td class="n"><b>438 k</b></td><td class="n">279 k</td></tr>
 </tbody>
 </table>
 </div>
@@ -175,16 +177,20 @@ below.</p>
 </table>
 </div>
 
-<p>YCSB's core workloads over a million records, operations a second, the
-median of three runs (<a href="benchmarks.html#ycsb">every cell</a>):</p>
+<p>And 100 000 rows of 128 dimensions, SQLite with no vector extension:
+its rows are read back and scored by fenecdb's own code.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>YCSB, 1 000 000 records</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
+<thead><tr><th>100 000 × 128</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
 <tbody>
-<tr><td>B, 95% reads, 16 threads, buffered</td><td class="n"><b>545 k</b></td><td class="n">47.9 k</td></tr>
-<tr><td>A, 50% updates, 16 threads, durable</td><td class="n"><b>3.22 k</b></td><td class="n">0.45 k</td></tr>
-<tr><td>C, reads, one thread, after the updates</td><td class="n"><b>438 k</b></td><td class="n">279 k</td></tr>
+<tr><td>data write, no index</td><td class="n"><b>936 k rows/s</b></td><td class="n">430 k/s</td></tr>
+<tr><td>disk size</td><td class="n"><b>59.3 MB</b></td><td class="n">59.8 MB</td></tr>
+<tr><td>scalar filter, indexed</td><td class="n"><b>1.25 ms</b></td><td class="n">14.1 ms</td></tr>
+<tr><td>vector top-10, exact</td><td class="n"><b>2.9 ms</b></td><td class="n">30.2 ms</td></tr>
+<tr><td>vector top-10, approximate</td><td class="n"><b>0.091 ms</b></td><td class="n">not measured</td></tr>
+<tr><td>open, then a read by id</td><td class="n">6.0 ms</td><td class="n"><b>0.46 ms</b></td></tr>
+<tr><td>open, then a vector top-10</td><td class="n"><b>6.1 ms</b></td><td class="n">30.5 ms, exact</td></tr>
 </tbody>
 </table>
 </div>
@@ -203,21 +209,27 @@ median of three runs (<a href="benchmarks.html#ycsb">every cell</a>):</p>
 </ul>
 
 <details class="deep"><summary>Method and details</summary>
-<p>The numbers are <code>make compare</code>'s and <code>make
-concurrency-bench</code>'s, as <a
+<p>The numbers are <code>make ycsb</code>'s, <code>make
+concurrency-bench</code>'s and <code>make compare</code>'s, as <a
+href="benchmarks.html#ycsb">Everyday reads and writes</a>, <a
+href="benchmarks.html#concurrency">Writers and readers at once</a> and <a
 href="benchmarks.html#against-sqlite-and-pgvector">Against SQLite and
-pgvector</a> and <a href="benchmarks.html#concurrency">Writers and readers
-at once</a> report them, on an Apple M-series laptop.</p>
+pgvector</a> report them, on an Apple M-series laptop.</p>
 
-<pre data-lang="bash">make compare
+<pre data-lang="bash">make ycsb
 make concurrency-bench
+make compare
 </pre>
 
 <ul>
-  <li><b>SQLite 3.53</b>, in WAL mode with
+  <li><b>YCSB</b>: SQLite 3.53 through <code>rusqlite</code>, a connection
+    a thread, WAL, the file mapped; durable is
+    <code>synchronous=FULL</code> with <code>fullfsync</code>, buffered its
+    default <code>synchronous=NORMAL</code>. Each cell 30 s after a 5 s
+    warm-up.</li>
+  <li><b>The 100 000 rows</b>: SQLite 3.53, in WAL mode with
     <code>synchronous=NORMAL</code>, the rows written in one transaction and
-    the index built afterwards. The first table is the median of three
-    runs.</li>
+    the index built afterwards; the median of three runs.</li>
   <li><b>SQLite had no vector index.</b> Its exact search reads every row
     and scores it with the same kernel fenecdb uses, so the difference is
     in reading the rows, not in the arithmetic.</li>
@@ -269,7 +281,19 @@ library installed, and makes a collection of a table.</p>
   <li><b><code>INTEGER PRIMARY KEY</code></b> becomes the document id.</li>
 </ul>
 
-<p>A search and its filter, in each:</p>
+<p>A query in each, and then a search by meaning and its filter:</p>
+
+<pre data-lang="sql">SELECT title FROM articles
+WHERE year >= 2024
+ORDER BY published DESC
+LIMIT 10;
+</pre>
+
+<pre data-lang="fenecql">get articles select title
+  where year >= 2024
+  order published desc
+  limit 10
+</pre>
 
 <pre data-lang="sql">-- sqlite-vec, year a metadata column of the vec0 table
 SELECT rowid, distance FROM vec_articles

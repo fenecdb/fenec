@@ -762,11 +762,12 @@ const SCENES = [
     },
   },
   {
-    /* A question in plain words. `near` finds the documents nearest it by
-       meaning; `match` finds the ones holding its words, which light; and
-       `fuse` adds each one's 1 / (60 + rank) from both lists, so what both
-       found comes first. The documents, their places and both rankings are
-       an example; the arithmetic of the fusion is fenecdb's. */
+    /* A question in plain words. `match` finds the documents holding its
+       words, which light; `near` then finds the ones nearest it by meaning;
+       and `fuse` adds each one's 1 / (60 + rank) from both lists, so what
+       both found comes first. Words first, as a search box asks: meaning is
+       what a vector field adds. The documents, their places and both
+       rankings are an example; the arithmetic of the fusion is fenecdb's. */
     key: 'search',
     d: 10,
     h: 560, nh: 830,
@@ -782,8 +783,8 @@ const SCENES = [
       };
       const NEAR = [2, 4, 1, 5, 3], MATCH = [1, 3, 6, 8];
       const fused = Object.keys(DOCS).map(Number).map((id) => {
-        const r1 = NEAR.indexOf(id) + 1, r2 = MATCH.indexOf(id) + 1;
-        return { id, r1, r2, s: (r1 ? 1 / (60 + r1) : 0) + (r2 ? 1 / (60 + r2) : 0) };
+        const rm = MATCH.indexOf(id) + 1, rn = NEAR.indexOf(id) + 1;
+        return { id, rm, rn, s: (rm ? 1 / (60 + rm) : 0) + (rn ? 1 / (60 + rn) : 0) };
       }).sort((x, y) => y.s - x.s || x.id - y.id).slice(0, 5);
 
       const k = n ? 0.82 : 1, ox = n ? -6 : 0, oy = n ? -6 : 0;
@@ -804,12 +805,13 @@ const SCENES = [
         do { x = 40 + r() * 490; y = 100 + r() * 410; } while (Math.hypot(x - 300, y - 350) < 150);
         dot(c, ...at(x, y), 2.2, P.sand2, a * 0.45);
       }
-      const nearK = (id) => { const i = NEAR.indexOf(id); return i < 0 ? 0 : ease(span(t, 1.9 + i * 0.18, 2.3 + i * 0.18)); };
-      const matchK = (id) => { const i = MATCH.indexOf(id); return i < 0 ? 0 : ease(span(t, 3.9 + i * 0.25, 4.2 + i * 0.25)); };
+      // The words first, from 1.5 s; then the meaning, from 2.9 s.
+      const matchK = (id) => { const i = MATCH.indexOf(id); return i < 0 ? 0 : ease(span(t, 1.5 + i * 0.25, 1.8 + i * 0.25)); };
+      const nearK = (id) => { const i = NEAR.indexOf(id); return i < 0 ? 0 : ease(span(t, 3.8 + i * 0.18, 4.2 + i * 0.18)); };
       for (const [id, [s, x0, y0, side]] of Object.entries(DOCS)) {
         const [x, y] = at(x0, y0);
         const nk = nearK(+id), mk = matchK(+id);
-        streak(c, [Q, [x, y]], span(t, 1.7 + NEAR.indexOf(+id) * 0.18, 2.1 + NEAR.indexOf(+id) * 0.18), { tail: 0.5, w: 2 });
+        streak(c, [Q, [x, y]], span(t, 3.6 + NEAR.indexOf(+id) * 0.18, 4.0 + NEAR.indexOf(+id) * 0.18), { tail: 0.5, w: 2 });
         if (nk > 0.5) line(c, ...Q, x, y, P.oasis, 1, a * 0.35);
         if (mk > 0) box(c, x - 9, y - 9, 18, 18, { r: 9, fill: null, stroke: P.sun, alpha: a * mk, line: 1.4 });
         if (nk > 0) glow(c, x, y, 4, a * nk); else dot(c, x, y, 4, P.sand, a);
@@ -818,21 +820,21 @@ const SCENES = [
         else if (side === 'left') mono(c, s, x - 12, y + 18, { ...o, align: 'right' });
         else mono(c, s, x + 12, y + 5, o);
       }
-      // The query lands among them, and its rings go out.
-      const land = ease(span(t, 1.0, 1.5));
+      // For `near` the query lands among them, and its rings go out.
+      const land = ease(span(t, 2.9, 3.4));
       if (land > 0) {
-        streak(c, [n ? [240, 46] : [180, 64], Q], span(t, 1.0, 1.5), { tail: 0.4, w: 2.5 });
+        streak(c, [n ? [240, 46] : [180, 64], Q], span(t, 2.9, 3.4), { tail: 0.4, w: 2.5 });
         for (const d of [0, 0.35]) {
-          const rr = span(t, 1.5 + d, 2.6 + d);
+          const rr = span(t, 3.4 + d, 4.5 + d);
           if (rr > 0 && rr < 1) box(c, Q[0] - 90 * k * rr, Q[1] - 90 * k * rr, 180 * k * rr, 180 * k * rr, { r: 90 * k * rr, fill: null, stroke: P.oasis, alpha: (1 - rr) * 0.8, line: 1.5 });
         }
-        if (t > 1.5) glow(c, ...Q, 6, a);
+        if (t > 3.4) glow(c, ...Q, 6, a);
       }
 
-      // The three rankings.
-      const head = [['near', 'by meaning'], ['match', 'by the words'], ['fuse', '1 / (60 + rank), added']];
+      // The three rankings, the words' first.
+      const head = [['match', 'by the words'], ['near', 'by meaning'], ['fuse', '1 / (60 + rank), added']];
       head.forEach(([h, sub], i) => {
-        const ha = ease(span(t, [1.8, 3.7, 5.3][i], [2.2, 4.1, 5.7][i]));
+        const ha = ease(span(t, [1.2, 3.7, 5.3][i], [1.6, 4.1, 5.7][i]));
         text(c, h, COL[i], top, { size: n ? 16 : 19, weight: 600, color: i === 2 ? P.oasis : P.star, alpha: ha });
         mono(c, sub, COL[i], top + (n ? 18 : 22), { size: n ? 10.5 : 13, alpha: ha });
       });
@@ -843,24 +845,24 @@ const SCENES = [
         words(c, DOCS[id][0], x + (n ? 24 : 30), y + (score ? 20 : rh / 2 + 5), { size: ts, lit, terms, alpha });
         if (score) mono(c, score, x + (n ? 24 : 30), y + rh - 9, { size: n ? 10.5 : 12, color: P.oasis, alpha });
       };
-      NEAR.forEach((id, i) => card(...rowAt(0, i), id, i + 1, ease(span(t, 2.3 + i * 0.15, 2.6 + i * 0.15)), { stroke: P.rule }));
       MATCH.forEach((id, i) => {
-        const ma = ease(span(t, 3.9 + i * 0.25, 4.2 + i * 0.25));
-        card(...rowAt(1, i), id, i + 1, ma, { lit: ease(span(t, 4.2 + i * 0.25, 4.6 + i * 0.25)) });
+        const ma = ease(span(t, 1.5 + i * 0.25, 1.8 + i * 0.25));
+        card(...rowAt(0, i), id, i + 1, ma, { lit: ease(span(t, 1.8 + i * 0.25, 2.2 + i * 0.25)) });
       });
+      NEAR.forEach((id, i) => card(...rowAt(1, i), id, i + 1, ease(span(t, 4.2 + i * 0.15, 4.5 + i * 0.15)), { stroke: P.rule }));
       // Fusion: each document flies in from the lists it is on.
       fused.forEach((f, i) => {
         const go = 5.6 + i * 0.25, m = inOut(span(t, go, go + 0.7));
         if (m <= 0) return;
         const [tx, ty] = rowAt(2, i);
-        for (const [col, rank] of [[0, f.r1], [1, f.r2]]) {
+        for (const [col, rank] of [[0, f.rm], [1, f.rn]]) {
           if (!rank || m >= 1) continue;
           const [sx, sy] = rowAt(col, rank - 1);
           box(c, lerp(sx, tx, m), lerp(sy, ty, m), cw, rh, { r: 8, fill: P.panel2, stroke: P.oasis, alpha: 0.7 * (1 - m * 0.5), glow: 0.5 });
         }
         if (m < 1) return;
-        const both = f.r1 && f.r2;
-        const parts = [f.r1 && `1/${60 + f.r1}`, f.r2 && `1/${60 + f.r2}`].filter(Boolean).join(' + ');
+        const both = f.rm && f.rn;
+        const parts = [f.rm && `1/${60 + f.rm}`, f.rn && `1/${60 + f.rn}`].filter(Boolean).join(' + ');
         card(tx, ty, f.id, i + 1, a, { lit: 1, stroke: both ? P.oasis : P.rule, g: both ? flash(t, go + 0.7, 1, 0.4) : 0, score: parts });
       });
       chip(c, 'found by both, ranked first', n ? 240 : 920, n ? 800 : 500, { size: n ? 15 : 17, center: true, color: P.oasis, alpha: ease(span(t, 7.4, 8)) });
