@@ -60,7 +60,9 @@ test:
 ##                     engine, and its live queries over a scripted server
 ##   fenec.replicas.test.js  connect(url, { reads: 'nearest' }) against real
 ##                     nodes and routers: reads answered by a read replica,
-##                     after the client's writes; skipped without the binaries
+##                     after the client's writes, and a live query's runs
+##                     after the change its stream at home told of;
+##                     skipped without the binaries
 ##   studio/test/statements.test.mjs  fenec studio's statements: every value a
 ##                     parameter, every name one FenecQL writes, its first load
 ##                     under 120 KB gzipped and holding nothing of the playground's

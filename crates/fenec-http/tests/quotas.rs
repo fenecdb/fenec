@@ -35,6 +35,12 @@ fn start(tag: &str, quota: Quota) -> Node {
 }
 
 fn start_with(tag: &str, quota: Quota, cfg: Config) -> Node {
+    start_of(tag, quota, cfg, false)
+}
+
+/// A node whose tenants each keep a change feed (`/_changes`), as one that
+/// replicates them does.
+fn start_of(tag: &str, quota: Quota, cfg: Config, feeds: bool) -> Node {
     fenec_http::audit::set_delay(0);
     let dir = std::env::temp_dir().join(format!(
         "fenec-quotas-{tag}-{}-{:?}",
@@ -42,7 +48,16 @@ fn start_with(tag: &str, quota: Quota, cfg: Config) -> Node {
         Instant::now()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    let tenants = Arc::new(Tenants::new(&dir).unwrap().with_quota(quota));
+    let mut tenants = Tenants::new(&dir).unwrap().with_quota(quota);
+    if feeds {
+        tenants = tenants.with_replication(fenec_http::tenants::Replicated {
+            token: "repl".into(),
+            buffer: 1 << 20,
+            upstream: None,
+            sync_on_write: true,
+        });
+    }
+    let tenants = Arc::new(tenants);
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         admin_token: Some("adm".into()),
@@ -449,6 +464,62 @@ fn a_tenant_at_its_streams_quota_leaves_the_others_answered() {
         }
     };
     drop((back, theirs));
+}
+
+/// A tenant at its quota of streams still answers a read sent after a
+/// write it holds: the stream a `Fenec-After` wait counts is taken only
+/// once it must wait. Taken for every request sent with the header, a
+/// tenant whose live queries' subscriptions filled its quota had every
+/// read after a write the node held refused 429 -- every run of a live
+/// query reading near that reached home, every read-your-writes read of
+/// every SDK. A read after a write the node does not hold yet still waits
+/// in a stream, and is refused.
+#[test]
+fn a_tenant_at_its_streams_quota_answers_a_read_after_a_write_it_holds() {
+    let n = start_of(
+        "held-after",
+        Quota::default().with(Kind::Streams, 2),
+        Config::default(),
+        true,
+    );
+    create(n.port, "acme", None);
+    let r = ok(query(n.port, "acme", "put notes {title: \"a\"}"));
+    let seq = r
+        .header("fenec-seq")
+        .expect("a write names its change")
+        .to_string();
+    let history = r.header("fenec-history").map(str::to_string);
+    let held = [subscribe(n.port, "acme"), subscribe(n.port, "acme")];
+    let mut after = vec![("Fenec-After", seq.as_str())];
+    if let Some(h) = &history {
+        after.push(("Fenec-History", h.as_str()));
+    }
+    let get = line("get notes");
+    let mut marked = after.clone();
+    marked.extend([("Fenec-Read", "replica"), ("Fenec-Wait", "1000")]);
+    for (method, target, body, headers) in [
+        ("POST", "/t/acme/query", get.as_str(), &after),
+        ("POST", "/t/acme/query", get.as_str(), &marked),
+        ("GET", "/t/acme/notes", "", &after),
+        ("GET", "/t/acme/_changes?since=0", "", &after),
+    ] {
+        let r = call(n.port, method, target, body, headers);
+        assert_eq!(
+            (r.status, r.quota()),
+            (200, None),
+            "{method} {target} {headers:?}: {}",
+            r.body
+        );
+    }
+    let r = call(
+        n.port,
+        "POST",
+        "/t/acme/query",
+        &get,
+        &[("Fenec-After", "1000000"), ("Fenec-Wait", "5000")],
+    );
+    assert_eq!((r.status, r.quota()), (429, Some("streams")), "{}", r.body);
+    drop(held);
 }
 
 /// A tenant at its quota of requests in flight: one more is refused with

@@ -1067,8 +1067,10 @@ export interface HttpOptions {
    * region holding the tenant's read replica answers them there, each sent
    * after the furthest position an answer from home named to this client
    * (`Fenec-After`, `Fenec-History`: the change and its history) -- never
-   * older than its own writes, nor a write a failover replaced. `'home'`,
-   * the default: every request goes to the tenant's home.
+   * older than its own writes, nor a write a failover replaced. A `live`
+   * query's streams stay home and its runs go near, each after the change
+   * a stream told of too; its polls (`{ poll }`) go home. `'home'`, the
+   * default: every request goes to the tenant's home.
    */
   reads?: 'home' | 'nearest';
 }
@@ -1093,7 +1095,10 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
   /**
    * Runs FenecQL; a write also answers `seq`, the change it left the
    * database at, and `replayed`, whether the answer is the one kept for
-   * its `idempotencyKey`.
+   * its `idempotencyKey`. A read sent near (`{ read: true }` on a client
+   * reading near) answers `seq` too: where the copy that answered stood as
+   * it read -- maybe a read replica behind home -- which moves nothing of
+   * the client's.
    */
   run(sql: string, params?: unknown[], opts?: RunOptions): Promise<any>;
   rows(sql: string, params?: unknown[]): Promise<any[]>;
@@ -1128,7 +1133,9 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
    * subscription to every collection the query reads is open, and again
    * after every write to one of them, the query run on the server each
    * time. A text names what it reads with `{collections}`, or is refused.
-   * Returns the function that stops it.
+   * On a client reading near the streams stay home and each run is a read
+   * near, sent after the change that ran it. Returns the function that
+   * stops it.
    */
   live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string, Fa extends Facets>(
     query: Query<F, P, L, R2, A, Fa>,
@@ -1396,7 +1403,9 @@ export interface LiveOptions {
    * `FenecHttp.live` alone: ask the query every this many milliseconds
    * (100 at least) instead of holding a stream, the server answering 304,
    * the query not run, while nothing it reads was written. For a public
-   * page: a stream is a server thread a viewer.
+   * page: a stream is a server thread a viewer. Asked of the tenant's
+   * home on a client reading near too: a read replica behind it would
+   * answer 304 to a change home holds.
    */
   poll?: number;
 }

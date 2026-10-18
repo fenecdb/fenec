@@ -319,7 +319,7 @@ curl localhost:8090/_shard/tenants/acme/quota -H 'Authorization: Bearer root'
 <tbody>
 <tr><td><code>bytes</code></td><td>the tenant's file, as written</td><td><b>507</b>, the write put back whole</td></tr>
 <tr><td><code>rows</code></td><td>the documents of its collections, together</td><td><b>507</b>, the write put back whole</td></tr>
-<tr><td><code>streams</code></td><td>subscriptions, <code>/_changes</code> waits and <code>Fenec-After</code> waits</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
+<tr><td><code>streams</code></td><td>subscriptions, <code>/_changes</code> waits and <code>Fenec-After</code> waits while they wait: a read after a write the node holds takes none</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
 <tr><td><code>held</code></td><td>writes held until they can write (<a href="queues.html#wait"><code>Fenec-Wait</code></a>): workers waiting for jobs</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
 <tr><td><code>requests</code></td><td>requests in flight</td><td><b>429</b>, <code>Retry-After: 1</code></td></tr>
 <tr><td><code>writes</code></td><td>rows written a second, charged as each write lands</td><td><b>429</b>, <code>retry_after_ms</code> until a row's worth is back</td></tr>
@@ -1662,7 +1662,19 @@ breaks off before its end, the router reading a replica's answer whole
 before any of it goes to the client (a stream's goes on as it comes). A
 replica that did not answer is let be for 5 s, its reads going home at once
 meanwhile: the node's, every tenant's, where it was not reached or took no
-whole request. Where it took one and did not answer in time, the tenant's
+whole request. A tenant's copy that answered <code>504</code> could not
+reach the position in the wait it was given, and asked again at every read,
+a replica cut off from its primary held each one that long — every run of a
+live query reading near came the wait late for as long as the partition
+lasted: for 5 s the tenant's reads sent after a position, with no longer a
+wait, go home at once through that router, the trip home a region away in
+place of a wait. A read naming no position, which the copy answers as it
+stands, and one willing to wait longer still go to the copy, home out of
+reach or not. So a client holding a token of the tenant can send its
+positioned reads through that router home: a <code>Fenec-After</code> past
+the tenant's last change, with a wait of a second or more, once every 5 s —
+as a failover that lost writes does on its own, its clients' positions on the
+lost branch. What that costs is the trip home, never a wrong answer. Where it took one and did not answer in time, the tenant's
 copy is let be at once and the read goes home, while the router asks the
 node's <code>/_health</code> — answered before any token, lock or routing —
 on a connection of its own, within 500 ms (<code>--replica-timeout</code>
@@ -1701,7 +1713,12 @@ answer from home named — a write's, a read-only <code>/batch</code>'s; of a
 later term, or further in one, so an answer arriving late is not the last —
 and sends it with every marked read, whose own answers move nothing: it reads
 its own writes and every write before them, and another client's writes after
-its own may or may not be there yet. A subscription and a
+its own may or may not be there yet. A marked <code>/query</code> read's
+answer names where the copy that answered it stood as it read
+(<code>Fenec-Seq</code>, <code>Fenec-History</code>), replica or home; the
+SDKs take nothing of it as the client's, since a replica may be behind home
+or on a branch a failover left, and a JavaScript live query sends its next run
+after it (below). A subscription and a
 <code>/_changes</code> page sent so wait for it as a read does, before their
 head, and go home on the replica's <code>504</code>: a stream is seeded with
 the client's write, never from the copy as it stood behind it, and a page's
@@ -1834,9 +1851,46 @@ and sent after that position too, and a server holds a stream for
 <code>Fenec-After</code> as it holds a read: the read replica seeds it once
 it has the client's own writes, and where it cannot in the wait its
 <code>504</code> sends the stream home, so no stream is seeded from behind
-them. JavaScript's live queries and subscriptions go home unmarked. A
-synced replica's streams, in the browser and in the native libraries, go
-home; Python's client and the Swift, Kotlin and Dart remotes open none.</p>
+them. JavaScript's <code>live</code> keeps its streams home, unmarked, and
+sends each of its runs near: after the furthest of the client's position and
+the one its streams named — a stream's head says where home stood as it
+opened, <code>Fenec-Seq</code> and <code>Fenec-History</code>, and each
+event's <code>seq</code> is a change of that history; a stream opened again
+after a failover names the later term, and never sets the position back. A
+run waits a second on the replica (<code>Fenec-Wait: 1000</code>), not five:
+the replica has a write once home's fsync covers it — 283 ms behind at most
+under <code>--sync 250</code> — and a link later, so one later than that is
+behind, and home answers in a region's round trip; the router then lets the
+copy be, so a replica cut off from home costs one second every 5 s, not one
+every change. The second assumes that: a primary syncing its file every
+second or more slowly (<code>--sync 1000</code> and up), or a link to the
+replica slower than about half a second, has a replica take a write past a
+run's second, and every run of a live query near it misses it — answered
+from home, <code>fenec_router_replica_reads_total{outcome="fallback"}</code>
+rising where <code>"replica"</code> does not, the rows a round trip home
+later, a second later once every 5 s: right, never stale, but slower than a
+client reading home (<code>reads: 'home'</code>), which such a deployment's
+live queries are better made with. The read replica answers a run
+once it holds the change that
+ran it and the router sends one it cannot hold home; each answer names where
+it read, and the next run goes after that too, so rows a run answered from
+home showed — a change whose event is still on its way — never go back. A
+<code>504</code> from home — the change lost in a failover — has the live query
+take home's position and the run asked near again after it, home unmarked if
+that fails too; answered home unmarked, the run names no position, so a run
+after it may again show rows from before it — only after a failover that
+lost writes, whose lost write the rows lose anyway. A stream whose head names
+no history — a server from before heads named one — has the runs go home
+until every stream's head names one again: its positions would pass none of
+the client's. The rows never come from before a change the streams told of,
+and the streams tell of every change home takes. Its polls
+(<code>{ poll }</code>) go home: sent after its tag's change, a replica would
+judge the tag as home does up to where it stands, but nothing in a poll names
+a change home took since, so a replica behind — or cut off from home — would
+answer <code>304</code> while home holds a write the query reads. Its
+<code>subscribe</code> streams go home. A synced replica's streams, in the
+browser and in the native libraries, go home; Python's client and the Swift,
+Kotlin and Dart remotes open none.</p>
 
 <p><b>What it costs.</b> A marked read through the router of the replica's
 region costs what one sent home does: 67.0 to 67.8 µs p50 against 66.2 to

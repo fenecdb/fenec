@@ -1183,6 +1183,109 @@ fn a_marked_stream_after_a_write_waits_on_the_replica_or_goes_home() {
     w.links[0].heal();
 }
 
+/// A read replica behind the position a marked read was sent after at the
+/// end of the wait it was given (504) is let be for a rest by the reads
+/// sent after a position with no longer a wait: they go home at once, not
+/// each wait it out. Asked again at every read, a replica cut off from its
+/// primary held each its whole wait -- every run of a live query reading
+/// near came that late, for as long as the partition lasted. A read naming
+/// no position is still the copy's, which answers it as it stands, home out
+/// of reach or not, and so is one willing to wait longer. The answer from
+/// home names where home stood as it read, past the write, as a marked
+/// read's answer does.
+#[test]
+fn a_read_replica_behind_its_wait_is_let_be_and_the_reads_after_go_home() {
+    let us = Config {
+        replica_rest: Duration::from_secs(600),
+        ..config(Some("us"), None, None)
+    };
+    let w = OneDirectory::with_us("behind", false, us);
+    w.tenant("acme");
+    write(w.us, "acme", r#"put notes {body: "a"}"#);
+    w.holds("acme", r#""a""#);
+    // The replica made to follow home through a link of its own, then the
+    // link cut: a write home is not on it.
+    let us1 = w._nodes[2].port;
+    let own = Proxy::to(w._nodes[0].port);
+    let (status, body) = admin(
+        us1,
+        "behind-us1",
+        "POST",
+        "/_admin/tenants/acme/follow",
+        &format!(r#"{{"from":"{}"}}"#, own.url()),
+    );
+    assert_eq!(status, 200, "{body}");
+    w.holds("acme", r#""a""#);
+    own.cut();
+    let b = write(w.us, "acme", r#"put notes {body: "b"}"#);
+    let copy = w._nodes[2].tenants.get("acme").unwrap();
+
+    // The first waits out its second there and is answered home.
+    let mut second = mark(Some(&b));
+    second.push(("Fenec-Wait", "1000".to_string()));
+    let (status, head, body) =
+        request_with(w.us, "/t/acme/query", "get notes select body", &second);
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(r#""b""#),
+        "answered without the write: {body}"
+    );
+    let named: u64 = header_of(&head, "fenec-seq")
+        .expect("a marked read names where it read")
+        .parse()
+        .unwrap();
+    assert!(named >= b.seq, "{head}");
+    assert_eq!(
+        header_of(&head, "fenec-history"),
+        b.history.as_deref(),
+        "{head}"
+    );
+
+    // The next, waiting no longer, goes home at once: the copy never waits
+    // for it, where it would wait its second.
+    let port = w.us;
+    let again = second.clone();
+    let reading = std::thread::spawn(move || {
+        request_with(port, "/t/acme/query", "get notes select body", &again)
+    });
+    until("the read after is answered", || {
+        assert_eq!(
+            copy.hub.after_waiting(),
+            0,
+            "the copy let be waits for a read"
+        );
+        reading.is_finished()
+    });
+    let (status, _, body) = reading.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""b""#), "{body}");
+
+    // Home out of reach: a read naming no position is the copy's still, as
+    // it stands; and one willing to wait longer waits on it, and is
+    // answered once the copy catches up.
+    w.links[0].cut();
+    let (status, body) = marked(w.us, "acme", "get notes select body", None);
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(r#""a""#) && !body.contains(r#""b""#),
+        "{body}"
+    );
+    let mut long = mark(Some(&b));
+    long.push(("Fenec-Wait", "30000".to_string()));
+    let reading = std::thread::spawn(move || {
+        request_with(port, "/t/acme/query", "get notes select body", &long)
+    });
+    until("the longer read waits on the copy", || {
+        assert!(!reading.is_finished(), "answered without waiting");
+        copy.hub.after_waiting() == 1
+    });
+    own.heal();
+    let (status, _, body) = reading.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""b""#), "{body}");
+    w.links[0].heal();
+}
+
 #[test]
 fn a_read_replica_follows_its_tenant_through_a_failover_and_a_move() {
     let w = OneDirectory::new("fail");

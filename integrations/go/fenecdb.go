@@ -348,7 +348,11 @@ type RawAnswer struct {
 	// NotModified says the server answered 304: the answer IfNoneMatch
 	// named still stands.
 	NotModified bool
-	// Seq is the change a write, or a batch, left the database at.
+	// Seq is the change a write, or a batch, left the database at. For a
+	// read sent near (Read, WithReadsNearest) it is where the copy that
+	// answered stood as it read -- maybe a read replica behind home, or on
+	// a branch a failover left -- which moves nothing of the client's; 0
+	// for a read nobody marked.
 	Seq uint64
 }
 

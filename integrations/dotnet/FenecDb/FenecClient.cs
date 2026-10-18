@@ -373,6 +373,10 @@ public sealed partial class FenecClient : IDisposable
         if (_owns) _http.Dispose();
     }
 
+    /// <summary>An answer's head. <c>Seq</c> is its <c>Fenec-Seq</c>: the change a write or a batch left the
+    /// database at, and for a read sent near (<see cref="AsRead"/>, <c>ReadsNearest</c>) where the copy that
+    /// answered stood as it read -- maybe a read replica behind home -- which moves nothing of the client's; 0 for
+    /// a read nobody marked.</summary>
     internal readonly record struct Head(long Seq, bool Replayed, long? Next);
 
     internal Task<(byte[], Head)> RunAsync(string query, IReadOnlyList<object?>? parameters, CancellationToken ct)
