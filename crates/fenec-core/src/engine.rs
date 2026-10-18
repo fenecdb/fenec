@@ -2808,7 +2808,14 @@ impl Step<'_> {
             return Ok(true);
         };
         let test = self.test.get_or_init(|| Filter::new(self.child, f, ctx));
-        test.matches(id, ctx)
+        test.matches(id, ctx).map_err(|e| match e {
+            Error::NotFound(m) => Error::NotFound(format!(
+                "{m} in `{}`{}",
+                self.l.collection,
+                crate::schema::AFTER_LOOKUP
+            )),
+            e => e,
+        })
     }
 
     /// [`Step::ids`] for a row of a level above that answered groups: its
@@ -7224,6 +7231,10 @@ impl Database {
     ) -> Result<Response> {
         // Taken out for the statement, as `set` takes it: an upsert's
         // values call its functions while the row is written.
+        if let Some(on) = pick.and_then(|p| p.conflict.as_deref()) {
+            let names_id = docs.iter().flatten().any(|(k, _)| k == "id") || docs_param.is_some();
+            self.collection(collection)?.schema.arbiter(on, names_id)?;
+        }
         let registry = std::mem::take(&mut self.registry);
         let list = pick.and_then(|p| p.returning.as_ref());
         let mut answered = list.map(|_| (Vec::new(), Vec::new()));

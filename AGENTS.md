@@ -3100,19 +3100,28 @@ over the test, `IS [NOT] DISTINCT FROM` `!=` and `=`, `IS [NOT] TRUE`
 FIRST`/`LAST` where it says what the order does, `values {..}, {..}` and
 `put t {..}, {..}` a list without its brackets, `ON CONFLICT DO NOTHING`
 `if absent` and `DO UPDATE SET` `if absent else set`, `excluded.f` made
-`new.f` and `<collection>.f` `f`. The fields of an insert are named (the
-parser reads no schema, `id` is no field, an alter adds last); a row of
-another arity, `INSERT … SELECT`, a conflict target (with a second unique
-key it would part from `if absent`, held by any, and the parser cannot
-tell) and `DO UPDATE … WHERE` are refused naming the FenecQL to write, as
-are `CREATE TABLE`, `CREATE INDEX` (a name, no kind), `ALTER`/`DROP TABLE`,
-`TRUNCATE`, `BEGIN`/`COMMIT`, `JOIN` (both ways a `lookup` runs), an
-alias, `SELECT DISTINCT`, `EXISTS`, a scalar subquery, `MATCH(…)` and `@@`
--- refused without consuming the word they start at, which the shell's
-statement cutting reads. An agent eval (row 40) found agents recovered
-whenever an error named the FenecQL form and never from ``unknown command
-`x` ``. Past the parser: `rowid` and `_id` are told `id`
-(`schema::no_field`), `users.email` that a field is named bare (`path_of`),
+`new.f` and `<collection>.f` `f`. A conflict target, `ON CONFLICT
+(email)`, rides in `Pick::conflict` and the engine takes it only where it
+names the one unique key the collection's rows are found by
+(`Schema::arbiter`): `if absent` is held by every unique key, so with a
+second, or an `id` named beside it, the two would part. The fields of an
+insert are named (the parser reads no schema, `id` is no field, an alter
+adds last); a row of another arity, `INSERT … SELECT` and `DO UPDATE …
+WHERE` are refused naming the FenecQL to write, as are `CREATE TABLE`,
+`CREATE INDEX` (a name, no kind), `ALTER`/`DROP TABLE`, `TRUNCATE`,
+`BEGIN`/`COMMIT`, `JOIN` and a comma between collections (both ways a
+`lookup` runs, its `where` before it), an alias, `SELECT DISTINCT` (outside
+`in (select distinct …)`, where it is passed over), `EXISTS`, a scalar
+subquery, `MATCH(…)`, `@@` and `->>` -- refused without consuming the word
+they start at, which the shell's statement cutting reads. A `get` whose
+clauses stop at a join or an alias says so before its `check`, whose
+refusal of a grouping over the join's columns came first and hid the
+hint. An agent eval (row 40) found agents recovered whenever an error named
+the FenecQL form and never from ``unknown command `x` ``; on this branch
+SQL's first tries went 30–35% -> 61–71%. Past the parser: `rowid` and
+`_id` are told `id` (`schema::no_field`), a field a `lookup` level lacks
+that the clauses after `lookup` are its collection's, `users.email` that a
+field is named bare (`path_of`), `json_extract()` a path,
 `contains()`/`starts_with()`/`ends_with()` `like`, and `/_schema?as=fenecql`
 and the MCP `schema` tool name the `id` in a comment (`with_id_note`), which
 `/_schema/plan` reads past. `like`/`ilike` are calls, as `case` is, so no
@@ -3143,15 +3152,16 @@ Rust crates' literals, the web tests' -- parsed on main and on the branch,
 `cmp_expr` keeps its frame: the worded tests are out of line (`worded`),
 or the depth test's 512 levels outgrew 8 MiB in a debug build; out of
 line, 511 parentheses parse in 1 091 KiB of stack in release against
-main's 1 187. The browser module grew 15.9 KB, 6.2 KB gzip, 4.8 KB brotli
-(729.2, 299.8, 248.7), the one with no feature 15.6 and 4.8: the parser's
-SQL forms and their refusals 8.4 KB raw, `like` 2.6 (`sql_like` 1.0,
-`like_pattern` 0.8, `bind_pattern` 0.8). The trap's error first found by
+main's 1 187. The browser module grew 19.8 KB, 7.7 KB gzip, 6.5 KB brotli
+(733.1, 301.2, 250.3), the one with no feature 19.5 and 6.2: the parser's
+SQL forms and their refusals 9.6 KB raw, `like` 2.6 (`sql_like` 1.0,
+`like_pattern` 0.8, `bind_pattern` 0.8), the conflict target's check and
+the hints past the parser 2.0 (`Schema::arbiter` and `no_field` 1.3, the
+engine's calls of them 0.7). The trap's error first found by
 `str::contains` brought the standard library's two-way searcher and a
 slice's panic, 4.1 KB, where `ends_with` brings none. Part 2:
-`JOIN` read as `lookup`, `DISTINCT`/`EXISTS`/a scalar
-subquery, `CREATE TABLE`'s types, pgvector's `<->`, a conflict target
-checked against the schema.
+`JOIN` read as `lookup`, `DISTINCT`/`EXISTS`/a scalar subquery,
+`CREATE TABLE`'s types, pgvector's `<->`.
 
 **A `set` reads the row it writes, and every write says what it did.**
 `Expr::Arith` is `+ - * /` (`query::arith`): ints stay ints and one past

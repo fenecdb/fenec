@@ -187,17 +187,18 @@ impl Registry {
                 ),
                 // What an agent tries for text after SQL's `like`.
                 false => {
-                    let like = matches!(
-                        name,
-                        "contains" | "starts_with" | "ends_with" | "strpos" | "instr" | "position"
-                    );
-                    Error::Query(format!(
-                        "unknown function `{name}`{}",
-                        match like {
-                            true => ": text is matched by `like '%a%'`, `'a%'` or `'%a'`",
-                            false => "",
+                    let hint = match name {
+                        "contains" | "starts_with" | "ends_with" | "strpos" | "instr"
+                        | "position" => ": text is matched by `like '%a%'`, `'a%'` or `'%a'`",
+                        "json_extract"
+                        | "json_value"
+                        | "jsonb_extract_path_text"
+                        | "json_extract_path_text" => {
+                            ": a json field's member is read by a path, `meta.source`"
                         }
-                    ))
+                        _ => "",
+                    };
+                    Error::Query(format!("unknown function `{name}`{hint}"))
                 }
             }
         })?;

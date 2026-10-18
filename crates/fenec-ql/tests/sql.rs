@@ -171,12 +171,8 @@ const REFUSED: &[(&str, &str)] = &[
     ),
     // An upsert that does not map exactly
     (
-        "insert into t (e) values (1) on conflict (e) do nothing",
-        "held by any unique key",
-    ),
-    (
         "insert into t (e) values (1) on conflict on constraint t_e do nothing",
-        "held by any unique key",
+        "an upsert names its unique field, or none",
     ),
     (
         "insert into t (e) values (1) on conflict do update set n = 1 where n < 3",
@@ -223,11 +219,11 @@ const REFUSED: &[(&str, &str)] = &[
     ("create index on t (a)", "it names its kind"),
     (
         "SELECT * FROM a JOIN b ON a.id = b.a_id",
-        "FenecQL has no `join`: `get orders lookup items on order_id`",
+        "FenecQL has no `join`: `get orders where ... lookup items on order_id`",
     ),
     (
         "SELECT * FROM a x JOIN b y ON x.id = y.a_id",
-        "FenecQL has no `join`: `get orders lookup items on order_id`",
+        "FenecQL has no `join`: `get orders where ... lookup items on order_id`",
     ),
     (
         "SELECT * FROM users u WHERE u.id = 1",
@@ -235,7 +231,7 @@ const REFUSED: &[(&str, &str)] = &[
     ),
     (
         "SELECT * FROM items JOIN orders ON orders.id = items.order_id",
-        "`get items lookup orders on id = order_id`",
+        "`get items where ... lookup orders on id = order_id`",
     ),
     (
         "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = users.id)",
@@ -261,7 +257,7 @@ const REFUSED: &[(&str, &str)] = &[
     ("get users where name ~ 'A.*a'", "not a regular expression"),
     (
         "SELECT DISTINCT city FROM users",
-        "`select distinct` is a group",
+        "FenecQL has no `distinct`",
     ),
     (
         "get t where lower(a) between 'a' and 'm'",
@@ -641,4 +637,148 @@ fn a_bound_like_answers_as_its_column_does() {
         }
     }
     assert!(checked > 2_500, "{checked}");
+}
+
+/// What the agent eval found answered before the hint it needed, each
+/// answered with that hint now.
+#[test]
+fn the_hint_an_agent_needs_comes_first() {
+    let says = |q: &str, what: &str| {
+        let e = parse(q)
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|e| e.to_string());
+        assert!(e.contains(what), "{q}: {e}");
+    };
+    // A join is named before the grouping over its columns is refused,
+    // after an alias, behind `distinct`, and as a comma between two.
+    let join = "FenecQL has no `join`";
+    says(
+        "SELECT c.name, count(*) FROM orders o JOIN customers c ON o.cid = c.id GROUP BY c.name",
+        join,
+    );
+    says(
+        "SELECT * FROM orders JOIN customers ON orders.cid = customers.id",
+        join,
+    );
+    says(
+        "SELECT DISTINCT c.name FROM orders o JOIN customers c ON o.cid = c.id",
+        join,
+    );
+    says(
+        "SELECT * FROM orders o, customers c WHERE o.cid = c.id",
+        join,
+    );
+    says("SELECT * FROM orders, customers", join);
+    // Its `lookup` puts the rows above's `where` first.
+    says(
+        "SELECT * FROM a JOIN b",
+        "`get items where ... lookup orders on id = order_id`",
+    );
+    // An alias alone, before the grouping over its columns.
+    says(
+        "SELECT u.city, count(*) FROM users u GROUP BY u.city",
+        "unknown command `u`: an alias",
+    );
+    // PostgreSQL's `->>`.
+    says(
+        "SELECT * FROM t WHERE meta->>'source' = 'web'",
+        "a json field's member is read by a path: `meta.source`",
+    );
+    // `distinct`'s hint names a group with its aggregate; in an `in`'s
+    // query it changes nothing.
+    says(
+        "SELECT DISTINCT city FROM users",
+        "a `group` needs an aggregate",
+    );
+    assert_eq!(
+        parse_one("get t where x in (select distinct a from u where b = 1)").unwrap(),
+        parse_one("get t where x in (get u select a where b = 1)").unwrap()
+    );
+}
+
+/// `on conflict (k)` names the one unique key a row is found by, which the
+/// engine holds it to: taken where it is the collection's one, refused
+/// where the collection has another or a document names an id.
+#[test]
+fn a_conflict_target_is_the_one_unique_key() {
+    let st = parse_one("INSERT INTO t (k) VALUES (1) ON CONFLICT (k) DO NOTHING").unwrap();
+    let Statement::Put {
+        pick, if_absent, ..
+    } = &st
+    else {
+        panic!()
+    };
+    assert!(if_absent);
+    assert_eq!(pick.as_ref().unwrap().conflict, Some(vec!["k".to_string()]));
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection p (sku text @unique, n int); create collection two (a text @unique, \
+         b text @unique, n int); create collection plain (n int)",
+    );
+    let up = "INSERT INTO p (sku, n) VALUES ('x', 1) ON CONFLICT (sku) DO UPDATE SET n = p.n + \
+              excluded.n RETURNING n";
+    assert_eq!(texts(&mut db, up), ["1"]);
+    assert_eq!(texts(&mut db, up), ["2"]);
+    assert!(matches!(
+        run(
+            &mut db,
+            "insert into plain (id, n) values (1, 1) on conflict (id) do nothing"
+        ),
+        Response::Affected(1)
+    ));
+    for (q, says) in [
+        (
+            "insert into p (sku) values ('y') on conflict (n) do nothing",
+            "its rows are found by (sku)",
+        ),
+        (
+            "insert into two (a, b) values ('a', 'b') on conflict (a) do nothing",
+            "its rows are found by (a), (b)",
+        ),
+        (
+            "insert into p (id, sku) values (9, 'z') on conflict (sku) do nothing",
+            "(sku), (id)",
+        ),
+    ] {
+        let e = db
+            .execute_with(&parse_one(q).unwrap(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(says), "{q}: {e}");
+    }
+}
+
+/// A field a `lookup` level does not hold says the clauses after it are
+/// that collection's -- where agents put the rows above's `where`.
+#[test]
+fn a_field_after_lookup_is_the_looked_up_collections() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection orders (total int); create collection items (order_id int @hash, \
+         qty int); put orders {total: 10}; put items {order_id: 1, qty: 3}",
+    );
+    for q in [
+        "get items lookup orders on id = order_id where qty > 1",
+        "get items lookup orders on id = order_id select qty",
+    ] {
+        let e = db
+            .execute_with(&parse_one(q).unwrap(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("the clauses after `lookup` are the looked-up collection's"),
+            "{q}: {e}"
+        );
+    }
+    // And `json_extract`, the engine's to answer.
+    let e = db
+        .execute_with(
+            &parse_one("get items where json_extract(qty, '$.a') = 1").unwrap(),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("`meta.source`"), "{e}");
 }

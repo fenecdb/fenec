@@ -81,10 +81,42 @@ const INDEX_FORM: &str = "an index is `create index on <collection> (<field>, ..
 
 /// What SQL's `join` is answered with: both ways a key runs, and the
 /// filter by another collection's rows.
-const JOIN: &str = "FenecQL has no `join`: `get orders lookup items on order_id` attaches each \
-                    order's items, `get items lookup orders on id = order_id` each item's \
-                    order, and `where order_id in (get orders select id where ...)` filters by \
-                    another collection";
+const JOIN: &str = "FenecQL has no `join`: `get orders where ... lookup items on order_id` \
+                    attaches each order's items, `get items where ... lookup orders on id = \
+                    order_id` each item's order -- the clauses after `lookup` are the looked-up \
+                    collection's -- and `where order_id in (get orders select id where ...)` \
+                    filters by another collection";
+
+/// The words a statement begins with, and SQL's that `Parser::statement`
+/// answers: one a `get` stops at is the next statement's, any other an
+/// alias or a mistake.
+const COMMANDS: [&str; 20] = [
+    "get",
+    "select",
+    "put",
+    "insert",
+    "set",
+    "update",
+    "del",
+    "delete",
+    "create",
+    "drop",
+    "alter",
+    "explain",
+    "collections",
+    "describe",
+    "compact",
+    "truncate",
+    "begin",
+    "start",
+    "commit",
+    "rollback",
+];
+
+/// What PostgreSQL's `->>` is answered with, and `json_extract()` by the
+/// engine in its words.
+const JSON_PATH: &str = "a json field's member is read by a path: `meta.source`, not \
+                         `meta->>'source'`";
 
 /// What full text in a filter is answered with: SQL's `match(...)`,
 /// PostgreSQL's `@@`.
@@ -749,13 +781,20 @@ impl Parser {
             // statement, as SQL's alias does. (One `format!` for both was 20
             // bytes smaller raw and 322 larger brotli.)
             other if self.i > 0 && matches!(self.toks[self.i - 1].tok, Tok::Ident(_)) => {
-                self.err(format!(
-                    "unknown command `{other}`: an alias, if it is one, FenecQL does not take -- \
-                     a statement's one collection names its fields bare"
-                ))
+                Err(self.alias(other))
             }
             other => self.err(format!("unknown command `{other}`")),
         }
+    }
+
+    /// `other`, a word that begins no statement after a name that ends
+    /// one: SQL's alias, if it is one.
+    #[inline(never)]
+    fn alias(&self, other: &str) -> Error {
+        self.error(&format!(
+            "unknown command `{other}`: an alias, if it is one, FenecQL does not take -- a \
+             statement's one collection names its fields bare"
+        ))
     }
 
     /// `table` after `create`, `drop` or `alter`: SQL's, refused with what
@@ -1334,24 +1373,31 @@ impl Parser {
                 self.expect_kw("set")?;
                 else_set = Some(self.object()?);
             }
-        } else if self.eat_kw("on") {
+        }
+        let mut conflict = None;
+        if !if_absent && self.eat_kw("on") {
             if_absent = true;
-            else_set = self.on_conflict(&collection)?;
+            (else_set, conflict) = self.on_conflict(&collection)?;
         }
         // `require` and `returning`, either first.
-        let (mut require, mut pick) = (None, None);
+        let mut require = None;
+        let mut returning = None;
         loop {
             if self.peek_kw("require") {
                 require = self.require()?;
             } else if self.eat_kw("returning") {
-                pick = Some(Box::new(Pick {
-                    returning: Some(self.projection_list()?),
-                    ..Pick::default()
-                }));
+                returning = Some(self.projection_list()?);
             } else {
                 break;
             }
         }
+        let pick = (returning.is_some() || conflict.is_some()).then(|| {
+            Box::new(Pick {
+                returning,
+                conflict,
+                ..Pick::default()
+            })
+        });
         Ok(Statement::Put {
             collection,
             docs,
@@ -1427,24 +1473,33 @@ impl Parser {
         }
     }
 
-    /// SQL's `on conflict do nothing` and `on conflict do update set ...`,
-    /// `on` read: FenecQL's `if absent` and `if absent else set {...}`, the
-    /// pairs the `else set` holds. They map exactly without a target alone
-    /// -- SQLite's reading, a conflict with any unique key -- since `if
-    /// absent` is held by the id or any `@unique` value, and the parser
-    /// reads no schema to tell whether the key named is the only one.
+    /// SQL's `on conflict [(<key>, ...)] do nothing` and `do update set
+    /// ...`, `on` read: FenecQL's `if absent` and `if absent else set
+    /// {...}` -- the pairs the `else set` holds -- and the target, which
+    /// the engine holds to the one unique key the collection's rows can
+    /// be found by (`Schema::arbiter`): `if absent` is held by the id or
+    /// any `@unique` value, and with two the target and it would part.
+    /// With no target, SQLite's reading, they map as they are.
     /// `excluded.f` is `new.f`, the document's `f`, and `<name>.f` the
     /// row's `f`.
-    fn on_conflict(&mut self, collection: &str) -> Result<Option<Vec<(String, Expr)>>> {
+    #[allow(clippy::type_complexity)]
+    fn on_conflict(
+        &mut self,
+        collection: &str,
+    ) -> Result<(Option<Vec<(String, Expr)>>, Option<Vec<String>>)> {
         self.expect_kw("conflict")?;
+        let target = match self.peek() {
+            Tok::LParen => Some(self.names()?),
+            _ => None,
+        };
         if !self.eat_kw("do") {
             return self.err(
-                "FenecQL's upsert is held by any unique key -- the id or a `@unique` value -- \
-                 and names none: `on conflict do nothing`, or `on conflict do update set ...`",
+                "an upsert names its unique field, or none: `on conflict (email) do ...`, or \
+                 `on conflict do nothing`",
             );
         }
         if self.eat_kw("nothing") {
-            return Ok(None);
+            return Ok((None, target));
         }
         self.expect_kw("update")?;
         self.expect_kw("set")?;
@@ -1466,7 +1521,7 @@ impl Parser {
                 Ok(false)
             });
         }
-        Ok(Some(set))
+        Ok((Some(set), target))
     }
 
     /// SQL's `a = <expr>, b = <expr>` after `set`: an update's pairs, as
@@ -1533,7 +1588,11 @@ impl Parser {
                      // is followed by `from` it is a projection, otherwise the first name
                      // is the collection.
         let mut list = SelectList::default();
-        // SQL's `select distinct a, b`: a group of each.
+        // SQL's `select distinct a, b`: a group of each -- which takes an
+        // aggregate here, so the hint names one (named without it, agents
+        // wrote `group city` alone and were refused again). In `in (select
+        // distinct ...)` it changes nothing, and is passed over. A join
+        // further on is answered first.
         if self.peek_kw("distinct")
             && matches!(&self.toks[self.i - 1].tok, Tok::Ident(w) if w.eq_ignore_ascii_case("select"))
             && matches!(
@@ -1541,10 +1600,21 @@ impl Parser {
                 Some(Tok::Ident(_) | Tok::Star)
             )
         {
-            return self.err(
-                "`select distinct` is a group: `get t select city, count(*) group city`, or \
-                 `count(distinct city)`",
-            );
+            if self.subqueries > 0 {
+                self.next();
+            } else {
+                let joins = self.toks[self.i..]
+                    .iter()
+                    .any(|t| matches!(&t.tok, Tok::Ident(w) if w.eq_ignore_ascii_case("join")));
+                return self.err(match joins {
+                    true => JOIN,
+                    false => {
+                        "FenecQL has no `distinct`: `get t select city, count(*) group city` \
+                         answers each city once, and a `group` needs an aggregate -- or \
+                         `select count(distinct city)` counts them"
+                    }
+                });
+            }
         }
         if !self.peek_kw("from") {
             let save = self.i;
@@ -1710,6 +1780,19 @@ impl Parser {
                 break;
             }
             break;
+        }
+        // SQL's join, where the clauses stop -- `join`, an alias before it,
+        // a comma between two collections -- and an alias alone, answered
+        // before the check, whose refusal of a grouping over the join's
+        // columns came first and hid the hint (the agent eval: 11 of 32
+        // joins).
+        if self.joined() {
+            return self.err(JOIN);
+        }
+        if let Tok::Ident(w) = self.peek() {
+            if !COMMANDS.iter().any(|c| w.eq_ignore_ascii_case(c)) {
+                return Err(self.alias(&w.to_ascii_lowercase()));
+            }
         }
         // The semantic check also runs here so the error carries a position.
         // The engine repeats the same check, because plan structures can be
@@ -2498,6 +2581,26 @@ impl Parser {
         self.error(&format!("`{name}`, not \"{name}\": {QUOTED}"))
     }
 
+    /// Whether a `get`'s clauses stopped at SQL's join: `join` or a word
+    /// that leads one, an alias before either or before a comma, or a
+    /// comma between collections. None begins a statement, so no text that
+    /// parsed reads otherwise.
+    fn joined(&self) -> bool {
+        let word = |t: Option<&Token>| {
+            matches!(t.map(|t| &t.tok), Some(Tok::Ident(w))
+                if ["join", "inner", "left", "right", "full", "cross"]
+                    .iter().any(|k| w.eq_ignore_ascii_case(k)))
+        };
+        let (a, b) = (self.toks.get(self.i), self.toks.get(self.i + 1));
+        match a.map(|t| &t.tok) {
+            Some(Tok::Comma) => true,
+            Some(Tok::Ident(_)) => {
+                word(a) || word(b) || matches!(b.map(|t| &t.tok), Some(Tok::Comma))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether the tokens from `at` to here are a double-quoted text alone.
     fn alone(&self, at: usize) -> bool {
         self.i == at + 1 && matches!(self.toks[at].tok, Tok::Str(_))
@@ -2818,6 +2921,8 @@ impl Parser {
                 }
                 Ok(Expr::Field(name))
             }
+            // PostgreSQL's `meta->>'source'`, lexed `-` and `>`.
+            Tok::Gt if self.toks[self.i - 1].tok == Tok::Minus => self.err(JSON_PATH),
             other => self.err(format!("expected a value, found {}", other.describe())),
         }
     }

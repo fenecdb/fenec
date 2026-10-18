@@ -1927,6 +1927,12 @@ pub struct Pick {
     /// picked, under the columns a `get`'s `select` names: `None` every
     /// field after the id (`returning *`), or those listed.
     pub returning: Option<Option<Vec<String>>>,
+    /// A `put`'s alone: SQL's `on conflict (email)`, the key its `if
+    /// absent` names, held by the engine to the one unique key the
+    /// collection's rows are found by ([`Schema::arbiter`]). A clause that
+    /// shapes the write, as `returning` is; `None` for FenecQL's own `if
+    /// absent`, held by every unique key.
+    pub conflict: Option<Vec<String>>,
 }
 
 impl Pick {

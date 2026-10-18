@@ -670,10 +670,17 @@ pub struct Schema {
 pub fn no_field(name: &str) -> Error {
     let hint = match name {
         "rowid" | "_id" | "oid" | "_rowid_" => ": a row's id is `id`",
+        // `orders.total`: a `lookup` level's, named with its collection.
+        _ if name.contains('.') => AFTER_LOOKUP,
         _ => "",
     };
     Error::NotFound(format!("field `{name}`{hint}"))
 }
+
+/// What a field a `lookup` level does not hold is said with: agents put
+/// the rows above's `where` after the `lookup`, where it reads the child.
+pub const AFTER_LOOKUP: &str = ": the clauses after `lookup` are the looked-up collection's, and \
+                                a filter of the rows above goes before it";
 
 pub fn split_path(name: &str) -> Option<(&str, &str)> {
     name.split_once('.')
@@ -818,6 +825,46 @@ impl Schema {
 
     /// Whether a write is asked for a value another document holds: a
     /// `@unique` field, path or composite.
+    /// Refuses `on`, SQL's conflict target, unless it is the one unique
+    /// key an upsert into this collection can find a row by: a `@unique`
+    /// field's, an index's over several fields (in any order), or `id`
+    /// where there is no other. An upsert is held by any of them, so with
+    /// a second the target and it would part -- SQL refuses a clash on a
+    /// key the target does not name. `names_id`: a document names an
+    /// `id`, which is then a key too.
+    pub fn arbiter(&self, on: &[String], names_id: bool) -> Result<()> {
+        let mut keys: Vec<Vec<&str>> = Vec::new();
+        for f in self.fields.iter().chain(&self.paths) {
+            if f.index.is_unique() {
+                keys.push(vec![&f.name]);
+            }
+        }
+        for c in self.composites.iter().filter(|c| c.unique) {
+            keys.push(c.keys.iter().map(|(k, _)| k.as_str()).collect());
+        }
+        if names_id || keys.is_empty() {
+            keys.push(vec!["id"]);
+        }
+        let named = |k: &Vec<&str>| k.len() == on.len() && on.iter().all(|o| k.contains(&&**o));
+        if keys.len() == 1 && named(&keys[0]) {
+            return Ok(());
+        }
+        let mut held = String::new();
+        for k in &keys {
+            held.push_str(if held.is_empty() { "(" } else { ", (" });
+            for (i, f) in k.iter().enumerate() {
+                held.push_str(if i > 0 { ", " } else { "" });
+                held.push_str(f);
+            }
+            held.push(')');
+        }
+        Err(Error::Query(format!(
+            "`on conflict` names the one unique key a row of `{}` is found by, and its rows \
+             are found by {held}: name it, or none to be held by any",
+            self.name
+        )))
+    }
+
     pub fn has_unique(&self) -> bool {
         self.fields
             .iter()

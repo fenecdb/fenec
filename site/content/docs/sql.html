@@ -37,6 +37,7 @@ SELECT count(*) AS n FROM users WHERE email ILIKE '%@EXAMPLE.COM'  -- → 3
 UPDATE users SET visits = coalesce(visits, 0) + 1 WHERE name = 'Ada' RETURNING visits  -- → 1
 INSERT INTO users (email, visits) VALUES ('ADA@example.com', 1) ON CONFLICT DO UPDATE SET visits = users.visits + excluded.visits RETURNING visits  -- → 2
 INSERT INTO users (email) VALUES ('bob@example.com') ON CONFLICT DO NOTHING  -- → 0
+INSERT INTO users (email, visits) VALUES ('bob@example.com', 1) ON CONFLICT (email) DO UPDATE SET visits = excluded.visits RETURNING visits  -- → 1
 SELECT name || ' <' || email || '>' AS who FROM users WHERE id IN (SELECT id FROM users WHERE age > 30) ORDER BY id  -- → "Ada <ada@example.com>"
 SELECT name FROM users WHERE visits IS DISTINCT FROM 2  -- → "Bob"
 DELETE FROM users WHERE age NOT BETWEEN 20 AND 40  -- → 1
@@ -68,6 +69,7 @@ last expression.</p>
 <tr data-same><td><code>SELECT * FROM t WHERE x IN (1, 2, 3)</code></td><td><code>get t where x in [1, 2, 3]</code></td><td>through <code>@hash</code> as <code>in [..]</code> is</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x NOT IN ('a', 'b')</code></td><td><code>get t where not (x in ["a", "b"])</code></td><td>a null <code>x</code> is taken in (<a href="#nulls">below</a>)</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x IN (SELECT y FROM u WHERE z = 1)</code></td><td><code>get t where x in (get u select y where z = 1)</code></td><td>a <a href="/docs/fenecql#subqueries">subquery</a>, run once</td></tr>
+<tr data-same><td><code>SELECT * FROM t WHERE x IN (SELECT DISTINCT y FROM u)</code></td><td><code>get t where x in (get u select y)</code></td><td><code>DISTINCT</code> changes nothing there</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x BETWEEN 1 AND 3 AND y = 2</code></td><td><code>get t where x &gt;= 1 and x &lt;= 3 and y = 2</code></td><td>both bounds in; the first <code>AND</code> is <code>BETWEEN</code>'s</td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE x NOT BETWEEN 1 AND 3</code></td><td><code>get t where not (x &gt;= 1 and x &lt;= 3)</code></td><td></td></tr>
 <tr data-same><td><code>SELECT * FROM t WHERE name LIKE 'A%'</code></td><td><code>get t where name like "A%"</code></td><td><code>%</code> any run of characters, <code>_</code> one (<a href="#like">below</a>)</td></tr>
@@ -102,9 +104,11 @@ last expression.</p>
 <tr data-refused><td><code>DROP TABLE t</code></td><td><code>drop collection t</code></td><td></td></tr>
 <tr data-refused><td><code>TRUNCATE t</code></td><td><code>del t</code></td><td></td></tr>
 <tr data-refused><td><code>BEGIN</code></td><td>a <code>/batch</code></td><td>no transaction is held open across requests; a <a href="/docs/http#batches"><code>/batch</code></a> lands whole or not at all, and <a href="/docs/fenecql#require"><code>require</code></a> makes a count its condition</td></tr>
-<tr data-refused><td><code>SELECT * FROM orders o JOIN users u ON u.id = o.user_id</code></td><td><code>get orders lookup users on id = user_id</code></td><td>no join: <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a> attaches each order's user, and <code>get users lookup orders on user_id</code> each user's orders; <code>in (get …)</code> filters by another collection's rows</td></tr>
+<tr data-refused><td><code>SELECT * FROM orders o JOIN users u ON u.id = o.user_id</code></td><td><code>get orders lookup users on id = user_id</code></td><td>no join: <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a> attaches each order's user, and <code>get users lookup orders on user_id</code> each user's orders; <code>in (get …)</code> filters by another collection's rows. A <code>where</code> of the orders goes before <code>lookup</code>: the clauses after it are the users'</td></tr>
+<tr data-refused><td><code>SELECT * FROM orders o, users u WHERE u.id = o.user_id</code></td><td><code>get orders lookup users on id = user_id</code></td><td>a comma between two collections is a join</td></tr>
 <tr data-refused><td><code>SELECT u.name FROM users u WHERE u.age &gt; 30</code></td><td><code>get users select name where age &gt; 30</code></td><td>no alias: one collection is in scope, its fields written bare</td></tr>
-<tr data-refused><td><code>SELECT DISTINCT city FROM users</code></td><td><code>get users select city, count(*) group city</code></td><td>or <code>count(distinct city)</code></td></tr>
+<tr data-refused><td><code>SELECT DISTINCT city FROM users</code></td><td><code>get users select city, count(*) group city</code></td><td>a <code>group</code> takes an aggregate; or <code>count(distinct city)</code></td></tr>
+<tr data-refused><td><code>SELECT * FROM t WHERE meta-&gt;&gt;'source' = 'web'</code></td><td><code>get t where meta.source = 'web'</code></td><td>a json field's member is a path; <code>json_extract(meta, '$.source')</code> is answered so too</td></tr>
 <tr data-refused><td><code>SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)</code></td><td><code>get users lookup orders on user_id required</code></td><td>the users with an order</td></tr>
 <tr data-refused><td><code>SELECT * FROM t WHERE at = (SELECT max(at) FROM t)</code></td><td><code>get t order at desc limit 1</code></td><td>a query stands after <code>in</code>; one value is a statement of its own</td></tr>
 <tr data-refused><td><code>SELECT * FROM docs WHERE to_tsvector(body) @@ to_tsquery('rust')</code></td><td><code>get docs match body "rust"</code></td><td>full text is <a href="/docs/fenecql#the-text-clause"><code>match</code></a> over an <code>@text</code> field; MySQL's <code>MATCH … AGAINST</code> too</td></tr>
@@ -113,7 +117,7 @@ last expression.</p>
 <tr data-refused><td><code>INSERT INTO t VALUES (1, 'x')</code></td><td><code>insert into t (a, b) values (1, 'x')</code></td><td>the fields are named (<a href="#insert">below</a>)</td></tr>
 <tr data-refused><td><code>INSERT INTO t (a) VALUES (1), (2, 3)</code></td><td><code>insert into t (a) values (1), (2)</code></td><td>a row of as many values as fields</td></tr>
 <tr data-refused><td><code>INSERT INTO t (a) SELECT a FROM u</code></td><td><code>get u select a</code>, then <code>insert t $1</code></td><td>an insert writes documents, not a query's rows</td></tr>
-<tr data-refused><td><code>INSERT INTO t (k) VALUES ('a') ON CONFLICT (k) DO NOTHING</code></td><td><code>insert into t (k) values ('a') on conflict do nothing</code></td><td>no conflict target (<a href="#upsert">below</a>)</td></tr>
+<tr data-refused><td><code>INSERT INTO t (k) VALUES ('a') ON CONFLICT ON CONSTRAINT t_k DO NOTHING</code></td><td><code>insert into t (k) values ('a') on conflict (k) do nothing</code></td><td>the target is the unique field (<a href="#upsert">below</a>)</td></tr>
 <tr data-refused><td><code>INSERT INTO t (k, n) VALUES ('a', 1) ON CONFLICT DO UPDATE SET n = 1 WHERE t.n &lt; 3</code></td><td><code>insert t {k: "a", n: 1} if absent else set {n: case when n &lt; 3 then 1 else n end}</code></td><td>the upsert sets the row it finds, with no <code>WHERE</code></td></tr>
 <tr data-refused><td><code>SELECT * FROM t WHERE "name" = 'Ada'</code></td><td><code>get t where name = 'Ada'</code></td><td><code>"name"</code> is text here (<a href="#quotes">below</a>)</td></tr>
 </tbody>
@@ -255,8 +259,12 @@ names the row's id; one that is taken is refused, as a key is, unless
 <code>DO UPDATE SET</code> sets the row holding its <code>id</code>, or
 else the first <code>@unique</code> value it holds, in the order the
 fields are declared. A target, <code>ON CONFLICT (email)</code>, is
-refused: where the collection has a second unique key the two would part,
-and the parser reads no schema to tell. In <code>DO UPDATE SET</code>,
+taken where it names the one unique key the collection's rows are found by
+— its <code>@unique</code> field, the fields of a unique index over several,
+or <code>id</code> where there is no other — and refused, naming the keys,
+where the collection has another or a row names an <code>id</code> beside
+it: the target and the upsert, held by any, would part there. In
+<code>DO UPDATE SET</code>,
 <code>excluded.f</code> is the row offered (<code>new.f</code>) and
 <code>t.f</code>, or <code>f</code>, the row held; a <code>WHERE</code> is
 refused.</p>
