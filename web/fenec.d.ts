@@ -1095,7 +1095,10 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
   /**
    * Runs FenecQL; a write also answers `seq`, the change it left the
    * database at, and `replayed`, whether the answer is the one kept for
-   * its `idempotencyKey`.
+   * its `idempotencyKey`. A read sent near (`{ read: true }` on a client
+   * reading near) answers `seq` too: where the copy that answered stood as
+   * it read -- maybe a read replica behind home -- which moves nothing of
+   * the client's.
    */
   run(sql: string, params?: unknown[], opts?: RunOptions): Promise<any>;
   rows(sql: string, params?: unknown[]): Promise<any[]>;

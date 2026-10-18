@@ -1444,7 +1444,12 @@ length. A read naming no position, which the copy answers as it stands,
 and one willing to wait longer stay the copy's: rested whole, two of
 `tests/read_replicas.rs`'s were refused 502 with home out of the router's
 reach where the copy answered them
-(`a_read_replica_behind_its_wait_is_let_be_and_the_reads_after_go_home`);
+(`a_read_replica_behind_its_wait_is_let_be_and_the_reads_after_go_home`).
+Left so: a client holding a tenant's token can send that tenant's
+positioned reads through a router home, with a `Fenec-After` past its last
+change and a wait of a second or more once every rest -- as a failover that
+lost writes does on its own, its clients' positions on the lost branch --
+at the cost of the trip home, never a wrong answer;
 the node, where it was not reached or took no whole request
 (`upstream::Near::Unreached`); where it took one and answered nothing in
 time (`Unanswered`) or broke its answer off (read whole before its head
@@ -4117,12 +4122,21 @@ on the replica (`Fenec-Wait: 1000`), not the node's five: a replica has a
 write once home's fsync covers it, 283 ms behind at most under `--sync 250`,
 and a link later, and home answers in a region's round trip; a replica's 504
 rests the copy at the router (above), so a replica cut off costs a live
-query one second each `RESTING`, not five each change. Home's 504 -- the
-change lost in a failover -- sets back whichever position the run was sent
-after and asks near again after home's, home unmarked only where that fails
-too, since an unmarked answer names nothing. A head naming no history -- a
-server from before heads named one, or a database never replicated --
-sends the runs home: term-0 positions never pass the client's. The rows are
+query one second each `RESTING`, not five each change. The second assumes
+a primary syncing at `--sync 250` or faster and links under about half a
+second: at `--sync 1000` and up every near run misses it and is answered
+home (`fallback` rising, the rows a round trip late), right but slower than
+reading home, which `sharding.html` says; not an option of `live`, since a
+deployment that slow reads home. Home's 504 -- the change lost in a
+failover -- sets back whichever position the run was sent after and asks
+near again after home's, home unmarked only where that fails too, since an
+unmarked answer names nothing -- and so a run after that one may show rows
+from before it, left so: it takes a failover that lost writes, whose lost
+write the rows lose anyway. A head naming no history -- a server from
+before heads named one, or a database never replicated -- sends the runs
+home until every stream's head names one again (`bare`, by collection: set
+for good, a stream reopened after an upgrade left the live query home):
+term-0 positions never pass the client's. The rows are
 never older than a change a stream told of or a run showed, and a stream
 tells of every change home takes. The polls stay home: a tag is a change of
 the copy that answered, and a replica holding that change of its history
@@ -4151,9 +4165,9 @@ replica behind home answering the run after a home answer -- failing with
 answers' positions left out as the review's rows did; a head with no
 history and a poll going home, unmarked. `useLiveQuery` passes the client
 through and needs nothing. An app's bundle of `connect`, rows and `live`
-went 29 684 -> 30 087 bytes, 9 728 -> 9 901 brotli; `http.js` 26 412 ->
-28 894, 7 787 -> 8 476 brotli, which took the client the docs quote to 194
-KB and the studio's first load to 66 KB gzipped.
+went 29 684 -> 30 124 bytes, 9 728 -> 9 891 brotli; `http.js` 26 412 ->
+29 298, 7 787 -> 8 586 brotli, which took the client the docs quote to 194
+KB, 51 brotli, and the studio's first load to 66 KB gzipped.
 `db.subscribe(collection, shape, onEvent, { onError, onState })`
 keeps a shape over a server -- a seed, then each change -- opened again with
 backoff and seeding again, stopped by a 401; `sseEvents` is exported with

@@ -809,17 +809,33 @@ test("a live query's rows never go back to before a run answered from home", asy
   s.end();
 });
 
-test('a live query reads home where its stream names no history, and polls home', async () => {
+test('a live query reads home while a stream names no history, and polls home', async () => {
   const s = scripted();
+  const h = '1-00000000000000aa';
   const db = connect('http://x', { reads: 'nearest', fetch: s.fetch });
-  // A head naming no history: a server from before heads named one.
+  // One head naming no history -- a server from before heads named one --
+  // beside one that does: the runs go home.
   s.heads.notes.push({ 'fenec-seq': '20' });
-  const stop = db.live('get notes', (r) => s.got.push(r), { collections: ['notes'] });
-  (await s.opened('notes', 1)).send('seed', { seq: 20, rows: [] });
+  s.heads.tags.push({ 'fenec-seq': '20', 'fenec-history': h });
+  const stop = db.live('get notes', (r) => s.got.push(r), { collections: ['notes', 'tags'] });
+  const bare = await s.opened('notes', 1);
+  bare.send('seed', { seq: 20, rows: [] });
+  (await s.opened('tags', 1)).send('seed', { seq: 20, rows: [] });
   const run = await s.next();
   unmarked(run.headers);
   run.resolve(answer(200, []));
   await s.rows(1);
+  // Its stream opened again on a server that names one -- upgraded -- and
+  // the runs read near again, after that history's change.
+  s.heads.notes.push({ 'fenec-seq': '21', 'fenec-history': h });
+  bare.end();
+  (await s.opened('notes', 2)).send('seed', { seq: 21, rows: [] });
+  const near = await s.next();
+  assert.equal(near.headers['fenec-read'], 'replica');
+  assert.equal(near.headers['fenec-after'], '21');
+  assert.equal(near.headers['fenec-history'], h);
+  near.resolve(answer(200, []));
+  await s.rows(2);
   stop();
   s.end();
 
@@ -836,11 +852,11 @@ test('a live query reads home where its stream names no history, and polls home'
   s.heads.notes.push({ 'fenec-seq': '20', 'fenec-history': '1-00000000000000aa' });
   const plain = connect('http://x', { fetch: s.fetch });
   const end = plain.live('get notes', (r) => s.got.push(r), { collections: ['notes'] });
-  (await s.opened('notes', 2)).send('seed', { seq: 20, rows: [] });
+  (await s.opened('notes', 3)).send('seed', { seq: 20, rows: [] });
   const first = await s.next();
   unmarked(first.headers);
   first.resolve(answer(200, []));
-  await s.rows(2);
+  await s.rows(3);
   end();
   s.end();
 });

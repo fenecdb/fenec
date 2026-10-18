@@ -95,7 +95,9 @@ export class FenecHttp {
    * delayed one come due, a lease lapsed -- or for that long, at most
    * 30 000: a claim waiting for a job (`Fenec-Wait`). `{ signal }` gives
    * it up, as any `fetch`. `{ read: true }`: the text only reads, and goes
-   * near on a client reading near, as the builder's reads do.
+   * near on a client reading near, as the builder's reads do; its answer's
+   * `seq` is then where the copy that answered stood as it read -- maybe a
+   * replica behind home -- which moves nothing of this client's.
    */
   async run(sql, params = [], opts = {}) {
     const { body, seq, replayed } = await this.#send(
@@ -323,6 +325,8 @@ export class FenecHttp {
     // the old primary's moves nothing.
     const seen = { at: null };
     const marked = { read: true, [AFTER]: seen };
+    // The collections whose stream's last head named no history.
+    const bare = new Set();
     let rows;
     let reads;
     if (query instanceof Query) {
@@ -384,8 +388,11 @@ export class FenecHttp {
           // the seed's `seq` is at or past the head's `Fenec-Seq`.
           const history = res.headers.get('fenec-history');
           // None (a server from before, or no replica): term-0 positions
-          // never pass the client's, so the runs go home.
-          if (!history) marked.read = false;
+          // never pass the client's, so the runs go home -- until every
+          // stream's head names one again, as after an upgrade.
+          if (history) bare.delete(collection);
+          else bare.add(collection);
+          marked.read = !bare.size;
           for await (const ev of sseEvents(res)) {
             if (stop.signal.aborted) return;
             if (ev.name === 'error') throw streamError(ev.data);

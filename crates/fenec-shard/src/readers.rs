@@ -2626,8 +2626,6 @@ pub(crate) fn traced(fields: &[(String, Value)]) -> Traced {
     }
 }
 
-/// Rests `key` in `resting` for `rest`, letting go of every rest that has
-/// run out ([`Router::rest_key`]).
 /// The wait a request's `Fenec-After` asks of a node -- `Fenec-Wait`, or
 /// the node's own -- or none without the header.
 pub(crate) fn after_wait(req: &Request) -> Option<Duration> {
@@ -2639,6 +2637,8 @@ pub(crate) fn after_wait(req: &Request) -> Option<Duration> {
     })
 }
 
+/// Rests `key` in `resting` for `rest`, letting go of every rest that has
+/// run out ([`Router::rest_key`]).
 fn rest_in(resting: &Mutex<HashMap<String, Instant>>, key: String, rest: Duration) {
     let now = Instant::now();
     let mut resting = lock(resting);
