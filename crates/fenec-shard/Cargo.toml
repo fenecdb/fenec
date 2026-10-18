@@ -58,3 +58,9 @@ path = "tests/entry.rs"
 [[test]]
 name = "lease_stalls"
 path = "tests/lease_stalls.rs"
+
+# Apart, as `lease_stalls`: three nodes and a router a test, and
+# connections kept open unanswered.
+[[test]]
+name = "late_grants"
+path = "tests/late_grants.rs"

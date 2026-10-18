@@ -3,24 +3,37 @@
 //! node, and fails a node over once its lease has certainly lapsed.
 //!
 //! A node started with `--lease` writes a tenant only while its lease names
-//! it and has not lapsed ([`fenec_http::lease`]), and measures a grant from
-//! when it takes it in. The router measures it from when the node's answer
-//! comes back, which is later, and waits a tenth longer: by the time it
-//! promotes a node's tenants elsewhere, the node has stopped taking their
-//! writes by its own clock. So a node the router cannot reach -- gone, or
-//! cut off with its clients still reaching it -- never takes a write that
-//! its tenants' new primaries do not see, and the router needs no answer
-//! from it to be sure. What it cannot do is tell the two apart, which is
-//! why the node stops on its own rather than wait to be told.
+//! it and has not lapsed ([`fenec_http::lease`]). Each grant to a node is
+//! numbered and names the newest grant whose answer came back in time
+//! (`acked`), and the node runs its lease from when it answered that one.
+//! The router measures it from when that answer came back, which is later,
+//! and waits a tenth longer: by the time it promotes a node's tenants
+//! elsewhere, the node has stopped taking their writes by its own clock.
+//! So a node the router cannot reach -- gone, or cut off with its clients
+//! still reaching it -- never takes a write that its tenants' new
+//! primaries do not see, and the router needs no answer from it to be
+//! sure. What it cannot do is tell the two apart, which is why the node
+//! stops on its own rather than wait to be told.
 //!
-//! That holds of every grant whose answer came back, or that the node
-//! never read. One the router gave up on -- no answer within the lease
-//! pool's third of a lease, so [`Answer::Silent`] and `acked` left as it
-//! was -- the node still takes whenever it reads it, and grants carry no
-//! number it could refuse a late one by: a node stalled with a grant unread
-//! in its socket can take writes for a lease after its tenants were
-//! promoted elsewhere. That hole is older than everything here, and its fix
-//! is to come.
+//! That holds of a grant however late the node reads it. The node ran its
+//! lease from when it read a grant, and one the router gave up on -- no
+//! answer within the lease pool's third of a lease, so [`Answer::Silent`]
+//! -- was a whole lease to a node that read it late: held on its way, or
+//! left unread by a node stopped or slow, and read after the router failed
+//! it over, the old primary wrote beside the new one for a lease. Now a
+//! grant read late acknowledges what the router had heard by then, a lease
+//! the failover outlasted, and an answer that came back late is
+//! acknowledged by no grant: it runs nothing. The price is a round: a
+//! node's lease runs from the grant before the last it read, so cut off it
+//! stops a third of a lease sooner, and a node holding no lease -- new,
+//! restarted or back from a failover -- needs two grants for one, the
+//! second sent at once where the first's answer says the lease is short
+//! ([`Leases::short`]). So is it where the node says it did not take the
+//! grant ([`Answer::Kept`]): the first of a router restarted or promoted,
+//! the lease of the one before still running, which the grant
+//! acknowledging it, newer, replaces -- shorter, where this router's lease
+//! is. What a node's monotonic clock misses -- its VM paused, its machine
+//! suspended -- leases do not cover ([`fenec_http::lease`]).
 //!
 //! No node waits for another. A round sends every node its grant on a
 //! thread of its own and judges the leases without waiting for any
@@ -33,10 +46,9 @@
 //! ([`Leases::begin_grant`]); its lapse, suspected by a round
 //! ([`Leases::suspects`]), is judged in that turn
 //! ([`Leases::confirm_lapse`]), when no grant to it that the router still
-//! waits on is in flight -- a grant it took runs its lease on from the
-//! moment it took it, and an answer saying so that comes back is counted
-//! -- and its failover keeps the turn until the node was sent the list the
-//! failover left.
+//! waits on is in flight -- an answer to it that comes back says the node
+//! is there -- and its failover keeps the turn until the node was sent the
+//! list the failover left.
 //!
 //! A router that starts leasing -- a restart, or a standby promoted --
 //! counts every node as granted at that moment: a lease its predecessor
@@ -44,7 +56,12 @@
 //! lapsed would make two primaries. A standby keeps forgetting every lease
 //! for as long as it follows, and its first round once promoted counts
 //! from then ([`Leases::leading`]), not from its last round while it
-//! followed, nor from its start.
+//! followed, nor from its start. As long, or longer: the directory records
+//! the longest lease a router leasing from it may have granted, and a node
+//! that has taken none of this router's grants is counted by it, one that
+//! has by this router's own -- a router started with a shorter lease
+//! failed a node it never reached over by its own, while the node held the
+//! longer lease and wrote.
 //!
 //! A grant names its holder (`fenec_http::lease::Holder`): the directory
 //! the router leases from -- the global one, or a region's own -- and its
@@ -55,7 +72,17 @@
 //! still runs -- cut off, or paused -- cannot leave the two leasing a node
 //! they both reach. A node only the old one reaches is beyond that, which
 //! is why a router is promoted once the one before it is gone, as before
-//! terms.
+//! terms. A grant's number is the router's own, counted per node: a
+//! router promoted counts afresh, and a node new to a holder forgets the
+//! numbers it answered another.
+//!
+//! A node from before numbered grants ignores them, and runs its lease from
+//! when it reads a grant as it did: leased as before, the late grant's hole
+//! open for it until it is upgraded (said once in the log). Failed over
+//! never instead, as a region's router treats a node from before terms
+//! ([`Answer::Unfenced`]), a rolling upgrade would take every node's
+//! failover away until the last node ran this build, where leased so it
+//! is protected as much as before.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -68,6 +95,11 @@ use std::time::{Duration, Instant};
 /// after. A tenth is two orders past any clock's drift.
 pub fn lapse(term: Duration) -> Duration {
     term + term / 10
+}
+
+/// `d` in whole milliseconds, as a grant names a lease.
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 pub struct Leases {
@@ -94,15 +126,42 @@ pub struct Leases {
     /// operation, that its grants name no more, and from when a promotion
     /// of each may come ([`Leases::withhold`]).
     withheld: Mutex<HashMap<String, HashMap<String, Instant>>>,
+    /// The longest lease a node that has taken none of this router's
+    /// grants may hold: its own, or a longer one the directory recorded
+    /// as it began leasing ([`Leases::leading`]), until that is lowered
+    /// ([`Leases::lowerable`]).
+    inherited: Mutex<Duration>,
+    /// This router made sure the directory's record covers its own lease,
+    /// which it does before its first grant ([`Leases::recorded`]).
+    recorded: AtomicBool,
+    /// It said it could not ([`Leases::say_unrecorded`]).
+    said: AtomicBool,
+    /// The lease a grant runs now, in milliseconds: `term`, but for a
+    /// directory that cannot record it, where it is the record's
+    /// ([`Leases::granting`]).
+    granting: AtomicU64,
+    /// The leasing thread, woken when the lease granted gets shorter.
+    leasing: Mutex<Option<std::thread::Thread>>,
 }
 
 #[derive(Clone)]
 struct Held {
     /// When the answer to the last grant the node took came back.
     acked: Instant,
+    /// The number of that grant: what every grant after it acknowledges,
+    /// and the node runs its lease from. `None` until one came back.
+    acked_grant: Option<u64>,
     /// When the router last stopped waiting on a grant to it, answered or
-    /// not: a grant the node may take is one sent before then.
+    /// not: what a node from before numbered grants may run a lease from,
+    /// reading any grant sent before then.
     settled: Instant,
+    /// The number the next grant to the node goes out under, counted on
+    /// from a random start: a grant this router sent before a restart,
+    /// read late, names no number it acknowledges since.
+    next: u64,
+    /// It took a grant without answering its number: a node from before
+    /// numbered grants, whose lease runs from when it reads one. Said once.
+    unnumbered: bool,
     /// The epoch of the list the node holds, as far as the router knows.
     epoch: Option<String>,
     /// Failed over: its tenants were promoted elsewhere, and when it answers
@@ -110,6 +169,11 @@ struct Held {
     lost: bool,
     /// It said it takes no lease, and is never failed over on its own.
     refuses: bool,
+    /// It ran a lease from this router's answer ([`Leases::ran`]): its
+    /// lease runs from this router's answers, its own length, cutting short
+    /// any longer one a router before it granted. Until then it is counted
+    /// by [`Leases::inherited`].
+    own: bool,
     /// A round's grant to it is under way: the next round sends it none
     /// ([`Leases::begin_grant`]).
     granting: bool,
@@ -122,6 +186,11 @@ struct Held {
 pub enum Answer {
     /// It holds the lease.
     Taken,
+    /// It answered and kept the lease and the list it held (`"took":
+    /// false`): a lease from a router before this one, or from a holder
+    /// before it, runs, and the grant acknowledged nothing of this one's.
+    /// The grant that acknowledges this one goes at once, with the list.
+    Kept,
     /// It does not hold the list the grant named: send the list.
     NeedsList,
     /// It takes no lease (`fenec-server` without `--lease`).
@@ -149,6 +218,11 @@ impl Leases {
             waiting: AtomicUsize::new(0),
             following: AtomicBool::new(true),
             withheld: Mutex::new(HashMap::new()),
+            inherited: Mutex::new(term),
+            recorded: AtomicBool::new(false),
+            said: AtomicBool::new(false),
+            granting: AtomicU64::new(millis(term)),
+            leasing: Mutex::new(None),
         }
     }
 
@@ -195,6 +269,9 @@ impl Leases {
         self.held().clear();
         self.withheld().clear();
         self.following.store(true, Ordering::SeqCst);
+        self.recorded.store(false, Ordering::SeqCst);
+        *self.inherited() = self.term;
+        self.granting.store(millis(self.term), Ordering::SeqCst);
     }
 
     /// A round of a router that leases: the first after following, its
@@ -203,8 +280,16 @@ impl Leases {
     /// third of a lease before the promotion -- a node the router before it
     /// renewed after that round could be failed over while that grant still
     /// ran, two primaries.
-    pub fn leading(&self) {
+    ///
+    /// A node that has taken none of its grants is counted by the longest
+    /// lease the directory recorded, `recorded` asked then, where it is
+    /// longer than this router's own: a router started with a shorter
+    /// lease than the one before it -- restarted, or a standby promoted --
+    /// failed over a node it never reached after its own lease and a
+    /// tenth, while the node, cut off, held the longer lease and wrote.
+    pub fn leading(&self, recorded: impl FnOnce() -> Option<Duration>) {
         if self.following.swap(false, Ordering::SeqCst) {
+            *self.inherited() = self.term.max(recorded().unwrap_or_default());
             let now = Instant::now();
             // Every node granted now, what was learnt of each kept: a router
             // primary from its start may have heard a node say it takes no
@@ -222,25 +307,132 @@ impl Leases {
         self.withheld.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn inherited(&self) -> std::sync::MutexGuard<'_, Duration> {
+        self.inherited.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The lease `h` may hold: this router's own once it took a grant of
+    /// it, the longest recorded until then.
+    fn term_of(&self, h: &Held) -> Duration {
+        match h.own {
+            true => self.term,
+            false => *self.inherited(),
+        }
+    }
+
+    /// How long `node` may go unrenewed before it is failed over: a lease
+    /// and a tenth, of the one it may hold: its own once it took a grant
+    /// of this router's, the longest recorded until then.
+    pub fn lapse_of(&self, node: &str) -> Duration {
+        let mut m = self.held();
+        let h = self.entry(&mut m, node);
+        lapse(self.term_of(h))
+    }
+
+    /// Whether this router has yet to make sure the directory's record
+    /// covers its own lease: asked before every grant, done once.
+    pub fn unrecorded(&self) -> bool {
+        !self.recorded.load(Ordering::SeqCst)
+    }
+
+    /// The directory's record covers this router's own lease, which every
+    /// grant runs from now.
+    pub fn recorded(&self) {
+        self.granting.store(millis(self.term), Ordering::SeqCst);
+        self.recorded.store(true, Ordering::SeqCst);
+    }
+
+    /// The lease a grant runs now: this router's own, but for a directory
+    /// that cannot record it, where it is no longer than the record
+    /// ([`Leases::grants_short`]). The leasing thread's rounds come a third
+    /// of it apart, and an answer is short against it.
+    pub fn granting(&self) -> Duration {
+        Duration::from_millis(self.granting.load(Ordering::SeqCst))
+    }
+
+    /// The directory could not record this router's lease, and grants run
+    /// `term`, the record's: the rounds come a third of it apart. A third
+    /// of the router's own apart, a 20 s router over a record of 1 s
+    /// granted a second every 6.7 s, every node without a lease most of
+    /// the time (the review of #343's
+    /// `r3_a_grant_of_the_record_s_length_between_rounds_of_the_router_s_own`).
+    pub fn grants_short(&self, term: Duration) {
+        let ms = millis(term);
+        // Woken, the leasing thread sleeps no longer than the new third:
+        // asleep for the third of its own lease it read before the grant,
+        // the round after the first came 6.7 s on all the same.
+        if ms < self.granting.swap(ms, Ordering::SeqCst) {
+            let leasing = self.leasing.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = leasing.as_ref() {
+                t.unpark();
+            }
+        }
+    }
+
+    /// `thread` runs the rounds ([`Leases::grants_short`] wakes it).
+    pub fn leasing_on(&self, thread: std::thread::Thread) {
+        *self.leasing.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread);
+    }
+
+    /// Whether to say the record could not be written: once a process.
+    pub fn say_unrecorded(&self) -> bool {
+        !self.said.swap(true, Ordering::SeqCst)
+    }
+
+    /// `node` ran its lease from this router's answer -- it said so
+    /// (`"ran"`) -- so its lease is this router's length from now: a
+    /// longer one from before was cut short. A take of the list alone, a
+    /// grant acknowledging nothing on a lease that had lapsed, runs none:
+    /// counted by its own lease from it, a grant of the router before,
+    /// read later, acknowledging an answer the node had kept, ran the
+    /// longer lease again while this router failed the node over by the
+    /// shorter (the review of #343's `r2_a_late_grant_...`).
+    pub fn ran(&self, node: &str) {
+        let mut m = self.held();
+        self.entry(&mut m, node).own = true;
+    }
+
+    /// Whether the record may come down to this router's own lease: it is
+    /// longer, and this router has led a lease and a tenth of it, so every
+    /// lease granted before it led has run out, while every one granted
+    /// since is its own -- and a router started after this one, finding it
+    /// lowered, counts by what can still run. Raised again by the first
+    /// router with a longer lease to lead.
+    pub fn lowerable(&self, now: Instant) -> bool {
+        let inherited = *self.inherited();
+        let started = *self.started.lock().unwrap_or_else(|e| e.into_inner());
+        inherited > self.term
+            && !self.following.load(Ordering::SeqCst)
+            && now.saturating_duration_since(started) > lapse(inherited)
+    }
+
+    /// The record came down to this router's own lease.
+    pub fn lowered(&self) {
+        *self.inherited() = self.term;
+    }
+
     /// `tenant`, left on `node` by its failover, named by no grant to the
     /// node from now: asked with the node's turn held, so no grant naming it
     /// is in flight. Its promotion may come a lease and a tenth after the
-    /// router last stopped waiting on a grant to the node -- the last that
-    /// could name it -- and not before. Left in the node's list, every
-    /// grant the failover and the rounds after it sent the node while
-    /// another operation held the tenant named it, and a late one the node
-    /// took (the module comment's hole) ran the tenant's lease past its
-    /// promotion: minutes of a move's, where the failover's own window is a
-    /// lease and a tenth.
+    /// last answer the node gave in time, what every grant naming it
+    /// acknowledged at the most -- which a failover's lapse has passed, so
+    /// at once. A node from before numbered grants runs a lease from any
+    /// grant it reads, so for one of those it is a lease and a tenth past
+    /// the last grant the router stopped waiting on, answered or not --
+    /// which bounds no grant read later still. Left out of the node's list
+    /// either way: a grant naming it would have the node take it back once
+    /// it answers again, a copy of a tenant that may have gone elsewhere.
     pub fn withhold(&self, node: &str, tenant: &str) {
-        let settled = {
+        let from = {
             let mut m = self.held();
-            self.entry(&mut m, node).settled
+            let h = self.entry(&mut m, node);
+            let from = if h.unnumbered { h.settled } else { h.acked };
+            from + lapse(self.term_of(h))
         };
         self.withheld()
             .entry(node.to_string())
             .or_default()
-            .insert(tenant.to_string(), settled + lapse(self.term));
+            .insert(tenant.to_string(), from);
     }
 
     /// From when `tenant`, withheld from `node`, may be promoted; `None`
@@ -288,7 +480,11 @@ impl Leases {
         let started = *self.started.lock().unwrap_or_else(|e| e.into_inner());
         m.entry(node.to_string()).or_insert_with(|| Held {
             acked: started,
+            acked_grant: None,
             settled: started,
+            next: fenec_http::replication::fresh_id(),
+            unnumbered: false,
+            own: false,
             epoch: None,
             lost: false,
             refuses: false,
@@ -320,16 +516,73 @@ impl Leases {
         self.held().get(node).and_then(|h| h.epoch.clone())
     }
 
-    /// Records what `node` answered a grant naming `epoch`, `at` the moment
-    /// the answer came back: whether it had been failed over and is back.
-    pub fn answered(&self, node: &str, epoch: &str, answer: &Answer, at: Instant) -> bool {
+    /// The number of the next grant to `node`, and the grant it
+    /// acknowledges: the newest whose answer came back. Asked with the
+    /// node's turn held, as grants go one at a time.
+    pub fn number(&self, node: &str) -> fenec_http::lease::Numbered {
+        let mut m = self.held();
+        let h = self.entry(&mut m, node);
+        let grant = h.next;
+        h.next = h.next.wrapping_add(1);
+        fenec_http::lease::Numbered {
+            grant,
+            acked: h.acked_grant,
+        }
+    }
+
+    /// Whether a lease with `left_ms` left -- what a node answers a grant,
+    /// `None` where it holds none -- would lapse before the next round's
+    /// grant could acknowledge the one it answered: the grant that does is
+    /// sent at once. A node renewed every round has two thirds of a lease
+    /// left as it answers, the grant before acknowledged; one with no lease,
+    /// or that missed the acknowledgement of a grant whose answer was lost,
+    /// has none or a third, and waited for the next round it would not
+    /// write meanwhile -- a tenant created on a node new to the router
+    /// refused its writes for up to a round.
+    pub fn short(&self, left_ms: Option<u64>) -> bool {
+        left_ms.is_none_or(|left| Duration::from_millis(left) < self.granting() / 2)
+    }
+
+    /// `node` took a grant without answering its number: a node from
+    /// before numbered grants, which runs its lease from when it reads one.
+    /// Said once: leased as before, it is open to the late grant until it
+    /// is upgraded.
+    pub fn unnumbered(&self, node: &str) {
+        let mut m = self.held();
+        if !std::mem::replace(&mut self.entry(&mut m, node).unnumbered, true) {
+            fenec_http::log!(
+                "node `{node}` took its lease without the grant's number: a node from before \
+                 numbered grants runs it from when it reads a grant, so one it reads late can \
+                 outlast its failover (upgrade it)"
+            );
+        }
+    }
+
+    /// Records what `node` answered `grant`, naming `epoch`, `at` the
+    /// moment the answer came back: whether it had been failed over and is
+    /// back.
+    pub fn answered(
+        &self,
+        node: &str,
+        grant: u64,
+        epoch: &str,
+        answer: &Answer,
+        at: Instant,
+    ) -> bool {
         let mut m = self.held();
         let h = self.entry(&mut m, node);
         h.settled = h.settled.max(at);
         match answer {
-            Answer::Taken => {
+            // Kept, the node answered at `at` -- the grant is one a later
+            // grant may acknowledge -- and holds a list this router does not
+            // know.
+            Answer::Taken | Answer::Kept => {
                 h.acked = at;
-                h.epoch = Some(epoch.to_string());
+                h.acked_grant = Some(grant);
+                h.epoch = match answer {
+                    Answer::Taken => Some(epoch.to_string()),
+                    _ => None,
+                };
                 h.refuses = false;
                 let back = std::mem::take(&mut h.lost);
                 // Back, it holds the tenants still placed on it again,
@@ -376,7 +629,8 @@ impl Leases {
         let mut m = self.held();
         let mut out = Vec::new();
         for (node, h) in m.iter_mut() {
-            if !h.refuses && !h.lost && !h.failing && lapsed(h, now, self.term) {
+            let term = self.term_of(h);
+            if !h.refuses && !h.lost && !h.failing && lapsed(h, now, term) {
                 h.failing = true;
                 out.push(node.clone());
             }
@@ -387,17 +641,19 @@ impl Leases {
     /// Whether `node`'s lease has certainly lapsed, now marked as failed
     /// over where it has: asked with the node's turn held
     /// ([`Leases::turn`]), so no grant to it that the router still waits on
-    /// is in flight -- one it took would run its lease on from the moment
-    /// it took it, and its answer, coming back after the suspicion, says it
-    /// did; one given up on is the module comment's hole. Ends the failover
-    /// [`Leases::suspects`] marked as under way either way.
+    /// is in flight -- its answer, coming back after the suspicion, says
+    /// the node is there, and a failover of a node that answers would be
+    /// for nothing; one given up on runs nothing past the answers that came
+    /// back (the module comment). Ends the failover [`Leases::suspects`]
+    /// marked as under way either way.
     pub fn confirm_lapse(&self, node: &str, now: Instant) -> bool {
         let mut m = self.held();
         let Some(h) = m.get_mut(node) else {
             return false;
         };
         h.failing = false;
-        if h.refuses || h.lost || !lapsed(h, now, self.term) {
+        let term = self.term_of(h);
+        if h.refuses || h.lost || !lapsed(h, now, term) {
             return false;
         }
         h.lost = true;
@@ -482,20 +738,20 @@ mod tests {
         assert!(l.suspects(after + Duration::from_secs(5)).is_empty());
         assert!(!l.confirm_lapse("n1", after + Duration::from_secs(5)));
         // It comes back, and says so once.
-        assert!(l.answered("n1", "e", &Answer::Taken, Instant::now()));
-        assert!(!l.answered("n1", "e", &Answer::Taken, Instant::now()));
+        assert!(l.answered("n1", 0, "e", &Answer::Taken, Instant::now()));
+        assert!(!l.answered("n1", 0, "e", &Answer::Taken, Instant::now()));
         assert_eq!(l.epoch("n1").as_deref(), Some("e"));
         // An answer that came back between the suspicion and the judgement,
         // a grant that was in flight, keeps it: nothing is failed over, and
         // it may be suspected again later.
         let later = Instant::now() + Duration::from_millis(115);
         assert_eq!(l.suspects(later), ["n1"]);
-        l.answered("n1", "e", &Answer::Taken, later);
+        l.answered("n1", 0, "e", &Answer::Taken, later);
         assert!(!l.confirm_lapse("n1", later));
         assert_eq!(l.suspects(later + Duration::from_millis(115)), ["n1"]);
         l.unsuspect("n1");
         // A node that takes no lease is never failed over.
-        l.answered("n2", "e", &Answer::Refuses, Instant::now());
+        l.answered("n2", 0, "e", &Answer::Refuses, Instant::now());
         assert!(l
             .suspects(Instant::now() + Duration::from_secs(60))
             .iter()
@@ -513,27 +769,39 @@ mod tests {
         l.standby();
         std::thread::sleep(Duration::from_millis(120));
         let before = Instant::now();
-        l.leading();
+        l.leading(|| None);
         l.know("n1");
         assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
         let led = Instant::now();
-        l.leading();
+        l.leading(|| None);
         l.know("n1");
         assert_eq!(l.suspects(led + Duration::from_millis(115)), ["n1"]);
     }
 
     /// A tenant withheld from a node is out of every list sent it, may be
-    /// promoted a lease and a tenth past the last grant the router stopped
-    /// waiting on, answered or not, and is the node's again once released
-    /// or once the node answers after its failover.
+    /// promoted a lease and a tenth past the last answer the node gave in
+    /// time -- a grant given up on since runs nothing -- and is the node's
+    /// again once released or once the node answers after its failover.
     #[test]
     fn a_withheld_tenant_is_named_by_no_grant_until_released() {
         let term = Duration::from_millis(100);
         let l = Leases::new(term);
-        let given_up = Instant::now();
-        l.answered("n1", "e", &Answer::Silent, given_up);
+        let answered = Instant::now();
+        l.answered("n1", 7, "e", &Answer::Taken, answered);
+        l.answered("n1", 8, "e", &Answer::Silent, answered + term);
         l.withhold("n1", "t");
-        assert_eq!(l.withheld_until("n1", "t"), Some(given_up + lapse(term)));
+        assert_eq!(l.withheld_until("n1", "t"), Some(answered + lapse(term)));
+        // A node from before numbered grants runs a lease from any grant it
+        // reads: past the last one the router stopped waiting on.
+        let old = Leases::new(term);
+        old.answered("n1", 7, "e", &Answer::Taken, answered);
+        old.unnumbered("n1");
+        old.answered("n1", 8, "e", &Answer::Silent, answered + term);
+        old.withhold("n1", "t");
+        assert_eq!(
+            old.withheld_until("n1", "t"),
+            Some(answered + term + lapse(term))
+        );
         let mut lists: std::collections::BTreeMap<String, Vec<String>> =
             [("n1".into(), vec!["t".into(), "u".into()])].into();
         l.withhold_from(&mut lists);
@@ -546,8 +814,78 @@ mod tests {
         l.know("n1");
         assert_eq!(l.suspects(late), ["n1"]);
         assert!(l.confirm_lapse("n1", late));
-        assert!(l.answered("n1", "e", &Answer::Taken, late));
+        assert!(l.answered("n1", 0, "e", &Answer::Taken, late));
         assert_eq!(l.withheld_until("n1", "t"), None);
+    }
+
+    /// Each grant to a node has a number of its own and acknowledges the
+    /// newest whose answer came back: none before one did, never one given
+    /// up on, one that was asked for the list neither. A node forgotten --
+    /// a standby's round -- is numbered afresh, from another start.
+    #[test]
+    fn a_grant_acknowledges_the_newest_answer_that_came_back() {
+        let l = Leases::new(Duration::from_millis(100));
+        let first = l.number("n1");
+        assert_eq!(first.acked, None);
+        let second = l.number("n1");
+        assert_eq!(second.grant, first.grant.wrapping_add(1));
+        l.answered("n1", first.grant, "e", &Answer::Taken, Instant::now());
+        assert_eq!(l.number("n1").acked, Some(first.grant));
+        for answer in [Answer::Silent, Answer::NeedsList] {
+            let given_up = l.number("n1");
+            l.answered("n1", given_up.grant, "e", &answer, Instant::now());
+            assert_eq!(l.number("n1").acked, Some(first.grant));
+        }
+        let before = l.number("n1").grant;
+        l.standby();
+        let afresh = l.number("n1");
+        assert_eq!(afresh.acked, None);
+        assert_ne!(afresh.grant, before.wrapping_add(1));
+        // Short: no lease, or less than would last to the next round's.
+        assert!(l.short(None) && l.short(Some(10)));
+        assert!(!l.short(Some(66)));
+    }
+
+    /// A node that has taken no grant of this router's is counted by the
+    /// longest lease the directory recorded; once it takes one -- not one
+    /// it answered and kept -- by this router's own. The record may come
+    /// down once this router has led a lease and a tenth of it, and not
+    /// before; a standby's round forgets all of it.
+    #[test]
+    fn a_node_unanswered_since_the_start_is_counted_by_the_longest_lease_recorded() {
+        let term = Duration::from_millis(100);
+        let l = Leases::new(term);
+        let before = Instant::now();
+        l.leading(|| Some(Duration::from_millis(1_000)));
+        l.know("n1");
+        l.know("n2");
+        let after = Instant::now();
+        // Past its own lease and a tenth, short of the recorded one's.
+        assert!(l.suspects(before + Duration::from_millis(1_000)).is_empty());
+        // n2 answers and keeps the lease it held; n3 takes a grant's list
+        // alone, running no lease; n1 takes one and runs it.
+        l.answered("n2", 1, "e", &Answer::Kept, after);
+        l.know("n3");
+        l.answered("n3", 1, "e", &Answer::Taken, after);
+        l.answered("n1", 1, "e", &Answer::Taken, after);
+        l.ran("n1");
+        let lapsed = after + Duration::from_millis(115);
+        assert_eq!(l.suspects(lapsed), ["n1"]);
+        assert!(l.confirm_lapse("n1", lapsed));
+        assert!(!l.lowerable(before + Duration::from_millis(1_000)));
+        let past = after + Duration::from_millis(1_115);
+        let mut late = l.suspects(past);
+        late.sort();
+        assert_eq!(late, ["n2", "n3"]);
+        assert!(l.lowerable(past));
+        l.lowered();
+        assert!(!l.lowerable(past));
+        // A standby forgets: promoted again, it counts by what it reads then.
+        l.standby();
+        assert!(l.unrecorded());
+        l.leading(|| None);
+        l.know("n3");
+        assert!(!l.lowerable(Instant::now() + Duration::from_secs(5)));
     }
 
     /// A router counts from its first round as the primary even where no
@@ -558,7 +896,7 @@ mod tests {
         let l = Leases::new(Duration::from_millis(100));
         std::thread::sleep(Duration::from_millis(120));
         let before = Instant::now();
-        l.leading();
+        l.leading(|| None);
         l.know("n1");
         assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
     }

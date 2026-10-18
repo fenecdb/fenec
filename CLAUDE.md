@@ -844,16 +844,126 @@ the next instance. The router cannot tell a node that is gone from one it cannot
 and guessing makes two primaries, so it promotes on its own only under a
 lease (`fenec-shard --auto-failover`, nodes `fenec-server --dir --lease`;
 `fenec-shard/src/lease.rs`, `fenec-http/src/lease.rs`): a node stops
-writing as its lease lapses by its own clock -- measured from when the grant
-came in, where the router measures from when the answer came back, and
-waits a tenth more -- and only then are its tenants promoted. One hole is
-older than all of this, and its fix is to come: a grant the router gave up
-on -- no answer within a third of a lease -- counts as no grant, yet the
-node takes it whenever it reads it, and grants carry no number a node could
-refuse a late one by; so a node stalled with one unread in its socket can
-take writes for a lease after the router promoted its tenants elsewhere
-(reproduced: a proxy holding grants back hands one to the node after the
-failover, and both copies answer writes 200). The fence is
+writing as its lease lapses by its own clock -- measured from a moment the
+router acknowledged, where the router measures from when that answer came
+back, and waits a tenth more -- and only then are its tenants promoted.
+Each grant is numbered (`grant`, per node from a random start a router
+process, `Leases::number`) and names the newest grant whose answer came
+back within the pool's third of a lease (`acked`); the node keeps when it
+answered each of its last 16 (`State::answered`, cleared as the holder
+changes) and runs its lease from the one acknowledged, never from a
+grant's reading (`fenec_http::lease::Numbered`, `grant_from`). Run from the
+reading, a grant the router gave up on (`Answer::Silent`) and the node read
+late -- held on its way, or left unread by a node stopped or slow -- was a
+whole lease after the router had failed the node over, both copies
+answering writes 200 (the review of #340's `late_grant.rs`), however late
+it came. Read late now, a grant acknowledges what the router had counted
+by its sending, a lease the failover outlasted; an answer that came back
+late is acknowledged by no grant; a number the node never answered, or
+answered for another holder, runs nothing; and a router's restart numbers
+afresh, so a grant of the one before, read late, names no number this one
+acknowledges. A grant is newer than the one the lease came from
+(`State::basis`) by the answer it acknowledges, then by its own number --
+one router process's, counted on as it sent them, the only grants that
+name one answer -- and taken whole where it is newer, its list with the
+lease `ms` from that answer, which may cut the lease held short; its list
+alone where the lease has lapsed; not at all otherwise. The list replaced
+on its own, as the design first had it, a late grant's list from before a
+failover named the tenant again beside the lease a newer grant ran
+(`late_grants.rs`'s `a_grant_read_late_takes_no_list_beside_a_newer_lease`);
+judged by the lease it would run, as this branch first had it, a router
+restarted or promoted with a shorter `--auto-failover` never cut a longer
+lease short, failed the node over by its own and left it writing beside
+the new primary, and a grant sent before another acknowledging the same
+answer, read after it, put its older list back (the review of #343,
+`a_router_restarted_with_a_shorter_lease_...`,
+`a_late_grant_acknowledging_the_same_answer_takes_nothing`). The node says
+whether it took a grant (`"took"`, which a node from before never says and
+which means taken), and one it answered and did not take -- the first of a
+router restarted or promoted, whose predecessor's lease runs -- is
+`Answer::Kept`: the grant acknowledging it goes at once, with the list, and
+is newer. Counted taken, the router believed the node held its list, and a
+create right after a restart had its schema refused (503) and was taken
+back. Two grants make a lease besides, so a grant whose answer says the
+lease is short -- none, or under half a lease, what a node new, restarted
+or back from a failover holds -- is followed at once by the one
+acknowledging it too (`Leases::short`): left to the next round, a tenant
+created with its schema was refused it (503), and so was the first write
+after every create in the lease tests. A router from before numbers sends
+none and its grant runs from the reading, as before, and a node from
+before them ignores them (`Leases::unnumbered`, said once): leased the old
+way rather than refused or failed over never, so a rolling upgrade in
+either order keeps every node writing and failed over on its own, the late
+grant open where either side is old. What leases do not cover: the node's
+lease runs on `Instant` (`CLOCK_MONOTONIC`, macOS's `CLOCK_UPTIME_RAW`),
+which stands still while a VM is stopped (kvmclock across a stop and a
+continue) or a machine suspended, so a node paused so wakes with lease left
+and writes beside the new primary until it runs out, and a write that
+passed the fence just before its process stopped lands once it resumes
+(the RUNBOOK's known gaps); a stall of 16 rounds or more can push the
+acknowledgement out of `answered`, the node holding no lease until the
+grant after, sent at once; two directories leasing one node -- a
+misconfiguration -- can take it in turns as each other's lease lapses,
+neither holding one for long. A router started with a shorter lease than
+the one before it -- restarted, or a standby promoted -- counted a node it
+never reached by its own: cut off across the change, the node held the
+longer lease and wrote while its tenants were failed over. The directory
+records the longest lease a router leasing from it may have granted
+(`leasing`, one row, written before a router's first grant where its own
+is longer -- `Router::grant_term`, once a process; no block is written at
+every start to ride in -- and sent to the standbys before any grant, as a
+move's flip is, `SENT_WAIT` at most); a router counts a node by that record
+(`Leases::inherited`, read as it leads) until the node has run a lease from
+one of its grants (`Held::own`, set by `Leases::ran` on the node's
+`"ran":true`, never by `Kept`, never by a take of the list alone), and
+lowers it to its own once it has led a lease and a tenth of it
+(`Leases::lowerable`): every lease granted before it led has run out, and
+one started after it counts by what may still run. Never lowered, one 20 s
+lease would have every router after it wait 22 s for a node it never
+reached. Set by any `Taken`, a grant taken for its list alone -- a
+restarted router's first, acknowledging nothing, on a node whose lease had
+lapsed -- had the node counted by the router's own lease while a held grant
+of the router before, acknowledging an answer the node's ring kept (a
+restart keeps the holder), ran the longer one again: two primaries (the
+review of #343's probe, `a_take_of_the_list_alone_...`). The node says
+`ran` as it says `took`, and a node from before says neither, so it stays
+counted by the record. A raise that cannot be written grants no longer than
+the record, or this router's own where there is none: refused, every
+node's lease lapsed and every node was failed over by a router whose
+directory then refused the failovers too. The leasing thread's rounds come
+a third of the lease granted apart (`Leases::granting`, the thread woken
+as a grant finds it shorter, `grants_short`), and its first at once: a
+third of its own apart, a 20 s router over a 1 s record granted a second
+every 6.7 s and the node held no lease in 158 of 187 samples, and the
+first round a third of its own lease after the start left a node without
+a lease from the end of a shorter one before it -- a router whose lease
+the record was raised to as well (`late_grants.rs`'
+`a_router_that_cannot_record_its_lease_renews_at_the_lease_it_grants`, 84
+of 113 samples without on e5b8413e). A thread finding the record raised
+by another of this router's waits for the standbys too before its grant
+(`standbys_sent`, at once once sent): each node's grant is a thread, and
+the second node's went while the first waited. What it does not cover: the first
+start after upgrading from a router without the record finds none and
+counts by its own lease, and a record is a directory's, so a node moved from
+the global router's leasing to a region's is counted by the region's alone
+(the RUNBOOK says how to lower a lease and move a node). A router from
+before the record writes and reads none (`late_grants.rs`'
+`..._waits_out_a_node_it_never_reaches`, a restart and a standby promoted
+at 1 s after 10 s, each failing with the record ignored or never written,
+and `a_router_that_cannot_record_its_lease_grants_no_longer_than_the_record`).
+Cut off, a node
+stops about a round sooner, its lease run from the grant before the last it
+read: at a lease of a second it stopped 386-406 ms after the cut against
+main's 714-777, its 10 tenants writing again on their replicas 1.27-1.36 s
+after against 1.26-1.42, four runs a side in ABBA turns; in a region keeping
+its own directory 0.38-0.63 s and 1.41-1.70 against 0.67-0.98 and 1.35-1.73,
+ten a side (at 5 s the bench cuts before the first round, so the node's
+lease runs from its tenants' creates' grants: 3.9-4.1 s against 3.9-4.3). A
+node's first create with a schema, its second grant sent at once, took 8.8
+ms either way, eight a side; the router's added p50 stayed 20.5 and 20.6 us
+against 20.5 in two sets of sixteen ABBA rounds (per round -0.3 to +0.4,
+one +1.3; nothing on the path changed), and `fenec-shard`'s `__text` grew 64
+bytes, `fenec-server`'s 2.3 KB. The fence is
 the engine's (`Database::set_fence`), asked in `commit` as a block lands and
 in `may_write` before a schema change or a maintenance, so every write path
 honours it; asked as a lone write started too, it took a `put` from 827 to
@@ -879,11 +989,10 @@ sent at once, put the list from before the create back, the new tenant
 refused on its node (503) until the next round. A lapse a round suspects
 (`Leases::suspects`) is judged again in the node's turn by a failover on a
 thread of its own (`fail_over_lapsed`, `Leases::confirm_lapse`): no grant
-to the node that the router still waits on is in flight then -- one it took
-runs its lease on from the moment it took it, and an answer saying so that
-comes back is counted, which the leasing thread had because it ran the
-failover between rounds; one the router gave up on is the hole above --
-and the turn is held
+to the node that the router still waits on is in flight then -- an answer
+that comes back says the node is there, which the leasing thread had
+because it ran the failover between rounds; one the router gave up on runs
+nothing -- and the turn is held
 until the node was sent the list the failover left, so no grant over a
 list read before it lands after; it is let go of before the other nodes'
 grants are waited for, or two nodes failed over at once waited on each
@@ -904,10 +1013,12 @@ of, the copy was the one the repair holding it had just attached,
 following the node gone, and the tenant went onto a file holding none of
 it, its rows wiped from its old node once that came back and followed it
 (the review's repro). It is out of the node's grants from the failover on
-(`Leases::withhold`) and promoted no sooner than a lease and a tenth past
-the router's last grant to the node, answered or given up: left in the
-list, every grant for as long as a move held it named it, and the
-late-grant hole stretched from the failover's lease and a tenth to the
+(`Leases::withhold`), which would hand it back to the node as it answered
+again, and promoted no sooner than a lease and a tenth past the node's last
+answer -- at once, the failover's lapse being that; for a node from before
+numbered grants, which runs a lease from any grant it reads, past the
+router's last grant to it, answered or given up (`settled`), as before
+them, the late-grant hole's window a grant naming it stretched to the
 whole wait. The wait ends at `HELD_WAIT` (an hour), the node gone from the
 directory or this router demoted -- `promote_on` asks `following()` before
 every promotion -- the tenant left where it is and named again; and a pair
@@ -984,8 +1095,8 @@ starts set, so one promoted before a round of its own counts from its first
 round too, and a router primary from its start from its first round, a
 third of a lease after it at most; a node without
 `--lease` is never failed over on its own. A lease of a second: a node cut
-off stopped writing 697 ms after, its 10 tenants took writes again 1.29 to
-1.33 s after. A
+off stopped writing 386-406 ms after (697 when it ran its lease from its
+last renewal), its 10 tenants took writes again 1.27 to 1.36 s after. A
 write is on the standby 0.089 ms after the primary answered it (p99 0.448),
 and 20 tenants failed over in 63.5 to 79 ms, the medians of three rounds
 (`make shard-bench`). A standby waits
@@ -1114,10 +1225,11 @@ global one, its standby, the region's -- writing on the new placement once
 healed, and a promoted region's router fencing the one before at the node,
 grant and promotion alike. Cut off
 from the global router, a region's node cut off from its router stopped
-writing 0.67-0.93 s after the cut and its 10 tenants wrote again on their
-replicas 1.30-1.56 s after at a lease of 1 s, ten runs (one at a load of 7,
-2.0-2.1), as the global router's own failover beside it (1.25-1.45), and
-3.9-4.5 and 5.9-6.5 s at 5 s (`make shard-bench ARGS=regions`); a relayed
+writing 0.38-0.63 s after the cut (0.67-0.98 when it ran its lease from its
+last renewal) and its 10 tenants wrote again on their replicas 1.41-1.70 s
+after at a lease of 1 s, ten runs, as the global router's own failover
+beside it (1.27-1.36), and 3.9-4.1 and 5.5-6.7 s at 5 s (`make shard-bench
+ARGS=regions`); a relayed
 request paid 32-42 us p50 over one to the region's router, a router's 24 and
 the loopback proxy standing for the link. Against main in ABBA turns the
 router's added p50 stayed 23.6 us (15.5-24.0, twelve runs at a load of 2-3)
@@ -6606,13 +6718,17 @@ replica, the router's failover read off its log against the killed
 container's end (`failed_over_after`, both by the Docker VM's clock). Three
 runs at a lease of 2 s and an upstream timeout of 4 s, what they saw and
 not bounds (a reviewer's machine saw a repair of 1.07 s, writes stopping
-1.31 s after a router's kill and gaps of 28-30 ms): 41 577
+1.31 s after a router's kill before grants were numbered and gaps of 28-30
+ms): 41 577
 acknowledged, 0 lost; the node failed over 1.92, 2.56 and 1.90 s after the
 kill, its tenants' writers writing again 3.90, 3.97 and 3.93 s after the
 kill, the tenant whose replica it held losing 17, 18 and 17 ms at most, every other tenant
 16, 18 and 17; the repair 0.51, 0.51 and 0.50 s after the node's start; a region
 whose router was killed stopped writing 1.67, 1.61 and 1.66 s after and wrote
-again 0.43-0.51 s after its standby's promotion. The writers' figure
+again 0.43-0.51 s after its standby's promotion -- since grants are
+numbered, 1.02, 0.83 and 1.00 s and 0.42-0.48, the node killed failed over
+1.90, 2.06 and 2.56 s after, its writers again 3.90-3.94 s, 40 588
+acknowledged and 0 lost (three runs of this kit's drill). The writers' figure
 is the upstream timeout's, not the failover's: a writer's request in
 flight to the dead node waits there until the router lets it go, which at
 fenec-shard's 60 s was the writer's own 5 s client timeout, every run's
