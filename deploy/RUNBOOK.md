@@ -386,9 +386,9 @@ node stops writing as its lease lapses by its own clock; the router, a
 tenth of a lease later, promotes each of its tenants on its replica in the
 region's other zone and routes it there. The node runs its lease from the
 last grant whose answer the router had, not from when it reads a grant: a
-node stalled with grants unread -- a process paused, a link delivering
-late -- takes no write from them once it wakes, and a node cut off stops
-writing two thirds of a lease after its last renewal at the most.
+grant it reads late -- held on its way, or left unread by a node stopped or
+slow -- gives it no write, and a node cut off stops writing two thirds of a
+lease after its last renewal at the most.
 
 What a failover keeps: under `--sync always` a write is answered once it is
 on the primary's disk and written into its replica's stream -- handed to
@@ -900,6 +900,20 @@ times and `lost`, which must be 0. No port is fixed and everything it
 made is removed; `DRILL_KEEP=1` leaves it for a look.
 
 ## Known gaps
+
+- **A node paused or suspended.** A node measures its lease on the
+  system's monotonic clock, which stands still while its virtual machine is
+  paused (KVM's clock across a stop and a continue) or the machine is
+  suspended. Woken, it has lease left, and writes beside its tenants' new
+  primaries until that runs out -- two primaries for up to a lease -- and a
+  write that passed the lease's check just before its process stopped lands
+  once it resumes. Do not pause or suspend a node's machine; stop the node
+  (`systemctl stop fenec-node`) first.
+- **A router started with a shorter lease** than the one before it
+  (`--auto-failover` lowered, then a restart or a standby's promotion)
+  counts a node it does not reach by the new one, while the node's lease
+  from before may run to the old one. Lower it with every node answering,
+  and let a round pass before anything else changes.
 
 - **No scrape-only token.** `/_metrics` takes a node's data or admin token,
   a router's `--token`.

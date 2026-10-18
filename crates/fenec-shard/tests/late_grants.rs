@@ -19,13 +19,14 @@
 #[path = "lease_nodes.rs"]
 mod nodes;
 
+use fenec_core::prelude::Database;
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
 use nodes::*;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// A proxy in front of a node, which forwards until told otherwise: to
@@ -302,6 +303,27 @@ fn failed_over(port: u16, mut round: impl FnMut()) {
     }
 }
 
+/// A write to acme through the router once its failover is done, as a
+/// client sends it: the directory flips before the grant naming acme
+/// reaches its new node, which answers a write in between 503 with
+/// `retry_after` -- the one answer waited out. Asked once, it failed at
+/// background QoS, the grant still on its way. `round` runs between tries.
+fn new_primary_writes(port: u16, mut round: impl FnMut()) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, body) = query(port, "/t/acme/query", r#"put notes {title: "new primary"}"#);
+        if status == 200 {
+            return;
+        }
+        assert!(
+            status == 503 && body.contains("retry_after") && Instant::now() < deadline,
+            "acme's new primary: {status} {body}"
+        );
+        round();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// n1 writing acme straight to it, as a client that still reaches it would.
 fn n1_writes_acme(nodes: &[Node; 3]) -> (u16, String) {
     query(
@@ -351,8 +373,7 @@ fn a_grant_read_late_runs_no_lease_past_its_node_s_failover() {
         std::thread::sleep(Duration::from_millis(10));
     }
     failed_over(port, || {});
-    let (status, body) = query(port, "/t/acme/query", r#"put notes {title: "new primary"}"#);
-    assert_eq!(status, 200, "{body}");
+    new_primary_writes(port, || {});
 
     let grants = stall.grants();
     for (i, grant) in grants.iter().enumerate() {
@@ -403,8 +424,7 @@ fn a_grant_whose_answer_is_lost_runs_no_lease() {
     stall.mute();
     stall.take_next(br#""primaries":"#);
     failed_over(port, || {});
-    let (status, body) = query(port, "/t/acme/query", r#"put notes {title: "new primary"}"#);
-    assert_eq!(status, 200, "{body}");
+    new_primary_writes(port, || {});
     let (direct, body) = n1_writes_acme(&nodes);
     assert_ne!(
         direct, 200,
@@ -593,17 +613,22 @@ fn answer_scripted(conn: TcpStream, kept: &Mutex<Vec<String>>, token: &str, scri
 }
 
 /// What a node says of its lease, as a grant's answer: `left` its
-/// milliseconds left (`None`, none), and the grant's number answered.
-fn lease_answer(left: Option<u64>, numbered: bool) -> Option<(u16, String)> {
+/// milliseconds left (`None`, none), whether it took the grant, and the
+/// grant's number answered -- a node from before numbers says neither.
+fn lease_answer(left: Option<u64>, took: bool, numbered: bool) -> Option<(u16, String)> {
     let left = left.map_or("null".to_string(), |l| l.to_string());
-    let grant = if numbered {
-        r#","grant":"0000000000000001""#
-    } else {
-        ""
+    let (took, grant) = match numbered {
+        true => (
+            format!(r#""took":{took},"#),
+            r#","grant":"0000000000000001""#,
+        ),
+        false => (String::new(), ""),
     };
     Some((
         200,
-        format!(r#"{{"epoch":"e","primaries":0,"left_ms":{left},"authority":"","term":0{grant}}}"#),
+        format!(
+            r#"{{{took}"epoch":"e","primaries":0,"left_ms":{left},"authority":"","term":0{grant}}}"#
+        ),
     ))
 }
 
@@ -612,25 +637,30 @@ fn lease_answer(left: Option<u64>, numbered: bool) -> Option<(u16, String)> {
 /// grant sent again with the list after a 412 acknowledges what the first
 /// did, under a number of its own; one given up on is acknowledged by no
 /// grant after it. A node whose answer says its lease is short -- none, or
-/// less than lasts to the next round -- is sent at once the grant that
-/// acknowledges it, and a node from before numbered grants, whose lease
+/// less than lasts to the next round -- or that it did not take the grant
+/// is sent at once the grant that acknowledges it, with the list where it
+/// did not take it; and a node from before numbered grants, whose lease
 /// runs from each grant, is not.
 #[test]
 fn each_grant_acknowledges_the_newest_answer_that_came_back() {
     let (addr, grants) = scripted_node("adm-script", |n, _| match n {
         // The first grant, then the one sent at once acknowledging it.
-        0 => lease_answer(None, true),
-        1 => lease_answer(Some(3_000), true),
+        0 => lease_answer(None, true, true),
+        1 => lease_answer(Some(3_000), true, true),
         // A round: asked for the list, then the grant sent with it.
         2 => Some((412, r#"{"error":"send the primaries"}"#.into())),
-        3 => lease_answer(Some(2_500), true),
+        3 => lease_answer(Some(2_500), true, true),
         // A round given up on.
         4 => None,
         // A round whose answer is short: acknowledged at once.
-        5 => lease_answer(Some(100), true),
-        6 => lease_answer(Some(3_000), true),
+        5 => lease_answer(Some(100), true, true),
+        6 => lease_answer(Some(3_000), true, true),
+        // A round not taken, a lease from before running long: acknowledged
+        // at once, with the list.
+        7 => lease_answer(Some(3_000), false, true),
+        8 => lease_answer(Some(3_000), true, true),
         // A node from before numbers, holding no lease by what it says.
-        _ => lease_answer(None, false),
+        _ => lease_answer(None, true, false),
     });
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
@@ -648,11 +678,11 @@ fn each_grant_acknowledges_the_newest_answer_that_came_back() {
     let body = format!(r#"{{"addr":"{addr}","token":"adm-script"}}"#);
     let (status, body) = call(port, "PUT", "/_shard/nodes/n1", &body, None);
     assert!(status == 200 || status == 201, "{body}");
-    for _ in 0..5 {
+    for _ in 0..6 {
         router.lease_round();
     }
     let sent = grants.lock().unwrap().clone();
-    assert_eq!(sent.len(), 8, "{sent:#?}");
+    assert_eq!(sent.len(), 10, "{sent:#?}");
     let grant = |i: usize| hex_field(sent[i].as_bytes(), "grant").unwrap();
     let acked = |i: usize| hex_field(sent[i].as_bytes(), "acked");
     for i in 1..sent.len() {
@@ -692,4 +722,159 @@ fn each_grant_acknowledges_the_newest_answer_that_came_back() {
         "the short lease was not acknowledged at once"
     );
     assert_eq!(acked(7), Some(grant(6)));
+    assert!(!sent[7].contains("primaries"));
+    assert_eq!(
+        acked(8),
+        Some(grant(7)),
+        "the grant not taken was not acknowledged at once"
+    );
+    assert!(sent[8].contains("\"primaries\":[]"), "{}", sent[8]);
+    assert_eq!(acked(9), Some(grant(8)));
+}
+
+/// A router over the directory `db` holds, leasing for `term`, its rounds
+/// the test's: two of them over one directory are a router and the same
+/// router restarted, the same holder.
+fn router_on(db: &Arc<RwLock<Database>>, term: Duration) -> (Arc<Router>, u16) {
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        upstream_timeout: Duration::from_secs(10),
+        replicas: true,
+        auto_failover: Some(term),
+        ..Config::default()
+    };
+    let router = Router::new(Directory::load(Arc::clone(db)).unwrap(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let serving = Arc::clone(&router);
+    std::thread::spawn(move || {
+        let _ = serving.serve_on(listener);
+    });
+    (router, port)
+}
+
+/// Three nodes registered with a router over `db`, leasing for `term`.
+fn registered(
+    tag: &str,
+    db: &Arc<RwLock<Database>>,
+    term: Duration,
+) -> ([Node; 3], Arc<Router>, u16) {
+    let nodes = [1, 2, 3].map(|i| node(&format!("{tag}{i}"), true));
+    let (router, port) = router_on(db, term);
+    for (i, n) in nodes.iter().enumerate() {
+        let body = format!(
+            r#"{{"addr":"{}","token":"adm-{tag}{}"}}"#,
+            n.proxy.addr,
+            i + 1
+        );
+        let (status, body) = call(
+            port,
+            "PUT",
+            &format!("/_shard/nodes/n{}", i + 1),
+            &body,
+            None,
+        );
+        assert!(status == 200 || status == 201, "{body}");
+    }
+    (nodes, router, port)
+}
+
+/// A router restarted over its directory -- the same holder -- whose first
+/// grant to a node is a create's, with a schema: the node's lease from the
+/// router before still runs, so the grant, acknowledging nothing of the new
+/// router's, is not taken, its list naming the new tenant with it. Counted
+/// taken, the router believed the node held the list, the schema was
+/// refused 503 and the create taken back (the review of #343). The node
+/// says it did not take it, and the grant acknowledging it goes at once,
+/// with the list.
+#[test]
+fn a_create_with_a_schema_right_after_a_router_restart() {
+    let db = Arc::new(RwLock::new(Database::new()));
+    let (nodes, before, _) = registered("rrs", &db, TERM);
+    before.lease_round();
+    before.lease_round();
+    let (status, lease) = call(nodes[0].port, "GET", "/_admin/lease", "", Some("adm-rrs1"));
+    assert_eq!(status, 200, "{lease}");
+    assert!(
+        !lease.contains("\"left_ms\":0"),
+        "n1 holds no lease before the restart: {lease}"
+    );
+    // Restarted: no round of its own yet.
+    let (_after, port) = router_on(&db, TERM);
+    let (status, body) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme",
+        r#"{"node":"n1","schema":"create collection notes (title text)"}"#,
+        None,
+    );
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = query(port, "/t/acme/query", r#"put notes {title: "one"}"#);
+    assert_eq!(status, 200, "{body}");
+}
+
+/// A router restarted over its directory -- the same holder -- with a
+/// shorter lease, 20 s then 1 s, and the node then cut off. A newer grant
+/// was judged by the lease it would run, so none of the new router's cut
+/// the 20 s one short: it failed n1 over 1.1 s after n1's last answer, and
+/// n1 took acme's writes beside the new primary, which, its own grants not
+/// taken either, refused them (the review of #343). The new router's
+/// first grant is answered as not taken, the one acknowledging it goes at
+/// once and runs the node's lease from it, 1 s.
+#[test]
+fn a_router_restarted_with_a_shorter_lease_fails_over_a_node_on_the_shorter_one() {
+    let db = Arc::new(RwLock::new(Database::new()));
+    let (nodes, before, port) = registered("shl", &db, Duration::from_secs(20));
+    before.lease_round();
+    let (status, body) = call(
+        port,
+        "PUT",
+        "/_shard/tenants/acme",
+        r#"{"node":"n1"}"#,
+        None,
+    );
+    assert_eq!(status, 201, "{body}");
+    let path = "/t/acme/query";
+    let (status, body) = query(port, path, "create collection notes (title text)");
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = query(port, path, r#"put notes {title: "one"}"#);
+    assert_eq!(status, 200, "{body}");
+    let replica = placed(port, "acme").1.expect("acme has a replica");
+    until(
+        by_name(&nodes, &replica).port,
+        path,
+        "get notes select title",
+        "one",
+    );
+    before.lease_round();
+    let lease = || call(nodes[0].port, "GET", "/_admin/lease", "", Some("adm-shl1")).1;
+    let left = number_after(&lease(), "\"left_ms\":");
+    assert!(left > 10_000.0, "n1 holds no 20 s lease: {}", lease());
+
+    // Restarted with a lease of a second: one round, and n1 is cut off.
+    let (after, port) = router_on(&db, Duration::from_secs(1));
+    after.lease_round();
+    let left = number_after(&lease(), "\"left_ms\":");
+    assert!(
+        left <= 1_000.0,
+        "the 20 s lease runs on under the 1 s router: {}",
+        lease()
+    );
+    nodes[0].proxy.cut();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while placed(port, "acme").0 == "n1" {
+        assert!(Instant::now() < deadline, "acme was never failed over");
+        after.lease_round();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (direct, body) = query(nodes[0].port, path, r#"put notes {title: "old primary"}"#);
+    assert_ne!(
+        direct,
+        200,
+        "two primaries: n1 took acme's write after the 1 s router failed it over ({body}); \
+         n1's lease: {}",
+        lease()
+    );
+    // The new primary takes them: the grants naming acme there are taken.
+    new_primary_writes(port, || after.lease_round());
 }

@@ -1003,7 +1003,12 @@ impl Router {
                     Ok((200, b)) => {
                         left = left_ms(&b);
                         answered_number = b.windows(8).any(|w| w == b"\"grant\":");
-                        lease::Answer::Taken
+                        // A node from before says nothing, and took it.
+                        const KEPT: &[u8] = b"\"took\":false";
+                        match b.windows(KEPT.len()).any(|w| w == KEPT) {
+                            true => lease::Answer::Kept,
+                            false => lease::Answer::Taken,
+                        }
                     }
                     Ok((412, _)) => lease::Answer::NeedsList,
                     Ok((409, b)) if b.windows(9).any(|w| w == b"\"held_by\"") => {
@@ -1018,6 +1023,12 @@ impl Router {
             }
             match answer {
                 lease::Answer::NeedsList if !with_list => with_list = true,
+                // Not taken: the grant acknowledging it, with the list, is
+                // newer than what the node holds, and is. Left to the next
+                // round, a create right after a router's restart had its
+                // list dropped and its schema refused (503), and a lease
+                // longer than this router's ran on for that round.
+                lease::Answer::Kept if !followed => (followed, with_list) = (true, true),
                 // A node from before numbered grants runs a lease from each:
                 // one more is for nothing. The list it took goes no more.
                 lease::Answer::Taken if !followed && answered_number && leases.short(left) => {

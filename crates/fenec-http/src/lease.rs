@@ -14,21 +14,39 @@
 //! it reads the grant. The router measures the lease from when that answer
 //! came back, which is later, and waits a tenth longer besides: by its own
 //! clock the node stops first. Run from when it read the grant, as it was,
-//! a grant the router gave up on -- the node stopped, its machine paused,
-//! the request held on its way -- and read after the router had failed the
-//! node over took a whole lease, the old primary writing beside the new
-//! one, and no bound on the clocks helped since the stall had none. Now a
-//! grant read late names an acknowledgement as old as the router's last
-//! answer from the node, whose lease ran out before the failover; an
+//! a grant the router gave up on -- held on its way, or left unread by a
+//! node stopped or slow -- and read after the router had failed the node
+//! over took a whole lease, the old primary writing beside the new one.
+//! Now a grant read late names an acknowledgement as old as the router's
+//! last answer from the node, whose lease ran out before the failover; an
 //! answer the router gave up on is acknowledged by no grant; a number this
 //! node never answered, or answered for another holder, runs nothing. So a
 //! node needs two grants for a lease, the second acknowledging the first:
 //! the router sends it at once where a node's answer says its lease is
-//! short. And a grant's list goes with its lease: a grant is taken whole
-//! -- its list and the lease it runs -- or, where it would cut short a
-//! lease that runs, not at all. Taken apart, a late one carrying a list
-//! from before a failover would name a tenant promoted elsewhere beside
-//! the lease a newer grant runs.
+//! short, or that it did not take the grant (`took`).
+//!
+//! **A grant is taken whole where it is newer.** Newer than the grant the
+//! lease came from by the answer it acknowledges, then by its own number;
+//! taken whole -- its list and the lease it runs, which may cut the one
+//! held short -- where it is newer, its list alone where the lease has
+//! lapsed, and not at all otherwise. Taken apart, a late grant carrying a
+//! list from before a failover would name a tenant promoted elsewhere
+//! beside the lease a newer grant runs; judged by the lease it would run,
+//! a router restarted or promoted with a shorter lease never cut a longer
+//! one short, and the node wrote on after that router failed it over.
+//!
+//! **What it does not cover.** The lease is measured on [`Instant`] --
+//! `CLOCK_MONOTONIC` on Linux, `CLOCK_UPTIME_RAW` on macOS -- which stands
+//! still while a virtual machine is stopped (KVM's kvmclock across a stop
+//! and a continue) or a machine suspended: a node paused so wakes with
+//! lease left, and writes beside the new primary until it runs out, no
+//! late grant needed. A write that passed the fence just before its
+//! process stopped lands once it resumes. A stall of `ANSWERED` (16)
+//! rounds or more can push the acknowledgement out of the grants kept: the
+//! node then holds no lease until the router's next grant, which it sends
+//! at once.
+//! Two directories leasing one node -- a misconfiguration -- can take it in
+//! turns as each other's lease lapses, neither holding one for long.
 //!
 //! **The lease names tenants.** A node the router failed over comes back
 //! holding the files of tenants now served elsewhere, primaries' files
@@ -46,7 +64,8 @@
 //! and none from another directory while that lease runs: a router
 //! promoted over one that is not gone -- cut off, or come back from a
 //! pause -- fences it at every node that has heard from the new one, and
-//! two directories that both name a node cannot take turns at it. A router
+//! two directories that both name a node cannot take turns at it while a
+//! lease runs. A router
 //! from before terms sends none and is the global directory at term 0, so
 //! a deployment that never forks a history leases as it did.
 //!
@@ -87,6 +106,10 @@ struct State {
     /// number the ones of a router before its restart could have pushed
     /// out every one of its own.
     answered: VecDeque<(u64, Instant)>,
+    /// What the lease and the list held came from: when the answer their
+    /// grant acknowledged was given, and that grant's number. `None` where
+    /// no numbered grant ran them.
+    basis: Option<(Instant, u64)>,
 }
 
 /// How many answered grants a node keeps. The router acknowledges the one
@@ -201,7 +224,7 @@ impl Lease {
         primaries: Option<Vec<String>>,
     ) -> Result<(), NeedList> {
         match self.grant_from(&Holder::default(), ms, epoch, primaries, None) {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(Refusal::NeedList(held)) => Err(NeedList(held)),
             Err(Refusal::Superseded(_)) => {
                 let s = self.state.read().unwrap_or_else(|e| e.into_inner());
@@ -210,12 +233,14 @@ impl Lease {
         }
     }
 
-    /// Takes a grant -- over `primaries` when they come with it, over the
+    /// Answers a grant -- over `primaries` when they come with it, over the
     /// list already held when `epoch` names it -- unless the lease held
-    /// supersedes `holder`'s. Numbered, it runs the lease `ms` from when
-    /// this node answered the grant it acknowledges, its list and that
-    /// lease taken together, and only where they cut short no lease that
-    /// runs; unnumbered -- a router from before numbers -- `ms` from now.
+    /// supersedes `holder`'s, and says whether it took it: whether its list
+    /// is the one held now. Numbered, it runs the lease `ms` from when this
+    /// node answered the grant it acknowledges, its list and that lease
+    /// taken together where it is newer than the grant they came from, and
+    /// its list alone where the lease has lapsed; unnumbered -- a router
+    /// from before numbers -- `ms` from now.
     pub fn grant_from(
         &self,
         holder: &Holder,
@@ -223,7 +248,7 @@ impl Lease {
         epoch: &str,
         primaries: Option<Vec<String>>,
         numbered: Option<Numbered>,
-    ) -> Result<(), Refusal> {
+    ) -> Result<bool, Refusal> {
         let mut s = self.state.write().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let running = s.until.is_some_and(|u| now < u);
@@ -239,11 +264,13 @@ impl Lease {
             take_list(&mut s, epoch, primaries);
             s.holder = Some(holder.clone());
             s.until = Some(now + Duration::from_millis(ms));
-            return Ok(());
+            s.basis = None;
+            return Ok(true);
         };
         // Another holder's numbers name none of its grants.
         if s.holder.as_ref() != Some(holder) {
             s.answered.clear();
+            s.basis = None;
             s.holder = Some(holder.clone());
         }
         let from = numbered.acked.and_then(|acked| {
@@ -252,31 +279,42 @@ impl Lease {
                 .find(|(grant, _)| *grant == acked)
                 .map(|(_, at)| *at)
         });
-        let runs = from.map(|at| at + Duration::from_millis(ms));
-        // Taken whole or not at all. A grant read late runs nothing past
-        // what its acknowledgement does, and one whose list named a tenant
-        // since promoted elsewhere, taken beside the lease a newer grant
-        // runs, would have this node write it again: the list and the
-        // lease go together, from the grant whose lease is the longest.
-        // A lease that has lapsed is cut short by nothing, so any grant
-        // may set the list -- what a node back from a failover, or new to
-        // this holder, writes once a grant acknowledges one of these.
-        let whole = match (runs, s.until) {
-            _ if !running => true,
-            (Some(runs), Some(until)) => runs >= until,
-            _ => false,
-        };
-        if whole {
-            take_list(&mut s, epoch, primaries);
-            if let Some(runs) = runs {
-                s.until = Some(s.until.map_or(runs, |until| until.max(runs)));
+        // Newer than the grant the lease came from: by the answer it
+        // acknowledges, then -- the same answer, which only grants of one
+        // router process name -- by its own number, counted on as that
+        // router sent them. Judged by the lease it would run, a grant of a
+        // router restarted with a shorter lease, or promoted over one with
+        // a longer, never cut the longer one short: the node wrote on for
+        // it after the new router had failed it over, two primaries; and a
+        // grant sent before another acknowledging the same answer, read
+        // after it, ran a lease as long and put its older list back.
+        let newer = match (from, s.basis) {
+            (Some(at), Some((was, by))) => {
+                at > was || (at == was && (numbered.grant.wrapping_sub(by) as i64) > 0)
             }
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        // Taken whole or not at all where a lease runs: a grant read late
+        // runs nothing past what its acknowledgement does, and one whose
+        // list named a tenant since promoted elsewhere, taken beside the
+        // lease a newer grant runs, would have this node write it again.
+        // A lease that has lapsed is held to nothing, so any grant may set
+        // the list -- what a node back from a failover, or new to this
+        // holder, writes once a newer grant runs it a lease.
+        let took = !running || newer;
+        if took {
+            take_list(&mut s, epoch, primaries);
+        }
+        if let (true, Some(at)) = (newer, from) {
+            s.until = Some(at + Duration::from_millis(ms));
+            s.basis = Some((at, numbered.grant));
         }
         if s.answered.len() == ANSWERED {
             s.answered.pop_front();
         }
         s.answered.push_back((numbered.grant, now));
-        Ok(())
+        Ok(took)
     }
 
     /// Whether a router naming itself `holder` may promote or re-point a
@@ -597,24 +635,115 @@ mod tests {
             .is_ok());
         assert!(l.allows("acme").is_err() && l.allows("b").is_ok());
         // Lapsed, a grant sets the list, and runs no lease past its
-        // acknowledgement's.
+        // acknowledgement's: a lease of 20 ms, asked of once the clock has
+        // gone past it, never while it may still run.
         let l = Lease::new();
-        assert!(l
-            .grant_from(&us, 20, "e1", with(&["acme"]), numbered(1, None))
-            .is_ok());
-        assert!(l
-            .grant_from(&us, 20, "e1", None, numbered(2, Some(1)))
-            .is_ok());
-        assert!(l.allows("acme").is_ok());
+        let took = |l: &Lease, ms, epoch, list, n| l.grant_from(&us, ms, epoch, list, n).ok();
+        assert_eq!(
+            took(&l, 20, "e1", with(&["acme"]), numbered(1, None)),
+            Some(true)
+        );
+        assert_eq!(took(&l, 20, "e1", None, numbered(2, Some(1))), Some(true));
         std::thread::sleep(Duration::from_millis(40));
-        assert!(l
-            .grant_from(&us, 20, "e2", with(&["b"]), numbered(3, Some(1)))
-            .is_ok());
+        // The same answer acknowledged, by a later grant: newer, and taken.
+        assert_eq!(
+            took(&l, 20, "e2", with(&["b"]), numbered(3, Some(1))),
+            Some(true)
+        );
         assert!(l.allows("b").unwrap_err().contains("lapsed"));
-        assert!(l
-            .grant_from(&us, 60_000, "e2", None, numbered(4, Some(3)))
-            .is_ok());
+        // One acknowledging nothing, read now: its list, and no lease.
+        assert_eq!(
+            took(&l, 60_000, "e3", with(&["c"]), numbered(0, None)),
+            Some(true)
+        );
+        assert!(l.allows("c").unwrap_err().contains("lapsed"));
+        assert_eq!(
+            took(&l, 60_000, "e2", with(&["b"]), numbered(4, Some(3))),
+            Some(true)
+        );
         assert!(l.allows("b").is_ok() && l.allows("acme").is_err());
+    }
+
+    /// Two grants acknowledging the same answer -- the second sent once the
+    /// first went unanswered, `acked` unmoved -- are told apart by their
+    /// numbers: the one sent first, held on its way and read after the
+    /// other, takes nothing. Judged by the lease each would run, the two
+    /// were equal, and the late one put its list back -- naming a tenant
+    /// since promoted elsewhere -- beside the lease that ran (the review of
+    /// #343's `equal_ack_late_grant_takes_its_stale_list`).
+    #[test]
+    fn a_late_grant_acknowledging_the_same_answer_takes_nothing() {
+        let l = Lease::new();
+        let us = holder("us", 1, 7);
+        let with = |names: &[&str]| Some(names.iter().map(|n| n.to_string()).collect());
+        let took = |list, epoch, n| l.grant_from(&us, 60_000, epoch, list, n).ok();
+        assert_eq!(
+            took(with(&["acme", "b"]), "e1", numbered(1, None)),
+            Some(true)
+        );
+        assert_eq!(took(None, "e1", numbered(2, Some(1))), Some(true));
+        assert!(l.allows("acme").is_ok());
+        // Grant 3 (acked 2, naming acme) is held on its way; acme leaves
+        // this node, and grant 4 (acked 2) names b alone.
+        assert_eq!(took(with(&["b"]), "e2", numbered(4, Some(2))), Some(true));
+        assert!(l.allows("acme").is_err());
+        // Grant 3 is read now.
+        assert_eq!(
+            took(with(&["acme", "b"]), "e1", numbered(3, Some(2))),
+            Some(false)
+        );
+        assert!(
+            l.allows("acme").is_err(),
+            "late grant 3 named acme again beside the lease grant 4 runs: {}",
+            l.describe()
+        );
+        assert!(l.allows("b").is_ok());
+        // Grant 4's answer lost, grant 5 acknowledges 2 as it did: sent
+        // after it, it is newer, and taken while the lease runs.
+        assert_eq!(
+            took(with(&["b", "c"]), "e3", numbered(5, Some(2))),
+            Some(true)
+        );
+        assert!(l.allows("c").is_ok() && l.allows("b").is_ok());
+    }
+
+    /// A newer grant runs the lease from its acknowledgement however long
+    /// the lease held: a router restarted, or one promoted, with a shorter
+    /// lease cuts the longer one short as soon as a grant of its own is
+    /// acknowledged. Kept, the longer lease ran on while the new router
+    /// counted its own, and failed the node over beside it (the review of
+    /// #343's `a_router_restarted_with_a_shorter_lease_...`, which
+    /// `late_grants.rs` holds through a router). Its first grant, which
+    /// acknowledges nothing, is answered as not taken.
+    #[test]
+    fn a_newer_grant_cuts_a_longer_lease_short() {
+        let left_of = |l: &Lease| left(l).unwrap_or(0);
+        for (holder_after, first) in [(holder("us", 1, 7), 70), (holder("us", 2, 9), 5)] {
+            let l = Lease::new();
+            let us = holder("us", 1, 7);
+            let list = || Some(vec!["acme".to_string()]);
+            assert!(l
+                .grant_from(&us, 600_000, "e1", list(), numbered(1, None))
+                .is_ok());
+            assert!(l
+                .grant_from(&us, 600_000, "e1", None, numbered(2, Some(1)))
+                .is_ok());
+            assert!(left_of(&l) > 500_000);
+            let first_took =
+                l.grant_from(&holder_after, 20_000, "e1", list(), numbered(first, None));
+            assert_eq!(first_took.ok(), Some(false), "{holder_after:?}");
+            assert!(
+                left_of(&l) > 500_000,
+                "a grant acknowledging nothing ran the lease"
+            );
+            let next = numbered(first + 1, Some(first));
+            assert_eq!(
+                l.grant_from(&holder_after, 20_000, "e1", None, next).ok(),
+                Some(true)
+            );
+            assert!(left_of(&l) <= 20_000, "{holder_after:?}: {}", l.describe());
+            assert!(l.allows("acme").is_ok());
+        }
     }
 
     /// A grant naming a list the node does not hold is asked for it again

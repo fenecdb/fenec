@@ -31,9 +31,11 @@
 //!                                      term?, history?, grant?, acked?}: the
 //!                                      router's lease, on a node started to
 //!                                      take one, run from when this node
-//!                                      answered the grant `acked` names (412:
-//!                                      send the primaries; 409 with held_by:
-//!                                      a lease from a newer term holds it)
+//!                                      answered the grant `acked` names; its
+//!                                      answer the lease and `took`, whether
+//!                                      it took the grant (412: send the
+//!                                      primaries; 409 with held_by: a lease
+//!                                      from a newer term holds it)
 //! GET    /_admin/lease                 {epoch, primaries, left_ms, authority,
 //!                                      term, history, grant}
 //! ```
@@ -359,7 +361,16 @@ fn lease(tenants: &Tenants, body: &[u8]) -> Result<Response, Refused> {
     }
     let numbered = grant.map(|grant| crate::lease::Numbered { grant, acked });
     match lease.grant_from(&holder, ms, &epoch, primaries, numbered) {
-        Ok(()) => Ok(Response::json(200, lease.describe())),
+        // Whether it took the grant -- its list the one held now -- beside
+        // the lease: a router reads a grant answered and not taken, from a
+        // router before it or a holder before it whose lease still runs, as
+        // one to acknowledge at once with its list; a node from before says
+        // nothing, and takes every grant.
+        Ok(took) => {
+            let lease = lease.describe();
+            let rest = lease.strip_prefix('{').unwrap_or(&lease);
+            Ok(Response::json(200, format!("{{\"took\":{took},{rest}")))
+        }
         Err(crate::lease::Refusal::NeedList(held)) => Ok(Response::json(
             412,
             format!(

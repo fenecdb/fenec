@@ -955,27 +955,48 @@ going through the router loses nothing that way, since the router could not
 reach the node either. A write is refused as a replica's is: <code>503</code>
 with <code>Retry-After</code>.</p>
 
-<p>That holds however long a node or the network stalls. Each grant is
+<p>That holds of a grant however late the node reads it. Each grant is
 numbered and names the newest grant whose answer came back to the router in
 time, and the node runs its lease from the moment it answered that one,
-never from when it reads a grant. A grant read late — the node's process
-stopped, its machine paused, the request held on its way — acknowledges
-only answers the router had already counted, whose lease ran out before the
-failover; a grant whose answer never came back is acknowledged by no grant
-after it. Neither gives the node a lease, so a node that wakes with grants
-waiting in its socket, after its tenants were promoted elsewhere, takes no
-write: with the lease run from when it read them, as it was, it took a whole
-lease's writes beside the new primary. A grant is taken whole, its list with
-its lease, so a late one cannot hand back a tenant failed over elsewhere
-beside a newer lease. The price is about a round: a node's lease runs from
-the grant before the last it read, so a node cut off stops writing a third
-of a lease sooner than it did, while the failover comes when it did; and a
-node holding no lease — new, restarted, back from a failover — needs a second
-grant, acknowledging the first, which the router sends at once. A router
-from before numbered grants sends none, and a node takes its grants from
-when it reads them, as before: a late grant can still outlast a failover
-until every router is upgraded. A node from before them is leased as before
-too, and the router says so once in its log.</p>
+never from when it reads a grant. A grant read late — held on its way, or
+left unread by a node stopped or slow — acknowledges only answers the router
+had already counted, whose lease ran out before the failover; a grant whose
+answer never came back is acknowledged by no grant after it. Neither gives
+the node a lease, so a node that reads grants waiting in its socket after
+its tenants were promoted elsewhere takes no write for them: with the lease
+run from when it read them, as it was, it took a whole lease's writes beside
+the new primary. A grant newer than the one the lease came from — by the
+answer it acknowledges, then by its own number — is taken whole, its list
+with its lease, which may cut the lease held short: a router restarted or
+promoted with a shorter lease shortens the node's with its first
+acknowledged grant. One that is not newer is taken not at all while a lease
+runs, so a late one cannot hand back a tenant failed over elsewhere, and a
+node says so in its answer (<code>took</code>), which has the router send
+the grant acknowledging it at once, with the list. The price is about a
+round: a node's lease runs from the grant before the last it read, so a
+node cut off stops writing a third of a lease sooner than it did, while the
+failover comes when it did; and a node holding no lease — new, restarted,
+back from a failover — needs a second grant, acknowledging the first, which
+the router sends at once. A router from before numbered grants sends none,
+and a node takes its grants from when it reads them, as before: a late grant
+can still outlast a failover until every router is upgraded. A node from
+before them is leased as before too, and the router says so once in its
+log.</p>
+
+<p>What leases do not cover. A node measures its lease on the system's
+monotonic clock, which stands still while a virtual machine is paused
+(KVM's clock across a stop and a continue) or a machine is suspended: a
+node paused so wakes with lease left and writes beside its tenants' new
+primaries until the lease runs out, with no late grant needed; and a write
+that passed the lease's check just before its process stopped lands once it
+resumes. A stall of sixteen rounds or more can leave a node without the
+answer its next grant acknowledges, holding no lease until the grant after
+it, which the router sends at once. Two directories leasing one node — a
+misconfiguration — can take it in turns as each other's lease lapses,
+neither holding one for long. A router started with a shorter lease than
+the one before it — restarted, or a standby promoted — counts a node it
+never reaches by the shorter one, while the node's lease from before may run
+longer.</p>
 
 <p>The lease names tenants, not the node. A node failed over comes back with
 the files of tenants served elsewhere now, primaries' files still; a lease
