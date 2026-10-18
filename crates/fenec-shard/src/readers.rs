@@ -220,6 +220,18 @@ impl Drop for ReaderHold<'_> {
     }
 }
 
+/// The quota each read replica (`<tenant>/<node>`) was last sent, `None`
+/// for the node's own, and how many times one was forgotten
+/// ([`Router::forget_reader`]): a send notes what it sent only where no
+/// forget came while it was out. Noted after a forget -- a follow landing
+/// as the send's answer came back -- the note outlived it, and the router
+/// held the copy, perhaps a new one, to hold a quota no look then sent it.
+#[derive(Default)]
+pub(crate) struct QuotaNotes {
+    sent: HashMap<String, Option<String>>,
+    forgets: u64,
+}
+
 /// The quotas the read replicas are to be sent, a node at a time
 /// ([`Router::deliver_quotas`]). Sent by the look and by a quota request
 /// themselves, a node that did not answer held each up for its
@@ -832,7 +844,9 @@ impl Router {
 
     /// Sends the read replica of `tenant` on `node` the tenant's quota --
     /// `{}`, the node's own, where none is set -- and notes it sent, so a
-    /// look sends it again only once it changes.
+    /// look sends it again only once it changes: unless the replica was
+    /// forgotten while the send was out ([`QuotaNotes`]), which has it sent
+    /// again, a `PUT` the copy takes as many times as it is sent.
     pub(crate) fn send_reader_quota(
         &self,
         tenant: &str,
@@ -846,12 +860,13 @@ impl Router {
             .ok_or_else(|| format!("no node `{node}`"))?;
         let target = format!("/_admin/tenants/{tenant}/quota");
         let body = quota.unwrap_or("{}");
+        let forgets = lock(&self.reader_quotas).forgets;
         match self
             .reader_pool
             .call(&n.addr, "PUT", &target, &n.token, body.as_bytes())
         {
             Ok((200, _)) => {
-                self.noted_quota(tenant, node, quota);
+                self.noted_quota(tenant, node, quota, forgets);
                 Ok(())
             }
             Ok((status, body)) => Err(format!(
@@ -862,20 +877,23 @@ impl Router {
         }
     }
 
-    /// Notes the quota the read replica of `tenant` on `node` holds.
-    pub(crate) fn noted_quota(&self, tenant: &str, node: &str, quota: Option<&str>) {
-        self.reader_quotas
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(format!("{tenant}/{node}"), quota.map(str::to_string));
+    /// Notes the quota the read replica of `tenant` on `node` holds, sent
+    /// when the read replicas had been forgotten `forgets` times: none
+    /// where one was forgotten since.
+    fn noted_quota(&self, tenant: &str, node: &str, quota: Option<&str>, forgets: u64) {
+        let mut notes = lock(&self.reader_quotas);
+        if notes.forgets == forgets {
+            notes
+                .sent
+                .insert(format!("{tenant}/{node}"), quota.map(str::to_string));
+        }
     }
 
     /// Whether the read replica of `tenant` on `node` holds `quota`, as far
     /// as this router has sent it one.
     fn holds_quota(&self, tenant: &str, node: &str, quota: Option<&str>) -> bool {
-        self.reader_quotas
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        lock(&self.reader_quotas)
+            .sent
             .get(&format!("{tenant}/{node}"))
             .is_some_and(|q| q.as_deref() == quota)
     }
@@ -1009,10 +1027,11 @@ impl Router {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&key);
-        self.reader_quotas
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&key);
+        {
+            let mut notes = lock(&self.reader_quotas);
+            notes.forgets += 1;
+            notes.sent.remove(&key);
+        }
         self.reader_quota_queue
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2845,6 +2864,108 @@ mod tests {
         q.want("acme", "us1", None);
         q.forget("acme", "us1");
         assert_eq!(q.idle(), Vec::<String>::new(), "taken off");
+    }
+
+    /// A read replica's upkeep calls go through a pool bounded by
+    /// `reader_timeout`, never the upstream timeout: a node that does not
+    /// answer holds a look up that long at most. On main a test's short
+    /// reader timeout caught a pool bounded by the other only by chance.
+    #[test]
+    fn the_readers_calls_are_bounded_by_the_reader_timeout() {
+        let cfg = Config {
+            reader_timeout: Duration::from_secs(7),
+            upstream_timeout: Duration::from_secs(70),
+            ..Config::default()
+        };
+        let router = Router::new(Directory::in_memory(), cfg);
+        assert_eq!(router.reader_pool.timeout(), Duration::from_secs(7));
+    }
+
+    /// A quota sent to a read replica is noted only where the replica was
+    /// not forgotten while the send was out. A follow landing meanwhile
+    /// forgets the note -- the copy may be a new one, to be sent its quota
+    /// again -- and the send's answer, noted after the forget, left the
+    /// router sure the copy held a quota: no look wanted one again
+    /// (`a_read_replica_is_sent_no_quota_older_than_one_it_was_sent`, once
+    /// in a dozen runs under load). The node is the test's, and answers
+    /// the send only once the forget is in.
+    #[test]
+    fn a_quota_sent_across_a_forget_is_not_noted() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::sync::Arc;
+        use std::time::Instant;
+        let node = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        node.set_nonblocking(true).unwrap();
+        let router = Router::new(Directory::in_memory(), Config::default());
+        let us1 = Node {
+            addr: node.local_addr().unwrap().to_string(),
+            token: "t".into(),
+            region: "us".into(),
+            ..Node::default()
+        };
+        router.write_dir().set_node("us1", us1).unwrap();
+        // The node's side of one send: its request read whole, then
+        // `between`, then its answer. The body is what was sent.
+        let answer = |between: &dyn Fn()| {
+            let t = Instant::now();
+            let mut s = loop {
+                match node.accept() {
+                    Ok((s, _)) => break s,
+                    Err(_) => {
+                        assert!(t.elapsed() < Duration::from_secs(30), "never sent");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            };
+            s.set_nonblocking(false).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; len];
+            r.read_exact(&mut body).unwrap();
+            between();
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .unwrap();
+            String::from_utf8(body).unwrap()
+        };
+        let send = |quota: &'static str| {
+            let r = Arc::clone(&router);
+            std::thread::spawn(move || r.send_reader_quota("acme", "us1", Some(quota)))
+        };
+        let (five, nine) = (r#"{"streams":5}"#, r#"{"streams":9}"#);
+        // Nothing between: noted.
+        let sending = send(five);
+        assert_eq!(answer(&|| {}), five);
+        assert_eq!(sending.join().unwrap(), Ok(()));
+        assert!(router.holds_quota("acme", "us1", Some(five)));
+        // Forgotten while the next is out: not noted, and wanted again.
+        let sending = send(nine);
+        assert_eq!(answer(&|| router.forget_reader("acme", "us1")), nine);
+        assert_eq!(sending.join().unwrap(), Ok(()));
+        assert!(
+            !router.holds_quota("acme", "us1", Some(nine)),
+            "noted across the forget"
+        );
+        router.want_reader_quota("acme", "us1", Some(nine));
+        assert!(
+            router
+                .reader_quota_queue
+                .lock()
+                .unwrap()
+                .wants("acme", "us1"),
+            "the next look wants it sent"
+        );
     }
 
     /// A change asked for while another of the same read replica is under

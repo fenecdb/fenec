@@ -231,7 +231,7 @@ pub struct Router {
     /// The quota each read replica (`<tenant>/<node>`) was last sent, `None`
     /// for the node's own: a look wants it sent again only once its
     /// tenant's changes ([`readers`]).
-    reader_quotas: Mutex<std::collections::HashMap<String, Option<String>>>,
+    reader_quotas: Mutex<readers::QuotaNotes>,
     /// The read replicas' nodes a look's worker is under way on
     /// ([`Router::follow_round`]): one a node at a time.
     lookers: Mutex<HashSet<String>>,
