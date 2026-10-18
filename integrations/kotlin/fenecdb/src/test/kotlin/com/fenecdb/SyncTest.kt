@@ -280,17 +280,24 @@ class SyncTest {
         db.close()
     }
 
-    /** The Kotlin tab's "over HTTP" lines on languages.html, as written there but for the server's address. */
+    /**
+     * The Kotlin tab's "over HTTP" lines on languages.html, as written there but for the server's address,
+     * and the read the home page's Kotlin session ends with.
+     */
     @Test
     fun theDocsExampleOverHttp() = runBlocking {
         val s = server("docs")
-        s.run("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
-        s.run("""put docs {title: "Night at the oasis", embed: [0.1, 0.2, 0.3]}""")
+        s.run("create collection if not exists docs (title text @text, year int @sorted)")
+        s.run("""put docs {title: "Night at the oasis", year: 2024}""")
 
         val remote = Fenec.connect(s.url, token = "secret")
-        remote.execute("put docs {title: \$1, embed: \$2}", "Dunes", floatArrayOf(0.9f, 0.1f, 0f))
-        val hits = remote.from("docs").select("title").near("embed", floatArrayOf(0.1f, 0.2f, 0.3f)).limit(5).rows()
-        assertEquals(listOf("Night at the oasis", "Dunes"), hits.map { it.string("title") })
+        remote.execute("put docs {title: \$1, year: \$2}", "Dunes", 2021)
+        val recent = remote.from("docs").select("title", "year").where("year", ">=", 2020).order("year", "desc").limit(5).rows()
+        assertEquals(listOf("Night at the oasis", "Dunes"), recent.map { it.string("title") })
+
+        val rows = remote.query("get docs select title, year where year >= \$1 order year desc limit \$2", 2020, 5)
+        assertEquals(listOf(2024, 2021), rows.map { it.int("year") })
+        assertEquals(recent.map { it.string("title") }, rows.map { it.string("title") })
     }
 
     @Test

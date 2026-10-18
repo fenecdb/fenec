@@ -8,18 +8,25 @@ db = Client(os.environ.get("FENEC_URL", "http://127.0.0.1:8080"),
             token=os.environ.get("FENEC_TOKEN"))
 
 db.query("create collection if not exists docs "
-         "(title text, embed vector<3> @hnsw(cosine))")
-db.query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
-db.query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
+         "(title text @text, year int @sorted)")
+db.query("put docs {title: $1, year: $2}", ["Dunes", 2021])
+db.query("put docs {title: $1, year: $2}", ["Night at the oasis", 2024])
 
-rows = db.query("get docs select title near embed $1 limit $2", [[0.1, 0.2, 0.3], 5])
-assert [r["title"] for r in rows] == ["Night at the oasis", "Dunes"], rows
+rows = db.query("get docs select title, year where year >= $1 order year desc limit $2", [2020, 5])
+assert rows == [{"title": "Night at the oasis", "year": 2024},
+                {"title": "Dunes", "year": 2021}], rows
+
+hits = db.query("get docs select title match title $1 fuzzy", ["oasys"])
+assert [h["title"] for h in hits] == ["Night at the oasis"], hits
+assert hits[0]["_score"] > 0, hits
 
 # The same through the query builder, which writes that statement itself.
 docs = db.collection("docs")
-query = docs.select("title").near("embed", [0.1, 0.2, 0.3]).limit(5)
-assert query.to_fenecql() == ("get docs select title near embed $1 limit $2", [[0.1, 0.2, 0.3], 5])
+query = docs.select("title", "year").where("year", ">=", 2020).order("year", "desc").limit(5)
+assert query.to_fenecql() == (
+    "get docs select title, year where year >= $1 order year desc limit $2", [2020, 5])
 assert query.rows() == rows, query.rows()
+assert docs.select("title").match("title", "oasys", fuzzy=True).rows() == hits
 assert docs.where("title", "~", "Dunes").count() == 1
 
 # A refusal is an exception carrying the server's message and status.

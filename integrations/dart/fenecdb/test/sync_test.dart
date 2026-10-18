@@ -4,7 +4,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:fenecdb/fenecdb.dart';
 import 'package:test/test.dart';
@@ -285,24 +284,27 @@ void main() {
   });
 
   // The Dart tab's "over HTTP" lines on languages.html, as written there
-  // but for the server's address.
+  // but for the server's address, and the read the home page's Dart session
+  // ends with.
   test("the docs' example over HTTP", () async {
     final s = await server('docs');
-    await s.run('create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))');
-    await s.run('put docs {title: "Night at the oasis", embed: [0.1, 0.2, 0.3]}');
+    await s.run('create collection if not exists docs (title text @text, year int @sorted)');
+    await s.run('put docs {title: "Night at the oasis", year: 2024}');
 
     final remote = Fenec.connect(s.url, token: 'secret');
-    await remote.execute(r'put docs {title: $1, embed: $2}', [
-      'Dunes',
-      Float32List.fromList([0.9, 0.1, 0.0])
-    ]);
-    final hits = await remote
+    await remote.execute(r'put docs {title: $1, year: $2}', ['Dunes', 2021]);
+    final recent = await remote
         .from('docs')
-        .select(['title'])
-        .near('embed', Float32List.fromList([0.1, 0.2, 0.3]))
+        .select(['title', 'year'])
+        .where('year', '>=', 2020)
+        .order('year', 'desc')
         .limit(5)
         .rows();
-    expect([for (final r in hits) r['title']], ['Night at the oasis', 'Dunes']);
+    expect([for (final r in recent) r['title']], ['Night at the oasis', 'Dunes']);
+
+    final rows =
+        await remote.query(r'get docs select title, year where year >= $1 order year desc limit $2', [2020, 5]);
+    expect(rows, recent);
     remote.close();
   });
 

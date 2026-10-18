@@ -26,14 +26,20 @@ async Task<JsonElement> Query(string query, params object[] args)
     return body;
 }
 
-await Query("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))");
-await Query("put docs {title: $1, embed: $2}", "Night at the oasis", new[] { 0.1f, 0.2f, 0.3f });
-await Query("put docs {title: $1, embed: $2}", "Dunes", new[] { 0.9f, 0.1f, 0.0f });
+await Query("create collection if not exists docs (title text @text, year int @sorted)");
+await Query("put docs {title: $1, year: $2}", "Dunes", 2021);
+await Query("put docs {title: $1, year: $2}", "Night at the oasis", 2024);
 
-var rows = await Query("get docs select title near embed $1 limit $2", new[] { 0.1f, 0.2f, 0.3f }, 5);
-var titles = rows.EnumerateArray().Select(r => r.GetProperty("title").GetString()).ToArray();
-if (!titles.SequenceEqual(new[] { "Night at the oasis", "Dunes" }))
-    throw new Exception($"near answered {string.Join(", ", titles)}");
+var rows = await Query("get docs select title, year where year >= $1 order year desc limit $2", 2020, 5);
+var got = rows.EnumerateArray()
+    .Select(r => $"{r.GetProperty("title").GetString()} {r.GetProperty("year").GetInt32()}").ToArray();
+if (!got.SequenceEqual(new[] { "Night at the oasis 2024", "Dunes 2021" }))
+    throw new Exception($"the filtered read answered {string.Join(", ", got)}");
+
+var hits = await Query("get docs select title match title $1 fuzzy", "oasys");
+var titles = hits.EnumerateArray().Select(r => r.GetProperty("title").GetString()).ToArray();
+if (!titles.SequenceEqual(new[] { "Night at the oasis" }) || hits[0].GetProperty("_score").GetSingle() <= 0)
+    throw new Exception($"match answered {hits}");
 
 try
 {

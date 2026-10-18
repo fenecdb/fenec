@@ -25,14 +25,19 @@ function query(string $q, array $params = []) {
     return $body;
 }
 
-query('create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))');
-query('put docs {title: $1, embed: $2}', ['Night at the oasis', [0.1, 0.2, 0.3]]);
-query('put docs {title: $1, embed: $2}', ['Dunes', [0.9, 0.1, 0.0]]);
+query('create collection if not exists docs (title text @text, year int @sorted)');
+query('put docs {title: $1, year: $2}', ['Dunes', 2021]);
+query('put docs {title: $1, year: $2}', ['Night at the oasis', 2024]);
 
-$rows = query('get docs select title near embed $1 limit $2', [[0.1, 0.2, 0.3], 5]);
-$titles = array_column($rows, 'title');
-if ($titles !== ['Night at the oasis', 'Dunes']) {
-    fwrite(STDERR, 'near answered ' . json_encode($rows) . "\n");
+$rows = query('get docs select title, year where year >= $1 order year desc limit $2', [2020, 5]);
+if ($rows !== [['title' => 'Night at the oasis', 'year' => 2024], ['title' => 'Dunes', 'year' => 2021]]) {
+    fwrite(STDERR, 'the filtered read answered ' . json_encode($rows) . "\n");
+    exit(1);
+}
+
+$hits = query('get docs select title match title $1 fuzzy', ['oasys']);
+if (array_column($hits, 'title') !== ['Night at the oasis'] || $hits[0]['_score'] <= 0) {
+    fwrite(STDERR, 'match answered ' . json_encode($hits) . "\n");
     exit(1);
 }
 

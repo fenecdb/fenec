@@ -13,21 +13,28 @@ fn query(q: &str, params: Value) -> Result<Value, ureq::Error> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    query(
-        "create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))",
-        json!([]),
-    )?;
-    query("put docs {title: $1, embed: $2}", json!(["Night at the oasis", [0.1, 0.2, 0.3]]))?;
-    query("put docs {title: $1, embed: $2}", json!(["Dunes", [0.9, 0.1, 0.0]]))?;
+    query("create collection if not exists docs (title text @text, year int @sorted)", json!([]))?;
+    query("put docs {title: $1, year: $2}", json!(["Dunes", 2021]))?;
+    query("put docs {title: $1, year: $2}", json!(["Night at the oasis", 2024]))?;
 
-    let rows = query("get docs select title near embed $1 limit $2", json!([[0.1, 0.2, 0.3], 5]))?;
-    let titles: Vec<&str> = rows
+    let rows = query(
+        "get docs select title, year where year >= $1 order year desc limit $2",
+        json!([2020, 5]),
+    )?;
+    assert_eq!(
+        rows,
+        json!([{"title": "Night at the oasis", "year": 2024}, {"title": "Dunes", "year": 2021}])
+    );
+
+    let hits = query("get docs select title match title $1 fuzzy", json!(["oasys"]))?;
+    let titles: Vec<&str> = hits
         .as_array()
-        .ok_or("near answered no rows")?
+        .ok_or("match answered no rows")?
         .iter()
         .filter_map(|r| r["title"].as_str())
         .collect();
-    assert_eq!(titles, ["Night at the oasis", "Dunes"]);
+    assert_eq!(titles, ["Night at the oasis"]);
+    assert!(hits[0]["_score"].as_f64() > Some(0.0));
 
     match query("get nowhere", json!([])) {
         Err(ureq::Error::Status(404, _)) => {}
