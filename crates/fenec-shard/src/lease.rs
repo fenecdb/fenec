@@ -97,6 +97,11 @@ pub fn lapse(term: Duration) -> Duration {
     term + term / 10
 }
 
+/// `d` in whole milliseconds, as a grant names a lease.
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
 pub struct Leases {
     pub term: Duration,
     nodes: Mutex<HashMap<String, Held>>,
@@ -131,6 +136,12 @@ pub struct Leases {
     recorded: AtomicBool,
     /// It said it could not ([`Leases::say_unrecorded`]).
     said: AtomicBool,
+    /// The lease a grant runs now, in milliseconds: `term`, but for a
+    /// directory that cannot record it, where it is the record's
+    /// ([`Leases::granting`]).
+    granting: AtomicU64,
+    /// The leasing thread, woken when the lease granted gets shorter.
+    leasing: Mutex<Option<std::thread::Thread>>,
 }
 
 #[derive(Clone)]
@@ -210,6 +221,8 @@ impl Leases {
             inherited: Mutex::new(term),
             recorded: AtomicBool::new(false),
             said: AtomicBool::new(false),
+            granting: AtomicU64::new(millis(term)),
+            leasing: Mutex::new(None),
         }
     }
 
@@ -258,6 +271,7 @@ impl Leases {
         self.following.store(true, Ordering::SeqCst);
         self.recorded.store(false, Ordering::SeqCst);
         *self.inherited() = self.term;
+        self.granting.store(millis(self.term), Ordering::SeqCst);
     }
 
     /// A round of a router that leases: the first after following, its
@@ -321,9 +335,43 @@ impl Leases {
         !self.recorded.load(Ordering::SeqCst)
     }
 
-    /// The directory's record covers this router's own lease.
+    /// The directory's record covers this router's own lease, which every
+    /// grant runs from now.
     pub fn recorded(&self) {
+        self.granting.store(millis(self.term), Ordering::SeqCst);
         self.recorded.store(true, Ordering::SeqCst);
+    }
+
+    /// The lease a grant runs now: this router's own, but for a directory
+    /// that cannot record it, where it is no longer than the record
+    /// ([`Leases::grants_short`]). The leasing thread's rounds come a third
+    /// of it apart, and an answer is short against it.
+    pub fn granting(&self) -> Duration {
+        Duration::from_millis(self.granting.load(Ordering::SeqCst))
+    }
+
+    /// The directory could not record this router's lease, and grants run
+    /// `term`, the record's: the rounds come a third of it apart. A third
+    /// of the router's own apart, a 20 s router over a record of 1 s
+    /// granted a second every 6.7 s, every node without a lease most of
+    /// the time (the review of #343's
+    /// `r3_a_grant_of_the_record_s_length_between_rounds_of_the_router_s_own`).
+    pub fn grants_short(&self, term: Duration) {
+        let ms = millis(term);
+        // Woken, the leasing thread sleeps no longer than the new third:
+        // asleep for the third of its own lease it read before the grant,
+        // the round after the first came 6.7 s on all the same.
+        if ms < self.granting.swap(ms, Ordering::SeqCst) {
+            let leasing = self.leasing.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = leasing.as_ref() {
+                t.unpark();
+            }
+        }
+    }
+
+    /// `thread` runs the rounds ([`Leases::grants_short`] wakes it).
+    pub fn leasing_on(&self, thread: std::thread::Thread) {
+        *self.leasing.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread);
     }
 
     /// Whether to say the record could not be written: once a process.
@@ -492,7 +540,7 @@ impl Leases {
     /// write meanwhile -- a tenant created on a node new to the router
     /// refused its writes for up to a round.
     pub fn short(&self, left_ms: Option<u64>) -> bool {
-        left_ms.is_none_or(|left| Duration::from_millis(left) < self.term / 2)
+        left_ms.is_none_or(|left| Duration::from_millis(left) < self.granting() / 2)
     }
 
     /// `node` took a grant without answering its number: a node from

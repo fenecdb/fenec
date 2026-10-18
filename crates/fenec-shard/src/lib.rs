@@ -502,24 +502,46 @@ impl Router {
 
     /// Starts the leasing thread under automatic failover: every third of a
     /// lease it renews every node's, and fails over a node whose lease has
-    /// certainly lapsed. Nothing without `--auto-failover`.
+    /// certainly lapsed. Nothing without `--auto-failover`. A third of the
+    /// lease a grant runs now ([`lease::Leases::granting`]): this router's
+    /// own, or the record's where the directory cannot record its own,
+    /// which wakes the thread as it is found. The first round at once: a
+    /// third of its own lease after the start, a router whose lease is
+    /// longer than the one before it -- the record raised, or not
+    /// writable -- left every node without a lease from the end of the
+    /// shorter one to its first round.
     pub fn start_leasing(self: &Arc<Router>) -> std::io::Result<()> {
         let Some((leases, _)) = &self.leases else {
             return Ok(());
         };
-        let every = leases.term / 3;
         fenec_http::log!(
             "leasing each node its tenants for {:?}: a node unrenewed for {:?} is failed over",
             leases.term,
             lease::lapse(leases.term)
         );
         let router = Arc::clone(self);
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("fenec-lease".into())
-            .spawn(move || loop {
-                std::thread::sleep(every);
-                router.round(false);
+            .spawn(move || {
+                let mut last: Option<Instant> = None;
+                loop {
+                    let Some((leases, _)) = &router.leases else {
+                        return;
+                    };
+                    let now = Instant::now();
+                    if let Some(due) = last.map(|at| at + leases.granting() / 3) {
+                        if now < due {
+                            // Woken early by a shorter lease, or for nothing:
+                            // the third is read again either way.
+                            std::thread::park_timeout(due - now);
+                            continue;
+                        }
+                    }
+                    last = Some(now);
+                    router.round(false);
+                }
             })?;
+        leases.leasing_on(thread.thread().clone());
         Ok(())
     }
 
@@ -1059,19 +1081,23 @@ impl Router {
     /// The lease a grant runs, the directory made to record one no shorter
     /// before the first ([`lease::Leases::leading`]): a router started after
     /// this one with a shorter lease counts a node it never reaches by the
-    /// longest that may still run. Raised, the record is sent to the
-    /// standbys before any grant goes out, as a move's flip is: one
-    /// promoted within the lease, the raise not on it, counted by the
-    /// record before. Once a process, no write on any grant after. `None`
-    /// for a router following another, which grants nothing.
+    /// longest that may still run. Raised, the record reaches the standbys
+    /// before any grant goes out, as a move's flip does: the thread that
+    /// wrote it waits for them, and so does every thread that finds it
+    /// written before this router takes it as recorded, each node's grant
+    /// being a thread of its own. One promoted within the lease, the raise
+    /// not on it, counted by the record before. Once a process, no write on
+    /// any grant after. `None` for a router following another, which grants
+    /// nothing.
     ///
     /// Where the raise cannot be written, the grant runs no longer than the
-    /// record, which covers it; and where there is none yet -- a directory
-    /// from before the record, its first leasing router's -- this router's
-    /// own, as a router before the record granted: refused, every node's
-    /// lease lapsed and every node was failed over, by a router whose
-    /// directory then refused the failovers' writes too. Asked again at the
-    /// next grant.
+    /// record, which covers it, and the leasing thread's rounds come a third
+    /// of that apart ([`lease::Leases::grants_short`]); and where there is
+    /// none yet -- a directory from before the record, its first leasing
+    /// router's -- this router's own, as a router before the record
+    /// granted: refused, every node's lease lapsed and every node was failed
+    /// over, by a router whose directory then refused the failovers' writes
+    /// too. Asked again at the next grant.
     fn grant_term(&self) -> Option<Duration> {
         let Some((leases, _)) = &self.leases else {
             return None;
@@ -1085,6 +1111,11 @@ impl Router {
         }
         let was = dir.lease_record();
         if was.is_some_and(|was| was >= leases.term) {
+            // Raised by this router on another thread, the record may be
+            // on its way to the standbys still: waited for here too, so no
+            // grant goes out before it reached them. Once there, at once.
+            drop(dir);
+            self.standbys_sent();
             leases.recorded();
             return Some(leases.term);
         }
@@ -1097,10 +1128,12 @@ impl Router {
             }
             Err(e) => {
                 let term = was.unwrap_or(leases.term);
+                leases.grants_short(term);
                 if leases.say_unrecorded() {
                     fenec_http::log!(
                         "the directory could not record this router's lease of {:?}: each \
-                         grant runs {term:?}, the longest recorded{} ({e})",
+                         grant runs {term:?}, the longest recorded, a round every third of \
+                         it{} ({e})",
                         leases.term,
                         if was.is_none() {
                             " -- none is, so a router started after this one with a \

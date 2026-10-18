@@ -1210,3 +1210,46 @@ fn a_router_that_cannot_record_its_lease_grants_no_longer_than_the_record() {
         lease_of(&nodes, "unn")
     );
 }
+
+/// A router of 60 s restarted over a record of 3 s that it cannot raise --
+/// its directory's disk gone -- grants 3 s leases, and its leasing thread
+/// renews them: its first round at once, and the rounds after a third of
+/// the lease it grants apart. A third of its own apart, it granted 3 s
+/// every 20, the first 20 s after its start, and n1 held no lease for 17 s
+/// of every 20 -- every tenant refused its writes most of the time (the
+/// review of #343's
+/// `r3_a_grant_of_the_record_s_length_between_rounds_of_the_router_s_own`).
+#[test]
+fn a_router_that_cannot_record_its_lease_renews_at_the_lease_it_grants() {
+    let db = Arc::new(RwLock::new(Database::new()));
+    let (nodes, before, _) = registered("rnd", &db, Duration::from_secs(3));
+    before.lease_round();
+    let (after, _) = router_on(&db, Duration::from_secs(60));
+    let gone = fenec_core::error::Error::Io("the disk is gone".into());
+    db.write().unwrap().fail(&gone);
+    after.start_leasing().unwrap();
+    let (mut lapsed, mut all, mut longest) = (0, 0, 0.0_f64);
+    let end = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < end {
+        let lease = lease_of(&nodes, "rnd");
+        all += 1;
+        if lease.contains("\"left_ms\":0") || lease.contains("\"left_ms\":null") {
+            lapsed += 1;
+        }
+        longest = longest.max(n1_lease(&nodes, "rnd").0.unwrap_or(0.0));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        longest <= 3_000.0,
+        "n1 ran a lease past the record: {longest} ms"
+    );
+    // A round every 20 s, the first 20 s in, leaves n1 without a lease
+    // from 3 s on: three samples in four. Rounds 1 s apart leave it none
+    // only past a stall of 2 s, and fail this only past 6 s of such
+    // stalls in the 12.
+    assert!(
+        lapsed * 2 < all,
+        "n1 held no lease in {lapsed} of {all} samples: {}",
+        lease_of(&nodes, "rnd")
+    );
+}

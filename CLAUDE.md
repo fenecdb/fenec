@@ -930,7 +930,19 @@ review of #343's probe, `a_take_of_the_list_alone_...`). The node says
 counted by the record. A raise that cannot be written grants no longer than
 the record, or this router's own where there is none: refused, every
 node's lease lapsed and every node was failed over by a router whose
-directory then refused the failovers too. What it does not cover: the first
+directory then refused the failovers too. The leasing thread's rounds come
+a third of the lease granted apart (`Leases::granting`, the thread woken
+as a grant finds it shorter, `grants_short`), and its first at once: a
+third of its own apart, a 20 s router over a 1 s record granted a second
+every 6.7 s and the node held no lease in 158 of 187 samples, and the
+first round a third of its own lease after the start left a node without
+a lease from the end of a shorter one before it -- a router whose lease
+the record was raised to as well (`late_grants.rs`'
+`a_router_that_cannot_record_its_lease_renews_at_the_lease_it_grants`, 84
+of 113 samples without on e5b8413e). A thread finding the record raised
+by another of this router's waits for the standbys too before its grant
+(`standbys_sent`, at once once sent): each node's grant is a thread, and
+the second node's went while the first waited. What it does not cover: the first
 start after upgrading from a router without the record finds none and
 counts by its own lease, and a record is a directory's, so a node moved from
 the global router's leasing to a region's is counted by the region's alone

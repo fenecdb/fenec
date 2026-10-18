@@ -938,8 +938,9 @@ fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replicas --auto-fa
 <details class="deep"><summary>Details</summary>
 <p>With <code>fenec-shard --auto-failover &lt;s&gt;</code> the router fails a
 node over on its own. It leases each node the tenants it places there for
-that long, renews the lease every third of it while the node answers, and
-fails over a node that has gone a tenth past its lease unrenewed. A node
+that long, renews the lease as it starts and every third of it after while
+the node answers, and fails over a node that has gone a tenth past its lease
+unrenewed. A node
 started with <code>--lease</code> writes a tenant only while its lease names
 the tenant and has not lapsed, and starts with none.</p>
 
@@ -1008,7 +1009,8 @@ had lapsed, runs none, and a late grant of the router before could still run
 the longer lease again. Once the router has led for the recorded lease and a
 tenth, every lease granted before it has run out, and it lowers the record
 to its own. Where the record cannot be written, a grant runs no longer than
-the record, or the router's own lease where there is none.</p>
+the record, renewed every third of that, or the router's own lease where
+there is none.</p>
 
 <p>What the record does not cover: it is a directory's own, so a node
 leased by one directory and then by another — the global one's, then a
