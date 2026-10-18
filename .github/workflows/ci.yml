@@ -141,6 +141,24 @@ jobs:
       - name: Test
         run: make test
 
+      # A node measures its lease on the boot clock (fenec-http's
+      # `lease::Moment`), which counts the time a machine was suspended. No
+      # runner suspends, so its boot and monotonic clocks read alike and no
+      # test tells them apart -- but in a time namespace whose boot clock is a
+      # day ahead of its monotonic one, the clock's test fails on any other.
+      # The flags are make test's, so the binary is the one it built. The
+      # test is named whole and its one pass asked for: renamed, a filter
+      # matching nothing runs nothing and passes.
+      - name: The lease is measured on the boot clock
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          bin=$(cargo test --workspace --exclude fenec-bench --lib --bins --tests --no-run \
+            --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.name == "fenec_http") | .executable')
+          sudo unshare --time --boottime 86400 "$bin" --exact \
+            lease::tests::the_boot_clock_is_the_systems_and_runs_as_instant_does \
+            | tee /dev/stderr | grep -q 'test result: ok. 1 passed'
+
       # fenec studio (`--studio`) in the runner's Chrome against the debug
       # fenec-server `make test` built: signed in with the server's token
       # and as one user of a policy, a scroll through 100 000 rows held to

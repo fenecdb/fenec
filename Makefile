@@ -16,7 +16,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),full)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench policy-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-min wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md studio-test studio-highlight statements-bench file-bench web serve server node shard shard-bench quota-bench fence-bench policy-bench replica-bench node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench recon-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench opens-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench queue-bench nearest-bench geo-bench small bench sweep collate-bench subquery-bench composite-bench lookup-bench ttl-bench growth-bench search-bench fuzzy-bench text-memory nocase-bench analytics-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test mcp-test cloudflare-test cloudflare-bench entry-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down grafana-check deploy-check drill memory clean \
@@ -272,6 +272,12 @@ shard-bench:
 ## (crates/fenec-http/examples/quotas.rs)
 quota-bench:
 	$(CARGO) run --release -p fenec-http --example quotas -- 20000
+
+## What a node's lease costs a write: a lone put in process with no fence
+## and with a lease's, in turns, and Lease::allows alone
+## (crates/fenec-http/examples/fence.rs)
+fence-bench:
+	$(CARGO) run --release -p fenec-http --example fence -- $(or $(ARGS),201)
 
 ## What a scoped write's rules cost: a `set` under the server's token and
 ## under a policy of a plain rule, a field list, a transition, a field

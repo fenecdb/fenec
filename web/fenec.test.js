@@ -1830,6 +1830,26 @@ test('a tenant being moved says when to come back, in its body as in its header'
   assert.equal(moved.quota, undefined, 'a move is no quota');
 });
 
+test("a write answered after its lease lapsed says its outcome is unknown, and where it left the node", async () => {
+  const answers = [
+    new Response(JSON.stringify({ error: 'the write landed', outcome: 'unknown', seq: 7, history: '1-00000000000000ab' }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    }),
+    new Response(JSON.stringify({ error: 'sync error: disk full' }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' },
+    }),
+  ];
+  const db = new FenecHttp('http://x', { fetch: async () => answers.shift() });
+  const lapsed = await db.run('put notes {n: 1}').catch((e) => e);
+  assert.ok(lapsed instanceof FenecError);
+  assert.deepEqual([lapsed.status, lapsed.outcome, lapsed.seq, lapsed.history], [500, 'unknown', 7, '1-00000000000000ab']);
+  assert.equal(db.seq, null, "the answer's position is not the client's");
+  const failed = await db.run('put notes {n: 2}').catch((e) => e);
+  assert.deepEqual([failed.status, failed.outcome, failed.seq], [500, undefined, undefined]);
+});
+
 // ------------------------------------------------------------------ lookup
 
 test('lookup is terminal: its clauses bind to the child', () => {

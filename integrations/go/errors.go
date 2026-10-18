@@ -23,6 +23,11 @@ const (
 	CodeUnavailable  = "unavailable"  // 503: too many connections or subscriptions, a tenant moved or failed over
 	CodeTimeout      = "timeout"      // 504: After's change did not reach the replica in the wait
 	CodeFull         = "storage_full" // 507: past --max-memory, or a tenant's quota of bytes or rows
+	// 500 with {"outcome": "unknown"}: a write a tenant's node landed and
+	// answered after its lease from the router lapsed -- its tenant may
+	// have been failed over without it. Send it again with the same
+	// idempotency key, or read it back a lease and a tenth later.
+	CodeOutcomeUnknown = "outcome_unknown"
 )
 
 // The quotas a tenant node holds a tenant to, as an *Error's Quota names
@@ -62,6 +67,13 @@ type Error struct {
 	// being moved or failed over or of a server at its ceiling in whole
 	// seconds: 0 otherwise.
 	RetryAfter time.Duration
+	// Seq and History are where a write whose outcome is unknown
+	// (CodeOutcomeUnknown) left its node's database: a read sent After them,
+	// once its tenant has settled, is answered by a primary that holds the
+	// write and refused 504 by one without it. 0 and "" otherwise. Not the
+	// client's position, which this answer does not move.
+	Seq     uint64
+	History string
 }
 
 func (e *Error) Error() string { return fmt.Sprintf("fenecdb: %d %s", e.Status, e.Message) }
@@ -105,6 +117,9 @@ func errorOf(status int, raw []byte) *Error {
 		Quota        string `json:"quota"`
 		RetryAfter   int64  `json:"retry_after"`
 		RetryAfterMs int64  `json:"retry_after_ms"`
+		Outcome      string `json:"outcome"`
+		Seq          uint64 `json:"seq"`
+		History      string `json:"history"`
 	}
 	if json.Unmarshal(raw, &body) == nil && body.Error != "" {
 		e.Message, e.Completed, e.Quota = body.Error, body.Completed, body.Quota
@@ -117,6 +132,9 @@ func errorOf(status int, raw []byte) *Error {
 		}
 		if body.At != nil {
 			e.At = *body.At
+		}
+		if body.Outcome == "unknown" {
+			e.Code, e.Seq, e.History = CodeOutcomeUnknown, body.Seq, body.History
 		}
 	} else {
 		e.Message = strings.TrimSpace(string(raw))
