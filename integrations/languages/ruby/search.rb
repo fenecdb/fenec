@@ -26,13 +26,16 @@ def query(q, params = [])
   body
 end
 
-query("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
-query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
-query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
+query("create collection if not exists docs (title text @text, year int @sorted)")
+query("put docs {title: $1, year: $2}", ["Dunes", 2021])
+query("put docs {title: $1, year: $2}", ["Night at the oasis", 2024])
 
-rows = query("get docs select title near embed $1 limit $2", [[0.1, 0.2, 0.3], 5])
-titles = rows.map { |r| r["title"] }
-abort "near answered #{rows}" unless titles == ["Night at the oasis", "Dunes"]
+rows = query("get docs select title, year where year >= $1 order year desc limit $2", [2020, 5])
+expected = [{ "title" => "Night at the oasis", "year" => 2024 }, { "title" => "Dunes", "year" => 2021 }]
+abort "the filtered read answered #{rows}" unless rows == expected
+
+hits = query("get docs select title match title $1 fuzzy", ["oasys"])
+abort "match answered #{hits}" unless hits.map { |h| h["title"] } == ["Night at the oasis"] && hits[0]["_score"] > 0
 
 begin
   query("get nowhere")

@@ -197,17 +197,21 @@
         }
 
         /// The Swift tab's "over HTTP" lines on languages.html, as written
-        /// there but for the server's address.
+        /// there but for the server's address, and the read the home page's
+        /// Swift session ends with.
         @Test func theDocsExampleOverHTTP() async throws {
             let s = try await Server("docs")
             defer { s.stop() }
-            try await s.run("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
-            try await s.run(#"put docs {title: "Night at the oasis", embed: [0.1, 0.2, 0.3]}"#)
+            try await s.run("create collection if not exists docs (title text @text, year int @sorted)")
+            try await s.run(#"put docs {title: "Night at the oasis", year: 2024}"#)
 
             let remote = Fenec.connect(url: s.url, token: "secret")
-            try await remote.execute("put docs {title: $1, embed: $2}", "Dunes", [Float(0.9), 0.1, 0.0])
-            let hits = try await remote.from("docs").select("title").near("embed", [Float(0.1), 0.2, 0.3]).limit(5).rows()
-            #expect(hits.compactMap { $0["title"]?.string } == ["Night at the oasis", "Dunes"])
+            try await remote.execute("put docs {title: $1, year: $2}", "Dunes", 2021)
+            let recent = try await remote.from("docs").select("title", "year").where("year", ">=", 2020).order("year", "desc").limit(5).rows()
+            #expect(recent.compactMap { $0["title"]?.string } == ["Night at the oasis", "Dunes"])
+
+            let rows = try await remote.query("get docs select title, year where year >= $1 order year desc limit $2", 2020, 5)
+            #expect(rows == recent)
         }
 
         @Test func connectRunsEveryQueryOnTheServer() async throws {

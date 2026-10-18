@@ -345,14 +345,17 @@ description: One database from the screen to the server: state your screens foll
     <h2 class="rise">Your language</h2>
     <p class="lede rise">Every language reaches the server over plain HTTP and
       JSON, and Swift, Kotlin and Dart can also keep the database in the app.
-      Your AI framework and your data from PostgreSQL or SQLite come with it.
+      Your data from PostgreSQL or SQLite and your AI framework come with it.
       Each session is the same flow against <code>fenec-server</code>: make a
-      collection, write two rows, ask for the nearest.</p>
+      collection, write two rows, read them back by a filter and an
+      order.</p>
 
     <!-- Each session is the docs' own example for its language
-         (docs/languages.html, integrations/languages), and the rows are the
-         answer the docs show; the player types them, and without script
-         this list is the section. -->
+         (docs/languages.html, run against a server by
+         integrations/languages; Swift's, Kotlin's and Dart's read over HTTP
+         by their packages' sync tests), and the rows are the answer the
+         docs show; the player types them, and without script this list is
+         the section. -->
     <div class="sessions rise" id="sessions">
       <div class="session-marks" role="group" aria-label="Language"></div>
       <div class="cast-screen">
@@ -361,9 +364,9 @@ description: One database from the screen to the server: state your screens foll
       </div>
 
       <pre class="session-rows" hidden data-bare>
-title                 _score
-Night at the oasis    0.9999999
-Dunes                 0.3246547</pre>
+title                 year
+Night at the oasis    2024
+Dunes                 2021</pre>
 
       <ol class="session-script">
 <li data-name="Python" data-mark="py" data-file="search.py">
@@ -373,10 +376,10 @@ from fenecdb import Client
 db = Client("http://127.0.0.1:8080", token="secret")
 </pre>
 <pre class="typed" data-lang="python" data-bare>
-db.query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
-db.query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
-db.query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
-rows = db.query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+db.query("create collection if not exists docs (title text @text, year int @sorted)")
+db.query("put docs {title: $1, year: $2}", ["Dunes", 2021])
+db.query("put docs {title: $1, year: $2}", ["Night at the oasis", 2024])
+rows = db.query("get docs select title, year where year &gt;= $1 order year desc limit $2", [2020, 5])
 </pre>
 </li>
 <li data-name="JS / TS" data-mark="js" data-file="client.mjs">
@@ -386,10 +389,10 @@ import { connect } from '@fenecdb/web';
 const db = connect('http://127.0.0.1:8080', { token: 'secret' });
 </pre>
 <pre class="typed" data-lang="js" data-bare>
-await db.run('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
-await db.from('docs').insert({ title: 'Night at the oasis', embed: [0.1, 0.2, 0.3] });
-await db.from('docs').insert({ title: 'Dunes', embed: [0.9, 0.1, 0.0] });
-const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();
+await db.run('create collection if not exists docs (title text @text, year int @sorted)');
+await db.from('docs').insert({ title: 'Dunes', year: 2021 });
+await db.from('docs').insert({ title: 'Night at the oasis', year: 2024 });
+const rows = await db.from('docs').select('title', 'year').where('year', '&gt;=', 2020).order('year', 'desc').limit(5).rows();
 </pre>
 </li>
 <li data-name="Go" data-mark="go" data-file="main.go">
@@ -399,10 +402,10 @@ import fenecdb "github.com/fenecdb/fenec/integrations/go"
 db := fenecdb.New("http://127.0.0.1:8080", fenecdb.WithToken("secret"))
 </pre>
 <pre class="typed" data-lang="go" data-bare>
-db.Exec(ctx, "create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
-db.Exec(ctx, "put docs {title: $1, embed: $2}", "Night at the oasis", []float32{0.1, 0.2, 0.3})
-db.Exec(ctx, "put docs {title: $1, embed: $2}", "Dunes", []float32{0.9, 0.1, 0.0})
-rows, err := db.Query(ctx, "get docs select title near embed $1 limit 5", []float32{0.1, 0.2, 0.3})
+db.Exec(ctx, "create collection if not exists docs (title text @text, year int @sorted)")
+db.Exec(ctx, "put docs {title: $1, year: $2}", "Dunes", 2021)
+db.Exec(ctx, "put docs {title: $1, year: $2}", "Night at the oasis", 2024)
+rows, err := db.Query(ctx, "get docs select title, year where year &gt;= $1 order year desc limit $2", 2020, 5)
 </pre>
 </li>
 <li data-name=".NET" data-mark="C#" data-file="Program.cs">
@@ -412,10 +415,10 @@ using FenecDb;
 using var db = new FenecClient("http://127.0.0.1:8080", new() { Token = "secret" });
 </pre>
 <pre class="typed" data-lang="csharp" data-bare>
-await db.ExecAsync("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))");
-await db.ExecAsync("put docs {title: $1, embed: $2}", ["Night at the oasis", new[] { 0.1f, 0.2f, 0.3f }]);
-await db.ExecAsync("put docs {title: $1, embed: $2}", ["Dunes", new[] { 0.9f, 0.1f, 0.0f }]);
-var rows = await db.QueryAsync("get docs select title near embed $1 limit 5", [new[] { 0.1f, 0.2f, 0.3f }]);
+await db.ExecAsync("create collection if not exists docs (title text @text, year int @sorted)");
+await db.ExecAsync("put docs {title: $1, year: $2}", ["Dunes", 2021]);
+await db.ExecAsync("put docs {title: $1, year: $2}", ["Night at the oasis", 2024]);
+var rows = await db.QueryAsync("get docs select title, year where year &gt;= $1 order year desc limit $2", [2020, 5]);
 </pre>
 </li>
 <li data-name="Rust" data-mark="rs" data-file="main.rs">
@@ -430,10 +433,10 @@ fn query(q: &amp;str, params: Value) -> Result&lt;Value, ureq::Error&gt; {
 }
 </pre>
 <pre class="typed" data-lang="rust" data-bare>
-query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))", json!([]))?;
-query("put docs {title: $1, embed: $2}", json!(["Night at the oasis", [0.1, 0.2, 0.3]]))?;
-query("put docs {title: $1, embed: $2}", json!(["Dunes", [0.9, 0.1, 0.0]]))?;
-let rows = query("get docs select title near embed $1 limit 5", json!([[0.1, 0.2, 0.3]]))?;
+query("create collection if not exists docs (title text @text, year int @sorted)", json!([]))?;
+query("put docs {title: $1, year: $2}", json!(["Dunes", 2021]))?;
+query("put docs {title: $1, year: $2}", json!(["Night at the oasis", 2024]))?;
+let rows = query("get docs select title, year where year &gt;= $1 order year desc limit $2", json!([2020, 5]))?;
 </pre>
 </li>
 <li data-name="Java" data-mark="jv" data-file="Search.java">
@@ -449,13 +452,13 @@ static HttpResponse&lt;String&gt; query(String json) throws Exception {
 </pre>
 <pre class="typed" data-lang="java" data-bare>
 query("""
-    {"query": "create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))"}""");
+    {"query": "create collection if not exists docs (title text @text, year int @sorted)"}""");
 query("""
-    {"query": "put docs {title: $1, embed: $2}", "params": ["Night at the oasis", [0.1, 0.2, 0.3]]}""");
+    {"query": "put docs {title: $1, year: $2}", "params": ["Dunes", 2021]}""");
 query("""
-    {"query": "put docs {title: $1, embed: $2}", "params": ["Dunes", [0.9, 0.1, 0.0]]}""");
+    {"query": "put docs {title: $1, year: $2}", "params": ["Night at the oasis", 2024]}""");
 String rows = query("""
-    {"query": "get docs select title near embed $1 limit 5", "params": [[0.1, 0.2, 0.3]]}""").body();
+    {"query": "get docs select title, year where year &gt;= $1 order year desc limit $2", "params": [2020, 5]}""").body();
 </pre>
 </li>
 <li data-name="PHP" data-mark="php" data-file="search.php">
@@ -477,10 +480,10 @@ function query(string $q, array $params = []) {
 }
 </pre>
 <pre class="typed" data-lang="php" data-bare>
-query('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
-query('put docs {title: $1, embed: $2}', ['Night at the oasis', [0.1, 0.2, 0.3]]);
-query('put docs {title: $1, embed: $2}', ['Dunes', [0.9, 0.1, 0.0]]);
-$rows = query('get docs select title near embed $1 limit 5', [[0.1, 0.2, 0.3]]);
+query('create collection if not exists docs (title text @text, year int @sorted)');
+query('put docs {title: $1, year: $2}', ['Dunes', 2021]);
+query('put docs {title: $1, year: $2}', ['Night at the oasis', 2024]);
+$rows = query('get docs select title, year where year &gt;= $1 order year desc limit $2', [2020, 5]);
 </pre>
 </li>
 <li data-name="Ruby" data-mark="rb" data-file="search.rb">
@@ -496,10 +499,10 @@ def query(q, params = [])
 end
 </pre>
 <pre class="typed" data-lang="ruby" data-bare>
-query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
-query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
-query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
-rows = query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+query("create collection if not exists docs (title text @text, year int @sorted)")
+query("put docs {title: $1, year: $2}", ["Dunes", 2021])
+query("put docs {title: $1, year: $2}", ["Night at the oasis", 2024])
+rows = query("get docs select title, year where year &gt;= $1 order year desc limit $2", [2020, 5])
 </pre>
 </li>
 <li data-name="Swift" data-mark="sw" data-file="Search.swift">
@@ -510,10 +513,10 @@ import FenecDB
 let db = Fenec.connect(url: "http://127.0.0.1:8080", token: "secret")
 </pre>
 <pre class="typed" data-lang="swift" data-bare>
-try await db.execute("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
-try await db.execute("put docs {title: $1, embed: $2}", "Night at the oasis", [Float(0.1), 0.2, 0.3])
-try await db.execute("put docs {title: $1, embed: $2}", "Dunes", [Float(0.9), 0.1, 0.0])
-let rows = try await db.query("get docs select title near embed $1 limit 5", [Float(0.1), 0.2, 0.3])
+try await db.execute("create collection if not exists docs (title text @text, year int @sorted)")
+try await db.execute("put docs {title: $1, year: $2}", "Dunes", 2021)
+try await db.execute("put docs {title: $1, year: $2}", "Night at the oasis", 2024)
+let rows = try await db.query("get docs select title, year where year &gt;= $1 order year desc limit $2", 2020, 5)
 </pre>
 </li>
 <li data-name="Kotlin" data-mark="kt" data-file="Search.kt">
@@ -524,10 +527,10 @@ import com.fenecdb.*
 val db = Fenec.connect("http://127.0.0.1:8080", token = "secret")
 </pre>
 <pre class="typed" data-lang="kotlin" data-bare>
-db.execute("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
-db.execute("put docs {title: \$1, embed: \$2}", "Night at the oasis", floatArrayOf(0.1f, 0.2f, 0.3f))
-db.execute("put docs {title: \$1, embed: \$2}", "Dunes", floatArrayOf(0.9f, 0.1f, 0f))
-val rows = db.query("get docs select title near embed \$1 limit 5", floatArrayOf(0.1f, 0.2f, 0.3f))
+db.execute("create collection if not exists docs (title text @text, year int @sorted)")
+db.execute("put docs {title: \$1, year: \$2}", "Dunes", 2021)
+db.execute("put docs {title: \$1, year: \$2}", "Night at the oasis", 2024)
+val rows = db.query("get docs select title, year where year &gt;= \$1 order year desc limit \$2", 2020, 5)
 </pre>
 </li>
 <li data-name="Dart" data-mark="dart" data-file="search.dart">
@@ -538,10 +541,10 @@ import 'package:fenecdb/fenecdb.dart';
 final db = Fenec.connect('http://127.0.0.1:8080', token: 'secret');
 </pre>
 <pre class="typed" data-lang="dart" data-bare>
-await db.execute('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
-await db.execute(r'put docs {title: $1, embed: $2}', ['Night at the oasis', Float32List.fromList([0.1, 0.2, 0.3])]);
-await db.execute(r'put docs {title: $1, embed: $2}', ['Dunes', Float32List.fromList([0.9, 0.1, 0.0])]);
-final rows = await db.query(r'get docs select title near embed $1 limit 5', [Float32List.fromList([0.1, 0.2, 0.3])]);
+await db.execute('create collection if not exists docs (title text @text, year int @sorted)');
+await db.execute(r'put docs {title: $1, year: $2}', ['Dunes', 2021]);
+await db.execute(r'put docs {title: $1, year: $2}', ['Night at the oasis', 2024]);
+final rows = await db.query(r'get docs select title, year where year &gt;= $1 order year desc limit $2', [2020, 5]);
 </pre>
 </li>
 <li data-name="curl" data-mark="$_" data-file="shell" data-shell>
@@ -550,17 +553,46 @@ $ fenec-server --file app.fenec --http 127.0.0.1:8080 --http-token secret
 </pre>
 <pre class="typed" data-lang="bash" data-bare>
 $ curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
-  -d '{"query":"create collection docs (title text, embed vector&lt;3&gt; @hnsw(cosine))"}'
+  -d '{"query":"create collection docs (title text @text, year int @sorted)"}'
 {"message":"collection `docs` created"}
 $ curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
-  -d '{"query":"put docs {title: $1, embed: $2}","params":["Night at the oasis",[0.1,0.2,0.3]]}'
+  -d '{"query":"put docs {title: $1, year: $2}","params":["Dunes",2021]}'
 {"affected":1}
 $ curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
-  -d '{"query":"put docs {title: $1, embed: $2}","params":["Dunes",[0.9,0.1,0.0]]}'
+  -d '{"query":"put docs {title: $1, year: $2}","params":["Night at the oasis",2024]}'
 {"affected":1}
 $ curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
-  -d '{"query":"get docs select title near embed $1 limit 5","params":[[0.1,0.2,0.3]]}'
-[{"title":"Night at the oasis","_score":0.9999999},{"title":"Dunes","_score":0.3246547}]
+  -d '{"query":"get docs select title, year where year &gt;= $1 order year desc limit $2","params":[2020,5]}'
+[{"title":"Night at the oasis","year":2024},{"title":"Dunes","year":2021}]
+</pre>
+</li>
+<li data-name="SQLite" data-mark="sq" data-file="shell" data-shell data-group="Your data">
+<pre class="typed" data-lang="bash" data-bare>
+$ fenec import data.sqlite --table docs --into articles --index "category@hash" --dry-run
+source   data.sqlite -&gt; docs
+target   articles.fenec -&gt; articles
+
+create collection articles (
+  title      text           &lt;- text
+  category   text           &lt;- text
+  score      int            &lt;- int
+  published  timestamp      &lt;- datetime
+)
+  id  &lt;- id (INTEGER PRIMARY KEY)
+create index on articles (category) @hash
+
+nothing was written (--dry-run); use --count for the row count
+</pre>
+</li>
+<li data-name="PostgreSQL" data-mark="pg" data-file="shell" data-shell data-group="Your data">
+<pre class="typed" data-lang="bash" data-bare>
+$ fenec import postgres://app@db:5432/app --table docs --into articles \
+    --index "category@hash" --follow
+follow   slot fenec_articles (created), publication fenec_articles (created)
+copying  there is none yet
+100000 records, articles.fenec (3.1s)
+following docs: ctrl-c stops, and the same command resumes
+42 transactions, 57 changes, at 0/1B0E7F0
 </pre>
 </li>
 <li data-name="LangChain" data-mark="lc" data-file="store.py" data-group="Your AI code">
@@ -626,34 +658,6 @@ const { text } = await generateText({
   stopWhen: stepCountIs(4),
   prompt: 'How do I compact the database?',
 });
-</pre>
-</li>
-<li data-name="SQLite" data-mark="sq" data-file="shell" data-shell data-group="Your data">
-<pre class="typed" data-lang="bash" data-bare>
-$ fenec import data.sqlite --table docs --into articles --vector embed:3 --dry-run
-source   data.sqlite -&gt; docs
-target   articles.fenec -&gt; articles
-
-create collection articles (
-  title     text           &lt;- text
-  category  text           &lt;- text
-  score     int            &lt;- int
-  published timestamp      &lt;- datetime
-  embed     vector&lt;3&gt;      &lt;- blob
-)
-  id  &lt;- id (INTEGER PRIMARY KEY)
-create index on articles (embed) @hnsw(cosine, m=16, ef_construction=200, ef_search=100)
-</pre>
-</li>
-<li data-name="PostgreSQL" data-mark="pg" data-file="shell" data-shell data-group="Your data">
-<pre class="typed" data-lang="bash" data-bare>
-$ fenec import postgres://app@db:5432/app --table docs --into articles \
-    --index "embed@hnsw(cosine)" --follow
-follow   slot fenec_articles (created), publication fenec_articles (created)
-copying  there is none yet
-100000 records, articles.fenec (3.1s)
-following docs: ctrl-c stops, and the same command resumes
-42 transactions, 57 changes, at 0/1B0E7F0
 </pre>
 </li>
       </ol>

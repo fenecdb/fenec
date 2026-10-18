@@ -11,6 +11,11 @@ import (
 	fenecdb "github.com/fenecdb/fenec/integrations/go"
 )
 
+type Doc struct {
+	Title string `json:"title"`
+	Year  int    `json:"year"`
+}
+
 type Hit struct {
 	Title string  `json:"title"`
 	Score float32 `json:"_score"`
@@ -20,32 +25,37 @@ func main() {
 	ctx := context.Background()
 	db := fenecdb.New(env("FENEC_URL", "http://127.0.0.1:8080"), fenecdb.WithToken(os.Getenv("FENEC_TOKEN")))
 
-	must(db.Exec(ctx, "create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))"))
-	must(db.Exec(ctx, "put docs {title: $1, embed: $2}", "Night at the oasis", []float32{0.1, 0.2, 0.3}))
-	must(db.Exec(ctx, "put docs {title: $1, embed: $2}", "Dunes", []float32{0.9, 0.1, 0.0}))
+	must(db.Exec(ctx, "create collection if not exists docs (title text @text, year int @sorted)"))
+	must(db.Exec(ctx, "put docs {title: $1, year: $2}", "Dunes", 2021))
+	must(db.Exec(ctx, "put docs {title: $1, year: $2}", "Night at the oasis", 2024))
 
-	hits, err := fenecdb.QueryAs[Hit](ctx, db, "get docs select title near embed $1 limit $2", []float32{0.1, 0.2, 0.3}, 5)
+	rows, err := fenecdb.QueryAs[Doc](ctx, db, "get docs select title, year where year >= $1 order year desc limit $2", 2020, 5)
 	if err != nil {
 		fail("%v", err)
 	}
-	titles := []string{}
-	for _, h := range hits {
-		titles = append(titles, h.Title)
+	if !reflect.DeepEqual(rows, []Doc{{"Night at the oasis", 2024}, {"Dunes", 2021}}) {
+		fail("the filtered read answered %v", rows)
 	}
-	if !reflect.DeepEqual(titles, []string{"Night at the oasis", "Dunes"}) {
-		fail("near answered %v", titles)
+	hits, err := fenecdb.QueryAs[Hit](ctx, db, "get docs select title match title $1 fuzzy", "oasys")
+	if err != nil || len(hits) != 1 || hits[0].Title != "Night at the oasis" || hits[0].Score <= 0 {
+		fail("match answered %v, %v", hits, err)
 	}
 
 	// The same through the query builder, which writes that statement itself.
-	query := db.From("docs").Select("title").Near("embed", []float32{0.1, 0.2, 0.3}).Limit(5)
-	if text, _, err := query.ToFenecQL(); err != nil || text != "get docs select title near embed $1 limit $2" {
+	docs := db.From("docs")
+	query := docs.Select("title", "year").Where("year", ">=", 2020).Order("year", "desc").Limit(5)
+	if text, _, err := query.ToFenecQL(); err != nil || text != "get docs select title, year where year >= $1 order year desc limit $2" {
 		fail("the builder wrote %q, %v", text, err)
 	}
-	built, err := fenecdb.RowsAs[Hit](ctx, query)
-	if err != nil || !reflect.DeepEqual(built, hits) {
+	built, err := fenecdb.RowsAs[Doc](ctx, query)
+	if err != nil || !reflect.DeepEqual(built, rows) {
 		fail("the builder's query answered %v, %v", built, err)
 	}
-	if n, err := db.From("docs").Where("title", "~", "Dunes").Count(ctx); err != nil || n != 1 {
+	found, err := fenecdb.RowsAs[Hit](ctx, docs.Select("title").Match("title", "oasys", fenecdb.Fuzzy(2)))
+	if err != nil || !reflect.DeepEqual(found, hits) {
+		fail("the builder's match answered %v, %v", found, err)
+	}
+	if n, err := docs.Where("title", "~", "Dunes").Count(ctx); err != nil || n != 1 {
 		fail("count answered %d, %v", n, err)
 	}
 

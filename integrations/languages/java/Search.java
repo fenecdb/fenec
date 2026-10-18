@@ -30,18 +30,23 @@ public class Search {
 
     public static void main(String[] args) throws Exception {
         ok(query("""
-            {"query": "create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))"}"""));
+            {"query": "create collection if not exists docs (title text @text, year int @sorted)"}"""));
         ok(query("""
-            {"query": "put docs {title: $1, embed: $2}", "params": ["Night at the oasis", [0.1, 0.2, 0.3]]}"""));
+            {"query": "put docs {title: $1, year: $2}", "params": ["Dunes", 2021]}"""));
         ok(query("""
-            {"query": "put docs {title: $1, embed: $2}", "params": ["Dunes", [0.9, 0.1, 0.0]]}"""));
+            {"query": "put docs {title: $1, year: $2}", "params": ["Night at the oasis", 2024]}"""));
 
         String rows = ok(query("""
-            {"query": "get docs select title near embed $1 limit $2", "params": [[0.1, 0.2, 0.3], 5]}"""));
-        var titles = Pattern.compile("\"title\":\"([^\"]*)\"").matcher(rows).results()
+            {"query": "get docs select title, year where year >= $1 order year desc limit $2", "params": [2020, 5]}"""));
+        if (!rows.equals("[{\"title\":\"Night at the oasis\",\"year\":2024},{\"title\":\"Dunes\",\"year\":2021}]"))
+            throw new AssertionError("the filtered read answered " + rows);
+
+        String hits = ok(query("""
+            {"query": "get docs select title match title $1 fuzzy", "params": ["oasys"]}"""));
+        var titles = Pattern.compile("\"title\":\"([^\"]*)\"").matcher(hits).results()
             .map(m -> m.group(1)).toList();
-        if (!titles.equals(List.of("Night at the oasis", "Dunes")))
-            throw new AssertionError("near answered " + rows);
+        if (!titles.equals(List.of("Night at the oasis")))
+            throw new AssertionError("match answered " + hits);
 
         if (query("{\"query\": \"get nowhere\"}").statusCode() != 404)
             throw new AssertionError("a missing collection was answered");

@@ -11,17 +11,24 @@ const db = connect(process.env.FENEC_URL ?? 'http://127.0.0.1:8080', {
   token: process.env.FENEC_TOKEN,
 });
 
-await db.run('create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))');
-await db.from('docs').insert({ title: 'Night at the oasis', embed: [0.1, 0.2, 0.3] });
-await db.from('docs').insert({ title: 'Dunes', embed: [0.9, 0.1, 0.0] });
+await db.run('create collection if not exists docs (title text @text, year int @sorted)');
+await db.from('docs').insert({ title: 'Dunes', year: 2021 });
+await db.from('docs').insert({ title: 'Night at the oasis', year: 2024 });
 
-const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();
-assert.deepEqual(rows.map((r) => r.title), ['Night at the oasis', 'Dunes']);
+const rows = await db.from('docs').select('title', 'year').where('year', '>=', 2020).order('year', 'desc').limit(5).rows();
+assert.deepEqual([...rows], [
+  { title: 'Night at the oasis', year: 2024 },
+  { title: 'Dunes', year: 2021 },
+]);
+
+const hits = await db.from('docs').select('title').match('title', 'oasys', { fuzzy: true }).rows();
+assert.deepEqual(hits.map((h) => h.title), ['Night at the oasis']);
 
 // The builder's statement is the one written by hand, and so is its answer.
-const [text, params] = db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).toFenecQL();
-assert.equal(text, 'get docs select title near embed $1 limit $2');
-assert.deepEqual(await db.rows(text, params), rows);
+const [text, params] = db.from('docs').select('title', 'year').where('year', '>=', 2020).order('year', 'desc').limit(5).toFenecQL();
+assert.equal(text, 'get docs select title, year where year >= $1 order year desc limit $2');
+assert.deepEqual(params, [2020, 5]);
+assert.deepEqual(await db.rows(text, params), [...rows]);
 assert.equal(await db.from('docs').where('title', '~', 'Dunes').count(), 1);
 
 await assert.rejects(db.run('get nowhere'), /nowhere/);

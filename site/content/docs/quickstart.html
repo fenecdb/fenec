@@ -1,11 +1,11 @@
 <!--
 title: Quickstart — fenecdb
-description: Build fenecdb and run your first vector query — in the browser, against a server, or in the shell.
+description: Build fenecdb, make a collection, write a row and query it — in the browser, against a server, or in the shell.
 -->
 
 <h1>Quickstart</h1>
-<p class="kicker">Go from a fresh clone to your first vector query, in the
-browser or on a server.</p>
+<p class="kicker">Go from a fresh clone to a collection you write rows into,
+read back and search, in the browser, on a server or in the shell.</p>
 
 <h2>Build</h2>
 
@@ -47,13 +47,30 @@ tests run against that binary.</p>
 <pre data-lang="bash">cp web/fenec.js web/builder.js web/http.js web/fenec.wasm my-page/</pre>
   </li>
   <li>
-    <p>Open a database, write a row, and search.</p>
+    <p>Open a database, make a collection and write two rows.</p>
 <pre data-lang="js" data-label="index.html">import { Fenec } from './fenec.js';
 
 const db = await Fenec.open('./fenec.wasm');
-db.run('create collection docs (title text, embed vector<384> @hnsw(cosine))');
-db.run('put docs {title: $1, embed: $2}', ['hello', embedding]);
-const { rows } = db.run('get docs near embed $1 limit 5', [queryVector]);</pre>
+db.run('create collection notes (title text @text, year int @sorted)');
+db.run('put notes {title: $1, year: $2}', ['Dunes', 2021]);
+db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);</pre>
+  </li>
+  <li>
+    <p>Read them back by a filter and an order, and search the words, a
+    typo and all.</p>
+<pre data-lang="js">const { rows } = db.run('get notes where year &gt;= $1 order year desc', [2020]);
+// [{ id: 2, title: 'Night at the oasis', year: 2024 }, { id: 1, title: 'Dunes', year: 2021 }]
+
+const hits = db.rows('get notes select title match title $1 fuzzy', ['oasys']);
+// [{ title: 'Night at the oasis', _score: 0.62... }]</pre>
+  </li>
+  <li>
+    <p>Keep the rows on the page as they change: a live query runs again
+    after every write to what it reads.</p>
+<pre data-lang="js">db.live(db.from('notes').where('year', '&gt;=', 2020).order('year', 'desc'), (rows) =&gt; {
+  document.querySelector('#notes').textContent = rows.map((n) =&gt; n.title).join(', ');
+});
+db.run('put notes {title: $1, year: $2}', ['Sand and stars', 2023]);   // the list is drawn again</pre>
   </li>
   <li>
     <p>Serve the page over HTTP — it does not open from <code>file://</code>.</p>
@@ -77,19 +94,22 @@ queries run on a server needs only <code>client.js</code> and those two
 
 const db = await Fenec.open('./fenec.wasm');
 
-db.run('create collection docs (title text, embed vector<384> @hnsw(cosine))');
-db.run('put docs {title: $1, embed: $2}', ['hello', embedding]);
+db.run('create collection notes (title text @text, year int @sorted)');
+db.run('put notes {title: $1, year: $2}', ['Night at the oasis', 2024]);
 
-const { rows } = db.run('get docs near embed $1 limit 5', [queryVector]);
+const { rows } = db.run('get notes where year &gt;= $1 order year desc limit 10', [2020]);
 
 // or with the builder, for dynamic filters and bound parameters
-const near = await db.from('docs').near('embed', queryVector).limit(5).rows();
+const recent = await db.from('notes').where('year', '&gt;=', 2020).order('year', 'desc').limit(10).rows();
 
 await persist(db);      // write the snapshot to IndexedDB
 await restore(db);      // read it back next session
 // or, in a worker: a file every statement is flushed into, which fenec-server opens too
 // const file = await openFile(db, 'notes.fenec');
 </pre>
+
+<p>A page can declare its collections in code instead, and the open makes
+them (<a href="javascript.html#state">State in the page</a>).</p>
 
 <div class="note trap">
   <p><b>It does not open over <code>file://</code>.</b>
@@ -114,20 +134,34 @@ const db = await Fenec.open(await readFile('./fenec.wasm'));
 <pre data-lang="bash">./target/release/fenec-server --file data.fenec --http 127.0.0.1:8080</pre>
   </li>
   <li>
-    <p>Send it a query. The language is FenecQL.</p>
+    <p>Make a collection and write a row. The language is FenecQL, and the
+    values go as parameters.</p>
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
-  -d '{"query": "get articles select title near embed $1 limit 5", "params": [[0.1, 0.2]]}'</pre>
+  -d '{"query": "create collection notes (title text @text, year int @sorted)"}'
+curl -X POST http://127.0.0.1:8080/query \
+  -d '{"query": "put notes {title: $1, year: $2}", "params": ["Night at the oasis", 2024]}'</pre>
   </li>
   <li>
-    <p>Or use the REST routes.</p>
-<pre data-lang="bash">curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&limit=10'</pre>
+    <p>Read it back by a filter and an order, or search the words.</p>
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
+  -d '{"query": "get notes where year &gt;= $1 order year desc limit 10", "params": [2020]}'
+curl -X POST http://127.0.0.1:8080/query \
+  -d '{"query": "get notes select title match title $1 fuzzy", "params": ["oasys"]}'</pre>
+  </li>
+  <li>
+    <p>Or use the REST routes, and follow the rows as they change.</p>
+<pre data-lang="bash">curl 'http://127.0.0.1:8080/notes?select=title,year&amp;year=gte.2020&amp;order=year.desc&amp;limit=10'
+curl -N 'http://127.0.0.1:8080/notes/changes?year=gte.2020'</pre>
   </li>
 </ol>
 
 <details class="deep"><summary>Details</summary>
 <p>Every language reaches the server over HTTP: <a href="languages.html">Your
-language</a> has the same request in each, and every route is on <a
-href="http.html">HTTP endpoint</a>.</p>
+language</a> has the same requests in each, and every route is on <a
+href="http.html">HTTP endpoint</a>. A write's answer is
+<code>{"affected": 1}</code>, a read's an array of rows, and the stream
+of <code>/notes/changes</code> sends the rows its filter holds, then each
+change to them (<a href="http.html#subscriptions">Subscriptions</a>).</p>
 
 <pre data-lang="bash">./target/release/fenec-server --ping        # 0 means up — a health check
 </pre>
@@ -149,69 +183,104 @@ href="sharding.html#deploying">Deploying it</a>.</p>
 <pre data-lang="bash">./target/release/fenec data.fenec</pre>
   </li>
   <li>
-    <p>Create a collection.</p>
+    <p>Create a collection, each field typed and the ones you filter,
+    order and search by indexed.</p>
 <pre data-lang="fenecql">create collection notes (
-  body   text,
+  body   text @text,
   topic  int @hash,
-  posted timestamp,
-  embed  vector&lt;384&gt;
+  posted timestamp @sorted
 )</pre>
   </li>
   <li>
-    <p>Load your rows.</p>
-<pre data-lang="fenecql">put notes {body: "hnsw is a navigable small world graph", topic: 3, embed: $1}
+    <p>Write your rows.</p>
+<pre data-lang="fenecql">put notes {body: "a night at the oasis, under the stars", topic: 3, posted: now()}
 put notes [ ... 100 000 more ... ]</pre>
   </li>
   <li>
-    <p>Build the vector index after the load, not before.</p>
-<pre data-lang="fenecql">create index on notes (embed) @hnsw(cosine)</pre>
+    <p>Read them back, newest first.</p>
+<pre data-lang="fenecql">get notes select body, posted where topic = 3 order posted desc limit 10</pre>
   </li>
   <li>
-    <p>Query.</p>
-<pre data-lang="fenecql">get notes select body
-  where topic = 3
-  near embed $1
-  limit 10</pre>
+    <p>Search the words. <code>fuzzy</code> finds them typed wrong.</p>
+<pre data-lang="fenecql">get notes select body match body "oasys stars" fuzzy limit 10</pre>
   </li>
 </ol>
 
 <details class="deep"><summary>Details</summary>
 <pre data-lang="bash">./target/release/fenec data.fenec              # interactive
-./target/release/fenec data.fenec -c 'get docs limit 5'
-echo 'get docs' | ./target/release/fenec data.fenec
+./target/release/fenec data.fenec -c 'get notes limit 5'
+echo 'get notes' | ./target/release/fenec data.fenec
 </pre>
 
 <p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
 <code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>
 <code>.quit</code>.</p>
 
-<p>A first collection, a bulk load, then the index — that order matters, and
-the reason is in <a href="concepts.html#bulk-load-first-index-after">How it
-works</a>.</p>
+<p>The shell runs a statement once its line ends with its parentheses and
+braces closed, so a <code>create collection</code> may span lines and a
+<code>get</code> goes on one.</p>
+
+<p>Fields and indexes can come later too, with no row rewritten:
+<code>alter collection notes add field mood text</code>, then
+<code>create index on notes (mood) @hash</code> over the rows already there
+(<a href="fenecql.html#changing-a-collection">Changing a collection</a>).
+<code>prefix</code> finds a word half typed, and <code>highlight()</code>
+and <code>snippet()</code> mark what matched (<a
+href="fenecql.html#typos">Typos and words begun</a>).</p>
+</details>
+
+<h2>Search by meaning</h2>
+
+<p>A vector field adds search by meaning beside the words: <code>near</code>
+ranks the rows by how close their embedding is to a query's, and
+<code>fuse</code> puts that ranking together with <code>match</code>'s. The
+vectors come from your embedding model, as parameters.</p>
+
+<pre data-lang="fenecql">alter collection notes add field embed vector&lt;384&gt;
+put notes {body: "hnsw is a navigable small world graph", topic: 3, posted: now(), embed: $1}
+create index on notes (embed) @hnsw(cosine)
+get notes select body where topic = 3 near embed $1 limit 10</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>Load the vectors first and build the index after, not before: the
+graph is then built once over all of them, on every core, rather than a
+row at a time. The reason is in <a
+href="concepts.html#bulk-load-first-index-after">How it works</a>.</p>
 
 <p>When a file with a vector index is closed from an interactive or piped
-session, a checkpoint is written so the graph is not rebuilt on the next open.
-A one-shot <code>-c</code> call does not write one.</p>
+session, a checkpoint is written so the graph is not rebuilt on the next
+open. A one-shot <code>-c</code> call does not write one.</p>
+
+<p>In the page the same statements go through <code>db.run</code>, the
+vector a <code>Float32Array</code>, or the builder:
+<code>db.from('notes').near('embed', queryVector).limit(5).rows()</code>.
+Every clause is on <a href="fenecql.html#the-vector-clause">FenecQL</a>, and
+words and meaning together on <a href="fenecql.html#hybrid">Hybrid
+search</a>.</p>
 </details>
 
 <h2>Bring your own data</h2>
 
 <p><code>fenec import</code> copies a SQLite file or a PostgreSQL table into a
-collection, schema and vector index included.</p>
+collection, its schema and indexes included.</p>
 
-<pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
-    --vector embed:384 --index "embed@hnsw(cosine)"</pre>
+<pre data-lang="bash">fenec import data.sqlite --table docs --into articles --index "category@hash"</pre>
 
 <details class="deep"><summary>Details</summary>
-<p><code>fenec import</code> derives the schema, recognises vector columns and
-follows the bulk-load-then-index order by itself.</p>
+<p><code>fenec import</code> derives the schema from the table's columns and
+builds the indexes you name once the rows are in. <code>--follow</code>
+keeps a PostgreSQL table's copy in step, applying each change as it
+commits.</p>
 
 <pre data-lang="bash">fenec import postgres://user@host:5432/database --table docs \
-    --into articles --index "embed@hnsw(cosine)"
+    --into articles --index "category@hash" --follow
 </pre>
 
 <p><code>--dry-run</code> prints the derived schema and any warnings without
-writing anything. Full flag list in <a href="import.html">Import</a>.</p>
+writing anything. A vector column comes across too, with
+<code>--vector embed:384</code> for a SQLite blob and <code>--index
+"embed@hnsw(cosine)"</code>. Full flag list in <a
+href="import.html">Import</a>.</p>
 </details>
 
 <h2>Generate TypeScript from the file</h2>

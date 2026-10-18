@@ -52,21 +52,30 @@ func query(out any, q string, params ...any) error {
 }
 
 func main() {
-	must(query(nil, "create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))"))
-	must(query(nil, "put docs {title: $1, embed: $2}", "Night at the oasis", []float32{0.1, 0.2, 0.3}))
-	must(query(nil, "put docs {title: $1, embed: $2}", "Dunes", []float32{0.9, 0.1, 0.0}))
+	must(query(nil, "create collection if not exists docs (title text @text, year int @sorted)"))
+	must(query(nil, "put docs {title: $1, year: $2}", "Dunes", 2021))
+	must(query(nil, "put docs {title: $1, year: $2}", "Night at the oasis", 2024))
 
 	var rows []struct {
+		Title string `json:"title"`
+		Year  int    `json:"year"`
+	}
+	must(query(&rows, "get docs select title, year where year >= $1 order year desc limit $2", 2020, 5))
+	got := []string{}
+	for _, r := range rows {
+		got = append(got, fmt.Sprintf("%s %d", r.Title, r.Year))
+	}
+	if !reflect.DeepEqual(got, []string{"Night at the oasis 2024", "Dunes 2021"}) {
+		fail("the filtered read answered %v", got)
+	}
+
+	var hits []struct {
 		Title string  `json:"title"`
 		Score float32 `json:"_score"`
 	}
-	must(query(&rows, "get docs select title near embed $1 limit $2", []float32{0.1, 0.2, 0.3}, 5))
-	titles := []string{}
-	for _, r := range rows {
-		titles = append(titles, r.Title)
-	}
-	if !reflect.DeepEqual(titles, []string{"Night at the oasis", "Dunes"}) {
-		fail("near answered %v", titles)
+	must(query(&hits, "get docs select title match title $1 fuzzy", "oasys"))
+	if len(hits) != 1 || hits[0].Title != "Night at the oasis" || hits[0].Score <= 0 {
+		fail("match answered %v", hits)
 	}
 
 	err := query(nil, "get nowhere")

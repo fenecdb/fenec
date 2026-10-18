@@ -32,8 +32,10 @@ export type FenecSchema = {
   };
 
   docs: {
-    /** text */
+    /** text @text(k1=0.9, b=0.4) */
     title: string | null;
+    /** int @sorted */
+    year: number | null;
     /** vector<384> @hnsw(cosine, m=16, ef_search=100) */
     embed: Vector | null;
   };
