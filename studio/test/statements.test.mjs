@@ -193,8 +193,14 @@ test('the editor cuts a text at each ; outside its strings and comments, and rew
   // Where each starts, so a refusal can point at it.
   assert.equal(text.slice(got[1].at, got[1].at + 7), '-- only');
   assert.deepEqual(S.splitStatements('  ;  -- nothing\n;'), []);
-  // A string left open ends at its line, as the lexer refuses it there.
-  assert.deepEqual(S.splitStatements('get a where t = "open\n; get b').map((s) => s.text), ['get a where t = "open', 'get b']);
+  // A string runs over lines to its quote, and `#` starts a comment, as
+  // the lexer reads them; a string left open holds the rest, which the
+  // server refuses whole.
+  const texts = (t) => S.splitStatements(t).map((s) => s.text);
+  assert.deepEqual(texts('put a {t: "two\nlines; one"}; get b'), ['put a {t: "two\nlines; one"}', 'get b']);
+  assert.deepEqual(texts('get a # x; y\n; get b'), ['get a # x; y', 'get b']);
+  assert.deepEqual(texts('# only; a comment\n;'), []);
+  assert.deepEqual(texts('get a where t = "open\n; get b'), ['get a where t = "open\n; get b']);
 });
 
 test('one statement goes to /query with its parameters; several, a list each, to /batch', () => {

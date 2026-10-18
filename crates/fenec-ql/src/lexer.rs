@@ -34,6 +34,11 @@ pub enum Tok {
     Eq,
     Ne,
     Tilde,
+    /// `;`, which ends the statement before it: dropped as white space,
+    /// it let a clause go on past it -- `del notes; where id = 3` was one
+    /// statement to the parser, which ran it as `-c`, and two to a shell
+    /// that ran each statement at its `;`.
+    Semi,
     Eof,
 }
 
@@ -70,6 +75,7 @@ impl Tok {
             Tok::Eq => "`=`".into(),
             Tok::Ne => "`!=`".into(),
             Tok::Tilde => "`~`".into(),
+            Tok::Semi => "`;`".into(),
             Tok::Eof => "end of input".into(),
         }
     }
@@ -119,6 +125,76 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
 /// back, for 0.3 KB brotli.
 pub fn tokenize_vectors(src: &str) -> Result<Vec<Token>> {
     lex::<true>(src)
+}
+
+/// The words a text that ends inside a string is refused with, by which
+/// `parser::reading` knows its end is what refused it.
+pub(crate) const UNTERMINATED: &str = "unterminated string";
+
+/// What a text leaves open, read as the lexer reads its strings, comments
+/// and brackets but a piece at a time and with no token made: a string not
+/// closed, or more brackets opened than closed. No statement is whole
+/// while either holds, so a reader taking a text a line at a time -- the
+/// shell -- asks this before it reads the text again: a document written
+/// over 10 000 lines is read once, at its last line, where reading it at
+/// each was the text lexed and parsed 10 000 times.
+///
+/// It is the lexer's reading but for one text the lexer refuses anyway: a
+/// number whose exponent's sign is followed by a `-` (`1e--2`), where it
+/// sees a comment the lexer does not reach. `the_gate_reads_as_the_lexer`
+/// holds it to the lexer over generated texts.
+#[derive(Clone, Debug, Default)]
+pub struct Unclosed {
+    /// Brackets opened and not closed: `(`, `[` and `{`.
+    depth: i64,
+    /// The quote of the string the text is inside, 0 outside one.
+    quote: u8,
+    /// Inside a string, just after a backslash: the next byte is escaped.
+    escape: bool,
+    /// Inside a comment, which the line's end closes.
+    comment: bool,
+    /// Outside a string and a comment, the byte before was a `-`: one more
+    /// starts a comment.
+    dash: bool,
+}
+
+impl Unclosed {
+    /// The next piece of the text.
+    pub fn feed(&mut self, piece: &str) {
+        for &b in piece.as_bytes() {
+            if self.comment {
+                self.comment = b != b'\n';
+                continue;
+            }
+            if self.quote != 0 {
+                match (self.escape, b) {
+                    (true, _) => self.escape = false,
+                    (false, b'\\') => self.escape = true,
+                    (false, q) if q == self.quote => self.quote = 0,
+                    _ => {}
+                }
+                continue;
+            }
+            let dash = std::mem::take(&mut self.dash);
+            match b {
+                b'"' | b'\'' => self.quote = b,
+                b'#' => self.comment = true,
+                b'-' => match dash {
+                    true => self.comment = true,
+                    false => self.dash = true,
+                },
+                b'(' | b'[' | b'{' => self.depth += 1,
+                b')' | b']' | b'}' => self.depth -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether the text so far ends inside a string or with a bracket
+    /// open.
+    pub fn is_open(&self) -> bool {
+        self.quote != 0 || self.depth > 0
+    }
 }
 
 /// At a `[` at byte `i`: the numbers alone up to the `]` that closes it,
@@ -337,7 +413,7 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
             }
             ';' => {
                 i += 1;
-                continue; // statement separator, ignored
+                Tok::Semi
             }
             '=' => {
                 i += 1;
@@ -408,9 +484,7 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                 let mut s = String::new();
                 loop {
                     if i >= b.len() {
-                        return Err(Error::Query(format!(
-                            "position {start}: unterminated string"
-                        )));
+                        return Err(Error::Query(format!("position {start}: {UNTERMINATED}")));
                     }
                     if b[i] == b'\\' && i + 1 < b.len() {
                         i += 1;
@@ -677,7 +751,7 @@ mod tests {
                 }
                 ';' => {
                     i += 1;
-                    continue; // statement separator, ignored
+                    Tok::Semi
                 }
                 '=' => {
                     i += 1;
@@ -951,6 +1025,92 @@ mod tests {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "{text:?}"),
                 (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{text:?}"),
                 _ => panic!("{text:?}: {a:?} against {b:?}"),
+            }
+        }
+    }
+
+    /// [`Unclosed`] fed a generated text in pieces, cut anywhere: where
+    /// the lexer reads the text it agrees on the brackets left open and on
+    /// the string, and where the lexer finds a string unterminated it is in
+    /// one -- over quotes, escapes, comments and brackets, ASCII and not.
+    #[test]
+    fn the_gate_reads_as_the_lexer() {
+        let pieces = [
+            "get",
+            " ",
+            "\n",
+            "\t",
+            "(",
+            ")",
+            "[",
+            "]",
+            "{",
+            "}",
+            "\"",
+            "'",
+            "\\",
+            "\\\"",
+            "--",
+            "-",
+            "#",
+            ";",
+            "a",
+            "1",
+            "1e5",
+            "7e",
+            "-3",
+            "x - 1",
+            "[1, 2]",
+            "\"a;b\"",
+            "'it''s'",
+            "-- it's\n",
+            "# \"\n",
+            "ş",
+            "名",
+            "\u{A0}",
+            ",",
+            ":",
+            "\r\n",
+        ];
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..50_000 {
+            let mut text = String::new();
+            for _ in 0..rnd(14) {
+                text.push_str(pieces[rnd(pieces.len())]);
+            }
+            let mut gate = Unclosed::default();
+            let mut at = 0;
+            while at < text.len() {
+                let mut to = (at + 1 + rnd(6)).min(text.len());
+                while !text.is_char_boundary(to) {
+                    to += 1;
+                }
+                gate.feed(&text[at..to]);
+                at = to;
+            }
+            match tokenize(&text) {
+                Ok(toks) => {
+                    let depth: i64 = toks
+                        .iter()
+                        .map(|t| match t.tok {
+                            Tok::LParen | Tok::LBracket | Tok::LBrace => 1,
+                            Tok::RParen | Tok::RBracket | Tok::RBrace => -1,
+                            _ => 0,
+                        })
+                        .sum();
+                    assert_eq!(gate.quote, 0, "{text:?}");
+                    assert_eq!(gate.depth, depth, "{text:?}");
+                }
+                Err(e) if e.to_string().ends_with(UNTERMINATED) => {
+                    assert!(gate.quote != 0, "{text:?}")
+                }
+                Err(_) => {}
             }
         }
     }
