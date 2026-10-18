@@ -75,7 +75,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--max-connections</code>, <code>--idle-timeout</code>, <code>--max-memory</code></td><td><a href="#limits">Limits</a>.</td></tr>
 <tr><td><code>--http-cors</code>, <code>--http-read-only</code>, <code>--http-max-streams</code>, <code>--http-keepalive</code>, <code>--changes</code>, <code>--idempotency-ttl</code></td><td>The HTTP endpoint's options (<a href="/docs/http">HTTP endpoint</a>).</td></tr>
 <tr><td><code>--replication-token</code>, <code>--replica-of</code>, <code>--promote</code>, <code>--replication-buffer</code>, <code>--cdc</code></td><td><a href="/docs/replication">Replication</a> and <a href="/docs/microservices">change data capture</a>.</td></tr>
-<tr><td><code>--admin-token</code>, <code>--idle-close</code>, <code>--lease</code></td><td>A tenant node's (<a href="/docs/sharding">Tenants and sharding</a>).</td></tr>
+<tr><td><code>--admin-token</code>, <code>--idle-close</code>, <code>--lease</code></td><td>A tenant node's (<a href="/docs/sharding">Tenants and sharding</a>). The admin token is also read from <code>FENEC_ADMIN_TOKEN</code>.</td></tr>
 <tr><td><code>--follow &lt;postgres://...&gt;</code>, <code>--follow-*</code></td><td>Mirrors a PostgreSQL table into the file and serves it (<a href="import.html#serving">Import</a>).</td></tr>
 <tr><td><code>--metrics</code>, <code>--slow-ms</code>, <code>--audit</code>, <code>--auth-delay</code></td><td><a href="/docs/monitoring">Monitoring</a> and the audit log.</td></tr>
 <tr><td><code>--otlp-endpoint</code>, <code>--otlp-header</code>, <code>--trace-sample</code></td><td>OpenTelemetry traces to a collector; off unless an endpoint is given (<a href="/docs/monitoring#tracing">Tracing</a>).</td></tr>
@@ -135,6 +135,16 @@ the tenant its <code>tenant</code> claim names
 (<a href="/docs/sharding#tokens">Tokens</a>). Pass the secret with <code>--jwt-secret-file</code> or
 <code>FENEC_JWT_SECRET</code> — <code>argv</code> shows up in <code>ps</code>
 output.</p>
+
+<p>Every token and key is read from the environment too:
+<code>FENEC_HTTP_TOKEN</code>, <code>FENEC_ADMIN_TOKEN</code>,
+<code>FENEC_REPLICATION_TOKEN</code>, <code>FENEC_JWT_SECRET</code> and
+<code>FENEC_JWT_KEYS</code>. One set and empty -- an environment file's line
+left blank -- is no token. One given empty as a flag --
+<code>--http-token "$TOKEN"</code> with <code>TOKEN</code> unset -- is
+refused at the start, as is a secret's file holding nothing: a request that
+carries no <code>Authorization</code> reads as the empty token, so an empty
+admin token let anyone into <code>/_admin/</code>.</p>
 
 <p>A request refused for its token waits before it is answered — 100 ms,
 twice as long for each refusal from the same address within a minute, 5 s at

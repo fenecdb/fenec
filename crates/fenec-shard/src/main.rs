@@ -151,8 +151,10 @@ usage: fenec-shard [options]
                             one that does not is let be for 5 s, its
                             region's reads going home  default: 2000
 
-The token is also read from the FENEC_SHARD_TOKEN environment variable, and
-the entry's from FENEC_SHARD_ENTRY_TOKEN.
+The token is also read from the FENEC_SHARD_TOKEN environment variable, the
+entry's from FENEC_SHARD_ENTRY_TOKEN and the replication token from
+FENEC_SHARD_REPLICATION_TOKEN: argv shows up in `ps`. Each one set and empty
+is unset.
 ";
 
 fn fail(msg: &str) -> ! {
@@ -174,16 +176,19 @@ fn refuse_node_token(dir: &Directory, entry_token: Option<&str>, path: &str) {
 }
 
 fn main() {
+    // Set and empty is unset, as a deployment's template leaves it: taken
+    // for a token, an empty FENEC_SHARD_TOKEN let a request with no
+    // `Authorization` at all into /_shard/ -- moves, deletes, every node's
+    // address -- and passed the check that keeps a router off a public
+    // address without a token.
+    let env = |name: &str| std::env::var(name).ok().filter(|t| !t.is_empty());
     let mut cfg = Config {
-        token: std::env::var("FENEC_SHARD_TOKEN").ok(),
-        // Set and empty is unset, as a deployment's template leaves it.
-        entry_token: std::env::var("FENEC_SHARD_ENTRY_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty()),
+        token: env("FENEC_SHARD_TOKEN"),
+        entry_token: env("FENEC_SHARD_ENTRY_TOKEN"),
         ..Config::default()
     };
     let mut path = "shard.fenec".to_string();
-    let mut replication_token: Option<String> = None;
+    let mut replication_token: Option<String> = env("FENEC_SHARD_REPLICATION_TOKEN");
     let mut replica_of: Option<String> = None;
     let mut promote = false;
     let mut replication_buffer = 8 << 20;
@@ -361,6 +366,19 @@ fn main() {
     // would reach more than the client's name: `--token` moves and deletes
     // every tenant, and the directory's replication stream carries every
     // node's admin token.
+    // A token given empty as a flag -- `--token "$ROOT"` with ROOT unset --
+    // is refused, not taken; the environment's are unset when empty.
+    for (flag, value) in [
+        ("--token", cfg.token.as_deref()),
+        ("--replication-token", replication_token.as_deref()),
+    ] {
+        if value == Some("") {
+            fail(&format!(
+                "{flag} is empty -- a variable given it unset? Give it a value, or leave \
+                 the flag out"
+            ));
+        }
+    }
     match cfg.entry_token.as_deref() {
         Some("") => fail("--entry-token is empty: the entry's mark would be anyone's to make"),
         Some(t) if cfg.token.as_deref() == Some(t) => fail(

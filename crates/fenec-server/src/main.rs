@@ -24,7 +24,8 @@ usage: fenec-server [options]
       --dir <path>          one file per tenant in this directory, served
                             under /t/<tenant>/
       --admin-token <value> token for /_admin/ (--dir only): create, delete,
-                            freeze and move tenants. Without it, off
+                            freeze and move tenants. Without it, off. Also
+                            read from FENEC_ADMIN_TOKEN: argv shows up in `ps`
       --idle-close <s>      close a tenant untouched for this long  default: 300
                             (0 = never). The next request reopens it
       --lease               write a tenant only while the router's lease names
@@ -253,6 +254,9 @@ usage: fenec-server [options]
       --ping                ask the server at --http for GET /_health and
                             exit: 0 = up, 1 = not. For health checks
 
+A token or key set empty in the environment is unset; one given empty as a
+flag is refused at the start.
+
 fenec-server does not speak TLS: put it behind a TLS terminator such as
 nginx or Caddy before using it on an open network.
 ";
@@ -260,6 +264,12 @@ nginx or Caddy before using it on an open network.
 fn fail(msg: &str) -> ! {
     fenec_http::log!("{msg}");
     std::process::exit(2);
+}
+
+/// A token or a key from the environment: set and empty is unset, as a
+/// deployment's environment file leaves a line it does not use.
+fn env_secret(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|t| !t.is_empty())
 }
 
 /// Health check: `GET /_health` on the HTTP listener, which answers with no
@@ -326,13 +336,13 @@ fn main() {
     let mut warm: Option<Option<fenec_http::warm::Warm>> = None;
     let mut idle_close = Duration::from_secs(300);
     let mut ping = false;
-    let mut replication_token: Option<String> = std::env::var("FENEC_REPLICATION_TOKEN").ok();
+    let mut replication_token: Option<String> = env_secret("FENEC_REPLICATION_TOKEN");
     let mut replica_of: Option<String> = None;
     let mut promote = false;
     let mut cdc = false;
     let mut replication_buffer = replication::DEFAULT_BUFFER;
-    let mut jwt_secret: Option<String> = std::env::var("FENEC_JWT_SECRET").ok();
-    let mut jwt_keys: Option<String> = std::env::var("FENEC_JWT_KEYS").ok();
+    let mut jwt_secret: Option<String> = env_secret("FENEC_JWT_SECRET");
+    let mut jwt_keys: Option<String> = env_secret("FENEC_JWT_KEYS");
     let mut policy: Option<String> = None;
     let mut mint: Option<String> = None;
     let mut demands = fenec_http::access::Demands::default();
@@ -355,9 +365,8 @@ fn main() {
     // writes are a share of the node's connections (`quota::shared`).
     let mut quota_given: Vec<fenec_http::quota::Kind> = Vec::new();
     let mut http_cfg = fenec_http::Config {
-        token: std::env::var("FENEC_HTTP_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty()),
+        token: env_secret("FENEC_HTTP_TOKEN"),
+        admin_token: env_secret("FENEC_ADMIN_TOKEN"),
         ..fenec_http::Config::default()
     };
 
@@ -494,6 +503,9 @@ fn main() {
             "--jwt-secret-file" => {
                 let path = next(&mut i, "--jwt-secret-file");
                 match std::fs::read_to_string(&path) {
+                    Ok(s) if s.trim_end_matches(['\n', '\r']).is_empty() => {
+                        fail(&format!("--jwt-secret-file {path} is empty"))
+                    }
                     Ok(s) => jwt_secret = Some(s.trim_end_matches(['\n', '\r']).to_string()),
                     Err(e) => fail(&format!("could not read {path}: {e}")),
                 }
@@ -650,6 +662,28 @@ fn main() {
     // line failed it (2), and the container never turned healthy.
     if ping {
         std::process::exit(health_check(&http_cfg.addr));
+    }
+
+    // A token given empty as a flag -- `--http-token "$TOKEN"` with TOKEN
+    // unset -- is refused, not taken: each check reads a request carrying
+    // no `Authorization` as the empty token, so an empty admin token let
+    // anyone into /_admin/ (create, delete, every tenant's image), and an
+    // empty data token passed the check that keeps a server off a public
+    // address and then answered nothing. The environment's are unset when
+    // empty (`env_secret`), so only a flag reaches here empty.
+    for (flag, value) in [
+        ("--http-token", http_cfg.token.as_deref()),
+        ("--admin-token", http_cfg.admin_token.as_deref()),
+        ("--replication-token", replication_token.as_deref()),
+        ("--jwt-secret", jwt_secret.as_deref()),
+        ("--jwt-keys", jwt_keys.as_deref()),
+    ] {
+        if value == Some("") {
+            fail(&format!(
+                "{flag} is empty -- a variable given it unset? Give it a value, or leave \
+                 the flag out"
+            ));
+        }
     }
 
     let access = |policy: &str| {

@@ -160,6 +160,20 @@ pub struct Config {
     pub mcp: Option<Arc<mcp::Options>>,
 }
 
+impl Config {
+    /// The config with an empty token taken for none. Every check reads a
+    /// request carrying no `Authorization` as the empty token, so an empty
+    /// one configured -- a variable set and left empty, a flag given "" --
+    /// let in whoever sent none (`/_admin/` did, and the router mark made
+    /// of it was anyone's to make). Taken for none, a server asks for none
+    /// on loopback and refuses an address past it, as with no token at all.
+    fn settled(mut self) -> Config {
+        self.token = self.token.filter(|t| !t.is_empty());
+        self.admin_token = self.admin_token.filter(|t| !t.is_empty());
+        self
+    }
+}
+
 impl Default for Config {
     fn default() -> Config {
         Config {
@@ -219,6 +233,7 @@ impl Server {
     /// `fenec-server` -- wakes the waiting subscriptions. One process, one writer,
     /// one wake-up point.
     pub fn new(db: Arc<RwLock<Database>>, cfg: Config) -> Server {
+        let cfg = cfg.settled();
         let hub = Hub::new();
         {
             let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
@@ -253,7 +268,8 @@ impl Server {
 
     /// One database per tenant under `/t/<tenant>/`, plus `/_admin/`. Each
     /// tenant gets its own watcher as it is opened.
-    pub fn with_tenants(tenants: Arc<Tenants>, mut cfg: Config) -> Server {
+    pub fn with_tenants(tenants: Arc<Tenants>, cfg: Config) -> Server {
+        let mut cfg = cfg.settled();
         if cfg.router_mark.is_none() {
             cfg.router_mark = cfg.admin_token.as_deref().map(audit::router_mark);
         }
@@ -279,7 +295,7 @@ impl Server {
     ) -> Server {
         Server {
             backend: Backend::Metrics { db, repl },
-            cfg: Arc::new(cfg),
+            cfg: Arc::new(cfg.settled()),
             live: Arc::new(AtomicUsize::new(0)),
         }
     }
