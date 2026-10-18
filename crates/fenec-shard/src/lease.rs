@@ -129,6 +129,8 @@ pub struct Leases {
     /// This router made sure the directory's record covers its own lease,
     /// which it does before its first grant ([`Leases::recorded`]).
     recorded: AtomicBool,
+    /// It said it could not ([`Leases::say_unrecorded`]).
+    said: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -156,9 +158,10 @@ struct Held {
     lost: bool,
     /// It said it takes no lease, and is never failed over on its own.
     refuses: bool,
-    /// It took a grant of this router's: its lease runs from this router's
-    /// answers, its own length, cutting short any longer one a router before
-    /// it granted. Until then it is counted by [`Leases::inherited`].
+    /// It ran a lease from this router's answer ([`Leases::ran`]): its
+    /// lease runs from this router's answers, its own length, cutting short
+    /// any longer one a router before it granted. Until then it is counted
+    /// by [`Leases::inherited`].
     own: bool,
     /// A round's grant to it is under way: the next round sends it none
     /// ([`Leases::begin_grant`]).
@@ -206,6 +209,7 @@ impl Leases {
             withheld: Mutex::new(HashMap::new()),
             inherited: Mutex::new(term),
             recorded: AtomicBool::new(false),
+            said: AtomicBool::new(false),
         }
     }
 
@@ -320,6 +324,24 @@ impl Leases {
     /// The directory's record covers this router's own lease.
     pub fn recorded(&self) {
         self.recorded.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether to say the record could not be written: once a process.
+    pub fn say_unrecorded(&self) -> bool {
+        !self.said.swap(true, Ordering::SeqCst)
+    }
+
+    /// `node` ran its lease from this router's answer -- it said so
+    /// (`"ran"`) -- so its lease is this router's length from now: a
+    /// longer one from before was cut short. A take of the list alone, a
+    /// grant acknowledging nothing on a lease that had lapsed, runs none:
+    /// counted by its own lease from it, a grant of the router before,
+    /// read later, acknowledging an answer the node had kept, ran the
+    /// longer lease again while this router failed the node over by the
+    /// shorter (the review of #343's `r2_a_late_grant_...`).
+    pub fn ran(&self, node: &str) {
+        let mut m = self.held();
+        self.entry(&mut m, node).own = true;
     }
 
     /// Whether the record may come down to this router's own lease: it is
@@ -513,10 +535,6 @@ impl Leases {
                     Answer::Taken => Some(epoch.to_string()),
                     _ => None,
                 };
-                // Taken, its lease runs from this answer, this router's
-                // length: a longer one from before is cut short. Kept, the
-                // longer one may still run.
-                h.own |= matches!(answer, Answer::Taken);
                 h.refuses = false;
                 let back = std::mem::take(&mut h.lost);
                 // Back, it holds the tenants still placed on it again,
@@ -796,15 +814,21 @@ mod tests {
         let after = Instant::now();
         // Past its own lease and a tenth, short of the recorded one's.
         assert!(l.suspects(before + Duration::from_millis(1_000)).is_empty());
-        // n2 answers and keeps the lease it held; n1 takes a grant.
+        // n2 answers and keeps the lease it held; n3 takes a grant's list
+        // alone, running no lease; n1 takes one and runs it.
         l.answered("n2", 1, "e", &Answer::Kept, after);
+        l.know("n3");
+        l.answered("n3", 1, "e", &Answer::Taken, after);
         l.answered("n1", 1, "e", &Answer::Taken, after);
+        l.ran("n1");
         let lapsed = after + Duration::from_millis(115);
         assert_eq!(l.suspects(lapsed), ["n1"]);
         assert!(l.confirm_lapse("n1", lapsed));
         assert!(!l.lowerable(before + Duration::from_millis(1_000)));
         let past = after + Duration::from_millis(1_115);
-        assert_eq!(l.suspects(past), ["n2"]);
+        let mut late = l.suspects(past);
+        late.sort();
+        assert_eq!(late, ["n2", "n3"]);
         assert!(l.lowerable(past));
         l.lowered();
         assert!(!l.lowerable(past));

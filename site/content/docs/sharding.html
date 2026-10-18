@@ -999,12 +999,24 @@ neither holding one for long.</p>
 <code>--auto-failover</code> lowered, then a restart or a standby promoted.
 A node it never reaches may still hold the longer lease, so the directory
 records the longest lease a router leasing from it may have granted, raised
-before a router's first grant with a longer one. A router counts a node that
-has taken none of its grants by that record, and a node that has by its own
-lease, since its grant cuts the longer one short. Once it has led for the
-recorded lease and a tenth, every lease granted before it has run out, and
-it lowers the record to its own. A router from before the record neither
-writes nor reads it.</p>
+before a router's first grant with a longer one and sent to its standbys
+first. A router counts a node by that record until the node has run a lease
+from one of its grants, which the node says in its answer
+(<code>ran</code>); from then on, by its own lease, since that grant cut the
+longer one short. A grant taken for its list alone, by a node whose lease
+had lapsed, runs none, and a late grant of the router before could still run
+the longer lease again. Once the router has led for the recorded lease and a
+tenth, every lease granted before it has run out, and it lowers the record
+to its own. Where the record cannot be written, a grant runs no longer than
+the record, or the router's own lease where there is none.</p>
+
+<p>What the record does not cover: it is a directory's own, so a node
+leased by one directory and then by another — the global one's, then a
+region's — is counted by the second's record, which knows nothing of the
+first's lease. And a router from before the record writes none, so the first
+router with it after an upgrade starts with no record, and counts by its own
+lease. Lower <code>--auto-failover</code> at a restart after that one; never
+at the upgrade itself.</p>
 
 <p>The lease names tenants, not the node. A node failed over comes back with
 the files of tenants served elsewhere now, primaries' files still; a lease

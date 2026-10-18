@@ -32,8 +32,9 @@
 //!                                      router's lease, on a node started to
 //!                                      take one, run from when this node
 //!                                      answered the grant `acked` names; its
-//!                                      answer the lease and `took`, whether
-//!                                      it took the grant (412: send the
+//!                                      answer the lease, `took`, whether it
+//!                                      took the grant's list, and `ran`,
+//!                                      whether it ran the lease (412: send the
 //!                                      primaries; 409 with held_by: a lease
 //!                                      from a newer term holds it)
 //! GET    /_admin/lease                 {epoch, primaries, left_ms, authority,
@@ -361,15 +362,21 @@ fn lease(tenants: &Tenants, body: &[u8]) -> Result<Response, Refused> {
     }
     let numbered = grant.map(|grant| crate::lease::Numbered { grant, acked });
     match lease.grant_from(&holder, ms, &epoch, primaries, numbered) {
-        // Whether it took the grant -- its list the one held now -- beside
-        // the lease: a router reads a grant answered and not taken, from a
-        // router before it or a holder before it whose lease still runs, as
-        // one to acknowledge at once with its list; a node from before says
-        // nothing, and takes every grant.
+        // Whether it took the grant -- its list the one held now -- and ran
+        // the lease from its acknowledgement, beside the lease: a router
+        // reads a grant answered and not taken, from a router before it or
+        // a holder before it whose lease still runs, as one to acknowledge
+        // at once with its list, and counts the node by its own lease only
+        // once one ran it; a node from before says neither, and takes every
+        // grant.
         Ok(took) => {
             let lease = lease.describe();
             let rest = lease.strip_prefix('{').unwrap_or(&lease);
-            Ok(Response::json(200, format!("{{\"took\":{took},{rest}")))
+            let (list, ran) = (took.list, took.lease);
+            Ok(Response::json(
+                200,
+                format!("{{\"took\":{list},\"ran\":{ran},{rest}"),
+            ))
         }
         Err(crate::lease::Refusal::NeedList(held)) => Ok(Response::json(
             412,

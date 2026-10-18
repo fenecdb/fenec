@@ -967,20 +967,19 @@ impl Router {
         let Some(n) = self.read_dir().node(node).cloned() else {
             return false;
         };
-        if reading < *sent || !self.lease_recorded() {
+        if reading < *sent {
             return false;
         }
+        let Some(term) = self.grant_term() else {
+            return false;
+        };
         *sent = reading;
         let epoch = lease::epoch_of(primaries);
         let mut with_list = leases.epoch(node).as_deref() != Some(epoch.as_str());
         let (mut back, mut followed) = (false, false);
         loop {
             let numbered = leases.number(node);
-            let mut body = format!(
-                "{{\"ms\":{},\"epoch\":{}",
-                leases.term.as_millis(),
-                quote(&epoch)
-            );
+            let mut body = format!("{{\"ms\":{},\"epoch\":{}", term.as_millis(), quote(&epoch));
             if with_list {
                 let names: Vec<String> = primaries.iter().map(|t| quote(t)).collect();
                 body.push_str(&format!(",\"primaries\":[{}]", names.join(",")));
@@ -996,7 +995,7 @@ impl Router {
                 Some(acked) => body.push_str(&format!(",\"acked\":\"{acked:016x}\"}}")),
                 None => body.push('}'),
             }
-            let (mut left, mut answered_number) = (None, false);
+            let (mut left, mut answered_number, mut ran) = (None, false, false);
             let answer =
                 match pool.call(&n.addr, "POST", "/_admin/lease", &n.token, body.as_bytes()) {
                     // A node from before terms answers without one. Under the
@@ -1012,6 +1011,7 @@ impl Router {
                     Ok((200, b)) => {
                         left = left_ms(&b);
                         answered_number = b.windows(8).any(|w| w == b"\"grant\":");
+                        ran = b.windows(11).any(|w| w == b"\"ran\":true");
                         // A node from before says nothing, and took it.
                         const KEPT: &[u8] = b"\"took\":false";
                         match b.windows(KEPT.len()).any(|w| w == KEPT) {
@@ -1029,6 +1029,13 @@ impl Router {
             back |= leases.answered(node, numbered.grant, &epoch, &answer, Instant::now());
             if matches!(answer, lease::Answer::Taken) && !answered_number {
                 leases.unnumbered(node);
+            }
+            // The node ran its lease from this router's answer: by its own
+            // length from now. A node from before says nothing, and stays
+            // counted by the record, which a node taking every grant from
+            // its reading never outruns by more than it did before.
+            if matches!(answer, lease::Answer::Taken) && ran {
+                leases.ran(node);
             }
             match answer {
                 lease::Answer::NeedsList if !with_list => with_list = true,
@@ -1049,34 +1056,63 @@ impl Router {
         back
     }
 
-    /// Whether the directory records a lease no shorter than this router's
-    /// own, written before its first grant where it did not
-    /// ([`lease::Leases::leading`]): a router started after this one with a
-    /// shorter lease counts a node it never reaches by the longest that may
-    /// still run. Not written, the grant is not sent -- a lease its
-    /// successor knows nothing of -- and a router following another sends
-    /// none. Once a process: no write on any grant after the first.
-    fn lease_recorded(&self) -> bool {
+    /// The lease a grant runs, the directory made to record one no shorter
+    /// before the first ([`lease::Leases::leading`]): a router started after
+    /// this one with a shorter lease counts a node it never reaches by the
+    /// longest that may still run. Raised, the record is sent to the
+    /// standbys before any grant goes out, as a move's flip is: one
+    /// promoted within the lease, the raise not on it, counted by the
+    /// record before. Once a process, no write on any grant after. `None`
+    /// for a router following another, which grants nothing.
+    ///
+    /// Where the raise cannot be written, the grant runs no longer than the
+    /// record, which covers it; and where there is none yet -- a directory
+    /// from before the record, its first leasing router's -- this router's
+    /// own, as a router before the record granted: refused, every node's
+    /// lease lapsed and every node was failed over, by a router whose
+    /// directory then refused the failovers' writes too. Asked again at the
+    /// next grant.
+    fn grant_term(&self) -> Option<Duration> {
         let Some((leases, _)) = &self.leases else {
-            return true;
+            return None;
         };
         if !leases.unrecorded() {
-            return true;
+            return Some(leases.term);
         }
         let mut dir = self.write_dir();
         if dir.following() {
-            return false;
+            return None;
         }
-        if dir.lease_record().is_none_or(|was| was < leases.term) {
-            if let Err(e) = dir.record_lease(leases.term) {
-                fenec_http::log!(
-                    "no lease granted: the directory could not record its length: {e}"
-                );
-                return false;
+        let was = dir.lease_record();
+        if was.is_some_and(|was| was >= leases.term) {
+            leases.recorded();
+            return Some(leases.term);
+        }
+        match dir.record_lease(leases.term) {
+            Ok(()) => {
+                drop(dir);
+                self.standbys_sent();
+                leases.recorded();
+                Some(leases.term)
+            }
+            Err(e) => {
+                let term = was.unwrap_or(leases.term);
+                if leases.say_unrecorded() {
+                    fenec_http::log!(
+                        "the directory could not record this router's lease of {:?}: each \
+                         grant runs {term:?}, the longest recorded{} ({e})",
+                        leases.term,
+                        if was.is_none() {
+                            " -- none is, so a router started after this one with a \
+                             shorter lease counts a node it never reaches by its own"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                Some(term)
             }
         }
-        leases.recorded();
-        true
     }
 
     /// `node` answered a grant after it was failed over: a repair has its

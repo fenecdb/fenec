@@ -425,14 +425,22 @@ on a thread of its own, a name is looked up within a third of the lease,
 and a replica being promoted stops reconnecting to the dead node at once.
 With the default lease of 5 s, count about 6 s to the failover.
 
-Lowering `--auto-failover` needs no care. The directory records the longest
-lease a router leasing from it may have granted. A router started with a
-shorter one -- restarted, or a standby promoted -- counts a node it has not
-reached since by that record, so a node cut off across the change, still
-holding the longer lease, is failed over only once that lease has run out.
-A node it does reach takes the shorter lease with its first grant. The
-record comes down to the new lease once the router has led for the old one
-and a tenth.
+Lowering `--auto-failover`: the directory records the longest lease a
+router leasing from it may have granted. A router started with a shorter one
+-- restarted, or a standby promoted -- counts a node by that record until the
+node has run a lease from one of its grants, so a node cut off across the
+change, still holding the longer lease, is failed over only once that lease
+has run out. The record comes down to the new lease once the router has led
+for the old one and a tenth. Two cases it does not cover:
+
+- The first start after upgrading from a router without the record finds
+  none, and counts by its own lease. Upgrade with the lease as it is; lower
+  it at a later restart.
+- The record is each directory's own. A node moved from one directory's
+  leasing to another's -- from the global router's to a region's own -- is
+  counted by the second's, which knows nothing of the first's lease. Move it
+  with the second's lease no shorter than the first's, or with the node
+  stopped for the first's lease and a tenth.
 
 What to do:
 

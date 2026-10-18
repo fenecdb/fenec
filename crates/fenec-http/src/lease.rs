@@ -33,7 +33,12 @@
 //! list from before a failover would name a tenant promoted elsewhere
 //! beside the lease a newer grant runs; judged by the lease it would run,
 //! a router restarted or promoted with a shorter lease never cut a longer
-//! one short, and the node wrote on after that router failed it over.
+//! one short, and the node wrote on after that router failed it over. The
+//! answer says which ([`Took`]): `took`, the list, and `ran`, the lease. A
+//! router counts a node by its own lease only once a grant of its own ran
+//! one; a grant taken for its list alone runs none, and a late grant of the
+//! router before it, acknowledging an answer kept here, may run the longer
+//! lease again.
 //!
 //! **What it does not cover.** The lease is measured on [`Instant`] --
 //! `CLOCK_MONOTONIC` on Linux, `CLOCK_UPTIME_RAW` on macOS -- which stands
@@ -116,6 +121,20 @@ struct State {
 /// before as it sends the next; a few more cover the grants a stalled node
 /// reads late in between, each answered too.
 const ANSWERED: usize = 16;
+
+/// What a node did with a grant it answered: whether it took its list --
+/// the list held now is the grant's -- and whether it ran the lease from
+/// the answer the grant acknowledges. A grant may be taken for its list
+/// alone, where the lease held has lapsed and the grant is no newer: a
+/// router's first grant, which acknowledges nothing of its own. Read as a
+/// lease, such a take had the router count the node by its own lease
+/// while a grant of the router before it, read later, ran a longer one
+/// again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Took {
+    pub list: bool,
+    pub lease: bool,
+}
 
 /// A grant's number, and the number of the newest grant whose answer the
 /// router had back in time: what the lease runs from, `None` where no
@@ -235,8 +254,8 @@ impl Lease {
 
     /// Answers a grant -- over `primaries` when they come with it, over the
     /// list already held when `epoch` names it -- unless the lease held
-    /// supersedes `holder`'s, and says whether it took it: whether its list
-    /// is the one held now. Numbered, it runs the lease `ms` from when this
+    /// supersedes `holder`'s, and says what it took of it ([`Took`]).
+    /// Numbered, it runs the lease `ms` from when this
     /// node answered the grant it acknowledges, its list and that lease
     /// taken together where it is newer than the grant they came from, and
     /// its list alone where the lease has lapsed; unnumbered -- a router
@@ -248,7 +267,7 @@ impl Lease {
         epoch: &str,
         primaries: Option<Vec<String>>,
         numbered: Option<Numbered>,
-    ) -> Result<bool, Refusal> {
+    ) -> Result<Took, Refusal> {
         let mut s = self.state.write().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let running = s.until.is_some_and(|u| now < u);
@@ -265,7 +284,10 @@ impl Lease {
             s.holder = Some(holder.clone());
             s.until = Some(now + Duration::from_millis(ms));
             s.basis = None;
-            return Ok(true);
+            return Ok(Took {
+                list: true,
+                lease: true,
+            });
         };
         // Another holder's numbers name none of its grants.
         if s.holder.as_ref() != Some(holder) {
@@ -314,7 +336,10 @@ impl Lease {
             s.answered.pop_front();
         }
         s.answered.push_back((numbered.grant, now));
-        Ok(took)
+        Ok(Took {
+            list: took,
+            lease: newer,
+        })
     }
 
     /// Whether a router naming itself `holder` may promote or re-point a
@@ -638,7 +663,9 @@ mod tests {
         // acknowledgement's: a lease of 20 ms, asked of once the clock has
         // gone past it, never while it may still run.
         let l = Lease::new();
-        let took = |l: &Lease, ms, epoch, list, n| l.grant_from(&us, ms, epoch, list, n).ok();
+        let took = |l: &Lease, ms, epoch, list, n| {
+            l.grant_from(&us, ms, epoch, list, n).ok().map(|t| t.list)
+        };
         assert_eq!(
             took(&l, 20, "e1", with(&["acme"]), numbered(1, None)),
             Some(true)
@@ -651,11 +678,14 @@ mod tests {
             Some(true)
         );
         assert!(l.allows("b").unwrap_err().contains("lapsed"));
-        // One acknowledging nothing, read now: its list, and no lease.
-        assert_eq!(
-            took(&l, 60_000, "e3", with(&["c"]), numbered(0, None)),
-            Some(true)
-        );
+        // One acknowledging nothing, read now: its list, and no lease -- a
+        // take of the list alone, which the node says.
+        let list_only = Took {
+            list: true,
+            lease: false,
+        };
+        let first = l.grant_from(&us, 60_000, "e3", with(&["c"]), numbered(0, None));
+        assert_eq!(first.ok(), Some(list_only));
         assert!(l.allows("c").unwrap_err().contains("lapsed"));
         assert_eq!(
             took(&l, 60_000, "e2", with(&["b"]), numbered(4, Some(3))),
@@ -676,7 +706,10 @@ mod tests {
         let l = Lease::new();
         let us = holder("us", 1, 7);
         let with = |names: &[&str]| Some(names.iter().map(|n| n.to_string()).collect());
-        let took = |list, epoch, n| l.grant_from(&us, 60_000, epoch, list, n).ok();
+        let took = |list, epoch, n| {
+            let took = l.grant_from(&us, 60_000, epoch, list, n).ok();
+            took.map(|t| t.list)
+        };
         assert_eq!(
             took(with(&["acme", "b"]), "e1", numbered(1, None)),
             Some(true)
@@ -731,15 +764,23 @@ mod tests {
             assert!(left_of(&l) > 500_000);
             let first_took =
                 l.grant_from(&holder_after, 20_000, "e1", list(), numbered(first, None));
-            assert_eq!(first_took.ok(), Some(false), "{holder_after:?}");
+            let kept = Took {
+                list: false,
+                lease: false,
+            };
+            assert_eq!(first_took.ok(), Some(kept), "{holder_after:?}");
             assert!(
                 left_of(&l) > 500_000,
                 "a grant acknowledging nothing ran the lease"
             );
             let next = numbered(first + 1, Some(first));
+            let ran = Took {
+                list: true,
+                lease: true,
+            };
             assert_eq!(
                 l.grant_from(&holder_after, 20_000, "e1", None, next).ok(),
-                Some(true)
+                Some(ran)
             );
             assert!(left_of(&l) <= 20_000, "{holder_after:?}: {}", l.describe());
             assert!(l.allows("acme").is_ok());

@@ -910,18 +910,35 @@ never reached by its own: cut off across the change, the node held the
 longer lease and wrote while its tenants were failed over. The directory
 records the longest lease a router leasing from it may have granted
 (`leasing`, one row, written before a router's first grant where its own
-is longer -- `Router::lease_recorded`, once a process; no block is written
-at every start to ride in); a router counts a node that has taken none of
-its grants (`Held::own`, set by `Taken`, not `Kept`) by that record
-(`Leases::inherited`, read as it leads), and lowers it to its own once it
-has led a lease and a tenth of it (`Leases::lowerable`): every lease
-granted before it led has run out, and one started after it counts by
-what may still run. Never lowered, one 20 s lease would have every router
-after it wait 22 s for a node it never reached. A router from before the
-record writes and reads none, and one started after it counts by its own
-lease, as before (`late_grants.rs`'
+is longer -- `Router::grant_term`, once a process; no block is written at
+every start to ride in -- and sent to the standbys before any grant, as a
+move's flip is, `SENT_WAIT` at most); a router counts a node by that record
+(`Leases::inherited`, read as it leads) until the node has run a lease from
+one of its grants (`Held::own`, set by `Leases::ran` on the node's
+`"ran":true`, never by `Kept`, never by a take of the list alone), and
+lowers it to its own once it has led a lease and a tenth of it
+(`Leases::lowerable`): every lease granted before it led has run out, and
+one started after it counts by what may still run. Never lowered, one 20 s
+lease would have every router after it wait 22 s for a node it never
+reached. Set by any `Taken`, a grant taken for its list alone -- a
+restarted router's first, acknowledging nothing, on a node whose lease had
+lapsed -- had the node counted by the router's own lease while a held grant
+of the router before, acknowledging an answer the node's ring kept (a
+restart keeps the holder), ran the longer one again: two primaries (the
+review of #343's probe, `a_take_of_the_list_alone_...`). The node says
+`ran` as it says `took`, and a node from before says neither, so it stays
+counted by the record. A raise that cannot be written grants no longer than
+the record, or this router's own where there is none: refused, every
+node's lease lapsed and every node was failed over by a router whose
+directory then refused the failovers too. What it does not cover: the first
+start after upgrading from a router without the record finds none and
+counts by its own lease, and a record is a directory's, so a node moved from
+the global router's leasing to a region's is counted by the region's alone
+(the RUNBOOK says how to lower a lease and move a node). A router from
+before the record writes and reads none (`late_grants.rs`'
 `..._waits_out_a_node_it_never_reaches`, a restart and a standby promoted
-at 1 s after 10 s, each failing with the record ignored or never written).
+at 1 s after 10 s, each failing with the record ignored or never written,
+and `a_router_that_cannot_record_its_lease_grants_no_longer_than_the_record`).
 Cut off, a node
 stops about a round sooner, its lease run from the grant before the last it
 read: at a lease of a second it stopped 386-406 ms after the cut against
