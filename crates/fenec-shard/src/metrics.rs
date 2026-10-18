@@ -112,6 +112,30 @@ static FANOUT_TENANTS: [AtomicU64; 2] = [ZERO; 2];
 
 /// Reads marked for a replica (`Fenec-Read: replica`), by [`ReplicaRead`].
 static REPLICA_READS: [AtomicU64; 3] = [ZERO; 3];
+/// Requests and streams a failover cut, by [`Cut`].
+static CUTS: [AtomicU64; 3] = [ZERO; 3];
+
+/// What became of a request out to a node as the node was failed over
+/// (`Router::cut_moved`): each is counted besides by the status it was
+/// answered with, as any request is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cut {
+    /// Sent to the tenant's new primary: its node cannot have run it, or
+    /// running it twice is harmless -- a read, or a write under an
+    /// `Idempotency-Key`.
+    SentAgain = 0,
+    /// Answered 502: written whole to the node gone, which may have run it.
+    MayHaveRun = 1,
+    /// A stream ended, for its client to open again.
+    StreamEnded = 2,
+}
+
+const CUT: [&str; 3] = ["sent_again", "may_have_run", "stream_ended"];
+
+/// Counts `n` requests a failover cut, by what became of them.
+pub fn cut(how: Cut, n: u64) {
+    CUTS[how as usize].fetch_add(n, Ordering::Relaxed);
+}
 static GIVEN_UP: AtomicI64 = AtomicI64::new(0);
 
 /// A read replica given up on (`1`), or let go of (`-1`): see
@@ -331,6 +355,18 @@ pub fn counters(out: &mut Text) {
     );
     for (node, n) in UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         out.sample("fenec_router_upstream_errors_total", &[("node", node)], n);
+    }
+    out.family(
+        "fenec_router_cut_requests_total",
+        "counter",
+        "Requests out to a node as a failover moved their tenant off it, ended rather than left to wait for --upstream-timeout, by what became of them: sent_again (to the tenant's new primary: the node cannot have run it, or it is a read or a write under an Idempotency-Key), may_have_run (answered 502: written whole, the node may have run it), stream_ended (for its client to open again). Each is also counted in fenec_router_requests_total by the status it was answered with.",
+    );
+    for (i, outcome) in CUT.iter().enumerate() {
+        out.sample(
+            "fenec_router_cut_requests_total",
+            &[("outcome", outcome)],
+            CUTS[i].load(Ordering::Relaxed),
+        );
     }
     out.family(
         "fenec_router_moves_total",

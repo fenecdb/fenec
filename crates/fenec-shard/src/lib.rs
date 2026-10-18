@@ -273,6 +273,14 @@ pub struct Router {
     /// primary: the next look over the read replicas comes now rather than
     /// at its time, and the failover waits on no replica's node.
     follow_soon: (Mutex<bool>, std::sync::Condvar),
+    /// The grants under way to nodes that refused a request a failover's
+    /// cut sent there before their grant named its tenant, and what tells
+    /// the requests waiting on each it is done ([`Router::grant_cut_onto`]).
+    #[allow(clippy::type_complexity)]
+    cut_grants: Mutex<std::collections::HashMap<String, Arc<(Mutex<bool>, std::sync::Condvar)>>>,
+    /// The requests waiting on one of [`Router::cut_grants`]: how a test
+    /// knows a request has joined a grant under way.
+    cut_waiting: AtomicUsize,
 }
 
 /// The `left_ms` of a node's answer to a grant: `None` where it holds no
@@ -354,6 +362,32 @@ struct HeldTenant {
     own_replica: bool,
 }
 
+/// How many times a request a failover cut is sent on before it is
+/// answered 503 ([`Router::after_cut`]): its tenant failed over again each
+/// time, faster than it could be answered.
+const CUT_TRIES: usize = 3;
+
+/// How many grants a request a failover cut asks for where the copy it was
+/// sent to refuses it, unrun, before its grant names the tenant
+/// ([`Router::grant_cut_onto`]): the grant it joins may have read the
+/// directory before its tenant was placed there, begun for another
+/// tenant's request a promotion earlier, and the one it asks for after
+/// that one ended began after it, so it reads the tenant there. Asked
+/// once, such a request was answered the copy's 503.
+const CUT_ASKS: u8 = 2;
+
+/// Where a forward goes ([`Router::toward`]): the node's name -- or what
+/// stands for a region's routers -- its address, the mark its node believes
+/// the router's word by, the region's routers where it is relayed, and the
+/// tenant's home region where the request asked for it.
+struct Toward {
+    node: String,
+    addr: String,
+    mark: Option<Arc<str>>,
+    routers: Option<(String, Vec<String>)>,
+    home: Option<String>,
+}
+
 /// An operation failure, shaped as an HTTP status and message.
 struct Fail(u16, String);
 
@@ -428,6 +462,8 @@ impl Router {
             probing: Arc::new(Mutex::new(HashSet::new())),
             reader_pool: Pool::new(cfg.reader_timeout),
             follow_soon: (Mutex::new(false), std::sync::Condvar::new()),
+            cut_grants: Mutex::new(Default::default()),
+            cut_waiting: AtomicUsize::new(0),
             cfg,
         })
     }
@@ -1577,39 +1613,20 @@ impl Router {
                 return kept;
             }
         }
-        // The node holding the tenant, as this router's own directory has
-        // it, with the node's region where the request asks for the
-        // tenant's home ([`region::HOME_HEADER`]); or, where that says
-        // nothing, the routers of the region the tenant lives in
-        // ([`region`]).
-        let placed = {
-            let dir = self.read_dir();
-            dir.placement(tenant).and_then(|p| {
-                dir.node(&p.node).map(|n| {
-                    let home = region::home_asked(req, &n.region);
-                    (p.node.clone(), n.addr.clone(), self.mark(&n.token), home)
-                })
-            })
-        };
-        let mut home = None;
-        let (node, addr, mark, routers) = match placed {
-            Some((node, addr, mark, h)) => {
-                home = h;
-                (node, addr, Some(mark), None)
-            }
-            None => match self.elsewhere(tenant, relayed.is_some()) {
-                region::Target::Node(node, addr, mark, region) => {
-                    home = region::home_asked(req, &region);
-                    (node, addr, Some(mark), None)
-                }
-                region::Target::Region(region, routers) => {
-                    let first = self.first_router(&region, &routers);
-                    let addr = region::host(&routers[first]).to_string();
-                    let mark = self.relay_mark.clone();
-                    (region::label(&region), addr, mark, Some((region, routers)))
-                }
-                region::Target::Answer(resp) => return reply(out, resp),
-            },
+        // The failovers' cuts of the tenant's bucket so far, read before the
+        // directory: one that moves the tenant after this read and before
+        // the request is out where it can see it has the directory read
+        // again ([`upstream::Flying`]).
+        let flying = upstream::Flying::of(tenant, &self.pool);
+        let Toward {
+            node,
+            addr,
+            mark,
+            routers,
+            home,
+        } = match self.toward(req, tenant, relayed) {
+            Ok(t) => t,
+            Err(resp) => return reply(out, resp),
         };
         if fenec_http::trace::recording() {
             fenec_http::trace::attr("fenec.node", node.clone());
@@ -1672,6 +1689,7 @@ impl Router {
                 &req.body,
                 held,
                 watch,
+                flying,
             ),
             // A region's routers, in turn from the one that answered last,
             // as far as the request cannot have run.
@@ -1693,6 +1711,14 @@ impl Router {
                 fenec_http::trace::end(499);
                 return false;
             }
+            // Its node was failed over before it answered: answered by what
+            // the node may have run, where it waited for the timeout.
+            Err(e) if upstream::ended_by(&e).is_some() => {
+                forwarding.error(e.to_string());
+                drop(forwarding);
+                let asked = (watch, held);
+                return self.after_cut(req, out, arrived, peer, relayed, asked, tenant, &node, e);
+            }
             Err(e) => {
                 forwarding.error(e.to_string());
                 drop(forwarding);
@@ -1712,6 +1738,369 @@ impl Router {
         };
         self.answer_out(
             req, out, arrived, peer, &node, answer, None, sent, forwarding, &home,
+        )
+    }
+
+    /// Where a forward of `tenant`'s request goes: the node holding it, as
+    /// this router's own directory has it, with the node's region where the
+    /// request asks for the tenant's home ([`region::HOME_HEADER`]); or,
+    /// where that says nothing, the routers of the region the tenant lives
+    /// in ([`region`]). `Err`: the router's own answer, no node or region
+    /// to send it to. Inlined in [`Self::forward`], as it was written out
+    /// there, and in [`Self::after_cut`], which reads it again; reached
+    /// from both, [`Self::elsewhere`] is kept out of line, the path no
+    /// tenant this directory places takes.
+    #[inline(always)]
+    fn toward(
+        &self,
+        req: &Request,
+        tenant: &str,
+        relayed: Option<std::net::IpAddr>,
+    ) -> std::result::Result<Toward, Response> {
+        let placed = {
+            let dir = self.read_dir();
+            dir.placement(tenant).and_then(|p| {
+                dir.node(&p.node).map(|n| {
+                    let home = region::home_asked(req, &n.region);
+                    (p.node.clone(), n.addr.clone(), self.mark(&n.token), home)
+                })
+            })
+        };
+        Ok(match placed {
+            Some((node, addr, mark, home)) => Toward {
+                node,
+                addr,
+                mark: Some(mark),
+                routers: None,
+                home,
+            },
+            None => match self.elsewhere(tenant, relayed.is_some()) {
+                region::Target::Node(node, addr, mark, region) => Toward {
+                    node,
+                    addr,
+                    mark: Some(mark),
+                    routers: None,
+                    home: region::home_asked(req, &region),
+                },
+                region::Target::Region(region, routers) => {
+                    let first = self.first_router(&region, &routers);
+                    let addr = region::host(&routers[first]).to_string();
+                    Toward {
+                        node: region::label(&region),
+                        addr,
+                        mark: self.relay_mark.clone(),
+                        routers: Some((region, routers)),
+                        home: None,
+                    }
+                }
+                region::Target::Answer(resp) => return Err(resp),
+            },
+        })
+    }
+
+    /// [`Self::forward`] of a request a failover ended short of its answer
+    /// (`ended`, [`upstream::ended_by`]). Cut ([`Self::cut_moved`]): `node`,
+    /// where it was out, was failed over before it answered, and the
+    /// directory places its tenant elsewhere now. One that had not gone out
+    /// whole ran nothing there, and goes to the tenant's node now whatever
+    /// it is; one that had may have run there, and goes again only where
+    /// running it twice is harmless ([`upstream::replayable`]): a read, a
+    /// request marked as one, a write under an `Idempotency-Key` -- the new
+    /// primary holding its key, and answering from it, where the old node's
+    /// write reached the copy before it was promoted. Anything else is
+    /// answered 502 saying it may have run, as the timeout would have
+    /// answered it, sooner: sent again, a `put` that had landed was made
+    /// twice. Moved ([`upstream::Ended::Moved`]): a failover of its tenant's
+    /// bucket came as it went out, and nothing of it was written, so the
+    /// directory is read again and it goes where that says, counted as no
+    /// cut -- most such are another tenant's failover, and go where they
+    /// were going.
+    ///
+    /// A held request (`Fenec-Wait`, `asked.1`) goes by the same rule. The
+    /// held-write rules say it wrote nothing while held, and that it is
+    /// answered with what it wrote the moment it writes; so a node that died
+    /// between a claim's write landing -- fsynced and on the copy, under
+    /// `--sync always` -- and its answer leaves one that may have run, and
+    /// nothing the router sees tells it from one still held. Under a key it
+    /// goes again with what is left of its wait: a write the old node made
+    /// is answered from the key, and one it never made keeps no key, so it
+    /// waits again on the new primary. Without one, its 502 lets its client
+    /// claim again rather than take a second job for it. A request ended
+    /// again, its tenant failed over once more meanwhile, is answered the
+    /// same way, [`CUT_TRIES`] times at most. Cold: a failover's.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn after_cut(
+        &self,
+        req: &Request,
+        out: &mut TcpStream,
+        arrived: Instant,
+        peer: Option<std::net::SocketAddr>,
+        relayed: Option<std::net::IpAddr>,
+        (watch, held): (Option<&TcpStream>, Duration),
+        tenant: &str,
+        node: &str,
+        ended: std::io::Error,
+    ) -> bool {
+        let head_only = req.method == Method::Head;
+        let reply = |out: &mut TcpStream, resp: Response| {
+            let resp = self.cors(resp);
+            metrics::counted(Route::Tenant, resp.status);
+            let sent = resp.write(out, req.keep_alive, head_only).is_ok();
+            metrics::timed(Route::Tenant, arrived.elapsed());
+            fenec_http::trace::end(resp.status);
+            sent && req.keep_alive
+        };
+        let traced = fenec_http::trace::propagating();
+        let client = relayed
+            .or_else(fenec_http::audit::named)
+            .or(peer.map(|p| p.ip()));
+        let mut node = node.to_string();
+        let mut ended = upstream::ended_by(&ended).unwrap_or(upstream::Ended::Moved);
+        let (mut tries, mut asks) = (1, CUT_ASKS);
+        loop {
+            let flying = upstream::Flying::of(tenant, &self.pool);
+            let Toward {
+                node: to,
+                addr,
+                mark,
+                routers,
+                home,
+            } = match self.toward(req, tenant, relayed) {
+                Ok(t) => t,
+                Err(resp) => return reply(out, resp),
+            };
+            let mut headers = forwarded_headers(req, traced);
+            let cut = matches!(ended, upstream::Ended::Cut { .. });
+            if ended == (upstream::Ended::Cut { whole: true })
+                && !upstream::replayable(req.method.name(), &headers)
+            {
+                metrics::cut(metrics::Cut::MayHaveRun, 1);
+                let why = format!(
+                    "node `{node}` was failed over while this request was out to it, and may \
+                     have run it: sent again it could run twice, so it is not -- read the \
+                     tenant to learn whether it ran"
+                );
+                return reply(out, region::homed(Response::error(502, &why), &home));
+            }
+            if cut && asks == CUT_ASKS {
+                metrics::cut(metrics::Cut::SentAgain, 1);
+            }
+            let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
+            if let Some(named) = &named {
+                headers.push((fenec_http::audit::ROUTER_HEADER, named));
+            }
+            // What is left of a held request's wait, counted from its
+            // arrival: the client asked for no longer in all.
+            let left = held.saturating_sub(arrived.elapsed());
+            let wait = (!held.is_zero()).then(|| left.as_millis().to_string());
+            if let Some(ms) = &wait {
+                for (k, v) in headers.iter_mut() {
+                    if k.eq_ignore_ascii_case("fenec-wait") {
+                        *v = ms;
+                    }
+                }
+            }
+            if fenec_http::trace::recording() {
+                fenec_http::trace::attr("fenec.node", to.clone());
+            }
+            let sent = Instant::now();
+            let forwarding = forward_span(req, &to, &addr);
+            let sending = match &routers {
+                None => self.pool.send_held(
+                    &addr,
+                    req.method.name(),
+                    &req.target,
+                    &headers,
+                    &req.body,
+                    left,
+                    watch,
+                    flying,
+                ),
+                Some((region, routers)) => {
+                    self.relay_send(region, routers, req, &headers, left, watch)
+                }
+            };
+            match sending {
+                // Under leases a promoted copy takes its tenant's writes once
+                // the router's grant names the tenant there, which a failover
+                // sends once every tenant of the node is promoted: until then
+                // it refuses one, unrun, 503 -- and a request cut at its
+                // promotion came back to it before that, every time in a test
+                // of four writes. So the node is granted its list now, as a
+                // create grants its node, and asked once more: the request is
+                // one that may go again, and the node ran nothing. Twice
+                // ([`CUT_ASKS`]), where the grant ended in time. Only a
+                // cut's, onto another node than the one it was cut from: a
+                // request moved back to where it was, or one whose node
+                // answers 503 for its own reasons, grants nothing.
+                Ok(answer)
+                    if answer.status == 503
+                        && cut
+                        && asks > 0
+                        && to != node
+                        && routers.is_none()
+                        && self.leases.is_some() =>
+                {
+                    forwarding.error("503");
+                    let _ = answer.read_body(&self.pool, head_only);
+                    drop(forwarding);
+                    asks = match self.grant_cut_onto(&to) {
+                        true => asks - 1,
+                        false => 0,
+                    };
+                }
+                Ok(answer) => {
+                    return self.answer_out_cold(
+                        req, out, arrived, peer, &to, answer, None, sent, forwarding, &home,
+                    )
+                }
+                Err(e) if upstream::client_gone(&e) => {
+                    forwarding.error(e.to_string());
+                    drop(forwarding);
+                    metrics::gone(Route::Tenant, arrived.elapsed());
+                    fenec_http::trace::end(499);
+                    return false;
+                }
+                Err(e) if upstream::ended_by(&e).is_some() => {
+                    forwarding.error(e.to_string());
+                    if tries == CUT_TRIES {
+                        break;
+                    }
+                    tries += 1;
+                    let again = upstream::ended_by(&e).unwrap_or(upstream::Ended::Moved);
+                    (node, ended, asks) = (to, again, CUT_ASKS);
+                }
+                Err(e) => {
+                    forwarding.error(e.to_string());
+                    drop(forwarding);
+                    metrics::unreachable(&to);
+                    let why = match &routers {
+                        None => format!("node `{to}` ({addr}) did not answer: {e}"),
+                        Some((region, _)) => format!(
+                            "region `{region}`'s routers did not answer -- it may be cut off \
+                             from this one, and answers through its own: {e}"
+                        ),
+                    };
+                    return reply(out, region::homed(Response::error(502, &why), &home));
+                }
+            }
+        }
+        let why = format!(
+            "tenant `{tenant}` was failed over {CUT_TRIES} times while this request was out: \
+             ask again"
+        );
+        reply(out, Response::retry_after(503, &why, 1))
+    }
+
+    /// Grants `node` its list at once for the requests a failover's cut
+    /// sent there and it refused, unrun, before its grant named their
+    /// tenant ([`Self::after_cut`]): one grant to a node at a time for all of
+    /// them, on a thread of its own, each request waiting for it two thirds
+    /// of a lease at most. A grant each was a reading of every node's list
+    /// each (`primaries_read`) and N grants one after another in the node's
+    /// turn; waited for on the request's own thread, a grant to a node
+    /// whose turn its own failover holds held the request for as long.
+    /// Waited out past the bound, the request goes again all the same, and
+    /// is refused as before. Whether the grant ended in time.
+    #[cold]
+    #[inline(never)]
+    fn grant_cut_onto(&self, node: &str) -> bool {
+        let Some((leases, _)) = &self.leases else {
+            return false;
+        };
+        let bound = leases.term * 2 / 3;
+        let slot = {
+            let mut grants = self.cut_grants.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(slot) = grants.get(node) {
+                Arc::clone(slot)
+            } else {
+                let Some(me) = self.me.upgrade() else {
+                    return false;
+                };
+                let slot: Arc<(Mutex<bool>, std::sync::Condvar)> = Arc::default();
+                let (theirs, name) = (Arc::clone(&slot), node.to_string());
+                let spawned = std::thread::Builder::new()
+                    .name("fenec-cut-grant".into())
+                    .spawn(move || {
+                        me.lease_now(&name);
+                        // Gone from the map before it is told: a cut after
+                        // this one grants again.
+                        me.cut_grants
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&name);
+                        *theirs.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                        theirs.1.notify_all();
+                    });
+                if let Err(e) = spawned {
+                    fenec_http::log!("no thread for a grant to `{node}` after a cut: {e}");
+                    return false;
+                }
+                grants.insert(node.to_string(), Arc::clone(&slot));
+                slot
+            }
+        };
+        let (done, told) = &*slot;
+        let done = done.lock().unwrap_or_else(|e| e.into_inner());
+        self.cut_waiting.fetch_add(1, Ordering::SeqCst);
+        let (done, _) = told
+            .wait_timeout_while(done, bound, |d| !*d)
+            .unwrap_or_else(|e| e.into_inner());
+        self.cut_waiting.fetch_sub(1, Ordering::SeqCst);
+        *done
+    }
+
+    /// The requests a failover's cut sent on waiting for a grant to the
+    /// node they were sent to ([`Self::grant_cut_onto`]): how a test knows
+    /// a request has joined a grant under way.
+    #[doc(hidden)]
+    pub fn cut_grants_waiting(&self) -> usize {
+        self.cut_waiting.load(Ordering::SeqCst)
+    }
+
+    /// Ends what is out to `addr` for `tenant`, which a failover has just
+    /// placed elsewhere ([`upstream::Pool::cut`]): each request whose answer
+    /// has not begun is answered by what the node may have run
+    /// ([`Self::after_cut`]), and each stream ends, so its client opens it
+    /// again where the tenant is. A node gone with no reset -- a machine
+    /// lost, a network cut -- answers nothing and closes nothing, and they
+    /// waited for `--upstream-timeout` though the tenant's new primary
+    /// answered: in V5's drill the writers sat idle for seconds past the
+    /// failover. Its answer begun, a request is the node's: one finishing
+    /// as the failover comes is answered as it would have been. Called once
+    /// the directory places the tenant elsewhere, so a request cut reads
+    /// the new placement, and only on a failover: a node merely suspected
+    /// may be slow, its lease still running, and a write cut there would be
+    /// a 502 for one that may well land, while a read would go nowhere
+    /// better.
+    fn cut_moved(&self, tenant: &str, addr: &str) {
+        let cuts = self.pool.cut(addr, tenant);
+        metrics::cut(metrics::Cut::StreamEnded, cuts.streams as u64);
+    }
+
+    /// [`Self::answer_out`] out of line, for the paths a request takes
+    /// rarely -- a read replica's answer, one sent again after a failover's
+    /// cut -- so one copy of it serves them, and only [`Self::forward`]
+    /// holds one of its own: inlined in each, each was a copy more.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn answer_out_cold(
+        &self,
+        req: &Request,
+        out: &mut TcpStream,
+        arrived: Instant,
+        peer: Option<std::net::SocketAddr>,
+        node: &str,
+        answer: upstream::Answer,
+        read: Option<Vec<u8>>,
+        sent: Instant,
+        forwarding: fenec_http::trace::Span,
+        home: &Option<String>,
+    ) -> bool {
+        self.answer_out(
+            req, out, arrived, peer, node, answer, read, sent, forwarding, home,
         )
     }
 
@@ -1859,7 +2248,7 @@ impl Router {
             return false;
         }
         let _ = out.set_read_timeout(None);
-        if let Ok(mut stream) = answer.into_stream() {
+        if let Ok(mut stream) = answer.into_stream(&self.pool) {
             let _ = std::io::copy(&mut stream, out);
         }
         false
@@ -1983,7 +2372,7 @@ impl Router {
                     // A replica's region is not the tenant's: its answer
                     // names no home.
                     let home = None;
-                    return Some(self.answer_out(
+                    return Some(self.answer_out_cold(
                         req, out, arrived, peer, &rnode, a, body, sent, forwarding, &home,
                     ));
                 }
@@ -2147,7 +2536,7 @@ impl Router {
                         &[("node", fenec_http::audit::Field::Text(n))],
                     );
                 }
-                self.failover(n, &mut Vec::new(), force)
+                self.failover_by_hand(n, force)
             }),
             (Method::Post, ["replicas"]) => Ok(self.repair()),
             (Method::Get, ["tenants"]) => Ok(self.list_tenants(req)),
@@ -2938,6 +3327,39 @@ impl Router {
         )
     }
 
+    /// [`Self::failover`] an operator asked for, and then each node its
+    /// tenants went to granted its lease over them at once, as a lapse's
+    /// failover grants them ([`Self::granted_after`]), before the operator
+    /// is answered. Under leases a copy promoted takes its tenant's writes
+    /// once a grant names the tenant there, and left to the next round, a
+    /// third of a lease away, every write of a tenant failed over by hand
+    /// was refused there, unrun, 503, until then. The nodes are granted in
+    /// turn over one reading of the directory, each having answered its
+    /// promotions a moment before: a set of them and a thread each were 8
+    /// KB of the router's code. The node failed over is granted nothing
+    /// here: it may be the machine lost, and its next round grants it as
+    /// before.
+    fn failover_by_hand(&self, name: &str, force: bool) -> Outcome<Response> {
+        // In name order, as the directory lists them.
+        let had: Vec<String> = self
+            .read_dir()
+            .tenants()
+            .into_iter()
+            .filter(|(_, p)| p.node == name)
+            .map(|(t, _)| t)
+            .collect();
+        let answer = self.failover(name, &mut Vec::new(), force);
+        if let Some((leases, _)) = &self.leases {
+            let (lists, reading, holder) = self.primaries_read(leases);
+            for (node, list) in &lists {
+                if node != name && list.iter().any(|t| had.binary_search(t).is_ok()) {
+                    self.grant(node, list, reading, &holder);
+                }
+            }
+        }
+        answer
+    }
+
     /// Moves every tenant of `name` to the node its writes went to: each is
     /// promoted there -- its history forks and it stops following -- and the
     /// directory points at it. One tenant at a time, because they are
@@ -3053,15 +3475,20 @@ impl Router {
         // Asked before each promotion: a router demoted since its failover
         // began -- its directory following another's -- promotes nothing,
         // where it went on until its next round noticed.
-        let (node, lineage, history) = {
+        let (node, lineage, history, from) = {
             let dir = self.read_dir();
             if dir.following() {
                 return Err("this router follows another router now".into());
             }
+            let from = dir
+                .placement(tenant)
+                .and_then(|p| dir.node(&p.node))
+                .map(|n| n.addr.clone());
             (
                 dir.node(to).cloned(),
                 dir.lineage(tenant),
                 dir.history(tenant),
+                from,
             )
         };
         let Some(node) = node else {
@@ -3089,12 +3516,17 @@ impl Router {
         ) {
             Ok((200, body)) => {
                 self.quota_after_failover(tenant, to);
-                self.promoted(tenant, to, &body)
-                    .and_then(|_| match own_replica {
-                        true => self.write_dir().set_replica(tenant, None),
-                        false => Ok(()),
-                    })
-                    .map_err(|e| message(&e))
+                self.promoted(tenant, to, &body).map_err(|e| message(&e))?;
+                // Placed on `to` now: what is out to the node it left is
+                // answered from here rather than wait for that node.
+                if let Some(from) = &from {
+                    self.cut_moved(tenant, from);
+                }
+                match own_replica {
+                    true => self.write_dir().set_replica(tenant, None),
+                    false => Ok(()),
+                }
+                .map_err(|e| message(&e))
             }
             Ok((status, body)) => Err(format!(
                 "{status}: {}",

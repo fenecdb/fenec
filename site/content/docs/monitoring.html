@@ -340,6 +340,7 @@ tenant moves. No label names a tenant.</p>
 <tr><td><code>fenec_router_lease_age_seconds{node, region}</code></td><td>gauge</td><td>with <code>--auto-failover</code>, the seconds since each node last took its lease: renewed every third of a lease, and failed over past the lease and a tenth</td></tr>
 <tr><td><code>fenec_router_node_failed_over{node, region}</code></td><td>gauge</td><td>1 for a node the router failed over on its own and that has not answered since; 0 again once it does and a repair has its copies follow</td></tr>
 <tr><td><code>fenec_router_auto_failovers_total{outcome}</code></td><td>counter</td><td>nodes failed over on their own, <code>done</code> when every tenant was promoted, <code>failed</code> when one was not</td></tr>
+<tr><td><code>fenec_router_cut_requests_total{outcome}</code></td><td>counter</td><td>requests out to a node as a failover — by hand or on a lease — moved their tenant off it, ended at once rather than left to wait for <code>--upstream-timeout</code> (<a href="sharding.html#in-flight">Requests out to a node failed over</a>): <code>sent_again</code> to the tenant's new primary, the node having run nothing or the request being a read or a keyed write; <code>may_have_run</code>, a write sent whole with no key, answered <code>502</code>; <code>stream_ended</code>, a subscription ended for its client to open again. Each is counted in <code>fenec_router_requests_total</code> as well, by the status it was answered with; none is an upstream error</td></tr>
 </tbody>
 </table>
 </div>

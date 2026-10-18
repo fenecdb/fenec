@@ -395,8 +395,9 @@ ROUTER_ENV = {"FENEC_SHARD_TOKEN": ROOT, "FENEC_SHARD_REPLICATION_TOKEN": DIRS,
 GLOBALS = "http://g1:8090,http://g2:8090"
 
 
-# As deploy/env/router.env sets it: twice the lease, so a request in
-# flight to a node killed is let go of once its tenants are failed over.
+# As deploy/env/router.env sets it, scaled to the drill's lease: what the
+# router had out to the node killed is answered at its failover whatever
+# this is, and this bounds what no failover ends.
 UPSTREAM = 2 * LEASE
 
 
@@ -590,8 +591,8 @@ def failed_over_after(router, victim):
     """Milliseconds from the victim's end to the router's log saying it
     failed the victim over, both by the Docker VM's clock -- the writers'
     figures carry the request each had in flight to the dead node, which
-    the router lets go of only at its upstream timeout. None where the log
-    names no failover."""
+    the failover answers, and the write each sends after it. None where the
+    log names no failover."""
     ended = docker_time(docker("inspect", "-f", "{{.State.FinishedAt}}", cname(victim)))
     r = subprocess.run(["docker", "logs", "--timestamps", cname(router)],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
