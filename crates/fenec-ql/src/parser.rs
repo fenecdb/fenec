@@ -87,6 +87,10 @@ const JOIN: &str = "FenecQL has no `join`: `get orders where ... lookup items on
                     collection's -- and `where order_id in (get orders select id where ...)` \
                     filters by another collection";
 
+/// What an insert that names no fields is answered with.
+const NAMED: &str = "an insert names its fields: `insert into <collection> (<field>, ...) values \
+                     (...)`, or `insert <collection> {<field>: <value>}`";
+
 /// The words a statement begins with, and SQL's that `Parser::statement`
 /// answers: one a `get` stops at is the next statement's, any other an
 /// alias or a mistake.
@@ -787,6 +791,14 @@ impl Parser {
         }
     }
 
+    /// `msg` and what was found where it is refused: at the text's end
+    /// "end of input", which a next line moves -- so the shell, reading a
+    /// line at a time, holds a statement it refuses there as open.
+    #[inline(never)]
+    fn taught(&self, msg: &str) -> Error {
+        self.error(&format!("{msg}; found {}", self.peek().describe()))
+    }
+
     /// `other`, a word that begins no statement after a name that ends
     /// one: SQL's alias, if it is one.
     #[inline(never)]
@@ -913,12 +925,12 @@ impl Parser {
         // SQL's `create index users_email on users (email)`: a name, and no
         // kind.
         if !self.eat_kw("on") {
-            return self.err(INDEX_FORM);
+            return Err(self.taught(INDEX_FORM));
         }
         let collection = self.ident()?;
         let mut keys = self.index_keys()?;
         if !matches!(self.peek(), Tok::At) {
-            return self.err(INDEX_FORM);
+            return Err(self.taught(INDEX_FORM));
         }
         self.next();
         // Several fields: an index over them, ordered part by part.
@@ -1416,11 +1428,13 @@ impl Parser {
     /// collection's fields have no order a statement could lean on, `id`
     /// not among them and a field added going last.
     fn values(&mut self) -> Result<Vec<Vec<(String, Expr)>>> {
-        // `values {a: 1}, {a: 2}`: documents, which name their fields.
-        if self.peek_kw("values")
-            && matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::LBrace))
-        {
-            self.next();
+        // `values {a: 1}, {a: 2}`: documents, which name their fields. Each
+        // refusal here says what it found (`taught`), so one at the text's
+        // end is one a next line moves, and the shell reads it as open.
+        if self.eat_kw("values") {
+            if !matches!(self.peek(), Tok::LBrace) {
+                return Err(self.taught(NAMED));
+            }
             let mut docs = vec![self.object()?];
             while matches!(self.peek(), Tok::Comma) {
                 self.next();
@@ -1431,12 +1445,7 @@ impl Parser {
         let cols = match self.peek() {
             Tok::LParen => self.names()?,
             _ if self.peek_kw("select") || self.peek_kw("get") => vec![],
-            _ => {
-                return self.err(
-                    "an insert names its fields: `insert into <collection> (<field>, ...) \
-                     values (...)`, or `insert <collection> {<field>: <value>}`",
-                )
-            }
+            _ => return Err(self.taught(NAMED)),
         };
         if self.peek_kw("select") || self.peek_kw("get") {
             return self.err(
@@ -1493,10 +1502,10 @@ impl Parser {
             _ => None,
         };
         if !self.eat_kw("do") {
-            return self.err(
+            return Err(self.taught(
                 "an upsert names its unique field, or none: `on conflict (email) do ...`, or \
                  `on conflict do nothing`",
-            );
+            ));
         }
         if self.eat_kw("nothing") {
             return Ok((None, target));
@@ -1789,8 +1798,18 @@ impl Parser {
         if self.joined() {
             return self.err(JOIN);
         }
-        if let Tok::Ident(w) = self.peek() {
-            if !COMMANDS.iter().any(|c| w.eq_ignore_ascii_case(c)) {
+        // An alias only where SQL's clause follows it (`from users u group
+        // by u.city`): a word at the end of the text may be a statement
+        // still being typed, which the shell holds back as one beginning
+        // no statement, refused where it stands.
+        if let (Tok::Ident(w), Some(Tok::Ident(k))) =
+            (self.peek(), self.toks.get(self.i + 1).map(|t| &t.tok))
+        {
+            if !COMMANDS.iter().any(|c| w.eq_ignore_ascii_case(c))
+                && ["where", "group", "order", "limit", "having"]
+                    .iter()
+                    .any(|c| k.eq_ignore_ascii_case(c))
+            {
                 return Err(self.alias(&w.to_ascii_lowercase()));
             }
         }
@@ -1864,11 +1883,14 @@ impl Parser {
             // SQL's `nulls first` and `nulls last`, where they say what
             // the order does here: nulls before the values ascending,
             // after them descending.
-            if self.eat_kw("nulls") && !self.eat_kw(if asc { "first" } else { "last" }) {
-                return self.err(
-                    "a null comes first ascending and last descending: to turn that round, \
-                     order by `<key> is null` first",
-                );
+            if self.eat_kw("nulls") {
+                let nulls = if asc { "first" } else { "last" };
+                if !self.eat_kw(nulls) {
+                    return Err(self.taught(
+                        "a null comes first ascending and last descending: to turn that round, \
+                         order by `<key> is null` first",
+                    ));
+                }
             }
             if collate.is_none() {
                 collate = self.collate()?;
@@ -2422,8 +2444,20 @@ impl Parser {
             }
             return Ok(Expr::Like(Box::new(left), Box::new(right)));
         }
+        // A word a test is named by -- `not`, `has`, `in`, `is`, `like`,
+        // `ilike`, `between` -- by its first letter, before the call: the
+        // words that follow an operand most, `and`, `or`, `where`, `order`
+        // and `as`, called it for nothing, a parse of a filtered `get` 2%
+        // slower.
         match self.peek() {
-            Tok::Ident(_) => self.worded(at, lq, left),
+            Tok::Ident(w)
+                if matches!(
+                    w.as_bytes().first().map(|b| b | 0x20),
+                    Some(b'n' | b'h' | b'i' | b'l' | b'b')
+                ) =>
+            {
+                self.worded(at, lq, left)
+            }
             // PostgreSQL's `@@`.
             Tok::At => self.err(FULLTEXT),
             _ => Ok(left),
@@ -2447,8 +2481,15 @@ impl Parser {
             && matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
                 Some(Tok::Ident(k)) if ["in", "like", "ilike", "between"]
                     .iter().any(|w| k.eq_ignore_ascii_case(w)));
-        if negated {
+        // `x not` where the text ends: a test a next line may name, which
+        // the shell reads as open where a word of no statement stood.
+        let open = w.eq_ignore_ascii_case("not")
+            && matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::Eof));
+        if negated || open {
             self.next();
+        }
+        if open {
+            return self.err("`not` after a value takes `in`, `like`, `ilike` or `between`");
         }
         let e = if self.eat_kw("has") {
             let right = self.arith()?;
@@ -3093,6 +3134,12 @@ mod tests {
         "collections",
         "describe notes",
         "compact notes",
+        // SQL's spellings, the same statements.
+        "insert into notes (body, topic) values ('a', 3), ($1, $2) on conflict (topic) do update set body = excluded.body returning id",
+        "insert into notes values {body: 'a'}, {body: 'b'} on conflict do nothing",
+        "update notes set topic = 4, body = body || '!' where id = 3 returning *",
+        "get notes where topic not in (1, 2) and posted between $1 and $2 and body like 'a%' escape '!' and body is distinct from 'it''s'",
+        "select topic, count(body) from notes where body ilike '%x%' and id in (select distinct n from tops) group by topic order by topic desc nulls last",
     ];
 
     /// The words of a text, cut where the white space between them is.
@@ -3210,6 +3257,9 @@ mod tests {
                 "alter collection notes alter",
                 "alter collection notes alter field",
                 "alter collection notes alter field posted",
+                // The SQL order's list again, of the spellings' statement.
+                "select topic,",
+                "select topic, count(body)",
             ]
         );
         // A refusal of what was read stands at once, wherever it is placed.
