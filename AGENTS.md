@@ -5759,6 +5759,42 @@ formatting back into the browser module, which is 1 KB smaller instead.
 `the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and
 errors to the old lexer's over 40 000 generated texts.
 
+**The shell runs a statement once nothing after it can go on with it**
+(`fenec_ql::reading`, fenec-cli's `Reader`). A statement has no end of its
+own -- `del notes` is whole, and so is it with `where id = 3` on the line
+under it -- and the shell ran every line whose brackets closed, so that
+`del` deleted every row before the `where` was refused. `reading` gives
+the statements a `;` or the next statement ended (`whole`) and what is
+left: a statement whole so far (`Rest::Last`), or one refused so far
+(`Refusal`), at the text's end (`end`) or at what begins no statement
+(`begins`: an unknown command, `wher`), which refuses the statement before
+it too, since it may have meant to go on with it. Piped, the next line
+says whether a refusal stands (`Refusal::stands`: its words without their
+position, not at the end), so a script reads as `-c` and `POST /query`
+read it. Typed, a read or a schema change on one line runs at Enter, and a
+write or a read over lines waits for the next line: an empty one runs it,
+a `.` command leaves it waiting, as `psql`'s meta-commands leave its
+buffer, and `.quit` or Ctrl-D leaves it unrun; with no next line to ask, a
+refusal stands where `limit 1` after it leaves it standing
+(`stands_alone`). A paste is read as a pipe, its next line waiting already
+(`pending`, a `poll` of 10 ms). Where the end of the text decides a reading
+the parser then backtracks over, it is marked (`Parser::cut`: the SQL
+order's list before its `from`, `alter field f` before its `@`); a check
+of that kind added to the parser belongs there too, or a script writing
+its statement over lines is refused --
+`a_statement_written_over_lines_reads_as_one` holds every cut of 42
+statements. A `;` is a token (`Tok::Semi`) that ends a statement in the
+parser, where it was white space and `del notes; where id = 3` one
+statement. `lexer::Unclosed` keeps a document of many lines from being
+parsed again at each, and `spans` and `reading` place statements in bytes:
+in characters, a synced text's second write was sliced a byte early per
+letter outside ASCII before it, and the server refused its first. The
+shell's code grew 7.6 KB (`__text`, aarch64-apple-darwin; 8.0 in `make
+small`): the reader, `reading`, and the lexer out of line once it had a
+second caller there (+0.4 KB net) -- `meta` called from two places went
+out of line too, 2.2 KB, and is called from one. The browser module grew
+401 bytes, 117 gzip (brotli within noise); parsing moved by noise alone.
+
 **A plain `get` is written as JSON from the stored documents**
 (`Database::query_json`). Fields alone, in the order the payload holds
 them -- `select *` and most lists, with no `match`, `near`, `lookup`,

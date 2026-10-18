@@ -86,6 +86,12 @@ pub struct Parser {
     /// rather than become a vector: only a `json` field holds an object,
     /// and `[19.99]` in it is two decimals, not an `f32`.
     exact: bool,
+    /// The end of the text decided how a statement was read: the SQL
+    /// order's list ran to it and was read again as a collection's name
+    /// for want of its `from`, or `alter field f` found it where an `@`
+    /// would have chosen `@ttl(..)`. What [`reading`] tells a reader a line
+    /// at a time, whose next line may hold the `from` or the `@`.
+    cut: bool,
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
@@ -133,9 +139,10 @@ fn statements(toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
         depth: 0,
         subqueries: 0,
         exact,
+        cut: false,
     };
     let mut out = Vec::new();
-    while !p.at_eof() {
+    while !p.ended() {
         out.push(p.statement()?);
     }
     if out.is_empty() {
@@ -144,27 +151,226 @@ fn statements(toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
     Ok(out)
 }
 
-/// Where each statement of `src` is: its text runs from its first token to
-/// the next statement's, a `;` between them included. A sync replica sends
-/// a server each write of a text on its own line of a `/batch`, as written
-/// -- the parser's own reading of where one ends, rather than a split on
-/// `;`, which a string holding one would cut. Unused by the browser module,
-/// whose link leaves it out.
+/// Where each statement of `src` is, in bytes: its text runs from its
+/// first token to the next statement's, a `;` between them included. A
+/// sync replica sends a server each write of a text on its own line of a
+/// `/batch`, as written -- the parser's own reading of where one ends,
+/// rather than a split on `;`, which a string holding one would cut. In
+/// characters, as a token's position counts, a text holding a letter
+/// outside ASCII had its second statement sliced a byte early and its
+/// first cut short. Unused by the browser module, whose link leaves it
+/// out.
 pub fn spans(src: &str) -> Result<Vec<(usize, usize)>> {
+    let r = reading(src);
+    let mut out = r.whole;
+    match r.rest {
+        Rest::Nothing => {}
+        Rest::Last(at, _) => out.push((at, src.len())),
+        Rest::Refused(r) => return Err(r.error),
+    }
+    Ok(out)
+}
+
+/// A text as a reader taking it a line at a time finds it -- the shell,
+/// which runs a statement once nothing after it can still go on with it.
+/// A statement has no end of its own: `get notes select body` is whole,
+/// and so is it with `where topic = 4` on the next line, so a statement
+/// is whole once a `;` or another statement follows it, and the last may
+/// yet take more. Unused by the browser module, whose link leaves it out.
+#[derive(Debug, PartialEq)]
+pub struct Reading {
+    /// The statements read whole, each the bytes from its first token to
+    /// the next statement's, as [`spans`] gives them.
+    pub whole: Vec<(usize, usize)>,
+    /// What follows them.
+    pub rest: Rest,
+}
+
+/// What a [`Reading`] ends in.
+#[derive(Debug, PartialEq)]
+pub enum Rest {
+    /// White space, comments and `;`s alone.
+    Nothing,
+    /// A statement read whole up to the end of the text, from this byte:
+    /// a next line may go on with it -- `where`, `order`, `and` -- or
+    /// begin another, which says it was whole.
+    Last(usize, Box<Statement>),
+    /// A statement refused, so far as the text goes.
+    Refused(Refusal),
+}
+
+/// A statement refused, so far as the text goes: whether the refusal
+/// stands is for what comes after to say ([`Refusal::stands`]).
+#[derive(Debug, PartialEq)]
+pub struct Refusal {
+    /// Where the text refused begins, in bytes. Where what was refused
+    /// begins no statement -- an unknown command, `where` on a line of its
+    /// own -- it may go on with the statement before it, which no `;`
+    /// ended: that statement is refused with it, since run alone it could
+    /// be a write wider than the one written (`del notes`, then `wher id =
+    /// 3`).
+    pub at: usize,
+    /// Where what begins no statement is, in bytes, when that is what was
+    /// refused.
+    pub begins: Option<usize>,
+    pub error: Error,
+    /// Refused at the end of the text: what comes after may make it read.
+    pub end: bool,
+}
+
+impl Refusal {
+    /// Whether this refusal stands whatever follows: `later`, the same
+    /// text read with more after it, is refused where this one was, for
+    /// the same reason, and not at its end. Its words are compared without
+    /// the position they lead with, which more text moves where an error is
+    /// placed at the token after the one refused (a `limit "x"` is placed
+    /// past the `"x"`); a refusal at the end is never one that stands,
+    /// since a line more may go on with it -- `get notes select a + b`
+    /// answers under no name until a line says `as total`.
+    pub fn stands(&self, later: &Refusal) -> bool {
+        let same = match (&self.error, &later.error) {
+            (Error::Query(a), Error::Query(b)) => unplaced(a) == unplaced(b),
+            (a, b) => a == b,
+        };
+        same && !later.end && self.at == later.at && self.begins == later.begins
+    }
+
+    /// Whether this refusal of `src` stands with no next line to ask -- a
+    /// line typed, the shell waiting on its user. One before the end does.
+    /// One at the end stands where a line more that most statements go on
+    /// with, `limit 1`, leaves it standing ([`Self::stands`]): what the end
+    /// refused moves with it -- a clause not finished, a check of the whole
+    /// statement such as `match` and `near` with no `fuse` -- and a refusal
+    /// of what was read, placed past it at the end, does not (`limit "x"`,
+    /// `@foo`). A check a next line could satisfy and `limit` cannot -- an
+    /// item with no `as` yet, `select a, b` before its `from` -- stands, as
+    /// it did when the shell ran each line.
+    pub fn stands_alone(&self, src: &str) -> bool {
+        if !self.end {
+            return true;
+        }
+        match reading(&format!("{src}\nlimit 1")).rest {
+            Rest::Refused(later) => self.stands(&later),
+            _ => false,
+        }
+    }
+}
+
+/// An error's words past the `position N: ` the parser leads them with.
+/// Its digits counted rather than split at `: `, which took the searcher
+/// for a pattern of several bytes, 1 KB of the shell.
+fn unplaced(m: &str) -> &str {
+    let Some(r) = m.strip_prefix("position ") else {
+        return m;
+    };
+    let n = r.bytes().take_while(u8::is_ascii_digit).count();
+    match r.get(n..).and_then(|w| w.strip_prefix(": ")) {
+        Some(w) if n > 0 => w,
+        _ => m,
+    }
+}
+
+/// What [`Reading`] finds `src` to be.
+pub fn reading(src: &str) -> Reading {
+    let toks = match tokenize(src) {
+        Ok(t) => t,
+        // Refused whole: a text the lexer refuses has no statements to
+        // tell apart. Only an open string is cut short by its end.
+        Err(error) => {
+            let end = matches!(&error, Error::Query(m) if m.ends_with(crate::lexer::UNTERMINATED));
+            let r = Refusal {
+                at: 0,
+                begins: None,
+                error,
+                end,
+            };
+            return Reading {
+                whole: Vec::new(),
+                rest: Rest::Refused(r),
+            };
+        }
+    };
     let mut p = Parser {
-        toks: tokenize(src)?,
+        toks,
         i: 0,
         depth: 0,
         subqueries: 0,
         exact: false,
+        cut: false,
     };
-    let mut starts = Vec::new();
-    while !p.at_eof() {
-        starts.push(p.pos());
-        p.statement()?;
+    // In characters, as tokens are placed: each statement read whole, by
+    // where it starts, and the one just read, which what follows decides,
+    // with whether the end of the text cut its SQL list short.
+    let mut whole: Vec<usize> = Vec::new();
+    let mut last: Option<(usize, Statement, bool)> = None;
+    let rest = loop {
+        // A `;` ends the one before.
+        if p.semis() {
+            whole.extend(last.take().map(|(at, ..)| at));
+        }
+        if p.at_eof() {
+            break match last {
+                Some((at, s, _)) => Rest::Last(at, Box::new(s)),
+                None => Rest::Nothing,
+            };
+        }
+        let (start, first) = (p.pos(), p.i);
+        p.cut = false;
+        match p.statement() {
+            Ok(s) => whole.extend(last.replace((start, s, p.cut)).map(|(at, ..)| at)),
+            Err(error) => {
+                let mut end = p.at_eof() || p.cut;
+                let begins = (p.i == first).then_some(start);
+                let at = match (begins, last.take()) {
+                    (Some(_), Some((at, _, cut))) => {
+                        end |= cut;
+                        at
+                    }
+                    (_, before) => {
+                        whole.extend(before.map(|(at, ..)| at));
+                        start
+                    }
+                };
+                break Rest::Refused(Refusal {
+                    at,
+                    begins,
+                    error,
+                    end,
+                });
+            }
+        }
+    };
+    // The places in bytes, which a caller slices the text by: walked once,
+    // in order, a character counted at each byte that begins one.
+    let b = src.as_bytes();
+    let (mut chars, mut to) = (0usize, 0usize);
+    let mut bytes = |at: usize| -> usize {
+        while to < b.len() && (chars < at || b[to] & 0xC0 == 0x80) {
+            chars += usize::from(b[to] & 0xC0 != 0x80);
+            to += 1;
+        }
+        to
+    };
+    let whole: Vec<usize> = whole.into_iter().map(&mut bytes).collect();
+    let rest = match rest {
+        Rest::Nothing => Rest::Nothing,
+        Rest::Last(at, s) => Rest::Last(bytes(at), s),
+        Rest::Refused(r) => {
+            let at = bytes(r.at);
+            let begins = r.begins.map(&mut bytes);
+            Rest::Refused(Refusal { at, begins, ..r })
+        }
+    };
+    let next = match &rest {
+        Rest::Nothing => src.len(),
+        Rest::Last(at, _) => *at,
+        Rest::Refused(r) => r.at,
+    };
+    let ends = whole.iter().skip(1).copied().chain([next]);
+    Reading {
+        whole: whole.iter().copied().zip(ends).collect(),
+        rest,
     }
-    let ends = starts.iter().skip(1).copied().chain([src.len()]);
-    Ok(starts.iter().copied().zip(ends).collect())
 }
 
 /// Parses a single statement; errors when there is more than one.
@@ -206,6 +412,7 @@ pub fn parse_select_list(src: &str) -> Result<SelectList> {
         depth: 0,
         subqueries: 0,
         exact: false,
+        cut: false,
     };
     let list = p.select_list()?;
     if !p.at_eof() {
@@ -223,6 +430,7 @@ pub fn parse_group_list(src: &str) -> Result<Vec<Expr>> {
         depth: 0,
         subqueries: 0,
         exact: false,
+        cut: false,
     };
     let list = p.group_list()?;
     if !p.at_eof() {
@@ -240,6 +448,7 @@ pub fn parse_facet_list(src: &str) -> Result<Vec<Facet>> {
         depth: 0,
         subqueries: 0,
         exact: false,
+        cut: false,
     };
     let list = p.facet_list()?;
     if !p.at_eof() {
@@ -254,6 +463,19 @@ impl Parser {
     }
     fn at_eof(&self) -> bool {
         matches!(self.peek(), Tok::Eof)
+    }
+    /// Steps past the `;`s here, and says whether there were any.
+    fn semis(&mut self) -> bool {
+        let at = self.i;
+        while matches!(self.peek(), Tok::Semi) {
+            self.next();
+        }
+        self.i > at
+    }
+    /// Whether the statements are over: nothing but `;`s is left.
+    fn ended(&mut self) -> bool {
+        self.semis();
+        self.at_eof()
     }
     fn next(&mut self) -> Tok {
         let t = self.toks[self.i].tok.clone();
@@ -905,7 +1127,10 @@ impl Parser {
             "alter"
                 if {
                     self.eat_kw("field");
-                    matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::At))
+                    let next = self.toks.get(self.i + 1).map(|t| &t.tok);
+                    let at = matches!(next, Some(Tok::At));
+                    self.cut |= matches!(next, Some(Tok::Eof));
+                    at
                 } =>
             {
                 let field = self.ident()?;
@@ -1463,7 +1688,9 @@ impl Parser {
     }
 
     fn projection_before_from(&mut self) -> Option<SelectList> {
-        let list = self.select_list().ok()?;
+        let list = self.select_list();
+        self.cut |= self.at_eof();
+        let list = list.ok()?;
         self.eat_kw("from").then_some(list)
     }
 
@@ -2124,6 +2351,281 @@ impl Parser {
 mod tests {
     use super::*;
 
+    fn refusal(r: &Reading) -> &Refusal {
+        match &r.rest {
+            Rest::Refused(r) => r,
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    /// What a text reads as, a line at a time: whole where a `;` or a
+    /// statement follows, the last left to what comes after, and a word
+    /// that begins no statement holding back the statement before it.
+    #[test]
+    fn a_text_reads_as_whole_statements_and_what_is_left() {
+        let r = reading("");
+        assert_eq!((r.whole.len(), &r.rest), (0, &Rest::Nothing));
+        let r = reading("get a");
+        assert!(r.whole.is_empty() && matches!(r.rest, Rest::Last(0, _)));
+        let r = reading("get a;  -- done\n");
+        assert_eq!((r.whole, r.rest), (vec![(0, 16)], Rest::Nothing));
+        let r = reading("get a\nget b");
+        assert_eq!(r.whole, [(0, 6)]);
+        assert!(matches!(r.rest, Rest::Last(6, _)));
+        // One statement over three lines.
+        let r = reading("get notes select body\n  where topic = 4\n  order posted desc\n");
+        assert!(r.whole.is_empty() && matches!(r.rest, Rest::Last(0, _)));
+        let r = reading("del notes\n  where id = 3");
+        let Rest::Last(0, s) = r.rest else { panic!() };
+        assert!(matches!(
+            *s,
+            Statement::Delete {
+                filter: Some(_),
+                ..
+            }
+        ));
+        // A `;` ends a statement: no clause goes on past it.
+        let r = reading("del notes; where id = 3");
+        assert_eq!(r.whole, [(0, 11)]);
+        assert_eq!((refusal(&r).at, refusal(&r).begins), (11, Some(11)));
+        assert!(parse("del notes; where id = 3").is_err());
+        // `wher` begins no statement: it may go on with `del notes`, which
+        // is refused with it rather than run as every row's delete.
+        let r = reading("del notes\nwher id = 3");
+        assert!(r.whole.is_empty());
+        let f = refusal(&r);
+        assert_eq!((f.at, f.begins, f.end), (0, Some(10), false));
+        assert!(f.error.to_string().contains("unknown command `wher`"));
+        // Refused inside a statement that began as one: the one before is whole.
+        let r = reading("put a {x: 1}\nget b limit \"x\"");
+        assert_eq!(r.whole, [(0, 13)]);
+        assert_eq!((refusal(&r).at, refusal(&r).begins), (13, None));
+        // Cut short by the end, and by an open string.
+        assert!(refusal(&reading("get a where")).end);
+        assert!(refusal(&reading("put a {s: \"it's")).end);
+        assert!(!refusal(&reading("get a where x = 1 !")).end);
+        // A `;`, a keyword or a quote in a string or a comment is neither.
+        for text in [
+            "put notes {body: \"a; where id = 3\"}",
+            "put notes {body: 'del notes; -- no'}",
+            "get notes -- it's; del notes\n",
+            "get notes # \"where\n  where id = 3",
+        ] {
+            let r = reading(text);
+            assert!(
+                r.whole.is_empty() && matches!(r.rest, Rest::Last(0, _)),
+                "{text}"
+            );
+        }
+    }
+
+    /// The places are bytes, which a caller slices the text by: in
+    /// characters, as tokens count them, a statement after a `ç` was sliced
+    /// a byte early.
+    #[test]
+    fn a_reading_is_placed_in_bytes() {
+        let text = "put a {b: \"çay\"}\nput a {b: \"ş\"}; get a";
+        let r = reading(text);
+        let got: Vec<&str> = r.whole.iter().map(|&(a, b)| &text[a..b]).collect();
+        assert_eq!(got, ["put a {b: \"çay\"}\n", "put a {b: \"ş\"}; "]);
+        let Rest::Last(at, _) = r.rest else { panic!() };
+        assert_eq!(&text[at..], "get a");
+        let spans = spans(text).unwrap();
+        let got: Vec<&str> = spans.iter().map(|&(a, b)| &text[a..b]).collect();
+        assert_eq!(got, ["put a {b: \"çay\"}\n", "put a {b: \"ş\"}; ", "get a"]);
+        let r = reading("put a {b: \"ü\"}\nwher x");
+        assert_eq!((refusal(&r).at, refusal(&r).begins), (0, Some(16)));
+        // Letters of three bytes and four, and a statement after each.
+        let text = "put a {b: \"名前\"} put a {b: \"😀😀\"};get a -- ü\nget b";
+        let r = reading(text);
+        let got: Vec<&str> = r.whole.iter().map(|&(a, b)| &text[a..b]).collect();
+        assert_eq!(
+            got,
+            [
+                "put a {b: \"名前\"} ",
+                "put a {b: \"😀😀\"};",
+                "get a -- ü\n"
+            ]
+        );
+        let Rest::Last(at, _) = r.rest else { panic!() };
+        assert_eq!(&text[at..], "get b");
+    }
+
+    /// Statements of every kind, written whole.
+    const WRITTEN: &[&str] = &[
+        "get notes select body, posted where topic = 3 and posted > 1 order posted desc limit 10 offset 2",
+        "get docs where year >= 2020 near embed [0.1, 0.2] limit 5",
+        "get docs select title near embed $1 ef 64 exact limit 5",
+        "get products match title $1 fuzzy prefix limit 10",
+        "get notes select body, highlight(body) match body \"oasys stars\" fuzzy limit 10",
+        "get docs match body $1 near embed $2 fuse k 60 candidates 40 limit 10",
+        "get docs match body $1 rerank embed $2 candidates 50 limit 10",
+        "get notes where topic in (get topics select id where name ~ \"x\") limit 3",
+        "get notes where topic in [1, 2, 3] and not (body is null) or posted < now() - 1000",
+        "get notes select topic, count(*) as n group topic having n > 1 order n desc limit 5",
+        "get e select bucket(at, 1d, 'Europe/Berlin') as day, count(*) group day",
+        "get notes select a + b as total, case when a > 1 then 'x' else 'y' end as k",
+        "get orders lookup lines on order_id required select sku limit 3",
+        "get shops lookup orders on (org, shop) = (org, id) order at desc limit 3",
+        "get products facet brand top 5 disjunctive, price ranges [0, 2500, 5000] limit 20",
+        "get notes order distance(loc, $1) limit 1",
+        "get notes where meta.source.rank > 2 order body collate tr limit 1 require 1",
+        "select a, b from notes where a = 1 order b limit 2",
+        "explain get notes where topic = 3 order posted desc",
+        "put notes {body: \"a night\", topic: 3, posted: now()}",
+        "put notes [{body: \"a\", embed: [0.1, -0.2]}, {body: \"b\", meta: {k: [1, 2.5]}}]",
+        "put locks {name: \"nightly\", owner: $1, at: now()} if absent",
+        "put hits {key: $1, n: 1} if absent else set {n: n + new.n} require 1 returning id",
+        "insert into notes {body: $1} returning *",
+        "put ev $1",
+        "set jobs {owner: $1, run_at: now() + 30000, attempts: attempts + 1} where run_at <= now() order run_at limit 10 returning *",
+        "set docs {body: $1, version: version + 1} where id = $2 and version = $3 require 1",
+        "update notes set {topic: 4} where id = 3",
+        "del notes where id = 3",
+        "delete from notes where topic = 4 order posted limit 1 returning id",
+        "create collection notes (body text @text(prefix=3), topic int @hash, posted timestamp @sorted, embed vector<384> @hnsw(cosine, m=16), @sorted(topic, posted desc))",
+        "create collection if not exists users (email text nocase @unique, name text collate tr required)",
+        "create index on notes (embed) @hnsw(cosine, quant=int8)",
+        "create index if not exists on notes (topic, posted desc) @sorted",
+        "drop index on notes (topic, posted)",
+        "drop collection if exists notes",
+        "alter collection notes add field mood text",
+        "alter collection notes rename field mood to feel",
+        "alter collection notes alter field posted @ttl(30d)",
+        "collections",
+        "describe notes",
+        "compact notes",
+    ];
+
+    /// The words of a text, cut where the white space between them is.
+    fn cuts(text: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut quote = None;
+        for (i, c) in text.char_indices() {
+            match (quote, c) {
+                (None, '"' | '\'') => quote = Some(c),
+                (Some(q), _) if c == q => quote = None,
+                (None, ' ') => out.push(i),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Every statement, written over lines cut between any of its words
+    /// and read a line at a time as the shell reads one: never read as two,
+    /// never refused for good before its last line -- each refusal is one a
+    /// next line moves (`Refusal::stands`) -- and read whole at the end as
+    /// the statement written on one line is.
+    #[test]
+    fn a_statement_written_over_lines_reads_as_one() {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        for text in WRITTEN {
+            let want = parse_one(text).unwrap();
+            let cuts = cuts(text);
+            for round in 0..200 {
+                // Every single cut first, then cuts at random.
+                let chosen: Vec<usize> = match round < cuts.len() {
+                    true => vec![cuts[round]],
+                    false => cuts
+                        .iter()
+                        .copied()
+                        .filter(|_| {
+                            x ^= x << 13;
+                            x ^= x >> 7;
+                            x ^= x << 17;
+                            x.is_multiple_of(3)
+                        })
+                        .collect(),
+                };
+                let mut lines = Vec::new();
+                let mut from = 0;
+                for c in chosen.iter().copied().chain([text.len()]) {
+                    lines.push(format!("{}\n", &text[from..c]));
+                    from = c;
+                }
+                let mut buf = String::new();
+                let mut held: Option<Refusal> = None;
+                for line in &lines {
+                    buf.push_str(line);
+                    let r = reading(&buf);
+                    assert!(r.whole.is_empty(), "{lines:?} read as two");
+                    match r.rest {
+                        Rest::Refused(now) => {
+                            if let Some(before) = &held {
+                                assert!(!before.stands(&now), "{lines:?}: {now:?}");
+                            }
+                            held = Some(now);
+                        }
+                        _ => held = None,
+                    }
+                }
+                let r = reading(&buf);
+                assert!(r.whole.is_empty());
+                let Rest::Last(0, got) = r.rest else {
+                    panic!("{lines:?}: {:?}", r.rest)
+                };
+                assert_eq!(*got, want, "{lines:?}");
+            }
+        }
+    }
+
+    /// A line typed, with no next line to ask: of every statement cut after
+    /// any of its words, with no string or bracket left open (which the
+    /// shell reads on past), a refusal stands alone only where a check a
+    /// next line could satisfy is one `limit` cannot reach -- the ones
+    /// below, each refused as it was when the shell ran every line as it
+    /// came. Pasted or piped, the next line is there to tell.
+    #[test]
+    fn a_statement_typed_up_to_a_word_is_left_open() {
+        let mut stood = Vec::new();
+        for text in WRITTEN {
+            for c in cuts(text) {
+                let prefix = &text[..c];
+                let mut gate = crate::lexer::Unclosed::default();
+                gate.feed(prefix);
+                if gate.is_open() {
+                    continue;
+                }
+                let r = reading(prefix);
+                assert!(r.whole.is_empty(), "{prefix} read as two");
+                if let Rest::Refused(f) = r.rest {
+                    if f.stands_alone(prefix) {
+                        stood.push(prefix);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            stood,
+            [
+                // An item with no name yet, which `as` would give it.
+                "get e select bucket(at, 1d, 'Europe/Berlin')",
+                "get notes select a + b",
+                "get notes select a + b as total, case when a > 1 then 'x' else 'y' end",
+                // The SQL order's list, before its `from`.
+                "select a,",
+                "select a, b",
+                // `@ttl(..)` decides the arm, a token past the field.
+                "alter collection notes alter",
+                "alter collection notes alter field",
+                "alter collection notes alter field posted",
+            ]
+        );
+        // A refusal of what was read stands at once, wherever it is placed.
+        for text in [
+            "get notes limit \"x\"",
+            "create index on notes (f) @foo",
+            "put notes {a: 1} require \"x\"",
+            "create collection x ()",
+        ] {
+            let Rest::Refused(f) = reading(text).rest else {
+                panic!("{text}")
+            };
+            assert!(f.stands_alone(text), "{text}");
+        }
+    }
+
     /// What the parser made of a text before the lexer read a list of
     /// numbers as one token.
     fn parse_plain(src: &str) -> Result<Vec<Statement>> {
@@ -2133,6 +2635,7 @@ mod tests {
             depth: 0,
             subqueries: 0,
             exact: false,
+            cut: false,
         };
         let mut out = Vec::new();
         while !p.at_eof() {

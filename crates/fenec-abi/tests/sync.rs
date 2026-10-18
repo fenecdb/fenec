@@ -505,6 +505,32 @@ fn an_offline_write_lands_once_its_answer_lost() {
     assert_eq!(w.state(), "online");
 }
 
+/// A text of two writes, letters outside ASCII in the first: each reaches
+/// the server as it was written. `fenec_ql::spans` placed them in
+/// characters, which the sync slices the text by as bytes, so the first
+/// line went out cut short of its `}` and the server refused it.
+#[test]
+fn a_text_of_writes_reaches_the_server_as_written_whatever_its_letters() {
+    let mut w = World::new();
+    w.write(
+        r#"put tasks {title: "şöyle güzel", status: "open"}; set tasks {title: "çift"} where key = "b""#,
+        "",
+    )
+    .unwrap();
+    w.fire();
+    w.deliver();
+    assert_eq!(w.refused, []);
+    let titles: Vec<Value> = w
+        .server
+        .rows("get tasks select title order title")
+        .into_iter()
+        .map(|r| r.values[0].clone())
+        .collect();
+    let want = ["one", "three", "çift", "şöyle güzel"].map(|t| Value::Text(t.into()));
+    assert_eq!(titles, want);
+    assert_eq!(w.pending(), 0);
+}
+
 #[test]
 fn a_restart_keeps_its_pending_writes_and_its_cursor() {
     let dir = std::env::temp_dir().join(format!("fenec-sync-{}", std::process::id()));

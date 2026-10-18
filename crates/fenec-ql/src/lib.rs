@@ -13,7 +13,7 @@ pub mod parser;
 
 pub use parser::{
     parse, parse_exact, parse_facet_list, parse_for, parse_group_list, parse_one, parse_one_for,
-    parse_select_list, spans, SelectList, MAX_EXPR_DEPTH,
+    parse_select_list, reading, spans, Reading, Refusal, Rest, SelectList, MAX_EXPR_DEPTH,
 };
 
 use fenec_core::error::Result;

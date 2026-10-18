@@ -194,7 +194,8 @@ href="sharding.html#deploying">Deploying it</a>.</p>
 )</pre>
   </li>
   <li>
-    <p>Write your rows.</p>
+    <p>Write your rows. A write runs at the empty line after it, or at
+    a <code>;</code>.</p>
 <pre data-lang="fenecql">put notes {body: "a night at the oasis, under the stars", topic: 3, posted: now()}
 put notes [ ... 100 000 more ... ]</pre>
   </li>
@@ -212,18 +213,32 @@ put notes [ ... 100 000 more ... ]</pre>
 <pre data-lang="bash">./target/release/fenec notes.fenec              # interactive
 ./target/release/fenec notes.fenec -c 'get notes limit 5'
 echo 'get notes' | ./target/release/fenec notes.fenec
+./target/release/fenec notes.fenec &lt; seed.fenecql   # a script
 </pre>
 
 <p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
 <code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>
 <code>.quit</code>.</p>
 
-<p>The shell runs a statement once a line ends with its parentheses,
-braces and brackets closed and no string open, so a <code>create
-collection</code> may span lines and a <code>get</code> goes on one. A
-statement broken after its first line runs that line alone: a
-<code>get</code> reads every row, unfiltered, and a <code>del notes</code>
-on a line of its own deletes every row.</p>
+<p>A statement may run over several lines, and the shell runs it only
+once nothing after it can go on with it. Typed, a read or a schema change
+written on one line runs at Enter. A write, and a read written over
+several lines, wait for the next line: one that goes on with them —
+<code>where</code>, <code>order</code>, <code>and</code> — joins them, and
+an empty line or another statement runs them first. A <code>;</code> after
+a statement runs it at once. So <code>del notes</code> with <code>where id
+= 3</code> on the line under it deletes one row. A <code>.</code> command
+leaves a waiting statement waiting — <code>.tables</code> to look a name
+up before the <code>where</code> — and <code>.quit</code> leaves it
+unrun.</p>
+
+<p>Piped from a file, a statement runs once the next one begins, and a
+paste is read the same way, its lines all there at once; <code>-c</code>
+reads its text whole, as <code>POST /query</code> does, so a text that
+does not parse runs nothing. A line that begins no statement — a
+<code>where</code> after a read that already ran at Enter, a
+<code>wher</code> mistyped — is refused, and so is a statement still
+waiting before it, which that line may have meant to go on with.</p>
 
 <p>Fields and indexes can come later too, with no row rewritten:
 <code>alter collection notes add field mood text</code>, then

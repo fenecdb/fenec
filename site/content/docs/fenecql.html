@@ -93,6 +93,13 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     added reads <code>null</code> in the documents already there; a field's
     type does not change — see <a href="#changing-a-collection">Changing a
     collection</a>.</li>
+  <li><b>A statement ends where the next one begins, or at a
+    <code>;</code>.</b> No separator is needed, and a statement may run
+    over several lines: the parser reads where each ends. A
+    <code>;</code> ends the statement before it, so no clause goes on past
+    one — <code>del notes; where id = 3</code> is refused, not read as one
+    statement. How the shell runs statements written over lines is in
+    <a href="quickstart.html#in-the-shell">In the shell</a>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
