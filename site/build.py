@@ -1109,7 +1109,7 @@ get articles select title where published >= "2026-01-01" near embed $1 limit 3
 get articles match body "borrowing" near embed $1 fuse limit 10
 get articles match body "borrowing" rerank embed $1 candidates 200 limit 10
 explain get articles where views < 100 order published desc limit 5
-set articles {views: views + 1} where id = 7 require 1
+set articles {views: views + 1} where title = "Rust" require 1
 del articles where views > 100000
 create index on articles (views) @hash
 drop collection articles
