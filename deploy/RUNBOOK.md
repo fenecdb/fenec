@@ -989,11 +989,15 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   write or made once by a new primary. Sent with none, a read-back means
   something only a lease and a tenth (`--auto-failover` x 1.1) after the
   answer: until the tenant settles the node still answers reads with the
-  write in them, and routers send reads there, while the copy promoted
-  may lack it. After that a read with `Fenec-After` and `Fenec-History`
-  set to the body's `seq` and `history` decides it -- 200 it survived, 504
-  it was lost. A process stopped after the second check sends a success
-  whenever it runs again.
+  write in them -- one sent with `Fenec-After` too, its history holding
+  the write -- and routers send reads there, while the copy promoted may
+  lack it. After that, and not before, a read through the router, or one
+  with `Fenec-After` and `Fenec-History` set to the body's `seq` and
+  `history`, decides it -- 200 it survived, 504 it was lost. A batch's
+  `seq` is its last landed statement's: a 200 says every statement that
+  landed survived, and a 504 not which earlier ones did, which are read
+  back. A process stopped after the second check sends a success whenever
+  it runs again.
 
 - **No scrape-only token.** `/_metrics` takes a node's data or admin token,
   a router's `--token`.

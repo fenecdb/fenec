@@ -1613,9 +1613,12 @@ pub(crate) fn answered_under_lease(t: &tenants::Tenant, req: &Request, resp: Res
 /// unknown, said in the body (`"outcome": "unknown"`) for a client to tell
 /// it from an error of the server's, with where the write left the
 /// database (`seq`, `history`) and, for a `/batch` that ran a statement at
-/// a time, how far it got (`completed`, `at`). The position is in the body
-/// alone: a client takes an answer's `Fenec-Seq` as its own, and a read
-/// near sent after this one waited for a write that may be lost.
+/// a time, how far it got (`completed`, `at`). A batch's `seq` is its last
+/// landed statement's: a read after it answered 200 says every statement
+/// that landed survived, and a 504 says nothing of which earlier ones did,
+/// which are read back. The position is in the body alone: a client takes
+/// an answer's `Fenec-Seq` as its own, and a read near sent after this one
+/// waited for a write that may be lost.
 fn outcome_unknown(
     t: &tenants::Tenant,
     req: &Request,
@@ -1664,10 +1667,12 @@ fn outcome_unknown(
 /// with it: a lapsed node refuses it before looking the key up, and once
 /// the tenant settles a node still holding the write answers it as made,
 /// and a new primary makes it once. Sent with none -- a `compact` or a
-/// batch holding one takes none -- it is read back once settled, or with
-/// the answer's position, which a primary without it answers 504.
-/// The lease's own refusal is not said: it tells a write to go through the
-/// router, which is not this one's way back.
+/// batch holding one takes none -- it is waited a lease and a tenth for,
+/// and only then read back, or read after the answer's position, which a
+/// primary without it answers 504: sent at once, a read after that position
+/// is answered 200 by this node, whose history holds it, until the router
+/// fails the tenant over. The lease's own refusal is not said: it tells a
+/// write to go through the router, which is not this one's way back.
 fn lapsed_under(keyed: bool) -> String {
     let head = "the write landed on this node, but by the time it was answered this node's \
                 lease from its router no longer let it write the tenant: the tenant may have \
@@ -1681,9 +1686,11 @@ fn lapsed_under(keyed: bool) -> String {
         false => format!(
             "{head}. Until the tenant settles, a lease and a tenth (--auto-failover x 1.1) \
              after this answer, this node answers reads with the write in them whether it \
-             survives or not: read it back through the router after that, or with Fenec-After \
-             and Fenec-History set to this answer's seq and history, which a primary without \
-             the write answers 504"
+             survives or not, a read sent with Fenec-After among them. After that, read it back \
+             through the router, or send a read with Fenec-After and Fenec-History set to this \
+             answer's seq and history, which a primary without the write answers 504; for a \
+             batch, seq is its last landed statement's, and a 504 does not say which earlier \
+             ones survived"
         ),
     }
 }

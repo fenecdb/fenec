@@ -534,7 +534,7 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
     let p = usize::from(acme.contains(r#""node":"us2""#));
     let (old, new) = (&w.us_nodes[p], format!(r#""node":"us{}""#, 2 - p));
     w.us_links[p].cut();
-    let (mut fenced, mut promoted) = (None, None);
+    let (mut fenced, mut promoted, mut unknown) = (None, None, false);
     until("us1 fenced and acme promoted on us2", || {
         let (direct, body) = query(old.port, "acme", r#"put notes {title: "direct"}"#);
         match direct {
@@ -553,8 +553,16 @@ fn a_region_cut_off_keeps_writing_and_fails_over_inside_itself() {
             }
             // Landed while the lease ran and answered once it had lapsed --
             // its wait for the replica's cut stream a second -- so not a
-            // success, which the replica promoted may never have had.
-            500 => assert!(body.contains(r#""outcome":"unknown""#), "{body}"),
+            // success, which the replica promoted may never have had. One
+            // at the most, before the fence: every write after is fenced.
+            500 => {
+                assert!(body.contains(r#""outcome":"unknown""#), "{body}");
+                assert!(
+                    !unknown && fenced.is_none(),
+                    "a second unknown outcome, or one after the fence: {body}"
+                );
+                unknown = true;
+            }
             other => panic!("us1 answered {other}: {body}"),
         }
         if promoted.is_none() && query(w.us, "acme", r#"put notes {title: "failed over"}"#).0 == 200

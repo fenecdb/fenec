@@ -1010,17 +1010,20 @@ new primary makes it once. Sent with none, read it back — but not at once:
 the node still answers reads, the write among them, and routers send them
 there until they fail the tenant over, a lease and a tenth
 (<code>--auto-failover</code> × 1.1) after the answer, while
-the copy promoted may lack it. After that, a read through the router
-decides it; so does one sent with <code>Fenec-After</code> and
+the copy promoted may lack it. After that, and not before, read it back
+through the router, or send a read with <code>Fenec-After</code> and
 <code>Fenec-History</code> set to the <code>seq</code> and
 <code>history</code> the answer's body names, which a primary holding the
-write answers and one without it refuses 504. The body names them, not
-<code>Fenec-Seq</code>, which a client would take as its own position.
-Answered as a success, as it was, a failover lost it. A <code>/batch</code>
-holding a <code>compact</code>, whose statements run on their own, is
-answered so too where one of them landed before a later one was refused,
-with <code>completed</code> and <code>at</code>; it was told to come back,
-503, as if none had.</p>
+write answers and one without it refuses 504 — sent at once, that read is
+answered 200 by the lapsed node, whose history holds the write. The body
+names them, not <code>Fenec-Seq</code>, which a client would take as its
+own position. Answered as a success, as it was, a failover lost it. A
+<code>/batch</code> holding a <code>compact</code>, whose statements run on
+their own, is answered so too where one of them landed before a later one
+was refused, with <code>completed</code> and <code>at</code> (it was told
+to come back, 503, as if none had); its <code>seq</code> is the last landed
+statement's, so a 200 after it says every landed statement survived, and a
+504 does not say which earlier ones did, which are read back.</p>
 
 <p>What leases do not cover. A virtual machine stopped by its host is no
 suspend to its kernel. Under QEMU/KVM's defaults, x86 and arm64, a guest
