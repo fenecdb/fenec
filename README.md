@@ -187,11 +187,15 @@ nodes while cut off from the rest. One Cloudflare Worker in front gives
 every tenant one URL, and a tenant's read replica in another region answers
 the reads a client there marks, which would each pay the trip home
 otherwise (Frankfurt to Singapore is 158 ms), never from before that
-client's own write.
+client's own write. `deploy/` is the kit to run it on machines of your own
+-- systemd units, alert rules and the operator's runbook -- and `make drill`
+kills a node and a router of a two-region deployment in Docker and checks
+that no acknowledged write was lost.
 [Tenants and sharding](https://fenecdb.com/docs/sharding) ·
 [Regions](https://fenecdb.com/docs/sharding#regions) ·
 [One URL for every region](https://fenecdb.com/docs/sharding#global-entry) ·
-[Read replicas](https://fenecdb.com/docs/sharding#read-replicas).
+[Read replicas](https://fenecdb.com/docs/sharding#read-replicas) ·
+[Deploying it](deploy/RUNBOOK.md).
 
 **Container.** 2.99 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
@@ -259,7 +263,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React, over a database in the page or a synced replica · SDKs for Python, JavaScript, Go and .NET · embedded in Swift, Kotlin and Dart/Flutter apps, live queries as SwiftUI observables, Flows and Streams |
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment, every tenant of a node over one connection · a file per tenant behind a router, failed over on a lease |
-| **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fenecdb.com/docs/sharding#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fenecdb.com/docs/sharding#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fenecdb.com/docs/sharding#read-replicas)) |
+| **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fenecdb.com/docs/sharding#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fenecdb.com/docs/sharding#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fenecdb.com/docs/sharding#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fenec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own |
 | **Runtime size** | 294 KB gzip wasm + 59 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
