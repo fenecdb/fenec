@@ -28,12 +28,14 @@
 //! GET    /_admin/tenants/<t>/quota     {tenant, open, set, quota, usage}
 //! GET    /_admin/quotas                every tenant's, an array; none opened
 //! POST   /_admin/lease                 {ms, epoch, primaries?, authority?,
-//!                                      term?, history?}: the router's lease,
-//!                                      on a node started to take one (412:
+//!                                      term?, history?, grant?, acked?}: the
+//!                                      router's lease, on a node started to
+//!                                      take one, run from when this node
+//!                                      answered the grant `acked` names (412:
 //!                                      send the primaries; 409 with held_by:
 //!                                      a lease from a newer term holds it)
 //! GET    /_admin/lease                 {epoch, primaries, left_ms, authority,
-//!                                      term, history}
+//!                                      term, history, grant}
 //! ```
 //!
 //! A separate token from the data one: a client that may read and write a
@@ -315,18 +317,22 @@ fn lease(tenants: &Tenants, body: &[u8]) -> Result<Response, Refused> {
         .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
     let (mut ms, mut epoch, mut primaries) = (None, None, None);
     // Who grants it: a router from before terms names nobody, and is the
-    // global directory at term 0.
+    // global directory at term 0. Its number and the grant it acknowledges:
+    // a router from before numbers sends neither.
     let mut holder = crate::lease::Holder::default();
+    let (mut grant, mut acked) = (None, None);
+    let hex = |field: &str, h: &str| {
+        u64::from_str_radix(h, 16).map_err(|_| Refused(400, format!("`{field}` is 16 hex digits")))
+    };
     for (k, v) in fields {
         match (k.as_str(), v) {
             ("ms", Value::Int(n)) if n > 0 => ms = Some(n as u64),
             ("epoch", Value::Text(e)) => epoch = Some(e),
             ("authority", Value::Text(a)) => holder.authority = a,
             ("term", Value::Int(n)) if n >= 0 => holder.term = n as u64,
-            ("history", Value::Text(h)) => {
-                holder.history = u64::from_str_radix(&h, 16)
-                    .map_err(|_| Refused(400, "`history` is 16 hex digits".into()))?
-            }
+            ("history", Value::Text(h)) => holder.history = hex("history", &h)?,
+            ("grant", Value::Text(g)) => grant = Some(hex("grant", &g)?),
+            ("acked", Value::Text(a)) => acked = Some(hex("acked", &a)?),
             ("primaries", Value::List(list)) => {
                 let names = list.into_iter().map(|v| match v {
                     Value::Text(name) => Ok(name),
@@ -343,7 +349,16 @@ fn lease(tenants: &Tenants, body: &[u8]) -> Result<Response, Refused> {
             "a lease needs {\"ms\": >0, \"epoch\": \"...\"}".into(),
         ));
     };
-    match lease.grant_from(&holder, ms, &epoch, primaries) {
+    // An acknowledgement without a number of its own is no grant a router
+    // sends, and taken unnumbered it would run a lease from now.
+    if grant.is_none() && acked.is_some() {
+        return Err(Refused(
+            400,
+            "`acked` comes with the grant's own `grant`".into(),
+        ));
+    }
+    let numbered = grant.map(|grant| crate::lease::Numbered { grant, acked });
+    match lease.grant_from(&holder, ms, &epoch, primaries, numbered) {
         Ok(()) => Ok(Response::json(200, lease.describe())),
         Err(crate::lease::Refusal::NeedList(held)) => Ok(Response::json(
             412,

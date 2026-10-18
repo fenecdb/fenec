@@ -275,6 +275,20 @@ pub struct Router {
     follow_soon: (Mutex<bool>, std::sync::Condvar),
 }
 
+/// The `left_ms` of a node's answer to a grant: `None` where it holds no
+/// lease, or the answer names none.
+fn left_ms(answer: &[u8]) -> Option<u64> {
+    let at = answer.windows(10).position(|w| w == b"\"left_ms\":")? + 10;
+    let digits = answer[at..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    std::str::from_utf8(&answer[at..at + digits])
+        .ok()?
+        .parse()
+        .ok()
+}
+
 /// Ends a round's grant to a node however the grant ends, a panic in it
 /// too: left marked as under way, the node would never be granted by a
 /// round again ([`lease::Leases::begin_grant`]).
@@ -603,16 +617,16 @@ impl Router {
     /// Fails `node` over if, judged in its turn, its lease has certainly
     /// lapsed. The turn is held through: a grant to it that the router still
     /// waits on ends first, so the lapse is judged on every answer that came
-    /// back -- a grant the node took runs its lease on from the moment it
-    /// took it -- and no grant over a list read before the failover reaches
-    /// it after: the turn is let go of once it was sent the list the
-    /// failover left, so an older list queued behind is dropped
-    /// ([`lease::Leases::turn`]). The leasing thread ran the failover itself
-    /// once its round's grants had ended, so none of theirs was under way;
-    /// on a thread of its own, beside the rounds, the turn is what keeps a
-    /// grant and the failover apart. A grant the router gave up on is not
-    /// counted, though the node may still take it (the lease module's
-    /// comment).
+    /// back -- one that did says the node is there -- and no grant over a
+    /// list read before the failover reaches it after: the turn is let go
+    /// of once it was sent the list the failover left, so an older list
+    /// queued behind is dropped ([`lease::Leases::turn`]). The leasing
+    /// thread ran the failover itself once its round's grants had ended, so
+    /// none of theirs was under way; on a thread of its own, beside the
+    /// rounds, the turn is what keeps a grant and the failover apart. A
+    /// grant the router gave up on runs nothing the node may still read it
+    /// for: it acknowledges no answer the lapse did not count (the lease
+    /// module's comment).
     fn fail_over_lapsed(&self, node: &str) {
         let Some((leases, _)) = &self.leases else {
             return;
@@ -701,8 +715,9 @@ impl Router {
     /// attached meanwhile follows the node gone and holds nothing of it.
     /// Withheld from the node's grants since the failover
     /// ([`lease::Leases::withhold`]), each is promoted a lease and a tenth
-    /// past the last grant that could name it at the soonest, in the node's
-    /// turn as the failover was, and only while the node has answered no
+    /// past the last answer the node gave in time at the soonest -- at once,
+    /// that lapse being the failover's -- in the node's turn as the
+    /// failover was, and only while the node has answered no
     /// grant since -- one that answers holds its tenants again, and their
     /// copies follow by the repair its answer starts -- and while this
     /// router leases. Given up after [`HELD_WAIT`], or once the node is
@@ -726,8 +741,8 @@ impl Router {
         loop {
             {
                 // Waited on while no tenant left may go yet: each held by
-                // another operation, or within its lease past the last grant
-                // that named it. Looked at again now and then besides: the
+                // another operation, or within its lease past the last answer
+                // the node gave. Looked at again now and then besides: the
                 // node may answer, or a tenant go elsewhere, meanwhile.
                 let now = Instant::now();
                 let busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
@@ -925,7 +940,10 @@ impl Router {
     /// [`Self::grant`] with the node's turn held, `sent` the reading of the
     /// newest list it was sent: whether the node answered after it was
     /// failed over. The list itself goes only when the node may not hold
-    /// it, and again with it when the node says it does not.
+    /// it, and again with it when the node says it does not; each grant
+    /// numbered and acknowledging the newest one answered, the one that
+    /// acknowledges this one sent at once where the node's lease is short
+    /// ([`lease::Leases::short`]), each of them once.
     fn grant_held(
         &self,
         sent: &mut u64,
@@ -946,8 +964,9 @@ impl Router {
         *sent = reading;
         let epoch = lease::epoch_of(primaries);
         let mut with_list = leases.epoch(node).as_deref() != Some(epoch.as_str());
-        let mut back = false;
+        let (mut back, mut followed) = (false, false);
         loop {
+            let numbered = leases.number(node);
             let mut body = format!(
                 "{{\"ms\":{},\"epoch\":{}",
                 leases.term.as_millis(),
@@ -958,11 +977,17 @@ impl Router {
                 body.push_str(&format!(",\"primaries\":[{}]", names.join(",")));
             }
             body.push_str(&format!(
-                ",\"authority\":{},\"term\":{},\"history\":\"{:016x}\"}}",
+                ",\"authority\":{},\"term\":{},\"history\":\"{:016x}\",\"grant\":\"{:016x}\"",
                 quote(&holder.authority),
                 holder.term,
-                holder.history
+                holder.history,
+                numbered.grant
             ));
+            match numbered.acked {
+                Some(acked) => body.push_str(&format!(",\"acked\":\"{acked:016x}\"}}")),
+                None => body.push('}'),
+            }
+            let (mut left, mut answered_number) = (None, false);
             let answer =
                 match pool.call(&n.addr, "POST", "/_admin/lease", &n.token, body.as_bytes()) {
                     // A node from before terms answers without one. Under the
@@ -975,7 +1000,11 @@ impl Router {
                     {
                         lease::Answer::Unfenced
                     }
-                    Ok((200, _)) => lease::Answer::Taken,
+                    Ok((200, b)) => {
+                        left = left_ms(&b);
+                        answered_number = b.windows(8).any(|w| w == b"\"grant\":");
+                        lease::Answer::Taken
+                    }
                     Ok((412, _)) => lease::Answer::NeedsList,
                     Ok((409, b)) if b.windows(9).any(|w| w == b"\"held_by\"") => {
                         lease::Answer::Superseded
@@ -983,9 +1012,17 @@ impl Router {
                     Ok((404 | 409, _)) => lease::Answer::Refuses,
                     _ => lease::Answer::Silent,
                 };
-            back |= leases.answered(node, &epoch, &answer, Instant::now());
+            back |= leases.answered(node, numbered.grant, &epoch, &answer, Instant::now());
+            if matches!(answer, lease::Answer::Taken) && !answered_number {
+                leases.unnumbered(node);
+            }
             match answer {
                 lease::Answer::NeedsList if !with_list => with_list = true,
+                // A node from before numbered grants runs a lease from each:
+                // one more is for nothing. The list it took goes no more.
+                lease::Answer::Taken if !followed && answered_number && leases.short(left) => {
+                    (followed, with_list) = (true, false)
+                }
                 _ => break,
             }
         }

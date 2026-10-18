@@ -930,7 +930,9 @@ fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replicas --auto-fa
   <li><b>Nodes need <code>--lease</code></b>; a node without it is never
     failed over automatically.</li>
   <li><b>With a 5-second lease</b>, a lost node's tenants cannot be written
-    for 5.5 to 7.2 s.</li>
+    for 5.5 to 7.2 s. A node cut off from the router while its clients still
+    reach it stops writing two thirds of a lease after its last renewal at
+    the most: its lease runs from the grant before that one.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -946,16 +948,34 @@ while its own clients reach it, and it does not have to. A node that hears
 from the router no more stops taking writes when its lease lapses, by its
 own clock, and the router promotes its tenants elsewhere only a tenth of a
 lease later, measured from the answer that came back rather than from the
-grant it sent — so no tenant has two primaries, whichever it was. One case
-is not covered yet, and a fix is coming: a grant whose answer the router
-gave up waiting for still counts for the node whenever it reads it, so a
-node stalled with that grant unread can take writes for one lease after its
-tenants were promoted elsewhere. What such
+grant it sent — so no tenant has two primaries, whichever it was. What such
 a node took from clients of its own before its lease lapsed, and had not
 sent its replicas, goes with the failover as a crash takes it; a client
 going through the router loses nothing that way, since the router could not
 reach the node either. A write is refused as a replica's is: <code>503</code>
 with <code>Retry-After</code>.</p>
+
+<p>That holds however long a node or the network stalls. Each grant is
+numbered and names the newest grant whose answer came back to the router in
+time, and the node runs its lease from the moment it answered that one,
+never from when it reads a grant. A grant read late — the node's process
+stopped, its machine paused, the request held on its way — acknowledges
+only answers the router had already counted, whose lease ran out before the
+failover; a grant whose answer never came back is acknowledged by no grant
+after it. Neither gives the node a lease, so a node that wakes with grants
+waiting in its socket, after its tenants were promoted elsewhere, takes no
+write: with the lease run from when it read them, as it was, it took a whole
+lease's writes beside the new primary. A grant is taken whole, its list with
+its lease, so a late one cannot hand back a tenant failed over elsewhere
+beside a newer lease. The price is about a round: a node's lease runs from
+the grant before the last it read, so a node cut off stops writing a third
+of a lease sooner than it did, while the failover comes when it did; and a
+node holding no lease — new, restarted, back from a failover — needs a second
+grant, acknowledging the first, which the router sends at once. A router
+from before numbered grants sends none, and a node takes its grants from
+when it reads them, as before: a late grant can still outlast a failover
+until every router is upgraded. A node from before them is leased as before
+too, and the router says so once in its log.</p>
 
 <p>The lease names tenants, not the node. A node failed over comes back with
 the files of tenants served elsewhere now, primaries' files still; a lease
@@ -982,10 +1002,11 @@ triggers runs beside the leasing, as do failovers; and a replica being
 promoted stops reconnecting to the node it followed at once rather than
 wait out the connect. A node's lapse is judged only once the router has
 stopped waiting for any grant it sent the node, so an answer that comes
-back is counted (a grant it gave up on is the case above). A tenant that
+back is counted (a grant it gave up on gives the node nothing). A tenant that
 another operation was holding — a quota being set, a move — when its node
 was failed over is failed over once that operation ends, onto the copy it
-had then and no other, and its node's grants name it no more meanwhile. A
+had then and no other, and its node's grants name it no more meanwhile, so
+the node does not take it back as it answers again. A
 copy that is not its tenant as its primary has it is never promoted: the
 router tells the node the tenant's lineage and the history its primary
 forked at its last failover, and the node refuses a copy of another
@@ -1019,11 +1040,15 @@ router now fails the dead node over 2.1 to 3.3 s after its kill at a lease
 of 2 s, and the region's other tenants never pause more than 19 ms.</p>
 
 <p>Measured with <code>make shard-bench</code>, three nodes and the router in
-one process and a lease of a second: a node cut off stopped taking writes 697
-ms after — its last renewal came a third of a lease before — and its 10
-tenants took writes on their replicas again 1.29 to 1.33 s after, the lease
-and a tenth, the next round and 49 ms of promotions. With a lease of five
-seconds, a node lost costs its tenants' writes 5.5 to 7.2 s.</p>
+one process and a lease of a second: a node cut off stopped taking writes
+386 to 406 ms after — its lease ran from the grant before its last renewal,
+about two thirds of a lease before the cut — and its 10 tenants took writes
+on their replicas again 1.27 to 1.36 s after, the lease and a tenth from the
+last answer, the next round and the promotions. Before grants were numbered,
+the node ran its lease from its last renewal and stopped 714 to 777 ms after
+the cut, and the failover came as it does now, 1.26 to 1.42 s after (four
+runs each, in turns). With a lease of five seconds, a node lost costs its
+tenants' writes 5.5 to 7.2 s.</p>
 </details>
 
 <h2 id="standby-router">A standby router</h2>
@@ -1329,12 +1354,12 @@ own directory; the link between the regions goes down.</p>
   <li>A node of us lost or cut off stops taking writes as its lease lapses,
     and us's router promotes its tenants on their replicas in us, a tenth of
     a lease later. With a lease of a second, a node cut off stopped writing
-    0.67 to 0.93 s after the cut and its 10 tenants wrote again on their
-    replicas 1.30 to 1.56 s after, ten runs (one at a load of 7, 2.0 to 2.1
-    s); with five seconds, 3.9 to 4.5 s and 5.9 to 6.5 s — as the global
-    router fails over its own, 1.25 to 1.45 s at a second (<code>make
-    shard-bench ARGS=regions</code>, the region cut off from the global
-    router throughout, three nodes and both routers in one process).</li>
+    0.38 to 0.63 s after the cut and its 10 tenants wrote again on their
+    replicas 1.41 to 1.70 s after, ten runs; with five seconds, 3.9 to 4.1 s
+    and 5.5 to 6.7 s — as the global router fails over its own, 1.27 to 1.36
+    s at a second (<code>make shard-bench ARGS=regions</code>, the region cut
+    off from the global router throughout, three nodes and both routers in
+    one process).</li>
   <li>A create in us, a delete of a us tenant, a move into or out of us are
     refused with <code>503</code> and <code>Retry-After</code>, through any
     router, and change nothing.</li>
@@ -1352,8 +1377,9 @@ regional directories reading the global one forwards no request of such a
 tenant (no node <code>@us</code>: <code>404</code>), refuses every change of
 it, takes no name it holds, and leases none of the region's nodes, which it
 does not know. A lease grant carries <code>authority</code>,
-<code>term</code> and <code>history</code>; a node from before reads the
-grant as it did. Not done: a query across tenants (<code>POST
+<code>term</code> and <code>history</code>, and its own number and the one
+it acknowledges (<code>grant</code>, <code>acked</code>); a node from before
+reads the grant as it did. Not done: a query across tenants (<code>POST
 /_shard/query</code>) asks the tenants the router's own directory places, and
 names each tenant of another region's directory as failed rather than leave
 it out; ask that region's router for its own.</p>

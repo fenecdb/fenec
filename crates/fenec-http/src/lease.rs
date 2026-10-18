@@ -5,13 +5,30 @@
 //! The router renews the lease while it reaches the node. A node it cannot
 //! reach stops taking writes once the lease lapses, and the router promotes
 //! the node's tenants elsewhere only once it knows the lease has -- so a
-//! partition never leaves two nodes taking one tenant's writes. The node
-//! measures its lease from when it takes a grant in; the router measures
-//! it from when the node's answer comes back, which is later, and waits a
-//! tenth longer besides: by its own clock the node stops first. Not yet of
-//! a grant the router gave up waiting for: the node takes it whenever it
-//! reads it, late, and grants carry no number to refuse it by -- a hole
-//! the router's lease module describes, its fix to come.
+//! partition never leaves two nodes taking one tenant's writes.
+//!
+//! **The lease runs from a moment the router acknowledged.** A grant is
+//! numbered, and names the newest grant whose answer the router had back
+//! in time (`acked`); the node notes when it answered each grant, and runs
+//! its lease from when it answered the one acknowledged -- never from when
+//! it reads the grant. The router measures the lease from when that answer
+//! came back, which is later, and waits a tenth longer besides: by its own
+//! clock the node stops first. Run from when it read the grant, as it was,
+//! a grant the router gave up on -- the node stopped, its machine paused,
+//! the request held on its way -- and read after the router had failed the
+//! node over took a whole lease, the old primary writing beside the new
+//! one, and no bound on the clocks helped since the stall had none. Now a
+//! grant read late names an acknowledgement as old as the router's last
+//! answer from the node, whose lease ran out before the failover; an
+//! answer the router gave up on is acknowledged by no grant; a number this
+//! node never answered, or answered for another holder, runs nothing. So a
+//! node needs two grants for a lease, the second acknowledging the first:
+//! the router sends it at once where a node's answer says its lease is
+//! short. And a grant's list goes with its lease: a grant is taken whole
+//! -- its list and the lease it runs -- or, where it would cut short a
+//! lease that runs, not at all. Taken apart, a late one carrying a list
+//! from before a failover would name a tenant promoted elsewhere beside
+//! the lease a newer grant runs.
 //!
 //! **The lease names tenants.** A node the router failed over comes back
 //! holding the files of tenants now served elsewhere, primaries' files
@@ -33,12 +50,20 @@
 //! from before terms sends none and is the global directory at term 0, so
 //! a deployment that never forks a history leases as it did.
 //!
+//! **A router from before numbered grants** sends no number, and its grant
+//! runs the lease from when the node reads it, as it did: a node refusing
+//! them would stop writing the moment it was upgraded ahead of its router,
+//! every node of a rolling upgrade, where taken so it protects as much as
+//! it did. The late grant is then still a hole, until the router is
+//! upgraded too.
+//!
 //! **Started without one.** A node started to take leases takes no write
 //! before its first grant: it cannot know whether its tenants were failed
 //! over while it was down. Nor which term it last held: a restart forgets
-//! it, and the first grant after one is taken from whoever sends it.
+//! it, and the first grant after one is taken from whoever sends it. Nor
+//! which grants it answered: an acknowledgement from before runs nothing.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -55,6 +80,27 @@ struct State {
     epoch: Option<String>,
     /// Who granted the lease held: `None` until the first grant.
     holder: Option<Holder>,
+    /// The numbered grants answered for `holder`, and when each was: what
+    /// an acknowledgement runs the lease from. The last [`ANSWERED`],
+    /// oldest first -- by when they came, not by number: a router's
+    /// grants are numbered from a random start a process, and kept by
+    /// number the ones of a router before its restart could have pushed
+    /// out every one of its own.
+    answered: VecDeque<(u64, Instant)>,
+}
+
+/// How many answered grants a node keeps. The router acknowledges the one
+/// before as it sends the next; a few more cover the grants a stalled node
+/// reads late in between, each answered too.
+const ANSWERED: usize = 16;
+
+/// A grant's number, and the number of the newest grant whose answer the
+/// router had back in time: what the lease runs from, `None` where no
+/// answer did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Numbered {
+    pub grant: u64,
+    pub acked: Option<u64>,
 }
 
 /// Who grants a lease: the directory a router leases from, and how many
@@ -146,15 +192,15 @@ impl Lease {
         }
     }
 
-    /// [`Self::grant_from`] the global directory at term 0, as a router
-    /// from before terms grants.
+    /// [`Self::grant_from`] the global directory at term 0, unnumbered, as
+    /// a router from before terms grants.
     pub fn grant(
         &self,
         ms: u64,
         epoch: &str,
         primaries: Option<Vec<String>>,
     ) -> Result<(), NeedList> {
-        match self.grant_from(&Holder::default(), ms, epoch, primaries) {
+        match self.grant_from(&Holder::default(), ms, epoch, primaries, None) {
             Ok(()) => Ok(()),
             Err(Refusal::NeedList(held)) => Err(NeedList(held)),
             Err(Refusal::Superseded(_)) => {
@@ -164,35 +210,72 @@ impl Lease {
         }
     }
 
-    /// Runs the lease `ms` from now, over `primaries` when they come with
-    /// the grant and over the list already held when `epoch` names it --
-    /// unless the lease held supersedes `holder`'s.
+    /// Takes a grant -- over `primaries` when they come with it, over the
+    /// list already held when `epoch` names it -- unless the lease held
+    /// supersedes `holder`'s. Numbered, it runs the lease `ms` from when
+    /// this node answered the grant it acknowledges, its list and that
+    /// lease taken together, and only where they cut short no lease that
+    /// runs; unnumbered -- a router from before numbers -- `ms` from now.
     pub fn grant_from(
         &self,
         holder: &Holder,
         ms: u64,
         epoch: &str,
         primaries: Option<Vec<String>>,
+        numbered: Option<Numbered>,
     ) -> Result<(), Refusal> {
         let mut s = self.state.write().unwrap_or_else(|e| e.into_inner());
-        let running = s.until.is_some_and(|u| Instant::now() < u);
+        let now = Instant::now();
+        let running = s.until.is_some_and(|u| now < u);
         if let Some(held) = &s.holder {
             if holder.superseded_by(held, running) {
                 return Err(Refusal::Superseded(held.clone()));
             }
         }
-        match primaries {
-            Some(list) => {
-                s.primaries = list.into_iter().collect();
-                s.epoch = Some(epoch.to_string());
-            }
-            None if s.epoch.as_deref() != Some(epoch) => {
-                return Err(Refusal::NeedList(s.epoch.clone()))
-            }
-            None => {}
+        if primaries.is_none() && s.epoch.as_deref() != Some(epoch) {
+            return Err(Refusal::NeedList(s.epoch.clone()));
         }
-        s.holder = Some(holder.clone());
-        s.until = Some(Instant::now() + Duration::from_millis(ms));
+        let Some(numbered) = numbered else {
+            take_list(&mut s, epoch, primaries);
+            s.holder = Some(holder.clone());
+            s.until = Some(now + Duration::from_millis(ms));
+            return Ok(());
+        };
+        // Another holder's numbers name none of its grants.
+        if s.holder.as_ref() != Some(holder) {
+            s.answered.clear();
+            s.holder = Some(holder.clone());
+        }
+        let from = numbered.acked.and_then(|acked| {
+            let mut answered = s.answered.iter();
+            answered
+                .find(|(grant, _)| *grant == acked)
+                .map(|(_, at)| *at)
+        });
+        let runs = from.map(|at| at + Duration::from_millis(ms));
+        // Taken whole or not at all. A grant read late runs nothing past
+        // what its acknowledgement does, and one whose list named a tenant
+        // since promoted elsewhere, taken beside the lease a newer grant
+        // runs, would have this node write it again: the list and the
+        // lease go together, from the grant whose lease is the longest.
+        // A lease that has lapsed is cut short by nothing, so any grant
+        // may set the list -- what a node back from a failover, or new to
+        // this holder, writes once a grant acknowledges one of these.
+        let whole = match (runs, s.until) {
+            _ if !running => true,
+            (Some(runs), Some(until)) => runs >= until,
+            _ => false,
+        };
+        if whole {
+            take_list(&mut s, epoch, primaries);
+            if let Some(runs) = runs {
+                s.until = Some(s.until.map_or(runs, |until| until.max(runs)));
+            }
+        }
+        if s.answered.len() == ANSWERED {
+            s.answered.pop_front();
+        }
+        s.answered.push_back((numbered.grant, now));
         Ok(())
     }
 
@@ -242,8 +325,12 @@ impl Lease {
         }
     }
 
-    /// `GET /_admin/lease`: the list's epoch, its length, the milliseconds
-    /// left and who granted it, or `null`s before a grant.
+    /// `GET /_admin/lease`, and a grant's answer: the list's epoch, its
+    /// length, the milliseconds left, who granted it and the newest
+    /// numbered grant answered for them, or `null`s before a grant. The
+    /// router reads `left_ms` to send at once the grant that acknowledges
+    /// this one where the lease is short, and the number's absence to tell
+    /// a node from before numbered grants.
     pub fn describe(&self) -> String {
         let s = self.state.read().unwrap_or_else(|e| e.into_inner());
         let left = s.until.map(|u| {
@@ -272,6 +359,10 @@ impl Lease {
                 ));
             }
         }
+        match s.answered.back() {
+            Some((grant, _)) => out.push_str(&format!(",\"grant\":\"{grant:016x}\"")),
+            None => out.push_str(",\"grant\":null"),
+        }
         out.push('}');
         out
     }
@@ -299,6 +390,14 @@ impl Lease {
             held.term, held.history
         ));
         out
+    }
+}
+
+/// Holds `primaries` under `epoch` where a grant brought them.
+fn take_list(s: &mut State, epoch: &str, primaries: Option<Vec<String>>) {
+    if let Some(list) = primaries {
+        s.primaries = list.into_iter().collect();
+        s.epoch = Some(epoch.to_string());
     }
 }
 
@@ -341,29 +440,29 @@ mod tests {
         let l = Lease::new();
         let us1 = holder("us", 1, 7);
         let list = || Some(vec!["acme".to_string()]);
-        assert!(l.grant_from(&us1, 60_000, "e1", list()).is_ok());
+        assert!(l.grant_from(&us1, 60_000, "e1", list(), None).is_ok());
         // Promoted: term 2 on a history of its own, taken while 1's runs.
         let us2 = holder("us", 2, 9);
-        assert!(l.grant_from(&us2, 60_000, "e1", None).is_ok());
+        assert!(l.grant_from(&us2, 60_000, "e1", None, None).is_ok());
         assert!(l.allows("acme").is_ok(), "the list held went on");
         for stale in [us1.clone(), holder("us", 2, 8)] {
-            match l.grant_from(&stale, 60_000, "e1", None) {
+            match l.grant_from(&stale, 60_000, "e1", None, None) {
                 Err(Refusal::Superseded(h)) => assert_eq!(h, us2),
                 _ => panic!("{stale:?} was taken"),
             }
         }
         // Another directory, and a router from before terms, while it runs.
         assert!(matches!(
-            l.grant_from(&holder("eu", 5, 1), 60_000, "e1", None),
+            l.grant_from(&holder("eu", 5, 1), 60_000, "e1", None, None),
             Err(Refusal::Superseded(_))
         ));
         assert!(l.grant(60_000, "e1", None).is_err());
         assert!(l.describe().contains(r#""authority":"us","term":2"#));
         // Lapsed, another directory may take the node.
-        l.grant_from(&us2, 1, "e1", None).ok().unwrap();
+        l.grant_from(&us2, 1, "e1", None, None).ok().unwrap();
         std::thread::sleep(Duration::from_millis(5));
         assert!(l
-            .grant_from(&holder("eu", 1, 3), 60_000, "e2", Some(vec![]))
+            .grant_from(&holder("eu", 1, 3), 60_000, "e2", Some(vec![]), None)
             .is_ok());
         // A promotion or a follow from the superseded router is refused; by
         // hand, or from another directory, it is not.
@@ -371,6 +470,186 @@ mod tests {
         assert!(l.admits(Some(&holder("eu", 1, 3))).is_ok());
         assert!(l.admits(Some(&holder("us", 1, 7))).is_ok());
         assert!(l.admits(None).is_ok());
+    }
+
+    fn numbered(grant: u64, acked: Option<u64>) -> Option<Numbered> {
+        Some(Numbered { grant, acked })
+    }
+
+    /// The milliseconds the lease has left, by `describe`.
+    fn left(l: &Lease) -> Option<u64> {
+        let d = l.describe();
+        let rest = d.split("\"left_ms\":").nth(1).unwrap();
+        rest.split([',', '}']).next().unwrap().parse().ok()
+    }
+
+    /// A numbered grant runs the lease from when this node answered the
+    /// grant it acknowledges, never from when it is read: the first, which
+    /// acknowledges none, runs nothing; one naming a number never answered,
+    /// or one answered for another holder, nothing either; and the lease
+    /// runs no longer than its acknowledgement does however late a grant
+    /// carrying it comes.
+    #[test]
+    fn a_numbered_grant_runs_from_the_answer_it_acknowledges() {
+        let l = Lease::new();
+        let us = holder("us", 1, 7);
+        let list = || Some(vec!["acme".to_string()]);
+        assert!(l
+            .grant_from(&us, 60_000, "e1", list(), numbered(10, None))
+            .is_ok());
+        assert!(l.allows("acme").unwrap_err().contains("no lease"));
+        assert!(l.describe().contains(r#""grant":"000000000000000a""#));
+        assert!(l
+            .grant_from(&us, 60_000, "e1", None, numbered(11, Some(99)))
+            .is_ok());
+        assert!(l.allows("acme").is_err(), "a number never answered ran it");
+        // Acknowledged, it runs from when 10 was answered.
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(l
+            .grant_from(&us, 60_000, "e1", None, numbered(12, Some(10)))
+            .is_ok());
+        assert!(l.allows("acme").is_ok());
+        let first = left(&l).unwrap();
+        assert!(
+            first <= 60_000 - 30,
+            "{first} left: run from the read, not the answer"
+        );
+        // Read again later, the same acknowledgement runs no further.
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(l
+            .grant_from(&us, 60_000, "e1", None, numbered(13, Some(10)))
+            .is_ok());
+        assert!(left(&l).unwrap() <= first - 30);
+        // A short lease from an old answer is over, whenever it is read.
+        let l = Lease::new();
+        assert!(l
+            .grant_from(&us, 20, "e1", list(), numbered(1, None))
+            .is_ok());
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(l
+            .grant_from(&us, 20, "e1", None, numbered(2, Some(1)))
+            .is_ok());
+        assert!(l.allows("acme").unwrap_err().contains("lapsed"));
+        // Another holder's numbers name none of its grants.
+        assert!(l
+            .grant_from(&us, 60_000, "e1", None, numbered(3, Some(2)))
+            .is_ok());
+        assert!(l.allows("acme").is_ok());
+        let us2 = holder("us", 2, 9);
+        let l2 = Lease::new();
+        assert!(l2
+            .grant_from(&us, 60_000, "e1", list(), numbered(5, None))
+            .is_ok());
+        assert!(l2
+            .grant_from(&us2, 60_000, "e1", None, numbered(6, Some(5)))
+            .is_ok());
+        assert!(
+            l2.allows("acme").is_err(),
+            "us at term 1's answer ran us at term 2's lease"
+        );
+    }
+
+    /// A grant is taken whole -- its list and its lease -- or not at all:
+    /// one read late, carrying a list from before a failover, leaves the
+    /// newer lease and its list as they are, where taken beside them it
+    /// would have this node write a tenant promoted elsewhere. Once the
+    /// lease has lapsed any grant sets the list, the lease still running
+    /// from its acknowledgement.
+    #[test]
+    fn a_grant_read_late_takes_no_list_beside_a_newer_lease() {
+        let l = Lease::new();
+        let us = holder("us", 1, 7);
+        let with = |names: &[&str]| Some(names.iter().map(|n| n.to_string()).collect());
+        assert!(l
+            .grant_from(&us, 60_000, "e1", with(&["acme", "b"]), numbered(1, None))
+            .is_ok());
+        assert!(l
+            .grant_from(&us, 60_000, "e1", None, numbered(2, Some(1)))
+            .is_ok());
+        // acme moves off: the grant after the failover names b alone, and
+        // the one after it acknowledges it.
+        assert!(l
+            .grant_from(&us, 60_000, "e2", with(&["b"]), numbered(4, Some(2)))
+            .is_ok());
+        assert!(l
+            .grant_from(&us, 60_000, "e2", None, numbered(5, Some(4)))
+            .is_ok());
+        assert!(l.allows("acme").is_err() && l.allows("b").is_ok());
+        // Grant 3, sent before the failover and read now: refused nothing,
+        // taken nothing.
+        assert!(l
+            .grant_from(
+                &us,
+                60_000,
+                "e1",
+                with(&["acme", "b"]),
+                numbered(3, Some(2))
+            )
+            .is_ok());
+        assert!(
+            l.allows("acme").is_err(),
+            "a late grant's list named acme again"
+        );
+        assert!(l.describe().contains(r#""epoch":"e2""#));
+        // A first grant read late, acknowledging nothing, neither.
+        assert!(l
+            .grant_from(&us, 60_000, "e1", with(&["acme"]), numbered(0, None))
+            .is_ok());
+        assert!(l.allows("acme").is_err() && l.allows("b").is_ok());
+        // Lapsed, a grant sets the list, and runs no lease past its
+        // acknowledgement's.
+        let l = Lease::new();
+        assert!(l
+            .grant_from(&us, 20, "e1", with(&["acme"]), numbered(1, None))
+            .is_ok());
+        assert!(l
+            .grant_from(&us, 20, "e1", None, numbered(2, Some(1)))
+            .is_ok());
+        assert!(l.allows("acme").is_ok());
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(l
+            .grant_from(&us, 20, "e2", with(&["b"]), numbered(3, Some(1)))
+            .is_ok());
+        assert!(l.allows("b").unwrap_err().contains("lapsed"));
+        assert!(l
+            .grant_from(&us, 60_000, "e2", None, numbered(4, Some(3)))
+            .is_ok());
+        assert!(l.allows("b").is_ok() && l.allows("acme").is_err());
+    }
+
+    /// A grant naming a list the node does not hold is asked for it again
+    /// (412), noted as answered nowhere; the grant sent with the list
+    /// acknowledges what the first one did, and runs from it.
+    #[test]
+    fn the_list_asked_for_again_runs_from_the_same_acknowledgement() {
+        let l = Lease::new();
+        let us = holder("us", 1, 7);
+        assert!(l
+            .grant_from(&us, 60_000, "e1", Some(vec![]), numbered(1, None))
+            .is_ok());
+        assert!(matches!(
+            l.grant_from(&us, 60_000, "e2", None, numbered(2, Some(1))),
+            Err(Refusal::NeedList(Some(e))) if e == "e1"
+        ));
+        assert!(l.describe().contains(r#""grant":"0000000000000001""#));
+        let list = Some(vec!["acme".to_string()]);
+        assert!(l
+            .grant_from(&us, 60_000, "e2", list, numbered(3, Some(1)))
+            .is_ok());
+        assert!(l.allows("acme").is_ok());
+        // 2 was never answered: acknowledged, it runs nothing.
+        let l = Lease::new();
+        assert!(l
+            .grant_from(&us, 60_000, "e1", Some(vec![]), numbered(1, None))
+            .is_ok());
+        assert!(l
+            .grant_from(&us, 60_000, "e2", None, numbered(2, None))
+            .is_err());
+        let list = Some(vec!["acme".to_string()]);
+        assert!(l
+            .grant_from(&us, 60_000, "e2", list, numbered(3, Some(2)))
+            .is_ok());
+        assert!(l.allows("acme").is_err());
     }
 
     #[test]
