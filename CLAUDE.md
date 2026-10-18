@@ -5787,8 +5787,11 @@ it leaves it standing (`stands_alone`). A paste is read as a pipe, its
 next line waiting already (`pending`, a `poll` of 40 ms: iTerm2 paces a
 paste about 15 ms apart), an empty line waiting as the line before was
 judged is white space (`waiting`), and in a script or a paste a `.`
-command waits behind the statement before it (`deferred`). Bracketed
-paste is not read: it needs the terminal out of its line mode. A new
+command -- `.quit` too -- waits behind the statement before it
+(`deferred`), as does a statement a `;` ends at a line's end (`take`'s
+`hold`): run there, `del notes;` then `where id = 3` deleted every row,
+and a `.quit` between `del notes` and its `where` ran the `del` alone.
+Bracketed paste is not read: it needs the terminal out of its line mode. A new
 statement form or lexer syntax owes this: a place in fenec-cli's `kind`
 (every statement named, so a new write cannot run at Enter by default); a
 mark in `Parser::cut` where the end of the text decides a reading the

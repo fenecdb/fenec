@@ -238,10 +238,40 @@ fn a_clause_past_a_semicolon_holds_its_statement_back() {
     assert!(said.contains("unknown command `where`"), "{said}");
     assert!(said.contains("not run either"), "{said}");
     assert_eq!(tables(&text(&out.stdout)), [["5"]]);
-    // A `;` at a line's end ends the statement there: it runs.
-    let out = piped(&f, "get notes count;\nget notes where id = 3 count\n");
+    // A `;` at a line's end ends the statement there, and a clause on the
+    // next line still holds it back: it waits for that line, as any
+    // statement piped does.
+    let out = piped(&f, "del notes;\nwhere id = 3\nget notes count\n");
+    let said = text(&out.stderr);
+    assert!(said.contains("unknown command `where`"), "{said}");
+    assert!(said.contains("not run either"), "{said}");
+    assert_eq!(tables(&text(&out.stdout)), [["5"]]);
+    let out = piped(&f, "del notes where id = 3;\nget notes count\n");
     assert_eq!(text(&out.stderr), "");
-    assert_eq!(tables(&text(&out.stdout)), [["5"], ["1"]]);
+    assert_eq!(tables(&text(&out.stdout)), [["4"]]);
+}
+
+/// `.quit` in a script waits behind the statement before it, as every
+/// `.` command does there: the `del` it interrupts deletes the one row its
+/// `where` names, a `put` before it is kept, and nothing read past it runs.
+#[test]
+fn a_quit_in_a_script_waits_behind_the_write_it_interrupts() {
+    let d = Dir::new("quit");
+    let f = d.notes();
+    let out = piped(&f, "del notes\n.quit\n  where id = 3\nget notes count\n");
+    assert_eq!(text(&out.stderr), "");
+    assert!(text(&out.stdout).contains("1 records"));
+    assert!(tables(&text(&out.stdout)).is_empty());
+    assert_eq!((count(&f, ""), count(&f, "where id = 3")), (4, 0));
+    let out = piped(&f, "put notes {body: \"kept\"}\n.quit\n");
+    assert_eq!(text(&out.stderr), "");
+    let out = piped(
+        &f,
+        "put notes {body: \"too\"}\n.quit\nput notes {body: \"past\"}\n",
+    );
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(count(&f, "where body = \"kept\" or body = \"too\""), 2);
+    assert_eq!(count(&f, "where body = \"past\""), 0);
 }
 
 /// A `.` command between a write and the line that goes on with it waits
@@ -466,13 +496,14 @@ fn pasted_or_typed_a_clause_past_a_semicolon_and_a_dot_command_hold() {
     let mut t = pty::Shell::start(&f);
     t.typed("del notes; where id = 3\n");
     t.pasted("del notes; where id = 3\nget notes count\n");
+    t.pasted("del notes;\nwhere id = 2\n");
     t.pasted("del notes\n.tables\n  where id = 4\n");
     t.typed("\n");
     t.typed("get notes count\n");
     t.wait_for("(1 rows", 2);
     t.typed(".quit\n");
     let out = t.end();
-    assert_eq!(out.matches("not run either").count(), 2, "{out}");
+    assert_eq!(out.matches("not run either").count(), 3, "{out}");
     let counts: Vec<Vec<String>> = tables(&out)
         .into_iter()
         .filter(|t| t.len() == 1 && t[0].parse::<i64>().is_ok())
@@ -484,6 +515,22 @@ fn pasted_or_typed_a_clause_past_a_semicolon_and_a_dot_command_hold() {
     );
     assert!(del < listed, "{out}");
     assert_eq!(count(&f, "where id = 4"), 0);
+    assert_eq!(count(&f, "where id = 2"), 1);
+}
+
+/// A pasted `.quit` between a write and its `where` waits behind the
+/// write, which the empty line typed after the paste runs, and then quits.
+#[cfg(unix)]
+#[test]
+fn a_pasted_quit_waits_behind_the_write_it_interrupts() {
+    let d = Dir::new("pasted-quit");
+    let f = d.notes();
+    let mut t = pty::Shell::start(&f);
+    t.pasted("del notes\n.quit\n  where id = 3\n");
+    t.typed_last("\n");
+    let out = t.end();
+    assert!(out.contains("1 records"), "{out}");
+    assert_eq!((count(&f, ""), count(&f, "where id = 3")), (4, 0));
 }
 
 /// A paste that comes in pieces: the blank line that came with `del
@@ -637,6 +684,11 @@ mod pty {
             if !line.starts_with(".quit") {
                 self.prompt();
             }
+        }
+
+        /// A line typed after which the shell quits, asking for no other.
+        pub fn typed_last(&mut self, line: &str) {
+            self.master.write_all(line.as_bytes()).unwrap();
         }
 
         /// Lines pasted, in one write.

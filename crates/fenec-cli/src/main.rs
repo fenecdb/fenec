@@ -281,8 +281,10 @@ fn main() {
 ///
 /// A paste is read as a pipe is: its next line is waiting already
 /// ([`pending`]), and an empty line that was waiting so is white space.
-/// In a script or a paste a `.` command read while a statement waits waits
-/// behind it, and runs once it has run or been refused.
+/// In a script or a paste a `.` command read while a statement waits --
+/// `.quit` too -- waits behind it, and runs once it has run or been
+/// refused; and a statement a `;` ends at a line's end waits for the next
+/// line there too, which a clause past the `;` would hold it back by.
 ///
 /// Adding to FenecQL: a statement form is placed in [`kind`] (every one
 /// is named, so a write cannot run at Enter by default), and its other
@@ -324,6 +326,8 @@ struct Reader {
     ran_before: bool,
     /// Why a statement waits has been said, once a session.
     told: bool,
+    /// A `.quit` ran: no line more is read.
+    quit: bool,
 }
 
 /// What [`Reader::buf`] holds, once its strings and brackets are closed.
@@ -356,6 +360,7 @@ impl Reader {
             ran: false,
             ran_before: false,
             told: false,
+            quit: false,
         }
     }
 
@@ -371,33 +376,32 @@ impl Reader {
         self.more = None;
         self.ran_before = std::mem::take(&mut self.ran);
         let queued = std::mem::take(&mut self.waiting);
-        let go_on = self.step(db, line, queued);
+        self.step(db, line, queued);
         // Asked once a statement waits: typed with nothing after it, a
         // write had asked it already, for the hint.
         self.waiting = self.typed && !matches!(self.held, Held::Nothing) && self.more();
-        go_on
+        !self.quit
     }
 
-    fn step(&mut self, db: &mut Database, line: &str, queued: bool) -> bool {
+    fn step(&mut self, db: &mut Database, line: &str, queued: bool) {
         let t = line.trim();
         // A `.` command where no string or bracket is open; inside one it
         // is text. Typed, it leaves what waits waiting, as `psql`'s do --
         // `del notes`, then `.tables` to look a name up, then its `where`
         // -- and `.quit` leaves it unrun. In a script or a paste it waits
-        // in turn behind what waits, and runs once that has run or been
-        // refused; a quit runs what waits first.
+        // in turn behind what waits, `.quit` too, and runs once that has
+        // run or been refused: run at once, a quit between `del notes` and
+        // its `where` ran the `del` alone.
         if t.starts_with('.') && !self.gate.is_open() {
-            let typed = self.typed && !self.more();
-            let leaving = t.split_whitespace().next().is_some_and(quits);
-            if !typed {
-                if !leaving && !self.buf.trim().is_empty() {
-                    self.deferred.push(t.to_string());
-                    return true;
+            self.deferred.push(t.to_string());
+            if self.typed && !self.more() {
+                if !self.settled(db) {
+                    self.abandon();
                 }
+            } else if self.buf.trim().is_empty() {
                 self.finish(db);
             }
-            self.deferred.push(t.to_string());
-            return self.settled(db);
+            return;
         }
         if t.is_empty() {
             // An empty line typed runs what waits, or says why it is
@@ -413,14 +417,13 @@ impl Reader {
                 self.buf.push_str(line);
                 self.gate.feed(line);
             }
-            return true;
+            return;
         }
         self.buf.push_str(line);
         self.gate.feed(line);
         if !self.gate.is_open() {
             self.read(db);
         }
-        true
     }
 
     /// `buf` read again, a line or more added to it.
@@ -439,8 +442,7 @@ impl Reader {
                     };
                     self.refused(&before, &self.buf[..len]);
                     self.keep(len);
-                    self.settled(db);
-                    if self.gate.is_open() || self.buf.trim().is_empty() {
+                    if !self.settled(db) || self.gate.is_open() || self.buf.trim().is_empty() {
                         return;
                     }
                     continue;
@@ -451,11 +453,12 @@ impl Reader {
     }
 
     /// The `.` commands that waited behind a statement, run now that it
-    /// has run or been refused; `false` where one quits.
+    /// has run or been refused; `false` where one quits, after which no
+    /// statement read past the quit runs.
     fn settled(&mut self, db: &mut Database) -> bool {
         for cmd in std::mem::take(&mut self.deferred) {
             if !meta(db, &cmd) {
-                self.abandon();
+                self.quit = true;
                 return false;
             }
         }
@@ -465,17 +468,38 @@ impl Reader {
     /// What a reading of `buf` found: the whole statements run, and what is
     /// left kept, run, or told as refused.
     fn take(&mut self, db: &mut Database, r: Reading) {
+        // A `;` that ends the text, piped or pasted: the next line may be
+        // a clause written past it, which holds it back as `-c` refuses
+        // the two, so it waits for that line as any statement does there.
+        // Run at once, `del notes;` then `where id = 3` deleted every row.
+        // Typed with nothing after it, it runs.
+        let mut whole = &r.whole[..];
+        let hold = match whole.split_last() {
+            Some((&(a, _), before)) if matches!(r.rest, Rest::Nothing) && self.more() => {
+                whole = before;
+                Some(a)
+            }
+            _ => None,
+        };
         // The first statement is the one that waited, whose `.` commands
         // come after it and before the rest.
-        for &(a, b) in &r.whole {
+        for &(a, b) in whole {
             run(db, &self.buf[a..b]);
-            self.settled(db);
+            if !self.settled(db) {
+                return;
+            }
         }
         match r.rest {
-            Rest::Nothing => {
-                self.clear();
-                self.settled(db);
-            }
+            Rest::Nothing => match hold {
+                Some(a) => {
+                    self.keep(a);
+                    self.held = Held::Whole;
+                }
+                None => {
+                    self.clear();
+                    self.settled(db);
+                }
+            },
             Rest::Last(at, s) => {
                 self.keep(at);
                 if self.runs_now(&s) {
@@ -537,7 +561,9 @@ impl Reader {
             let r = fenec_ql::reading(&self.buf);
             for &(a, b) in &r.whole {
                 run(db, &self.buf[a..b]);
-                self.settled(db);
+                if !self.settled(db) {
+                    return self.clear();
+                }
             }
             match &r.rest {
                 Rest::Nothing => {}
