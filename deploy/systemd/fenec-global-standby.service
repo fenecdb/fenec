@@ -42,6 +42,7 @@ ExecStart=/usr/local/bin/fenec-shard \
     --directory /var/lib/fenecdb/global/directory.fenec \
     --replica-of ${FENEC_PRIMARY} \
     --max-connections 1000 \
+    --upstream-timeout ${FENEC_UPSTREAM_TIMEOUT} \
     --audit /var/log/fenecdb/global/audit.log \
     $FENEC_GLOBAL_FLAGS
 Restart=on-failure

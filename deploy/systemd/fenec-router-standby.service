@@ -49,6 +49,7 @@ ExecStart=/usr/local/bin/fenec-shard \
     --auto-failover ${FENEC_LEASE} \
     --replica-of ${FENEC_PRIMARY} \
     --max-connections 1000 \
+    --upstream-timeout ${FENEC_UPSTREAM_TIMEOUT} \
     --audit /var/log/fenecdb/router/audit.log \
     $FENEC_ROUTER_FLAGS
 Restart=on-failure

@@ -50,7 +50,8 @@ check held, 1 otherwise.
 Knobs (environment): DRILL_IMAGE (fenec-kit), DRILL_LEASE seconds (2),
 DRILL_TENANTS a region (3), DRILL_RATE writes a second a tenant (100),
 DRILL_KEEP=1 to leave everything running for a look, DRILL_JSON=<path> to
-write the results there too.
+write the results there too, DRILL_LOG_LINES of each router's and node's
+log printed when it fails (300).
 
 The standard library alone, so a machine with Docker and python3 runs it.
 """
@@ -393,9 +394,15 @@ ROUTER_ENV = {"FENEC_SHARD_TOKEN": ROOT, "FENEC_SHARD_REPLICATION_TOKEN": DIRS,
 GLOBALS = "http://g1:8090,http://g2:8090"
 
 
+# As deploy/env/router.env sets it: twice the lease, so a request in
+# flight to a node killed is let go of once its tenants are failed over.
+UPSTREAM = 2 * LEASE
+
+
 def global_cmd(standby_of=None):
     # As deploy/systemd/fenec-global(.standby).service runs it.
-    cmd = ["fenec-shard", "--listen", "0.0.0.0:8090", "--directory", "/data/directory.fenec"]
+    cmd = ["fenec-shard", "--listen", "0.0.0.0:8090", "--directory", "/data/directory.fenec",
+           "--upstream-timeout", str(UPSTREAM)]
     return cmd + (["--replica-of", standby_of] if standby_of else [])
 
 
@@ -405,7 +412,7 @@ def region_cmd(region, standby_of=None):
     # over as the primary did.
     cmd = ["fenec-shard", "--listen", "0.0.0.0:8090", "--directory", "/data/directory.fenec",
            "--region", region, "--global", GLOBALS, "--replicas",
-           "--auto-failover", str(LEASE)]
+           "--auto-failover", str(LEASE), "--upstream-timeout", str(UPSTREAM)]
     return cmd + (["--replica-of", standby_of] if standby_of else [])
 
 
@@ -758,6 +765,8 @@ def main():
     finally:
         for w in writers:
             w.stop.set()
+        if not ok and results.get("failed") != "interrupted":
+            logs()
         if KEEP:
             say(f"DRILL_KEEP=1: left running; remove with: docker rm -f $(docker ps -aq --filter label={LABEL}); "
                 f"docker volume rm $(docker volume ls -q --filter label={LABEL}); docker network rm {NET}")
@@ -772,6 +781,21 @@ def main():
         with open(os.environ["DRILL_JSON"], "w") as f:
             json.dump(results, f, indent=2)
     return 0 if ok else 1
+
+
+def logs():
+    """Every router's and node's log, the last DRILL_LOG_LINES lines of
+    each (300), for a failure read in CI where nothing is left to look at:
+    the containers go with the cleanup, a killed one's log with them."""
+    lines = os.environ.get("DRILL_LOG_LINES", "300")
+    names = ["g1", "g2"] + [x for r in REGIONS.values() for x in r["routers"]]
+    names += [n for r in REGIONS.values() for n, _ in r["nodes"]]
+    for name in names:
+        print(f"\n---- {name}: the last {lines} lines of its log ----", flush=True)
+        r = subprocess.run(["docker", "logs", "--timestamps", "--tail", lines, cname(name)],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+        print(r.stdout.rstrip() or "(nothing)", flush=True)
+    print("---- end of the logs ----", flush=True)
 
 
 def summary(results, ok):

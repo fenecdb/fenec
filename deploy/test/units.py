@@ -192,6 +192,7 @@ def router_env(primary):
         "FENEC_REGION": "eu",
         "FENEC_GLOBAL": "http://m1:8091,http://m2:8091",
         "FENEC_LEASE": "5",
+        "FENEC_UPSTREAM_TIMEOUT": "10",
         "FENEC_PRIMARY": f"http://{primary}:8090",
         "FENEC_SHARD_TOKEN": TOKENS["root"],
         "FENEC_SHARD_REPLICATION_TOKEN": TOKENS["dirs"],
@@ -203,6 +204,7 @@ def router_env(primary):
 def global_env():
     return envfile("global.env", {
         "FENEC_LISTEN": "0.0.0.0:8091",
+        "FENEC_UPSTREAM_TIMEOUT": "10",
         "FENEC_PRIMARY": "http://m1:8091",
         "FENEC_SHARD_TOKEN": TOKENS["root"],
         "FENEC_SHARD_REPLICATION_TOKEN": TOKENS["dirs"],

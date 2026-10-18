@@ -6615,8 +6615,16 @@ refuse -- GitHub's Docker DNS for a removed container -- held the round up,
 the region's healthy nodes went unrenewed and stopped writing (18 s), and
 were failed over themselves; the dead node's tenants wrote again after 30 s
 (21 s and 8 s locally with the routers' unknown names sent to a resolver
-that never answers). The kit records nodes by address. CI's `deploy` job
-runs both checks.
+that never answers). The kit records nodes by address. The kit's routers
+run `--upstream-timeout` at twice the lease (`FENEC_UPSTREAM_TIMEOUT`, 10
+s), the drill's at twice its own: at fenec-shard's 60 s a request in
+flight to the killed node held its writer until the writer's own 5 s
+timeout, where at 4 s the drill's killed tenants wrote again after about
+4 s; past it a slow statement is a 502 while the node finishes it, and a
+request carrying `Fenec-Wait` is allowed the timeout plus its wait. When
+the drill fails it prints the last 300 lines of every router's and node's
+log (`DRILL_LOG_LINES`), since the cleanup takes the containers and CI
+leaves nothing else to read. CI's `deploy` job runs both checks.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-server` stays on `release`: a

@@ -216,6 +216,44 @@ SIGHUP shuts it down. So logrotate copies and truncates:
 A line written between the copy and the truncate is lost from the
 rotated file; the journal keeps the servers' own log.
 
+### The routers' upstream timeout
+
+`FENEC_UPSTREAM_TIMEOUT` (`router.env`, `global.env`: 10 s, fenec-shard's
+own default 60) is how long a router waits on a node -- or the global
+router on a region's router -- for each read of an answer: the connect,
+the answer's head, and every read after it but a stream's, which reads
+with none. Past it the client is answered 502, the request perhaps run.
+
+- **What it buys.** A request in flight to a node whose machine is gone
+  waits out the timeout, its client unanswered, unless the client gives up
+  first; at fenec-shard's 60 s every client without a bound of its own
+  waited a minute. At twice the lease it is let go of once the node's
+  tenants have been failed over (a lease and a tenth), so a client's
+  retry of a read or a keyed write reaches the new primary. With
+  `make drill`'s lease of 2 s and a timeout of 4 s, the killed node's
+  tenants wrote again about 4 s after the kill, where the writers' own
+  5 s timeout had them at 4.9.
+- **What it costs.** An answer slower than the timeout to begin is a 502
+  while the node goes on with it: a `create index` over a large
+  collection, a `compact` of a large tenant, a large batch or a heavy
+  aggregate. A write so cut may have run, which an `Idempotency-Key` makes
+  safe to send again; run such statements against the node on the private
+  network, or raise the timeout for them. A move copies a tenant's image
+  through the region's router under the same bound, read by read: a
+  tenant whose export or install takes longer fails the move, which puts
+  it back as it was.
+- **What it leaves alone.** A request carrying `Fenec-Wait` -- a held
+  claim, or a read waiting for a write with `Fenec-After` -- is allowed the
+  timeout plus its wait (30 s at most), so a claim held 25 s is answered
+  within 35. A `Fenec-After` read with no `Fenec-Wait` waits 5 s, inside
+  it. A `/_changes` page's `wait` is a query parameter the router does not
+  read: keep it under the timeout through a router. Streams -- a
+  subscription, a replication stream -- read with no timeout once their
+  head is in.
+
+Raise it with the lease, keeping it at twice the lease; lower it no
+further than the slowest statement your clients send through the routers.
+
 ## Bring-up
 
 In this order, each step checked before the next. `$ROOT` is the routers'
@@ -854,7 +892,8 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   it is killed: 4.86, 4.92 and 4.89 s after the kill, every run waiting;
   with the container killed alone, whose kernel refused the reconnect at
   once, 2.2 and 2.5 s.
-- **Requests in flight to a dead machine** can wait at the router for its
-  `--upstream-timeout` (60 s) where the machine's address swallows packets,
-  unless the client gives up first: clients should bound their requests and
-  retry with an `Idempotency-Key`.
+- **Requests in flight to a dead machine** wait at the router for its
+  upstream timeout (10 s in the kit, The routers' upstream timeout) where
+  the machine's address swallows packets, unless the client gives up
+  first, even once the node has been failed over: clients should bound
+  their requests and retry with an `Idempotency-Key`.
