@@ -3152,9 +3152,9 @@ Rust crates' literals, the web tests' -- parsed on main and on the branch,
 `cmp_expr` keeps its frame: the worded tests are out of line (`worded`),
 or the depth test's 512 levels outgrew 8 MiB in a debug build; out of
 line, 511 parentheses parse in 1 091 KiB of stack in release against
-main's 1 187. The browser module grew 19.8 KB, 7.7 KB gzip, 6.5 KB brotli
-(733.1, 301.2, 250.3), the one with no feature 19.5 and 6.2: the parser's
-SQL forms and their refusals 9.6 KB raw, `like` 2.6 (`sql_like` 1.0,
+main's 1 187. The browser module grew 20.2 KB, 7.9 KB gzip, 6.7 KB brotli
+(733.7, 301.4, 250.5), the one with no feature 19.9 and 6.5: the parser's
+SQL forms and their refusals 9.9 KB raw, `like` 2.6 (`sql_like` 1.0,
 `like_pattern` 0.8, `bind_pattern` 0.8), the conflict target's check and
 the hints past the parser 2.0 (`Schema::arbiter` and `no_field` 1.3, the
 engine's calls of them 0.7). The trap's error first found by

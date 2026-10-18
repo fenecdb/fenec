@@ -753,7 +753,7 @@ feature; another set is a build option.</p>
 <pre data-lang="bash">make wasm                              # every feature: 250 KB brotli
 make wasm FEATURES="text sorted"       # those two alone, and the schema check
 make wasm FEATURES=indexes             # the indexes, none of the rest
-make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 178 KB
+make wasm FEATURES=language SCHEMA=0   # no index, nor the schema check: 179 KB
 make wasm FEATURES=none SCHEMA=0       # no feature at all: 155 KB
 </pre>
 
