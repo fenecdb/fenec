@@ -356,6 +356,38 @@ pub fn number_after(text: &str, prefix: &str) -> f64 {
         .unwrap_or_else(|e| panic!("{prefix}{rest}: {e}"))
 }
 
+/// How long a call into a router a test waits for: a lease round, a
+/// router over a directory another one keeps. Each of its calls to a node
+/// is bounded -- a grant by a third of the lease, a promotion by the
+/// upstream timeout -- and a round takes milliseconds; one that has not
+/// ended in a minute waits for good.
+pub const WITHIN: Duration = Duration::from_secs(60);
+
+/// `f` run on a thread of its own and waited for [`WITHIN`] at most: a
+/// router that waits for good -- a lock a thread holds taken again, a
+/// round joining a grant that waits on it -- fails the test, naming
+/// `what`, where it hung CI's job for its hour. A panic in `f` fails it
+/// too, its message above.
+pub fn bounded<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(WITHIN) {
+        Ok(v) => v,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{what} did not end in {WITHIN:?}: it waits for good")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("{what} panicked"),
+    }
+}
+
+/// One lease round of `router`'s, waited for as [`bounded`] waits.
+pub fn round(router: &Arc<Router>) {
+    let router = Arc::clone(router);
+    bounded("a lease round", move || router.lease_round());
+}
+
 pub fn by_name<'a>(nodes: &'a [Node; 3], name: &str) -> &'a Node {
     &nodes[name[1..].parse::<usize>().unwrap() - 1]
 }

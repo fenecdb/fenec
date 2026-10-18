@@ -658,9 +658,9 @@ fn a_promoted_standby_router_counts_every_lease_from_its_promotion() {
 
     // The standby's round while it follows, then, most of a lease later,
     // the primary's grant to n1, which runs a lease from then.
-    b.lease_round();
+    round(&b);
     std::thread::sleep(TERM * 5 / 6);
-    a.lease_round();
+    round(&a);
     let (status, lease) = call(n1.port, "GET", "/_admin/lease", "", Some("adm-promoted1"));
     assert_eq!(status, 200, "{lease}");
     assert!(
@@ -675,7 +675,7 @@ fn a_promoted_standby_router_counts_every_lease_from_its_promotion() {
     let deadline = Instant::now() + Duration::from_secs(30);
     while placed(b_port, "t").0 == "n1" {
         assert!(Instant::now() < deadline, "t was never failed over");
-        b.lease_round();
+        round(&b);
         std::thread::sleep(Duration::from_millis(20));
     }
     // Failed over: n1 takes no write of t, by its own clock.
