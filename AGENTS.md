@@ -6644,13 +6644,17 @@ replica, the router's failover read off its log against the killed
 container's end (`failed_over_after`, both by the Docker VM's clock). Three
 runs at a lease of 2 s and an upstream timeout of 4 s, what they saw and
 not bounds (a reviewer's machine saw a repair of 1.07 s, writes stopping
-1.31 s after a router's kill and gaps of 28-30 ms): 41 577
+1.31 s after a router's kill before grants were numbered and gaps of 28-30
+ms): 41 577
 acknowledged, 0 lost; the node failed over 1.92, 2.56 and 1.90 s after the
 kill, its tenants' writers writing again 3.90, 3.97 and 3.93 s after the
 kill, the tenant whose replica it held losing 17, 18 and 17 ms at most, every other tenant
 16, 18 and 17; the repair 0.51, 0.51 and 0.50 s after the node's start; a region
 whose router was killed stopped writing 1.67, 1.61 and 1.66 s after and wrote
-again 0.43-0.51 s after its standby's promotion. The writers' figure
+again 0.43-0.51 s after its standby's promotion -- since grants are
+numbered, 1.02, 0.83 and 1.00 s and 0.42-0.48, the node killed failed over
+1.90, 2.06 and 2.56 s after, its writers again 3.90-3.94 s, 40 588
+acknowledged and 0 lost (three runs of this kit's drill). The writers' figure
 is the upstream timeout's, not the failover's: a writer's request in
 flight to the dead node waits there until the router lets it go, which at
 fenec-shard's 60 s was the writer's own 5 s client timeout, every run's

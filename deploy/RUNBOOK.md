@@ -384,7 +384,11 @@ limit is working as sold); `GET /_admin/quotas` on a node, or
 With `--auto-failover` the region's router fails a node over by itself. A
 node stops writing as its lease lapses by its own clock; the router, a
 tenth of a lease later, promotes each of its tenants on its replica in the
-region's other zone and routes it there.
+region's other zone and routes it there. The node runs its lease from the
+last grant whose answer the router had, not from when it reads a grant: a
+node stalled with grants unread -- a process paused, a link delivering
+late -- takes no write from them once it wakes, and a node cut off stops
+writing two thirds of a lease after its last renewal at the most.
 
 What a failover keeps: under `--sync always` a write is answered once it is
 on the primary's disk and written into its replica's stream -- handed to
@@ -532,12 +536,13 @@ reach the primary would make two primaries in a partition.
    take `/_shard/` changes into a directory nobody else reads.
 
 Seen in `make drill` (lease 2 s), three runs: the region's writes stopped
-1.67, 1.61 and 1.66 s after its router was killed, as the leases lapsed
-(1.31 in a reviewer's run); once the standby was promoted -- an operator's
-minute in production, 2.7 s in the drill -- writes resumed 0.45, 0.44 and
-0.51 s after the promotion, and the switch of units, a restart of the only
-router the region then had, left gaps of 0.51, 0.39 and 0.42 s between two
-answered writes.
+1.02, 0.83 and 1.00 s after its router was killed, as the leases lapsed --
+each node's lease runs from the grant before the last one it read, where
+running it from its last grant they stopped 1.61 to 1.67 s after; once the
+standby was promoted -- an operator's minute in production, 1.9 to 2.1 s in
+the drill -- writes resumed 0.47, 0.48 and 0.44 s after the promotion, and
+the switch of units, a restart of the only router the region then had,
+left gaps of 0.49, 0.43 and 0.47 s between two answered writes.
 
 **The global router.** Tenants go on working: every region keeps its own
 directory. Creates, deletes and moves across regions are refused (503)
@@ -578,7 +583,10 @@ directories answers 404 for a tenant of a region keeping its own -- so
 upgrade every router before turning either on. A node from before lease
 terms takes grants without checking the term, and a region's router then
 does not fail it over on its own; a node or router from before lineages
-protects less and breaks nothing. Files go one way: a binary refuses record
+protects less and breaks nothing; and a node or router from before
+numbered lease grants leases as before, so a grant read late can still
+give a node a lease past its failover until both sides are upgraded (the
+router logs each such node once). Files go one way: a binary refuses record
 kinds newer than it, so once an upgraded
 node has written a tenant, that node cannot go back to the older binary --
 and an older node may not follow a newer primary's replication stream where
@@ -899,12 +907,6 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   (`/t/<t>/_replication/status` on the primary's node has each), and **no
   archive lag**: `fenec archive` exports nothing, and the node's
   `fenec_node_streams` says only whether an archiver is connected.
-- **A late grant.** A grant whose answer the router gave up on counts as
-  no grant at the router, but the node takes it whenever it reads it, and
-  grants carry no number: a node stalled with one unread -- a process
-  paused, a link delivering late -- can take writes for up to a lease after
-  its tenants were promoted elsewhere, two primaries for that while. The
-  fix is under way.
 - **Requests in flight to a dead machine** wait at the router for its
   upstream timeout (10 s in the kit, The routers' upstream timeout) where
   the machine's address swallows packets, unless the client gives up
