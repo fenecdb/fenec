@@ -902,6 +902,13 @@ textfile collector).
 
 ## The drill
 
+The image `make drill` and `make deploy-check` build holds the binaries of
+the tree they are run in, however old its files: `tools/image-cargo.sh`
+compiles in a copy it keeps by content and holds every binary to the
+sources it was given, failing the build otherwise. A branch's image once
+held main's `fenec-shard`, and a drill on it tested what the branch had
+not changed.
+
 `make drill` builds the binaries into an image and runs two regions in
 Docker -- a router keeping each region's directory and its standby, two
 nodes in two zones each, an archiver a node, the global router and its

@@ -652,9 +652,11 @@ grafana-check:
 
 ## deploy/: the alert rules checked and their tests run by promtool, the
 ## tunnel's rules asked of cloudflared's own matcher (a tenant's paths
-## through, every other path and a tenant's replication stream 404), then
-## the systemd units under a real systemd (Docker, privileged): two
-## machines, every unit installed as deploy/RUNBOOK.md installs it, checked
+## through, every other path and a tenant's replication stream 404), the
+## script the images build their binaries with (tools/image-cargo.sh) held
+## to a tree older than its last build and to a unit compiled from other
+## bytes, then the systemd units under a real systemd (Docker, privileged):
+## two machines, every unit installed as deploy/RUNBOOK.md installs it, checked
 ## by `systemd-analyze verify`, started and used -- a region, two nodes and
 ## a tenant made through the global router, its tokens on no command line
 ## and no environment readable by another role, its limits and sandbox in
@@ -667,6 +669,7 @@ deploy-check:
 	$(PROMTOOL) check rules fenecdb.rules.yml
 	$(PROMTOOL) test rules fenecdb.rules.test.yml
 	python3 deploy/test/ingress.py
+	python3 deploy/test/image_cargo.py
 	docker build -f deploy/Dockerfile --target systemd -t fenec-kit-systemd .
 	python3 deploy/test/units.py
 
