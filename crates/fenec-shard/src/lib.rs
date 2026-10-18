@@ -109,7 +109,7 @@ pub struct Config {
     /// write of the request and every read of its answer's head. One that
     /// does not is let be for [`readers::RESTING`] -- its node, not
     /// reached, or not answering its `/_health` either within
-    /// [`readers::HEALTH_WAIT`] (this where shorter); its tenant's copy
+    /// [`Config::health_wait`] (this where shorter); its tenant's copy
     /// alone where the node answers, the read slower than this -- and the
     /// read goes home: at `upstream_timeout` a hung replica's node held
     /// each marked read a minute. A node that answers its health while
@@ -119,6 +119,11 @@ pub struct Config {
     /// How long a read replica that did not answer a marked read is let be
     /// ([`readers::RESTING`] unless set).
     pub replica_rest: Duration,
+    /// How long a read replica's node that did not answer a marked read in
+    /// time has to answer its `/_health` ([`readers::HEALTH_WAIT`] unless
+    /// set, `replica_timeout` where shorter): set longer by a test whose
+    /// machine, under load, may not run a thread for that long.
+    pub health_wait: Duration,
     /// The longest a call a read replica's upkeep makes may take
     /// ([`readers::CALL`] unless set).
     pub reader_timeout: Duration,
@@ -153,6 +158,7 @@ impl Default for Config {
             near: None,
             replica_timeout: Duration::from_secs(2),
             replica_rest: readers::RESTING,
+            health_wait: readers::HEALTH_WAIT,
             reader_timeout: readers::CALL,
             entry_token: None,
         }
@@ -225,7 +231,7 @@ pub struct Router {
     /// The quota each read replica (`<tenant>/<node>`) was last sent, `None`
     /// for the node's own: a look wants it sent again only once its
     /// tenant's changes ([`readers`]).
-    reader_quotas: Mutex<std::collections::HashMap<String, Option<String>>>,
+    reader_quotas: Mutex<readers::QuotaNotes>,
     /// The read replicas' nodes a look's worker is under way on
     /// ([`Router::follow_round`]): one a node at a time.
     lookers: Mutex<HashSet<String>>,

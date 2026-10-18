@@ -1022,6 +1022,14 @@ fn bad(msg: &str) -> io::Error {
 }
 
 #[cfg(test)]
+impl Pool {
+    /// The bound a call through the pool is held to, for a test to ask.
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;

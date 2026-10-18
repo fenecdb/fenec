@@ -1483,7 +1483,11 @@ another tenant 4.4 s, and after a router's restart, its sent quotas
 forgotten, every look), and a look's send, of the quota its round began
 with, landed after a request's newer one; this directory's quota the look
 reads under the queue's lock (`want_kept_quota`), so a request's want is
-never followed by an older one. **What a copy
+never followed by an older one. A send is noted only where no replica was
+forgotten while it was out (`QuotaNotes`, a count of forgets beside the
+notes): a follow landing as a send's answer came back forgot the note, the
+answer noted it after, and no look sent the copy -- a new one, maybe -- its
+quota again; a send more is a `PUT` the copy takes as often. **What a copy
 answers**: a tenant's copy on a replicating node is `ready`
 (`Tenant::ready`) once, since it opened, the primary it follows has said
 hello -- its image adopted, or its place in that history found
@@ -1699,7 +1703,7 @@ that node has said hello -- the tenant there made again meanwhile -- and a
 read replica re-pointed after a failover while another's node holds up the
 check for ten minutes, a tenant deleted while its replica is being taken
 off by a silent node answering only once the copy is gone, its claim free
-meanwhile, a tenant whose replica's node is silent kept (502), a name not
+meanwhile, a tenant whose replica's node is out of reach kept (502), a name not
 made again while another region's directory keeps its deleted tenant's
 replica, a quota a silent node does not take holding up neither the quota
 request nor the look, a replica sent no quota older than one it was sent
@@ -1707,7 +1711,8 @@ request nor the look, a replica sent no quota older than one it was sent
 request), a move onto a replica's node waiting out a look's `follow` held
 there, and a failover keeping the tenant's lineage where a tenant made
 again starts another (`readers::tests` a refused hold keeping the other's,
-no marked read to a tenant gone, the quota queue's order;
+no marked read to a tenant gone, the quota queue's order, a quota whose
+send a forget crossed left unnoted, the calls bounded by `reader_timeout`;
 `replication::tests` the fork's id; `directory::tests` a directory
 whose `readers` lacks `lineage` keeping its records, a field not found
 never an empty collection, lineages following the ring), a copy taking nothing from another
@@ -1724,7 +1729,7 @@ over none recorded since (the node's answer held: the proxy holds answers
 too), a replica following a primary promoted from a standby that never
 synced -- its copy refusing nothing -- and one following its tenant's file
 put in place by hand, one whose copy keeps refusing given up on (the
-primary's lineage asked and never answered), a worker asking a region for its
+primary's lineage asked, its answer broken off), a worker asking a region for its
 replicas' primaries at once (at most one call names one tenant alone; the proxy
 records what it reads while parking), a create asking only the regions that
 may keep a replica of its name -- one out of reach refusing those names

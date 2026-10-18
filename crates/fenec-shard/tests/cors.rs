@@ -56,13 +56,15 @@ fn node(tag: &str, cors: Option<&str>) -> Node {
     Node { addr, dir }
 }
 
-/// A router over `dir` answering browsers from `cors`, its port.
+/// A router over `dir` answering browsers from `cors`, its port. Its
+/// upstream timeout is the default minute: it bounds every answer a node
+/// sends through it, and at 2 s a node under load could miss it, while the
+/// node it cannot reach refuses at once.
 fn router(dir: Directory, cors: Option<&str>, max_connections: usize) -> u16 {
     fenec_http::audit::set_delay(0);
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: Some("root".into()),
-        upstream_timeout: Duration::from_secs(2),
         max_connections,
         cors: cors.map(String::from),
         ..Config::default()

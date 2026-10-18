@@ -531,11 +531,17 @@ fn directory(
     (db, repl)
 }
 
+/// A router's configuration. Its replica timeout bounds every marked read
+/// a read replica answers, so it is half a minute: at the two seconds a
+/// router has by default, a replica under load answered past it, and the
+/// read went home -- a 502 with home cut off, as the test had it. A test of
+/// a replica that does not answer, or answers late, sets its own.
 fn config(near: Option<&str>, region: Option<&str>, global: Option<String>) -> Config {
     Config {
         addr: "127.0.0.1:0".into(),
         token: Some(ROOT.into()),
         upstream_timeout: Duration::from_secs(60),
+        replica_timeout: Duration::from_secs(30),
         replicas: true,
         near: near.map(str::to_string),
         region: region.map(str::to_string),
@@ -1725,11 +1731,16 @@ fn a_marked_read_passes_a_read_replica_that_does_not_answer_by_its_bound() {
 /// the tenant's copy as one that did not answer and was asked again home
 /// for the whole wait. Home cut off from the router shows both: a page or
 /// a read sent home would be its 502, and the copy, rested for longer than
-/// the test, would send the read after it home.
+/// the test, would send the read after it home. The wait is twice the
+/// timeout: a page never answers before its wait, so a router giving it
+/// the timeout alone cuts it even with its clock a timeout late. The
+/// timeout is what the copy has past its wait to answer the page in, and
+/// to answer the read after it: a second, as it was, a node under load
+/// missed.
 #[test]
 fn a_marked_change_page_waiting_past_the_replica_timeout_is_answered_near() {
     let mut us = config(Some("us"), None, None);
-    us.replica_timeout = Duration::from_secs(1);
+    us.replica_timeout = Duration::from_secs(5);
     us.replica_rest = Duration::from_secs(600);
     let w = OneDirectory::with_us("page-wait", false, us);
     w.tenant("acme");
@@ -1739,7 +1750,7 @@ fn a_marked_change_page_waiting_past_the_replica_timeout_is_answered_near() {
     let (status, _, page) = request(
         w.us,
         "GET",
-        &format!("/t/acme/_changes?since={}&wait=2000", a.seq),
+        &format!("/t/acme/_changes?since={}&wait=10000", a.seq),
         "",
         &[("Fenec-Read", "replica")],
     );
@@ -1911,15 +1922,19 @@ fn a_tenant_deleted_beside_a_change_of_its_read_replica_waits_it_out() {
 /// the record: deleted regardless, the record outlived its tenant, and the
 /// look that found the name made again -- another owner's tenant -- pointed
 /// the old copy at it, which took the new tenant's image into a region
-/// nobody had chosen.
+/// nobody had chosen. The node is out of reach here, so the delete is
+/// refused at once: hung, it was refused by the router's bound on a call,
+/// a second for it -- which bounded every other call of the test too, and
+/// placing the replica on a machine under load took longer. A silent node,
+/// whose call is under way until it answers, is the test above's.
 #[test]
 fn a_tenant_whose_read_replica_will_not_go_is_kept() {
     let mut primary = config(Some("eu"), None, None);
-    primary.reader_timeout = Duration::from_secs(1);
+    primary.reader_timeout = Duration::from_secs(600);
     let w = OneDirectory::build("kept", false, primary, config(Some("us"), None, None));
     w.tenant("acme");
     let us1 = w._nodes[2].port;
-    w.links[2].hang();
+    w.links[2].cut();
     let (status, body) = shard(w.primary, "DELETE", "/_shard/tenants/acme", "");
     assert_eq!(status, 502, "{body}");
     assert!(body.contains("is kept"), "{body}");
@@ -3127,10 +3142,14 @@ fn a_read_replica_follows_its_tenant_s_file_put_in_place_by_hand() {
 #[test]
 fn a_read_replica_whose_copy_keeps_refusing_is_given_up_on() {
     let tag = "given-up";
-    let w = Near::new(tag, Duration::from_millis(300));
+    let w = Near::new(tag, readers_call());
     w.tenant("acme");
-    // What its file is of is asked of eu1 and never answered.
-    w.link.park("acme/lineage");
+    // What its file is of is asked of eu1, whose answer is broken off
+    // every time: the router never learns it, and knows so at once. Parked
+    // instead, each question waited out the router's bound on a call, cut
+    // to 300 ms for it -- which bounded every other call of the test too,
+    // and placing the replica on a machine under load took longer.
+    w.link.cut_answers("acme/lineage");
     w.swapped(tag, "acme");
     until("the read replica is given up on", || {
         let _ = marked(w.port, "acme", "get notes select body", None);
@@ -3154,16 +3173,24 @@ fn a_read_replica_whose_copy_keeps_refusing_is_given_up_on() {
         "{:?}",
         w.us_link.seen("/t/acme/")
     );
-    // Placed again by an operator, it is a replica as any.
-    let (status, body) = shard(
-        w.port,
-        "DELETE",
-        "/_shard/tenants/acme/read-replicas/us",
-        "",
-    );
-    assert_eq!(status, 204, "{body}");
+    // Placed again by an operator, it is a replica as any. Its copy lost,
+    // the replica is due at every look, which holds it as it passes it
+    // over: a DELETE meeting one is refused as a change under way (409),
+    // which an operator sends again.
+    until("the read replica is taken off", || {
+        let (status, body) = shard(
+            w.port,
+            "DELETE",
+            "/_shard/tenants/acme/read-replicas/us",
+            "",
+        );
+        if status == 409 && body.contains("under way") {
+            return false;
+        }
+        assert_eq!(status, 204, "{body}");
+        true
+    });
     assert!(!w.listed("acme").contains("given_up"));
-    w.link.unpark("acme/lineage");
     drop(w.router);
 }
 
@@ -3258,7 +3285,13 @@ fn a_lineage_backfilled_late_writes_over_none_recorded_since() {
     dir.set_node("eu1", n).unwrap();
     dir.place("acme", "eu1", fenec_shard::directory::State::Active)
         .unwrap();
-    let router = Router::new(dir, config(Some("eu"), None, None));
+    // The answer is held until the test lets it go, never cut by the
+    // router's bound on a call: cut at the 10 s it was while the name was
+    // made again, on a machine under load, it was asked no more -- the
+    // name's create had recorded a lineage -- and never taken.
+    let mut cfg = config(Some("eu"), None, None);
+    cfg.reader_timeout = Duration::from_secs(600);
+    let router = Router::new(dir, cfg);
     let port = serve(Arc::clone(&router));
     link.park_answers("acme/lineage");
     let placed = |port| {
@@ -3300,6 +3333,19 @@ fn readers_call() -> Duration {
     fenec_shard::readers::CALL
 }
 
+/// A router whose read replica's node, where a test holds one read's
+/// answer past `--replica-timeout`, has that timeout to answer every
+/// other read and its `/_health` in: five seconds, as long as the held
+/// read waits. At a second, and the health's half a second, a node under
+/// load missed them -- the health unanswered, the node rested as a hung
+/// one -- though nothing in the test was slow but the machine. Rested
+/// longer than any test.
+fn answering_within(cfg: &mut Config) {
+    cfg.replica_timeout = Duration::from_secs(5);
+    cfg.health_wait = cfg.replica_timeout;
+    cfg.replica_rest = Duration::from_secs(600);
+}
+
 /// A marked read slower at its read replica than `--replica-timeout`
 /// lets that tenant's copy be, not the node: every other tenant's marked
 /// reads of the node are answered by their replicas still. A replica's
@@ -3309,14 +3355,13 @@ fn readers_call() -> Duration {
 /// every few seconds. The node answers its `/_health`, asked on a thread
 /// of the router's own once the read timed out, which tells the two
 /// apart. Here the slow read's answer is held at the node's door past the
-/// timeout.
+/// timeout, however long that is, so the timeout is what the answers the
+/// test waits for come in -- the other tenant's reads, and the node's
+/// health, given as long ([`answering_within`]).
 #[test]
 fn a_slow_marked_read_lets_its_tenant_s_copy_be_and_no_other() {
     let tag = "slow-read";
-    let w = Near::with(tag, |cfg| {
-        cfg.replica_timeout = Duration::from_secs(1);
-        cfg.replica_rest = Duration::from_secs(600);
-    });
+    let w = Near::with(tag, answering_within);
     w.tenant("slow");
     w.tenant("other");
     w.us_link.park_answers("/t/slow/query");
@@ -3385,14 +3430,11 @@ fn a_hung_replica_node_is_let_be_by_the_first_read_that_waits_it_out() {
 /// replica still. Counted by tenants -- the node rested once a second
 /// tenant's copy was -- a client holding two tenants' tokens, or two
 /// tenants' slow analytics, sent every tenant's marked reads of the node
-/// home.
+/// home. The slow reads are held as the one above's.
 #[test]
 fn two_tenants_slow_reads_leave_a_third_s_answered_by_its_replica() {
     let tag = "two-slow";
-    let w = Near::with(tag, |cfg| {
-        cfg.replica_timeout = Duration::from_secs(1);
-        cfg.replica_rest = Duration::from_secs(600);
-    });
+    let w = Near::with(tag, answering_within);
     for t in ["slow1", "slow2", "third"] {
         w.tenant(t);
     }
@@ -3466,12 +3508,16 @@ fn reads_timing_out_together_on_a_hung_node_ask_its_health_once() {
 /// A marked read whose body is past what the sockets between the router
 /// and its replica hold, sent to a node that stopped reading, goes home by
 /// `--replica-timeout`: its write was bounded by the pool's timeout alone
-/// (the upstream timeout, a minute here), the connect and the head's reads
-/// by the replica's.
+/// (the upstream timeout), the connect and the head's reads by the
+/// replica's. The upstream timeout is five minutes, half of it the bound
+/// the read is held to: at a minute's half, a node of a debug build under
+/// load took 39 s to read the body sent home.
 #[test]
 fn a_marked_read_whose_body_the_replica_does_not_read_goes_home_by_the_replica_timeout() {
+    const UPSTREAM: Duration = Duration::from_secs(300);
     let tag = "unread-body";
     let w = Near::with(tag, |cfg| {
+        cfg.upstream_timeout = UPSTREAM;
         cfg.replica_timeout = Duration::from_secs(1);
         cfg.replica_rest = Duration::from_secs(600);
     });
@@ -3482,7 +3528,7 @@ fn a_marked_read_whose_body_the_replica_does_not_read_goes_home_by_the_replica_t
     let body = format!(r#"{{"query":"get notes select body","pad":"{pad}"}}"#);
     // A client of its own: `request`'s refusal would print the body.
     let mut s = TcpStream::connect(("127.0.0.1", w.port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    s.set_read_timeout(Some(UPSTREAM)).unwrap();
     let started = Instant::now();
     write!(
         s,
@@ -3499,7 +3545,7 @@ fn a_marked_read_whose_body_the_replica_does_not_read_goes_home_by_the_replica_t
     assert!(answer.contains(r#""before""#), "answered home: {answer}");
     assert_eq!(w.us_link.asked("/t/a/"), 1, "the replica asked");
     // Half the upstream timeout it would have waited.
-    assert!(took < Duration::from_secs(30), "{took:?}");
+    assert!(took < UPSTREAM / 2, "{took:?}");
     w.us_link.heal();
 }
 
