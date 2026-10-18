@@ -37,14 +37,26 @@
 #
 # And a check that trusts none of that: cargo runs every compile through
 # this script (RUSTC_WRAPPER), which, once rustc has succeeded, records the
-# sha256 of each file the compile read -- the unit's dep-info: its sources
-# and what it include_bytes! alike. Cargo counts a unit built only once the
-# wrapper has exited 0, so every unit it takes for fresh has the record of
-# the compile that made it. After the build every unit of the binaries,
-# fresh or compiled now, is held to its record against the build context
-# itself: a binary made from other bytes than this build's fails the build,
-# naming the files, and the outputs kept in /work are emptied so that the
-# next build starts clean.
+# sha256 of each file the compile read -- the unit's dep-info, its sources
+# and what it include_bytes! alike, and the libraries it was handed
+# (--extern), each as cargo named it: a library's .rmeta to a library, its
+# .rlib to a binary. Held to its sources alone, a binary whose own outputs
+# looked newer than a library compiled since for another binary was taken
+# for fresh, every record matching, and linked the library as it had been.
+# Not each library's record instead, which is smaller to hash: cargo starts
+# a library's dependents on its .rmeta, while its own compile -- and the
+# record written after it -- is still running. Cargo counts a unit built
+# only once the wrapper has exited 0, so every unit it takes for fresh has
+# the record of the compile that made it. After the build every unit of
+# the binaries, fresh or compiled now, is held to its record against the
+# build context itself: a binary made from other bytes than this build's
+# fails the build, naming the files, and the outputs kept in /work are
+# emptied so that the next build starts clean.
+#
+# Not followed yet: what a build script reads when it runs, which cargo
+# tracks by mtime alone (its rerun-if-changed), and files a proc-macro opens
+# itself. No crate here has a build script, and one is refused below until
+# the check holds its runs too; a proc-macro's own compile is checked as any.
 set -eu
 
 # ---------------------------------------------------------------- wrapper
@@ -52,12 +64,14 @@ set -eu
 if [ -n "${FENEC_IMAGE_RECORDS:-}" ]; then
     "$@" || exit
     shift
-    out='' name='' extra='' prev=''
+    out='' name='' extra='' prev='' externs=''
     for a do
         case $prev in
         --out-dir) out=$a ;;
         --crate-name) name=$a ;;
         -C) case $a in extra-filename=*) extra=${a#extra-filename=} ;; esac ;;
+        # name=path, priv:name=path; a bare name is the sysroot's.
+        --extern) case $a in *=*) externs="$externs ${a#*=}" ;; esac ;;
         esac
         prev=$a
     done
@@ -75,7 +89,7 @@ if [ -n "${FENEC_IMAGE_RECORDS:-}" ]; then
     record=$FENEC_IMAGE_RECORDS/$name$extra
     set -f
     # shellcheck disable=SC2086 # one word a file
-    sha256sum $deps > "$record.$$"
+    sha256sum $deps $externs > "$record.$$"
     mv -f "$record.$$" "$record"
     exit 0
 fi
@@ -115,6 +129,16 @@ bins=''
 # One line a unit, fresh or compiled now: every one the binaries are made of.
 while IFS= read -r m; do
     case $m in *'"reason":"compiler-artifact"'*) ;; *) continue ;; esac
+    case $m in
+    *'"kind":["custom-build"]'*)
+        printf 'image-cargo: %s has a build script, which the check does not follow yet:\n' \
+            "$(printf '%s\n' "$m" | sed -n 's/.*"package_id":"\([^"]*\)".*/\1/p')" >&2
+        echo "image-cargo: what it reads when it runs, cargo tracks by mtime alone. Have" \
+            "tools/image-cargo.sh hold each run's inputs (cargo's build-script-executed" \
+            "messages name its out_dir, whose output lists them) before adding one." >&2
+        exit 1
+        ;;
+    esac
     exe=$(printf '%s\n' "$m" | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')
     if [ -n "$exe" ]; then
         # A binary is a hard link out of deps/ to the unit that made it.
@@ -122,10 +146,12 @@ while IFS= read -r m; do
         unit=${unit##*/}
         bins="$bins $exe"
     else
-        # A library names its metadata in deps/: lib<unit>.rmeta.
-        unit=$(printf '%s\n' "$m" | grep -o '/deps/lib[^"/]*\.rmeta"' | head -n 1)
+        # A library names its metadata in deps/, lib<unit>.rmeta; a
+        # proc-macro, which has none, its shared object.
+        unit=$(printf '%s\n' "$m" | grep -oE '/deps/lib[^"/]*\.(rmeta|so|dylib)"' | head -n 1)
         unit=${unit#/deps/lib}
-        unit=${unit%.rmeta\"}
+        unit=${unit%\"}
+        unit=${unit%.*}
     fi
     [ -n "$unit" ] || fail "cannot tell which unit this is: $m"
     record=$records/$unit

@@ -1,6 +1,14 @@
 # Build outputs stay out of the image: the local `target/` holds another
-# platform's objects, and copying it only bloats the build context.
+# platform's objects, and copying it only bloats the build context. Every
+# one, at any depth, and what agents and benchmarks keep in the checkout --
+# worktrees under .claude/ (4.6 GB on one machine), BEIR's corpora under
+# fenec-bench (2.1 GB): tools/image-cargo.sh keeps a second copy of the
+# context and compares it each build, which they cost 16 s the first time
+# and 8 s each after.
 target/
+**/target/
+.claude/
+crates/fenec-bench/beir/
 web/fenec.wasm
 pkg/
 node_modules/

@@ -5,10 +5,12 @@ whatever their mtimes, and a build that fails when they are not.
 
     python3 deploy/test/image_cargo.py      # make deploy-check runs it
 
-A workspace of two crates, one reading a file outside itself through
-include_bytes! as fenec-http reads the studio's, is built in rust:alpine
-by the script, its /work a volume of the test's own as the Dockerfiles'
-is a cache mount:
+First, both Dockerfiles build their binaries through the script and copy
+them from /built: either put back to a plain `cargo build` passed the rest.
+Then a workspace of a library, read through include_bytes! from a file
+outside itself as fenec-http reads the studio's, and two binaries using it
+is built in rust:alpine by the script, its /work a volume of the test's own
+as the Dockerfiles' is a cache mount:
 
 - a tree whose every file is older than the last build, one of them
   changed, builds the change: with target/ alone in the cache, as the
@@ -20,11 +22,16 @@ is a cache mount:
   check, which names the file, and the build after starts clean;
 - a build whose library compiles and whose binary does not, then the
   binary fixed, passes the check: a unit is recorded as it is compiled,
-  not when the whole build succeeds.
+  not when the whole build succeeds;
+- the library changed and built for one binary alone, then the other's
+  outputs made newer than it, as a clock set back between the two builds
+  leaves them: that binary, its own sources unchanged, fails the check,
+  which names the library it linked.
 
 Each fails with its part taken out: times kept in the copy (`rsync -t`,
-COPY's way), the check, or a unit's record kept only once the whole build
-has succeeded.
+COPY's way), the check, a unit's record kept only once the whole build
+has succeeded, or the libraries a compile was handed (--extern) left out
+of its record.
 """
 
 import os
@@ -71,13 +78,35 @@ def age(tree):
             os.utime(os.path.join(d, n), (OLD, OLD))
 
 
-def build(tree):
+def build(tree, package="b"):
     p = subprocess.run(
         ["docker", "run", "--rm", "-v", f"{tree}:/src:ro", "-v", f"{VOLUME}:/work",
          "-v", f"{SCRIPT}:/tools/image-cargo.sh:ro", "-w", "/src", IMAGE,
-         "sh", "-c", "/tools/image-cargo.sh /out --release -p b && /out/b"],
+         "sh", "-c", f"/tools/image-cargo.sh /out --release -p {package} && /out/{package}"],
         capture_output=True, text=True, timeout=600)
     return p.returncode, p.stdout.strip(), p.stderr
+
+
+def in_volume(command):
+    subprocess.run(["docker", "run", "--rm", "-v", f"{VOLUME}:/work", IMAGE, "sh", "-c", command],
+                   check=True, capture_output=True, timeout=120)
+
+
+def held_dockerfiles():
+    """Each Dockerfile runs the script once and no `cargo build` of its own,
+    and copies every binary it installs from /built."""
+    for path in ("Dockerfile", "deploy/Dockerfile"):
+        with open(os.path.join(ROOT, path)) as f:
+            text = f.read().replace("\\\n", " ")
+        lines = [l.strip() for l in text.splitlines() if not l.lstrip().startswith("#")]
+        runs = [l for l in lines if l.startswith("RUN")]
+        through = [l for l in runs if "tools/image-cargo.sh /built " in l]
+        plain = [l for l in runs if "cargo build" in l]
+        copies = [l for l in lines if l.startswith("COPY --from=build") and "/usr/local/bin" in l]
+        if len(through) != 1 or plain or not copies or not all(" /built/" in l for l in copies):
+            raise SystemExit(f"image-cargo: {path} does not build through tools/image-cargo.sh "
+                             "and copy from /built:\n" + "\n".join(runs + copies))
+        print(f"ok  {path}: built through the script, copied from /built")
 
 
 def expect(what, got, want, err):
@@ -87,18 +116,22 @@ def expect(what, got, want, err):
 
 
 def main():
+    held_dockerfiles()
     subprocess.run(["docker", "build", "-q", "-t", IMAGE, "-"], input=BASE, text=True,
                    check=True, capture_output=True, timeout=600)
     subprocess.run(["docker", "volume", "create", VOLUME], check=True, capture_output=True)
     tree = tempfile.mkdtemp(prefix="image-cargo-")
     try:
         write(tree, {
-            "Cargo.toml": '[workspace]\nresolver = "2"\nmembers = ["a", "b"]\n',
+            "Cargo.toml": '[workspace]\nresolver = "2"\nmembers = ["a", "b", "c"]\n',
             "a/Cargo.toml": '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n',
             "a/src/lib.rs": lib(1),
             "b/Cargo.toml": ('[package]\nname = "b"\nversion = "0.1.0"\nedition = "2021"\n'
                              '[dependencies]\na = { path = "../a" }\n'),
             "b/src/main.rs": main_rs(),
+            "c/Cargo.toml": ('[package]\nname = "c"\nversion = "0.1.0"\nedition = "2021"\n'
+                             '[dependencies]\na = { path = "../a" }\n'),
+            "c/src/main.rs": 'fn main() { println!("c {}", a::N); }\n',
             "assets/word.txt": "one\n",
         })
         code, out, err = build(tree)
@@ -117,11 +150,8 @@ def main():
         # the context alike, so the copy finds nothing to do.
         write(tree, {"assets/word.txt": "three\n"})
         age(tree)
-        subprocess.run(
-            ["docker", "run", "--rm", "-v", f"{VOLUME}:/work", IMAGE, "sh", "-c",
-             "printf 'three\\n' > /work/src/assets/word.txt && "
-             "touch -t 202001010000 /work/src/assets/word.txt"],
-            check=True, capture_output=True, timeout=120)
+        in_volume("printf 'three\\n' > /work/src/assets/word.txt && "
+                  "touch -t 202001010000 /work/src/assets/word.txt")
         code, out, err = build(tree)
         named = "word.txt: FAILED" in err and "compiled from other bytes" in err
         expect("a unit kept from other bytes", (code, out, named), (1, "", True), err)
@@ -137,6 +167,22 @@ def main():
         write(tree, {"b/src/main.rs": main_rs()})
         code, out, err = build(tree)
         expect("its fix", (code, out), (0, "4 three"), err)
+
+        # The library changed and built for c alone; then b's outputs made
+        # newer than the library's, so cargo takes b for fresh.
+        code, out, err = build(tree, "c")
+        expect("the other binary", (code, out), (0, "c 4"), err)
+        write(tree, {"a/src/lib.rs": lib(5)})
+        code, out, err = build(tree, "c")
+        expect("the library changed, built for it alone", (code, out), (0, "c 5"), err)
+        in_volume("touch -d '2030-01-01 00:00:00' /work/target/release/deps/b-* "
+                  "/work/target/release/.fingerprint/b-*/* /work/target/release/b")
+        code, out, err = build(tree)
+        named = "compiled from other bytes" in err and ".rlib: FAILED" in err and "/liba-" in err
+        expect("a binary kept from another build of its library",
+               (code, out, named), (1, "", True), err)
+        code, out, err = build(tree)
+        expect("the build after it", (code, out), (0, "5 three"), err)
     finally:
         shutil.rmtree(tree)
         subprocess.run(["docker", "volume", "rm", "-f", VOLUME], capture_output=True)
