@@ -230,9 +230,10 @@ with none. Past it the client is answered 502, the request perhaps run.
   waited a minute. At twice the lease it is let go of once the node's
   tenants have been failed over (a lease and a tenth), so a client's
   retry of a read or a keyed write reaches the new primary. With
-  `make drill`'s lease of 2 s and a timeout of 4 s, the killed node's
-  tenants wrote again about 4 s after the kill, where the writers' own
-  5 s timeout had them at 4.9.
+  `make drill`'s lease of 2 s and a timeout of 4 s, the router failed the
+  killed node over about 2 s after the kill and its tenants' writers wrote
+  again at about 4 s, where at 60 s their own 5 s client timeout had them
+  at 4.9.
 - **What it costs.** An answer slower than the timeout to begin is a 502
   while the node goes on with it: a `create index` over a large
   collection, a `compact` of a large tenant, a large batch or a heavy
@@ -399,37 +400,65 @@ with no copy beside them, and a primary lost then loses them. Writes the
 old primary took that were never sent are dropped when it comes back as a
 replica (A node back).
 
-Seen in `make drill` (lease 2 s, three tenants a region, the node cut
-off the network and then killed, as a machine lost) -- three runs on one
-laptop, which are observations, not bounds: another machine's runs fell
-outside them. The killed node's own tenants wrote again 4.86, 4.92 and
-4.89 s after the kill (4.94 in a reviewer's run); the tenants whose
-replica it held, whose primaries went on writing, went at most 20, 17 and
-16 ms between two answered writes, and every other tenant 22, 19 and 18
-(28 and 30 elsewhere); none of 44 563 acknowledged writes was lost. The
-second kind
-waits up to a second (`SENT_WAIT`) where its replica's stream stops taking
-bytes: with the node killed alone rather than cut off, one such tenant went
-639 ms without an answered write.
-The lease and a tenth is the floor of the first kind; its tail is the
-promotion waiting on the replica's attempt to reconnect to the dead node,
-bounded by that connection's 5 s timeout (Known gaps). With the default
-lease of 5 s, count 6 to 11 s -- for nodes recorded by address: a node
+Seen in `make drill` (lease 2 s, the routers' upstream timeout 4 s, three
+tenants a region, the node cut off the network and then killed, as a
+machine lost) -- three runs on one laptop, which are observations, not
+bounds: another machine's runs fall outside them. The router failed the
+node over 1.92, 2.56 and 1.90 s after the kill -- a lease and a tenth
+after its last renewal, then the promotions; its own tenants' writers
+wrote again 3.90, 3.97 and 3.93 s after the kill, the request each had in
+flight to the dead node let go of at the upstream timeout (The routers'
+upstream timeout); the tenants whose replica it
+held, whose primaries went on writing, went at most 17, 18 and 17 ms
+between two answered writes, and every other tenant 16, 18 and 17; none
+of 41 577 acknowledged writes was lost. The second kind waits up
+to a second (`SENT_WAIT`) where its replica's stream stops taking bytes:
+with the node killed alone rather than cut off, one such tenant went 639 ms
+without an answered write. A node slow to answer, or to be found -- one
 recorded by a name its resolver is slow to refuse once the machine is gone
-stalls the router's leasing of the whole region (Known gaps, measured at
-30 s in CI).
+-- holds up its own renewal and its own failover alone: each grant goes out
+on a thread of its own, a name is looked up within a third of the lease,
+and a replica being promoted stops reconnecting to the dead node at once.
+With the default lease of 5 s, count about 6 s to the failover.
 
 What to do:
 
 1. `FenecNodeFailedOver` and `FenecAutoFailover` fire. Check the router's
    log (`failover of <node>: 200 {...}`) and `GET /_shard/tenants?region=<r>`:
    every tenant placed on a live node. `FenecAutoFailoverIncomplete` means
-   a tenant was not promoted -- its replica's node did not answer -- and
-   is unwritable: fix that node, then `POST /_shard/nodes/<n>/failover` on
-   the region's router.
+   tenants are still placed on the failed-over node, unwritable until it
+   answers again or they are failed over. The router's log names why each:
+   - its replica's node did not answer -- fix that node, then `POST
+     /_shard/nodes/<n>/failover` on the region's router;
+   - another operation held it (a move, a quota being set) -- it is failed
+     over once that ends, onto the copy it had then;
+   - its replica's node refused the copy, 409: a copy of another lineage
+     (one that never took its primary's image, or a file put in its place
+     by hand), or one lacking the history of the tenant's last failover
+     that has heard nothing from its primary since it was told to follow
+     it (an old primary's copy a repair pointed at the new primary). The
+     tenant waits for its node, where its rows are: bring the node back.
 2. The failed-over tenants now have no replica (`FenecTenantsWithoutReplica`)
    until a node takes one: bring the node back, or give them replicas
-   elsewhere with `POST /_shard/replicas` on the region's router.
+   elsewhere with `POST /_shard/replicas` on the region's router. No tenant
+   is given a replica while its primary does not answer; the router looks
+   again over the next four minutes, and that call asks at once.
+
+**Force.** `{"force": true}` on `POST /_shard/nodes/<n>/failover` (or on
+the copy's node, `POST /_admin/tenants/<t>/promote`) promotes whatever the
+copy holds, past the node's refusal; the router writes `failover_forced`
+and the node `promote_forced` into their audit logs, the node naming the
+refusal it went past. Reach for it only when the node is gone for good --
+its disk lost, no archive newer than the copy -- and the copy is the best
+there is: whatever the copy never took from the primary is lost, and a
+copy of another lineage is another file. Or when a file of another
+lineage was put in the primary's place on purpose (a tenant made again,
+another file restored there) and no read replica's look has taught the
+router its lineage yet. Never while the node may come back with its rows:
+once a copy is forced, the node back follows it as any old primary does,
+and whatever it held that the copy lacked is gone (A node back). Where an
+archive holds more than the copy, restore from it instead (Archives and
+restores).
 
 **By hand.** Without leases, or to fail a node over before its lease
 lapses because you know it is gone: `POST /_shard/nodes/<n>/failover` on
@@ -443,8 +472,8 @@ old tenants' files still primaries' files. As it takes its first lease the
 router runs a repair: each tenant it lost follows its new primary from
 this node -- this node becomes its replica -- and the writes it took that
 were never sent are gone, the trade any failover makes. Three `make drill`
-runs saw the repair 0.64, 0.79 and 0.54 s after the start (1.07 in a
-reviewer's run), the copies caught up 26 to 39 ms later.
+runs saw the repair 0.51, 0.51 and 0.50 s after the start (1.07 in a
+reviewer's run), the copies caught up 25 to 39 ms later.
 
 Check: `GET /_shard/tenants/<t>` names the node as `replica`;
 `FenecNodeFailedOver` and `FenecTenantsWithoutReplica` clear. A node whose
@@ -503,12 +532,12 @@ reach the primary would make two primaries in a partition.
    take `/_shard/` changes into a directory nobody else reads.
 
 Seen in `make drill` (lease 2 s), three runs: the region's writes stopped
-1.65, 1.64 and 1.67 s after its router was killed, as the leases lapsed
+1.67, 1.61 and 1.66 s after its router was killed, as the leases lapsed
 (1.31 in a reviewer's run); once the standby was promoted -- an operator's
-minute in production, 2.7 to 4.9 s in the drill -- writes resumed 0.43,
-0.25 and 0.47 s after the promotion, and the switch of units, a restart of
-the only router the region then had, left gaps of 0.57, 0.51 and 0.42 s
-between two answered writes.
+minute in production, 2.7 s in the drill -- writes resumed 0.45, 0.44 and
+0.51 s after the promotion, and the switch of units, a restart of the only
+router the region then had, left gaps of 0.51, 0.39 and 0.42 s between two
+answered writes.
 
 **The global router.** Tenants go on working: every region keeps its own
 directory. Creates, deletes and moves across regions are refused (503)
@@ -870,28 +899,12 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   (`/t/<t>/_replication/status` on the primary's node has each), and **no
   archive lag**: `fenec archive` exports nothing, and the node's
   `fenec_node_streams` says only whether an archiver is connected.
-- **A dead node's name stalls its region's leases.** The router renews
-  every node's lease in one round and checks for lapses once every grant
-  of the round has ended, and a grant looks its node's address up with no
-  bound of its own. A node recorded by a name that its resolver is slow to
-  refuse once the machine is gone holds the round up: the region's other
-  nodes go unrenewed, stop writing as their leases lapse, and are failed
-  over themselves when the round ends; every failover and repair after it
-  waits on the same lookup. In CI's Docker (GitHub's runner, whose Docker
-  DNS is slow to refuse a removed container's name) `make drill` measured
-  a 30.2 s failover and 18.0 s without a write for the region's other
-  tenants, nothing acknowledged lost; locally, with the routers' unknown
-  names sent to a resolver that never answers, 21 s and 8 s, and the
-  router's log failing the healthy node over. Until the router bounds the
-  lookup, record nodes by address, as every example here does.
-- **A failover's tail.** Promoting a tenant waits for its replica's
-  follower to stop, and a follower in the middle of reconnecting to the
-  dead node stops only when that attempt fails -- up to its 5 s connect
-  timeout where the dead machine's address swallows packets, as a machine
-  lost has it. Seen in `make drill`, the node cut off the network before
-  it is killed: 4.86, 4.92 and 4.89 s after the kill, every run waiting;
-  with the container killed alone, whose kernel refused the reconnect at
-  once, 2.2 and 2.5 s.
+- **A late grant.** A grant whose answer the router gave up on counts as
+  no grant at the router, but the node takes it whenever it reads it, and
+  grants carry no number: a node stalled with one unread -- a process
+  paused, a link delivering late -- can take writes for up to a lease after
+  its tenants were promoted elsewhere, two primaries for that while. The
+  fix is under way.
 - **Requests in flight to a dead machine** wait at the router for its
   upstream timeout (10 s in the kit, The routers' upstream timeout) where
   the machine's address swallows packets, unless the client gives up

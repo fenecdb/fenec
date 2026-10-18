@@ -2066,8 +2066,9 @@ make drill          # two regions: a node killed and back, a router killed, the 
     not believed, refusals and errors.</li>
   <li><b>The drill's figures</b>, lease 2 s, three runs on one laptop --
     what they saw, not bounds: a node cut off the network and killed, as a
-    machine lost, had its tenants writing again 4.86 to 4.92 s after the
-    kill, none of 44 563 acknowledged writes was lost, and a tenant
+    machine lost, was failed over 1.9 to 2.6 s after the kill, the other
+    tenants of its region never more than 18 ms between two answered
+    writes, none of 41 577 acknowledged writes was lost, and a tenant
     restored from its node's archive held exactly the rows acknowledged by
     the moment it was restored to.</li>
 </ul>
@@ -2104,18 +2105,15 @@ it again, kills a
 region's router and promotes its standby as an operator would, and marks a
 moment it later restores a tenant to from its node's archive. Then every
 acknowledged write is read back from each tenant's primary and its replica,
-and the times are printed. A killed node's tenants write again a lease and
-a tenth after their last renewal, plus however long the replica's
-reconnection to the dead node takes to fail, its 5 s timeout at most,
-which a dead machine's address makes it wait out: 4.86, 4.92 and 4.89 s
-in the three runs. The tenants whose replica it held went 16 to 20 ms
-between two answered writes at most, the rest 18 to 22; a reviewer's runs
-on another machine saw 4.94 s and 28-30 ms, so these are what three runs
-saw, not bounds. That holds for nodes recorded by address:
-the router leases a region's nodes in rounds and resolves a node's name
-with no bound of its own, so a dead node whose name its resolver is slow to
-refuse holds up every node's renewal -- 30 s to fail over and 18 s without
-a write for the region's other tenants in the drill on GitHub's runner. The
+and the times are printed. The router fails a killed node over a lease
+and a tenth after its last renewal and the promotions after: 1.92, 2.56 and 1.90 s
+after the kill in three runs at a lease of 2 s. Its tenants' writers write
+again once the request each had in flight to the dead node is let go of,
+at the router's upstream timeout -- 4 s in the drill, twice its lease, as
+the kit's routers run at twice theirs: 3.90, 3.97 and 3.93 s. The tenants whose
+replica it held went 17, 18 and 17 ms between two answered writes at
+most, the rest 16, 18 and 17; a reviewer's runs on another machine saw
+28-30 ms, so these are what three runs saw, not bounds. The
 runbook says what each alert means, the order to bring a deployment up in,
 how to rotate each token and upgrade with no downtime, and what is not
 measured yet.</p>

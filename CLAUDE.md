@@ -6596,32 +6596,30 @@ killed alone, its kernel closed its sockets and delivered what they held --
 and starts it again, kills a region's router and promotes its standby as
 the runbook does, restores a tenant from its node's archive to a moment it
 marked, and reads every acknowledged write back from each primary and its
-replica. Three runs at a lease of 2 s, what they saw and not bounds (a
-reviewer's machine saw a repair of 1.07 s, writes stopping 1.31 s after a
-router's kill, gaps of 28-30 ms and 4.94 s): 44 563 acknowledged, 0 lost;
-the node's tenants wrote again 4.86, 4.92 and 4.89 s after the kill, the
-tenant whose replica it held lost 20, 17 and 16 ms at most, every other
-tenant 22, 19 and 18; the repair 0.64, 0.79 and 0.54 s after the node's
-start; a region whose router was killed stopped writing 1.65, 1.64 and
-1.67 s after and wrote again 0.25-0.48 s after its standby's
-promotion. The 5 s tail is `Follower::halt` in `promote` waiting out the
-replica's reconnection to the dead node (`replication::connect`'s 5 s
-timeout, a dead machine's address swallowing the SYN): reported, not worked
-around. So is a worse one CI's run of the drill met: `Router::lease_round`
-checks for lapses only once every grant of its `thread::scope` has ended,
-and a grant's `upstream::dial` resolves the node's name unbounded
-(`to_socket_addrs`), so a dead node whose name its resolver is slow to
-refuse -- GitHub's Docker DNS for a removed container -- held the round up,
-the region's healthy nodes went unrenewed and stopped writing (18 s), and
-were failed over themselves; the dead node's tenants wrote again after 30 s
-(21 s and 8 s locally with the routers' unknown names sent to a resolver
-that never answers). The kit records nodes by address. The kit's routers
-run `--upstream-timeout` at twice the lease (`FENEC_UPSTREAM_TIMEOUT`, 10
-s), the drill's at twice its own: at fenec-shard's 60 s a request in
-flight to the killed node held its writer until the writer's own 5 s
-timeout, where at 4 s the drill's killed tenants wrote again after about
-4 s; past it a slow statement is a 502 while the node finishes it, and a
-request carrying `Fenec-Wait` is allowed the timeout plus its wait. When
+replica, the router's failover read off its log against the killed
+container's end (`failed_over_after`, both by the Docker VM's clock). Three
+runs at a lease of 2 s and an upstream timeout of 4 s, what they saw and
+not bounds (a reviewer's machine saw a repair of 1.07 s, writes stopping
+1.31 s after a router's kill and gaps of 28-30 ms): 41 577
+acknowledged, 0 lost; the node failed over 1.92, 2.56 and 1.90 s after the
+kill, its tenants' writers writing again 3.90, 3.97 and 3.93 s after the
+kill, the tenant whose replica it held losing 17, 18 and 17 ms at most, every other tenant
+16, 18 and 17; the repair 0.51, 0.51 and 0.50 s after the node's start; a region
+whose router was killed stopped writing 1.67, 1.61 and 1.66 s after and wrote
+again 0.43-0.51 s after its standby's promotion. The writers' figure
+is the upstream timeout's, not the failover's: a writer's request in
+flight to the dead node waits there until the router lets it go, which at
+fenec-shard's 60 s was the writer's own 5 s client timeout, every run's
+4.86-4.92 s -- quoted at first as a promotion waiting out the replica's
+reconnect. CI's runs met a worse one before #340 -- a dead node's name its
+resolver was slow to refuse held up the router's whole lease round, the
+region's healthy nodes unrenewed and failed over, 26.5-31.4 s to write again
+and 12-18 s without a write for a tenant on a healthy node, the repair
+missing its 60 s in four of six runs -- which #340 fixed (the lease
+paragraph above). The kit's routers run `--upstream-timeout` at twice the
+lease (`FENEC_UPSTREAM_TIMEOUT`, 10 s), the drill's at twice its own; past
+it a slow statement is a 502 while the node finishes it, and a request
+carrying `Fenec-Wait` is allowed the timeout plus its wait. When
 the drill fails it prints the last 300 lines of every router's and node's
 log (`DRILL_LOG_LINES`), since the cleanup takes the containers and CI
 leaves nothing else to read. CI's `deploy` job runs both checks.

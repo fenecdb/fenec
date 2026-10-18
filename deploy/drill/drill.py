@@ -27,9 +27,10 @@ Then, in turn:
     node kill       the us node holding the most primaries cut off the network
                     and then killed (`docker kill`), as a machine lost: no FIN
                     or reset reaches its peers, and its replicas keep what its
-                    sockets had sent; its tenants write again on their
-                    replicas, timed, and the tenants whose replica it held
-                    and the rest timed apart
+                    sockets had sent; the router's failover timed off its log
+                    (Docker's clock), its tenants' writes again on their
+                    replicas, and the tenants whose replica it held and the
+                    rest timed apart
     node back       it starts again: the router's repair has its stale copies
                     follow the new primaries, which they catch up with
     router kill     `docker kill` of eu's router: its standby forwards until the
@@ -562,10 +563,14 @@ def kill_node(writers, tenants, results):
     replica_gap = max((longest_gap(w, called, now) for w in writers if w.tenant in replicated), default=0)
     others = [w for w in writers if w.tenant not in primaries and w.tenant not in replicated]
     other_gap = max(longest_gap(w, called, now) for w in others)
+    failed_over = failed_over_after(REGIONS[region]["routers"][0], victim)
     results["node_kill"] = {"node": victim, "tenants": times, "lease_s": LEASE,
+                            "failed_over_after_kill_ms": failed_over,
                             "replica_tenants": replicated,
                             "replica_tenants_longest_gap_ms": round(replica_gap * 1000),
                             "other_tenants_longest_gap_ms": round(other_gap * 1000)}
+    say(f"  the router failed {victim} over {failed_over} ms after the kill" if failed_over is not None
+        else f"  the router's log names no failover of {victim}")
     for t, v in times.items():
         say(f"  {t}: writes again {v['after_kill_ms']} ms after the kill "
             f"(no write answered for {v['blocked_ms']} ms)")
@@ -573,6 +578,27 @@ def kill_node(writers, tenants, results):
         say(f"  tenants whose replica it held: longest gap {replica_gap * 1000:.0f} ms")
     say(f"  every other tenant: longest gap {other_gap * 1000:.0f} ms")
     return victim, primaries
+
+
+def docker_time(stamp):
+    """A Docker timestamp (RFC 3339, nanoseconds) as seconds since 1970."""
+    head, _, frac = stamp.strip().rstrip("Z").partition(".")
+    return datetime.fromisoformat(f"{head}.{(frac or '0')[:6]}").replace(tzinfo=timezone.utc).timestamp()
+
+
+def failed_over_after(router, victim):
+    """Milliseconds from the victim's end to the router's log saying it
+    failed the victim over, both by the Docker VM's clock -- the writers'
+    figures carry the request each had in flight to the dead node, which
+    the router lets go of only at its upstream timeout. None where the log
+    names no failover."""
+    ended = docker_time(docker("inspect", "-f", "{{.State.FinishedAt}}", cname(victim)))
+    r = subprocess.run(["docker", "logs", "--timestamps", cname(router)],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+    after = [docker_time(line.split(" ", 1)[0]) - ended for line in r.stdout.splitlines()
+             if f"failover of `{victim}`: 200" in line]
+    after = [t for t in after if t > 0]
+    return round(min(after) * 1000) if after else None
 
 
 def node_back(victim, primaries, writers, results):
@@ -807,7 +833,8 @@ def summary(results, ok):
     if "node_kill" in results:
         n = results["node_kill"]
         ms = [v["after_kill_ms"] for v in n["tenants"].values()]
-        print(f"node {n['node']} cut off and killed (lease {n['lease_s']} s)   its tenants wrote again after "
+        print(f"node {n['node']} cut off and killed (lease {n['lease_s']} s)   failed over after "
+              f"{n['failed_over_after_kill_ms']} ms, its tenants wrote again after "
               f"{min(ms)}-{max(ms)} ms; tenants it held the replica of, longest gap "
               f"{n['replica_tenants_longest_gap_ms']} ms; others {n['other_tenants_longest_gap_ms']} ms")
     if "node_back" in results:
