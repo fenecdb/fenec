@@ -17,15 +17,19 @@ What it holds:
     region, two nodes and a tenant made through the global router, rows
     written through the router and its standby, a compact (a file renamed
     under the system call filter), a vector graph checkpointed at the stop;
-  - no token is on any process's command line (`ps`), and no other user
-    reads one out of /proc/<pid>/environ;
-  - LimitNOFILE and TasksMax reach the process, and `systemd-analyze
+  - no token is on any process's command line (`ps`), and no other user --
+    another role's among them -- reads one out of /proc/<pid>/environ;
+  - each runs as its role's user; LimitNOFILE and TasksMax reach the
+    process; /proc/meminfo reads in the node's namespace (the compact
+    before a file outgrows the page cache asks it); `systemd-analyze
     security` puts each fenecdb unit at 2.0 or below;
   - a stop syncs the node within its timeout and exits clean, and the data
     are there after the start; the archiver stops clean, its sealed archive
-    verifies with the key the unit hands it, and the bucket sync and the
-    tunnel find their credentials (cloudflared and rclone are stand-ins:
-    deploy/test/stub.py);
+    verifies with the key the unit hands it; the bucket sync, with real
+    rclone, copies the archive while rows are written to its tenant -- the
+    copy verifying as an archive -- and says when it last succeeded, for
+    the alert; the tunnel finds its credentials (cloudflared is a stand-in:
+    deploy/test/stub.py; its rules are deploy/test/ingress.py's);
   - the runbook's router promotion, by the units: the standby promoted, its
     unit switched, the old router back as its standby.
 
@@ -153,11 +157,18 @@ def install(m, files):
           "cp /kit/systemd/*.service /kit/systemd/*.timer /etc/systemd/system/ && "
           "cp /kit/RUNBOOK.md /usr/local/share/doc/fenecdb/ 2>/dev/null; "
           "install -m 0755 /kit/test/stub.py /usr/bin/cloudflared && "
-          "install -m 0755 /kit/test/stub.py /usr/bin/rclone")
+          # The bucket: a directory, rclone's `local` remote standing for S3,
+          # writable by the sync alone, through a drop-in of the test's.
+          "install -d -o fenec-sync -g fenec-sync -m 0700 /srv/bucket && "
+          "mkdir -p '/etc/systemd/system/fenec-archive-sync@.service.d' && "
+          "printf '[Service]\\nReadWritePaths=/srv/bucket\\n' "
+          "> '/etc/systemd/system/fenec-archive-sync@.service.d/test-bucket.conf' && "
+          # node_exporter's textfile collector, writable by the sync.
+          "install -d -o root -g fenec-sync -m 0775 /var/lib/prometheus/node-exporter")
     for path, text in files.items():
         # Secrets 0600 root's; cloudflared's config, which names none, is
         # read by its DynamicUser and so 0644, as the unit says.
-        mode = "0644" if path.endswith("config.yml") else "0600"
+        mode = "0644" if path.endswith(("config.yml", "archive-sync.env")) else "0600"
         docker("exec", "-i", f"{RUN}-{m}", "sh", "-c", f"cat > {path} && chmod {mode} {path}", input=text)
     sh(m, "systemctl daemon-reload")
 
@@ -197,10 +208,11 @@ def global_env():
 
 
 def archive_env():
-    return envfile("archive.env", {
-        "FENEC_REPLICATION_TOKEN": TOKENS["repl"],
-        "FENEC_ARCHIVE_REMOTE": "test-remote:fenecdb-archive/eu",
-    })
+    return envfile("archive.env", {"FENEC_REPLICATION_TOKEN": TOKENS["repl"]})
+
+
+def archive_sync_env():
+    return envfile("archive-sync.env", {"FENEC_ARCHIVE_REMOTE": "test-remote:/srv/bucket/eu"})
 
 
 def archive_node_env(machine):
@@ -247,7 +259,7 @@ def wire_up():
                    {"addr": f"{m}:8081", "token": TOKENS[f"admin-{name}"], "region": "eu", "zone": zone})
         check(s in (200, 201), f"node {name}: {s} {b}")
     s, b = ask("m1", "PUT", "http://m1:8091/_shard/tenants/acme", "/etc/fenecdb/global.env:FENEC_SHARD_TOKEN",
-               {"region": "eu", "schema": "create collection notes (n int, e vector<2> @hnsw(cosine))"})
+               {"region": "eu", "schema": "create collection notes (n int, title text, e vector<2> @hnsw(cosine))"})
     check(s == 201 and "replica_on" in b, f"tenant acme: {s} {b}")
     until(lambda: "fenec_router_following 1" in ask("m2", "GET", "http://m2:8091/_metrics",
                                                      "/etc/fenecdb/global.env:FENEC_SHARD_TOKEN")[1],
@@ -263,11 +275,19 @@ def write(m, first, n):
 
 
 def count(m, port=8090):
-    """The rows through `m`'s router, or None while it does not answer 200
-    -- a node just started holds no lease until the router's next round."""
+    """The rows of the test's own ids (under 1000; the writes beside the
+    bucket sync take ids from 1000) through `m`'s router, or None while it
+    does not answer 200 -- a node just started holds no lease until the
+    router's next round."""
     s, b = ask(m, "POST", f"http://{m}:{port}/t/acme/query", "/etc/fenecdb/node.env:FENEC_HTTP_TOKEN",
-               {"query": "get notes select count() as c"})
+               {"query": "get notes select count() as c where id < 1000"})
     return json.loads(b)[0]["c"] if s == 200 else None
+
+
+ROLES = {"fenec-node": "fenec-node", "fenec-router": "fenec-router", "fenec-router-standby": "fenec-router",
+         "fenec-global": "fenec-router", "fenec-global-standby": "fenec-router",
+         "fenec-archive@eu-a": "fenec-archive", "fenec-archive@eu-b": "fenec-archive"}
+USERS = ["nobody", "fenec-node", "fenec-router", "fenec-archive", "fenec-sync"]
 
 
 def secrets_kept():
@@ -276,24 +296,37 @@ def secrets_kept():
         args = sh(m, "ps -eo args")
         for name, t in TOKENS.items():
             check(t not in args, f"token {name} is on a command line on {m}:\n{args}")
-        for unit in ["fenec-node", "fenec-router", "fenec-router-standby", "fenec-global",
-                     "fenec-global-standby", "fenec-archive@eu-a", "fenec-archive@eu-b"]:
+        for unit, role in ROLES.items():
             pid = sh(m, f"systemctl show -p MainPID --value {unit} 2>/dev/null || echo 0").strip()
             if pid in ("", "0"):
                 continue
-            out = sh(m, f"setpriv --reuid=nobody --regid=nogroup --clear-groups "
-                        f"cat /proc/{pid}/environ >/dev/null 2>&1 && echo READ || echo REFUSED")
-            check(out.strip() == "REFUSED", f"nobody read {unit}'s environment on {m}")
-        modes = sh(m, "stat -c '%a %U %n' /etc/fenecdb/*.env /etc/fenecdb/*.key")
+            check(show(m, unit, "User") == role, f"{unit} runs as {show(m, unit, 'User')}, not {role}")
+            # Every other role's user too: a process reads the environment
+            # of its own user's processes, ProtectProc or not, so the roles
+            # sharing a machine are users of their own.
+            for user in USERS:
+                if user == role:
+                    continue
+                out = sh(m, f"setpriv --reuid={user} --regid={'nogroup' if user == 'nobody' else user} "
+                            f"--init-groups cat /proc/{pid}/environ >/dev/null 2>&1 && echo READ || echo REFUSED")
+                check(out.strip() == "REFUSED", f"{user} read {unit}'s environment on {m}")
+        # The secrets' files; archive-sync.env holds none and is 0644.
+        modes = sh(m, "stat -c '%a %U %n' $(ls /etc/fenecdb/*.env /etc/fenecdb/*.key "
+                      "/etc/fenecdb/rclone.conf 2>/dev/null | grep -v archive-sync.env)")
         check(all(l.startswith("600 root") for l in modes.splitlines()), f"env files on {m}:\n{modes}")
-    say("no token on a command line, no environment readable by another user, env files and archive key 0600 root's")
+    say("no token on a command line, each unit its role's user, no environment readable by another user "
+        "or role, env files and archive key 0600 root's")
 
 
 def limits_and_exposure():
     pid = sh("m1", "systemctl show -p MainPID --value fenec-node").strip()
     lim = sh("m1", f"grep 'Max open files' /proc/{pid}/limits")
-    check("16384" in lim, f"the node's LimitNOFILE: {lim}")
-    check(show("m1", "fenec-node", "TasksMax") == "4096", "the node's TasksMax")
+    check("65536" in lim, f"the node's LimitNOFILE: {lim}")
+    check(show("m1", "fenec-node", "TasksMax") == "16384", "the node's TasksMax")
+    # ProcSubset=pid took /proc/meminfo away, and with it the room the page
+    # cache has (cache::room): the compact before a file outgrows it was off.
+    meminfo = sh("m1", f"nsenter -t {pid} -m head -1 /proc/meminfo || true")
+    check(meminfo.startswith("MemTotal:"), f"/proc/meminfo in the node's namespace: {meminfo!r}")
     scores = {}
     for m, units in [("m1", ["fenec-node", "fenec-router", "fenec-global", "fenec-archive@eu-b"]),
                      ("m2", ["fenec-router-standby", "fenec-global-standby", "fenec-archive@eu-a"])]:
@@ -302,7 +335,7 @@ def limits_and_exposure():
             score = float(re.search(r"level for .*: ([0-9.]+)", out).group(1))
             scores[u] = score
             check(score <= 2.0, f"{u}'s exposure {score}: {out}")
-    say("LimitNOFILE 16384 and TasksMax 4096 on the node; exposure "
+    say("LimitNOFILE 65536 and TasksMax 16384 on the node, /proc/meminfo readable in its namespace; exposure "
         + ", ".join(f"{u} {s}" for u, s in scores.items()))
 
 
@@ -332,15 +365,36 @@ def archive_checks():
     took = time.monotonic() - began
     check(show("m2", "fenec-archive@eu-a", "Result") == "success", "the archiver's stop")
     sh("m2", "systemctl start fenec-archive@eu-a")
-    sh("m2", "systemctl start fenec-archive-sync@eu-a.service")
-    j = journal("m2", "fenec-archive-sync@eu-a.service")
-    check(show("m2", "fenec-archive-sync@eu-a.service", "Result") == "success"
-          and "rclone.conf reads" in j and "/var/lib/fenecdb/archive/eu-a lists" in j,
-          f"the bucket sync:\n{j}")
+    # The bucket sync with real rclone, while the tenant is written as fast
+    # as it takes rows of 64 KB: its newest segment grows as rclone reads
+    # it, which without --local-no-check-updated failed every run ("source
+    # file is being updated").
+    writer = subprocess.Popen(
+        ["docker", "exec", f"{RUN}-m1", "python3", "/kit/test/writes.py", "http://m1:8090/t/acme/query",
+         "/etc/fenecdb/node.env:FENEC_HTTP_TOKEN", "/tmp/stop-writes", "120", "1000"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(1)
+        for _ in range(3):
+            sh("m2", "systemctl start fenec-archive-sync@eu-a.service", check_=False)
+            result = show("m2", "fenec-archive-sync@eu-a.service", "Result")
+            j = journal("m2", "fenec-archive-sync@eu-a.service")
+            check(result == "success", f"the bucket sync: {result}\n{j[-3000:]}")
+    finally:
+        sh("m1", "touch /tmp/stop-writes", check_=False)
+        out, err = writer.communicate(timeout=60)
+    check(writer.returncode == 0 and int(out.strip() or 0) > 10, f"the writes beside the sync: {out} {err}")
+    copied = sh("m2", "FENEC_KEY_FILE=/etc/fenecdb/archive.key fenec verify --tenants /srv/bucket/eu/eu-a")
+    check("acme" in copied, f"the bucket's copy does not verify as an archive: {copied}")
+    stamp = sh("m2", "cat /var/lib/prometheus/node-exporter/fenec-archive-sync-eu-a.prom")
+    m_ = re.fullmatch(r'fenec_archive_sync_last_success_timestamp_seconds\{node="eu-a"\} (\d+)\n', stamp)
+    check(m_ and abs(int(m_.group(1)) - int(sh("m2", "date +%s"))) < 120,
+          f"the sync's success, for node_exporter: {stamp!r}")
     sh("m2", "systemctl enable --now fenec-archive-sync@eu-a.timer")
     check(active("m2", "fenec-archive-sync@eu-a.timer") == "active", "the sync's timer")
     say(f"archive: sealed, verified with the key and refused without it; the archiver stopped clean in "
-        f"{took:.2f} s; the bucket sync read its credential and the archive")
+        f"{took:.2f} s; rclone copied it to the bucket three times while it was written, the copy "
+        f"verifying, and the sync's success written for node_exporter")
 
 
 def tunnel():
@@ -393,7 +447,8 @@ def main():
                        "/etc/fenecdb/global.env": global_env(),
                        "/etc/fenecdb/archive.env": archive_env(),
                        "/etc/fenecdb/archive-eu-a.env": archive_node_env("m1"),
-                       "/etc/fenecdb/rclone.conf": "[test-remote]\ntype = memory\n"})
+                       "/etc/fenecdb/archive-sync.env": archive_sync_env(),
+                       "/etc/fenecdb/rclone.conf": "[test-remote]\ntype = local\n"})
         for m in ["m1", "m2"]:
             sh(m, "fenec key /etc/fenecdb/archive.key >/dev/null")
         verify_units()

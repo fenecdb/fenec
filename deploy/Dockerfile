@@ -6,7 +6,7 @@
 # `kit` is fenec-server, fenec-shard and fenec on Alpine -- a shell for the
 # drill's checks, nothing else -- one container a process, as the drill
 # runs a deployment's machines. `systemd` is the same binaries where the
-# units go, under a real systemd (deploy/test/systemd.sh boots it).
+# units go, under a real systemd (deploy/test/units.py boots it).
 #
 # Built as the repository's Dockerfile builds fenec-server: statically with
 # musl, so the binaries run on any Linux, glibc or not, and on the same
@@ -41,11 +41,12 @@ CMD ["fenec-server", "--help"]
 
 # --------------------------------------------------------------- systemd
 # Debian, since systemd: python3 is the checks' HTTP client, procps their
-# `ps`.
+# `ps`, rclone the bucket sync's own (its stand-in passed a run real rclone
+# failed: a segment growing as it read it).
 FROM python:3.13-slim AS systemd
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends systemd systemd-sysv procps && \
+    apt-get install -y --no-install-recommends systemd systemd-sysv procps rclone && \
     rm -rf /var/lib/apt/lists/* && \
     # Nothing a container boots needs these, and some wait for hardware.
     systemctl mask systemd-udevd.service systemd-udevd-kernel.socket \

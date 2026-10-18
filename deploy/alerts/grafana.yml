@@ -2,7 +2,9 @@
 # Prometheus data source Grafana reads fenecdb's metrics through (uid
 # `prometheus`, as monitoring/grafana/provisioning/datasources/prometheus.yml
 # provisions it). Copy it into Grafana's provisioning/alerting/ beside
-# monitoring/'s own rule.
+# monitoring/'s own rule. Evaluated every 30 s, the shortest `for` among
+# them: a rule's `for` is counted in evaluations, so at a minute's interval
+# a `for: 30s` waited a minute.
 #
 # Each rule is the Prometheus rule's expression, which returns the series
 # that are alerting and nothing else, and a condition that fires for every
@@ -16,8 +18,170 @@ groups:
   - orgId: 1
     name: fenecdb-deployment
     folder: fenecdb
-    interval: 1m
+    interval: 30s
     rules:
+      - uid: fenec-node-down
+        title: FenecNodeDown
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: up{job="fenecdb-node"} == 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.instance }} does not answer: its router fails its tenants over as its lease lapses, and its replicas are gone"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      - uid: fenec-primary-router-down
+        title: FenecPrimaryRouterDown
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: up{job=~"fenecdb-router|fenecdb-global"} == 0 and on (instance) last_over_time(fenec_router_following[1h]) == 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Router {{ $labels.instance }} keeps its directory and does not answer: promote its standby"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - uid: fenec-standby-router-down
+        title: FenecStandbyRouterDown
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: up{job=~"fenecdb-router|fenecdb-global"} == 0 and on (instance) last_over_time(fenec_router_following[1h]) == 1
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Standby router {{ $labels.instance }} does not answer: its directory has no standby to promote"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - uid: fenec-router-down
+        title: FenecRouterDown
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: up{job=~"fenecdb-router|fenecdb-global"} == 0 unless on (instance) last_over_time(fenec_router_following[1h])
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Router {{ $labels.instance }} does not answer, and has not in the hour"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - uid: fenec-scrape-missing
+        title: FenecScrapeMissing
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: absent(up{job="fenecdb-node"}) or absent(up{job="fenecdb-router"}) or absent(up{job="fenecdb-global"})
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus scrapes no target of job {{ $labels.job }}: every alert over it is blind"
+          runbook: deploy/RUNBOOK.md#alerts
+      - uid: fenec-connections-near-ceiling
+        title: FenecConnectionsNearCeiling
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: fenec_connections > 3200 or fenec_router_connections > 800
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} holds {{ $values.A.Value }} connections, near its --max-connections"
+          runbook: deploy/RUNBOOK.md#adding-a-node
       - uid: fenec-node-failed-over
         title: FenecNodeFailedOver
         condition: B
@@ -57,7 +221,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: increase(fenec_router_auto_failovers_total{outcome="failed"}[10m]) > 0
+              expr: fenec_router_auto_failovers_total{outcome="failed"} > 0 and on (instance) max by (instance) (fenec_router_node_failed_over) == 1
           - refId: B
             datasourceUid: __expr__
             model:
@@ -111,7 +275,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: fenec_router_lease_age_seconds > 3
+              expr: max_over_time(fenec_router_lease_age_seconds[5m]) > 3 unless on (instance, node) fenec_router_node_failed_over == 1
           - refId: B
             datasourceUid: __expr__
             model:
@@ -120,7 +284,7 @@ groups:
               expression: is_number($A)
         noDataState: OK
         execErrState: Error
-        for: 30s
+        for: 0s
         labels:
           severity: warning
         annotations:
@@ -462,7 +626,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: fenec_replicas == 0 and on (instance) fenec_router_following == 0
+              expr: fenec_replicas{job="fenecdb-router"} == 0 and on (instance) fenec_router_following{job="fenecdb-router"} == 0
           - refId: B
             datasourceUid: __expr__
             model:
@@ -585,6 +749,33 @@ groups:
         annotations:
           summary: "{{ $labels.instance }}'s disk refused a write: it takes none until restarted"
           runbook: deploy/RUNBOOK.md#errors-and-refusals
+      - uid: fenec-archive-sync-stale
+        title: FenecArchiveSyncStale
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: time() - fenec_archive_sync_last_success_timestamp_seconds > 1800
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: math
+              expression: is_number($A)
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.node }}'s archive has not reached the bucket in {{ $values.A.Value }} s"
+          runbook: deploy/RUNBOOK.md#archives-and-restores
       - uid: fenec-archiver-disconnected
         title: FenecArchiverDisconnected
         condition: B

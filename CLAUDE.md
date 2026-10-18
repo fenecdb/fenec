@@ -59,8 +59,8 @@ make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP 
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js and build.py's rules
 make grafana-check # monitoring/'s compose (Docker): both data dashboards, Infinity's and the Grafana plugin's (integrations/grafana), and its alert rule held to fenec-server
-make deploy-check  # deploy/: promtool over the alert rules and their tests, then every systemd unit in two privileged containers booting systemd -- verified, started, used, a standby router promoted by the units
-make drill         # deploy/'s failover drill (Docker): two regions, a node killed and back, a router killed and its standby promoted, the global routers cut off, a restore; lost must be 0 (DRILL_LEASE, DRILL_KEEP=1)
+make deploy-check  # deploy/: promtool over the alert rules and their tests, the tunnel's rules asked of cloudflared, then every systemd unit in two privileged containers booting systemd -- verified, started, used, the archive copied by real rclone, a standby router promoted by the units
+make drill         # deploy/'s failover drill (Docker): two regions, a node cut off and killed and back, a router killed and its standby promoted, the global routers cut off, a restore; lost must be 0 (DRILL_LEASE, DRILL_KEEP=1)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
@@ -6519,7 +6519,35 @@ an environment file systemd reads as root (`EnvironmentFile=`, 0600), the
 archive key and the tunnel's and rclone's credentials through
 `LoadCredential=`, and never on a command line, which `ps` shows every user
 (every token has a variable, and an empty one is none: An empty token is
-no token, above). A standby router's
+no token, above). Each role runs as a user of its own (`fenec-node`,
+`fenec-router`, `fenec-archive`, `fenec-sync`): a process reads
+`/proc/<pid>/environ` of its own user's processes, which `ProtectProc=`
+hides only from other users, so one `fenec` user let rclone read the
+archiver's replication token. No `ProcSubset=pid`: it hid `/proc/meminfo`,
+and with it `cache::room`, the compact before a file outgrows the page
+cache. The tunnel's hostname is public, so `cloudflared/config.yml` sends a
+tenant's paths alone to the router and answers 404 to the rest -- a
+tenant's `/t/<t>/_replication` first, which the router would forward to the
+node and the one replication token opens: let through, it was every
+tenant's rows behind one token from anywhere. cloudflared matches the path
+decoded, so `%5F` and `%2F` meet that rule, and `deploy/test/ingress.py`
+asks cloudflared's own matcher (`tunnel ingress rule`) of 28 paths. Access
+in front says who: the entry sends a service token
+(`ACCESS_CLIENT_ID`/`ACCESS_CLIENT_SECRET`, both or neither) and the router
+drops `CF-Access-Client-*` before a node (`forwarded_headers`, which
+`forward` now shares with `forward_near`: its own copy of the filter kept
+the token once only the shared one dropped it). The bucket copy is `rclone
+copy` (never `sync`: a lost archive takes nothing from the bucket, whose
+lifecycle rule expires what `--keep` let go of) with
+`--local-no-check-updated` -- rclone refused a segment growing as it read
+it, so a busy tenant's newest segment never reached the bucket, every run
+failing in the test -- and each success written into node_exporter's
+textfile collector, which `FenecArchiveSyncStale` reads. The rules read
+Prometheus's `up` by job for processes that export nothing because they
+are down, a router's role (primary, standby) taken from its last
+`fenec_router_following`; `tests/datadog.rs` passes over `job` and
+`instance` matchers, holds the jobs to the rules' scrape config and the
+textfile metric to the unit writing it. A standby router's
 unit carries its primary's flags and the same directory file and conflicts
 with the primary's, and a promotion is `POST /_replication/promote` and the
 switch of units at once: `--replica-of` makes any file follow again
@@ -6529,7 +6557,11 @@ deploy-check` runs promtool over the rules and their tests, then boots
 systemd in two privileged containers (`deploy/Dockerfile`'s `systemd`, whose
 boot script makes `/` shared first: systemd in a container leaves it
 private, and `LoadCredential=` then hands a service an empty directory) and
-installs, verifies, starts and uses every unit (`deploy/test/units.py`);
+installs, verifies, starts and uses every unit (`deploy/test/units.py`:
+real rclone into a `local` remote while a tenant takes 64 KB rows as fast
+as it can, the copy verified as an archive; every role's user refused
+every other role's environment; `/proc/meminfo` read in the node's mount
+namespace);
 fenec-shard's `tests/datadog.rs` holds every metric and label value the
 rules read to a scrape of every kind of process, a leasing router and a
 replicated node among them, and Grafana's rules to Prometheus's. `make
@@ -6539,14 +6571,16 @@ two nodes in two zones under `--lease --replicas --sync always`, an
 archiver a node, the global router and its standby -- every token in the
 environment and no port fixed, a writer a tenant putting rows by id 1..K
 through the routers; it cuts the global routers off (each region writes
-on), `docker kill`s a node and starts it again, kills a region's router and
-promotes its standby as the runbook does, restores a tenant from its node's
-archive to a moment it marked, and reads every acknowledged write back from
-each primary and its replica. Three runs at a lease of 2 s: 42 202
-acknowledged, 0 lost; a killed node's tenants wrote again 2.5, 4.9 and 5.0 s
-after the kill, every other tenant's longest gap 21 ms; the repair 0.4-0.7
-s after the node's start; a region whose router was killed stopped writing
-1.35-1.58 s after and wrote again 0.11-0.48 s after its standby's
+on), cuts a node off the network and `docker kill`s it -- a machine lost:
+killed alone, its kernel closed its sockets and delivered what they held --
+and starts it again, kills a region's router and promotes its standby as
+the runbook does, restores a tenant from its node's archive to a moment it
+marked, and reads every acknowledged write back from each primary and its
+replica. Three runs at a lease of 2 s: 44 563 acknowledged, 0 lost; the
+node's tenants wrote again 4.86-4.92 s after the kill, the tenant whose
+replica it held lost 20 ms at most, every other tenant 22; the repair
+0.5-0.8 s after the node's start; a region whose router was killed stopped
+writing 1.64-1.67 s after and wrote again 0.25-0.48 s after its standby's
 promotion. The 5 s tail is `Follower::halt` in `promote` waiting out the
 replica's reconnection to the dead node (`replication::connect`'s 5 s
 timeout, a dead machine's address swallowing the SYN): reported, not worked

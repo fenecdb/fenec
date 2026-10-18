@@ -368,7 +368,9 @@ fn rules(text: &str, name_key: &str) -> Vec<(String, String)> {
 }
 
 /// Each metric an expression reads, and the label values its selector
-/// matches: `name{label="v"}`, and `label=~"a|b"` as `a` and `b` each.
+/// matches: `name{label="v"}`, and `label=~"a|b"` as `a` and `b` each --
+/// but `job` and `instance`, which Prometheus puts on every series it
+/// scrapes and no server sends ([`jobs`] holds the jobs).
 fn selectors(expr: &str) -> Vec<(String, Vec<(String, String)>)> {
     let b = expr.as_bytes();
     let mut out = Vec::new();
@@ -390,6 +392,9 @@ fn selectors(expr: &str) -> Vec<(String, Vec<(String, String)>)> {
                     .unwrap_or_else(|| panic!("a matcher this reads no label of: {m}"));
                 // A negative one says nothing a scrape could show.
                 assert!(!label.ends_with('!'), "`{m}`: hold it here before using it");
+                if matches!(label.trim(), "job" | "instance") {
+                    continue;
+                }
                 for v in value.trim_matches('"').split('|') {
                     matchers.push((label.trim().to_string(), v.to_string()));
                 }
@@ -400,6 +405,29 @@ fn selectors(expr: &str) -> Vec<(String, Vec<(String, String)>)> {
     }
     out
 }
+
+/// The jobs an expression names (`job="a"`, `job=~"a|b"`).
+fn jobs(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, _) in expr.match_indices("job=") {
+        let rest = expr[i + 4..].trim_start_matches('~');
+        let Some(quoted) = rest.strip_prefix('"') else {
+            continue;
+        };
+        let value = &quoted[..quoted.find('"').expect("a job's name left open")];
+        out.extend(value.split('|').map(str::to_string));
+    }
+    out
+}
+
+/// Metrics a rule reads that no fenecdb process exports, and where each
+/// comes from instead.
+const FROM_ELSEWHERE: [(&str, &str); 1] = [(
+    // A run of the bucket sync that succeeded, into node_exporter's
+    // textfile collector.
+    "fenec_archive_sync_last_success_timestamp_seconds",
+    "../../deploy/systemd/fenec-archive-sync@.service",
+)];
 
 #[test]
 fn the_alert_rules_read_only_what_the_servers_expose() {
@@ -416,14 +444,41 @@ fn the_alert_rules_read_only_what_the_servers_expose() {
          expression, in its order"
     );
 
+    // The scrape jobs the file's header declares: a rule naming any other
+    // matches no series, and a target-down rule over it never fires.
+    let file = std::fs::read_to_string(root.join("fenecdb.rules.yml")).unwrap();
+    let declared: BTreeSet<&str> = file
+        .lines()
+        .filter_map(|l| l.split_once("job_name:"))
+        .map(|(_, rest)| rest.split_whitespace().next().unwrap())
+        .collect();
+    assert!(declared.contains("fenecdb-node"), "{declared:?}");
+
     let mut read = BTreeSet::new();
     for (alert, expr) in &prometheus {
         let found = selectors(expr);
+        // Prometheus's own `up` is what a process that answers nothing
+        // leaves to read.
         assert!(
-            !found.is_empty(),
-            "{alert} reads no fenec_ metric: `{expr}`"
+            !found.is_empty() || expr.contains("up{"),
+            "{alert} reads neither a fenec_ metric nor `up`: `{expr}`"
         );
+        for job in jobs(expr) {
+            assert!(
+                declared.contains(job.as_str()),
+                "{alert} names job `{job}`, which the scrape config does not: {declared:?}"
+            );
+        }
         for (name, matchers) in found {
+            if let Some((_, source)) = FROM_ELSEWHERE.iter().find(|(m, _)| *m == name) {
+                let unit = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(source);
+                assert!(
+                    std::fs::read_to_string(&unit).unwrap().contains(&name),
+                    "{alert} reads {name}, which {source} no longer writes"
+                );
+                read.insert(name);
+                continue;
+            }
             assert!(
                 exposed.contains_key(&name),
                 "{alert} reads {name}, which no server exposes: {:?}",
@@ -457,6 +512,8 @@ fn the_alert_rules_read_only_what_the_servers_expose() {
         "fenec_router_requests_total",
         "fenec_statement_errors_total",
         "fenec_node_streams",
+        "fenec_connections",
+        "fenec_archive_sync_last_success_timestamp_seconds",
     ] {
         assert!(read.contains(want), "no alert reads {want}");
     }

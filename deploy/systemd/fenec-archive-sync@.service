@@ -1,18 +1,30 @@
 # A node's archive copied to a bucket (S3, R2, any rclone remote), run by
 # fenec-archive-sync@<node>.timer. fenecdb speaks no TLS and no S3: rclone
-# does both. An archive is safe to copy while it is written -- a segment is
-# closed and synced before the next begins, an image renamed into place --
-# so a copy taken a file at a time is the archive up to a moment.
+# does both.
 #
 #   apt install rclone          # or the release from rclone.org
-#   install -m 0600 rclone.conf /etc/fenecdb/rclone.conf   # the remote's keys
+#   install -m 0600 rclone.conf /etc/fenecdb/rclone.conf     # the remote's keys
+#   install -m 0644 ../env/archive-sync.env /etc/fenecdb/archive-sync.env
 #   install -m 0644 fenec-archive-sync@.service fenec-archive-sync@.timer \
 #       /etc/systemd/system/
 #   systemctl enable --now fenec-archive-sync@eu-a.timer
 #
-# `sync` makes the bucket the archive: what --keep let go of goes there too.
-# Against a bucket with object lock, or to keep more than the archive keeps,
-# use `copy` and the bucket's own lifecycle rules.
+# `copy`, not `sync`: a copy never deletes from the bucket, so an archive
+# lost with its disk -- and an archiver started afresh on a new one -- cannot
+# take the bucket's history with it at the next run. What the archive's
+# --keep lets go of stays in the bucket until the bucket's own lifecycle
+# rule expires it (RUNBOOK, "Archives and restores": --keep and a day).
+#
+# A segment is appended in place for as long as its tenant writes (an hour
+# at most, --image-every), so rclone finds it growing as it reads it and, by
+# default, refuses the file and fails the run: a busy tenant's newest
+# segment never reached the bucket. --local-no-check-updated takes the file
+# as it stood when read; a segment cut short is what a crash leaves, and a
+# restore reads it to its last whole record. The next run copies it again.
+#
+# Each run that succeeds writes when it did into node_exporter's textfile
+# collector, for the alert FenecArchiveSyncStale (deploy/alerts/); a run
+# that fails writes nothing, and the alert fires.
 
 [Unit]
 Description=fenecdb archive of node %i to the bucket (rclone)
@@ -22,16 +34,27 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=fenec
-Group=fenec
-EnvironmentFile=/etc/fenecdb/archive.env
-# The remote's keys, readable by this run alone.
+# A user of its own, in the archiver's group to read its files: neither it
+# nor anything else of the machine's reads the archiver's replication token,
+# which is in the archiver's environment and not in this unit's.
+User=fenec-sync
+Group=fenec-sync
+SupplementaryGroups=fenec-archive
+# The remote's name and the textfile directory, no secret; the remote's keys
+# are a credential this run alone reads.
+EnvironmentFile=/etc/fenecdb/archive-sync.env
 LoadCredential=rclone.conf:/etc/fenecdb/rclone.conf
-ExecStart=/usr/bin/rclone sync --config %d/rclone.conf --cache-dir %C/fenecdb-rclone \
+ExecStart=/usr/bin/rclone copy --local-no-check-updated \
+    --config %d/rclone.conf --cache-dir %C/fenecdb-rclone \
     /var/lib/fenecdb/archive/%i ${FENEC_ARCHIVE_REMOTE}/%i
+# Written by rename, so node_exporter never reads half a file; ignored where
+# the directory is not there or not writable -- the alert then fires, as for
+# a run that failed.
+ExecStartPost=-/bin/sh -c 'd=/var/lib/prometheus/node-exporter; f=$$d/fenec-archive-sync-%i.prom; echo "fenec_archive_sync_last_success_timestamp_seconds{node=\\\"%i\\\"} $$(date +%%s)" > $$f.tmp && mv $$f.tmp $$f'
 CacheDirectory=fenecdb-rclone
 # Reads the archive, writes nothing of it.
 ReadOnlyPaths=/var/lib/fenecdb/archive/%i
+ReadWritePaths=-/var/lib/prometheus/node-exporter
 TimeoutStartSec=1h
 
 NoNewPrivileges=yes
@@ -46,10 +69,12 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
+ProtectProc=invisible
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
+UMask=0077
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service

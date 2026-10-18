@@ -1430,30 +1430,15 @@ impl Router {
         // own put in its place. The global entry's name for its client is
         // dropped too, believed or not, flag or not: it is this router's
         // to read, and the node takes the client from the router's.
-        // Borrowed, not cloned: a request's headers were copied into
-        // `String`s here and formatted one by one into the head, which with
-        // the router's own header made a request through it 1.5 us slower.
         // A router relaying names the client it was relayed for, as the
         // router before it did, and the client the global entry named.
         let client = relayed
             .or_else(fenec_http::audit::named)
             .or(peer.map(|p| p.ip()));
         let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
-        let mut headers: Vec<(&str, &str)> = req
-            .headers
-            .iter()
-            .filter(|(k, _)| {
-                !hop_by_hop(k)
-                    && !k.eq_ignore_ascii_case("host")
-                    && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
-                    && !k.eq_ignore_ascii_case(fenec_http::audit::CLIENT_HEADER)
-                    && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
-                    && !(traced
-                        && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
-                            || k.eq_ignore_ascii_case(fenec_http::trace::TRACESTATE)))
-            })
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
+        // `forward_near`'s filter: a copy of its own here passed the entry's
+        // Access token on to the node once only the shared one dropped it.
+        let mut headers: Vec<(&str, &str)> = forwarded_headers(req, traced);
         if let Some(named) = &named {
             headers.push((fenec_http::audit::ROUTER_HEADER, named));
         }
@@ -3803,7 +3788,9 @@ fn hop_by_hop(name: &str) -> bool {
 /// router's own name for its client -- what a client sent under it is
 /// dropped, and the router's put in its place, which the node believes
 /// from the router alone -- nor the global entry's, which is this
-/// router's to read, nor the request id the router sends, nor,
+/// router's to read, nor the entry's Cloudflare Access service token, which
+/// admitted the request at the edge and is no node's to see, nor the
+/// request id the router sends, nor,
 /// while it traces, the client's trace context, which the router's own
 /// replaces. Borrowed, not cloned: a request's headers were copied into
 /// `String`s here and formatted one by one into the head, which with the
@@ -3816,6 +3803,8 @@ fn forwarded_headers(req: &Request, traced: bool) -> Vec<(&str, &str)> {
                 && !k.eq_ignore_ascii_case("host")
                 && !k.eq_ignore_ascii_case(fenec_http::audit::ROUTER_HEADER)
                 && !k.eq_ignore_ascii_case(fenec_http::audit::CLIENT_HEADER)
+                && !k.eq_ignore_ascii_case("cf-access-client-id")
+                && !k.eq_ignore_ascii_case("cf-access-client-secret")
                 && !k.eq_ignore_ascii_case(fenec_http::request_id::HEADER)
                 && !(traced
                     && (k.eq_ignore_ascii_case(fenec_http::trace::TRACEPARENT)
@@ -4017,6 +4006,8 @@ mod tests {
                 header("X-Request-Id", "r-1"),
                 header("Fenec-Read", "replica"),
                 header("Connection", "keep-alive"),
+                header("CF-Access-Client-Id", "id.access"),
+                header("cf-access-client-secret", "access-secret"),
             ],
             body: Vec::new(),
             keep_alive: true,

@@ -5,11 +5,20 @@
 # Worker fetches no bare IP address. One on each router's machine, the
 # standby's too, each tunnel its own hostname.
 #
-#   cloudflared tunnel login && cloudflared tunnel create router-1-eu
-#   install -m 0644 ../cloudflared/config.yml /etc/cloudflared/config.yml
-#   install -m 0600 ~/.cloudflared/<tunnel-id>.json /etc/cloudflared/tunnel.json
-#   cloudflared tunnel route dns router-1-eu router-1.eu.example.com
-#   systemctl enable --now cloudflared
+# The tunnel is made on an operator's machine, not here: `tunnel login`
+# leaves cert.pem, the account's certificate that makes and deletes every
+# tunnel, in the home it ran in. Only the one tunnel's credentials come over:
+#
+#   (operator)  cloudflared tunnel login && cloudflared tunnel create router-1-eu
+#   (operator)  cloudflared tunnel route dns router-1-eu router-1.eu.example.com
+#   (operator)  scp ~/.cloudflared/<tunnel-id>.json router-1:/tmp/tunnel.json
+#   (router)    install -m 0600 /tmp/tunnel.json /etc/cloudflared/tunnel.json && rm /tmp/tunnel.json
+#   (router)    install -m 0644 ../cloudflared/config.yml /etc/cloudflared/config.yml
+#   (router)    systemctl enable --now cloudflared
+#
+# The hostname is public: put a Cloudflare Access application with a
+# service token in front of it, so only the entry Worker reaches it
+# (RUNBOOK, "The network"), and the config's path rules besides.
 #
 # cloudflared's own `service install` writes a unit with the tunnel's token
 # on its command line, which `ps` shows every user; here the credentials are

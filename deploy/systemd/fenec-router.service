@@ -19,8 +19,8 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-User=fenec
-Group=fenec
+User=fenec-router
+Group=fenec-router
 EnvironmentFile=/etc/fenecdb/router.env
 # --region keeps the region's nodes and tenants in this router's directory,
 # so it leases them and fails them over cut off from every other region;
@@ -36,7 +36,7 @@ ExecStart=/usr/local/bin/fenec-shard \
     --replicas \
     --auto-failover ${FENEC_LEASE} \
     --max-connections 1000 \
-    --audit /var/log/fenecdb/router-audit.log \
+    --audit /var/log/fenecdb/router/audit.log \
     $FENEC_ROUTER_FLAGS
 Restart=on-failure
 RestartSec=2s
@@ -58,7 +58,7 @@ LimitCORE=0
 
 StateDirectory=fenecdb/router
 StateDirectoryMode=0700
-LogsDirectory=fenecdb
+LogsDirectory=fenecdb/router
 ReadWritePaths=/var/lib/fenecdb/router
 UMask=0077
 
@@ -76,7 +76,6 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
-ProcSubset=pid
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

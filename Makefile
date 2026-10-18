@@ -650,17 +650,22 @@ grafana-check:
 	  if [ $$status -ne 0 ]; then $(GRAFANA_CHECK) logs --no-color --tail 60; fi; \
 	  $(GRAFANA_CHECK) down -v --remove-orphans; exit $$status
 
-## deploy/: the alert rules checked and their tests run by promtool, then
+## deploy/: the alert rules checked and their tests run by promtool, the
+## tunnel's rules asked of cloudflared's own matcher (a tenant's paths
+## through, every other path and a tenant's replication stream 404), then
 ## the systemd units under a real systemd (Docker, privileged): two
 ## machines, every unit installed as deploy/RUNBOOK.md installs it, checked
 ## by `systemd-analyze verify`, started and used -- a region, two nodes and
-## a tenant made through the global router, its tokens on no command line,
-## its limits and sandbox in force, a stop that syncs, a sealed archive, the
-## standby router promoted by the units -- then both removed
+## a tenant made through the global router, its tokens on no command line
+## and no environment readable by another role, its limits and sandbox in
+## force, a stop that syncs, a sealed archive copied to a bucket by real
+## rclone while written, the standby router promoted by the units -- then
+## both removed
 PROMTOOL = docker run --rm -v "$(CURDIR)/deploy/alerts:/a:ro" -w /a --entrypoint promtool prom/prometheus:v3.15.0
 deploy-check:
 	$(PROMTOOL) check rules fenecdb.rules.yml
 	$(PROMTOOL) test rules fenecdb.rules.test.yml
+	python3 deploy/test/ingress.py
 	docker build -f deploy/Dockerfile --target systemd -t fenec-kit-systemd .
 	python3 deploy/test/units.py
 

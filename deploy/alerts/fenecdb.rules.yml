@@ -9,24 +9,99 @@
 #       metrics_path: /_metrics
 #       authorization: {credentials_file: /etc/prometheus/fenec-node.token}
 #       static_configs: [{targets: ["10.1.0.11:8081", "10.1.1.11:8081"]}]
-#     - job_name: fenecdb-router      # every router, standbys and global too
+#     - job_name: fenecdb-router      # every region's routers, standbys too
 #       metrics_path: /_metrics
 #       authorization: {credentials_file: /etc/prometheus/fenec-router.token}
 #       static_configs: [{targets: ["10.1.0.21:8090", "10.1.1.21:8090"]}]
+#     - job_name: fenecdb-global      # the global router and its standby
+#       metrics_path: /_metrics
+#       authorization: {credentials_file: /etc/prometheus/fenec-router.token}
+#       static_configs: [{targets: ["10.1.0.31:8090", "10.2.0.31:8090"]}]
+#     - job_name: node-exporter       # each archiver's machine, for the sync
+#       static_configs: [{targets: ["10.1.0.41:9100"]}]
 #
-# A node's /_metrics takes its data or its admin token, a router's its
+# The job names are the rules' too: a router down is told primary from
+# standby by the role its last scrape gave (fenec_router_following). A
+# node's /_metrics takes its data or its admin token, a router's its
 # --token: no token reads metrics alone (RUNBOOK, "Alerts").
 #
 # crates/fenec-shard/tests/datadog.rs holds every metric and label value
-# here to a scrape of every kind of process, and grafana.yml's rules to
-# these, expression for expression.
+# here to a scrape of every kind of process -- but Prometheus's own `up`, and
+# fenec_archive_sync_last_success_timestamp_seconds, which the bucket sync
+# writes into node_exporter's textfile collector -- and grafana.yml's rules
+# to these, expression for expression; fenecdb.rules.test.yml is promtool's
+# tests of them.
 #
 # Not here, for want of a metric: a tenant's replica lag on a node (a --dir
-# node exports none by tenant; /t/<t>/_replication/status has it), and how
-# far a node's archive is behind (`fenec archive` serves no metrics; the
-# node's fenec_node_streams says only whether an archiver is connected).
+# node exports none by tenant; /t/<t>/_replication/status has it), how far
+# a node's archive is behind its node (`fenec archive` serves no metrics;
+# the node's fenec_node_streams says only whether an archiver is
+# connected), a region router's copy of the global directory (its follower
+# exports nothing), and the connections a ceiling refused (none counts them:
+# FenecConnectionsNearCeiling watches the gauge instead).
 
 groups:
+  - name: fenecdb-targets
+    rules:
+      # A process that stops answering exports nothing at all, so no rule
+      # over its metrics fires: these read Prometheus's own `up`.
+      - alert: FenecNodeDown
+        expr: up{job="fenecdb-node"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.instance }} does not answer: its router fails its tenants over as its lease lapses, and its replicas are gone"
+          runbook: deploy/RUNBOOK.md#a-node-lost
+      # A router that keeps a directory: a region's writes stop within a
+      # lease, until its standby is promoted by hand; the global router's,
+      # creates, deletes and moves across regions are refused.
+      - alert: FenecPrimaryRouterDown
+        expr: up{job=~"fenecdb-router|fenecdb-global"} == 0 and on (instance) last_over_time(fenec_router_following[1h]) == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Router {{ $labels.instance }} keeps its directory and does not answer: promote its standby"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - alert: FenecStandbyRouterDown
+        expr: up{job=~"fenecdb-router|fenecdb-global"} == 0 and on (instance) last_over_time(fenec_router_following[1h]) == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Standby router {{ $labels.instance }} does not answer: its directory has no standby to promote"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      # One not seen answering in the hour, whose role is not known.
+      - alert: FenecRouterDown
+        expr: up{job=~"fenecdb-router|fenecdb-global"} == 0 unless on (instance) last_over_time(fenec_router_following[1h])
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Router {{ $labels.instance }} does not answer, and has not in the hour"
+          runbook: deploy/RUNBOOK.md#a-router-lost
+      - alert: FenecScrapeMissing
+        expr: absent(up{job="fenecdb-node"}) or absent(up{job="fenecdb-router"}) or absent(up{job="fenecdb-global"})
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus scrapes no target of job {{ $labels.job }}: every alert over it is blind"
+          runbook: deploy/RUNBOOK.md#alerts
+      # Set it at four fifths of --max-connections: 3200 for a node's 4000,
+      # 800 for a router's 1000. Past the ceiling a connection is refused
+      # 503 -- a new tenant's replica among them, whose writes are then
+      # acknowledged with no replica -- and nothing counts the refusals.
+      - alert: FenecConnectionsNearCeiling
+        expr: fenec_connections > 3200 or fenec_router_connections > 800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} holds {{ $value }} connections, near its --max-connections"
+          runbook: deploy/RUNBOOK.md#adding-a-node
+
   - name: fenecdb-router
     rules:
       - alert: FenecNodeFailedOver
@@ -36,8 +111,12 @@ groups:
         annotations:
           summary: "Node {{ $labels.node }} ({{ $labels.region }}) was failed over and has not answered since"
           runbook: deploy/RUNBOOK.md#a-node-lost
+      # Held while the router has failed a failover since it started and a
+      # node of it stays failed over: the tenant left unpromoted is
+      # unwritable until that node answers again or the failover is run
+      # again by hand. A count over ten minutes cleared while it stayed so.
       - alert: FenecAutoFailoverIncomplete
-        expr: increase(fenec_router_auto_failovers_total{outcome="failed"}[10m]) > 0
+        expr: fenec_router_auto_failovers_total{outcome="failed"} > 0 and on (instance) max by (instance) (fenec_router_node_failed_over) == 1
         labels:
           severity: critical
         annotations:
@@ -51,11 +130,13 @@ groups:
           summary: "{{ $labels.instance }} failed a node over in the last 10 minutes"
           runbook: deploy/RUNBOOK.md#a-node-lost
       # For FENEC_LEASE=5: renewed every 1.7 s, failed over unrenewed at
-      # 5.5 s. Past 3 s a renewal or two did not land. Set it to three
-      # fifths of your lease.
+      # 5.5 s. Past 3 s a renewal did not land. Set it to three fifths of
+      # your lease. A scrape sees the age at one moment of a renewal's
+      # cycle, so the rule holds the worst of five minutes rather than wait
+      # for one that lasts -- a node late for longer than a lease is failed
+      # over, and then FenecNodeFailedOver says so instead.
       - alert: FenecLeaseRenewalLate
-        expr: fenec_router_lease_age_seconds > 3
-        for: 30s
+        expr: max_over_time(fenec_router_lease_age_seconds[5m]) > 3 unless on (instance, node) fenec_router_node_failed_over == 1
         labels:
           severity: warning
         annotations:
@@ -141,8 +222,9 @@ groups:
 
   - name: fenecdb-directories
     rules:
-      # A standby router (and a region router's copy of the global
-      # directory), or any replica of a file: its primary not heard.
+      # A standby router, or any replica of a file: its primary not heard.
+      # A region router's copy of the global directory is not among them:
+      # that follower exports nothing.
       - alert: FenecReplicaDisconnected
         expr: fenec_replica_connected == 0
         for: 2m
@@ -167,8 +249,12 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} has not heard from its primary in {{ $value }} s"
           runbook: deploy/RUNBOOK.md#a-router-lost
+      # A region router's directory, which its standby alone follows. The
+      # global router's feed is followed by every region's routers too, so
+      # its count cannot say its standby is gone: FenecStandbyRouterDown
+      # does.
       - alert: FenecDirectoryUnreplicated
-        expr: fenec_replicas == 0 and on (instance) fenec_router_following == 0
+        expr: fenec_replicas{job="fenecdb-router"} == 0 and on (instance) fenec_router_following{job="fenecdb-router"} == 0
         for: 10m
         labels:
           severity: warning
@@ -210,6 +296,16 @@ groups:
         annotations:
           summary: "{{ $labels.instance }}'s disk refused a write: it takes none until restarted"
           runbook: deploy/RUNBOOK.md#errors-and-refusals
+      # Written by each run of fenec-archive-sync@<node> that succeeds, into
+      # node_exporter's textfile collector: a bucket half an hour behind is
+      # six runs failed (or the collector's directory not writable).
+      - alert: FenecArchiveSyncStale
+        expr: time() - fenec_archive_sync_last_success_timestamp_seconds > 1800
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.node }}'s archive has not reached the bucket in {{ $value }} s"
+          runbook: deploy/RUNBOOK.md#archives-and-restores
       - alert: FenecArchiverDisconnected
         expr: fenec_node_streams < 1
         for: 10m

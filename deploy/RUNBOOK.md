@@ -13,11 +13,12 @@ this page is the procedures, and the files beside it are the kit:
 | `systemd/fenec-archive@.service` | a node's archive, `fenec archive --tenants`, one instance a node |
 | `systemd/fenec-archive-sync@.service`, `.timer` | that archive copied to a bucket by rclone, every five minutes |
 | `systemd/cloudflared.service`, `cloudflared/config.yml` | the tunnel the global entry Worker reaches a router through |
-| `systemd/fenecdb.sysusers` | the `fenec` user every unit runs as |
+| `systemd/fenecdb.sysusers` | a user for each role: `fenec-node`, `fenec-router`, `fenec-archive`, `fenec-sync` |
 | `env/*.env` | the environment files the units read: addresses, flags and tokens |
 | `alerts/fenecdb.rules.yml`, `alerts/grafana.yml` | alert rules, for Prometheus and for Grafana |
 | `drill/drill.py` | `make drill`: the failovers below, in Docker, timed |
 | `test/units.py` | `make deploy-check`: these units under a real systemd |
+| `test/ingress.py` | `make deploy-check`: the tunnel's rules, asked of cloudflared's own matcher |
 
 Nothing here deploys anything: the kit is files to install and procedures
 to follow, held to the binaries by `make deploy-check` and `make drill`.
@@ -65,13 +66,33 @@ fenecdb speaks no TLS and no part of it should face the internet. Nodes,
 routers and archivers talk over a private network: a VPC within a region,
 and between regions WireGuard or the provider's encrypted peering --
 relays, the global directory, read replicas and moves cross it. The only
-public way in is Cloudflare's edge, through the tunnels, and
-`cloudflared/config.yml` lets nothing through but a tenant's path: the
-tunnel's hostname is public, and the router's own `/_shard/`,
-`/_replication` and `/_metrics` answer 404 there whatever token a request
-carries. A tenant's paths pass, its replication stream
-(`/t/<t>/_replication`) among them, behind the nodes' replication token;
-the entry itself refuses that one.
+public way in is Cloudflare's edge, through the tunnels. A tunnel's
+hostname is public -- anyone may ask it, not the entry Worker alone -- so
+two things stand in front of each router:
+
+- **The tunnel's rules** (`cloudflared/config.yml`) say which paths: a
+  tenant's alone. The router's own `/_shard/`, `/_replication`,
+  `/_metrics` and `/_studio/` answer 404 at the edge whatever token a
+  request carries, and so does a tenant's replication stream,
+  `/t/<t>/_replication`: the router forwards it to the node, and the nodes'
+  one replication token opens it -- every row of every tenant. cloudflared
+  matches a rule against the path decoded, so `/t/acme/%5Freplication` and
+  `/t/acme%2F_replication` meet that rule as the plain spelling does;
+  `test/ingress.py` (in `make deploy-check`) asks cloudflared's own matcher
+  for 28 paths, the tenant's and every refused one.
+- **Cloudflare Access** says who. On each tunnel's hostname, a
+  self-hosted Access application whose one policy admits a service token
+  (action *Service Auth*), and the token handed to the entry Worker:
+  ```sh
+  cd integrations/cloudflare
+  npx wrangler secret put ACCESS_CLIENT_ID --config entry/wrangler.jsonc       # the token's Client ID
+  npx wrangler secret put ACCESS_CLIENT_SECRET --config entry/wrangler.jsonc   # and its secret
+  ```
+  The Worker sends both with every request to a router
+  (`CF-Access-Client-Id`, `CF-Access-Client-Secret`, a client's own copies
+  dropped), and the routers drop them before a request reaches a node. A
+  request that is not the entry's then never reaches a router at all; the
+  tunnel's rules and the routers' tokens hold either way.
 
 Each node and router listens on its private address (`FENEC_LISTEN`), with
 a token: a router or a node refuses an address past loopback without one.
@@ -80,12 +101,17 @@ a token: a router or a node refuses an address past loopback without one.
 
 Every token is made with `openssl rand -hex 32` and lives in an
 environment file, `/etc/fenecdb/*.env`, mode 0600, owned by root. systemd
-reads it as root before the process starts, so the `fenec` user cannot
-read the file, no token is on a command line (`ps` shows every process's
-arguments to every user), and `/proc/<pid>/environ` is readable by the
-process's owner alone. `make deploy-check` holds all three. The archive's
-key and the tunnel's and rclone's credentials are files handed to their
-service alone with `LoadCredential=`.
+reads it as root before the process starts, so no service's user can read
+the file, and no token is on a command line (`ps` shows every process's
+arguments to every user). A process's environment, `/proc/<pid>/environ`,
+is readable by its own user's processes: each role is a user of its own
+(`fenec-node`, `fenec-router`, `fenec-archive`, `fenec-sync`), so a node
+cannot read a router's tokens, nor rclone the archiver's, where two roles
+share a machine. `make deploy-check` holds all of it, each user against
+every other role's processes. The archive's key and the tunnel's and
+rclone's credentials are files handed to their service alone with
+`LoadCredential=`; `env/archive-sync.env` holds no secret (the bucket's
+name) and is 0644.
 
 | Token | Variable | Held by | Reaches |
 | --- | --- | --- | --- |
@@ -126,14 +152,55 @@ Then the environment file of each role the machine has, copied from
 data go under `/var/lib/fenecdb/`, which a disk of its own mounted there
 keeps apart from the system's.
 
-Each unit runs as `fenec` with nothing writable but its own state
-directory, no capability, a system call filter and a private `/tmp`
-(`systemd-analyze security` puts each at 1.2). `LimitNOFILE` and
-`TasksMax` follow `--max-connections` (every connection is a thread and a
-descriptor): raise them together. `TimeoutStopSec` leaves a node 120 s to
-sync every open tenant and checkpoint their graphs on SIGTERM; a kill past
-it loses no write under `--sync always`, only the checkpoint. Never
-`systemctl reload` a fenecdb unit: the servers take SIGHUP for a shutdown.
+Each unit runs as its role's user with nothing writable but its own state
+and log directories, no capability, a system call filter, a private `/tmp`
+and other users' processes hidden (`systemd-analyze security` puts each at
+1.2). `/proc/meminfo` stays readable: a node compacts a file before it
+outgrows the page cache, and reads the cache's room there.
+
+Every connection is a thread and a descriptor, and a node's
+`--max-connections` (4 000 in `fenec-node.service`) is shared by clients'
+requests, their subscriptions and held writes, the followers of the
+tenants it holds replicas of -- one each, for as long as they follow --
+and its archivers. A node holding the replicas of 1 000 tenants holds
+1 000 of its connections for them alone; size it as 1 000 tenants of
+replicas, the clients' peak and a quarter more, and raise `LimitNOFILE`
+and `TasksMax` with it (65 536 and 16 384 leave room for 4 000).
+`FenecConnectionsNearCeiling` fires at four fifths. A router's ceiling (its
+default, 1 000) is its clients' and the regions' relays.
+
+`TimeoutStopSec` leaves a node 120 s to sync every open tenant and
+checkpoint their graphs on SIGTERM; a kill past it loses no write under
+`--sync always`, only the checkpoint. Never `systemctl reload` a fenecdb
+unit: the servers take SIGHUP for a shutdown.
+
+### Logs
+
+The servers write their log to the journal and refusals, schema changes
+and admin changes to an audit log, `/var/log/fenecdb/<role>/audit.log`
+(`node`, `router`, `global`), 0600 under the units' `UMask` -- it names
+clients' addresses and every tenant changed. A log shipper reads it through
+an ACL, set once on the directory so each new file inherits it:
+
+```sh
+setfacl -m u:<shipper>:rx -m d:u:<shipper>:r /var/log/fenecdb/node
+```
+
+The server opens the file once and appends; it does not reopen it, and
+SIGHUP shuts it down. So logrotate copies and truncates:
+
+```
+/var/log/fenecdb/*/audit.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    copytruncate
+}
+```
+
+A line written between the copy and the truncate is lost from the
+rotated file; the journal keeps the servers' own log.
 
 ## Bring-up
 
@@ -162,7 +229,12 @@ token; `g1` the global router's private address.
    The router checks the node with the token before it records it, and
    leases it from then on.
 5. **The tunnels**: `cloudflared` on each router's machine, its hostname
-   routed to that router alone (`cloudflared/config.yml`).
+   routed to that router alone (`cloudflared/config.yml`). Each tunnel is
+   made on an operator's machine -- `cloudflared tunnel login` leaves the
+   account's certificate, which makes and deletes every tunnel, there --
+   and only its credentials file is copied to the router
+   (`systemd/cloudflared.service` has the lines). Then an Access
+   application on each hostname (The network).
 6. **The entry Worker**: each region's routers in `REGIONS`
    (`integrations/cloudflare/entry/wrangler.jsonc`), the one keeping its
    directory first, then
@@ -175,7 +247,9 @@ token; `g1` the global router's private address.
    apart from it, and `fenec-archive-sync@<node>.timer` (Archives and
    restores, below).
 8. **Monitoring**: Prometheus or Grafana with `alerts/`, scraping every
-   node and router (`alerts/fenecdb.rules.yml` has the scrape config).
+   node and router, and node_exporter on each archiver's machine with its
+   textfile collector (`alerts/fenecdb.rules.yml` has the scrape config;
+   its job names are the rules').
 
 A first tenant, made through the global router and written through the
 entry:
@@ -257,20 +331,38 @@ limit is working as sold); `GET /_admin/quotas` on a node, or
 With `--auto-failover` the region's router fails a node over by itself. A
 node stops writing as its lease lapses by its own clock; the router, a
 tenth of a lease later, promotes each of its tenants on its replica in the
-region's other zone and routes it there. Nothing acknowledged under
-`--sync always` is lost: a write is answered once it is on the primary's
-disk and written into its replica's stream.
+region's other zone and routes it there.
 
-Measured by `make drill` (lease 2 s, three tenants a region, the node's
-container killed), three runs: the killed node's tenants wrote again 2.5,
-4.9 and 5.0 s after the kill, every other tenant without a gap past 21 ms
-between two answered writes, and none of 42 202 acknowledged writes lost.
-The lease and a tenth is the floor; the tail is the promotion waiting on
-the replica's attempt to reconnect to the dead node, bounded by that
-connection's 5 s timeout (Known gaps). With the default lease of 5 s, count
-6 to 11 s -- for nodes recorded by address: a node recorded by a name its
-resolver is slow to refuse once the machine is gone stalls the router's
-leasing of the whole region (Known gaps, measured at 30 s in CI).
+What a failover keeps: under `--sync always` a write is answered once it is
+on the primary's disk and written into its replica's stream -- handed to
+the primary's kernel, not yet on the replica's. That survives the primary's
+process dying, whose kernel still sends what its socket holds, and the
+replica's machine dying, since the primary holds the write. It does not
+survive the primary's machine dying in the moment between the answer and
+the bytes leaving it: a write answered then is on a disk no one can read
+until the machine is back, and the promoted replica never had it. And a
+stream that has missed a write for a second is not waited for until it
+catches up (`SENT_WAIT`): while a replica is behind, writes are answered
+with no copy beside them, and a primary lost then loses them. Writes the
+old primary took that were never sent are dropped when it comes back as a
+replica (A node back).
+
+Measured by `make drill` (lease 2 s, three tenants a region, the node cut
+off the network and then killed, as a machine lost), three runs: the
+killed node's own tenants wrote again 4.86 to 4.92 s after the kill; the
+tenants whose replica it held, whose primaries went on writing, lost no
+more than 20 ms between two answered writes, and every other tenant
+22 ms; none of 44 563 acknowledged writes was lost. The second kind
+waits up to a second (`SENT_WAIT`) where its replica's stream stops taking
+bytes: with the node killed alone rather than cut off, one such tenant went
+639 ms without an answered write.
+The lease and a tenth is the floor of the first kind; its tail is the
+promotion waiting on the replica's attempt to reconnect to the dead node,
+bounded by that connection's 5 s timeout (Known gaps). With the default
+lease of 5 s, count 6 to 11 s -- for nodes recorded by address: a node
+recorded by a name its resolver is slow to refuse once the machine is gone
+stalls the router's leasing of the whole region (Known gaps, measured at
+30 s in CI).
 
 What to do:
 
@@ -296,8 +388,8 @@ old tenants' files still primaries' files. As it takes its first lease the
 router runs a repair: each tenant it lost follows its new primary from
 this node -- this node becomes its replica -- and the writes it took that
 were never sent are gone, the trade any failover makes. Three `make drill`
-runs measured the repair at 0.4 to 0.7 s after the start, the copies caught
-up 20 to 50 ms later.
+runs measured the repair at 0.5 to 0.8 s after the start, the copies caught
+up 26 to 39 ms later.
 
 Check: `GET /_shard/tenants/<t>` names the node as `replica`;
 `FenecNodeFailedOver` and `FenecTenantsWithoutReplica` clear. A node whose
@@ -323,8 +415,11 @@ they stop writing as their leases lapse, and the region's tenants answer
 never the routers': a standby that promoted itself whenever it could not
 reach the primary would make two primaries in a partition.
 
-1. Make sure the old router is gone (machine down, or `systemctl stop`
-   reached it). A promoted router fences it at every node it reaches --
+1. Make sure the old router is gone, and stays gone: where its machine is
+   reachable, `systemctl mask --now fenec-router` there, so a reboot or a
+   `systemctl start` cannot bring it back as a primary; where it is not,
+   power it off from the provider's console and mask the unit the first
+   time it boots. A promoted router fences it at every node it reaches --
    grants of a lower term are refused -- but not at a node only the old one
    still reaches.
 2. Promote the standby and switch its unit at once (`make deploy-check`
@@ -342,16 +437,16 @@ reach the primary would make two primaries in a partition.
    `PUT /_shard/regions/<r> {"routers":["http://<new>:8090","http://<old>:8090"]}`.
 4. When the old machine returns, it rejoins as the new one's standby:
    `FENEC_PRIMARY` pointed at the new router, `fenec-router-standby`
-   enabled, `fenec-router` disabled. Started as a primary, it would lease
+   enabled, `fenec-router` left masked. Started as a primary, it would lease
    at its old term -- refused by every node the new one has reached -- and
    take `/_shard/` changes into a directory nobody else reads.
 
 Measured by `make drill` (lease 2 s), three runs: the region's writes
-stopped 1.35 to 1.58 s after its router was killed, as the leases lapsed;
-once the standby was promoted -- an operator's minute in production, 2.4
-to 4.9 s in the drill -- writes resumed 0.11 to 0.48 s after the promotion,
+stopped 1.64 to 1.67 s after its router was killed, as the leases lapsed;
+once the standby was promoted -- an operator's minute in production, 2.7
+to 4.9 s in the drill -- writes resumed 0.25 to 0.48 s after the promotion,
 and the switch of units, a restart of the only router the region then had,
-left a gap of 0.43 to 0.49 s between two answered writes.
+left a gap of 0.42 to 0.57 s between two answered writes.
 
 **The global router.** Tenants go on working: every region keeps its own
 directory. Creates, deletes and moves across regions are refused (503)
@@ -369,8 +464,11 @@ alerts between steps:
 1. **`fenec` (archivers, operators' machines)**: restart each archiver; it
    reconnects to its node and goes on in the same archive.
 2. **Routers**: each region's standby, then promote it (A router lost) --
-   or restart the primary in place, which costs the region's forwarding
-   the restart's second and no write, since the nodes' leases outlast it.
+   or restart the primary in place, which loses no acknowledged write,
+   since the nodes' leases outlast it, but answers the requests in flight
+   through it as the connection ends: the entry sends a read or a keyed
+   write on to the standby, and answers any other write 502, which may have
+   run (send writes with an `Idempotency-Key` and they are retried safely).
    Then the global standby and the global router the same way.
 3. **Nodes**, one at a time, a zone at a time: replace the binary and
    `systemctl restart fenec-node`. A restart shorter than the lease costs
@@ -406,8 +504,48 @@ connection for all its tenants, an hourly image of each, a week kept
 the archive -- without it nothing restores). A replica's copy is archived
 as a primary is, its writes the primary's and numbered alike, so every
 tenant is in two archives: its primary's node's and its replica's. A write
-is in the archive once its node's stream has sent it, and in the bucket at
-the next `fenec-archive-sync` run, five minutes at most.
+is in the archive once its node's stream has sent it -- under load the
+stream may be behind its node (Known gaps) -- and in the bucket after the
+next `fenec-archive-sync` run that succeeds: the timer starts one every
+five minutes, so a write is there five minutes and a run's length after
+the archive took it, while runs succeed. One that fails is retried at the
+next tick, and `FenecArchiveSyncStale` fires once no run has succeeded for
+half an hour (each success is written into node_exporter's textfile
+collector, `/var/lib/prometheus/node-exporter`, which the `fenec-sync` user
+must be able to write: `setfacl -m u:fenec-sync:rwx` on it).
+
+**The bucket keeps what the archive lets go of.** The sync is `rclone
+copy`, never `sync`: it adds and replaces files and deletes none. An
+archive lost with its disk, or `--keep` pruning a week back, cannot take
+the bucket's copy with it. So the bucket needs a lifecycle rule of its own
+(S3 and R2 both have them) expiring objects a day past the archive's
+`--keep`: eight days for `--keep 7d`. A restore from the bucket to a
+moment older than the archive's own oldest image needs the files `--keep`
+let go of, which the bucket still holds until that rule expires them.
+
+rclone refuses by default a file that grows while it reads it, and a
+segment is appended to for as long as its tenant writes: the unit passes
+`--local-no-check-updated`, so a busy tenant's newest segment is copied as
+it stood, a cut-short segment a restore reads to its last whole record, and
+copied again whole at the next run. `make deploy-check` runs real rclone
+against a tenant written as fast as it takes rows, three runs, and verifies
+the bucket's copy as an archive; without the flag every run failed.
+
+**The archiver's disk replaced**: copy the bucket back before the archiver
+starts on the new disk, so it goes on in the same archive:
+
+```sh
+systemctl stop fenec-archive@eu-a fenec-archive-sync@eu-a.timer
+rclone copy r2:fenecdb-archive/eu/eu-a /var/lib/fenecdb/archive/eu-a --config /etc/fenecdb/rclone.conf
+chown -R fenec-archive:fenec-archive /var/lib/fenecdb/archive/eu-a
+FENEC_KEY_FILE=/etc/fenecdb/archive.key fenec verify --tenants /var/lib/fenecdb/archive/eu-a
+systemctl start fenec-archive@eu-a fenec-archive-sync@eu-a.timer
+```
+
+Started on an empty disk instead, the archiver begins a new archive from
+images, and its first sync writes that archive's `history` and `began`
+over the bucket's: the old segments stay, but a restore from the bucket no
+longer reads them.
 
 ```sh
 # what an archive can restore
@@ -430,11 +568,28 @@ on a new machine given the node's address, restore the node's archive into
 is lost, and each copy that does not lead from a restored primary is sent
 an image.
 
-**The drill**: once a week, restore one tenant to a moment and hold it to
-what was written by then -- `make drill` does exactly that against a
-restore point it marks. `FenecArchiverDisconnected` fires when no archiver
-follows a node; nothing exports how far an archive is behind (Known gaps),
-so verify the restore, not the process.
+**The weekly restore**, from the bucket and on a machine of no role, as a
+disaster would have it -- the archiver's own disk proves nothing about the
+bucket:
+
+1. Copy one node's archive out of the bucket (`rclone copy
+   r2:fenecdb-archive/eu/eu-a /restore/eu-a`) and `fenec verify --tenants`
+   it with the key kept apart from the archive -- which proves that copy
+   of the key too.
+2. Pick a tenant and a moment an hour back; ask the live tenant, through
+   the router, for something written before it and nothing after -- the
+   rows of a collection whose `created` field is older, a count by
+   `bucket(created, 1h)` -- and note it.
+3. `fenec restore --tenants /restore/eu-a /restore/out --to <moment>` and
+   ask the restored file the same (`fenec /restore/out/<t>.fenec -c '...'`):
+   the same answer, and the restore took as long as a real one would.
+4. Remove `/restore`: it holds a tenant's rows.
+
+`make drill` runs the same restore against writes it recorded, in Docker.
+`FenecArchiverDisconnected` fires when no archiver follows a node and
+`FenecArchiveSyncStale` when the bucket stopped moving; nothing exports how
+far an archive is behind its node (Known gaps), so verify the restore, not
+the process.
 
 ## Read replicas
 
@@ -503,8 +658,8 @@ it short and says what it costs.
   writes stop until the process is restarted on a working disk.
 - `FenecRouterRefusals`, `FenecNodeRefusals`: more than one refused token a
   second -- a client with a stale token, or someone guessing. The audit log
-  (`/var/log/fenecdb/*-audit.log`) names the address; each refusal waits,
-  longer for each one more from the same address.
+  (`/var/log/fenecdb/<role>/audit.log`) names the address; each refusal
+  waits, longer for each one more from the same address.
 
 ## The entry token
 
@@ -520,15 +675,27 @@ it short and says what it costs.
 
 `alerts/fenecdb.rules.yml` for Prometheus, `alerts/grafana.yml` the same
 rules for Grafana's alerting; `make deploy-check` runs promtool's check and
-tests, and `crates/fenec-shard/tests/datadog.rs` holds every metric and
-label value they read to a real scrape, and the two files to each other.
+tests -- each rule firing and each held back -- and
+`crates/fenec-shard/tests/datadog.rs` holds every metric and label value
+they read to a real scrape, the jobs they name to the scrape config, and
+the two files to each other. A process that is down exports nothing, so
+the target-down rules read Prometheus's own `up` by job: keep the job
+names of the rules' scrape config (`fenecdb-node`, `fenecdb-router`,
+`fenecdb-global`, `node-exporter` on each archiver's machine with its
+textfile collector).
 
 | Alert | Severity | Means | Do |
 | --- | --- | --- | --- |
+| `FenecNodeDown` | critical | Prometheus cannot scrape a node | A node lost |
+| `FenecPrimaryRouterDown` | critical | a router that kept its directory does not answer: its region's writes stop as their leases lapse | A router lost |
+| `FenecStandbyRouterDown` | warning | a standby router, a region's or the global one's, does not answer: nothing to promote | A router lost, step 4 |
+| `FenecRouterDown` | critical | a router never seen up in the hour does not answer | A router lost |
+| `FenecScrapeMissing` | warning | a job has no target at all: every rule over it is blind | Alerts |
+| `FenecConnectionsNearCeiling` | warning | a process at four fifths of its `--max-connections` | Installing a machine |
 | `FenecNodeFailedOver` | critical | a node was failed over and has not answered since | A node lost |
-| `FenecAutoFailoverIncomplete` | critical | a failover left a tenant unpromoted | A node lost, step 1 |
+| `FenecAutoFailoverIncomplete` | critical | a failover left a tenant unpromoted, while the node stays failed over | A node lost, step 1 |
 | `FenecAutoFailover` | warning | a node was failed over | A node lost |
-| `FenecLeaseRenewalLate` | warning | renewals to a node are late (threshold for a 5 s lease) | A lease late |
+| `FenecLeaseRenewalLate` | warning | a renewal to a node was late in the last five minutes (threshold for a 5 s lease); not a node failed over | A lease late |
 | `FenecTenantsWithoutReplica` | warning | tenants with no replica, a node lost away | A node back |
 | `FenecSameZoneCopies` | warning | copies in their primary's zone | Adding a node |
 | `FenecReadReplicasGivenUp` | warning | read replicas no longer made again | Read replicas |
@@ -539,11 +706,12 @@ label value they read to a real scrape, and the two files to each other.
 | `FenecEntryMarkAbsent` | info | requests naming no client | The entry token |
 | `FenecRouterRefusals`, `FenecNodeRefusals` | warning | tokens refused | Errors and refusals |
 | `FenecReplicaDisconnected`, `FenecReplicaBehind`, `FenecReplicaSilent` | warning | a standby router (or a file's replica) not following | A router lost |
-| `FenecDirectoryUnreplicated` | warning | a router's directory has no standby | A router lost, step 4 |
+| `FenecDirectoryUnreplicated` | warning | a region router's directory has no standby following | A router lost, step 4 |
 | `FenecQuotaRefusals` | info | a tenant at its quota | Quotas |
 | `FenecStatementErrors` | warning | statements failing | Errors and refusals |
 | `FenecStorageFailed` | critical | a single-file server's disk refused a write | Errors and refusals |
 | `FenecArchiverDisconnected` | warning | no archiver follows a node | Archives and restores |
+| `FenecArchiveSyncStale` | warning | no bucket sync of a node's archive succeeded in half an hour | Archives and restores |
 | `FenecCopiesRefused` | info | a copy of a tenant made again deleted itself | Read replicas |
 
 ## The drill
@@ -554,7 +722,8 @@ nodes in two zones each, an archiver a node, the global router and its
 standby -- with every token in the processes' environments, as the units
 hand them over. Writers put rows through the routers and record every one
 answered; then the global routers are cut off the network, a node is
-killed (`docker kill`) and brought back, a region's router is killed and
+cut off the network and killed (`docker kill`), as a machine lost, and
+brought back, a region's router is killed and
 its standby promoted and switched as above, and a tenant is restored from
 its archive to a moment marked earlier. Every acknowledged write is read
 back from each tenant's primary and its replica; the summary prints the
@@ -586,9 +755,11 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
 - **A failover's tail.** Promoting a tenant waits for its replica's
   follower to stop, and a follower in the middle of reconnecting to the
   dead node stops only when that attempt fails -- up to its 5 s connect
-  timeout where the dead machine's address swallows packets. Measured in
-  `make drill`: 2.2 and 2.5 s after the kill where the reconnect failed at
-  once, 4.9 and 5.0 s where it waited.
+  timeout where the dead machine's address swallows packets, as a machine
+  lost has it. Measured in `make drill`, the node cut off the network
+  before it is killed: 4.86 to 4.92 s after the kill in three runs, every
+  one waiting; with the container killed alone, whose kernel refused the
+  reconnect at once, 2.2 and 2.5 s.
 - **Requests in flight to a dead machine** can wait at the router for its
   `--upstream-timeout` (60 s) where the machine's address swallows packets,
   unless the client gives up first: clients should bound their requests and

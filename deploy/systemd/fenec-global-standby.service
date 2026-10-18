@@ -30,8 +30,8 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-User=fenec
-Group=fenec
+User=fenec-router
+Group=fenec-router
 EnvironmentFile=/etc/fenecdb/global.env
 # No --region: this directory is the global one. Its regions keep their
 # own (PUT /_shard/regions/<r>), so it leases no node: what it takes are
@@ -42,7 +42,7 @@ ExecStart=/usr/local/bin/fenec-shard \
     --directory /var/lib/fenecdb/global/directory.fenec \
     --replica-of ${FENEC_PRIMARY} \
     --max-connections 1000 \
-    --audit /var/log/fenecdb/global-audit.log \
+    --audit /var/log/fenecdb/global/audit.log \
     $FENEC_GLOBAL_FLAGS
 Restart=on-failure
 RestartSec=2s
@@ -64,7 +64,7 @@ LimitCORE=0
 
 StateDirectory=fenecdb/global
 StateDirectoryMode=0700
-LogsDirectory=fenecdb
+LogsDirectory=fenecdb/global
 ReadWritePaths=/var/lib/fenecdb/global
 UMask=0077
 
@@ -82,7 +82,6 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
-ProcSubset=pid
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

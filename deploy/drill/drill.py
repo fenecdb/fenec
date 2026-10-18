@@ -24,8 +24,12 @@ Then, in turn:
 
     restore point   the writers paused, a moment noted, the writers resumed
     partition       the global routers cut off the network: both regions write on
-    node kill       `docker kill` of the us node holding the most primaries:
-                    its tenants write again on their replicas, timed
+    node kill       the us node holding the most primaries cut off the network
+                    and then killed (`docker kill`), as a machine lost: no FIN
+                    or reset reaches its peers, and its replicas keep what its
+                    sockets had sent; its tenants write again on their
+                    replicas, timed, and the tenants whose replica it held
+                    and the rest timed apart
     node back       it starts again: the router's repair has its stale copies
                     follow the new primaries, which they catch up with
     router kill     `docker kill` of eu's router: its standby forwards until the
@@ -374,7 +378,8 @@ def longest_gap(w, start, end):
 
 
 def node_cmd():
-    # As deploy/systemd/fenec-node.service runs it.
+    # As deploy/systemd/fenec-node.service runs it, with fewer connections
+    # than its 4000: a container's threads are the Docker VM's.
     return ["fenec-server", "--dir", "/data", "--http", "0.0.0.0:8081", "--sync", "always",
             "--lease", "--max-connections", "200"]
 
@@ -520,8 +525,18 @@ def kill_node(writers, tenants, results):
         if r == region:
             by_node.setdefault(placement(region, t)["node"], []).append(t)
     victim, primaries = max(by_node.items(), key=lambda kv: len(kv[1]))
-    say(f"node kill: docker kill {victim}, primary of {', '.join(primaries)}")
+    # The tenants whose replica the victim holds: their primaries' durable
+    # writes wait for a stream that will never answer again, a second at
+    # most (SENT_WAIT), before it is not waited for.
+    replicated = [t for t, r in tenants if r == region and t not in primaries
+                  and placement(region, t).get("replica") == victim]
+    say(f"node kill: {victim} cut off the network, then docker kill; primary of {', '.join(primaries)}"
+        + (f", replica of {', '.join(replicated)}" if replicated else ""))
     called = time.monotonic()
+    # A machine lost, not a process: cut off first, its sockets send no FIN
+    # or reset as the process dies, and whatever its send buffers held never
+    # leaves. Killed alone, the kernel delivered what they held.
+    docker("network", "disconnect", NET, cname(victim))
     docker("kill", cname(victim))
     killed = time.monotonic()
     affected = [w for w in writers if w.tenant in primaries]
@@ -536,19 +551,26 @@ def kill_node(writers, tenants, results):
     for t in primaries:
         p = placement(region, t)
         check(p["node"] != victim, f"{t} still placed on {victim}: {p}")
-    others = [w for w in writers if w.tenant not in primaries]
-    other_gap = max(longest_gap(w, called, time.monotonic()) for w in others)
-    results["node_kill"] = {"node": victim, "tenants": times,
-                            "lease_s": LEASE, "other_tenants_longest_gap_ms": round(other_gap * 1000)}
+    now = time.monotonic()
+    replica_gap = max((longest_gap(w, called, now) for w in writers if w.tenant in replicated), default=0)
+    others = [w for w in writers if w.tenant not in primaries and w.tenant not in replicated]
+    other_gap = max(longest_gap(w, called, now) for w in others)
+    results["node_kill"] = {"node": victim, "tenants": times, "lease_s": LEASE,
+                            "replica_tenants": replicated,
+                            "replica_tenants_longest_gap_ms": round(replica_gap * 1000),
+                            "other_tenants_longest_gap_ms": round(other_gap * 1000)}
     for t, v in times.items():
         say(f"  {t}: writes again {v['after_kill_ms']} ms after the kill "
             f"(no write answered for {v['blocked_ms']} ms)")
+    if replicated:
+        say(f"  tenants whose replica it held: longest gap {replica_gap * 1000:.0f} ms")
     say(f"  every other tenant: longest gap {other_gap * 1000:.0f} ms")
     return victim, primaries
 
 
 def node_back(victim, primaries, writers, results):
     began = time.monotonic()
+    docker("network", "connect", "--alias", victim, NET, cname(victim))
     docker("start", cname(victim))
     forget(victim)
     listening(victim)
@@ -761,8 +783,9 @@ def summary(results, ok):
     if "node_kill" in results:
         n = results["node_kill"]
         ms = [v["after_kill_ms"] for v in n["tenants"].values()]
-        print(f"node {n['node']} killed (lease {n['lease_s']} s)   its tenants wrote again after "
-              f"{min(ms)}-{max(ms)} ms")
+        print(f"node {n['node']} cut off and killed (lease {n['lease_s']} s)   its tenants wrote again after "
+              f"{min(ms)}-{max(ms)} ms; tenants it held the replica of, longest gap "
+              f"{n['replica_tenants_longest_gap_ms']} ms; others {n['other_tenants_longest_gap_ms']} ms")
     if "node_back" in results:
         b = results["node_back"]
         print(f"node back                      repaired {b['repaired_ms']} ms, caught up {b['caught_up_ms']} ms")

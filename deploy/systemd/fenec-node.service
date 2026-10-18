@@ -24,22 +24,32 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-User=fenec
-Group=fenec
+User=fenec-node
+Group=fenec-node
 EnvironmentFile=/etc/fenecdb/node.env
-# --sync always: a write is answered once it is on this disk and sent to the
-# tenant's replica, so a node lost loses no acknowledged write (make drill).
+# --sync always: a write is answered once it is on this disk and written
+# into the tenant's replica's stream. That survives this process killed --
+# the kernel delivers what the socket holds -- but not the machine lost with
+# bytes still in its send buffer, and a stream a second behind (lagging) is
+# not waited for at all. make drill cuts the node's network before it kills
+# it, the machine-loss case, and has lost no acknowledged write; see
+# deploy/RUNBOOK.md, "A node lost", for what is and is not promised.
 # --lease: it writes a tenant only while its region's router has leased it
 # that tenant, which is what lets the router fail it over by itself.
-# --max-connections: every connection is a thread; see LimitNOFILE and
-# TasksMax below, which follow it.
+# --max-connections: every connection is a thread and a descriptor, and
+# besides the clients' it counts one for each tenant whose replica follows
+# from this node (a follower connects per tenant) and one for each
+# archiver: past the ceiling a new tenant's follower cannot connect, and its
+# writes are acknowledged with no replica. Size it at the primaries a node
+# may hold, plus its clients, streams and held writes; LimitNOFILE and
+# TasksMax below follow it.
 ExecStart=/usr/local/bin/fenec-server \
     --dir ${FENEC_DIR} \
     --http ${FENEC_LISTEN} \
     --sync always \
     --lease \
-    --max-connections 1000 \
-    --audit /var/log/fenecdb/node-audit.log \
+    --max-connections 4000 \
+    --audit /var/log/fenecdb/node/audit.log \
     $FENEC_NODE_FLAGS
 Restart=on-failure
 RestartSec=2s
@@ -52,20 +62,23 @@ RestartSec=2s
 KillSignal=SIGTERM
 TimeoutStopSec=120s
 
-# Descriptors: a connection each (--max-connections 1000), a replica's
-# stream and an archiver's, and each open tenant's file, its sync log and
-# its lock -- 1000 + 3 x the open tenants, with room. Raise with them.
-LimitNOFILE=16384
-# Threads: a connection each, and a follower a replica tenant, under
-# systemd's DefaultTasksMax (15% of pid_max) unless set.
-TasksMax=4096
+# Descriptors: a connection each (--max-connections 4000), and each open
+# tenant's file, its sync log and its lock -- 4000 + 3 x the open tenants,
+# with room. Raise with them.
+LimitNOFILE=65536
+# Threads: a connection each, and a follower for each replica this node
+# holds, under systemd's DefaultTasksMax (15% of pid_max) unless set.
+TasksMax=16384
 # A core dump would hold the tokens and the tenants' rows.
 LimitCORE=0
 
 # The data and nothing else is writable; the files are the node's alone.
 StateDirectory=fenecdb/node
 StateDirectoryMode=0700
-LogsDirectory=fenecdb
+# The audit log, 0600 under the UMask: a log shipper reads it through an
+# ACL (RUNBOOK, "Logs"), and rotates it by copytruncate, since SIGHUP shuts
+# the server down.
+LogsDirectory=fenecdb/node
 ReadWritePaths=/var/lib/fenecdb/node
 UMask=0077
 
@@ -83,7 +96,6 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
-ProcSubset=pid
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

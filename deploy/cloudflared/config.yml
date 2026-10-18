@@ -4,15 +4,26 @@
 # (--credentials-file), so this file names no secret.
 tunnel: router-1-eu
 
+# The hostname is public -- anyone may ask it, not the entry Worker alone --
+# so the rules let through exactly what the entry sends a region's router,
+# and the edge answers 404 to the rest whatever token a request carries:
+# the router's own /_shard/, /_replication, /_metrics and the studio, and a
+# tenant's replication stream, which the router would forward to the node
+# and which the cluster-wide replication token opens. cloudflared matches a
+# rule's path against the request's path decoded, without its query, so
+# /t/acme/%5Freplication, /t/acme%2F_replication and //t//acme/_replication
+# meet the first rule as /t/acme/_replication does
+# (deploy/test/ingress.py holds every one of them to it). Put Cloudflare
+# Access in front as well (deploy/RUNBOOK.md, "The network"): these rules
+# say which paths, Access says who.
 ingress:
-  # The global entry Worker's REGIONS name this hostname among eu's routers.
-  # The hostname is public -- anyone may ask it, not the entry alone -- so
-  # only what the entry sends a region's router is let through: a tenant's
-  # path. /_shard/, /_replication, /_metrics and the studio answer 404 at
-  # the edge, whatever token a request carries. (The global router, which
-  # the entry's ADMIN may send /_shard/ to, wants a rule of its own.)
+  # A tenant's replication stream: a standby node's, on the private network.
   - hostname: router-1.eu.example.com
-    path: ^/t/[a-z0-9_-]+(/|$)
+    path: ^/+t/+[^/]+/+_replication(/|$)
+    service: http_status:404
+  # A tenant's paths, the tenant named as the entry and the router name one.
+  - hostname: router-1.eu.example.com
+    path: ^/+t/+[a-z0-9_-]{1,64}(/|$)
     service: http://10.1.0.21:8090
     originRequest:
       # A held write (Fenec-Wait) waits 30 s at most and a silent stream

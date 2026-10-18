@@ -21,8 +21,8 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-User=fenec
-Group=fenec
+User=fenec-archive
+Group=fenec-archive
 EnvironmentFile=/etc/fenecdb/archive.env
 EnvironmentFile=/etc/fenecdb/archive-%i.env
 # The archive is sealed (ChaCha20-Poly1305): a copy in a bucket is out of
@@ -50,10 +50,13 @@ TimeoutStopSec=30s
 LimitNOFILE=4096
 LimitCORE=0
 
+# Group-readable, so the bucket sync (fenec-sync, in this group) reads the
+# archive and nothing else of this service's: sealed with the key, its
+# files say nothing without it.
 StateDirectory=fenecdb/archive/%i
-StateDirectoryMode=0700
+StateDirectoryMode=0750
 ReadWritePaths=/var/lib/fenecdb/archive/%i
-UMask=0077
+UMask=0027
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -69,7 +72,6 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
-ProcSubset=pid
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

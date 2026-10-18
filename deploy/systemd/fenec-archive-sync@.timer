@@ -10,7 +10,6 @@ Description=fenecdb archive of node %i to the bucket, every five minutes
 OnBootSec=5min
 OnUnitActiveSec=5min
 RandomizedDelaySec=30s
-Persistent=true
 
 [Install]
 WantedBy=timers.target

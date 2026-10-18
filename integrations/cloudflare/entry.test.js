@@ -102,6 +102,12 @@ test('the configuration is read, and refused where it names nothing to send to',
   assert.throws(() => configure({ REGIONS: '{"us": ["ftp://x"]}' }), /not http/);
   assert.throws(() => configure({ REGIONS: '{"us": ["https://x"]}', DEFAULT_REGION: 'ap' }), /not one of REGIONS/);
   assert.throws(() => configure({ REGIONS: '{"us": ["https://x"]}', HOMES: '-1' }), /count/);
+  // An Access service token, both halves or neither.
+  assert.equal(cfg.access, null);
+  const both = configure({ REGIONS: '{"us": ["https://x"]}', ACCESS_CLIENT_ID: 'id.access', ACCESS_CLIENT_SECRET: 's' });
+  assert.deepEqual(both.access, { id: 'id.access', secret: 's' });
+  assert.throws(() => configure({ REGIONS: '{"us": ["https://x"]}', ACCESS_CLIENT_ID: 'id.access' }), /both or neither/);
+  assert.throws(() => configure({ REGIONS: '{"us": ["https://x"]}', ACCESS_CLIENT_SECRET: 's' }), /both or neither/);
 });
 
 test('a home is forgotten first-heard first past the bound, and moved on a change', () => {
@@ -149,6 +155,12 @@ test('a request goes on less its hops, the marks and every address a client clai
   });
   // No mark, no client named: the address alone would be believed of anyone.
   assert.equal(sentHeaders(new Headers({ 'CF-Connecting-IP': '203.0.113.7' }), null).has('fenec-client'), false);
+  // The entry's Access service token goes to the router, a client's never.
+  const forged = new Headers({ 'CF-Access-Client-Id': 'forged', 'CF-Access-Client-Secret': 'forged' });
+  assert.equal(sentHeaders(forged, null).has('cf-access-client-id'), false);
+  const withToken = sentHeaders(forged, null, { id: 'id.access', secret: 's' });
+  assert.equal(withToken.get('cf-access-client-id'), 'id.access');
+  assert.equal(withToken.get('cf-access-client-secret'), 's');
 });
 
 test("an answer is a router's where it carries the router's mark, as every answer a router writes does", () => {
