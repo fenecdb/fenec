@@ -628,8 +628,9 @@ fn instructions(opts: Option<&Options>) -> String {
          embedding, @hash and @sorted fields filter fast. `search` ranks rows by words, by an \
          embedding (yours to compute, with the model the collection was filled with) or both; \
          `query` runs a FenecQL read (get <collection> where <condition> order <field> limit <n>, \
-         aggregates, count); `get` reads rows by id. Values always go in `params` as $1, $2, never \
-         into the text. An answer too large is refused rather than cut: narrow the filter, ask \
+         aggregates, count; SQL's SELECT ... FROM ... WHERE is read too, double quotes being text \
+         and a field written bare); `get` reads rows by id. Values always go in `params` as $1, \
+         $2, never into the text. An answer too large is refused rather than cut: narrow the filter, ask \
          for fewer fields or rows.",
     );
     if let Some(o) = opts {

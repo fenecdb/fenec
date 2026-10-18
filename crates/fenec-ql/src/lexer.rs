@@ -6,7 +6,11 @@ use fenec_core::error::{Error, Result};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     Ident(String),
+    /// `"..."`: text. SQL reads one as a column's name, which is why the
+    /// parser is told it apart from a [`Tok::Single`].
     Str(String),
+    /// `'...'`: text, as SQL writes it, `''` a quote within it.
+    Single(String),
     Int(i64),
     Float(f64),
     /// `$1` -> Param(0)
@@ -47,6 +51,7 @@ impl Tok {
         match self {
             Tok::Ident(s) => format!("`{s}`"),
             Tok::Str(s) => format!("\"{s}\""),
+            Tok::Single(s) => format!("'{s}'"),
             Tok::Int(i) => i.to_string(),
             Tok::Float(f) => {
                 let mut text = String::new();
@@ -98,6 +103,7 @@ fn subtracts(last: Option<&Token>) -> bool {
         Some(
             Tok::Ident(_)
                 | Tok::Str(_)
+                | Tok::Single(_)
                 | Tok::Int(_)
                 | Tok::Float(_)
                 | Tok::Param(_)
@@ -407,6 +413,12 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                 i += 1;
                 Tok::Slash
             }
+            // SQL's `||` joins two texts, as FenecQL's `+` does: the same
+            // operator, a text and a number refused alike.
+            '|' if next_is(i + 1, b'|') => {
+                i += 2;
+                Tok::Plus
+            }
             '-' if !digit_at(i + 1) || subtracts(out.last()) => {
                 i += 1;
                 Tok::Minus
@@ -501,6 +513,14 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                     }
                     if b[i] == quote {
                         i += 1;
+                        // SQL's `'it''s'`: two quotes in a single-quoted
+                        // text are one. Two texts side by side were never
+                        // FenecQL, so no text that parsed reads otherwise.
+                        if quote == b'\'' && next_is(i, b'\'') {
+                            s.push('\'');
+                            i += 1;
+                            continue;
+                        }
                         break;
                     }
                     // A run of plain characters at once, a backslash that
@@ -511,7 +531,10 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
                     }
                     s.push_str(src.get(run..i).unwrap_or_default());
                 }
-                Tok::Str(s)
+                match quote {
+                    b'"' => Tok::Str(s),
+                    _ => Tok::Single(s),
+                }
             }
             c if c.is_ascii_digit() || (c == '-' && digit_at(i + 1)) => {
                 let s = i;
@@ -745,6 +768,10 @@ mod tests {
                     i += 1;
                     Tok::Slash
                 }
+                '|' if i + 1 < b.len() && b[i + 1] == '|' => {
+                    i += 2;
+                    Tok::Plus
+                }
                 '-' if !(i + 1 < b.len() && b[i + 1].is_ascii_digit()) || subtracts(out.last()) => {
                     i += 1;
                     Tok::Minus
@@ -833,12 +860,20 @@ mod tests {
                         }
                         if b[i] == quote {
                             i += 1;
+                            if quote == '\'' && i < b.len() && b[i] == '\'' {
+                                s.push('\'');
+                                i += 1;
+                                continue;
+                            }
                             break;
                         }
                         s.push(b[i]);
                         i += 1;
                     }
-                    Tok::Str(s)
+                    match quote {
+                        '"' => Tok::Str(s),
+                        _ => Tok::Single(s),
+                    }
                 }
                 c if c.is_ascii_digit()
                     || (c == '-' && i + 1 < b.len() && b[i + 1].is_ascii_digit()) =>
@@ -973,6 +1008,9 @@ mod tests {
             "#",
             "\"s\"",
             "'q'",
+            "''",
+            "'a''b'",
+            "||",
             "\"a\\\"b\"",
             "'x\\n'",
             "\"ü\\ğ\"",

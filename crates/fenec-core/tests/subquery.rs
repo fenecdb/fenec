@@ -425,7 +425,7 @@ fn an_inner_get_answers_with_one_column() {
             "get customers select id lookup orders on customer",
             "attaches children",
         ),
-        ("collections", "takes a `get`"),
+        ("select id, tier from customers", "one column"),
     ] {
         let sql = format!("get orders where customer in ({inner})");
         let e = fenec_ql::parse_one(&sql).unwrap_err();
@@ -439,8 +439,17 @@ fn an_inner_get_answers_with_one_column() {
     )
     .unwrap_err();
     assert!(e.to_string().contains("nobody"), "{e}");
-    // `not x in (...)` is the `not` FenecQL has; `x not in` is not FenecQL.
-    assert!(fenec_ql::parse_one("get orders where customer not in (get tiers select n)").is_err());
+    // SQL's `x not in (...)` is `not (x in (...))`, and `in (a, b)` a list
+    // of values, `in [a, b]`: a `(` takes a `get` or a `select` alone as a
+    // query.
+    assert_eq!(
+        fenec_ql::parse_one("get orders where customer not in (get tiers select n)").unwrap(),
+        fenec_ql::parse_one("get orders where not (customer in (get tiers select n))").unwrap()
+    );
+    assert_eq!(
+        fenec_ql::parse_one("get orders where customer in (collections)").unwrap(),
+        fenec_ql::parse_one("get orders where customer in [collections]").unwrap()
+    );
 }
 
 #[test]

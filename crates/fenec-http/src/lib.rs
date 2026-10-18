@@ -2024,7 +2024,7 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
             // the page, and a body `/_schema/plan` takes back as it is.
             if req.query.iter().any(|(k, v)| k == "as" && v == "fenecql") {
                 let mut out = String::from("{\"format\":1,\"fenecql\":");
-                fenec_core::json::escape_into(&mut out, &fenec_core::declared::fenecql(&schemas));
+                fenec_core::json::escape_into(&mut out, &with_id_note(&schemas));
                 out.push('}');
                 return Response::json(200, out);
             }
@@ -2078,6 +2078,20 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
 /// meant for moving tenants near their rows. Counted among the tenant's
 /// statements and in the slow log, as a read under its prefix is: it is the
 /// tenant's load.
+/// The collections as the FenecQL that makes them, after a comment naming
+/// the `id` no field declares: shown none, agents reading a schema asked
+/// for `rowid` or `_id`, and failed. A comment, so the text is still one
+/// `/_schema/plan` takes back as it is; none where there is no collection.
+pub(crate) fn with_id_note<S: std::borrow::Borrow<Schema>>(schemas: &[S]) -> String {
+    let text = fenec_core::declared::fenecql(schemas);
+    match text.is_empty() {
+        true => text,
+        false => format!(
+            "-- every row also has an `id`, an int the database makes: `where id = 1`\n{text}"
+        ),
+    }
+}
+
 pub(crate) fn admin_query(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
     if req.body.len() > cfg.max_body {
         return Response::error(

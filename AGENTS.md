@@ -3080,6 +3080,79 @@ the flag as it rewrites the statement; made a `put` there, a scoped insert
 would write over. The JS builder's `.insert()` still sends `put`: the sync
 layer writes rows back through it when it undoes an optimistic write.
 
+**SQL's spellings are FenecQL, read by the one parser into the same
+statements** (`fenec-ql`'s `values`, `on_conflict`, `assignments`,
+`worded`, `in_list`; `query::sql_like`; `site/content/docs/sql.html`).
+The pg wire, its SQL subset and its `pg_catalog` went on 2026-10-01 and
+stay gone; what came back is spelling, with no mode and no second front
+end, so HTTP, MCP, the shell, the browser module and the native library
+read it alike. `INSERT INTO t (a, b) VALUES (..), (..)` is `insert t
+[{a: .., b: ..}]`, `UPDATE t SET a = e` `set t {a: e}`, `x IN (1, 2)` `x
+in [1, 2]` (a `(` after `in` took a `get` alone, so no text that parsed
+reads otherwise), `x [NOT] BETWEEN a AND b` `[not] (x >= a and x <= b)` --
+its `and` read by `worded` before `and_expr` sees one, and its operand a
+field or a parameter, copied as one: any expression's copy was `Expr`'s
+whole clone, 2 KB of the browser module -- `NOT IN`, `NOT LIKE` `not`
+over the test, `IS [NOT] DISTINCT FROM` `!=` and `=`, `IS [NOT] TRUE`
+`[not] (x = true)`, `count(x)` the rows where `x` is not null
+(`Fold::add` skips a null for `Count` too, `count(*)` being handed `true`),
+`'it''s'` a quote (`Tok::Single`), `||` the `+` it lexes to, `NULLS
+FIRST`/`LAST` where it says what the order does, `values {..}, {..}` and
+`put t {..}, {..}` a list without its brackets, `ON CONFLICT DO NOTHING`
+`if absent` and `DO UPDATE SET` `if absent else set`, `excluded.f` made
+`new.f` and `<collection>.f` `f`. The fields of an insert are named (the
+parser reads no schema, `id` is no field, an alter adds last); a row of
+another arity, `INSERT … SELECT`, a conflict target (with a second unique
+key it would part from `if absent`, held by any, and the parser cannot
+tell) and `DO UPDATE … WHERE` are refused naming the FenecQL to write, as
+are `CREATE TABLE`, `CREATE INDEX` (a name, no kind), `ALTER`/`DROP TABLE`,
+`TRUNCATE`, `BEGIN`/`COMMIT`, `JOIN` (both ways a `lookup` runs), an
+alias, `SELECT DISTINCT`, `EXISTS`, a scalar subquery, `MATCH(…)` and `@@`
+-- refused without consuming the word they start at, which the shell's
+statement cutting reads. An agent eval (row 40) found agents recovered
+whenever an error named the FenecQL form and never from ``unknown command
+`x` ``. Past the parser: `rowid` and `_id` are told `id`
+(`schema::no_field`), `users.email` that a field is named bare (`path_of`),
+`contains()`/`starts_with()`/`ends_with()` `like`, and `/_schema?as=fenecql`
+and the MCP `schema` tool name the `id` in a comment (`with_id_note`), which
+`/_schema/plan` reads past. `like`/`ilike` are calls, as `case` is, so no
+walk over an expression grew a variant: `eval` special-cases them
+(`sql_like`: a `nocase` field by its fold, as its `=`; `ilike` by
+Unicode's full fold, refused without `nocase`; no escape unless named; a
+pattern ending in its escape refused whatever the text), and
+`Filter::bind` binds one over a text field to `Test::Pattern` through the
+out-of-line `apart` arm, so `test` gained no arm. Through `eval` a scan of
+100 000 rows by `%99 of%` took 42.8 ms against `~`'s 8.3; bound, 29.0;
+with a literal after a `%` found by a byte scan, 10.4. **Two traps
+refused.** SQL's `"name"` is a column, FenecQL's text: `where "name" =
+'a'` answered every row or none. A double-quoted word is a name where only
+a name stands (`ident`, `path`) and text where a value does, and is
+refused (`Parser::quoted`) where SQL reads a column and text makes the
+answer the same in every row: alone on the left of a test against
+literals or parameters, on the right against a literal, a select item, an
+`order` or `group` key, an aggregate's argument -- never `$1 = "admin"`
+(a policy's claim) nor `name = "x"`. PostgreSQL's `~` is a regular
+expression: a `~` literal anchored (`^a`, `a$`) or holding `.*`/`.+` is
+refused pointing at `like` (`regex_like`; 85 `~` literals in the
+repository, none refused). `<>` stays `!=`, null and all: it was read so
+before any other SQL, and SQL's unknown runs through every `not` above it,
+which no rewrite of one comparison carries. The corpus of every FenecQL
+text the repository holds -- the docs' blocks, both golden files, the
+Rust crates' literals, the web tests' -- parsed on main and on the branch,
+4 085 texts: none parsed to another statement, the trap's own tests aside.
+`cmp_expr` keeps its frame: the worded tests are out of line (`worded`),
+or the depth test's 512 levels outgrew 8 MiB in a debug build; out of
+line, 511 parentheses parse in 1 091 KiB of stack in release against
+main's 1 187. The browser module grew 15.9 KB, 6.2 KB gzip, 4.8 KB brotli
+(729.2, 299.8, 248.7), the one with no feature 15.6 and 4.8: the parser's
+SQL forms and their refusals 8.4 KB raw, `like` 2.6 (`sql_like` 1.0,
+`like_pattern` 0.8, `bind_pattern` 0.8). The trap's error first found by
+`str::contains` brought the standard library's two-way searcher and a
+slice's panic, 4.1 KB, where `ends_with` brings none. Part 2:
+`JOIN` read as `lookup`, `DISTINCT`/`EXISTS`/a scalar
+subquery, `CREATE TABLE`'s types, pgvector's `<->`, a conflict target
+checked against the schema.
+
 **A `set` reads the row it writes, and every write says what it did.**
 `Expr::Arith` is `+ - * /` (`query::arith`): ints stay ints and one past
 64 bits is refused, never wrapped; `/` between ints divides whole toward

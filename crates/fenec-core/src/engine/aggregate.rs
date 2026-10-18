@@ -361,7 +361,9 @@ impl Fold {
     /// took 4% longer.
     #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
     fn add(&mut self, v: &Value) -> Result<bool> {
-        if matches!(v, Value::Null) && !matches!(self, Fold::Count(_)) {
+        // `count(*)` is handed `true` a row, and `count(x)` counts the rows
+        // where `x` is not null, as SQL's does.
+        if matches!(v, Value::Null) {
             return Ok(true);
         }
         match self {

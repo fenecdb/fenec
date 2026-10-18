@@ -724,6 +724,140 @@ pub(crate) fn like_match(hay: &str, needle: &str) -> bool {
     h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
+/// Whether `h` is `p` as SQL's `like` reads a pattern, both UTF-8: `%` any
+/// run of characters, `_` one, and `e` -- the escape, empty for none --
+/// before a character taking it as written. `None` for a pattern that ends
+/// in its escape, which SQL refuses. A mismatch after a `%` takes one more
+/// character of the text into it and goes on from there; only the last
+/// `%` is gone back to, since an earlier one could only take what the
+/// later one takes.
+pub(crate) fn like_pattern(h: &[u8], p: &[u8], e: &[u8]) -> Option<bool> {
+    // A character's length in bytes, by its first.
+    let len = |b: u8| 1 + (b >= 0xC0) as usize + (b >= 0xE0) as usize + (b >= 0xF0) as usize;
+    // Refused whatever the text, as a mistake in the statement: found as
+    // the match reached it, it was an error for some rows and no other.
+    let mut k = 0;
+    while k < p.len() {
+        if !e.is_empty() && p[k..].starts_with(e) {
+            k += e.len();
+            if k == p.len() {
+                return None;
+            }
+        }
+        k += 1;
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut back = None;
+    loop {
+        if let Some(&c) = p.get(j) {
+            let lit = !e.is_empty() && p[j..].starts_with(e);
+            let at = j + if lit { e.len() } else { 0 };
+            if !lit && c == b'%' {
+                j += 1;
+                if j == p.len() {
+                    return Some(true);
+                }
+                back = Some((j, i));
+                continue;
+            }
+            if let Some(&b) = h.get(i) {
+                if !lit && c == b'_' {
+                    i += len(b);
+                    j += 1;
+                    continue;
+                }
+                let n = len(p[at]);
+                if h[i..].starts_with(&p[at..at + n]) {
+                    i += n;
+                    j = at + n;
+                    continue;
+                }
+            }
+        } else if i == h.len() {
+            return Some(true);
+        }
+        match back {
+            Some((bj, bi)) if bi < h.len() => {
+                i = bi + len(h[bi]);
+                // A character written after the `%` can match only where
+                // its first byte stands, found by a scan of the bytes
+                // rather than a match tried at each character: a scan by
+                // `%99 of%` took 29 ms over 100 000 rows, by `~` 8.
+                let lit = !e.is_empty() && p[bj..].starts_with(e);
+                let c = p[bj + if lit { e.len() } else { 0 }];
+                if lit || (c != b'%' && c != b'_') {
+                    match h[i..].iter().position(|&b| b == c) {
+                        Some(k) => i += k,
+                        None => return Some(false),
+                    }
+                }
+                j = bj;
+                back = Some((bj, i));
+            }
+            _ => return Some(false),
+        }
+    }
+}
+
+/// SQL's `x like p [escape e]` and `ilike`, which the parser writes as
+/// calls of those names, so that no walk over an expression grew a
+/// variant. A `nocase` field compares by its fold, as its `=` does, and
+/// `ilike` by Unicode's where the field has none; a collated field by its
+/// bytes, as its `=` does. No escape unless one is named, as in standard
+/// SQL and SQLite. A null either side is null; any other value but text a
+/// type error, as PostgreSQL's.
+#[inline(never)]
+fn sql_like(
+    ci: bool,
+    x: &Expr,
+    p: &Expr,
+    e: &[Expr],
+    row: &mut dyn RowAccess,
+    ctx: &EvalCtx,
+) -> Result<Value> {
+    let fold = folded(&*row, x);
+    #[cfg(feature = "nocase")]
+    let fold = fold.or(ci.then_some(crate::case::CaseFold::Unicode));
+    #[cfg(not(feature = "nocase"))]
+    if ci {
+        return Err(crate::error::not_built("`ilike`", "nocase"));
+    }
+    let (h, p) = (eval(x, row, ctx)?, eval(p, row, ctx)?);
+    let e = match e {
+        [] => Value::Text(String::new()),
+        [e] => eval(e, row, ctx)?,
+        _ => {
+            return Err(Error::Query(
+                "`like` takes a text, a pattern and an escape".into(),
+            ))
+        }
+    };
+    let (Value::Text(h), Value::Text(p), Value::Text(e)) = (&h, &p, &e) else {
+        if h.is_null() || p.is_null() || e.is_null() {
+            return Ok(Value::Null);
+        }
+        return Err(Error::Type(format!(
+            "`like` takes text, not {} and {}",
+            h.type_name(),
+            p.type_name()
+        )));
+    };
+    let fit = |s| match fold {
+        Some(f) => crate::case::fold(s, f),
+        None => std::borrow::Cow::Borrowed(s),
+    };
+    // Folded, an escape with a case would be read in the pattern's letters.
+    if e.chars().nth(1).is_some() || fit(e) != e.as_str() {
+        return Err(Error::Query(
+            "`escape` takes one character, with no case where case is ignored".into(),
+        ));
+    }
+    match like_pattern(fit(h).as_bytes(), fit(p).as_bytes(), e.as_bytes()) {
+        Some(m) => Ok(Value::Bool(m)),
+        None => Err(Error::Query("a `like` pattern ends in its escape".into())),
+    }
+}
+
 /// `$n` (`Param(i)`) asked of a statement handed fewer parameters: one
 /// message, where four places each wrote it.
 #[inline(never)]
@@ -858,6 +992,9 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
                     [e] => eval(e, row, ctx),
                     _ => Ok(Value::Null),
                 };
+            }
+            if let ("like" | "ilike", [x, p, e @ ..]) = (name.as_str(), args.as_slice()) {
+                return sql_like(name.starts_with('i'), x, p, e, row, ctx);
             }
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
@@ -2533,10 +2670,13 @@ fn grouped(e: &Expr, keys: &[&Expr], inside: bool) -> Result<()> {
             return grouped(&x[0], keys, true);
         }
         ("count", []) => return Ok(()),
-        ("count", _) => {
-            "`count` counts rows or distinct values: `count(*)` or `count(distinct <field>)`"
+        ("count", [_, _, ..]) => {
+            "`count` counts rows, values or distinct values: `count(*)`, `count(<value>)`, \
+             `count(distinct <value>)`"
         }
-        ("first" | "last", [_] | [_, _])
+        // SQL's `count(x)`: the rows where `x` is not null.
+        ("count", [_])
+        | ("first" | "last", [_] | [_, _])
         | (
             "sum"
             | "avg"
@@ -3117,6 +3257,70 @@ pub fn projection_columns(schema: &Schema, project: &Option<Vec<String>>) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `like` by its definition, over characters: what the pattern's first
+    /// piece takes, the rest matched against what is left, every split
+    /// tried.
+    fn like_by_definition(h: &[char], p: &[char], e: Option<char>) -> Option<bool> {
+        let Some(&c) = p.first() else {
+            return Some(h.is_empty());
+        };
+        if Some(c) == e {
+            let &lit = p.get(1)?;
+            return match h.first() {
+                Some(&x) if x == lit => like_by_definition(&h[1..], &p[2..], e),
+                _ => {
+                    // The rest must still be read whole, to refuse a
+                    // pattern ending in its escape whatever the text.
+                    like_by_definition(&[], &p[2..], e)?;
+                    Some(false)
+                }
+            };
+        }
+        if c == '%' {
+            let mut any = false;
+            for k in 0..=h.len() {
+                any |= like_by_definition(&h[k..], &p[1..], e)?;
+            }
+            return Some(any || (h.is_empty() && like_by_definition(h, &p[1..], e)?));
+        }
+        match h.first() {
+            Some(&x) if c == '_' || x == c => like_by_definition(&h[1..], &p[1..], e),
+            _ => {
+                like_by_definition(&[], &p[1..], e)?;
+                Some(false)
+            }
+        }
+    }
+
+    /// The matcher answers every text and pattern of a small alphabet --
+    /// letters of one, two and four bytes, the wildcards, an escape -- as
+    /// the definition does, and refuses the same patterns.
+    #[test]
+    fn like_pattern_matches_by_its_definition() {
+        let alphabet = ['a', 'b', 'ç', '𝔸', '%', '_', '!'];
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut pick = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..60_000 {
+            let h: Vec<char> = (0..pick(7)).map(|_| alphabet[pick(4)]).collect();
+            let p: Vec<char> = (0..pick(7)).map(|_| alphabet[pick(7)]).collect();
+            let e = [None, Some('!'), Some('%')][pick(3)];
+            let (hs, ps): (String, String) = (h.iter().collect(), p.iter().collect());
+            let mut eb = [0u8; 4];
+            let es = e.map(|c| &*c.encode_utf8(&mut eb)).unwrap_or("");
+            let got = like_pattern(hs.as_bytes(), ps.as_bytes(), es.as_bytes());
+            assert_eq!(
+                got,
+                like_by_definition(&h, &p, e),
+                "{hs:?} like {ps:?} escape {e:?}"
+            );
+        }
+    }
 
     fn lookup_sel() -> Select {
         Select {

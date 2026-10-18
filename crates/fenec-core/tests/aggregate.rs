@@ -83,10 +83,13 @@ fn by_hand(rows: &[&Order]) -> Vec<Value> {
         opt(totals.iter().max().map(|m| Value::Int(*m))),
         // A sum over no rows is null, as SQL's is, not 0.
         opt((!weights.is_empty()).then(|| Value::Float(weights.iter().sum()))),
+        // `count(total)`: the rows whose total is not null, as SQL counts.
+        Value::Int(totals.len() as i64),
     ]
 }
 
-const LIST: &str = "count(*), sum(total), avg(total), min(total), max(total), sum(weight)";
+const LIST: &str =
+    "count(*), sum(total), avg(total), min(total), max(total), sum(weight), count(total)";
 
 fn close(a: &[Value], b: &[Value]) -> bool {
     a.len() == b.len()
@@ -111,7 +114,8 @@ fn aggregates_over_the_rows_match_the_sums_by_hand() {
             "avg(total)",
             "min(total)",
             "max(total)",
-            "sum(weight)"
+            "sum(weight)",
+            "count(total)"
         ]
     );
     let everything: Vec<&Order> = all.iter().collect();
@@ -263,7 +267,6 @@ fn what_does_not_combine_is_refused() {
             "neither aggregated nor grouped",
         ),
         ("get t select g group g", "needs an aggregate"),
-        ("get t select count(n)", "count(*)"),
         ("get t select median(n)", "answers under a name"),
         ("get t select median(n) as m", "unknown function"),
         ("get t select g, count(*) group g order n", "not a column"),

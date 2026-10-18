@@ -427,7 +427,9 @@ fn what_an_aggregating_list_cannot_answer_is_refused() {
             "neither aggregated",
         ),
         ("get ticks select sum(max(px)) as x", "inside another"),
-        ("get ticks select count(qty)", "count(distinct"),
+        // `count(qty)` is SQL's, the rows where `qty` is not null; inside
+        // another aggregate it is refused as any is.
+        ("get ticks select sum(count(qty)) as x", "inside another"),
         (
             "get ticks select distinct(qty) as d, count(*)",
             "inside `count`",

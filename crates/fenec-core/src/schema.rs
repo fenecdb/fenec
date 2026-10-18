@@ -664,6 +664,17 @@ pub struct Schema {
 /// A name read as a path: the field and the keys past it (`meta` and
 /// `source.rank` of `meta.source.rank`), `None` for a plain field's name.
 /// A field's name holds no dot ([`Schema::new`]), so the first one ends it.
+/// A field a collection does not hold, refused: SQLite's `rowid` and
+/// MongoDB's `_id`, which an agent reaches for, told the id is `id`.
+#[inline(never)]
+pub fn no_field(name: &str) -> Error {
+    let hint = match name {
+        "rowid" | "_id" | "oid" | "_rowid_" => ": a row's id is `id`",
+        _ => "",
+    };
+    Error::NotFound(format!("field `{name}`{hint}"))
+}
+
 pub fn split_path(name: &str) -> Option<(&str, &str)> {
     name.split_once('.')
 }
@@ -823,9 +834,13 @@ impl Schema {
         let Some((field, keys)) = split_path(name) else {
             return Ok(None);
         };
-        let pos = self
-            .field_pos(field)
-            .ok_or_else(|| Error::NotFound(format!("field `{field}`")))?;
+        // `users.email`: SQL's column named with its table, which reads
+        // into a json field here.
+        let pos = self.field_pos(field).ok_or_else(|| {
+            Error::NotFound(format!(
+                "field `{field}`: `{name}` reads into a json field, and a field is named bare"
+            ))
+        })?;
         if self.fields[pos].ty != DataType::Json {
             return Err(Error::Type(format!(
                 "`{name}` is a path, and `{field}` is {}: a path reads into a json field",

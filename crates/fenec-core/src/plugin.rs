@@ -185,7 +185,20 @@ impl Registry {
                      has no `@ttl`"
                         .into(),
                 ),
-                false => Error::Query(format!("unknown function `{name}`")),
+                // What an agent tries for text after SQL's `like`.
+                false => {
+                    let like = matches!(
+                        name,
+                        "contains" | "starts_with" | "ends_with" | "strpos" | "instr" | "position"
+                    );
+                    Error::Query(format!(
+                        "unknown function `{name}`{}",
+                        match like {
+                            true => ": text is matched by `like '%a%'`, `'a%'` or `'%a'`",
+                            false => "",
+                        }
+                    ))
+                }
             }
         })?;
         let (lo, hi) = (*lo, *hi);

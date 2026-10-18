@@ -345,7 +345,11 @@ pub fn shape(text: &str, out: &mut String) {
             hole(out);
             continue;
         }
-        if c == b'[' {
+        // SQL's `in (1, 2, 3)` is `in [1, 2, 3]`, one shape whatever its
+        // length.
+        let t = out.as_bytes();
+        let listed = c == b'(' && t.len() >= 4 && t[t.len() - 4..].eq_ignore_ascii_case(b" in ");
+        if c == b'[' || listed {
             if let Some(end) = literals_until(b, i) {
                 i = end;
                 hole(out);
@@ -476,11 +480,12 @@ fn number_end(b: &[u8], at: usize) -> usize {
 /// literals: a vector, or `in [1, 2, 3]`. `None` for a list of anything
 /// else, whose shape is written out.
 fn literals_until(b: &[u8], at: usize) -> Option<usize> {
+    let close = if b[at] == b'(' { b')' } else { b']' };
     let mut i = at + 1;
     let mut any = false;
     while i < b.len() {
         let c = b[i];
-        if c == b']' {
+        if c == close {
             return any.then_some(i + 1);
         }
         if c.is_ascii_whitespace() || c == b',' {
@@ -539,6 +544,12 @@ mod tests {
             "get d near embed $1 limit $2"
         );
         assert_eq!(of("get d where id in [1, 2, 3]"), "get d where id in $1");
+        assert_eq!(of("get d where id IN (1, 2, 3)"), "get d where id IN $1");
+        assert_eq!(of("get d where id in ('a', 'b')"), "get d where id in $1");
+        assert_eq!(
+            of("get d where id in (get e select f where g = 1)"),
+            "get d where id in (get e select f where g = $1)"
+        );
         assert_eq!(
             of("get col1 select x2 where a-1 > b"),
             "get col1 select x2 where a-$1 > b"
