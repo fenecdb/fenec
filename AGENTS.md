@@ -904,8 +904,25 @@ passed the fence just before its process stopped lands once it resumes
 acknowledgement out of `answered`, the node holding no lease until the
 grant after, sent at once; two directories leasing one node -- a
 misconfiguration -- can take it in turns as each other's lease lapses,
-neither holding one for long; and a router started with a shorter lease
-than the one before counts a node it never reaches by the shorter one. Cut off, a node
+neither holding one for long. A router started with a shorter lease than
+the one before it -- restarted, or a standby promoted -- counted a node it
+never reached by its own: cut off across the change, the node held the
+longer lease and wrote while its tenants were failed over. The directory
+records the longest lease a router leasing from it may have granted
+(`leasing`, one row, written before a router's first grant where its own
+is longer -- `Router::lease_recorded`, once a process; no block is written
+at every start to ride in); a router counts a node that has taken none of
+its grants (`Held::own`, set by `Taken`, not `Kept`) by that record
+(`Leases::inherited`, read as it leads), and lowers it to its own once it
+has led a lease and a tenth of it (`Leases::lowerable`): every lease
+granted before it led has run out, and one started after it counts by
+what may still run. Never lowered, one 20 s lease would have every router
+after it wait 22 s for a node it never reached. A router from before the
+record writes and reads none, and one started after it counts by its own
+lease, as before (`late_grants.rs`'
+`..._waits_out_a_node_it_never_reaches`, a restart and a standby promoted
+at 1 s after 10 s, each failing with the record ignored or never written).
+Cut off, a node
 stops about a round sooner, its lease run from the grant before the last it
 read: at a lease of a second it stopped 386-406 ms after the cut against
 main's 714-777, its 10 tenants writing again on their replicas 1.27-1.36 s

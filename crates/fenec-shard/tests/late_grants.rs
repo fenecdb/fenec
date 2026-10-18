@@ -20,6 +20,7 @@
 mod nodes;
 
 use fenec_core::prelude::Database;
+use fenec_http::replication::{fresh_id, Follower, Replication};
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
 use nodes::*;
@@ -877,4 +878,190 @@ fn a_router_restarted_with_a_shorter_lease_fails_over_a_node_on_the_shorter_one(
     );
     // The new primary takes them: the grants naming acme there are taken.
     new_primary_writes(port, || after.lease_round());
+}
+
+/// The lease the router before granted with, and how long it may run past
+/// its last grant: what a router started with a shorter one waits out for a
+/// node it never reaches.
+const LONG: Duration = Duration::from_secs(10);
+
+/// Runs `router`'s rounds until `acme` leaves n1, asserting that it did no
+/// sooner than [`LONG`] and a tenth past `granted` -- when the answer to the
+/// router before's last grant to n1 was in -- and that n1 then takes none
+/// of acme's writes. Seen moved only after the round that moved it, so a
+/// failover seen early was early; one made early and seen late is missed,
+/// never one made in time taken for early.
+fn waits_out_the_long_lease(router: &Router, port: u16, nodes: &[Node], granted: Instant) {
+    let deadline = granted + LONG * 4;
+    loop {
+        router.lease_round();
+        if placed(port, "acme").0 != "n1" {
+            let after = granted.elapsed();
+            assert!(
+                after > LONG + LONG / 10,
+                "acme was failed over {after:?} after the last grant of a lease of {LONG:?} to n1, \
+                 which may still hold it"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "acme was never failed over");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (direct, body) = query(
+        nodes[0].port,
+        "/t/acme/query",
+        r#"put notes {title: "old"}"#,
+    );
+    assert_ne!(
+        direct, 200,
+        "n1 took acme's write after its failover: {body}"
+    );
+}
+
+/// A router restarted over its directory with a shorter lease -- 10 s, then
+/// 1 s -- and n1 cut off across the restart: the new router never reaches
+/// it, and n1 holds the 10 s lease the router before granted, and writes.
+/// Counted by its own lease, the new router failed it over 1.1 s after it
+/// started, two primaries for the rest of the 10 s; it counts a node that
+/// has taken none of its grants by the longest lease the directory
+/// recorded, and once it has led that long lowers the record to its own.
+#[test]
+fn a_router_restarted_with_a_shorter_lease_waits_out_a_node_it_never_reaches() {
+    let db = Arc::new(RwLock::new(Database::new()));
+    let (nodes, before, port) = registered("unr", &db, LONG);
+    before.lease_round();
+    acme_on_n1(port, &nodes);
+    before.lease_round();
+    let granted = Instant::now();
+    nodes[0].proxy.cut();
+    let recorded = || Directory::load(Arc::clone(&db)).unwrap().lease_record();
+    assert_eq!(recorded(), Some(LONG));
+
+    let (after, port) = router_on(&db, Duration::from_secs(1));
+    waits_out_the_long_lease(&after, port, &nodes, granted);
+    // Led a lease and a tenth of the one recorded: no node holds it now.
+    after.lease_round();
+    assert_eq!(recorded(), Some(Duration::from_secs(1)));
+}
+
+/// A router of a directory file of its own leasing for `term`, its rounds
+/// the test's, following `upstream` -- its primary router -- where given,
+/// as a standby: the database it keeps beside it.
+fn standing(
+    path: &std::path::Path,
+    upstream: Option<&str>,
+    term: Duration,
+) -> (Arc<Router>, u16, Arc<RwLock<Database>>) {
+    let (mut db, feed) = fenec_http::replication::open(path.to_str().unwrap(), 8 << 20).unwrap();
+    match upstream {
+        Some(_) => {
+            let lineage = db.history().lineage.clone();
+            db.follow(lineage).unwrap();
+        }
+        None => {
+            db.fork(fresh_id()).unwrap();
+            db.sync().unwrap();
+        }
+    }
+    let db = Arc::new(RwLock::new(db));
+    let dir = Directory::load(Arc::clone(&db)).unwrap();
+    let follower = upstream.map(|url| {
+        let f = Follower::new(
+            url,
+            DIRS.into(),
+            Arc::clone(&db),
+            Some(Arc::clone(&feed)),
+            true,
+        )
+        .unwrap();
+        let run = Arc::clone(&f);
+        std::thread::spawn(move || run.run());
+        f
+    });
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        upstream_timeout: Duration::from_secs(10),
+        replicas: true,
+        auto_failover: Some(term),
+        ..Config::default()
+    };
+    let replication = Replication::new(Some(DIRS.into()), Some(feed), follower);
+    let router = Router::replicated(dir, cfg, replication);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let serving = Arc::clone(&router);
+    std::thread::spawn(move || {
+        let _ = serving.serve_on(listener);
+    });
+    (router, port, db)
+}
+
+const DIRS: &str = "directory-secret";
+
+/// A standby router with a shorter lease than its primary's -- 1 s against
+/// 10 s -- promoted with n1 cut off from both: the record its primary wrote
+/// came with the directory, and the promoted router waits out the 10 s
+/// lease for n1 as a restarted one does.
+#[test]
+fn a_promoted_standby_with_a_shorter_lease_waits_out_a_node_it_never_reaches() {
+    let files = std::env::temp_dir().join(format!("fenec-late-standby-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&files);
+    std::fs::create_dir_all(&files).unwrap();
+    let nodes = [1, 2].map(|i| node(&format!("stb{i}"), true));
+    let (a, a_port, _) = standing(&files.join("a.fenec"), None, LONG);
+    let upstream = format!("http://127.0.0.1:{a_port}");
+    let (b, b_port, b_db) = standing(
+        &files.join("b.fenec"),
+        Some(&upstream),
+        Duration::from_secs(1),
+    );
+    for (i, n) in nodes.iter().enumerate() {
+        let body = format!(
+            r#"{{"addr":"{}","token":"adm-stb{}"}}"#,
+            n.proxy.addr,
+            i + 1
+        );
+        let (status, body) = call(
+            a_port,
+            "PUT",
+            &format!("/_shard/nodes/n{}", i + 1),
+            &body,
+            None,
+        );
+        assert!(status == 200 || status == 201, "{body}");
+    }
+    let create = r#"{"node":"n1","schema":"create collection notes (title text)"}"#;
+    let (status, body) = call(a_port, "PUT", "/_shard/tenants/acme", create, None);
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(
+        query(a_port, "/t/acme/query", r#"put notes {title: "one"}"#).0,
+        200
+    );
+    until(
+        nodes[1].port,
+        "/t/acme/query",
+        "get notes select title",
+        "one",
+    );
+    // The record and the placement have reached the standby's directory.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let dir = Directory::load(Arc::clone(&b_db)).unwrap();
+        if dir.lease_record() == Some(LONG) && dir.placement("acme").is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the standby's directory never caught up"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    a.lease_round();
+    let granted = Instant::now();
+    nodes[0].proxy.cut();
+    let (status, body) = call(b_port, "POST", "/_replication/promote", "", Some(DIRS));
+    assert_eq!(status, 200, "{body}");
+    waits_out_the_long_lease(&b, b_port, &nodes, granted);
+    drop(a);
+    let _ = std::fs::remove_dir_all(&files);
 }

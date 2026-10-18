@@ -56,7 +56,12 @@
 //! lapsed would make two primaries. A standby keeps forgetting every lease
 //! for as long as it follows, and its first round once promoted counts
 //! from then ([`Leases::leading`]), not from its last round while it
-//! followed, nor from its start.
+//! followed, nor from its start. As long, or longer: the directory records
+//! the longest lease a router leasing from it may have granted, and a node
+//! that has taken none of this router's grants is counted by it, one that
+//! has by this router's own -- a router started with a shorter lease
+//! failed a node it never reached over by its own, while the node held the
+//! longer lease and wrote.
 //!
 //! A grant names its holder (`fenec_http::lease::Holder`): the directory
 //! the router leases from -- the global one, or a region's own -- and its
@@ -116,6 +121,14 @@ pub struct Leases {
     /// operation, that its grants name no more, and from when a promotion
     /// of each may come ([`Leases::withhold`]).
     withheld: Mutex<HashMap<String, HashMap<String, Instant>>>,
+    /// The longest lease a node that has taken none of this router's
+    /// grants may hold: its own, or a longer one the directory recorded
+    /// as it began leasing ([`Leases::leading`]), until that is lowered
+    /// ([`Leases::lowerable`]).
+    inherited: Mutex<Duration>,
+    /// This router made sure the directory's record covers its own lease,
+    /// which it does before its first grant ([`Leases::recorded`]).
+    recorded: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -143,6 +156,10 @@ struct Held {
     lost: bool,
     /// It said it takes no lease, and is never failed over on its own.
     refuses: bool,
+    /// It took a grant of this router's: its lease runs from this router's
+    /// answers, its own length, cutting short any longer one a router before
+    /// it granted. Until then it is counted by [`Leases::inherited`].
+    own: bool,
     /// A round's grant to it is under way: the next round sends it none
     /// ([`Leases::begin_grant`]).
     granting: bool,
@@ -187,6 +204,8 @@ impl Leases {
             waiting: AtomicUsize::new(0),
             following: AtomicBool::new(true),
             withheld: Mutex::new(HashMap::new()),
+            inherited: Mutex::new(term),
+            recorded: AtomicBool::new(false),
         }
     }
 
@@ -233,6 +252,8 @@ impl Leases {
         self.held().clear();
         self.withheld().clear();
         self.following.store(true, Ordering::SeqCst);
+        self.recorded.store(false, Ordering::SeqCst);
+        *self.inherited() = self.term;
     }
 
     /// A round of a router that leases: the first after following, its
@@ -241,8 +262,16 @@ impl Leases {
     /// third of a lease before the promotion -- a node the router before it
     /// renewed after that round could be failed over while that grant still
     /// ran, two primaries.
-    pub fn leading(&self) {
+    ///
+    /// A node that has taken none of its grants is counted by the longest
+    /// lease the directory recorded, `recorded` asked then, where it is
+    /// longer than this router's own: a router started with a shorter
+    /// lease than the one before it -- restarted, or a standby promoted --
+    /// failed over a node it never reached after its own lease and a
+    /// tenth, while the node, cut off, held the longer lease and wrote.
+    pub fn leading(&self, recorded: impl FnOnce() -> Option<Duration>) {
         if self.following.swap(false, Ordering::SeqCst) {
+            *self.inherited() = self.term.max(recorded().unwrap_or_default());
             let now = Instant::now();
             // Every node granted now, what was learnt of each kept: a router
             // primary from its start may have heard a node say it takes no
@@ -260,6 +289,58 @@ impl Leases {
         self.withheld.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn inherited(&self) -> std::sync::MutexGuard<'_, Duration> {
+        self.inherited.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The lease `h` may hold: this router's own once it took a grant of
+    /// it, the longest recorded until then.
+    fn term_of(&self, h: &Held) -> Duration {
+        match h.own {
+            true => self.term,
+            false => *self.inherited(),
+        }
+    }
+
+    /// How long `node` may go unrenewed before it is failed over: a lease
+    /// and a tenth, of the one it may hold: its own once it took a grant
+    /// of this router's, the longest recorded until then.
+    pub fn lapse_of(&self, node: &str) -> Duration {
+        let mut m = self.held();
+        let h = self.entry(&mut m, node);
+        lapse(self.term_of(h))
+    }
+
+    /// Whether this router has yet to make sure the directory's record
+    /// covers its own lease: asked before every grant, done once.
+    pub fn unrecorded(&self) -> bool {
+        !self.recorded.load(Ordering::SeqCst)
+    }
+
+    /// The directory's record covers this router's own lease.
+    pub fn recorded(&self) {
+        self.recorded.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the record may come down to this router's own lease: it is
+    /// longer, and this router has led a lease and a tenth of it, so every
+    /// lease granted before it led has run out, while every one granted
+    /// since is its own -- and a router started after this one, finding it
+    /// lowered, counts by what can still run. Raised again by the first
+    /// router with a longer lease to lead.
+    pub fn lowerable(&self, now: Instant) -> bool {
+        let inherited = *self.inherited();
+        let started = *self.started.lock().unwrap_or_else(|e| e.into_inner());
+        inherited > self.term
+            && !self.following.load(Ordering::SeqCst)
+            && now.saturating_duration_since(started) > lapse(inherited)
+    }
+
+    /// The record came down to this router's own lease.
+    pub fn lowered(&self) {
+        *self.inherited() = self.term;
+    }
+
     /// `tenant`, left on `node` by its failover, named by no grant to the
     /// node from now: asked with the node's turn held, so no grant naming it
     /// is in flight. Its promotion may come a lease and a tenth after the
@@ -275,16 +356,13 @@ impl Leases {
         let from = {
             let mut m = self.held();
             let h = self.entry(&mut m, node);
-            if h.unnumbered {
-                h.settled
-            } else {
-                h.acked
-            }
+            let from = if h.unnumbered { h.settled } else { h.acked };
+            from + lapse(self.term_of(h))
         };
         self.withheld()
             .entry(node.to_string())
             .or_default()
-            .insert(tenant.to_string(), from + lapse(self.term));
+            .insert(tenant.to_string(), from);
     }
 
     /// From when `tenant`, withheld from `node`, may be promoted; `None`
@@ -336,6 +414,7 @@ impl Leases {
             settled: started,
             next: fenec_http::replication::fresh_id(),
             unnumbered: false,
+            own: false,
             epoch: None,
             lost: false,
             refuses: false,
@@ -434,6 +513,10 @@ impl Leases {
                     Answer::Taken => Some(epoch.to_string()),
                     _ => None,
                 };
+                // Taken, its lease runs from this answer, this router's
+                // length: a longer one from before is cut short. Kept, the
+                // longer one may still run.
+                h.own |= matches!(answer, Answer::Taken);
                 h.refuses = false;
                 let back = std::mem::take(&mut h.lost);
                 // Back, it holds the tenants still placed on it again,
@@ -480,7 +563,8 @@ impl Leases {
         let mut m = self.held();
         let mut out = Vec::new();
         for (node, h) in m.iter_mut() {
-            if !h.refuses && !h.lost && !h.failing && lapsed(h, now, self.term) {
+            let term = self.term_of(h);
+            if !h.refuses && !h.lost && !h.failing && lapsed(h, now, term) {
                 h.failing = true;
                 out.push(node.clone());
             }
@@ -502,7 +586,8 @@ impl Leases {
             return false;
         };
         h.failing = false;
-        if h.refuses || h.lost || !lapsed(h, now, self.term) {
+        let term = self.term_of(h);
+        if h.refuses || h.lost || !lapsed(h, now, term) {
             return false;
         }
         h.lost = true;
@@ -618,11 +703,11 @@ mod tests {
         l.standby();
         std::thread::sleep(Duration::from_millis(120));
         let before = Instant::now();
-        l.leading();
+        l.leading(|| None);
         l.know("n1");
         assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
         let led = Instant::now();
-        l.leading();
+        l.leading(|| None);
         l.know("n1");
         assert_eq!(l.suspects(led + Duration::from_millis(115)), ["n1"]);
     }
@@ -695,6 +780,42 @@ mod tests {
         assert!(!l.short(Some(66)));
     }
 
+    /// A node that has taken no grant of this router's is counted by the
+    /// longest lease the directory recorded; once it takes one -- not one
+    /// it answered and kept -- by this router's own. The record may come
+    /// down once this router has led a lease and a tenth of it, and not
+    /// before; a standby's round forgets all of it.
+    #[test]
+    fn a_node_unanswered_since_the_start_is_counted_by_the_longest_lease_recorded() {
+        let term = Duration::from_millis(100);
+        let l = Leases::new(term);
+        let before = Instant::now();
+        l.leading(|| Some(Duration::from_millis(1_000)));
+        l.know("n1");
+        l.know("n2");
+        let after = Instant::now();
+        // Past its own lease and a tenth, short of the recorded one's.
+        assert!(l.suspects(before + Duration::from_millis(1_000)).is_empty());
+        // n2 answers and keeps the lease it held; n1 takes a grant.
+        l.answered("n2", 1, "e", &Answer::Kept, after);
+        l.answered("n1", 1, "e", &Answer::Taken, after);
+        let lapsed = after + Duration::from_millis(115);
+        assert_eq!(l.suspects(lapsed), ["n1"]);
+        assert!(l.confirm_lapse("n1", lapsed));
+        assert!(!l.lowerable(before + Duration::from_millis(1_000)));
+        let past = after + Duration::from_millis(1_115);
+        assert_eq!(l.suspects(past), ["n2"]);
+        assert!(l.lowerable(past));
+        l.lowered();
+        assert!(!l.lowerable(past));
+        // A standby forgets: promoted again, it counts by what it reads then.
+        l.standby();
+        assert!(l.unrecorded());
+        l.leading(|| None);
+        l.know("n3");
+        assert!(!l.lowerable(Instant::now() + Duration::from_secs(5)));
+    }
+
     /// A router counts from its first round as the primary even where no
     /// round of its own came before -- a standby promoted before its first,
     /// or a router primary from its start -- not from when it was made.
@@ -703,7 +824,7 @@ mod tests {
         let l = Leases::new(Duration::from_millis(100));
         std::thread::sleep(Duration::from_millis(120));
         let before = Instant::now();
-        l.leading();
+        l.leading(|| None);
         l.know("n1");
         assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
     }

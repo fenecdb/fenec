@@ -993,10 +993,18 @@ resumes. A stall of sixteen rounds or more can leave a node without the
 answer its next grant acknowledges, holding no lease until the grant after
 it, which the router sends at once. Two directories leasing one node — a
 misconfiguration — can take it in turns as each other's lease lapses,
-neither holding one for long. A router started with a shorter lease than
-the one before it — restarted, or a standby promoted — counts a node it
-never reaches by the shorter one, while the node's lease from before may run
-longer.</p>
+neither holding one for long.</p>
+
+<p>A router may start with a shorter lease than the one before it —
+<code>--auto-failover</code> lowered, then a restart or a standby promoted.
+A node it never reaches may still hold the longer lease, so the directory
+records the longest lease a router leasing from it may have granted, raised
+before a router's first grant with a longer one. A router counts a node that
+has taken none of its grants by that record, and a node that has by its own
+lease, since its grant cuts the longer one short. Once it has led for the
+recorded lease and a tenth, every lease granted before it has run out, and
+it lowers the record to its own. A router from before the record neither
+writes nor reads it.</p>
 
 <p>The lease names tenants, not the node. A node failed over comes back with
 the files of tenants served elsewhere now, primaries' files still; a lease

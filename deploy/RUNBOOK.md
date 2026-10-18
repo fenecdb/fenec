@@ -425,6 +425,15 @@ on a thread of its own, a name is looked up within a third of the lease,
 and a replica being promoted stops reconnecting to the dead node at once.
 With the default lease of 5 s, count about 6 s to the failover.
 
+Lowering `--auto-failover` needs no care. The directory records the longest
+lease a router leasing from it may have granted. A router started with a
+shorter one -- restarted, or a standby promoted -- counts a node it has not
+reached since by that record, so a node cut off across the change, still
+holding the longer lease, is failed over only once that lease has run out.
+A node it does reach takes the shorter lease with its first grant. The
+record comes down to the new lease once the router has led for the old one
+and a tenth.
+
 What to do:
 
 1. `FenecNodeFailedOver` and `FenecAutoFailover` fire. Check the router's
@@ -909,11 +918,6 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   write that passed the lease's check just before its process stopped lands
   once it resumes. Do not pause or suspend a node's machine; stop the node
   (`systemctl stop fenec-node`) first.
-- **A router started with a shorter lease** than the one before it
-  (`--auto-failover` lowered, then a restart or a standby's promotion)
-  counts a node it does not reach by the new one, while the node's lease
-  from before may run to the old one. Lower it with every node answering,
-  and let a round pass before anything else changes.
 
 - **No scrape-only token.** `/_metrics` takes a node's data or admin token,
   a router's `--token`.

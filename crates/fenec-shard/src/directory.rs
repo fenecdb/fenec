@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 /// in a region keeping its own: `@` and the region.
 pub const HOME: char = '@';
 
-const SCHEMA: [&str; 10] = [
+const SCHEMA: [&str; 11] = [
     "create collection if not exists nodes \
      (name text @hash, addr text, token text, region text, zone text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
@@ -95,6 +95,17 @@ const SCHEMA: [&str; 10] = [
     // history its primary forked at its last failover, 16 hex digits,
     // which the copy promoted at the next must hold.
     "create collection if not exists lineages (tenant text @hash, lineage text, was text)",
+    // The longest lease, in milliseconds, a router leasing from this
+    // directory may have granted that can still run: one row, raised by a
+    // router with a longer lease before its first grant, lowered to its
+    // own once it has led a lease and a tenth of the one recorded. A
+    // router started -- restarted, or a standby promoted -- counts a node
+    // that has not taken a grant of its own by it: by its own shorter
+    // lease, a node cut off across the start held its predecessor's
+    // longer one, and wrote, as its tenants were failed over. A collection
+    // of its own, read where asked, never mapped; a router from before it
+    // neither reads nor writes it.
+    "create collection if not exists leasing (ms int)",
 ];
 
 /// The fields `nodes` took after directories were first written, added to
@@ -1213,6 +1224,30 @@ impl Directory {
         self.set_lineage(tenant, None)?;
         self.set_quota(tenant, None)?;
         self.set_replica(tenant, None)
+    }
+
+    /// The longest lease a router leasing from this directory recorded
+    /// (`leasing`): `None` where none did -- no router has leased from it
+    /// yet, or only routers from before the record.
+    pub fn lease_record(&self) -> Option<std::time::Duration> {
+        let g = read(&self.db);
+        let ms = rows(&g, "leasing", "get leasing select ms").ok()?;
+        let ms = ms.iter().filter_map(|(_, row)| match row.first() {
+            Some(Value::Int(ms)) if *ms > 0 => Some(*ms as u64),
+            _ => None,
+        });
+        ms.max().map(std::time::Duration::from_millis)
+    }
+
+    /// Records `lease` as the longest a router leasing from this directory
+    /// may have granted that can still run ([`Self::lease_record`]).
+    pub fn record_lease(&mut self, lease: std::time::Duration) -> Result<()> {
+        let ms = vec![Value::Int(lease.as_millis().min(i64::MAX as u128) as i64)];
+        let held = !rows(&read(&self.db), "leasing", "get leasing select ms")?.is_empty();
+        match held {
+            true => self.run("set leasing {ms: $1}", &ms),
+            false => self.run("put leasing {ms: $1}", &ms),
+        }
     }
 
     /// One statement, then a sync: a directory change the router has

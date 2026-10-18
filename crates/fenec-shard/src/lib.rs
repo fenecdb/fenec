@@ -556,7 +556,16 @@ impl Router {
             leases.standby();
             return;
         }
-        leases.leading();
+        leases.leading(|| self.read_dir().lease_record());
+        // Led a lease and a tenth of a longer one recorded: no node holds
+        // it now, and a router started after this one waits only for what
+        // can still run.
+        if leases.lowerable(Instant::now()) {
+            match self.write_dir().record_lease(leases.term) {
+                Ok(()) => leases.lowered(),
+                Err(e) => fenec_http::log!("the lease recorded stays longer than this one: {e}"),
+            }
+        }
         let Some(me) = self.me.upgrade() else {
             return;
         };
@@ -643,7 +652,7 @@ impl Router {
         }
         fenec_http::log!(
             "node `{node}` renewed no lease in {:?}: failing its tenants over",
-            lease::lapse(leases.term)
+            leases.lapse_of(node)
         );
         let mut held = Vec::new();
         let (status, why) = match self.failover(node, &mut held, false) {
@@ -958,7 +967,7 @@ impl Router {
         let Some(n) = self.read_dir().node(node).cloned() else {
             return false;
         };
-        if reading < *sent {
+        if reading < *sent || !self.lease_recorded() {
             return false;
         }
         *sent = reading;
@@ -1038,6 +1047,36 @@ impl Router {
             }
         }
         back
+    }
+
+    /// Whether the directory records a lease no shorter than this router's
+    /// own, written before its first grant where it did not
+    /// ([`lease::Leases::leading`]): a router started after this one with a
+    /// shorter lease counts a node it never reaches by the longest that may
+    /// still run. Not written, the grant is not sent -- a lease its
+    /// successor knows nothing of -- and a router following another sends
+    /// none. Once a process: no write on any grant after the first.
+    fn lease_recorded(&self) -> bool {
+        let Some((leases, _)) = &self.leases else {
+            return true;
+        };
+        if !leases.unrecorded() {
+            return true;
+        }
+        let mut dir = self.write_dir();
+        if dir.following() {
+            return false;
+        }
+        if dir.lease_record().is_none_or(|was| was < leases.term) {
+            if let Err(e) = dir.record_lease(leases.term) {
+                fenec_http::log!(
+                    "no lease granted: the directory could not record its length: {e}"
+                );
+                return false;
+            }
+        }
+        leases.recorded();
+        true
     }
 
     /// `node` answered a grant after it was failed over: a repair has its
