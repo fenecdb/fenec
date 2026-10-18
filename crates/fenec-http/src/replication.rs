@@ -60,7 +60,7 @@ use fenec_core::prelude::*;
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -85,6 +85,10 @@ pub(crate) const ALIVE: Duration = Duration::from_secs(2);
 /// A replica that hears nothing for this long takes the primary for gone and
 /// connects again.
 pub(crate) const SILENCE: Duration = Duration::from_secs(10);
+
+/// How long a connection to the primary may take: its name's lookup, then
+/// the connect to each address it stands for ([`crate::dial::connect`]).
+pub(crate) const CONNECT: Duration = Duration::from_secs(5);
 
 /// An image is sent once the primary's disk holds it; a primary whose disk
 /// does not get there in this long is not sending it.
@@ -1439,7 +1443,12 @@ impl Upstream {
     /// Opens the stream for a database `since` changes in on `history`;
     /// `image` asks for one whatever the positions say.
     pub fn open(&self, since: u64, history: u64, image: bool) -> io::Result<Receiver> {
-        let s = connect(&self.addr)?;
+        self.request(connect(&self.addr)?, since, history, image)
+    }
+
+    /// [`Upstream::open`] over `s`, a connection to the primary made
+    /// already: the request, and the answer's head.
+    fn request(&self, s: TcpStream, since: u64, history: u64, image: bool) -> io::Result<Receiver> {
         s.set_read_timeout(Some(SILENCE))?;
         s.set_write_timeout(Some(SILENCE))?;
         let request = format!(
@@ -1681,11 +1690,19 @@ impl Follower {
             let g = self.db.read().unwrap_or_else(|e| e.into_inner());
             (g.change_seq(), g.history().current())
         };
-        let mut stream = self.upstream.open(since, history, *force_image)?;
-        *lock(&self.conn) = Some(stream.handle()?);
+        // The connect is walked away from at a halt: a promotion halts the
+        // follower before it forks, and one in the middle of reconnecting
+        // to a dead primary waited out that connect -- its 5 s, and a
+        // name's lookup besides -- and the failover with it.
+        let s = crate::dial::connect_unless(&self.upstream.addr, CONNECT, &self.stop)?;
+        // Handed to `halt` before the request goes out, so a primary that
+        // takes the connection and never answers is cut as a stream is, not
+        // waited for to the head's SILENCE.
+        *lock(&self.conn) = Some(s.try_clone()?);
         if self.stop.load(Ordering::SeqCst) {
             return Ok(());
         }
+        let mut stream = self.upstream.request(s, since, history, *force_image)?;
         let Message::Hello {
             image,
             seq,
@@ -1866,17 +1883,7 @@ impl Follower {
 }
 
 pub(crate) fn connect(addr: &str) -> io::Result<TcpStream> {
-    let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
-    for a in addr.to_socket_addrs()? {
-        match TcpStream::connect_timeout(&a, Duration::from_secs(5)) {
-            Ok(s) => {
-                let _ = s.set_nodelay(true);
-                return Ok(s);
-            }
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
+    crate::dial::connect(addr, CONNECT)
 }
 
 /// The status line and the length of the body, when it has one.

@@ -2464,9 +2464,9 @@ impl Router {
                     let (mut lineage, mut was) = (lineage.clone(), was.clone());
                     // Its copy lost with nothing else changed: the copy may
                     // have refused its primary, which is then of a lineage
-                    // the tenant's directory does not know -- a copy that
-                    // never took its first image promoted, an older file
-                    // restored, a file put in its place. The primary is the
+                    // the tenant's directory does not know -- an older
+                    // file of it promoted, an older file restored, a file
+                    // put in its place. The primary is the
                     // tenant: its node is asked, and the directory takes its
                     // word, the lineage before kept as one the tenant was
                     // (`was`), so this replica is bound to it again rather

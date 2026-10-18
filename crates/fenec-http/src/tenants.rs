@@ -120,6 +120,135 @@ pub struct Tenant {
 /// The opens of tenants' files in this process, numbered.
 static OPENS: AtomicU64 = AtomicU64::new(1);
 
+/// What a router knows of a tenant it promotes a copy of (`POST
+/// /_admin/tenants/<t>/promote`'s body), which the copy is held to
+/// ([`Tenants::promote_as`]).
+#[derive(Clone, Debug, Default)]
+pub struct Expected {
+    /// The lineage the tenant is of: a copy that took its primary's image
+    /// is of it, one that never did is of its own -- a new file's, or none
+    /// on a standby -- and so is a file put in its place by hand.
+    pub lineage: Option<u32>,
+    /// The history the tenant's primary forked at its last failover, which
+    /// a copy that has heard from that primary holds among its own: an old
+    /// primary's copy made to follow it and never reached holds the history
+    /// it had, which the lineage alone does not tell from the tenant's. A
+    /// copy that heard from the node it follows since it was told to
+    /// follow it passes without it: a primary's file restored in place to a
+    /// moment before that failover holds the history it had then, and so
+    /// does every copy that took it, though each holds every write its
+    /// primary has.
+    pub history: Option<u64>,
+    /// Promoted whatever it holds: an operator's word.
+    pub force: bool,
+}
+
+/// The line `.follows` takes once the copy heard from the node it was
+/// told to follow ([`mark_heard`]).
+const HEARD: &str = "heard";
+
+/// Writes a tenant's `.follows` whole or not at all: beside, synced, then
+/// renamed, and the rename made durable -- until its directory is synced a
+/// power loss can bring back the file before, the node it followed then, or
+/// a copy marked heard that has heard nothing since its follow.
+fn write_follows(dir: &Path, name: &str, text: &str) -> std::io::Result<()> {
+    let tmp = dir.join(format!("{name}.follows.writing"));
+    let path = dir.join(format!("{name}.follows"));
+    std::fs::File::create(&tmp)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()
+        })
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .and_then(|_| dir_synced(&path))
+}
+
+/// [`fenec_core::fs::sync_dir`] as an I/O error.
+fn dir_synced(path: &Path) -> std::io::Result<()> {
+    fenec_core::fs::sync_dir(path).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Notes in a tenant's `.follows` that its copy has heard from the node it
+/// was told to follow -- its image taken, or its place in that node's
+/// history found -- once since the follow wrote it ([`Tenants::follow`]):
+/// kept across a restart, where the copy's `ready` is not, and asked as a
+/// promotion is ([`refusal`]). Called on the follower's thread, which a
+/// follow halts before it writes the file again, so no hello of the follow
+/// before lands after it. A copy with no `.follows` was never told to
+/// follow -- a standby's made with its node -- and notes nothing.
+fn mark_heard(dir: &Path, name: &str) {
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.follows"))) else {
+        return;
+    };
+    if text.lines().any(|l| l.trim() == HEARD) {
+        return;
+    }
+    let marked = format!("{}\n{HEARD}", text.trim_end_matches('\n'));
+    if let Err(e) = write_follows(dir, name, &marked) {
+        crate::log!("tenant `{name}` heard from its primary, but could not note it: {e}");
+    }
+}
+
+/// Why a copy is not to be promoted as `want` would have it, if it is not.
+/// Asked of a following copy alone: a file taking writes is refused as no
+/// replica further on. `heard` is whether it heard from the node it follows
+/// since it was last told to follow it ([`Tenants::heard_since_told`]).
+fn refusal(
+    name: &str,
+    g: &Database,
+    ready: bool,
+    heard: Option<bool>,
+    want: &Expected,
+) -> Option<String> {
+    let h = g.history();
+    if !h.following {
+        return None;
+    }
+    let text = crate::replication::lineage_text;
+    let ours = crate::replication::lineage_of(h);
+    if let Some(l) = want.lineage.filter(|l| ours != Some(*l)) {
+        return Some(format!(
+            "tenant `{name}` here is of lineage {}, not {}, the tenant's: it has not taken \
+             its primary's image -- a copy made to follow a primary it never reached, or \
+             another file put in its place -- and promoted it would be an empty primary, or \
+             another file's",
+            ours.map_or("none".into(), text),
+            text(l)
+        ));
+    }
+    if let Some(id) = want
+        .history
+        .filter(|id| heard != Some(true) && h.lineage.iter().all(|e| e.0 != *id))
+    {
+        let told = match heard {
+            Some(_) => "has heard nothing from the node it follows since it was told to follow it",
+            None => "keeps no word of hearing from the node it follows",
+        };
+        return Some(format!(
+            "tenant `{name}` here lacks the history the tenant's primary forked at its last \
+             failover ({id:016x}) and {told}: it may be an older primary's file, without the \
+             writes taken since, and promoted it would take them back"
+        ));
+    }
+    // Nothing said of the tenant -- a router from before lineages were
+    // kept, a tenant made before it kept them, an operator's call naming
+    // none -- the one copy known to hold nothing of it: no write taken, and
+    // no hello from its primary since it opened nor since it was told to
+    // follow it. A standby's copy of a tenant that took no write either,
+    // its node restarted since, is refused with it, for the operator to
+    // force.
+    let empty = g.change_seq() == 0 && !ready && heard != Some(true);
+    if want.lineage.is_none() && want.history.is_none() && empty {
+        return Some(format!(
+            "tenant `{name}` here has taken no write and has not heard from its primary since \
+             it opened, and nothing was said of the lineage it is to be of: it may hold \
+             nothing of the tenant"
+        ));
+    }
+    None
+}
+
 impl Tenant {
     pub fn name(&self) -> &str {
         &self.name
@@ -583,39 +712,44 @@ impl Tenants {
             .and_then(|l| crate::replication::parse_lineage(l.trim()))
     }
 
-    /// Records the node a tenant follows, and the lineage it is told that
-    /// node's tenant is of, whole or not at all: written beside and
-    /// renamed, as a tenant's file is installed.
-    fn record_upstream(&self, name: &str, url: Option<&str>) -> std::io::Result<()> {
-        self.record_following(name, url, None)
+    /// Whether a tenant's copy has heard from the node it follows since it
+    /// was last told to follow it (`.follows`' `heard` line, [`mark_heard`]):
+    /// `None` where it was never told, a standby's copy made with its node
+    /// or a file from before the mark.
+    fn heard_since_told(&self, name: &str) -> Option<bool> {
+        let text = std::fs::read_to_string(self.follows_path(name)).ok()?;
+        Some(text.lines().any(|l| l.trim() == HEARD))
     }
 
+    /// Forgets the node a tenant followed, durably: a promoted file follows
+    /// nobody, and kept -- or brought back by a power loss before its
+    /// directory is synced -- the record would have the next open make it
+    /// follow its old primary again.
+    fn forget_following(&self, name: &str) -> std::io::Result<()> {
+        let path = self.follows_path(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => dir_synced(&path),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    /// Records the node a tenant is told to follow -- none, on a standby,
+    /// for the node's own upstream, an empty line -- and the lineage it is
+    /// told that node's tenant is of, as not heard from yet: whole or not at
+    /// all, written beside and renamed, as a tenant's file is installed.
     fn record_following(
         &self,
         name: &str,
         url: Option<&str>,
         lineage: Option<u32>,
     ) -> std::io::Result<()> {
-        let path = self.follows_path(name);
-        let Some(url) = url else {
-            return match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                _ => Ok(()),
-            };
-        };
-        let mut text = url.to_string();
+        let mut text = url.unwrap_or("").to_string();
         if let Some(l) = lineage {
             text.push_str("\nlineage ");
             text.push_str(&crate::replication::lineage_text(l));
         }
-        let tmp = self.dir.join(format!("{name}.follows.writing"));
-        std::fs::File::create(&tmp)
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(text.as_bytes())?;
-                f.sync_all()
-            })
-            .and_then(|_| std::fs::rename(&tmp, &path))
+        write_follows(&self.dir, name, &text)
     }
 
     /// Opens every tenant that follows a node of its own, and on a standby
@@ -740,15 +874,62 @@ impl Tenants {
     /// because a node's tenants are separate databases -- there is nothing
     /// to make atomic between them.
     pub fn promote(&self, name: &str) -> std::result::Result<(u64, u64), Refused> {
-        let promoted = self.promote_held(name);
+        self.promote_as(name, &Expected::default())
+    }
+
+    /// [`Tenants::promote`], the copy held to what the router knows of its
+    /// tenant ([`Expected`]): one that is not the tenant as its primary has
+    /// it is refused, 409, unless `force`.
+    pub fn promote_as(
+        &self,
+        name: &str,
+        want: &Expected,
+    ) -> std::result::Result<(u64, u64), Refused> {
+        let promoted = self.promote_held(name, want);
         // The fork's history reached the feed as its record was appended;
         // the node's stream sends it on before the writes after it.
         self.touch(name);
         promoted
     }
 
-    fn promote_held(&self, name: &str) -> std::result::Result<(u64, u64), Refused> {
+    fn promote_held(
+        &self,
+        name: &str,
+        want: &Expected,
+    ) -> std::result::Result<(u64, u64), Refused> {
         let t = self.get(name)?;
+        // A copy that is not its tenant as the primary has it is refused:
+        // promoted, a copy that never took its primary's image was an empty
+        // primary, and the tenant's rows, whole on its old primary's node,
+        // were wiped from there once that node came back and its copy was
+        // made to follow this one; an old primary's copy made to follow the
+        // tenant's new primary, promoted before it heard from it, took back
+        // every write since the failover before. Refused, the tenant stays
+        // where its rows are until that node returns.
+        let heard = self.heard_since_told(name);
+        let refused = refusal(name, &t.read(), t.ready.load(Ordering::SeqCst), heard, want);
+        match (refused, want.force) {
+            (Some(why), false) => {
+                return Err(Refused(
+                    409,
+                    format!("{why}. {{\"force\": true}} promotes it all the same"),
+                ))
+            }
+            (refused, true) => {
+                // The operator's deliberate word, in the audit log whatever
+                // it overrode: what the tenant had since is theirs to lose.
+                let overrode = refused.as_deref().unwrap_or("");
+                crate::log!("tenant `{name}` promoted by force: {overrode}");
+                crate::audit::event(
+                    "promote_forced",
+                    &[
+                        ("tenant", crate::audit::Field::Text(name)),
+                        ("overrode", crate::audit::Field::Text(overrode)),
+                    ],
+                );
+            }
+            (None, false) => {}
+        }
         // Promoted, it follows nobody: the record would have the next open
         // make it follow its old primary again.
         // And it is ready: a promoted copy that never heard from its primary
@@ -757,7 +938,7 @@ impl Tenants {
         // read 503 for as long as it stayed open.
         let forget = |done| {
             t.ready.store(true, Ordering::SeqCst);
-            self.record_upstream(name, None)
+            self.forget_following(name)
                 .map_err(|e| Refused(500, format!("tenant `{name}` promoted, but {e}")))?;
             Ok(done)
         };
@@ -841,21 +1022,29 @@ impl Tenants {
                     // -- deleted and made again while this copy was cut off
                     // -- and a router placing a read replica over a file it
                     // found on the node asks for no more than this follow.
-                    self.record_following(name, from, lineage).map_err(|e| {
+                    // Halted before the record is written again, not heard
+                    // from: a hello of the stream before, noted after it,
+                    // would mark heard a copy that heard nothing since.
+                    let follower = t.repl.as_ref().and_then(|r| r.follower());
+                    if let Some(f) = follower {
+                        f.halt();
+                    }
+                    let recorded = self.record_following(name, from, lineage).map_err(|e| {
                         Refused(
                             500,
                             format!("could not record the node tenant `{name}` follows: {e}"),
                         )
-                    })?;
-                    if let Some(f) = t.repl.as_ref().and_then(|r| r.follower()) {
-                        f.halt();
-                        f.expect_lineage(lineage);
-                        t.ready.store(false, Ordering::SeqCst);
+                    });
+                    if let Some(f) = follower {
+                        if recorded.is_ok() {
+                            f.expect_lineage(lineage);
+                            t.ready.store(false, Ordering::SeqCst);
+                        }
                         f.start(format!("fenec-replica-{name}")).map_err(|e| {
                             Refused(500, format!("tenant `{name}` could not follow again: {e}"))
                         })?;
                     }
-                    return Ok(());
+                    return recorded;
                 }
                 // Closed first: one instance over the file, always. What it
                 // served ends -- a primary's file made a replica's feeds a
@@ -1021,8 +1210,15 @@ impl Tenants {
                 // another tenant of the name, whose image it never takes.
                 let seen = Arc::clone(&ready);
                 let (me, who) = (self.me.get().cloned(), name.to_string());
+                let dir = self.dir.clone();
                 f.on_hello(Box::new(move |said| match said {
-                    Said::Taken => seen.store(true, Ordering::SeqCst),
+                    // Noted before it reads as ready, so a copy found ready
+                    // has its word on disk: noted after, a restart in between
+                    // forgot a hello its reads had been answered after.
+                    Said::Taken => {
+                        mark_heard(&dir, &who);
+                        seen.store(true, Ordering::SeqCst);
+                    }
                     Said::Refused { expected } => {
                         seen.store(false, Ordering::SeqCst);
                         refused_copy(me.clone(), &who, opened, expected);

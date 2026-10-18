@@ -167,7 +167,7 @@ image:</p>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/thaw</code></td><td>accept writes again</td></tr>
 <tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;/file</code></td><td>install an image as a new tenant</td></tr>
-<tr><td><code>POST /_admin/tenants/&lt;t&gt;/promote</code></td><td>a replica's file takes writes: its history forks there</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/promote</code></td><td>a replica's file takes writes: its history forks there. <code>{"lineage", "history"}</code>, as the router sends them, refuse a copy of another lineage, or one lacking that history that has not heard from the node it follows since it was last told to follow it (409); without them, a copy with no write and no word from its primary since it opened or was told to follow is refused; <code>{"force": true}</code> promotes it whatever it holds, an audit event</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>the file follows <code>{"from": "http://host:port"}</code>, kept in <code>&lt;t&gt;.follows</code> beside it, or without it the node's <code>--replica-of</code></td></tr>
 </tbody>
 </table>
@@ -515,6 +515,10 @@ fenec restore --tenants /backups/n1 /data/n1 --to 2026-09-22T10:14:59Z</pre>
     returns; the target node's archiver takes it up from its image. A
     restore of the node to a moment it was away leaves it out, as it does a
     tenant deleted before.</li>
+  <li><b>Restored in place:</b> a tenant restored on its primary's node
+    keeps its lineage, and fails over as before once its copies have taken
+    the restored file (<a href="#automatic-failover">automatic
+    failover</a>).</li>
   <li><b>Replicas and standbys</b> can be archived the same way: their
     tenants' writes are the primary's, numbered alike, and a promotion goes
     on in the same archive.</li>
@@ -804,7 +808,12 @@ the old primary's copy would wipe the writes taken since.</p>
 <p>When a node is gone, <code>POST /_shard/nodes/&lt;n&gt;/failover</code>
 promotes its tenants on the standby, one at a time, and points the directory
 at it. They are separate databases: there is nothing to make atomic between
-them, so the answer lists what was promoted and what was not.</p>
+them, so the answer lists what was promoted and what was not. A copy that
+is not its tenant as the directory knows it — of another lineage, or an old
+primary's copy that never heard from the new one — is refused by its node
+and listed as not promoted, the tenant left where its rows are; with
+<code>-d '{"force": true}'</code> it is promoted whatever it holds, which
+the audit log records.</p>
 
 <pre data-lang="bash">curl -X POST localhost:8090/_shard/nodes/n1/failover
 {"node":"n1","to":"n2","promoted":["acme","beta"],"failed":[]}
@@ -838,7 +847,9 @@ curl -X PUT localhost:8090/_shard/nodes/n2 \
 <p>A tenant file that still follows on a node that follows nobody — a failover
 that left it behind, and the node restarted without <code>--replica-of</code>
 — refuses writes, says so in the log, and is promoted where it stands with
-<code>POST /_admin/tenants/&lt;t&gt;/promote</code>.</p>
+<code>POST /_admin/tenants/&lt;t&gt;/promote</code> (with
+<code>-d '{"force": true}'</code> where it holds no write and has heard
+nothing from its primary since it opened).</p>
 </details>
 
 <h2 id="replicas-of-their-own">Replicas of their own</h2>
@@ -934,7 +945,11 @@ while its own clients reach it, and it does not have to. A node that hears
 from the router no more stops taking writes when its lease lapses, by its
 own clock, and the router promotes its tenants elsewhere only a tenth of a
 lease later, measured from the answer that came back rather than from the
-grant it sent — so no tenant has two primaries, whichever it was. What such
+grant it sent — so no tenant has two primaries, whichever it was. One case
+is not covered yet, and a fix is coming: a grant whose answer the router
+gave up waiting for still counts for the node whenever it reads it, so a
+node stalled with that grant unread can take writes for one lease after its
+tenants were promoted elsewhere. What such
 a node took from clients of its own before its lease lapsed, and had not
 sent its replicas, goes with the failover as a crash takes it; a client
 going through the router loses nothing that way, since the router could not
@@ -949,12 +964,58 @@ the node answers, which has those copies follow the tenants' new primaries.
 The list rides with a grant only when it changed, and a create or a move
 grants the node its new one at once, so a tenant takes writes as soon as it
 is placed. A router that starts leasing — a restart, or a standby promoted —
-counts every node as granted then: its predecessor may have granted a lease
-just before it stopped. A grant names the directory's term, which a
+counts every node as granted then, at its first round as the primary: its
+predecessor may have granted a lease just before it stopped. A grant names the directory's term, which a
 promotion moves on, and a node refuses grants from a lower term once it has
 taken a higher one, so a router promoted over one still running fences it at
 every node it reaches (<a href="#region-directories">Fencing</a>). A node started without <code>--lease</code> answers
 that it takes none, and is never failed over on its own.</p>
+
+<p>No node waits for another. Each node's grant goes out on a thread of its
+own and the router judges the leases without waiting for any, so a node
+slow to answer — or to be found at all: one recorded by a name its resolver
+is slow to refuse once the machine is gone — holds up its own renewal and
+its own failover, nobody else's. A name is looked up within the call's own
+bound, a third of the lease for a grant; the repair a node's return
+triggers runs beside the leasing, as do failovers; and a replica being
+promoted stops reconnecting to the node it followed at once rather than
+wait out the connect. A node's lapse is judged only once the router has
+stopped waiting for any grant it sent the node, so an answer that comes
+back is counted (a grant it gave up on is the case above). A tenant that
+another operation was holding — a quota being set, a move — when its node
+was failed over is failed over once that operation ends, onto the copy it
+had then and no other, and its node's grants name it no more meanwhile. A
+copy that is not its tenant as its primary has it is never promoted: the
+router tells the node the tenant's lineage and the history its primary
+forked at its last failover, and the node refuses a copy of another
+lineage — one that never took its primary's image, or a file put in its
+place — and an old primary's copy that has not heard from the new primary
+since, which would take back every write after that failover; the tenant
+waits for its node, where its rows are. A copy that has heard from the node
+it follows since it was last told to follow it is promoted whatever
+history it holds, and its node remembers the hello across a restart, so a
+tenant restored in place on its primary's node — <code>fenec restore</code>
+installed with <code>DELETE</code> and <code>PUT .../file</code>, or the
+whole node with <code>fenec restore --tenants</code> — fails over as before
+once its copies have taken the restored file. A tenant not yet written
+fails over as any other. A file of another lineage put in a primary's place
+by hand — another tenant's, or one made again under the name — is not the
+tenant the router knows: every failover of it is refused until a read
+replica's look teaches the router the new lineage, or an operator forces
+one. An operator who knows better sends
+<code>{"force": true}</code> to <code>POST /_shard/nodes/&lt;n&gt;/failover</code>
+or to the node's <code>POST /_admin/tenants/&lt;t&gt;/promote</code>, which
+promotes the copy whatever it holds and is written to the audit log. Nor is
+a tenant given a new replica while its primary does not answer; the repair
+looks again a few times over the next minutes, and <code>POST
+/_shard/replicas</code> asks at once. Before, one such node held
+up the leasing of its whole region: in a drill on GitHub's runner, whose
+Docker resolver is slow to refuse a removed container's name, the region's
+healthy nodes went 18 s without a write and one was failed over, and the
+dead node's tenants wrote again only after 30 s. In the same drill run
+locally, every unknown name sent to a resolver that never answers, the
+router now fails the dead node over 2.1 to 3.3 s after its kill at a lease
+of 2 s, and the region's other tenants never pause more than 19 ms.</p>
 
 <p>Measured with <code>make shard-bench</code>, three nodes and the router in
 one process and a lease of a second: a node cut off stopped taking writes 697
@@ -1794,8 +1855,10 @@ anywhere. So does every other way a record outlives its tenant —
 <code>?forget</code> of a node that comes back, a router lost between a
 <code>follow</code> and the record. A primary of another lineage than the
 directory's, on the node the directory places its tenant on, is the
-tenant: a standby that never took its first image promoted by a failover,
-an older file restored, a file put in place by hand. A failover records
+tenant: another file of it promoted by force, an older file restored, a
+file put in place by hand. (A copy of another lineage, such as a standby
+that never took its first image, is promoted only by force: its node
+refuses it, and the tenant stays where its rows are.) A failover records
 the lineage the promotion answers, and a read replica's copy lost has the
 primary's node asked which lineage it is of; the directory takes its
 word, keeping the lineage before as one the tenant was, and the read

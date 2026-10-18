@@ -154,11 +154,14 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         // The failover, tenant by tenant: what a replica's file needs to
         // take writes. It goes through the admin token the router already
         // holds rather than the replication one, which the router does not.
+        // A body says what the router knows of the tenant, which the copy is
+        // held to, or forces it ([`expected`]).
         (Method::Post, ["tenants", t, "promote"]) => superseded(tenants, req)
-            .and_then(|_| tenants.promote(t))
+            .and_then(|_| expected(&req.body))
+            .and_then(|want| tenants.promote_as(t, &want))
             .map(|(seq, id)| {
-                // Its lineage, which the router records: a copy that never
-                // took its first image is promoted into one of its own.
+                // Its lineage, which the router records: another file of
+                // the tenant, promoted by force, is of one of its own.
                 let lineage = tenants.get(t).map_or("null".into(), |t| lineage_json(&t));
                 Response::json(
                     200,
@@ -226,6 +229,43 @@ fn from(body: &[u8]) -> Result<(Option<String>, Option<u32>), Refused> {
         }
     }
     Ok((from, lineage))
+}
+
+/// A promotion's body: the lineage the tenant is of (`"lineage": "<8
+/// hex>"`), the history its primary forked at its last failover
+/// (`"history": "<16 hex>"`), and `"force": true` for an operator promoting
+/// it whatever it holds. Empty, nothing is said, as a router from before
+/// lineages says nothing.
+fn expected(body: &[u8]) -> Result<crate::tenants::Expected, Refused> {
+    use fenec_core::prelude::Value;
+    let mut want = crate::tenants::Expected::default();
+    let text = String::from_utf8_lossy(body);
+    if text.trim().is_empty() {
+        return Ok(want);
+    }
+    let fields = fenec_core::json::parse_object(&text)
+        .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
+    for (k, v) in fields {
+        match (k.as_str(), v) {
+            ("lineage", Value::Text(l)) => {
+                want.lineage = Some(
+                    crate::replication::parse_lineage(&l)
+                        .ok_or_else(|| Refused(400, "`lineage` is 8 hex digits".into()))?,
+                )
+            }
+            ("history", Value::Text(h)) if h.len() == 16 => {
+                want.history = Some(
+                    u64::from_str_radix(&h, 16)
+                        .map_err(|_| Refused(400, "`history` is 16 hex digits".into()))?,
+                )
+            }
+            ("history", _) => return Err(Refused(400, "`history` is 16 hex digits".into())),
+            ("force", Value::Bool(f)) => want.force = f,
+            ("force", _) => return Err(Refused(400, "`force` is true or false".into())),
+            _ => {}
+        }
+    }
+    Ok(want)
 }
 
 /// A tenant's lineage as JSON: 8 hex digits, or `null` for one that never

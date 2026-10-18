@@ -8,7 +8,10 @@
 //! partition never leaves two nodes taking one tenant's writes. The node
 //! measures its lease from when it takes a grant in; the router measures
 //! it from when the node's answer comes back, which is later, and waits a
-//! tenth longer besides: by its own clock the node stops first.
+//! tenth longer besides: by its own clock the node stops first. Not yet of
+//! a grant the router gave up waiting for: the node takes it whenever it
+//! reads it, late, and grants carry no number to refuse it by -- a hole
+//! the router's lease module describes, its fix to come.
 //!
 //! **The lease names tenants.** A node the router failed over comes back
 //! holding the files of tenants now served elsewhere, primaries' files

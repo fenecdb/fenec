@@ -43,7 +43,7 @@ use crate::metrics::Text;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1302,21 +1302,11 @@ fn answered(conn: &mut Option<BufReader<TcpStream>>, status: u16, keep: bool) ->
     }
 }
 
+/// The collector's name is looked up within the post's bound too
+/// ([`crate::dial`]): unbounded, a resolver slow to refuse it held the
+/// exporter, the queue filling and its spans dropped meanwhile.
 fn connect(authority: &str, timeout: Duration) -> io::Result<TcpStream> {
-    let mut last = io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("{authority} does not resolve"),
-    );
-    for a in authority.to_socket_addrs()? {
-        match TcpStream::connect_timeout(&a, timeout) {
-            Ok(s) => {
-                let _ = s.set_nodelay(true);
-                return Ok(s);
-            }
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
+    crate::dial::connect(authority, timeout)
 }
 
 /// Sets a socket's timeouts to what is left before `deadline`.

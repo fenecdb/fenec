@@ -245,6 +245,11 @@ events:</p>
     sends each node (<code>POST /_admin/tenants/&lt;t&gt;/query</code>) is
     not, or one query over a thousand tenants would be a thousand lines; it
     carries the router's request id, which the router's line names.</li>
+  <li><b>A promotion forced past its node's refusal</b>: a
+    <code>failover_forced</code> line at the router naming the node, and a
+    <code>promote_forced</code> line at each node naming the tenant and, in
+    <code>overrode</code>, the refusal it went past (see
+    <a href="sharding.html#automatic-failover">automatic failover</a>).</li>
 </ul>
 
 <p>Each line has the time, a level (<code>warn</code> for a refusal,

@@ -46,6 +46,7 @@ pub mod audit;
 pub mod cdc;
 pub mod cors;
 pub mod crypto;
+pub mod dial;
 pub mod held;
 pub mod http;
 pub mod idempotent;

@@ -51,3 +51,10 @@ path = "tests/tracing.rs"
 [[test]]
 name = "entry"
 path = "tests/entry.rs"
+
+# Apart: each test holds threads for its whole run -- lookups a stand-in
+# resolver never answers, connections a hung node swallows -- and `all`
+# stands near macOS's 2 048 threads a process: beside them it ran out.
+[[test]]
+name = "lease_stalls"
+path = "tests/lease_stalls.rs"

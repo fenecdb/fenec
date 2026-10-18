@@ -981,12 +981,14 @@ impl Drop for SideFile {
     }
 }
 
-/// Makes a rename in `path`'s directory durable. The new name is an entry
-/// in the directory, and until the directory is synced a power loss can
-/// bring back the old one: the file from before a `compact`, without the
-/// writes the image had taken in.
+/// Makes a rename or a removal in `path`'s directory durable. The new name
+/// is an entry in the directory, and until the directory is synced a power
+/// loss can bring back the old one: the file from before a `compact`,
+/// without the writes the image had taken in. Public for the files a server
+/// keeps beside a database (fenec-http's `.follows`); nothing where the
+/// target is not unix, as the rest of this module.
 #[cfg(unix)]
-fn sync_dir(path: &Path) -> Result<()> {
+pub fn sync_dir(path: &Path) -> Result<()> {
     let dir = match path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => Path::new("."),
@@ -996,7 +998,7 @@ fn sync_dir(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_path: &Path) -> Result<()> {
+pub fn sync_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 
