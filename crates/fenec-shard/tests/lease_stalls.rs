@@ -536,7 +536,7 @@ fn a_tenant_held_through_its_node_s_failover_is_failed_over_once_let_go() {
     );
     nodes[0].proxy.hang();
     // Holds `t` from now until its call to n1 ends, which the test ends
-    // once n1 has been failed over and sent a grant past it: n1's lapse
+    // once n1 has been failed over and sent a grant whole past it: n1's lapse
     // comes a lease and a tenth after its last renewal at most. Ended by
     // the router's timeout, ten seconds, the hold was a guess at how soon
     // all of that came, and the router's other calls in the test held to
@@ -553,7 +553,7 @@ fn a_tenant_held_through_its_node_s_failover_is_failed_over_once_let_go() {
     until_failed_over(port, "n1", 1.0, "n1 was never judged lapsed");
     let from = nodes[0].proxy.heard().len();
     let deadline = Instant::now() + WITHIN;
-    while !nodes[0].proxy.heard()[from..].contains("POST /_admin/lease") {
+    while grants_heard(&nodes[0].proxy.heard()[from..]).is_empty() {
         assert!(
             Instant::now() < deadline,
             "n1 was sent no grant while t was held"
@@ -565,8 +565,7 @@ fn a_tenant_held_through_its_node_s_failover_is_failed_over_once_let_go() {
     assert_eq!(status, 502, "the quota's call to n1 was answered: {body}");
     // The grants n1 was sent while the quota held `t` past the failover.
     let heard = nodes[0].proxy.heard();
-    let grants: Vec<&str> = heard[from..].split("POST /_admin/lease").skip(1).collect();
-    for g in &grants {
+    for g in grants_heard(&heard[from..]) {
         let list = g
             .split_once("\"primaries\":[")
             .and_then(|(_, rest)| rest.split_once(']'))
@@ -578,6 +577,29 @@ fn a_tenant_held_through_its_node_s_failover_is_failed_over_once_let_go() {
     }
     writes_again(port, "t");
     assert_eq!(placed(port, "t").0, replica);
+}
+
+/// The bodies of the grants in what a proxy heard that came whole. One the
+/// proxy was cut off from before its body came was never sent whole: cut
+/// once a grant's head was heard, the body behind it was not there yet
+/// beside ten other copies of the suite and sixteen busy loops (4 runs of
+/// 110), and read as a grant with no list. A grant n1 never answered
+/// carries its list, the router not knowing what n1 holds.
+fn grants_heard(heard: &str) -> Vec<&str> {
+    heard
+        .split("POST /_admin/lease")
+        .skip(1)
+        .filter_map(|g| {
+            let (head, rest) = g.split_once("\r\n\r\n")?;
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: "))?
+                .trim()
+                .parse()
+                .ok()?;
+            rest.get(..len)
+        })
+        .collect()
 }
 
 /// A router over a directory file of its own, leasing for [`TERM`] with
