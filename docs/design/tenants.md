@@ -374,7 +374,14 @@ to a third of a lease before the promotion, and a grant its primary sent
 after that round could still run as it failed the node over. `following`
 starts set, so one promoted before a round of its own counts from its first
 round too, and a router primary from its start from its first round, a
-third of a lease after it at most; a node without
+third of a lease after it at most. A node added since counts from its
+addition (`Leases::entry`), which no lease of the directory's can have
+named before: counted from the router's start, a node added a lease and a
+tenth into the router's life was lapsed before its first grant came back,
+and with that grant given up on -- a second at a 3 s lease, at background
+QoS beside busy loops -- it was failed over at once, every replica it kept
+dropped, as `lease_stalls.rs`' traces showed; the count moves on only with
+an answer heard, either way, so it never comes sooner than before. A node without
 `--lease` is never failed over on its own. A lease of a second: a node cut
 off stopped writing 386-406 ms after (697 when it ran its lease from its
 last renewal), its 10 tenants took writes again 1.27 to 1.36 s after. A

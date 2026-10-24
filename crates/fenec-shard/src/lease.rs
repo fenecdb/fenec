@@ -53,7 +53,9 @@
 //! A router that starts leasing -- a restart, or a standby promoted --
 //! counts every node as granted at that moment: a lease its predecessor
 //! granted just before it stopped may run as long, and a failover before it
-//! lapsed would make two primaries. A standby keeps forgetting every lease
+//! lapsed would make two primaries. A node added after that is counted from
+//! its addition, which no lease of the directory's can have named before
+//! ([`Leases::entry`]). A standby keeps forgetting every lease
 //! for as long as it follows, and its first round once promoted counts
 //! from then ([`Leases::leading`]), not from its last round while it
 //! followed, nor from its start. As long, or longer: the directory records

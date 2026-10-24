@@ -311,7 +311,8 @@ router fails a node over on its own only under a lease, which the node
 runs on the boot clock (`lease::Moment`) from when it answered the grant
 the router acknowledged, never from a grant's reading (`grant_from`); a
 router counts a node by the directory's `leasing` record until the node
-ran one of its leases (`Leases::inherited`), and grants it one at a time,
+ran one of its leases (`Leases::inherited`), from when it began leading
+or from the node's addition since (`Leases::entry`), and grants it one at a time,
 never with a list older than the last it sent (`Leases::turn`), its rounds
 each due a third of a lease after the last was due, not after it woke
 (`lease::round_due`). Every
