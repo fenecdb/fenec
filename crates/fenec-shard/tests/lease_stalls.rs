@@ -249,13 +249,15 @@ fn a_dead_node_whose_name_never_resolves_holds_up_no_other_node_s_lease() {
     let body = format!(r#"{{"addr":"{name}","token":"adm-dns1"}}"#);
     let (status, body) = call(port, "PUT", "/_shard/nodes/n1", &body, None);
     assert!(status == 200 || status == 201, "{body}");
-    tenant_on(port, "gone", "n1");
     tenant_on(port, "b", "n2");
     tenant_on(port, "c", "n3");
-    for t in ["gone", "b", "c"] {
+    for t in ["b", "c"] {
         written(port, t, r#"put notes {id: 1, title: "one"}"#);
     }
-    // Its replica holds the write before n1 goes.
+    // `gone` last, and n1 cut off as soon as its replica holds its write
+    // ([`leased_until_cut`]).
+    tenant_on(port, "gone", "n1");
+    written(port, "gone", r#"put notes {id: 1, title: "one"}"#);
     let replica = placed(port, "gone").1.expect("gone has a replica");
     until(
         by_name(&nodes, &replica).port,
@@ -263,6 +265,7 @@ fn a_dead_node_whose_name_never_resolves_holds_up_no_other_node_s_lease() {
         "get notes select title",
         "one",
     );
+    leased_until_cut(port, "gone", "n1", &replica);
     nodes[0].proxy.cut();
     resolver.silence();
     // Its failover waited for, and only then a write: one sent before it
@@ -355,6 +358,24 @@ fn a_repair_waiting_on_a_node_that_hangs_holds_up_no_lease() {
     written_meanwhile(port, "b", hang);
 }
 
+/// Holds that `tenant` is on `node` with its replica on `replica` as the
+/// test is about to cut `node` off, where what the test is about starts. A
+/// router the machine ran past a lease fails over a node that was only
+/// starved -- its lease lapsed by its own clock as well, the fence working
+/// -- and at background QoS beside eight busy loops that came during a
+/// test's setup in 1 run of 20, the tenant promoted before the cut: each
+/// test makes its other tenants first and cuts the node as soon as this
+/// one's replica holds its write, which leaves that the least time to
+/// come in, and says so where it came.
+fn leased_until_cut(port: u16, tenant: &str, node: &str, replica: &str) {
+    let (on, copy) = placed(port, tenant);
+    assert!(
+        on == node && copy.as_deref() == Some(replica),
+        "{tenant} left {node} before the test cut it off (on {on}, its replica {copy:?}): the \
+         router failed {node} over as its renewals ran past its lease"
+    );
+}
+
 /// Waits until `proxy`, hung, has been sent `request` (bounded by
 /// [`WITHIN`]): what hangs on it has reached it.
 fn until_heard(proxy: &Proxy, request: &str, what: &str) {
@@ -383,15 +404,17 @@ fn a_failover_waiting_on_a_promotion_that_hangs_holds_up_no_lease() {
     // The promotion's wait on n2 lasts past the end of the test, so what it
     // held up would not come while the test counts.
     let (router, port) = leasing_replicas(Duration::from_secs(600));
+    // `w` made while n3 is the only node, before `a` ([`leased_until_cut`]).
+    put_node(port, "n3", &nodes[2].proxy.addr, "adm-promote3");
+    tenant_on(port, "w", "n3");
     put_node(port, "n1", &nodes[0].proxy.addr, "adm-promote1");
     put_node(port, "n2", &nodes[1].proxy.addr, "adm-promote2");
-    // `a` made while n1 and n2 are the only nodes: its replica is on n2.
+    // n3 holds `w`, so `a`'s replica goes to n2, which holds nothing.
     tenant_on(port, "a", "n1");
     assert_eq!(placed(port, "a").1.as_deref(), Some("n2"));
     written(port, "a", r#"put notes {id: 1, title: "one"}"#);
     until(nodes[1].port, "/t/a/query", "get notes select title", "one");
-    put_node(port, "n3", &nodes[2].proxy.addr, "adm-promote3");
-    tenant_on(port, "w", "n3");
+    leased_until_cut(port, "a", "n1", "n2");
     nodes[1].proxy.hang();
     nodes[0].proxy.cut();
     until_failed_over(port, "n1", 1.0, "n1 was never judged lapsed");
