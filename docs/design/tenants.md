@@ -205,7 +205,16 @@ first round a third of its own lease after the start left a node without
 a lease from the end of a shorter one before it -- a router whose lease
 the record was raised to as well (`late_grants.rs`'
 `a_router_that_cannot_record_its_lease_renews_at_the_lease_it_grants`, 84
-of 113 samples without on e5b8413e). A thread finding the record raised
+of 113 samples without on e5b8413e). Each round after the first is due a
+third after the last was due, not after the last woke
+(`lease::round_due`), and one woken more than a third late counts from its
+wake, so the rounds it missed are not run back to back: counted from the
+wake, every wake's lateness put the rounds after it as late, and at
+background QoS, where a park of a second wakes up to 0.2 s late, the rounds
+of a 3 s lease came 1.18 s apart on average and two of them up to 2.40 s,
+a node's next grant left 0.6 s to be late in before its lease lapsed; 1.00
+s and 2.04-2.18 s now (a stand-in node timing the grants it was sent, four
+runs a side in ABBA turns, the same beside six busy loops). A thread finding the record raised
 by another of this router's waits for the standbys too before its grant
 (`standbys_sent`, at once once sent): each node's grant is a thread, and
 the second node's went while the first waited. What it does not cover: the first
