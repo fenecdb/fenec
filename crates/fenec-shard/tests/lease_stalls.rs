@@ -170,7 +170,10 @@ fn tenant_on(port: u16, tenant: &str, node: &str) {
 
 /// Writes `sql` to `tenant` through the router once it is leased where it
 /// is ([`fenced`]): a write that is one row however often it lands -- a
-/// `put` naming its id, a `create ... if not exists`.
+/// `put` naming its id, a `create ... if not exists`. So it is sent again
+/// where the router cut it at its node's failover too, 502 saying it may
+/// have run, which a write run twice would make two rows of: a node whose
+/// lease lapsed so is failed over, and was during a test's setup.
 fn written(port: u16, tenant: &str, sql: &str) {
     let path = format!("/t/{tenant}/query");
     let deadline = Instant::now() + WITHIN;
@@ -179,8 +182,9 @@ fn written(port: u16, tenant: &str, sql: &str) {
         if status == 200 {
             return;
         }
+        let cut = status == 502 && body.contains("was failed over while this request was out");
         assert!(
-            fenced(status, &body) && Instant::now() < deadline,
+            (fenced(status, &body) || cut) && Instant::now() < deadline,
             "{sql} to {tenant}: {status} {body}"
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -191,7 +195,7 @@ fn written(port: u16, tenant: &str, sql: &str) {
 /// failover has come.
 fn writes_again(port: u16, tenant: &str) {
     let path = format!("/t/{tenant}/query");
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + WITHIN;
     loop {
         let (status, body) = query(port, &path, r#"put notes {title: "after"}"#);
         if status == 200 {
@@ -223,7 +227,7 @@ fn failed_over(port: u16, nodes: &[&str]) -> Vec<f64> {
 
 /// Waits until the scrape says `node` was failed over (`1`) or not (`0`).
 fn until_failed_over(port: u16, node: &str, want: f64, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     while failed_over(port, &[node]) != [want] {
         assert!(Instant::now() < deadline, "{what}");
         std::thread::sleep(Duration::from_millis(20));
@@ -678,7 +682,7 @@ fn a_promoted_standby_router_counts_every_lease_from_its_promotion() {
     tenant_on(a_port, "t", "n1");
     let (_, replica) = placed(a_port, "t");
     assert_eq!(replica.as_deref(), Some("n2"));
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + WITHIN;
     while !call(b_port, "GET", "/_shard/tenants", "", None)
         .1
         .contains("\"t\"")
@@ -703,7 +707,7 @@ fn a_promoted_standby_router_counts_every_lease_from_its_promotion() {
     let (status, body) = call(b_port, "POST", "/_replication/promote", "", Some(DIRS));
     assert_eq!(status, 200, "{body}");
     n1.proxy.cut();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     while placed(b_port, "t").0 == "n1" {
         assert!(Instant::now() < deadline, "t was never failed over");
         round(&b);
@@ -864,7 +868,7 @@ fn put_node(port: u16, name: &str, addr: &str, token: &str) {
 /// Waits until `tenant` is placed on `to`: its node's failover, which takes
 /// the tenants in name order, has come to it and to every one before it.
 fn failover_done(port: u16, tenant: &str, to: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     while placed(port, tenant).0 != to {
         assert!(Instant::now() < deadline, "{tenant} was never failed over");
         std::thread::sleep(Duration::from_millis(20));
@@ -890,7 +894,7 @@ fn stays_on(port: u16, tenant: &str, node: &str, long: Duration) {
 /// Waits for `t`'s row "one" to read through the router again: its rows
 /// survived, wherever it is placed.
 fn rows_survive(port: u16, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(40);
+    let deadline = Instant::now() + WITHIN;
     loop {
         let (status, rows) = query(port, "/t/t/query", "get notes select title");
         if status == 200 && rows.contains("\"one\"") {
@@ -943,7 +947,7 @@ fn a_tenant_held_through_its_failover_goes_to_no_copy_attached_meanwhile() {
     h2.armed.store(true, Ordering::SeqCst);
     h3.armed.store(true, Ordering::SeqCst);
     let repair = std::thread::spawn(move || call(port, "POST", "/_shard/replicas", "", None));
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + WITHIN;
     while h2.held() + h3.held() == 0 {
         assert!(Instant::now() < deadline, "no follow held");
         std::thread::sleep(Duration::from_millis(10));
@@ -1104,7 +1108,7 @@ fn a_tenant_that_took_no_write_fails_over_onto_the_copy_that_took_its_image() {
         .unwrap_or_else(|| panic!("e's lineage: {made}"))
         .to_string();
     let tag = format!("adm-empty{}", &r[1..]);
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + WITHIN;
     loop {
         let (_, copy) = call(rn.port, "GET", "/_admin/tenants/e/lineage", "", Some(&tag));
         if copy.contains(&format!("\"lineage\":\"{lineage}\"")) && copy.contains("\"ready\":true") {
@@ -1166,7 +1170,7 @@ fn an_old_primary_s_copy_that_never_heard_from_the_new_one_is_never_promoted() {
     // follow it, never hears from it.
     filter.armed.store(true, Ordering::SeqCst);
     nodes[0].proxy.heal();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     while placed(port, "t").1.as_deref() != Some("n1") {
         assert!(
             Instant::now() < deadline,
@@ -1203,7 +1207,7 @@ fn an_old_primary_s_copy_that_never_heard_from_the_new_one_is_never_promoted() {
     );
     filter.heal();
     filter.release();
-    let deadline = Instant::now() + Duration::from_secs(40);
+    let deadline = Instant::now() + WITHIN;
     loop {
         let (status, rows) = query(port, "/t/t/query", "get notes select title");
         if status == 200 && rows.contains("\"one\"") && rows.contains("\"two\"") {
@@ -1243,7 +1247,7 @@ fn a_tenant_a_repair_passed_over_gets_its_replica_once_its_primary_answers() {
     assert_eq!(status, 502, "{body}");
     assert!(body.contains("does not answer"), "{body}");
     f1.armed.store(false, Ordering::SeqCst);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     while placed(port, "t").1.is_none() {
         assert!(
             Instant::now() < deadline,
@@ -1258,7 +1262,7 @@ fn a_tenant_a_repair_passed_over_gets_its_replica_once_its_primary_answers() {
 /// tenant's image goes and comes so.
 fn raw(port: u16, method: &str, target: &str, token: &str, body: &[u8]) -> (u16, Vec<u8>) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    s.set_read_timeout(Some(WITHIN)).unwrap();
     write!(
         s,
         "{method} {target} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
@@ -1314,7 +1318,7 @@ fn a_tenant_restored_in_place_before_its_last_failover_fails_over_again() {
     // n1 back: its copy follows r.
     nodes[0].proxy.heal();
     until_failed_over(port, "n1", 0.0, "n1 never answered again");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     while placed(port, "t").1.as_deref() != Some("n1") {
         assert!(Instant::now() < deadline, "n1 never became t's replica");
         std::thread::sleep(Duration::from_millis(20));
@@ -1396,7 +1400,7 @@ fn a_copy_s_word_of_its_primary_s_hello_outlives_a_restart() {
     };
     let ready = |copy: &Tenants| copy.get("t").unwrap().ready();
     let until_ready = |copy: &Tenants| {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + WITHIN;
         while !ready(copy) {
             assert!(
                 Instant::now() < deadline,

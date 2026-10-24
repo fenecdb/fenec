@@ -322,7 +322,7 @@ pub fn query(port: u16, path: &str, sql: &str) -> (u16, String) {
 
 /// Waits until `sql` on `port` answers with `want` in it.
 pub fn until(port: u16, path: &str, sql: &str, want: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + WITHIN;
     loop {
         let (_, body) = query(port, path, sql);
         if body.contains(want) {
@@ -425,7 +425,14 @@ pub fn number_after(text: &str, prefix: &str) -> f64 {
 /// router over a directory another one keeps. Each of its calls to a node
 /// is bounded -- a grant by a third of the lease, a promotion by the
 /// upstream timeout -- and a round takes milliseconds; one that has not
-/// ended in a minute waits for good.
+/// ended in a minute waits for good. And so every wait the lease tests make
+/// for what must come -- a failover, a node answering again, a copy taking
+/// its image, a request's answer: each comes once calls the router bounds
+/// by its upstream timeout, a minute ([`upstream`]), have been answered,
+/// and a wait shorter than one of them measured the machine. At 20 and 30
+/// s, at background QoS beside busy loops and other suites' work, `t was
+/// never failed over` and `n1 never answered again` each came once in 20
+/// runs.
 pub const WITHIN: Duration = Duration::from_secs(60);
 
 /// `f` run on a thread of its own and waited for [`WITHIN`] at most: a
