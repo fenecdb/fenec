@@ -27,7 +27,7 @@ jobs:
 
       - run: cargo fmt --all --check
 
-      - name: AGENTS.md is CLAUDE.md under its own title
+      - name: AGENTS.md is CLAUDE.md under its own title, CLAUDE.md under 64 000 bytes
         run: python3 tools/agents_md.py --check
 
   clippy:

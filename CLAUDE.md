@@ -8,6 +8,10 @@ speaks HTTP; every language reaches it that way, Python, JavaScript, Go,
 .NET, Swift, Kotlin and Dart through official clients. The docs under `site/content/docs/` are the long-form reference (design
 rationale, benchmarks, full FenecQL and HTTP surface); `README.md` is the
 front door and links into them, and this file is the working summary.
+Each invariant here is its rule; its long form -- measurements, rejected
+alternatives, history -- is in `docs/design/`, whose `README.md` gives
+their order, and `tools/agents_md.py --check` fails once this file passes
+64 000 bytes.
 `AGENTS.md` is this file for other agents, the same text under its own title
 and first line: `make agents-md` writes it from `CLAUDE.md`
 (`tools/agents_md.py`), and CI fails when the two differ, so edit `CLAUDE.md`.
@@ -22,12 +26,7 @@ make wasm-lite     # the test build without the indexes, to web/fenec-lite.wasm 
 make wasm-min      # the test build with no feature at all, to web/fenec-min.wasm (the same)
 make wasm-sizes    # what each feature adds to the module with none, and what leaving it out of the full one saves
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's; FEATURES=none: that build's)
-make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
-make wasm-exact-speed   # near without the graph (the wasm-lite build), 1k-50k rows x 128/384, against the graph and exact
-make file-bench    # what keeping a database costs a page: IndexedDB (persist) against an OPFS file (openFile), 32 MB, headless Chrome (BROWSER=safari|firefox)
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
-make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
-make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
 make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
 make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server, read-routing tests fenec-shard routers too), then again on one cooperative thread
 make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux (Docker unless Linux with Gradle)
@@ -36,10 +35,6 @@ make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGe
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make agents-md     # AGENTS.md written again from this file (CI fails when they differ)
 make serve         # wasm + python3 http.server -> http://localhost:8787
-make bench         # scale measurement (fenec-core/examples/bench.rs)
-make memory        # memory footprint, for calibrating --max-memory
-make sweep         # ef / recall trade-off
-make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
 make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby and Rust over HTTP (Docker for some)
 make examples-test    # examples/: the Notes app in every language, each its smoke on this checkout's build (E="python go" for some)
@@ -53,60 +48,30 @@ make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wa
 make langchain-test   # the LangChain.js vector store over a database in the page and over fenec-server (needs `make wasm`)
 make ai-sdk-test   # integrations/ai-sdk/rag.js against the Vercel AI SDK's own mock models (needs `make wasm`)
 make cloudflare-test  # a database in a Durable Object's storage, SQL rows and values: persist, restore, storage failing part way, the example Worker under wrangler dev; then the global entry (entry/) in front of two regions' routers and of stand-ins
-make cloudflare-bench # a Durable Object's first near after an eviction, under wrangler dev, against the ones after (SIZES=1000,10000 to choose); rows a write and a checkpoint cost; a restore's peak memory
-make entry-bench      # the global entry under wrangler dev: a read by id through it, its tenant's home heard, in the colo's cache and never heard (a relay), against the router asked directly, in turns
 make mcp-test      # the MCP server vs the official TypeScript MCP client: HTTP and stdio, both eras, the docs' configs
 make studio-test   # fenec studio (--studio) in headless Chrome: browse, edit, a scoped token, 100k rows
 make studio-highlight   # studio/highlight.js and the Grafana data source's copy written again from site/highlight.js and build.py's rules
 make grafana-check # monitoring/'s compose (Docker): both data dashboards, Infinity's and the Grafana plugin's (integrations/grafana), and its alert rule held to fenec-server
 make deploy-check  # deploy/: promtool over the alert rules and their tests, the tunnel's rules asked of cloudflared, the images' build script (tools/image-cargo.sh) held to a tree older than its last build and to a unit compiled from other bytes, then every systemd unit in two privileged containers booting systemd -- verified, started, used, the archive copied by real rclone, a standby router promoted by the units
 make drill         # deploy/'s failover drill (Docker): two regions, a node cut off and killed and back, a router killed and its standby promoted, the global routers cut off, a restore; lost must be 0 (DRILL_LEASE, DRILL_KEEP=1)
-make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
-make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
-make mirror-bench  # fenec-server --follow: commit to a subscriber, a server killed and started again (pgvector-up first)
 make pgvector-up   # PostgreSQL 17 + pgvector in Docker on 127.0.0.1:55432, wal_level=logical, for the comparisons and --follow (pgvector-down removes it)
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make server TOKEN=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
-make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part; ARGS=standby a standby router's request against the primary's; ARGS=regions a region's own failover cut off from the global router, leases of 1 and 5 s; ARGS=reads a read answered by a read replica against one sent home)
-make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
-make fence-bench         # a node's lease: a put in process with no fence and with the lease's, and Lease::allows alone
-make policy-bench        # a scoped set under a plain rule, a field list, a transition, answering its row and a rule reading another collection, and a read by id, against the server's token, in process and over HTTP (ARGS=streams|beats: writes beside scoped streams)
-make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
-make node-archive-bench  # every tenant of a node archived: 1 000 tenants and one of 64 MB, a stream each against the node's one stream (ARGS="tenants active seconds sync way big_mb"); the syncer's passes and a close beside it (PASSES="way seconds big_mb")
-make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes (ARGS=blocks those alone, NOPREP=1 a block built under the lock; ARGS=long writers beside long reads)
-make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
-make mcp-bench           # an MCP tool call against the /query it runs: in process, and over HTTP
-make pages-bench         # pages of every size and place, limit and offset written in against as parameters: the parse cache's hits
-make recon-bench         # a ledger's reconciliation /batch beside transfers and reads: their longest waits
-make roundtrip-bench     # one client's round trip taken apart: the client, the server's phases (--features timing, GET /_timing), PostgreSQL's bind and execute
-make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
-make maintenance-bench   # reads and writes during create index / compact
-make compact-bench       # a file under updates, compacted on its own or not: its size, reads during and after each compact, its swap's lock (COMPACT_ARGS)
-make open-bench          # opening a 1 GB file, read into memory or mapped
-make opens-bench         # a checkpointed file opened, alone and with its first read: 1k and 100k x 128, a million rows of no vector
-make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
-make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
-make scale-bench         # fenec-server over HTTP against pgvector at scale: load, memory, recall, latency, filters (pgvector-up first)
-make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server vs PostgreSQL, MongoDB and Redis in Docker, durable and buffered (YCSB_ARGS; ycsb/run-redis.sh the Redis runs)
-make statements-bench    # what counting a statement by its shape costs
-make subquery-bench      # in (get ...) against its list written out and against lookup ... required
-make composite-bench     # an index over several fields: a user's latest twenty and a feed over ten through @sorted(owner, created desc) against @hash, @sorted and the scan; @unique(org, slug)
-make lookup-bench        # a lookup over a key of several fields: a tenant's 20 shops x 3 orders x 5 lines against the key joined into one @hash field (ARGS="all 500 2", ARGS=single)
-make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
-make fuzzy-bench         # match ... fuzzy and prefix over 100 000 documents: the sorted words' build and size, the walk at one edit and two, a query plain, with a typo and half typed (BEIR=dir: its words too)
-make text-memory         # what a text index holds, counted by the allocator: a tenant's notes over a Zipf vocabulary and of made-up words, musl's slots for them and memory_bytes (BEIR="a b": those corpora)
-make nocase-bench        # a `nocase` field against a plain one over 100 000 rows: a put asking @unique, lookups, scans, `~`, an order, group and facet (ARGS=scan for some)
-make collate-bench       # order ... collate tr over a million Turkish names, against PostgreSQL's tr-x-icu (that side after pgvector-up)
-make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M, a lone put and del beside such a field (`writes`)
-make growth-bench        # indexes growing a put at a time, the longest (a table's growth), p50/p99.99: @unique to 4M keys, @text to 4M terms, @hnsw to 1.1M x 128 and 300k x 768; then builds, lookups, match, near, the first put after an open (GROWTH=unique|text|vector)
-make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`ARGS=old`: those alone, for another commit; `ARGS=writes` and `folds` the parts quoted below)
-make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
-make geo-bench           # a million points: radii, the nearest, through @geo and by the scan, against PostGIS and Redis in Docker (GEO_ARGS)
-make queue-bench         # a job queue's claim over a million jobs: one worker, 16 threads, 16 HTTP clients, against read-then-set; QUEUE_ARGS=held (or "held pickup|delayed|idle|busy|other|contested|nearest"): a claim held by Fenec-Wait against polling, 100 and 1 000 held, busy queues beside held claims, a put of another collection beside claims held, one job to 10, 100 and 1 000 claims of their own, one order to couriers each claiming the nearest
-make nearest-bench       # the nearest ready order claimed over HTTP, 1, 16 and 50 claimers: order distance(...) limit 1 returning id and an inner get's near, against examples/dispatch's read and /batch (ORDERS, CLAIMS)
+# Measurements, none of them in CI: `make <name>`, each described with its
+# arguments (ARGS=... and the like) in the Makefile's `##` comments above its
+# rule, `make pgvector-up` first where PostgreSQL is the other side:
+#   wasm-speed wasm-exact-speed file-bench ffi-bench sync-bench bench memory
+#   sweep compare cloudflare-bench entry-bench beir follow-bench mirror-bench
+#   shard-bench quota-bench fence-bench policy-bench replica-bench
+#   node-archive-bench concurrency-bench requests-bench mcp-bench pages-bench
+#   recon-bench roundtrip-bench load-bench maintenance-bench compact-bench
+#   open-bench opens-bench reopen-bench quant-bench scale-bench ycsb
+#   statements-bench subquery-bench composite-bench lookup-bench search-bench
+#   fuzzy-bench text-memory nocase-bench collate-bench ttl-bench growth-bench
+#   analytics-bench counters-bench geo-bench queue-bench nearest-bench
 ```
 
 Single tests:
@@ -183,6967 +148,853 @@ and re-exports, and `web/client.js` the two alone (`@fenecdb/web/client`).
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
 image, then the writes since as chunks, from the journal `fenec_journal` starts
 and `fenec_drain` empties (off until asked for -- a page that never drains would
-hold every write). One row persists in 0.18 ms over 32 MB in Chrome, against 92
-ms for the image. `openFile` (a dedicated worker) keeps the same bytes as a file
+hold every write). `openFile` (a dedicated worker) keeps the same bytes as a file
 of the origin private file system -- the file `fenec-server` keeps, so each opens
 the other's -- and `run` appends each statement's writes and flushes before it
-answers: 0.56 ms a row, statement included, and it opens in 20 ms against
-IndexedDB's 47 (`make file-bench`; Safari 0.98 and 0.36 ms). A new image
+answers (`make file-bench` measures both ways). A new image
 (`compact`, or appended writes past half the image and 64 KB) goes into
 `<name>~` and is flushed before the file is written over, so a crash leaves
 one of the two whole; `openFile` takes the copy when its image is whole.
 `persist(db, key, { cryptoKey })` seals the image and each chunk with
 AES-GCM (WebCrypto), a tag over the key, the image's random generation and
 the chunk's number, so one moved, dropped from the middle or kept from an
-image before is refused; a row persists in 0.16 ms either way, the 32 MB
-image in 129 ms against 76. The OPFS file stays plain: it is `fenec-server`'s.
+image before is refused. The OPFS file stays plain: it is `fenec-server`'s.
 
 ## Invariants worth knowing before you change things
 
-**Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-abi`, `fenec-wasm`, `fenec-ffi`,
-`fenec-http`, `fenec-wire`, `fenec-server`, `fenec-import`, `fenec-shard`. The WASM output has to stay small and
-auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
-and back (`str::parse` drags in a 12 KB table, `{}` on a float 20.8 KB of
-Grisu and Dragon -- see `num.rs`). `fenec-core` does
-dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
-can write real queries.
+### The crates
 
-**No page cache, and the file is mapped.** The byte sequence on disk and in
-memory are the same format, so a read decodes straight over the bytes --
-there is no eviction policy, no dirty pages and no cache of fenecdb's own.
-`fs::open` maps the file where the target maps files (unix, 64-bit), so the
-documents stay in it and the process holds what it derived from them: the
-offset index, the hash, ordered and text indexes, the graph, and the
-documents written since the open until it hands them over to the file
-(below). A 1 GB file of 2.3 million rows with a hash and an ordered
-index holds 188 MB that way against 1 095 read into memory, and its
-`compact` peaks at 236 MB against 2 012; a 10 GB file opens on an 8 GB
-machine, which read it cannot. `fs::open_in_memory` (`fenec-server --no-mmap`,
-which reaches a replicated file and a `--dir` node's tenants as well) is the
-other way, for a network file system or to have `--max-memory` cover the
-data. In the browser `store::Base` is the image a load was handed
-(`fenec_load_owned`, `Database::load_mapped`): the module keeps it and
-reads the documents out of it, as a server reads its file, where it copied
-each into a segment -- 10 000 rows of 768 dimensions restored held 97 MB,
-and hold 66, for 0.7 KB brotli; the load is up to 12% quicker and the
-first build of each derived index after it 2 to 6% slower, which grows the
-memory past the image the copy let go of: a load and its first three reads
-took 28.7 ms against 28.8. A
-new file is mapped from the start. A rewrite -- `checkpoint`,
-`compact`, an image adopted -- writes the new file and points the stores at
-it (`Database::repoint`), so the old one is let go of; a compact over a
-mapped file never copies a record into memory, on a server either, and
-rebuilds no index but a graph holding tombstones, since the documents are
-the same ones. An image this database writes records where each
-collection's data went (`image_into`'s `placed`), and each store works its
-new places out from its own (`Store::relocate_image`, `relocate_live`):
-walking the new file's record heads read the whole of it back, 1.8 to 2.3 s
-of a 1 GB checkpoint under the write lock, against 19 ms. Only an adopted
-image, written elsewhere, is walked.
+**[Zero dependencies is a hard rule](docs/design/crates.md#zero-dependencies)**
+for every crate but `fenec-bench`; `fenec-core` dev-depends on `fenec-ql`.
 
-**A mapped database hands what it writes over to its file.** A block's
-record goes into the file as it lands, and the stores held its documents in
-their segments besides, until a restart or a compact: 250 000 768-dim rows
-loaded into a server, the engine counted 1 592 MB against 818 for the same
-file started again. Once the documents since the last handover amount to
-`HANDOVER_AT` (16 MB), 65 536 records or 16 384 writes
-(`HANDOVER_DOCS`: its pause is a document's work each, about 17 ns, and 16
-MB of rows of a text and an int were 930 000 of them, the write lock held
-16 to 17.5 ms; at 65 536 writes 0.82-0.89 ms, and at 16 384 0.26-0.31, a
-block's p99 under the lock 1.04 -> 0.45 ms and its mean as it was), `Database::hand_over` has the sink
-write what is pending (`Sink::written_through`) and each store point the
-documents it holds at their places in the file and let its segments go
-(`Store::hand_over`): 820 MB after that load. One due while a durability
-fsyncs the file is put off to the first write landing after it, up to
-twice the bounds (`Sink::syncing`): it writes into the file, and waited
-out the fsync with the write lock held (below). Where each record went is
-noted as it lands (`handover::Landed`: a data record's body, each of a
-block record's), so nothing of the file is read, and a store takes its runs
-in only when they account for every frame its segments hold, in order --
-frames a compact built in memory stay, and with them the ones after. Nothing
-is handed over while a block is open, whose writes are in no record yet.
-The file is the same byte for byte, and so is the image a checkpoint writes
-from it (`tests/handover.rs`). The write lock is held 1 ms for 16 MB of
-768-dim documents and 2 ms of 128-dim ones; 3.9 and 8.5 at 64 MB. The file
-is mapped with room past its end (`Mapping::with_room`: its length again, a
-gigabyte at the least, address space alone) and the mapping grows over the
-appends, which Linux and macOS both show through a mapping made before them,
-so readers keep the pages they touched; only a file outgrowing it is mapped
-anew. Whether the heap goes back to the system is the allocator's call:
-musl's and glibc's unmap a large block when it is freed, so the process
-holds what the engine counts (250 000 x 768 with no graph: 6 MB of
-anonymous memory against 777), while macOS's keeps hundreds of megabytes of
-freed large blocks in a cache of its own, which its footprint counts (998
-to 1 288 MB after the 250 000 x 768 load; 823 with `MallocSpaceEfficient=1`).
-So a large block's buffers are let go of as it lands (`Database::spare`),
-where a COPY of 50 000 768-dim rows kept its 154 MB of frames until the next
-write, and a record the sink's buffer cannot hold is written where it lies
-rather than copied into it.
+**[Limits error, they do not truncate.](docs/design/crates.md#limits)**
+`near`, `match` and `fuse` cap at 10 000 rows, expressions at 512 levels,
+a `lookup` chain at 8 and `in (get ...)` at 100 000 values and 4 levels,
+each a query error, never a cut result; a new limit takes that shape.
 
-**A block that outgrows 16 MB spills into the file before it lands.** Held
-back until it landed, a block's frames were in memory twice, in its record
-and in the stores: 250 000 768-dim rows in one block peaked at 2 389 MB of
-anonymous memory on Linux against the 820 they left, blocks of 50 000 at
-1 144. Once the frames a block holds amount to `SPILL_AT` (16 MB),
-`run_one` has it spill after the statement (`Database::spill`): the frames
-are appended as a spill record (kind 10, a block record's body), and each
-store takes its frames in from there with the records that landed before
-the block (`Store::hand_over_keeping`) -- the block's mark for it becomes
-where it stood then, those taken in (`Mark::spilled`), and each document
-the block overwrote is pointed at where it is in the file now
-(`store::Moved`), so a rollback puts it back. The block lands as a land
-record (kind 11) naming its spills by where their bodies are, then its
-writes since the last; a load applies a spill only where a land names it,
-and cuts off the spills a file ends with. A rollback, a lapsed lease or a
-crash leaves them dead in the file until a compact. The land never travels:
-the sink is handed the spills' bodies (`Sink::land`), and a primary's feed
-sends the block as the one block record it would have been
-(`landed_block`), which a replica applies whole. A spill that cannot be
-made (`Store::would_hand_over` refuses its frames) stops the block's
-spills, which lands holding them as before. With them the peaks were 904 and
-888 MB (in process, in a `rust:alpine` container), and the one block
-without a graph loaded in 3.8 s against 8.6. A binary from before refuses
-kinds 10 and 11. The browser module writes no spill, and reading them cost
-it 1.5 KB, 0.5 KB brotli.
+**[Profiles differ on purpose.](docs/design/crates.md#profiles)**
+`fenec-cli` uses `cli` (`panic = abort`); `fenec-server` stays on
+`release`: a connection's panic unwinds alone.
 
-**Single writer, and readers beside it.** Reads take a shared lock
-(`Database::query`), writes the exclusive one (`execute_with`), and a block
-of writes (`begin` .. `commit`) is open only under the write lock of
-whoever opened it: a `/batch`, a keyed write, the browser module's `run` of
-several. So a read lock finds no block open and reads what has landed, and
-`fenec_http::held` is only the lock taken whole past a poisoned one. A pg
-transaction once left its block open between statements, parked for
-readers (`leave_block`, `park`, savepoints); with the pg wire gone that
-machinery went, since nothing else leaves a block open. What one writer
-costs readers is measured against SQLite in one process (`make
-concurrency-bench`): four threads read 7.1M rows/s by id alone, 701k beside four writers, and
-2.0M beside blocks of 1 000 writes landing back to back, p99 2.5 us and the
-longest 0.5-1.2 ms, where SQLite's WAL reads the last commit meanwhile,
-630k/s, p99 59 us and 0.4-1.9 ms at most -- a block's documents built beside
-the readers and its buffer written behind the lock (both below); built under
-it, 76-292k/s, p99 0.52-1.48 ms and 5.5-6.2 at most in the same session (213k
-and 4.8 quoted before), and before the handover counted writes the longest was
-17.4, a handover of 930 000 small documents. Durable writes gain from the fsync outside the
-lock: 252 -> 516 writes/s from 1 to 16 writers, SQLite's 248 -> 258. Two processes opening the same file corrupts
-it, which is why everything that writes one -- the HTTP endpoint, a
-replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
-of `fenec-server`, never a binary of its own. A `/batch` whose every
-statement reads (`read_batch`) is one snapshot, as the native library's
-`fenec_abi::query` is: every read at the one change `Fenec-Seq` names, a
-`require` stopping it with 412 and `at`. It took the write lock as every
-batch did, then the read lock once for all of them (reads by id with no
-transfer waiting, 18 waits past 50 ms -> 2), and a long one is pinned now
-(below). Where a writer waits, the std lock holds new readers behind it on
-macOS and Linux alike, so a read under the lock beside a busy writer waits
-as before.
+### Storage
 
-**A block's documents are built beside the readers** (`engine/prepared.rs`,
-`Database::prepare`). A block holds the write lock from its first write to
-its record, and a block of 1 000 single puts held it 0.45 ms p50 on this
-Mac, 1.3 at p99, every reader waiting. Sampled (`sample`, 1 kHz), the time
-under the lock was the schema copied whole for each statement (17%), each
-document built from its pairs and parameters and each value made its field's
-type (20%), its payload encoded with every value copied first (12%), the
-document freed once written (10%), the collection looked up by name five
-times a statement (8%), each frame made in a `Vec` of its own and copied
-twice (6%), the record and the handovers (6%). Natively the schema is an
-`Arc` (`SchemaCell`, a plain value in the browser, its module 80 bytes
-smaller raw and 95 larger brotli, the layout's noise), each value encoded
-where it lies (`encode_doc_into`), the frame written once into the block's
-frames and copied from there into the segment (`Store::append_onto`), the
-hooks borrowed and the collection looked up once -- which took a lone put in
-memory from 599-618 to 412-431 ns, 687-691 to 482 under `@hash`, a `del`
-705-714 to 617-626 (`make ttl-bench`'s `writes`, in turns), and a writer
-with no fsync from 1.47-1.49M to 1.78-1.91M a second. Then `prepare`, under the
-read lock, builds and encodes the documents of every `put` among a block's
-statements into one buffer for the block -- buffers of its own a statement
-were three allocations each, a quarter of what they saved -- and the block
-takes them (`execute_prepared`; `execute_ready` for a `/batch` run a
-statement at a time, `fenec_http::held::prepared`) where its collection
-holds the very schema they were built against: the preparation holds the
-`Arc`, so any change copies it and `Arc::ptr_eq` fails, and the `put` builds
-its own as it always did. Everything the database decides -- the id, an
-insert over a held id, `@unique`, `if absent`, the hooks, the indexes, the
-record -- is decided under the lock as before, so the file is the same byte
-for byte (`tests/prepared.rs`, against twins built under the lock). A hook
-that may change a document (`Hook::rewrites`, true unless it says not;
-`Check` and the mirror's `Guard` judge only) has its payload encoded after
-it. The documents written are freed after the lock, with the preparation. A
-preparation a panic left half way is let go of as the next statement starts
-(`disarm`): taken, a block that came after it wrote another's documents. A
-server prepares a `/batch` or a `/query` whose `put`s write `PREPARE_AT`
-(16) documents or more: fewer spend more on the read lock and the buffers
-than they take off. The lock is held 0.14-0.15 ms p50 for the block,
-0.38-0.39 at p99 and 0.44-0.50 at most over 10 000 blocks, against
-0.31-0.35, 0.59-0.73 and 4.6-50 built under it with the rest of the change; a writer
-alone lands 1.6% fewer blocks prepared than built under the lock (the read
-lock, the buffers, the documents cold again), and a fifth more than on
-main. A REST insert prepares too (`early_put`): its body is read with no
-lock held, against its collection's schema `Arc` taken under the read
-lock, its documents built under a second where that `Arc` is still the
-collection's, and the write lock takes both where the collection holds
-that very schema (`Early::holds`), routing the body again under it
-otherwise -- a field added, the collection made again, a vector field
-made json are read and built again (fenec-http's
-`a_rest_insert_whose_schema_moved_before_the_lock_is_read_again`, which
-fails with the check taken out). Under the write lock a body of 1 000
-rows was read, checked and built: a reader by id beside such inserts back
-to back waited out holds of 0.40-0.47 ms p50 and 0.62-0.78 at p99 for rows
-of a text and an int, 0.07-0.08 and 0.30-0.34 now, and of 3.25-3.73 and
-4.35-5.49 ms for rows with a 128-dim vector, 0.18-0.21 and 1.26-1.74 now,
-the writer as fast (`make concurrency-bench ARGS=rest`, in turns), and
-`make load-bench`'s REST arrays went in at 212-221k rows a second against
-216-217k, for 5.3 KB of `fenec-server`'s code. A body under `EARLY_AT`
-(1 KB) with fewer `{` than 16 is read under the lock as before: read
-first, a read lock, the schema's count and a look-up more took a row 1.11
--> 1.14-1.16 us in process. A token whose
-rules read another collection is bound under the write lock, so its
-insert routes there. The native library prepares a text's `put`s as well
-(`fenec_abi::execute_ready`): the lists a json field keeps are read first
-(`exact_noting`, which notes whether it read anything anew -- returned
-beside the error, the `bool` grew the browser module's `fenec_query` 48
-bytes), again under the write lock only where a write landed meanwhile,
-and the preparation is let go of where that read anything anew. An app's
-read by id beside texts of 1 000 128-dim rows waited 0.24-0.40 ms p50
-against 0.81-1.07, read 209-275k times a second against 108-143k (`make
-ffi-bench`'s `beside`), the p99 3.2-7.0 ms either way: the native library
-wrote its buffer under the lock as it filled, and writes it behind the lock
-now (below). A lone buffered put is what
-it was (1.96 us p50 against 1.94, the mean 2.25 either way, `ffi_bench put`
-in turns), and the library's code 6.5 KB more. The shell has nothing
-reading beside it and builds under its lock. Rejected: a pin
-taken as each block starts, for the readers to read the database as it
-stood -- it copies the id index, 12 bytes a row, 0.25-0.37 ms over a
-million rows, as long as the block and growing with the collection, and a
-read an index answers would still wait; a copy-on-write id index in chunks
-to make that pin cheap, a pointer more on every read by id; the whole block
-run beside the readers, applied under the lock as a list of effects -- a
-read in a block sees the block's writes, a `set` reads the row it writes,
-`require` and `@unique` count under the single writer, so every read path
-would have consulted an overlay of the block's writes; readers handed the
-block's undo log to read the rows as they were, which reads by id alone
-could use.
+**[No page cache, and the file is mapped.](docs/design/storage.md#the-mapped-file)**
+`fs::open` maps it and a read decodes over its bytes; a rewrite points the
+stores at the new file (`Database::repoint`).
 
-**A long read is pinned, and read with no lock held** (`engine/pinned.rs`,
-`Database::pin`). Under the read lock a write waited for every read, so a
-long one held them all: a ledger's reconciliation (a read-only `/batch`
-of three aggregates over a million entries, 140-200 ms) held transfers up
-to 187-512 ms, 36 past 50 ms in ten seconds (`make recon-bench`), and an
-aggregate of 50 000 groups over a million events four writers' puts --
-and every read by id behind a waiting one -- for its 0.8 s (`make
-concurrency-bench ARGS=long`). `pin`, under the read lock, takes what a read
-of the documents alone needs into a `Database` of its own: each
-collection's schema and its store as `Store::pinned` takes it -- the
-segments and the mapped file shared, the id index copied, 12 bytes a row,
-the stretches left out (an image's, which a read never writes) -- and the
-read runs on that with no lock held, the database as it stood at the pin.
-Nothing a write changes in place is shared: an append to a segment the pin
-holds copies it first (`Arc::make_mut`, 8 MB at most, once a pin), a
-handover or a compact lets go of its own hold only, and a checkpoint or a
-compact renames its file over the one the pin maps, which the mapping
-keeps. The pin took 0.26 to 0.87 ms over a million rows, and the read as
-long as it took under the lock (151.9 ms against 151.4, 664 against
-668); the writes beside it waited at most 2.5-10.8 ms, what they wait
-beside no long read (handovers, the segment's copy), against 118-854 ms,
-and the reconciliation's transfers 5.4-29 ms and none past 50 in three
-runs of four. The fourth met a 385 ms stall, of the kind both servers met
-in the bench's first round, which runs no reconciliation (118-223 ms):
-the journal's `@unique` index growing its table whole as it passed 1.8
-million entries, and `--warm` building an index the bench's warm-up had
-not read as the round began (both below). With those gone, three runs:
-1.9-10.4 ms, none past 50. The indexes are
-not taken: a hash index's map, an ordered index's chunks, a text index's
-postings change in place, and a copy under the lock costs what the read
-spares -- a shared one, copied by the first write to touch it, would have
-that write wait instead, a ledger's `@unique` over its entries a million
-keys -- while a read an index answers is short anyway. So `pin` declines a read an index would answer --
-an equality or `in` over a `@hash` field, a range or a one-key `order`
-over a `@sorted` one, a facet the buckets or the ranges count, an inner
-`get` on a hashed field, `expired()`, `match`, `near`, `lookup` -- and one
-reading fewer than `PIN_AT` (10 000) rows by its shape (a page with no
-`order`, a read by id, a `count` of everything, a statement alone let go
-before its filter is walked), which run under the lock as before; every
-index of a pinned collection is there by name and refuses (`PINNED_OUT`),
-so a read let through by mistake is answered `None` by `Pinned` and run
-again under the lock, the whole batch, never planned without the index
-(`a_read_that_reaches_for_an_index_is_answered_none`). Readers taking the
-lock in slices were not an option: a slice's end lets a write change the
-answer. Copy-on-write indexes and a chunked id index would make the pin
-O(chunks) and let an index read be pinned, for a pointer more on every
-lookup and a copy of a chunk on the first write to each a pin holds; the
-pin's copy is a hundredth of the scan it spares, so it stays the flat
-copy. A database's pins hold `PIN_BUDGET` (256 MB) of id indexes at most,
-past which a read runs under the lock. The server pins a lone read
-(`/query`, its JSON path too) and a read-only `/batch`, and asks every
-read: a short one declined costs 25 to 40 ns, a read by id 573 in process
-and 17 to 24 us over HTTP (`make requests-bench` the same in turns); `tests/pinned.rs`
-holds every pinned answer to the lock's at the pin, past deletes, updates
-of indexed fields, an alter, a drop, a compact under the lock and beside,
-a checkpoint, a handover a write, and three writers and a compactor
-beside three readers. The browser module has one thread and none of it:
-not a byte of it changed.
+**[Writes are handed over to the mapped file.](docs/design/storage.md#handover)**
+Past `HANDOVER_AT` or `HANDOVER_DOCS`, `Database::hand_over` points the
+stores at it, never with a block open, the file the same byte for byte.
 
-**Every write is a block, and a block is one record.** `execute_with` runs a
-write as a block of one (`Database::execute_block` runs several, `begin`,
-`commit` and `rollback` hold one open): `wal` and `note` hold its frames and
-ids back (`Block`), and `commit` appends them as one record -- within one
-collection a data record of as many frames, which a binary from before
-blocks reads, across collections a `REC_BLOCK` (kind 9) of one data record a
-write -- and only then notes them, so a crash, a replica and a subscriber
-see all of it or none. A block that fails is undone in memory: each id it
-wrote is pointed back to where its record was (`Store::point`) and
-`Store::rewind` cuts each store back to its `Mark`, the documents it wrote
-are unindexed and the versions before them indexed again, and the ids it
-handed out are handed out again. A record is numbered by its last write, `writes_in` counts them, and
-whatever counts records -- the replication feed, the archive,
-`apply_records` -- counts that way; a restore to a change inside a block
-stops before it. A compact cannot be undone, so it is refused in a block
-(`Statement::fits_block`), and a `/batch` holding one runs each statement
-on its own. A schema change is undone as a write is: the
-block's log (`Undo`) holds a collection made, which goes, a collection
-dropped -- kept whole until the block lands, then let go -- which comes
-back where it stood, and an index built, which goes. It lands inside the
-block's record (kind 9) as the record it is on its own, and a lone one as
-that record alone, so only a block mixing one with other writes is new to
-a binary from before 0.1.5, which refuses it as corrupt. Undone in one pass
-the last write first, the collection a write is of is looked up by id, not
-kept: a drop and a create of the same name in one block are two
-collections. It cost the browser module 3.0 KB, 0.6 KB brotli, the
-removal of an index from each of the five maps most of it; draining the
-log rather than popping it was 0.5 KB more. A `/batch`, a keyed write
-and the browser module's `run` of several are one block. A block is put back a write at
-a time, the last first, each the inverse of what it did: 3.0 ms for 50 000
-writes, where finding each id's first write by searching took 402 ms, and
-a sort was 4.6 KB of the browser module. The buffers are kept from one block to the next (`Block::cleared`),
-the record's header written into room left before the frames: allocated
-anew they took a lone `put` from 832 to 985 ns; kept, a put cost 841
-against the 829 before blocks, a `del` 648 against 634.
+**[A block past 16 MB spills into the file before it lands.](docs/design/storage.md#spills)**
+A spill (kind 10) counts only where a land (kind 11) names it; the feed
+sends the block as one record (`landed_block`).
 
-**A storage error stops writes.** Once the sink refuses an append, a sync or a
-rewrite, every later write and sync returns `Error::Io` until the file is
-reopened (`Database::failure`); reads go on, from memory and from the
-mapped file's pages. A page that cannot be read in is the process's end
-(`SIGBUS`), not an error -- which is what `--no-mmap` is for on a disk that
-fails reads or a network file system -- and a mapped file is only ever
-replaced by rename: a copy over it in place took a server down. A failed `fsync` is
-never retried -- the kernel may already have dropped the pages -- and
-`fenec-server` under `--sync always` reports it (500) instead of the success it
-had not yet sent. That fsync runs *outside* the exclusive lock: under it a
-write only calls `Database::flush`, which hands back a `Durability` to run once
-the lock is released, and `FileSink` writes the bytes there as well (a `write`
-under the lock waited out concurrent fsyncs on macOS). The writes the lock
-still makes -- the 1 MB buffer's once it is full, a handover's -- take the
-sink's disk, which a durability holds through its fsync, so both are put
-off while one does (`Sink::syncing`, a `try_lock`): the buffer up to
-`WRITE_HELD` (8 MB), a handover to twice its bounds. A ledger's transfer
-landing a handover waited out the syncer's `F_FULLFSYNC` of a quarter
-second's writes, 52 ms, every request behind it. A durability whose bytes
-an earlier fsync already covered runs none, which is the group commit: 268 ->
-1 156 durable writes/s over eight clients. A failed one is reported back with
-`Database::fail` so the engine stops taking writes. The syncer of `--sync
-<ms>` flushes the same way, a database's and each of a node's tenants'
-(`Tenants::sync_dirty`): the tenants' held their lock through the fsync, and
-every read and write of one waited up to 27 ms a pass on macOS.
+**[A lone `create index` or `compact` runs beside the database](docs/design/storage.md#maintenance-beside-the-database)**
+(`Database::maintain`): every write must pass `Database::note`, or a built
+index misses it; a schema change meanwhile fails it, and an image adopted
+meanwhile marks every tail changed (`Tails::all_changed`).
 
-**Buffered writes are written behind the lock** (`Database::write_behind`,
-`Sink::write_behind`). On macOS a `write` that takes a file's dirty pages
-past each 8 MB waits for the disk: 1 MB writes appended one after another
-took 1.5-2.9 ms every eighth, 2.0-11 ms with the file mapped, and
-preallocating 128 MB (`F_PREALLOCATE`) changed nothing. The buffer written
-as it outgrew 1 MB, under the write lock, held four readers beside blocks of
-1 000 writes 4-6 ms every 8 MB. `write_behind` hands back what writes the
-buffer, with no fsync, for the caller to run once it has let the lock go,
-as it runs a durability: a server asks after every write that `--sync
-always` does not fsync (`flush_for`), the buffer once it holds 64 KB
-(`BEHIND_AT`). It passes over a disk a durability holds (`try_lock`), whose
-fsync writes the bytes anyway: waiting, a buffered write waited out the
-syncer's `F_FULLFSYNC`, a ledger's transfer once 126 ms, where it had
-touched no disk before. A sink
-asked once leaves its buffer for it from then on, an append writing it
-only past `WRITE_HELD`, should the writes behind fall back. A handover writes what is pending, so for a database written behind
-it is put off to the next block's start (`hand_over_before`), where the
-write behind -- every byte, once a handover is due -- left nothing pending,
-and runs at the end of a block only past twice its bounds: written there,
-its bytes met the same stall under the lock. A replica and the shell write
-as before; the native library writes behind as a server does (below).
+**[A file compacts itself once half of it is dead](docs/design/storage.md#compaction)**
+and 64 MB: `CompactPolicy` is the one rule, run beside the database by
+`Compactor` or `fenec_http::link` (`--auto-compact`), on replicas too.
 
-**A durable write syncs a log beside the file, not the file**
-(`synclog.rs`, Linux and Android). The file only grows, and on ext4 an
-fsync of a file whose length changed commits the journal too: in Docker's
-VM a 300-byte append and its `fdatasync` took 356 us, the same bytes
-written into room the file already had and synced 65 -- why PostgreSQL
-fills its WAL segments first. So `FileSink`'s sync writes what the file
-took since the last one into `<file>.sync` (the whole name and `.sync`:
-with the extension replaced, `x.db` and `x.fenec` shared one, as they
-shared `.compacting` and `.beside` -- `fs::beside` names all three), 4 KB
-of header and 256 KB of entries written once at full size and never
-grown, and syncs that alone (`Tail`). The file is fsynced when an entry
-would not fit, a sync holds more than 64 KB, or the sink is new to the
-file -- whose bytes an earlier process may have left unsynced -- and the
-log then begins a generation from where the file stands. An entry is the
-file's bytes at a place, with its generation and a hash, so a cut one
-ends the log; the header names the generation, where the file stood
-synced, the file's device and inode, and a hash of the 4 KB before that
-point, so a log is applied to its own file alone -- not to one renamed
-into the place, even one holding the same bytes. `create` applies it
-before the file is read or mapped (`synclog::recover`), fsyncs the file
-and wipes the header, so a file cut below the log's end after that open
-is not written over at the next. Everything that renames a file into a
-database's place removes the log first and makes the removal durable --
-`swap_in` after syncing the file it replaces, a restore, a backup
-unsealed, a tenant's import (`fs::forget_sync_log`); a clean close syncs
-the file and removes it, so a node keeps none beside a closed tenant, and
-`Tenants::stats` counts it; a log that cannot be made is not tried again
-until the next open, each try being 260 KB of writes. `open_read_only`
-applies none: after a power loss, `fenec types` or a raw copy taken
-before the next open may lack the last durable writes. On macOS
-`F_FULLFSYNC` flushes the drive either way, 3.9 ms appended or not, so
-there is no log (`ENABLED`; `fs::keep_sync_log` has a test thread keep
-one). In Docker a durable update went 624 -> 325 us p50 (`make
-roundtrip-bench`), against PostgreSQL's 378; `tests/synclog.rs` crashes
-the machine (the process forgotten, the file cut back to the log's
-start) through a full log, a sync past an entry, a torn header, a file
-renamed in, a second open and two files of one stem, and fenec-core's
-and fenec-http's tests pass on Linux, where every file keeps one.
+**[A file is compacted before it outgrows the page cache](docs/design/storage.md#compaction-and-the-page-cache)**
+(`CompactPolicy::memory`): where its live records fit the cache's room
+(`cache::room`), once a third of what the compact writes is dead and the
+file has reached `ROOM_SHARE` of that room or the process faults
+(`cache::faulting`); a compact's own faults are forgotten
+(`cache::forget_faults`).
 
-**Replication ships only what is on disk, numbered by the change counter.**
-A primary (`--replication-token`) writes through a `Tee`
-(`fenec-http/src/replication.rs`): a write's record enters a bounded feed in
-memory as it is appended, and is sent once an fsync has covered it -- so a
-primary back from a crash holds every write any replica was sent. A replica
-applies them with `Database::apply`, which does the write path's index upkeep
-and hands each record on to its own sink with `Sink::record(seq, ..)`: its
-change counter matches the primary's write for write, and its file reopens
-where it stopped. So every write goes through `wal`, and a record moves the
-counter by the writes it holds (a block's, `writes_in`); a record that moved
-no counter would leave every replica one change off. The
-history (record kind 8, `History`) moves none, as a graph a server keeps in
-the tail does, and neither is sent. A promotion forks the history, a replica is continued only from a position
-the primary's history passed through and sent an image otherwise, and a
-following database refuses writes (`Error::ReadOnly`, 403). A promotion
-halts the follower before it forks, and a follower reconnecting to a
-primary that is gone walks away from the dial at the halt
-(`fenec_http::dial::connect_unless`: the lookup and the connect on a
-thread of their own, the stop flag looked at every 10 ms, the stream
-handed to `halt` before its request goes out): waited for, the halt took
-the connect's 5 s where the dead machine's address swallowed packets, and
-as long as the resolver took to refuse its name -- the tail of a failover
-in V5's drill on CI; `tests/replication.rs` holds a promotion beside a
-lookup that never ends (30 s on main, the 5 s of the dial's bound with the
-dial not walked away from) and beside a primary that takes the connection
-and never answers (the follower's 10 s of silence where the stream reached
-`halt` only with the head). A durable
-write is answered once every stream has written it into its socket
-(`Feed::wait_sent` in the `Tee`'s durability, `SENT_WAIT` a second at
-most, a stream that missed it `lagging` and not waited for until it
-catches up): sent after the answer, a write answered in the moment before
-was lost when the primary died -- a node of the SaaS example killed under
-eight writers lost one in 3 of 60 runs on main, none in 120 since -- and
-a socket's bytes reach the replica after the process is killed, though
-not after the machine dies. Lag is 0.04 ms p50 under `--sync always`
-(0.14 before the wait) and at most 283 ms under `--sync 250`, durable
-writes 254 a second against 246; ten failovers under `always` lost no
-acknowledged write. An archive (`fenec archive`,
-`fenec-http/src/archive.rs`) is the same stream written to files, each write
-with the time the primary appended it; `fenec restore` is an image plus the
-archived writes up to a time or a change, forked -- a fenecdb file is exactly
-that, so a restore is a concatenation checked by opening it. An archive
-takes images of its own end (`Archive::consolidate`, `--image-every`, an
-hour): it kept its first image for good, and a restore replayed every write
-since. The segment being written ends at the next write after one, so
-`prune` (`--keep`) lets go of whole segments -- in the open segment the
-writes before an image stayed until it reached 64 MB. `fenec verify` reads
-an archive as a restore would. A segment is closed and fsynced before the
-next begins and an image renamed into place, so a sync tool's copy, taken
-a file at a time while the archive writes, is the archive up to a moment:
-fenecdb speaks no TLS, and S3 and R2 are reached with `rclone sync`.
+**[File format](docs/design/storage.md#file-format):** a record is
+`[kind][collection-id][length][body]`, its length read even when empty;
+`head` writes a head (the counter's `image_head` aside), `record_at` reads
+it, `Walk` walks them. A torn tail is cut on open, a torn image refused,
+and the file only grows; a tool that only looks opens with
+`fs::open_read_only`, which cuts, creates and writes nothing. A new record
+kind, index kind, type tag or graph version is a number a binary from
+before refuses (a graph's, rebuilds from), never one it would misread.
 
-**A node's tenants are archived over one stream** (`fenec archive
---tenants`, `fenec_http::node_stream` on the node, `node_archive` the
-archiver). A tenant's own stream is a connection and a thread on the node
-for as long as it runs, one of `--max-connections`, and holds its tenant
-open: archived so, a node of 1 000 tenants of ten rows and one of 64 MB held
-1 016 threads, 4 011 descriptors and every tenant open for good, against 15,
-27 and the 10 written with no archiver -- and at the default 100 connections
-could not be archived at all. `POST /_replication/tenants`, with the
-replication token, is one connection and one node thread for every tenant:
-its body is where each archive under the root stands (`<tenant> <since>
-<history> <image>` a line), the node says hello to each tenant it holds (an
-image where the place does not lead to its writes) and `G` to each listed
-one it does not, and every message is the tenant stream's led by its name.
-It sends a tenant's writes from its feed while it is open, and nothing while
-it is closed, whose file does not change. It is a sender on each open
-tenant's feed as a replica's stream is -- put there as the tenant opens
-where its client stands where the file does (`NodeStreams::attach`), and on
-the tenants open as it connects, before it reads which tenants there are
-(`begin`: read first, a tenant made between was in neither) -- so a `--sync
-always` write waits for it, and `Tenants::close` refuses while a sender has
-a write left (`Feed::unsent`), syncing a dirty tenant first: closed, its
-feed went with it and the writes came again as an image. One stream for
-every tenant holds no tenant up for another: its sender carries a flag
-(`Sender::held`, `Listener::hold`) set while the stream does what can block
--- a closed tenant read or opened to be looked at, a tenant's lock waited
-for (`Listener::read`: waited for unheld, a tenant write-locked as the
-stream came to judge it held another's next durable write 1.014 s), an
-image's snapshot and its sending, a socket the archiver reads slower than it
-fills (written non-blocking, `Out`, the flag set before a write that would
-block) -- and a durable write waits for no sender held so
-(`Sender::waited_for`); a stream that starts behind, at an image or on the
-tenants open as it connects, is lagging until it catches up, and an image
-waits for its tenant's disk among the stream's other work (`Pending`, looked
-at again every 50 ms) rather than in `DURABLE_WAIT`'s 30 s. Its feed is
-among the stream's while it waits, where a close takes it off
-(`NodeStreams::detach`) and an open puts another in its place, `attach`
-dropping a feed of an earlier opening, and `send_pending` sends only while
-it is still there, taking the tenant again otherwise: an image pending
-across a close and an open put the dead feed back once sent, the stream read
-nothing from it again and the archive stood still -- the node at 8, it at 5
--- until the archiver connected again. Held up the replica's way, every
-tenant's next durable write waited out `SENT_WAIT`, 1.008 s, while the
-stream opened another tenant. The syncer of `--sync <ms>` and a close sync
-waiting for no stream (`replication::unwaited`), since no client's answer
-waits on them: waiting, a pass took 5.06 s over five tenants beside a stream
-busy elsewhere, the writes of the pass unsynced meanwhile, and a close held
-its slot's lock 1.01 s. So an archive of a node is synchronous only while
-the stream keeps up, and under load it is not: a write answered while the
-stream is held up or behind is on the node's disk and not yet in the
-archive, sent once the stream comes back to its tenant -- at worst inside an
-image -- and missing from it if that disk is lost first; a replica's own
-stream keeps a write's answer waiting up to a second instead.
-`tests/node_archive.rs` holds a tenant's open, a tenant's lock, an image's
-disk and a full socket each beside another tenant's writes, and fails with
-the flag, the held lock wait, a blocked write's hold or the pending image
-taken out (a write beside an archiver that stopped reading waited 1.014 s)
--- the unwaited sync is `replication`'s unit test's to hold
-(`the_syncers_durability_waits_for_no_stream`), since beside a stream held
-up a sync waits for none either way; it asks `Feed::waited_out`, the durable
-writes that waited out a stream, rather than a clock, which a runner slowed
-by its neighbours fails. Which tenants have news is told: a feed tells as
-its writes reach the disk, it starts over or closes (`Feed::tell_with`, held
-strongly: a `Weak`'s upgrade was a compare-and-swap on one count every
-tenant's sync shared, 139-141 ns a tell from 16 threads against 0.20-0.24),
-and a tenant made, installed, deleted, promoted or made to follow touches
-the stream; one released while the stream is busy with it (`Next::Gone`) is
-looked at again until it is gone or back -- a tenant made again under the
-name, writing nothing, gave no notice more -- and the directory is read
-again every 10 s for a file put there by hand. With no stream connected a
-sync pays two loads, 13 ns a durable advance either way. A closed tenant's
-place is where it closed in this process (`Tenants::closed`) or read from
-its file (`Tenants::peek`, `open_read_only`), where opening to look took 6.3
-ms a tenant, the open fsyncing the file; a closed tenant the stream is told
-of is read again, since a holder of its database may have written it after
-the close, and one with a non-empty sync log beside it (Linux, after the
-machine went down) is opened, the log holding durable writes the file lacks.
-The feed keeps the lineage the database last wrote, read off the history
-records `Tee::append` passes, and the stream sends it (`L`) before the
-writes after a promotion: a promoted standby's archive goes on with no
-image. The archiver keeps `<root>/<tenant>/` as `fenec archive` keeps one,
-through the same `archive::Writer` the single archiver now writes with; a
-segment file is open only while its tenant writes (a thousand would pass a
-macOS shell's 256 descriptors), the `history` file is written only when it
-moved (a thousand fsyncs a reconnect otherwise), and `archiving.lock` keeps
-a second archiver off the root. A tenant the node says is gone -- deleted,
-or moved to a node whose archiver takes it up from its image on the same
-history -- keeps its archive, and `presence` notes `gone <ms>`, then `back
-<ms>` if it returns: a restore to a moment it was away leaves it out, as one
-deleted, where forgetting the time away gave the copy from before it left.
-The times are the node's clock, as its writes' are: `G` carries when this
-process deleted the tenant (`Tenants::departed`, the last 65 536, kept only
-on a node that replicates its tenants and noted once the file is gone: noted
-before it, a removal refused had the archive read the tenant gone and back
-62 ms later) or else when the stream saw it go, and `back` is the node's
-hello -- stamped as the archiver heard, a moment after a delete still
-restored the tenant while the stream was busy or the archiver away. A tenant
-deleted and made again while the stream was busy is told gone at the delete
-before the new copy's hello (`Session::left`), and a line moved aside for a
-copy heard of alone, the archiver away meanwhile, is noted gone by that
-hello at the latest; `away_at` reads the last line noted by a moment, a
-clock set back leaving the times out of order. An image at or before the
-archive's end on a history that does not lead from it
-(`archive::Took::Diverged`: restored to an earlier moment, or another tenant
-of the name) would have landed among changes of the same numbers --
-`File::create` of a segment of the same name wrote one over -- so the single
-archiver refuses it and the node's moves the line aside to
-`<tenant>.<history>` and begins a new one. `restore --tenants` to a time
-takes, of a tenant's lines, the one that began last by then
-(`node_archive::lines`; `Archive::began`, its oldest image's time, which a
-`prune` letting that image go writes into `began` first -- written with the
-first image it was an fsync more a tenant of the stream's first pass), and
-refuses a moment `--keep` let go of (`Restoring::LetGo`, exit 1) rather than
-pass the tenant over as never archived; `verify` and `prune` run on every
-line, and `Archive::verify` names a gap an image alone ends. One tenant's
-archive that does not read is left for an operator and the rest go on.
-Measured with `make node-archive-bench` (1 000 tenants of ten rows and one
-of 64 MB, closed when idle, ten written ten times a second from before the
-archiver connected and for 20 s after, under `--sync always`, in turns): the
-node held 16 threads, 29 descriptors and the 10 written open, 3.9-6.0% of a
-core against 4.7-5.1 with no archiver and 7.0-8.0 a stream each; the
-archiver a thread and 21 descriptors against 1 001 threads and 2 021; the
-writes while the first images were taken, the 64 MB one among them,
-14.5-14.7 ms p50, 32-35 p99 and 43-116 at most, where a stream each held
-them 176-600 p99 and up to 1.1 s, main's build alike (86-351, up to 994 ms);
-after them 12.4-13.8 p50 against 11.8-12.1 with none (`F_FULLFSYNC`); a new
-archive's first images, a tenant at a time, 14.8-15.2 s against 11.2-15.5
-for a thousand streams; after a restart 2.2-4.6 MB and no tenant open
-against 121-157 MB and every one, all 1 001 said hello to in 0.29-0.33 s.
-Under `--sync 250` (`node_archive_passes`: eight tenants written every 5 ms,
-eight opened, written and closed in turn, one of 32 MB closed) the syncer's
-pass took 52 ms p50 beside the node's stream, 91-168 at most -- the
-archiver's fsyncs on the same disk -- against 31-33 with none and 65-86 a
-stream each, and a close 4.0 ms p50, 15-33 at most, against 3.8-4.0 and
-12-25 with none. With no archiver and with a stream each, every figure
-stayed main's in ABBA turns (the pass 31.0-31.4 and 67-73 ms p50 on main, a
-close 3.6-3.9). The pending feed, the lock held up and the departures moved
-nothing, four turns a side against the build before them: the writes while
-the first images were taken 13.9-15.3 ms p50 and 26.7-32.9 p99 against
-13.9-14.9 and 29.5-30.6, the first images 14.8-16.8 s against 15.1-16.8, and
-with no archiver 11.5-12.1 ms p50 against main's 12.0-12.1. `make
-replica-bench`, four turns a side at a load of 10-15 from other work:
-`--sync always` lag 0.10-0.15 ms p50 against 0.10-0.11, catch-up 11 128-13
-614 writes/s against 11 384-13 857, a restore to the end 7.87-9.09 s against
-8.51-9.05, each pair inside its turns' spread -- a replicated write meets a
-byte compared in `Tee::append`, a thread-local in its flush and a flag in
-`wait_sent`. A node's request path (`make shard-bench ARGS=latency`, a
-tenant's read straight to the node) stayed 21.5 us p50 against main's 21.6,
-eight turns a side, with the stream's handler out of line and cold (inlined
-into the connection loop, four turns a side read 21.5-22.0 against
-15.7-21.5: main ran in a 15-16 us mode three times in twelve, this build
-never). Nothing below `fenec-http` changed.
+### The engine's lock and blocks
 
-**Scaling out is by tenant, one file each** (`fenec-server --dir`, `fenec-shard`,
-whose directory replicates to a standby router like any other file, the
-standby's maps catching up from the change ring -- 4 us a change at 100 000
-tenants against 38 ms reading them all again under the router's write lock;
-`site/content/docs/sharding.html`). The tenant comes from the path
-(`/t/<tenant>/`, looked up again per request, so a move, an idle close or
-a delete between two of them is seen), never from the query, so tenants
-cannot share a file -- they
-would read each other's rows. A file each also keeps ids, the change sequence,
-BM25 statistics and `lookup` per tenant, which is why the router forwards bytes
-and never parses a query. The registry (`fenec-http/src/tenants.rs`) opens a
-file only under its lock after checking the open map, and closes one only when
-the map holds the last `Arc` -- a second `Database` over one file corrupts it
-exactly as a second process would. `freeze` takes a per-tenant gate
-exclusively so a write that passed the frozen check cannot land after the final
-export. A move is freeze, copy the image, install, flip the directory in one
-statement, delete the source; the change sequence travels in the image, so a
-caught-up subscriber resumes on the target without a reseed. A node's tenants
-are replicated to its standby, each through its own feed at
-`/t/<tenant>/_replication`, and `POST /_shard/nodes/<n>/failover` promotes
-them there one at a time -- separate databases, nothing to make atomic
-between them. A tenant's role is its file's, not the node's `--replica-of`:
-a replica's file follows, a primary's stays one, and a file new to a replica
-node follows (the standby copy the router made). Every file on a replica
-node was made to follow once, so an idle close or a restart undid a
-promotion and the old primary's image wiped the writes since. A rejoining
-node's tenants follow when the router records the pair
-(`POST /_admin/tenants/<t>/follow`, each), a failover that moved every
-tenant ends the pair, and no tenant is placed on or moved to a standby. A
-tenant whose follower runs is never closed as idle: the follower holds the
-database rather than the tenant, and a close left it writing the file under
-the next instance. The router cannot tell a node that is gone from one it cannot reach,
-and guessing makes two primaries, so it promotes on its own only under a
-lease (`fenec-shard --auto-failover`, nodes `fenec-server --dir --lease`;
-`fenec-shard/src/lease.rs`, `fenec-http/src/lease.rs`): a node stops
-writing as its lease lapses by its own clock -- measured from a moment the
-router acknowledged, where the router measures from when that answer came
-back, and waits a tenth more -- and only then are its tenants promoted.
-Each grant is numbered (`grant`, per node from a random start a router
-process, `Leases::number`) and names the newest grant whose answer came
-back within the pool's third of a lease (`acked`); the node keeps when it
-answered each of its last 16 (`State::answered`, cleared as the holder
-changes) and runs its lease from the one acknowledged, never from a
-grant's reading (`fenec_http::lease::Numbered`, `grant_from`). Run from the
-reading, a grant the router gave up on (`Answer::Silent`) and the node read
-late -- held on its way, or left unread by a node stopped or slow -- was a
-whole lease after the router had failed the node over, both copies
-answering writes 200 (the review of #340's `late_grant.rs`), however late
-it came. Read late now, a grant acknowledges what the router had counted
-by its sending, a lease the failover outlasted; an answer that came back
-late is acknowledged by no grant; a number the node never answered, or
-answered for another holder, runs nothing; and a router's restart numbers
-afresh, so a grant of the one before, read late, names no number this one
-acknowledges. A grant is newer than the one the lease came from
-(`State::basis`) by the answer it acknowledges, then by its own number --
-one router process's, counted on as it sent them, the only grants that
-name one answer -- and taken whole where it is newer, its list with the
-lease `ms` from that answer, which may cut the lease held short; its list
-alone where the lease has lapsed; not at all otherwise. The list replaced
-on its own, as the design first had it, a late grant's list from before a
-failover named the tenant again beside the lease a newer grant ran
-(`late_grants.rs`'s `a_grant_read_late_takes_no_list_beside_a_newer_lease`);
-judged by the lease it would run, as this branch first had it, a router
-restarted or promoted with a shorter `--auto-failover` never cut a longer
-lease short, failed the node over by its own and left it writing beside
-the new primary, and a grant sent before another acknowledging the same
-answer, read after it, put its older list back (the review of #343,
-`a_router_restarted_with_a_shorter_lease_...`,
-`a_late_grant_acknowledging_the_same_answer_takes_nothing`). The node says
-whether it took a grant (`"took"`, which a node from before never says and
-which means taken), and one it answered and did not take -- the first of a
-router restarted or promoted, whose predecessor's lease runs -- is
-`Answer::Kept`: the grant acknowledging it goes at once, with the list, and
-is newer. Counted taken, the router believed the node held its list, and a
-create right after a restart had its schema refused (503) and was taken
-back. Two grants make a lease besides, so a grant whose answer says the
-lease is short -- none, or under half a lease, what a node new, restarted
-or back from a failover holds -- is followed at once by the one
-acknowledging it too (`Leases::short`): left to the next round, a tenant
-created with its schema was refused it (503), and so was the first write
-after every create in the lease tests. A router from before numbers sends
-none and its grant runs from the reading, as before, and a node from
-before them ignores them (`Leases::unnumbered`, said once): leased the old
-way rather than refused or failed over never, so a rolling upgrade in
-either order keeps every node writing and failed over on its own, the late
-grant open where either side is old. The node's lease runs on the boot
-clock (`lease::Moment`: `CLOCK_BOOTTIME` on Linux, `mach_continuous_time` on
-Apple's systems through `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`,
-declared by hand), which counts a suspend: on `Instant`'s
-(`CLOCK_MONOTONIC`, `CLOCK_UPTIME_RAW`) a node suspended past its lease
-woke with the lease left as it was and wrote beside its tenants' new
-primaries. It fails closed, as std's `Instant::now` does: a boot clock that
-stops answering panics, Linux decides once whether it has one (before
-2.6.39, `Instant` throughout) -- a failure read past from call to call mixed
-two clocks' moments, and a timebase guessed at 1 / 1 made an Apple silicon
-lease 41.7 times as long. The router counts on `Instant`, which a suspend
-of its own machine stops: it fails over later, never sooner. It cost a
-write nothing: a fenced put 555-560 -> 548-552 ns on an M1, about 7 ns
-saved, eight runs a side in ABBA turns (`make fence-bench`), and in
-Docker's Linux VM (musl), where `CLOCK_BOOTTIME` is read through the vDSO as
-`CLOCK_MONOTONIC` is, 1 488-1 677 against 1 472-1 720, quartet by quartet
-the same at loads of 34-46 from other work; the clock as it stands, read
-again at loads of 50-88, lower in every M1 quartet (804-880 against
-821-1 114) and the same on Linux. No runner suspends, so the
-clock's test reads it between two reads of a boot clock the system vouches
-for -- `/proc/uptime`, `mach_continuous_time` -- which CI runs in a time
-namespace whose boot clock is a day ahead of its monotonic one (`unshare
---time --boottime`, the test named whole and its one pass asked for):
-reading `CLOCK_MONOTONIC` it fails there, and reading `CLOCK_UPTIME_RAW` on
-a Mac that has slept. And a write landed under the lease is not answered as
-a success once the lease has lapsed by the time it is answered
-(`answered_under_lease`, from `handle_admitted`, the admin schema's route
-and a `/_changes` consumer's commit): a process stopped between the fence
-and the append, a suspend, or a durability that outlasted the lease -- a
-cut stream waits out `SENT_WAIT`, a second, where a lease's tenth is half
-of one at the default -- had it answered 200 and lost in the failover. It
-is answered 500 with `"outcome": "unknown"`, and `seq` and `history` in the
-body rather than in `Fenec-Seq`, which a client would take as its own (Go's
-and .NET's code `outcome_unknown`, JavaScript's and Python's `outcome`); a
-keyed one is told to send it again with its key, which the lapsed node
-refuses before the key is looked up and the tenant settled replays or
-makes once, and one with none that a read-back means something only a
-lease and a tenth after the answer, the node answering reads with the
-write in them until its tenant settles. What wrote is a statement that
-writes (`metrics::writing`, a keyed replay's too) or a block landed in the
-request (`metrics::landed`, set by `Hub::landed` on the committing thread):
-a `/batch` holding a compact, a put landed and a later statement fenced,
-was told 503 to come back as if nothing had. Both flags are cleared as each
-request begins (`metrics::begin_request`): cleared by `record` alone, they
-outlived the admin schema's answer, which records none, and the next read
-on its keep-alive connection was answered as a write once its lease
-lapsed under it (`tests/lease_answers.rs`, each failing with its part taken
-out). What
-leases do not cover: a VM stopped by its host is no suspend to the guest --
-under QEMU/KVM's defaults a `stop` and `cont` (QEMU sets the kvmclock back,
-on arm64 the virtual counter), and under any of its settings a save and
-restore or a live migration's blackout, leave every clock in the guest
-where it stopped, the boot clock too, as do Hyper-V's saved state, VMware's
-suspend, Firecracker's snapshot restore and a container's CRIU restore,
-whose time namespace keeps the clocks going on from where they were -- so a
-node paused so wakes with lease left and writes beside the new primary
-until it runs out or it reads
-the router's first grant after the failover. Every signal inside the guest
-comes once it runs again and none is sound -- KVM's `PVCLOCK_GUEST_STOPPED`
-is the soft-lockup watchdog's, in no interface userspace has; the TSC
-against the monotonic clock hangs on the VMM's settings and misses a
-migration; the wall clock is set by an agent after, or slewed -- so none is
-built; a cloud's notice comes ahead (Azure's Scheduled Events `Freeze`,
-GCE's `maintenance-event`), and the RUNBOOK's known gaps say which pauses
-count; an answer that passed the second check goes out
-whenever the process runs again; a stall of 16 rounds or more can push the
-acknowledgement out of `answered`, the node holding no lease until the
-grant after, sent at once; two directories leasing one node -- a
-misconfiguration -- can take it in turns as each other's lease lapses,
-neither holding one for long. A router started with a shorter lease than
-the one before it -- restarted, or a standby promoted -- counted a node it
-never reached by its own: cut off across the change, the node held the
-longer lease and wrote while its tenants were failed over. The directory
-records the longest lease a router leasing from it may have granted
-(`leasing`, one row, written before a router's first grant where its own
-is longer -- `Router::grant_term`, once a process; no block is written at
-every start to ride in -- and sent to the standbys before any grant, as a
-move's flip is, `SENT_WAIT` at most); a router counts a node by that record
-(`Leases::inherited`, read as it leads) until the node has run a lease from
-one of its grants (`Held::own`, set by `Leases::ran` on the node's
-`"ran":true`, never by `Kept`, never by a take of the list alone -- the
-answer read as the object it is, `Granted`: looked for as bytes,
-`"ran":true` was sought in windows a byte too long and never found, so
-every node was counted by the record until it came down, and a router
-restarted at 3 s over a record of 10 s failed a node it had cut off over
-11 s after it led, not 3.3 s after the node's last answer --
-`late_grants.rs`'
-`a_node_that_ran_the_router_s_lease_is_counted_by_it_not_the_record`;
-#343's tests held only the other side), and
-lowers it to its own once it has led a lease and a tenth of it
-(`Leases::lowerable`): every lease granted before it led has run out, and
-one started after it counts by what may still run. Never lowered, one 20 s
-lease would have every router after it wait 22 s for a node it never
-reached. Set by any `Taken`, a grant taken for its list alone -- a
-restarted router's first, acknowledging nothing, on a node whose lease had
-lapsed -- had the node counted by the router's own lease while a held grant
-of the router before, acknowledging an answer the node's ring kept (a
-restart keeps the holder), ran the longer one again: two primaries (the
-review of #343's probe, `a_take_of_the_list_alone_...`). The node says
-`ran` as it says `took`, and a node from before says neither, so it stays
-counted by the record. A raise that cannot be written grants no longer than
-the record, or this router's own where there is none: refused, every
-node's lease lapsed and every node was failed over by a router whose
-directory then refused the failovers too. The leasing thread's rounds come
-a third of the lease granted apart (`Leases::granting`, the thread woken
-as a grant finds it shorter, `grants_short`), and its first at once: a
-third of its own apart, a 20 s router over a 1 s record granted a second
-every 6.7 s and the node held no lease in 158 of 187 samples, and the
-first round a third of its own lease after the start left a node without
-a lease from the end of a shorter one before it -- a router whose lease
-the record was raised to as well (`late_grants.rs`'
-`a_router_that_cannot_record_its_lease_renews_at_the_lease_it_grants`, 84
-of 113 samples without on e5b8413e). A thread finding the record raised
-by another of this router's waits for the standbys too before its grant
-(`standbys_sent`, at once once sent): each node's grant is a thread, and
-the second node's went while the first waited. What it does not cover: the first
-start after upgrading from a router without the record finds none and
-counts by its own lease, and a record is a directory's, so a node moved from
-the global router's leasing to a region's is counted by the region's alone
-(the RUNBOOK says how to lower a lease and move a node). A router from
-before the record writes and reads none (`late_grants.rs`'
-`..._waits_out_a_node_it_never_reaches`, a restart and a standby promoted
-at 3 s after 10 s, each failing with the record ignored or never written,
-and `a_router_that_cannot_record_its_lease_grants_no_longer_than_the_record`).
-Those tests' shorter lease is 3 s, as the other lease tests' is: at 1 s,
-once a node that ran it was counted by it, the healthy nodes beside the one
-cut off -- each grant bounded by a third of the lease, 333 ms -- went
-unrenewed past 1.1 s at background QoS and were failed over, the replica
-their failover dropped leaving the cut-off node's tenant nowhere to go.
-Cut off, a node
-stops about a round sooner, its lease run from the grant before the last it
-read: at a lease of a second it stopped 386-406 ms after the cut against
-main's 714-777, its 10 tenants writing again on their replicas 1.27-1.36 s
-after against 1.26-1.42, four runs a side in ABBA turns; in a region keeping
-its own directory 0.38-0.63 s and 1.41-1.70 against 0.67-0.98 and 1.35-1.73,
-ten a side (at 5 s the bench cuts before the first round, so the node's
-lease runs from its tenants' creates' grants: 3.9-4.1 s against 3.9-4.3). A
-node's first create with a schema, its second grant sent at once, took 8.8
-ms either way, eight a side; the router's added p50 stayed 20.5 and 20.6 us
-against 20.5 in two sets of sixteen ABBA rounds (per round -0.3 to +0.4,
-one +1.3; nothing on the path changed), and `fenec-shard`'s `__text` grew 64
-bytes, `fenec-server`'s 2.3 KB. The fence is
-the engine's (`Database::set_fence`), asked in `commit` as a block lands and
-in `may_write` before a schema change or a maintenance, so every write path
-honours it; asked as a lone write started too, it took a `put` from 827 to
-898 ns, once 822 to 846. The lease names
-the node's primaries, not the node: a node back from a failover writes none
-of its stale copies before the repair its answer triggers has them follow.
-The list rides only when its epoch (FNV of the sorted names) changed, and a
-node that does not hold it answers 412; a create or a move grants the new
-list at once. Grants go out each on a thread of its own over a pool
-bounded by a third of the lease, and a round waits for none of them
-(`Router::round`): it waited for every grant before it looked for a lapse,
-and in V5's drill a grant to a node gone, recorded by a name its resolver
-was slow to refuse -- the lookup bounded by nothing -- held the round up
-until the region's healthy nodes stopped writing (18 s in CI) and were
-failed over themselves, the dead node's tenants writing again 30 s after
-the kill. To one node a grant goes one at a time, a round sending none
-while one of its own is under way (`Leases::begin_grant`; sent anyway,
-one that took its whole bound had another queued behind it every round),
-and never with a list read before the last one it was sent
-(`Leases::turn`, each reading of the directory numbered): a round reads
-every list as it starts, and its grant, landing after the one a create
-sent at once, put the list from before the create back, the new tenant
-refused on its node (503) until the next round. A lapse a round suspects
-(`Leases::suspects`) is judged again in the node's turn by a failover on a
-thread of its own (`fail_over_lapsed`, `Leases::confirm_lapse`): no grant
-to the node that the router still waits on is in flight then -- an answer
-that comes back says the node is there, which the leasing thread had
-because it ran the failover between rounds; one the router gave up on runs
-nothing -- and the turn is held
-until the node was sent the list the failover left, so no grant over a
-list read before it lands after; it is let go of before the other nodes'
-grants are waited for, or two nodes failed over at once waited on each
-other's turns for good. A repair runs on a thread of its own, one at a
-time (`repair_soon`): on the leasing thread, a node back from a failover
-had it call a node gone, 5 s a call for its name's lookup alone, 20 s with
-no lease renewed, and the healthy node it ran for failed over at its end;
-run in the grant that heard the node back, it held that node's renewals
-and had it failed over again. A tenant whose claim another operation held
-as its node failed over -- a repair, which runs beside the failovers now,
-a quota being set, a move -- is failed over once let go of
-(`fail_over_held`, waiting on the claims' condvar), in the node's turn and
-only while the node has answered nothing since: left, as a failover by hand
-leaves it to be asked again, it stayed on a node gone for good. It goes to
-the copy it had as the failover ran and to no other (`HeldTenant`, pinned
-then, and only while that copy is still its own): read again once let go
-of, the copy was the one the repair holding it had just attached,
-following the node gone, and the tenant went onto a file holding none of
-it, its rows wiped from its old node once that came back and followed it
-(the review's repro). It is out of the node's grants from the failover on
-(`Leases::withhold`), which would hand it back to the node as it answered
-again, and promoted no sooner than a lease and a tenth past the node's last
-answer -- at once, the failover's lapse being that; for a node from before
-numbered grants, which runs a lease from any grant it reads, past the
-router's last grant to it, answered or given up (`settled`), as before
-them, the late-grant hole's window a grant naming it stretched to the
-whole wait. The wait ends at `HELD_WAIT` (an hour), the node gone from the
-directory or this router demoted -- `promote_on` asks `following()` before
-every promotion -- the tenant left where it is and named again; and a pair
-ends once its node holds no tenant, promoted, moved or deleted alike. Two
-guards besides, older than all of it. A node refuses to promote a copy that
-is not its tenant as the router knows it (`tenants::Expected`, the
-promote's body: 409, the tenant left where its rows are until its node is
-back): of another lineage than the directory's -- a copy that never took
-its primary's image is of its own, a new file's or none on a standby, and
-so is a file put in its place by hand -- or lacking the history the
-tenant's primary forked at its last failover, which the router records from
-each promotion's answer (`lineages`' `history`, added as an alter, cleared
-where the lineage is succeeded) and not heard from the node it follows
-since it was last told to follow it: an old primary's copy a repair made
-follow the new primary, promoted before it heard from it, took back every
-write since that failover -- its lineage the tenant's and its change past
-0, so neither caught it. The hello is the copy's own word, kept in
-`.follows` (`heard`, written at the first hello after each `follow`, which
-halts the follower before it writes the file again: `mark_heard`,
-`heard_since_told`; renamed and removed durably, `fs::sync_dir`, or a power
-loss could bring back the file before), since the history alone goes stale: a primary's file
-restored in place to before that failover (`DELETE` and `PUT .../file`,
-`fenec restore --tenants`) keeps its lineage and lacks the fork, so does
-every copy that took it, and every failover after was refused, on a lease
-for good (the review's `restore_trap.rs`). Kept across a restart, where
-`ready` is not: a node restarted between a follow and its hello still
-refuses the copy, one restarted after it still promotes it. A copy never
-told to follow -- a standby's, made with its node -- keeps no word, and is
-held to the history alone. A tenant whose lineage the directory never learnt, or a
-call naming none, is held to the one copy known to hold nothing (no write
-and no hello since it opened or since it was told to follow). A file of
-another lineage put in its primary's place by hand still leaves every
-failover refused until the directory learns it (a read replica's look) or an
-operator forces one. Refused at change 0 as this first stood, a
-tenant not yet written could not fail over at all, its copy ready and of
-its lineage (the review's `empty_refused.rs`). `{"force": true}` on `POST
-/_admin/tenants/<t>/promote` or `POST /_shard/nodes/<n>/failover` promotes
-whatever the copy holds, an audit event on each (`promote_forced`,
-`failover_forced`), and `promoted()` then records the other file's lineage
-as the tenant's, the one before among those it was. And a repair gives no
-tenant a copy while its primary does not answer its `GET /_admin/tenants`
--- one that ran between a node's death and its lapse attached a copy
-following nothing, which the failover promoted and the node's return wiped
-the tenant into, on main -- and runs again for those it passed over
-(`repair_later`, 2 s doubling to 60, eight times): a repair runs only when
-a node failed over answers again or an operator asks, so a primary slow at
-the one look left its tenant with no replica until then. A name is
-looked up within the call's own bound (`fenec_http::dial`, the
-router's connections below). In deploy-kit's drill at a lease of 2 s, the
-routers' unknown names sent to a resolver that never answers, us-a's
-failover was done 2.7-2.8 s after its kill in three runs against main's
-5.3, 5.8 and 15.7 s, the region's other tenants' longest gap 17-19 ms
-against 8.0-18.0 s, and no healthy node failed over against one or two in
-each of main's runs (us-a's tenants writing again 21-26 s after the kill,
-one run failing its repair); with every container's unknown names so, the
-follower's lookup of the dead primary hanging too, 2.1-3.3 s in three
-against 5.7; by names that resolve, 2.0-2.6 s either way. What the drill's writers
-waited past that is the router's `--upstream-timeout` on a request to the
-dead node, cut by their own 5 s: at `--upstream-timeout 2` they wrote
-again 1.96 s after the kill on both builds -- a wait the failover now ends
-itself (what a failover ends, below the router's pool). `make shard-bench`'s failovers
-as they were, twelve runs a side in ABBA turns at loads under 3 with all
-of the above in, the lineage and history sent and recorded among it: a
-lease's last tenant writing again 1.28 s after the cut against 1.29
-(1.23-1.57 either way, the round's phase), a region's at a lease of 1 s
-1.59 against 1.60 and at 5 s 6.20 against 6.21, a pair's 20 tenants 63.5 ms
-either way, one node's 10 over their replicas 52 either way, the repair
-after it 241.5 against 238, the router's added p50 20.6 us against 20.4. A
-standby router forgets
-its leases while it follows and counts from its first round once promoted
-(`Leases::leading`): it counted from its last round while it followed, up
-to a third of a lease before the promotion, and a grant its primary sent
-after that round could still run as it failed the node over. `following`
-starts set, so one promoted before a round of its own counts from its first
-round too, and a router primary from its start from its first round, a
-third of a lease after it at most; a node without
-`--lease` is never failed over on its own. A lease of a second: a node cut
-off stopped writing 386-406 ms after (697 when it ran its lease from its
-last renewal), its 10 tenants took writes again 1.27 to 1.36 s after. A
-write is on the standby 0.089 ms after the primary answered it (p99 0.448),
-and 20 tenants failed over in 63.5 to 79 ms, the medians of three rounds
-(`make shard-bench`). A standby waits
-idle and takes all of a node at once, so with `fenec-shard --replicas` a
-tenant on a node in no pair gets a replica of its own instead (the
-`replicas` collection): on the node holding the fewest replicas of its node,
-then the fewest in all -- the fewest in all alone had every tenant of a node
-follow on the same other, ties going by name. The node is told
-(`POST /_admin/tenants/<t>/follow {from}`) and keeps the URL in
-`<t>.follows` beside the file for its restarts (`resume_following`); a file
-made to follow ends what it served first (`release`, as a delete does), or
-the old primary's feed held it. A failover of a node in no pair promotes each
-tenant on its own replica, `POST /_shard/replicas` gives replicas back -- on
-a node holding a copy first, so a returning node's old primaries follow --
-and a move re-points the replica or, onto its node, places another. Three
-nodes, 10 tenants each: one node's failover took 57 ms, 5 onto each other.
+**[Single writer, and readers beside it.](docs/design/engine.md#single-writer)**
+Never two processes over one file: whatever writes a served file -- the
+endpoint, a follower, the graph keeper, `--follow`'s mirror -- is a
+`fenec-server` thread, never a binary of its own, and a block is open only
+under its opener's write lock.
 
-**A node is in a region and a zone, and a tenant in its node's region**
-(`directory::Node`, `Router::replica_node`, `relocate`;
-`site/content/docs/sharding.html#regions`). A global service runs nodes in
-several regions, each in two datacenters or more, and a tenant has one home:
-`PUT /_shard/nodes/<n> {region, zone}` records them -- fields of `nodes`,
-added by an `alter` to a directory from before them, whose nodes read the
-unnamed region, one region like any other, so a directory naming none places
-and fails over as it did; a router from before them reads `name, addr,
-token`, ignores the rest and places without regard to regions -- and a
-tenant's region is its node's, kept nowhere else, so a move or a failover
-changes it with the node and no second record drifts. `PUT
-/_shard/tenants/<t> {region}` places on the fewest bytes there, 409 where
-no node is and nothing created (`--default-region` where a create names
-neither region nor node, otherwise any node as before); a node's region is
-fixed while it holds a tenant, a replica or a place in a pair (`holds`).
-A replica (`--replicas`) goes to a node of its primary's region only, one of
-another zone ranked first -- before a node holding a copy and before the
-fewest replicas, since a datacenter lost takes a replica in its primary's
-zone with it -- a zone not named between; one placed in its primary's zone
-where nothing else was free is logged, answered `"same_zone": true` and
-counted (`fenec_router_same_zone_copies{region}`), and a pair's standby must
-share its node's region. So a failover, by hand or on a lease, promotes
-within the region by construction: nothing placed a copy anywhere else. A
-move leaves the region only where the request names the region it goes to
-(`{to, region}`, or `{region}` for the fewest bytes there), and the replica
-is placed again where it no longer fits (`replica_node(to, [r]) != r`):
-kept, a failover would carry the tenant back. The global entry is one router
-a region: a standby router already forwarded from its replicated maps and
-refused `/_shard/` changes with 409 (not 503: asked again it refuses again),
-and added 23.7 us p50 to a request as the primary did (`make shard-bench
-ARGS=standby`, the two asked in turns, five runs: 23.0-23.8 and 23.1-23.9);
-a move now deletes its source once every standby keeping up has been sent
-the flip (`standbys_sent`, `SENT_WAIT` at most), where one in another region
-forwarded the tenant's next request to a node that held it no more, 404.
-With one directory leases come from the primary router alone: a region cut
-off from it stops writing as its leases lapse and cannot be failed over
-until it is reached again -- a region keeping its own directory (below) is
-leased by its own router. Against main in ABBA turns the router's added p50 stayed
-23.65 us (23.3-23.9, 16 runs) against 23.50 (23.0-24.0), and the failovers
-as they were, medians of eight runs a side, ABBA and BAAB: a pair's 20
-tenants 79 ms against 75.5 (58-111 and 63-81), one node's 10 over their
-replicas 49 against 50.5, the repair after it 172 against 173.5, a lease's
-tenants writing again 1.29-1.32 s after the cut against 1.26-1.30; a round
-on a machine whose load rose to 12 was left out. The gauges by node carry
-`region` where the node names one.
+**[A block's documents are built beside the readers](docs/design/engine.md#prepared-blocks)**
+(`Database::prepare`, `early_put`), taken only where the collection holds
+the schema `Arc` they were built against; all else is decided under the
+write lock, as `tests/prepared.rs` holds. A hook that may change a
+document keeps `Hook::rewrites` true, its payload encoded after it.
 
-**A region may keep its own directory, and leases and fails over inside
-itself** (`fenec-shard/src/region.rs`, `--region`, `--global`, `PUT
-/_shard/regions/<r>`; `site/content/docs/sharding.html#region-directories`).
-With one directory every lease came from the primary router, so every
-region's writes hung on the primary's region. A region's router (`--region us --global
-<url>`) keeps the region's nodes and tenants in a directory of its own -- the
-same collections, its region in `scope` (`settle_scope`: a router opened
-over another's, or over the global one, refuses it) -- and alone leases
-them: a lease, a failover, a repair, a move between its nodes, a quota and a
-node added write that directory alone and go on through a partition. The
-global directory keeps every tenant's name, a home for each of such a
-region's (`@<region>` as its node, a name no node can have, kept apart in
-`Directory::homes` so nothing reading placements meets it) and the regions'
-routers (`regions`, the one keeping the directory first). A create takes the
-name there and asks the region's router to make it -- given back where it
-refuses or is not reached, kept where it says the tenant exists, which takes
-in a create whose answer was lost -- a delete asks first and gives the name
-back after, and a move across regions (`move_across`) freezes and exports
-in one directory, installs and records in the other, releases in the first
--- whose directory then places the tenant nowhere, so no lease names it,
-and a source restarted takes no write before a grant from there -- and only
-then flips the home, one statement; each step undone where the next fails,
-so a region not reached refuses it 503 with `Retry-After` and nothing
-changed. A router relays a change it does not keep once (`regional_admin`),
-a region's to the global router, the global router's to the region's under
-`Fenec-Global`, which is carried out and never relayed on; a deployment
-whose regions keep none returns before reading a body (`route_global`), as
-before. Forwarding relays to the region's routers rather than keep a copy of
-every region's directory in every router -- rejected: a follower a region in
-each router, re-pointed as authorities move, and a copy that lags a failover
-by the partition's length, sending writes to the node failed over away from
--- so the routers holding the placement answer, and after a partition every
-router reaches the new one with its first request, for a hop inside the
-tenant's region a client of that region never takes; a relayed request is
-never relayed again (503). The relaying router names its client -- the
-one the global entry named, where it believed one (`--entry-token`) -- in
-`Fenec-Router` under an HMAC of the shared `--token` (`relay_mark`, believed
-through `audit::request`, `Fenec-Verified` passed back), and moves to the
-next router of a region only where the one asked cannot have run the
-request (`Pool::send_tried`'s `Tried::Unrun`), passing over one answering
-that it follows another. A lease names its holder (`fenec_http::lease::Holder`:
-the directory's region, its term -- its history's forks, one more at each
-promotion -- and its history): a node takes a grant from the directory it
-holds at a term no lower and none from another while that lease runs,
-refuses a superseded router's (409 `held_by`, which a router from before
-reads as a node taking no lease and so fails over never) and its promotions
-and follows (`Fenec-Lease-Holder`, `Lease::admits`). So a router promoted
-over one still running fences it at every node it reaches; a node only the
-old one reaches is beyond that, and a router is promoted once the one before
-is gone, as before. A region's router fails over no node that took a grant
-without echoing its term (`Answer::Unfenced`, a node from before terms); the
-global directory leases one as before, and its nodes, once they hold a term,
-refuse a router from before terms put back in front of them until they
-restart, which forgets it. A router from before regional directories reads
-a home as a node it does not know: 404 for the tenant, every change of it
-refused, none of the region's nodes leased. A query across tenants asks the
-router's own directory's and names each of another's as failed.
-`tests/region_leases.rs` cuts a region off from the global router through
-proxies and holds it writing past every lease granted before the cut, its
-node fenced before the region's router promotes the replica, the move and
-the create across refused and nothing changed, then every router -- the
-global one, its standby, the region's -- writing on the new placement once
-healed, and a promoted region's router fencing the one before at the node,
-grant and promotion alike. Cut off
-from the global router, a region's node cut off from its router stopped
-writing 0.38-0.63 s after the cut (0.67-0.98 when it ran its lease from its
-last renewal) and its 10 tenants wrote again on their replicas 1.41-1.70 s
-after at a lease of 1 s, ten runs, as the global router's own failover
-beside it (1.27-1.36), and 3.9-4.1 and 5.5-6.7 s at 5 s (`make shard-bench
-ARGS=regions`); a relayed
-request paid 32-42 us p50 over one to the region's router, a router's 24 and
-the loopback proxy standing for the link. Against main in ABBA turns the
-router's added p50 stayed 23.6 us (15.5-24.0, twelve runs at a load of 2-3)
-against 23.75 (16.3-24.3), and the failovers as they were, medians of four
-a side: a pair's 20 tenants 64 ms against 67, one node's 10 over their
-replicas 43.5 against 45.5, the repair after it 157.5 against 196, a lease's
-tenants writing again 1.36 s after the cut against 1.37. Nothing below
-`fenec-http`'s lease and admin changed.
+**[A long read is pinned, and read with no lock held](docs/design/engine.md#pinned-reads)**
+(`Database::pin`), sharing nothing a write changes in place; it declines a
+read an index answers, and a pinned index refuses (`PINNED_OUT`), so a
+stray read reruns under the lock.
 
-**One URL reaches every region: a Worker learns each tenant's home from
-the routers** (`integrations/cloudflare/entry`, `region::HOME_HEADER`). A
-client had to know its tenant's region, a router of another relaying the
-request once, a hop between regions every request. The entry is a plain
-Worker -- Workers for Platforms' dispatch, about 17 ms, stays out of the
-path -- sending `/t/<tenant>/...` to the routers of the tenant's home, and
-asking nobody where that is: every request carries `Fenec-Home: 1`, and the
-router forwarding it to the tenant's node -- from its directory, or from
-its copy of the global one (`Target::Node` carries the node's region now)
--- answers `Fenec-Home: <region>`, the node's; a relaying router names
-nothing and passes the home router's through, and the entry takes it off
-the answer (a router names it on a 401 too, to anyone with a tenant's
-name). A tenant not heard goes to the region of the client's continent
-(`REGIONS`' `continents`, `request.cf.continent`) or `DEFAULT_REGION`, is
-relayed home once, and its next request goes home; where that region's
-routers fail, it goes on to the others (`guesses`), since any router
-relays a tenant home and only the home's places it on a node -- a known
-home is never left (a 503). A region whose routers failed is asked last:
-by a read or a keyed write for 10 s (`DOWN_MS`), by any other write until
-one of its routers answers -- a write that may have reached a dead guess is
-not resent, and dropped from the end after 10 s it was a 502 for an unrun
-write every 10 s an isolate while the default region stayed down. A
-guessed region's router answering 5xx naming no home (cut off from the
-home's region) sends a read on to the next region; the placing router's own
-502 for a node it could not reach names the home (`region::homed`), and is
-the answer. A move across leaves the old region's router relaying
-the tenant and the answer naming the new home, a hop and never an error.
-A read marked for a replica (`Fenec-Read: replica`, the read replicas
-below; `marked`, `near`) goes to the region of the client's continent
-first whatever the home, then to the home where that region fails or
-answers a 5xx naming none: sent to the known home alone, every marked read
-went home once one unmarked request had taught the colo the home, and the
-replica near the client was never asked. A continent no region names goes
-home alone -- through `DEFAULT_REGION`, an Asian client's read of a us
-tenant went by eu, where it had no replica. It may go to two -- the mark
-has every router and node run a request to a tenant's path read-only, so
-`repeatable` takes it there as the routers' `replayable` does, and not on
-`/_shard/`, where a marked change of the global router runs as any and a
-thrown fetch had it sent to the standby again -- while an unmarked request
-never leaves a known home; a region found down is passed over for
-`DOWN_MS`, and where it keeps no replica its router relays home, a hop.
-`entry.test.js` holds a marked read of a tenant whose home was learned to
-eu's router and its replica, us asked none, under `wrangler dev` with the
-client's continent pinned (`serve`'s `cf`, `CLOUDFLARE_CF_FETCH_PATH`:
-miniflare otherwise gives this machine's), and in Node the home alone from
-a continent no region names and a marked `/_shard/` change not sent
+**[Every write is a block, and a block is one record.](docs/design/engine.md#blocks)**
+`commit` appends it whole and only then notes it, so a crash, a replica
+and a subscriber see all of it or none. A failed one is undone in memory,
+a schema change too (`Undo`, a variant each); whatever counts records
+counts their writes (`writes_in`), and what cannot be undone, a compact,
+is refused in a block (`Statement::fits_block`).
+
+### Durability
+
+**[A storage error stops writes.](docs/design/durability.md#storage-errors)**
+Writes after one are `Error::Io` until reopened (`Database::failure`). A
+mapped file is replaced only by rename. The fsync runs after the lock
+(`Database::flush`'s `Durability`), a durable write answered only once it
+has; a failed one is never retried (500 under `--sync always`) and goes to
+`Database::fail`. A write the lock still makes is put off while a
+durability holds the disk (`Sink::syncing`).
+
+**[Buffered writes are written behind the lock](docs/design/durability.md#writes-behind-the-lock)**
+(`Database::write_behind`), asked after every write no fsync follows.
+
+**[A durable write syncs a log beside the file, not the file](docs/design/durability.md#the-sync-log)**
+(Linux and Android, `synclog.rs`). Whatever renames a file into a
+database's place removes the log first, durably (`fs::forget_sync_log`).
+
+### Replication and archives
+
+**[Replication ships only what is on disk, by the change counter.](docs/design/replication.md#replication)**
+Every write goes through `wal`, its record moving the counter by its
+writes (`writes_in`): one that moved none would leave every replica a
+change off, and the history and a tail's graphs, which move none, are
+never sent. A durable write waits for every stream keeping up
+(`Feed::wait_sent`, `SENT_WAIT` at most, a lagging one not waited for); a
+promotion halts the follower before it forks, and a following database
+refuses writes (`Error::ReadOnly`).
+
+**[A node's tenants are archived over one stream](docs/design/replication.md#a-nodes-archive)**
+(`fenec_http::node_stream`), a sender on each open tenant's feed:
+`Tenants::close` refuses while it has a write left (`Feed::unsent`), and
+whatever the stream does that can block sets `Sender::held` first, which
+no durable write waits for; a sync waits for no stream
+(`replication::unwaited`). Whatever makes, installs, deletes, promotes or
+makes a tenant follow touches the stream, and an image on a history not
+leading from an archive's end never lands among its changes
+(`archive::Took::Diverged`).
+
+**[`/_changes` reads the writes on disk, documents and all](docs/design/replication.md#change-data-capture)**
+(`Database::changes_in`): only what an fsync covered, never with writes
+missing (410); a scoped token is refused.
+
+**[A read can wait for a write on a replica](docs/design/replication.md#fenec-after)**
+(`Hub::reached`): served once the database holds that change or 504
+after `Fenec-Wait` (30 s at most), never before. Every wait comes after
+its token (`admitted`), a stream's before its head.
+
+**[An archive and a backup can be sealed](docs/design/replication.md#sealed-archives)**
+(`seal.rs`, `--key-file`), never the live file.
+
+**[`--follow` confirms nothing that is not on disk.](docs/design/replication.md#follow)**
+Every write is a put or delete by id, so replays change nothing; the
+mirror is a `fenec-server` thread, its collections' only writer. A wire
+message's length is held to `proto::MAX_MESSAGE` before anything is
+allocated (`proto::zeroed`).
+
+### Tenants and leases
+
+**[Scaling out is by tenant, one file each.](docs/design/tenants.md#scaling-out-by-tenant)**
+The tenant comes from the path, never the query, and the router forwards
+bytes, parsing none; the registry opens a file under its lock and closes
+it on its last `Arc` alone, never while its follower runs, so no two
+`Database`s share a file. A tenant's role is its file's, not the node's
+`--replica-of`. A move is `freeze` (a gate taken exclusively, so no write
+lands after the export), copy, install, the flip in one statement, and
+the source deleted once the standbys were sent it (`standbys_sent`). The
+router fails a node over on its own only under a lease, which the node
+runs on the boot clock (`lease::Moment`) from when it answered the grant
+the router acknowledged, never from a grant's reading (`grant_from`); a
+router counts a node by the directory's `leasing` record until the node
+ran one of its leases (`Leases::inherited`), and grants it one at a time,
+never with a list older than the last it sent (`Leases::turn`). Every
+write path meets the engine's fence (`Database::set_fence`, in `commit`
+and `may_write`), every route answering a write asks
+`answered_under_lease` (500 `outcome: unknown` once lapsed), and a node
+promotes only a copy of the tenant's lineage and history
+(`tenants::Expected`, 409) unless `force`d.
+
+### Regions and the global entry
+
+**[A node is in a region and a zone, and a tenant in its node's region.](docs/design/regions.md#regions-and-zones)**
+Its region is its node's, kept nowhere else and fixed while the node holds
+a tenant, a replica or a place in a pair (`holds`); a `--replicas` copy
+and a pair's standby stay in the primary's region, another zone first
+(`Router::replica_node`).
+
+**[A region may keep its own directory, and leases and fails over inside itself.](docs/design/regions.md#region-directories)**
+A request is relayed once, never again (`regional_admin`), and a move
+across regions undoes each step where the next fails (`move_across`). A
+node refuses a router its lease's holder superseded (409 `held_by`,
+`Lease::admits`), and another directory's grant while its lease runs.
+
+**[One URL reaches every region: the Worker learns homes from the routers.](docs/design/regions.md#the-global-entry)**
+It serves `/t/<tenant>/`, and `/_shard/` where `ADMIN` is set, never a
+tenant's `/_replication`, decoding a path as fenec-http does
+(`percentDecode`). It drops every address a client claims and names the
+client (`CF-Connecting-IP`) in `Fenec-Client`, an HMAC under `ENTRY_TOKEN`
+a router believes only with `--entry-token` and within 60 s
+(`audit::entry`), and drops from all it forwards (`forwarded_headers`); a
+router refuses an entry token empty or equal to another it holds, at the
+start and as a node is added (`set_node`). Every router answer carries
+`Fenec-Shard: 1`; a request that may have reached one goes again only as a
+`GET`, `HEAD`, `OPTIONS` or keyed.
+
+### Read replicas
+
+**[Read replicas in other regions answer only marked reads.](docs/design/read-replicas.md#marked-reads)**
+The router parses no FenecQL: only `Fenec-Read: replica` goes near, and
+every server runs a marked request read-only on every route (`marked`,
+read in `serve_connection` alone); a failover never promotes a read
+replica. One is recorded once its node follows; taken off, its record goes
+first, sent to the standbys, then its file; a name is not made again while a
+directory keeps a trace of one (`reader_traces`). A copy answers only once
+its primary said hello since it opened (`Tenant::ready`, 503 otherwise); a
+read replica is bound to its tenant's lineage, which every promotion and
+restore keeps (`fork_id`), and deletes itself rather than take another's
+(`Follower::expect_lineage`). `Fenec-History` goes beside `Fenec-Seq`, and
+`after` waits for that change of that history (`History::continues`).
+SDKs send home's furthest position with each marked read, whose answer
+moves none; home's 504 sets it, lower or not, only over the position that
+read was sent after, never to an earlier term of its lineage. No lock is
+held across a call to a node, and a refused hold makes none (`then`,
+never `then_some`).
+
+### Access
+
+**[A scoped token is held to its rules at every level, twice for
+writes.](docs/design/access.md#scoped-tokens)** A new path that runs a
+statement must go through `scoped()` or it reads everything, and a scoped
+write run outside `within()` goes unchecked; a write over a row meets
+`before_overwrite` with the row as it was, which judges `update(a, b)` and
+transitions (`new.`, granting `update` alone), and `append-only` binds
+every scoped token. A scoped stream tells deletions only of ids it sent, a
+scoped poll's tag digests its answer (`content_tag`), a scoped `match`
+scores its rows alone (`Match::within`), and the algorithm is the key's,
+never the token's.
+
+**[A field a read rule withholds is held out of what a statement
+does.](docs/design/access.md#field-lists)** `fields::hold` and
+`fields::write` guard or refuse (403) each use of it before the rules are
+ANDed in; it is `null` in a row (`Scope::shown`), absent from every schema
+answer (`Scope::shown_schema`) and refused by name as a missing one, and a
+stream sends no row a write left showing the same (`sse::Seen`).
+`tests/fields.rs` holds each attack.
+
+**[A rule may read another collection, answered before each
+statement.](docs/design/access.md#rules-reading-another-collection)**
+Its `in` lists are answered under each lock (`Scope::bound`), the scope
+`Check`, the mask and streams use; a list past `MAX_CLAIM_VALUES` is
+refused, never cut, and rules reading each other's collections, a `*` rule
+reading one, or `new.` or `expired()` in one are refused at startup
+(`ring`).
+
+**[A token is bound to the tenant it
+names.](docs/design/access.md#tenant-binding)** `route_tenant` asks it,
+and no route below `/t/<t>/` may skip it; every tenant's database installs
+the `Check` hook (`Tenants::check_scoped_writes`).
+
+**[An empty token is no token.](docs/design/access.md#empty-tokens)**
+A variable set empty is unset (`env_secret`, fenec-shard's `env`); a token
+flag, a JWT secret's file or a key file given empty is refused at the
+start; a library constructor takes an empty token as none
+(`Config::settled`).
+
+### Quotas and retries
+
+**[A tenant is held to its quota by its node, a block as it
+lands.](docs/design/quotas.md#tenant-quotas)** A block or spill past
+its bytes or rows is put back (507) as it lands (`Database::set_limit`),
+one only taking away let through; a refusal names the bound alone, and a
+rate charges a request's own thread alone (`writing_here`). The router
+enforces nothing but sends the quota to the tenant's node, standby,
+replica, a move's target before the flip and a promoted copy.
+
+**[A quota is a refusal where waiting makes no room, a wait the server
+names otherwise.](docs/design/quotas.md#quotas-in-the-sync)** A synced
+507 naming a `quota` is put back; a retry waits `retry_after_ms` where
+longer than its backoff.
+
+**[Every 503 says when to come back, in its body
+too.](docs/design/quotas.md#retry-after-in-bodies)** Write one with
+`Response::retry_after`: the sync reads bodies.
+
+### The HTTP server
+
+**[fenec studio is a page with no authority of its
+own.](docs/design/http.md#studio)** Its files are served before any token
+under a strict CSP, and it sends the pasted token as any client does, so
+the scope rewrite bounds it. Each statement is written in
+`studio/statements*.js`: values as parameters, a name only as FenecQL
+writes one, the typed `where` inside parentheses it cannot close. `make
+studio-highlight` copies `site/highlight.js` in, and `transport.test.mjs`
+holds the in-page answers to a server's.
+
+**[An agent's MCP tool is a statement, held to the token as `/query`
+is.](docs/design/http.md#mcp)** A model's filter goes in parsed, never as
+text, and a read past `--mcp-max-rows` or `--mcp-max-bytes` is refused,
+never cut. The origin is asked before the token, and with no token only a
+`Host` naming localhost or an address is answered; `write` never changes a
+schema or compacts. `<file>.lock` (`fenec_abi::lock`) is taken by `fenec
+mcp --file`, `fenec-server --file` and the native library alike.
+
+**[An `Idempotency-Key` makes a write
+once.](docs/design/http.md#idempotency-keys)** The write and its key's
+`_idempotency` row are one block, the key the subject's for a scoped token
+and the key with another request 422; a failed write or a `compact` keeps
+none.
+
+**[Refusals and schema changes are logged; a refusal
+waits.](docs/design/http.md#audit)** Only `audit::verified`, where a token
+checks out, clears the wait; a new check must call it, and nothing infers
+it from an answer. A node believes `Fenec-Router` from the router alone; a
+test opening the log is a `[[test]]` of its own.
+
+**[Every request has an id, in its answer and every line it
+wrote.](docs/design/http.md#request-ids)** `tests/datadog.rs` and
+`tests/logs.rs` hold `monitoring/datadog/` to what is sent.
+
+**[A request is a trace, sent over OTLP.](docs/design/http.md#traces)** A
+thread-local from `begin` to `end`, `discard`ed before a stream takes the
+connection over; a span names a statement's shape, never a value, and a
+request never waits on the collector.
+
+**[`/_metrics` counts at the edge, a shard per
+thread.](docs/design/http.md#metrics)** Timed around `handle`, counted
+before the answer is written; no label names a tenant or its collections,
+and `--metrics` attaches no watcher.
+
+**[`/_stats/statements` counts by shape, a tenant's
+apart.](docs/design/http.md#statement-counts)** Literals are `$n`
+(`statements::shape`). A shape names every collection, so they take what
+reads the data unscoped or the admin token; on a tenant node a tenant
+reads its own, and every tenant's, named, are the admin's alone.
+
+**[A statement is parsed once, and an answer goes out in one
+write.](docs/design/http.md#parse-cache)** A JWT's scope is ANDed into a
+copy, never the cached parse; an answer is one `writev`
+(`http::write_parts`).
+
+**[A plain `get` is written as JSON from the stored
+documents.](docs/design/http.md#json-from-stored-rows)**
+`Database::query_json` must match `query` through `json::rows_array_into`
+byte for byte (`tests/query_json.rs`).
+
+### The HNSW graph
+
+**[The HNSW graph is derived data, not a
+cache.](docs/design/hnsw.md#the-graph-is-derived)** Never written on the
+write path; an open that cannot validate it rebuilds it silently, so a
+corrupt graph loses no data. A tombstone carries its vector, a rewrite
+touches only indexes whose field changed, to the bit (`unindex_doc`), and
+an unfiltered `near` tombstones cut short walks again wider or searches
+exactly (`past_tombstones`).
+
+**[A restore gives back the arena it had, to the
+bit.](docs/design/hnsw.md#restored-arena)** Each vector is normalised in
+the write path's order (`flat_sq`, `flat_sqs8`), or the graph would be
+another.
+
+**[A graph record is laid out flat.](docs/design/hnsw.md#flat-graph-records)**
+Versions 9 (images) and 10 (tails) are written; every layout reads into
+one set of arrays (`Read`), built in one place (`build_restored`).
+
+**[A batch links in parallel, into the graph it would link in
+turn.](docs/design/hnsw.md#parallel-linking)** A pruning reads only the
+list it prunes and the vectors, and each list's additions go in node
+order (`link_batch`):
+`a_batch_links_as_its_nodes_would_one_after_another` holds it to the byte.
+
+**[The upper layers are walked with a
+beam.](docs/design/hnsw.md#upper-layer-beam)** A search and an insert walk
+each layer above 0 with `UPPER_BEAM` (4).
+
+**[A block's `put`s link their vectors
+together.](docs/design/hnsw.md#block-linking)** Natively they wait
+(`defer_batch`), linked before the block's record is written; a search in
+the block measures them exactly, and a rollback drops those it made
+tombstones (`forget_waiting`).
+
+**[A server answers before its graph is
+linked.](docs/design/hnsw.md#deferred-linking)** `fs::open_serving`
+leaves the tail's vectors for `link::beside` to link, a search measuring
+each beside its walk so none is missed.
+
+**[A server keeps its graphs in its
+file.](docs/design/hnsw.md#graphs-in-the-tail)** `link::keep` appends a
+changed graph (kind 4) under the read lock (`Database::save_graphs`); it
+moves no counter and no replica is sent it.
+
+**[A vector written again is one node.](docs/design/hnsw.md#aliases)**
+Every insert, batch and deferral goes through `VectorIndex::place`: a
+vector a live node holds to the bit makes its document an alias.
+
+**[Natively the copies table grows from its own
+slots.](docs/design/hnsw.md#the-copies-table)** `Same` grows reading no
+vector, in 256 shards past `SAME_SPLIT`.
+
+**[A graph record carries the copies table's
+halves.](docs/design/hnsw.md#halves)** Every writer writes them
+(`HALVES`), so a record is the same however its index was made.
+
+**[The browser module hashes as a native build
+does.](docs/design/hnsw.md#halves-in-the-browser)** It takes and writes
+the halves, which `web/fenec.test.js` holds to a native record's.
+
+**[An open copies a graph's vectors into the
+arena.](docs/design/hnsw.md#opening-a-graph)** It restores and validates
+the graph then.
+
+### Benchmarks
+
+**[`make scale-bench` holds fenec-server to pgvector, each over its own protocol.](docs/design/benchmarks.md#scale-bench)**
+Sides run in turns after idle minutes; a hot run's figure is not one.
+
+**[`make ycsb` is fenecdb as a general database.](docs/design/benchmarks.md#ycsb)**
+`--verify` checks every answer; `ycsb/results.tsv` is appended to, never
+rewritten (a replaced run named in `ycsb/superseded.tsv`), and
+`site/build.py` holds every YCSB figure on the site to its median there.
+
+### Writes
+
+**[`insert` never writes over; `put`
+does.](docs/design/writes.md#insert-and-put)** A held id is
+`Error::Duplicate` (409); a scoped rewrite keeps `insert`, and the JS
+builder's `.insert()` sends `put`, which the sync's undo writes rows back
+through.
+
+**[A `set` reads the row it writes, and every write says what it
+did.](docs/design/writes.md#arithmetic-in-set)** `query::arith` never
+wraps past 64 bits; the record holds the result, never the expression.
+
+**[`require <n>` makes a write's count a
+condition.](docs/design/writes.md#require)** Any other count is
+`Error::Unmet` (412), the block put back; `n` is an integer, never a
+parameter. A `get` takes it too, counting after `offset` and `limit`
+(`read_required`); a sync replica refuses one reaching an unanswered
+insert's row (`REQUIRE_UNANSWERED`) or a `get`'s beside a synced write
+(`GUARDED`).
+
+**[`if absent else set` is an upsert; `put <c> $n` takes a parameter's
+documents.](docs/design/writes.md#upserts)** Scoped, the row it sets
+passes the update filter (`Check::before_overwrite`) and `$n`'s documents
+go in first (`Statement::with_documents`); a sync replica refuses a
+document naming neither id nor key (`UPSERT_KEY`).
+
+**[A `set` or a `del` picks its rows with `order` and `limit`, and
+`returning` answers them.](docs/design/writes.md#picked-writes)**
+`page_ids` picks them under one lock; `returning` is held to the read
+rules (`Hook::answering`).
+
+**[A key of `order` may be an
+expression](docs/design/writes.md#order-by-expression)** (`Sort::expr`,
+`order_ids_by`), ties in id order; `check_order` refuses an inner `get`,
+an aggregate or `expired()` in one.
+
+**[A `put` answers the rows it wrote with
+`returning`.](docs/design/writes.md#put-returning)** Each row reaches
+`Hook::answering` as the write it was. A write clause goes into every
+builder, held to the golden file, and the sync refuses one a replica
+cannot answer (`PICKED`), as a scenario holds.
+
+### FenecQL and schemas
+
+**[SQL's spellings are FenecQL, read by the one
+parser](docs/design/fenecql.md#sql-spellings)** into the same statements:
+no mode, no second front end, no pg wire. What has no FenecQL meaning is
+refused naming the FenecQL to write, without consuming its word; `"name"`
+where SQL reads a column (`Parser::quoted`) and a regex-like `~`
+(`regex_like`) are refused, `<>` stays `!=`.
+
+**[`limit`, `offset` and `top` take a parameter, read where the plan reads
+them](docs/design/fenecql.md#count-parameters)** (`Count::at`); a value is
+refused as its literal is (`Select::check_counts`).
+
+**[`in (get ...)` is answered before the query, as the list it
+is.](docs/design/fenecql.md#inner-gets)** `Database::answered` puts an
+`Expr::In` in its place on every path, so `eval` never meets one.
+
+**[`alter collection` rewrites no document; positions are not
+places.](docs/design/fenecql.md#alter-collection)** A drop keeps its place
+until `compact`; `read_fields` takes places (`Schema::place`), never
+positions, and wherever the schema changes the store is told its dropped
+places (`Store::set_dropped`).
+
+**[A `json` field holds any value, and a path is a
+name.](docs/design/fenecql.md#json-fields-and-paths)** A field name holds
+no dot, so a path is an `Expr::Field`; a list of numbers read with no
+schema is `f32`s, so `Database::exactly` must walk every place a statement
+holds a value.
+
+**[The shell runs a statement once nothing after it can go on with
+it](docs/design/fenecql.md#the-shell)** (`fenec_ql::reading`). A new
+statement form or lexer syntax owes a place in fenec-cli's `kind` (or a
+write runs at Enter), a mark in `Parser::cut` wherever the text's end
+decides a reading the parser backtracks over, `lexer::Unclosed` taught any
+new string, comment or bracket, and a line in
+`a_statement_written_over_lines_reads_as_one`'s corpus.
+
+**[A schema declared in code is checked at every open, in the
+engine.](docs/design/fenecql.md#declared-schemas)** `declared::plan`
+plans additions alone, never guessing a rename; `make schema-golden`
+writes `integrations/schema-golden.json`.
+
+### Held writes
+
+**[`Fenec-Wait` holds a `set` or a `del` that writes nothing until it
+can](docs/design/waits.md#fenec-wait)** (`fenec_http::waits`, 30 s at
+most), each run `handle` whole, token and all; a `put`, or the time read
+but as a field against `now()` plus or minus integers or parameters, is
+refused (`holdable`). The builders refuse `wait` on a database in the
+page (`LOCAL_WAIT`).
+
+**[A write wakes the held writes that read what it wrote, and a row
+several groups would take goes to the one ranking it
+first](docs/design/waits.md#waking-held-writes)** (`Waits::wrote`,
+`waits::settle`). A landing that cannot name its collections wakes every
+group (`None`).
+
+**[One held request looks for every group, and a group that found nothing
+looks among the rows written since](docs/design/waits.md#the-leaders-looks)**
+(`waits::look_all`): a look among the rows written must pick as the whole
+pick does, which runs wherever that is not shown -- a load, a compact, a
+maintenance or a schema mark moves `epoch` (`wrote(None)`).
+
+### Indexes
+
+**[`@unique` is a `@hash` that asks its bucket before a
+write.](docs/design/indexes.md#unique)** `Collection::unique_clash` runs
+after the hooks, before any write; a scoped token is told the field alone
+(`access::told`).
+
+**[A `@hash` bucket holds its ids ascending, in
+runs](docs/design/indexes.md#hash-buckets)** (`engine/bucket.rs`), read in
+order through `Bucket::iter`.
+
+**[A hash index's table grows a 256th at a time, and a text index's terms
+too](docs/design/indexes.md#sharded-tables)** (`maps::Sharded`): natively,
+past `SPLIT_AT`, 256 maps, each key kept beside its hash; the browser
+module keeps one map.
+
+**[`@ttl` is an ordered index whose rows expire, and every read leaves them
+out at once.](docs/design/indexes.md#ttl)** Every filter must have
+`Database::alive` ANDed in; a server sweeps (`fenec_http::sweep`) a row a
+pass past its time (`sweep::GRACE`), never a replica, a following tenant
+or the browser, and a scoped token reads `expired()` only by the `expired`
+grant.
+
+**[Only an `and` chain reaches an index.](docs/design/indexes.md#index-reach)**
+An `in` takes buckets only when every element resolves, else the scan.
+
+**[A filter is bound to its collection once a
+query.](docs/design/indexes.md#bound-filters)** What `Filter` cannot bind
+stays `eval`: an error at the first row, never over none.
+
+**[`@sorted` must give the scan's answer, row for
+row.](docs/design/indexes.md#sorted)** Keys order as `Value::cmp_value`,
+`null` and `NaN` apart, ties in id order; `tests/sorted.rs` holds it to a
+twin without the index.
+
+**[An index over several fields is its parts' bytes laid end to
+end](docs/design/indexes.md#composite-indexes)** (`composite.rs`), a
+part's bytes ordering as `cmp_value` orders its values or held apart;
+`tests/composite.rs` holds every filter, order and page to a twin without
+it.
+
+**[An open builds no hash, text, ordered or sparse
+index.](docs/design/indexes.md#lazy-indexes)** The first read fills its
+`Derived`; a write skips an unbuilt one, and `stats` and `memory_bytes`
+count what is built, never building to count.
+
+**[A server warms what an open left for the first
+read](docs/design/indexes.md#warm)** (`--warm`, `fenec_http::warm`), an
+index at a time under the read lock; a bench's warm-up reads every index
+its writes keep up.
+
+**[A point is two `f64`s on Redis's sphere; `@geo` is Morton
+keys](docs/design/indexes.md#geo)**: `distance` uses `geo.rs`'s own
+series, never libm, so a server and a page agree; a list bound for a
+point is read as written (`DataType::keeps_numbers`).
+
+### The browser module
+
+**[Threads are `cfg`'d out of WASM.](docs/design/browser-module.md#no-threads-in-wasm)**
+Nor has it a clock: `now()` reads the time a statement is handed
+(`Database::set_clock`), or errors.
+
+**[Indexes are features; a build without one opens a file declaring
+it.](docs/design/browser-module.md#index-features)** A missing one is a type
+of no value (`off.rs`), its checks behind `EVERY_INDEX`, and a replayed
+`create index` of one is taken unbuilt, never refused; a crate using
+`fenec-core` names `full`, and `fenec-ql` and `fenec-abi` name it in their
+dev-dependencies alone, or every browser module gets the indexes back.
+
+**[The rest of the language is features
+too.](docs/design/browser-module.md#language-features)** Its checks ask
+`crate::FULL` first; a build without one opens every file, refusing what
+it cannot answer -- a function by name (`missing_function`), every
+statement over a `nocase` or collated field's collection
+(`refuse_unbuilt`). `FENEC_WRITE_FIXTURE=1` rewrites `tests/language.fenec`.
+
+**[What is core, and why one module
+ships.](docs/design/browser-module.md#what-is-core)** What any app expects
+is core, a domain's extra a feature.
+
+**[The module holds one copy of a
+generic.](docs/design/browser-module.md#one-copy-of-a-generic)** Sort
+through `sort_unstable`, `text::best_first` or `order_rows`; slice a `str`
+with `get`, never `s[a..b]`.
+
+**[The core lost what it held twice or for one
+use.](docs/design/browser-module.md#size-cuts)** What std brings in for one
+call is the crate's own (`num::parse_i64`).
+
+**[The module grows nothing by doubling past a
+mebibyte.](docs/design/browser-module.md#chunked-memory)** Its memory never
+goes back, so vectors are 1 MiB chunks (`ROWS_CHUNK`) and a segment
+doubles only to its sealing record.
+
+### Vector search
+
+**[wasm32's SIMD kernels match the scalar ones bit for
+bit.](docs/design/vector-search.md#simd)** `vector::simd` keeps the
+scalar loop's order (`web/fenec.test.js`).
+
+**[aarch64's strips are NEON, to the same
+bits.](docs/design/vector-search.md#neon)** `vector::neon` multiplies and
+adds unfused in `strip8!`'s order, held by
+`f32_and_f16_kernels_match_the_scalar_strips`.
+
+**[A vector goes out as its
+`f32`s.](docs/design/vector-search.md#vectors-out)** JSON writes the
+shortest text reading back as it (`json::num32_into`), but for
+`json::TIE`.
+
+**[A number is read exactly.](docs/design/vector-search.md#numbers-in)**
+`num::parse_f64` reads one, and natively `num::clinger` a list of numbers
+alone into `f32`s.
+
+**[A vector parameter goes into the module as
+`f32`s.](docs/design/vector-search.md#vector-parameters)** `run` hands it
+beside the JSON (`vectorsApart`), `-0` as `0`.
+
+**[A quantized index holds codes, and `near` orders by the
+vectors.](docs/design/vector-search.md#quantized-indexes)** `Space` orders
+the beam by the stored vectors, so every score is exact.
+
+**[A bit code is a residual's signs from a learned
+centre.](docs/design/vector-search.md#bit-codes)** Its centres are
+learned alike on every target and travel in the graph record
+(`BIT_CENTRED`).
+
+**[Filtered `near` needs its
+fallback.](docs/design/vector-search.md#filtered-near)** A filtered ANN
+walk short of the limit must search the whole set, or a correlated
+filter answers empty (`tests/filtered.rs`).
+
+**[`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers
+exactly.](docs/design/vector-search.md#sparse-vectors)** Every way in goes
+through `sparse::normalise`, which the index relies on.
+
+### The JS client and Cloudflare
+
+**[One module and a client entry, by where the queries
+run.](docs/design/js-client.md#the-module-and-the-client)** `fenec-lite`
+and `fenec-min` are test builds, never shipped; `web/client.js` is
+`builder.js` and `http.js` alone (`web/fenec.client.test.js`), and
+`FenecHttp` calls `fetch` on its own (`#request`), never as its method. On
+a client reading near (`reads: 'nearest'`), `FenecHttp.live`'s streams and
+polls stay home and its runs read near.
+
+**[A Durable Object keeps a database as a file
+would.](docs/design/js-client.md#durable-objects)** `persist` writes an
+image, then a row a flush (`storage.sql`), a new image and the old's drop
+in one `transactionSync`; a failed flush stores nothing and rejects every
+later `persist`. The example opens and restores inside
+`blockConcurrencyWhile`.
+
+**[An object's alarm keeps its
+database.](docs/design/js-client.md#alarms)** `schedule` sets one only when
+something is due; `maintain` returns a failure as `error`, never a
+rejection; every database let go goes through `#retire`, a released one
+refusing `restore`.
+
+**[A live query learns what changed from the change
+ring.](docs/design/js-client.md#live-queries)** `Query.reads` names each
+collection read (`Lives`), `fenec_changes` those written.
+
+### Text
+
+**[`collate und` and `collate tr` are ICU's
+orders.](docs/design/text.md#collations)**
+`crates/fenec-core/tools/collate/gen.py` writes the tables, and equality
+stays the bytes'. In the browser a statement meeting a chunk it lacks is
+refused (`collate::refuse`), a write before it changes anything, and
+`Fenec.query`, the builder, `restore` and the sync fetch it and run it
 again.
-Rejected: the global router asked at each miss (its `--token`, which moves
-and deletes every tenant, in the Worker, a round trip to its region, and
-every unknown name a client tries a question for that one router), and
-Workers KV (read eventually consistently, billed a read, and something must
-write it). An isolate keeps 50 000 homes (`HOMES`), forgotten first heard
-first -- by use it was a delete and a set every request -- and shares each
-it learns through the colo's Cache API (`waitUntil`, read only on an
-isolate's miss; nothing on `workers.dev`). Asked for, so every other
-client is told no home: not asked, the router's added p50 was
-23.75 us against origin/main's 23.9 with its mark on every answer
-(23.4-24.1 and 23.7-24.0, six runs a side in ABBA turns, `make shard-bench
-ARGS=latency`; 24.15 against 24.1 before the mark), and asked, a router
-answered in 82-83 us p50 against 81. A path is judged as the router and the node read
-it, decoded as fenec-http decodes one (`percentDecode`, `segments`):
-WHATWG's URL leaves `%5F` and `%2F` encoded, and `/t/acme/%5Freplication`
-with a tenant's replication token was its whole replication stream through
-the public entry. A request goes on with what the client sent but the
-hop-by-hop headers, the routers' marks (`Fenec-Router`, `Fenec-Global`,
-`Fenec-Verified`, the last dropped from answers too) and every address a
-client claims (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`,
-`True-Client-IP`, `cf-*`); `X-Request-Id` is the client's or Cloudflare's
-ray id. The client is named in `Fenec-Client: <address> <seconds>
-<mark>`, the address `CF-Connecting-IP`, the mark 16 bytes of HMAC-SHA256
-of `fenec-client <address> <seconds>` under `ENTRY_TOKEN`, base64url
-(`clientMark`): bound to the address and the time, a mark seen names that
-address for a minute, where one of the token alone, as `audit::router_mark`
-is, would name any address for good -- and not `CF-Connecting-IP` believed
-from Cloudflare's ranges, since a Worker sets it and `X-Real-IP` as it
-likes towards an origin outside Cloudflare (Cloudflare's HTTP headers page),
-so any account's Worker could claim any address. A router started with
-the same token (`fenec-shard --entry-token`, `FENEC_SHARD_ENTRY_TOKEN`, set
-and empty being unset) reads it (`audit::entry`, after `audit::request`
-and for a request no router relayed): the mark first, in constant time
-against its own HMAC of `fenec-client <address> <seconds>` (`EntryKey`, the
-key's padded blocks hashed once, a `HmacKey`: 0.73-0.78 us a mark checked
-where the HMAC alone took 1.28-1.36 with them hashed each time), then the seconds
-within 60 of its clock either way (`CLIENT_WITHIN_SECS`), so a stale header
-is one the entry made. The address then stands in for the connection's
-peer for that request alone (`audit::NAMED`, cleared by each request's
-`audit::request`, a kept-alive connection carrying many clients) -- the
-refusal's wait and count (`audit::http`), a verified token's clearing
-(`audit::verified`), the audit and slow lines' `peer`, the entry's address
-their `via` (`audit::line`), the trace's `client.address` (on a node too,
-for the client a router named; the connection's own `network.peer.address`
-always), and the `Fenec-Router` the router names to a node, a read
-replica's (`forward_near`) or a relay, which names it to the node in turn
--- the router still waiting a refusal out and still relaying a tenant of
-another region, where for a relayed request it does neither. A count is
-kept by the address made canonical (`counted_as`, and the name the entry
-gives): a router on `[::]` saw an IPv4 client as `::ffff:a.b.c.d`, the
-entry named it `a.b.c.d`, and one client had two counts. Replayed, a header
-names that one address for its minute: what the minute costs against a
-mark of the token alone, which named any for good. A header that does not
-check, or a router without the flag, leaves the connection's address, and
-every router drops the header from what it forwards, flag or not
-(`forward`'s list, `forwarded_headers`), so a node never reads a client's
-claim: relays, held requests, streams and a read replica's reads go out
-through those lists, and `/_shard/`'s relays and a fan-out write headers of
-their own. What each came to is counted
-(`fenec_router_entry_clients_total{outcome}`: `named`, `bad_mark`,
-`stale`, and `absent` for a tenant's request carrying none -- every one,
-behind an entry whose `ENTRY_TOKEN` is unset, which names nobody and
-otherwise shows nothing -- in the thread's metrics shard as a request is),
-one not believed said in the log a minute apart at most a kind -- once a
-process, a router running for weeks said it once -- and none is an audit
-event: each audit line costs its sender a refusal's wait, a token or a
-write, and such a header costs nothing, so a line each would grow the log
-at the router's request rate, and a mistyped token write one for every
-request through the entry. On a router only the entry reaches, all but
-`named` is worth an alert (monitoring.html). The entry's token is refused
-where the router holds it for anything else (`main.rs`, `set_node`): empty,
-equal to `--token` (moves and deletes every tenant), to
-`--replication-token` (the directory's stream carries every node's admin
-token) or to a node's admin token in its directories, at the start and as
-a node is added; the nodes' data and replication tokens it never sees.
-One token at a time: rotated by starting the routers with the new one and
-then the Worker, every request served in between and its client counted by
-Cloudflare's address (`bad_mark`) -- a second accepted token was not worth
-its flag against minutes of the counting there was before. Nodes read none
-of it: the entry reaches routers alone (`REGIONS`, `ADMIN`). A forwarded
-request compares each header once more, to drop it: the router's added p50
-stayed 20.4 us against main's 20.4 (20.1-21.0 and 20.0-22.9, ten runs a
-side in ABBA turns at loads of 1.7-2.3, `make shard-bench ARGS=latency`).
-With the flag, in the bench's `entry` part (each request through a router
-with it and one without, in ABBA turns, eight runs at loads of 2.2-2.9):
-one without the header -- a look among its headers, an `absent` count --
-took 42.0 us p50 against 42.05 (the runs' differences -0.2 to +0.1), and
-one the entry named its client in 41.7 against 42.1 (-0.8 to +0.1, one run
-+2.8): the mark's 0.75 us is not seen in a round trip. The router without
-the flag was timed first in every run before, an order no turns of whole
-runs undo; it takes turns inside each run now.
-`tests/entry.rs` holds two named clients' counts apart and a good token
-clearing its own alone, the router's own refusals and the node's; a bad
-mark, a moved address, a stale time either way and a router without the
-flag to the connection's address, and a request carrying no name counted
-`absent`; one kept-alive connection named, then not, then named again; the
-header at no node, through a forward, a held request and a stream; the
-audit lines; a relay carrying the client to the home router's and the
-node's lines and spans; a read a read replica answers naming it to the
-replica's node; and the entry's token refused as each other token, at the
-start and as a node is added, an empty environment's taken as unset --
-each failing with its part taken out -- and `entry.test.js` a token
-refused through the Worker in front of real routers waiting by
-`CF-Connecting-IP`'s address, never cleared by another client's good
-token. The routers' CORS headers pass unchanged; with `CORS`
-(their `--http-cors`) the entry answers a preflight itself and puts the
-same headers on its own answers alone, which the test holds to a router's
-preflight, and an isolate seeing a router's `Access-Control-Allow-Origin`
-with no `CORS` logs it once: its own 503s would read as the network
-failing. Only `/t/<tenant>/` is served: `/_shard/` where `ADMIN` names the
-global router, everything else and a tenant's `/_replication` a 404. A
-region's routers are tried from the one that answered last; every answer a
-router writes carries its mark (`Fenec-Shard: 1`, `region::SHARD_HEADER`,
-written by `Router::cors` and `forward`, a relayed answer's the relaying
-router's alone), and one without it is not the router's (`judged`) -- not
-`X-Request-Id`, which a load balancer may write on its own 502, so that a
-dead router behind one looked like the router's answer and its standby was
-never tried. Cloudflare's 521/523/525/526/530 never reached one, so
-any request goes on; one that may have -- a thrown fetch (workerd says
-`Network connection lost.` of a connection refused and of one reset after
-the request alike, probed), Cloudflare's 520/522/524 (its 522 page counts a
-request unacknowledged for 90 s on a connection made), a tunnel's connector
-answering 502 for a router it cannot reach (Cloudflare's tunnel
-troubleshooting: 530 means no connector, the 502 a connector up and its
-origin not) -- goes on only for a `GET`, `HEAD`, `OPTIONS` or a keyed
-request, the router's own rule towards a node, any other a 502 saying it
-may have run; a router's own 502 is its answer. A body up to a mebibyte is
-read whole for a retry, a longer one streamed to one router (`request.body`
-handed on keeps its length, probed; a router refuses a chunked body, 411),
-and one sent with no length is read up to a mebibyte and refused past it
-(411): read whole, it was as large as a client sent, in isolates sharing
-128 MB. An answer goes back as its body arrives; `request.signal` (the
-`enable_request_signal` flag) cancels the fetch with the client. Waiting
-on a fetch is not CPU time and an HTTP-triggered Worker has no duration
-limit while its client is connected (Cloudflare's Workers limits), so a
-held write or a stream is not cut; a proxied hostname's answer must start
-within the proxy read timeout (100 s below Enterprise), past
-`Fenec-Wait`'s 30. Under `wrangler dev` a client gone before its answer's
-head never reaches the Worker -- workerd notices a client only as it writes
-to it, past wrangler's own proxy Worker too -- so that case is held in Node,
-the handler over Node's `fetch`; a stream is let go of at a stand-in router
-2 s after its client, at a node through a router in 4 to 8. And a router
-waiting on a node's held answer watches its client and passes its end on
-to the node (`upstream::answered_or_gone`, below): blocked in the head's
-`read_line`, it had a claim whose client went through it take the next
-job, leased to nobody, where asked of the node itself the claim passed it
-on -- so cancellation reaches the node from the entry through every
-router on the way. `entry.test.js`
-runs the Worker under `wrangler dev` in front of real routers and nodes
-(`entry/cluster.mjs`: a global router, us with a standby, eu, each on port
-0) and of stand-ins (a tunnel's connector, Cloudflare's 522 and 530), each
-fix held by a test that fails without it. Under `wrangler dev`, a read by
-id took 81 us p50 of us's router, 1.18-1.22 ms through the entry with its
-home heard -- 0.66-0.68 past wrangler's proxy -- and 1.23-1.24 with the
-client named besides (an HMAC a request), 1.29-1.31 never heard (eu
-relaying, 114-115 us asked directly) and 1.60-1.61 heard through
-miniflare's cache, two runs at loads of 3.4 to 5 (`make entry-bench`):
-loopback and workerd, not a colo and a region away.
 
-**A tenant may keep read replicas in other regions, which a router near
-them answers the reads its clients mark from** (`fenec-shard/src/readers.rs`,
-`PUT /_shard/tenants/<t>/read-replicas/<region>`, `fenec-shard --near`,
-`Fenec-Read: replica`; `site/content/docs/sharding.html#read-replicas`). A
-client in Singapore of a tenant living in Frankfurt paid 158 ms a read. A
-read replica is a follower of the tenant's primary node (`POST
-/_admin/tenants/<t>/follow`, as a replica of its own) on the node of the
-region holding the fewest tenants and copies, never a standby, one a region
-and none in the tenant's own; a resource a region rather than `{regions:
-[...]}`, so each change touches one directory. Its record is a row of
-`readers` (`key` `<tenant>/<node>`, `follows` the primary's address) in the
-directory holding its node -- the global one or the region's own, whose
-router places it, leases its node and routes to it through a partition;
-another router relays the request there, and the global router gathers the
-list from every directory. It is recorded once its node follows -- recorded
-first, a marked read reached the file the `PUT` makes, a primary of its own
-holding nothing -- and a node that will not follow has that file deleted
-again (`tell_follow`); taken off, the record goes first, the standby routers
-are sent that (`standbys_sent`), then the file, and a node that does not
-take it off has the record put back and the `DELETE` answered 502, a copy
-following unrecorded being a follower nothing stops (`?forget` for a node
-gone for good; a node holding one is not removed, `Directory::remove_node`).
-`Directory::remove_tenant` keeps the rows: a tenant leaving for a regional
-directory keeps the read replicas here, which follow it, and the delete
-paths take them off with their files (`take_readers`, all at once), a
-replica whose node does not take it off keeping the tenant, 502, as a
-`DELETE` of the replica keeps its record: deleted regardless, the record
-outlived its tenant, and the look that found the name made again --
-another owner's -- pointed the old copy at it, which took the new tenant's
-image into a region nobody had chosen. Another directory's go at its
-router's next look, so a create of the name is refused, 409, while any
-directory keeps a trace of one -- a record, or a change of one under way,
-whose record is out while its node is asked to take the copy off
-(`reader_traces`, `changing` in the list) -- the global router asking each
-region keeping its own, 503 where one is not reached (`no_reader_traces`);
-and a marked read goes to no read replica of a tenant no directory the
-router reads places (`reader_near`). The regions asked are only those
-that may keep one: a region's router tells the global router as it places
-one, before the copy exists (`trace_globally`, `PUT
-/_shard/tenants/<t>/traces/<r>`, a row of the global directory's `traces`
-read where asked and never mapped), and once its last is taken off, under
-the replica's hold (`untrace_if_none`); a create asks those regions at once,
-each through the pool bounded by `reader_timeout`, takes off the trace of
-one that keeps none, and is refused 503 for that name alone where one is
-not reached or answers from a router following the region's, whose list
-says `changing: null` -- its holds are not the primary's, and `false` let a
-create go on while the primary took a replica off that its node then put
-back. Every region asked one after another, one region's router out of
-reach refused every create in every region, and hung, after the upstream
-timeout's minute; a name no region traced now asks none, a create costing
-what main's did. The way out for a region gone for good is `DELETE
-/_shard/tenants/<t>/traces/<r>` by hand, which the 503 names, and it
-cannot copy a new tenant of the name there: a read replica is bound to its
-tenant's lineage (`lineages`, recorded from the node's answer to a create
-or an import, `"lineage"` in `POST /_shard/placements`; the record's
-`lineage`), which every `follow` tells the copy and `.follows` keeps
-(`lineage <8 hex>`, `Follower::expect_lineage`): a copy whose primary is of
-another lineage takes nothing from it and deletes itself, file and
-`.follows`, through the registry it is served from (`refused_copy`,
-`Tenants::shared`, `fenec_copies_refused_total`) -- stopped and kept, it
-held the deleted tenant's rows on the node for anyone to read -- and a look
-finding a replica's tenant of another lineage takes it off
-(`another_lineage`). The delete is the copy's that refused alone:
-`delete_refused` asks, under the slot's lock it deletes under, that the
-tenant is still open as the open whose follower refused (`Tenant::opened`),
-following, its follower refusing (`Said::Refused` names the lineage) and
-`.follows` naming that lineage -- asked of `.follows` before the slot, a
-promotion of the copy or a move installing the tenant there landing
-between had the primary deleted (`tenants::refusals` holds a refusal
-there for a test). Only a read replica is told a lineage, and a copy that
-never had its first image holds nothing to lose. A primary of another
-lineage than the directory's, where the directory places the tenant, is
-the tenant -- every read and write of it goes there: another file of it
-promoted by force (a lineage of its own: `fork_id` keeps the first id's top
-half only where there is a first id), an older file restored, a file put in
-place by hand. A copy of another lineage -- one that never took its first
-image among them -- is not promoted but by force: its node, told the
-directory's lineage, refuses it, where it was once promoted into an empty
-primary. A failover records the lineage the
-promotion answers (`promoted`, `"lineage"` of `.../promote`), and a read
-replica's copy lost with nothing else changed has the primary's node
-asked first (`verify_lineage`, through `verify_primary`; another region's
-router or the global router asked by `POST /_shard/placements {verify}`):
-the directory takes the node's word, the lineage before kept as one the
-tenant was (`succeed_lineage`, `lineages.was`), and a replica bound to one
-it was is bound to the new one rather than taken off (`bound_before`).
-Bound to the old, the copy refused, deleted itself and was made again by
-every look, for good. A tenant made again through a router keeps no
-`was`: its create records a lineage of its own. A copy lost three times
-in a row anyway -- refusing a primary whose lineage the router cannot
-learn -- is made again no more (`REMAKES`, `may_remake`): said once,
-`"given_up": true` in its list and `fenec_router_read_replicas_given_up`,
-until its primary or its lineage changes or an operator places it again.
-`reader_near` passes it by: still asked, every marked read of its region
-went to its node, was answered that the tenant was not there and went
-home, waking a look. The count is in memory alone -- a router started
-again makes the copy up to three times more, and a standby router knows
-nothing of it -- which is a loop bounded, not one stopped for good.
-A tenant with no lineage known -- made before they were kept -- has it
-asked of its node at the next check (`want_lineage`, `backfill_lineages`,
-`GET /_admin/tenants/<t>/lineage`, wanted by a look over a tenant of this
-directory and by a placement asked of one), recorded only where none is
-yet, asked under the write guard that records it -- a create meanwhile
-recorded the new tenant's lineage, which the answer of the one before
-wrote over. Each of its read replicas recorded with none is bound once its
-copy's node says the copy is of it and holds its primary's history
-(`"ready"`: a copy not caught up is of a new file's lineage, and was taken
-off as another tenant's as it caught up), the copy told with a follow of
-the node it follows, and taken off where the copy is another's
-(`bind_reader`). Mixed versions protect less and
-break nothing: a node from before lineages ignores `"lineage"` and has no
-`lineage` endpoint, a router from before them ignores `lineages`, and no
-copy refuses on their word. Lineages are kept in the directory's maps
-from the change ring (`lineages`), read by every look and placement: read
-from the database, each was a statement parsed and run. `readers` took
-`lineage` as an alter, as `nodes` took its fields (`READER_FIELDS`), and
-is selected by the fields it has (`reader_fields`): the select naming one
-a directory from before lacked failed not found, which `rows` read as an
-empty collection, every record forgotten -- now only a collection not
-there reads as empty. With only the trace to go by, the trace
-let go of and the name made again on the very node, the look found
-nothing to change and the copy's follower took the new tenant's image; a
-`?forget` of a node that came back, and a router lost between the
-`follow` and the record, did the same. A trace names a tenant the global
-directory holds, under its claim (`set_trace`, 404 otherwise). A node's
-worker looks again where a tenant's primary is as it reaches the replica
-(`fresh_primary`), not where the look saw it: reached after a slow node's
-earlier calls, it pointed the replica at the primary a failover had left.
-This directory's own it reads each time, from its maps; one at home in
-another region only once the look's answer is a `PRIMARY_FRESH` (1 s) old,
-and then for every such replica it has left at once, one call a region --
-asked again for each, the worker made a call an item where the look made
-one a region.
-A failover reads `pairs` and
-`replicas` alone, so none is ever promoted. Each is held to its tenant's
-quota wherever it is recorded: `POST /_shard/placements` answers the quota
-beside the placement, so every look wants each read replica sent the quota
-of the directory placing its tenant -- another region's too -- where it
-differs from the one it was last sent (`reader_quotas`), and `set_quota`
-wants this directory's, answering once the directory records it; placed in
-a region keeping its own directory, one took only what the placing router
-read, and a quota set later reached the readers of the setting directory
-alone. Wanted, never sent there: one sender a node, started as a quota is
-wanted and every `CHECK_EVERY` for one that did not land, on a thread of its
-own, sends the newest wanted of each replica in turn (`QuotaQueue`,
-`deliver_quotas`) -- sent by the quota request and the look themselves, a
-node that did not answer held each up for its `reader_timeout` (a move of
-another tenant 4.4 s, and after a router's restart, its sent quotas
-forgotten, every look), and a look's send, of the quota its round began
-with, landed after a request's newer one; this directory's quota the look
-reads under the queue's lock (`want_kept_quota`), so a request's want is
-never followed by an older one. A send is noted only where no replica was
-forgotten while it was out (`QuotaNotes`, a count of forgets beside the
-notes): a follow landing as a send's answer came back forgot the note, the
-answer noted it after, and no look sent the copy -- a new one, maybe -- its
-quota again; a send more is a `PUT` the copy takes as often. **What a copy
-answers**: a tenant's copy on a replicating node is `ready`
-(`Tenant::ready`) once, since it opened, the primary it follows has said
-hello -- its image adopted, or its place in that history found
-(`Follower::on_hello`) -- and a copy taking writes always (`promote`
-stores it, and `ready` asks the history where the flag says no). Not kept
-past an open: a read replica placed a moment ago is an empty file of a
-history of its own and answered a marked read as a tenant with no
-collections, and a file reopened or pointed at another node may hold a
-history the primary's does not continue -- a copy left on a node gone for
-good while its tenant was deleted and made again -- so it answers 503, which
-sends the router home, until the primary says hello; and a follow of the
-node a copy follows already begins its stream again and waits for the hello
-the same way, since a router placing a read replica over a file it found
-asks for no more than that follow. Kept in `<t>.follows` across a restart,
-a standby's copies, which keep none, waited for a hello after every one, and
-a pair's failover onto one promoted before it came answered every marked
-read 503 at the tenant's home while it stayed open. A replica cut off from
-its primary stays ready, serving what it last applied, until it is reopened
-or pointed elsewhere. **Read your writes across a failover**: a
-change number names a write only within a history, and a promotion forks it
-where the copy promoted stood -- a write the old primary answered and the
-copy never got is lost, the new primary's next write takes its number, and a
-read replica still on the old branch held a change of that number, the lost
-write, and answered a read sent after the new one with it. So every answer
-carrying `Fenec-Seq` of a database with a history of its own carries
-`Fenec-History: <term>-<id>` too (`http::Fork`, the term the lineage's
-length; a `NonZeroU64` id, so `Response` grew 16 bytes, not 24 -- past 128 a
-`Result` of one was clippy's `result_large_err`), the root's naming nothing,
-and `after` answers once the copy holds that change of that history
-(`History::continues`): a copy on another branch waits until it is pointed
-at the new primary and takes its image, and a primary whose history does not
-hold it -- the write lost -- answers 504 at once with its own `seq` and
-`history`, which every SDK takes as the client's position, lower or not --
-kept, every read near would wait out the replica and home for good -- but
-only over the position that read was sent after, compared and set under one
-lock or in one turn (a write answered meanwhile is further, and set back the
-next read near missed it), and never an earlier term of the same lineage (a
-router whose copy of the directory lags a failover sends the fallback to the
-old primary, fenced, whose 504 names the branch it abandoned); a change the
-caller named (`after=`, `After`) is not the client's to take. A history's
-lineage is the top half of its id: every promotion and restore keeps it
-(`replication::fork_id`, the bottom half fresh), and a database made anew
-has its own -- a tenant deleted and made again under its name starts again
-at term 1, below the old one's, and refused as a fenced primary's word, every
-read near of a client that held the old position waited its whole wait, then
-home's 504, for good. In the id, not a field of the header: the header and
-`Response` the size they were. A binary from before keeps no lineage: a
-promotion or a restore it makes starts a fresh one, which an SDK takes at
-any term -- so during a rolling upgrade a router whose copy of the directory
-lags a failover can again set a client back onto the old branch, until
-every node runs a build that keeps it. The SDKs
-keep the furthest position an answer from home named -- a write's, a
-read-only `/batch`'s, `/_changes`'s where the SDK reads it: of another
-lineage, a later term of the same, or further in one, so one arriving late
-is not the last -- and send it with
-each marked read, whose own answers move nothing, since a replica's may be
-behind home or on an abandoned branch. A marked subscription and
-`/_changes` -- Go's `Read()` and .NET's `AsRead()` copies send the
-position on `Subscribe` and `Changes` too, and a router sends any marked
-request near whatever its route, a stream copied as it comes -- wait for
-it on the copy as a read does, and their 504 sends them home: both were
-answered before the wait, a stream seeded from the replica as it stood,
-behind the client's own write or on the branch a failover left, and a
-page whose `Fenec-Seq` said every write there was had been read (the
-`Fenec-After` paragraph below). The router parses no FenecQL, so a
-read goes near only where its client marked it: a `GET` alone was not taken
-for one, since a client that sends no `Fenec-After` would have lost reading
-its own writes. A router stands in a region (`--near`, or a region's
-router's `--region`) and sends a marked request of a tenant with a read
-replica there, and not living there, to it -- one header looked for on every
-forward, the lookup only for a marked one, and one more on the node, which
-reads the mark once a request in `serve_connection` -- bounded by the wait its
-`Fenec-After` asks, a `/_changes` page's own `wait` (`cdc::page_wait`;
-left out, a consumer's long poll near an idle tenant was cut at the
-timeout, its copy rested and the page asked again home for the whole
-wait, `wait=10000` answered in 17 s, which
-`a_marked_change_page_waiting_past_the_replica_timeout_is_answered_near`
-holds -- nothing else marked waits on a node: a held write is refused
-there) and `--replica-timeout` (2 s) past them (`Pool::send_within`,
-the connect, each write and each read of the head, the write timeout kept
-with a pooled connection as its read timeout is, so a request sets it on no
-connection a replica's read has not used): at the upstream timeout a node
-that took connections and never answered held each marked read a minute,
-and one that stopped reading a body past the sockets' buffers held the
-write as long. It goes home where the replica does not answer --
-and is let be for `RESTING` (5 s, `Config::replica_rest`), its reads going
-home at once: the tenant's copy where it answered 504, behind the position
-at the end of the wait it was given -- a copy following its primary never
-says a position is out of reach, it may yet be pointed there, so its 504 is
-always that -- for the reads sent after a position with no longer a wait
-(`rest_behind`, `behind`, the longest wait it missed kept): asked again at
-every read, a replica cut off from its primary held each its whole wait,
-every run of a live query reading near that late for the partition's
-length. A read naming no position, which the copy answers as it stands,
-and one willing to wait longer stay the copy's: rested whole, two of
-`tests/read_replicas.rs`'s were refused 502 with home out of the router's
-reach where the copy answered them
-(`a_read_replica_behind_its_wait_is_let_be_and_the_reads_after_go_home`).
-Left so: a client holding a tenant's token can send that tenant's
-positioned reads through a router home, with a `Fenec-After` past its last
-change and a wait of a second or more once every rest -- as a failover that
-lost writes does on its own, its clients' positions on the lost branch --
-at the cost of the trip home, never a wrong answer;
-the node, where it was not reached or took no whole request
-(`upstream::Near::Unreached`); where it took one and answered nothing in
-time (`Unanswered`) or broke its answer off (read whole before its head
-goes on, `read_body_kept`: answered 502 before; a stream goes on as it
-comes, and the tail `forward` shares took the body as a parameter: an
-unmarked request's added p50 20.6 us either way, main's 23.75, sixteen
-runs a side in turns), the tenant's copy is let be at once, the read going
-home, and the node is asked its `/_health` -- answered before any token,
-lock or routing -- on a thread of the router's own within `HEALTH_WAIT`
-(500 ms, the replica timeout where shorter; `Router::rest_unanswered`,
-`upstream::answers_health`), one question a node at a time and none while
-it rests (`probing`): unanswered, the node is let be too -- stopped,
-deadlocked: the kernel takes a small request -- so no other tenant waits
-it out, where resting a copy at a time had each wait the timeout once a
-`RESTING`; answered, the copy alone, since the head comes once the query
-has run and a read slower than the timeout -- one every few seconds --
-rested the node and sent every tenant's marked reads of the region home.
-Asked on the read's own path, a read sent home from a hung node waited the
-question out past its timeout, and every read timing out beside it asked
-again (`tests/read_replicas.rs`: eight timing out together ask once,
-failing with that rule back; `Router::replica_node_resting` and
-`health_questions` are what its tests wait on). Rested once a second
-tenant's copy there was, as before, the node was any client's to rest:
-one holding two tenants' tokens, or two tenants' slow analytics, sent
-every tenant's marked reads of the node home (a third tenant's reads held
-to its replica beside two slow ones, failing with that rule back). Left:
-a node that answers its health while every query on it stalls -- its disk
-stalled under the queries, or its tenant registry deadlocked -- costs
-each tenant with a copy there one timeout a `RESTING`. A question through
-the tenant path, the node's registry and no database's lock, was weighed
-and left: it would catch the registry deadlocked, a bug of the node's
-own, and nothing a disk does, a disk stalled under a write lock leaving
-the registry free; while a tenant's slot is held through its open,
-seconds for a large file, so a node opening one copy would read as hung
-and rest every tenant's. It goes home too where the replica
-answers 503 or 504, or a 404 with
-`Fenec-Tenant: absent` (the file gone, made again at the next look; every
-`CHECK_EVERY`, 10 s, a thread of its own asks each replica's node what it
-holds, a set of its names, since a standby or another region's router routes
-the reads and keeps no record -- in the look, a node out of reach held each
-re-pointing after a failover up for its call, 10 s);
-`fenec_router_replica_reads_total{outcome}`. Every server runs a marked
-request read-only on every route, the one place `serve_connection` reads the
-mark (`marked`, a `Config` with `read_only` and `marked`, whose refusals say
-why, `read_only_refused`): the MCP endpoint was answered before the mark was
-read, a consumer's commit before `handle`, and a frozen or unleased tenant's
-skip let a request through on the header alone -- it passes a freeze and a
-lease only where `read_only` holds. The router replays a marked request on a
-pooled connection's end only for the value a node runs read-only
-(`fenec_http::marks_read`). Every router looks once a second (`FOLLOW_EVERY`)
-at where each primary it keeps a read replica of is -- its directory, its
-copy of the global one, or another region's router through `POST
-/_shard/placements`, one call a region a look -- and re-points the ones
-following another address, those needing a call on a worker a node the
-look waits for none of (`look_on`, one at a time a node; on threads the look
-waited for, a node that did not answer held every look after it up for its
-timeout, the next tenant failed over left following the old primary as
-long), each call through a pool bounded by `CALL` (10 s,
-`Config::reader_timeout`) and no lock
-held across one: a mutex over every change made a move's `readers_arriving`
-wait out a node a region away. Each read replica is held for its change
-alone (`reader_busy`, `<tenant>/<region>`), which a placement, a `DELETE`, a
-move and a look take, a look passing over one held; no tenant's claim,
-which a placement held across its calls, and which a look holding one would
-have had a failover of that tenant refused. A refused hold makes none
-(`then`, never `then_some`: made and dropped at once, it let go of the
-other's key under the lock its drop takes again, and a delete beside a
-look's re-point waited on itself for good, a CI run's 120 s). A tenant's
-delete holds every region's changes until the tenant is gone, one under way
-waited out (`hold_readers`, `wait_reader`) before its claim on the tenant,
-which a failover of it would have found taken and passed it over, and for
-`reader_timeout` or `CHANGE_WAIT_MOST` (15 s) at most in all, then 409,
-inside the minute a global router's relay waits: passed over, a replica
-whose record was out while its node was asked to take it off stayed after
-the 204, a marked read answered from the deleted tenant's copy until the
-next look. A move into a replica's region waits one out the same way and
-holds it until the directory places the tenant there (`readers_arriving`):
-passed over, the look's `follow` landing after the move installed the
-tenant on the replica's node made the new primary a follower of the node
-it had left, which the move then deleted. A failover or a move
-it makes wakes the look (`follow_soon`) rather than call the replicas'
-nodes. Following through a router URL instead was rejected: a stream to a
-fenced but living old primary never ends, and a deployment of one directory
-records no router's URL. The Swift, Kotlin and Dart remotes mark reads as
-Go's and .NET's clients do (`reads: .nearest`, `Reads.NEAREST`,
-`Reads.nearest`, and `asRead()`), the position shared by every copy, each
-held to a real global router, its standby near the replica and two nodes in
-its own tests. JavaScript's `live` keeps its streams home and reads its
-runs near, each after the change a stream told of, and polls home
-(`FenecHttp.live`, below). Not done: reads of a bounded staleness (a
-decision, not a detail), JavaScript's `subscribe` near and the synced
-replicas' streams, which go home (Go's and .NET's read copies mark a
-subscription, held for its position as a read is, above).
-`tests/read_replicas.rs` holds a marked read answered with the rows only the
-replica held and while home is out of reach, a read after the client's write
-going home past the wait, a failover onto the replica of its own and a move
-re-pointing it, a write marked by mistake refused 403 by a leased replica's
-node, both regional directions, and each fix's case, every one failing with
-its fix taken out: a replica placed with home cut off answering 503 (the
-router's 502 home, never the empty copy), a forked history's lost write
-answered by neither the old branch (504) nor home (504 at once, naming the
-new history), a hung replica's node passed over by its bound and let be (no
-second request line, its rest longer than the test), a deleted file sent
-home and made again, a record kept past a `DELETE` its node refused and a
-node refused removal, a quota reaching the replica and, both ways, a quota
-kept by one region's directory reaching a read replica kept by the other's,
-a pair's standby copy promoted before its primary ever said hello answering
-marked reads at home, a copy told to follow its node again answering once
-that node has said hello -- the tenant there made again meanwhile -- and a
-read replica re-pointed after a failover while another's node holds up the
-check for ten minutes, a tenant deleted while its replica is being taken
-off by a silent node answering only once the copy is gone, its claim free
-meanwhile, a tenant whose replica's node is out of reach kept (502), a name not
-made again while another region's directory keeps its deleted tenant's
-replica, a quota a silent node does not take holding up neither the quota
-request nor the look, a replica sent no quota older than one it was sent
-(a look's `follow` held at the node's door by a parking proxy across a quota
-request), a move onto a replica's node waiting out a look's `follow` held
-there, and a failover keeping the tenant's lineage where a tenant made
-again starts another (`readers::tests` a refused hold keeping the other's,
-no marked read to a tenant gone, the quota queue's order, a quota whose
-send a forget crossed left unnoted, the calls bounded by `reader_timeout`;
-`replication::tests` the fork's id; `directory::tests` a directory
-whose `readers` lacks `lineage` keeping its records, a field not found
-never an empty collection, lineages following the ring), a copy taking nothing from another
-tenant of its name made again on its very node, a replica of a tenant made
-again taken off where its trace was let go of by hand, a trace of a name no
-tenant holds refused, a look's worker pointing a replica at the primary as
-it reaches it (the parking proxy holding one tenant's `follow` as the other
-moves), a copy refusing another tenant of its name deleting itself (an
-orphan told its lineage by hand, and a `?forget`'s), a refused copy
-promoted or installed anew while its delete is held kept, a tenant and its
-read replica from before lineages bound to one, a replica not caught up
-bound once it is (its stream parked), a lineage backfilled late writing
-over none recorded since (the node's answer held: the proxy holds answers
-too), a replica following a primary promoted from a standby that never
-synced -- its copy refusing nothing -- and one following its tenant's file
-put in place by hand, one whose copy keeps refusing given up on (the
-primary's lineage asked, its answer broken off), a worker asking a region for its
-replicas' primaries at once (at most one call names one tenant alone; the proxy
-records what it reads while parking), a create asking only the regions that
-may keep a replica of its name -- one out of reach refusing those names
-alone, a name no region traced made with every region cut off -- a router
-following a region's saying `changing: null`, a placement the directory
-cannot record answering and taking its copy off (a directory database made
-to fail its writes), and a node that does not answer holding up no other's
-re-pointing (fenec-http's `archive.rs` a restore's and a backup's
-lineage); fenec-http's `api.rs`, `mcp.rs` and `cdc.rs` a marked
-statement, MCP write and consumer commit refused; `web/fenec.replicas.test.js`
-the JS client against real nodes and routers, eu1 killed, and its position
-taken from a 504 -- over its own alone, a write answered meanwhile and an
-earlier term's 504 left where they stand, another lineage's taken from a 504
-and an answer, its term lower -- as Go's, .NET's and Python's tests hold
-theirs, and a live query's runs read near (below). A marked read through
-the replica's region's router took 59.2-68.2 us p50 against 58.8-66.9 sent
-home, three runs at loads of 4.3-7.8, each node behind a loopback proxy,
-and 60.9-70.3 sent after a position the replica
-held, `Fenec-History` and its check included, 1.8-3.4 us over home where
-the number alone was 1.4 (`make shard-bench ARGS=reads`); a client's read
-of the write it was just answered 168-386 us on the replica, its wait
-included, against 165-343 at home, run by run. `make requests-bench` in
-five ABBA quartets against main: a row by id 0.020-0.022 ms p50 either way,
-eight clients 135-146k a second against 132-145k (one branch run at a load
-of 8.4, 123k, left out), a put 0.023-0.025 ms against 0.023. The router's
-added p50 for a forward no client marks: `forward` is main's body with one
-check of the mark after its prologue, a marked read handed to
-`forward_near` (`#[cold]`, out of line) and the answer written by
-`answer_out` (`#[inline(always)]`, the tail both share). In one body with
-the replica's path the unmarked request ran 0.4-0.65 us slower at the
-median in ABBA turns against main (23.7 against 23.2 us), the work the
-same. Split, and with every per-request addition taken out besides --
-the mark looked for on neither side, no `Fenec-History`, no readers'
-threads -- builds still sat 0.2-0.5 us over main, and builds differing
-only off the path (the tail inlined or not, the threads started or not)
-0.1-0.3 us apart either way, so what was left was where the code lands:
-with every function aligned to 64 bytes the node's own time came level
-(+0.05 us). So the head the router writes is sized once with no `format!`
-a header, and goes out with its body in one `writev`
-(`http::write_parts`, which the node's answers share): written apart they
-were two sends, and the router's added p50 went 23.6 -> 20.6-20.8 us on
-main and on this branch alike. In 16 ABBA rounds against main with that
-change and nothing else, at loads of 2.0-2.1: 20.55 us median (20.5-20.8
-quartiles) against 20.7 (20.6-20.9), the branch's per-round difference
--0.15 us and positive in 5 of 16; against main as it is, 20.6 against
-23.6, lower in all 20 rounds. A request straight to the node stays
-0.15-0.25 us over main's 21.3, which the aligned builds put on layout.
-What the unmarked path does more: `Fenec-Read` looked for once on the
-router and once on the node, `Fenec-History` written where an answer
-names a history, and a `Response` 16 bytes larger; the pool asks
-`replayable` only where a send failed (`Replay`), where every request
-scanned its headers for it before.
-The JS client grew 4.1 KB raw, 1.4 KB gzip, 1.2 brotli (59 KB gzip, 50
-brotli, as README and benchmarks.html quote), an app's minified bundle of
-`connect` and a query's rows 1 114 bytes, 406 brotli; the browser module not
-by a byte.
-
-**A scoped token is held to its rules at every level, twice for writes**
-(`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement
--- the `where`, each `lookup` level, a subscription's shape -- so a new path
-that runs a statement must go through `scoped()` or it reads everything. Writes
-also get `WITH CHECK`: the `Check` write hook tests every document a put or a
-set writes against the filter, found through a thread-local set by `within()`
-around the execution -- a scoped write executed outside `within` goes
-unchecked. A scoped subscription keeps the ids it sent and reports deletions
-only for those; the unscoped shape's "a changed id that does not match is a
-deletion" would hand every user everyone's ids. A scoped stream of a shape
-that holds nothing (`where=false`, what `FenecHttp.live` opens) follows the
-token's own filter instead, its ids kept server side and never sent, and a
-write to one, or one leaving, is a change naming no row: ANDed with the
-filter the shape matched nothing and a scoped live query never ran again,
-and told of every write it would have had the moments of other users'. A
-stream is ended at its token's `exp` (`Scope::expires_ms`, the keep-alive
-wait bounded by it) with `event: error` and `{"error":"the token has
-expired","status":401}`, which every client takes as a refused request --
-`FenecHttp.live` and `subscribe` stop with a `FenecError` of status 401,
-the sync layer asks for a token (a scenario), Go's stream ends with an
-`*Error` of 401, .NET's with `Event.Status`: a stream opened two seconds
-before `exp` delivered a change written four after, while the token's `get`
-was 401. A scoped read's poll tag is a digest of its answer (`content_tag`,
-the query run every time): the change counter's tag, and a 304 answered
-unrun, told it when anyone wrote to what it reads. The algorithm is the key's,
-never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
-`RSA` keys (2048 bits up, `crypto::RsaKey`, 64-bit limbs: 166 us a check in
-32-bit ones, 38 now) for an identity provider's RS256, a `kid` picking the
-key; an RSA modulus taken for an HS256 secret would sign anything. The file
-is read again as it changes, looked at once a second, which is the rotation.
-A verified token is kept by its text (`verified`, 16 shards of 256, emptied
-when the keys change, `exp` asked each time): 0.27 us against 2.9 for HS256.
-A token naming no `exp` is refused (`Demands::require_exp`,
-`--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
-one may lie; `mint` stamps an hour on claims naming none. Grants are
-`read`, `insert`, `update` and `delete` (`write` the three, bits in
-`Rule::ops`), `update(a, b)` the update of those fields alone
-(`Rule::fields`): `update` on `accounts` let a ledger's app token `set
-accounts {balance: balance + 500000}` and change an account's kind too,
-and `WITH CHECK` saw only the row after. A write over a row is judged by
-the fields that differ, as encodings (`Scope::overwrites`, through the
-hook's `before_overwrite`, which the engine calls with the row as it was
--- a `set`'s and a `put`'s over an id, the old row read before the hooks
-rather than after, so no read more): each must be one granting rule's,
-that rule admitting the row before and after; a policy naming no field
-list judges nothing there, and an unscoped write meets an empty hook
-list or a thread-local found empty. And the `Check` hook takes the write's op: an insert held to
-the rules granting it, an update found and checked by its own, a delete
-found by its own; an update and a delete need read beside them, an insert
-none, so a client appends to a stream it cannot see. `<c> append-only`, a
-line of no filter and no role, takes updates and deletes from every
-scoped token whatever its rules say -- a rule naming them there is refused
-at startup -- and not from the server's token, which keeps corrections,
-erasure and `@ttl`'s sweep: in the schema it would bind the operator too,
-a format change for an invariant whoever holds the file can break anyway.
-A rule's filter naming `new.<field>` is a transition (`Rule::transition`):
-`new.` reads the row as the write leaves it, as in an upsert's `else set`,
-a bare name the row as it stands, and the rule is true or not of the two
-together (`Pair`). One filter asked of each row could not say which way a
-row may go: under examples/dispatch's `status = "ready" or status =
-"cancelled"` a customer took a cancelled order back and moved one to the
-queue's head, and a courier delivered a ready order nobody claimed. It
-grants `update` alone, refused at startup beside any other grant. A write
-over a row is the token's when one rule naming every field it changes
-admits the change, a transition by the pair, any other by each row;
-rules with no field list and no transition still widen each other a half
-each, as PostgreSQL's permissive policies, and a transition lends no half.
-A `set` picks a transition's rows by `Rule::before`, the filter with each
-term naming `new.` taken as true or false by the `not`s above it
-(`relaxed`), so it admits every row the pair could -- held to that over
-every filter of three levels and every assignment of 0, 1 and null by
-a test -- and `before_write` leaves an update to `before_overwrite`, with
-the row before, where a transition grants it. `returning` answers rows
-held to the read rules as the write leaves them: a `del`'s picked through
-them as they stood, a `set`'s through their terms over fields it does not
-write, the rest taken as passing (`Scope::answerable`) and asked of each
-row as written by `Hook::answering`, which the engine's `returned` calls
--- a row the token may not read refuses the statement (403), as
-PostgreSQL makes its `SELECT` policies `WITH CHECK` options on an
-`UPDATE ... RETURNING`'s new row, an error rather than a row dropped
-unseen.
-ANDed in whole, the read rules judged the row before: a courier, who
-reads the orders they carry, claiming a ready order with `returning *`
-took nothing and was told nothing. `Scope::admits` asks the rules one
-after another rather than making the `or` of their filters, which copied
-each, twice an update: a scoped `set` cost 1.6-1.9 us over the server
-token's in process against 2.2-2.9 on main, a field list 2.3-2.8 against
-3.0-3.7, a transition 2.2-2.6, answering its row 4.1-4.9 against 4.6-5.6;
-over HTTP 5.0 us of 45 under a plain rule, 5.7-5.9 a field list, 6.1-6.8
-a transition and 8.7-9.3 answering, main's 5.1, 5.8-6.0 and 8.5-9.0 (`make
-policy-bench`, three runs each in turns). The browser module registers no
-hook and has the `answering` loop `cfg`'d out: the size it was.
-A list claim goes after `in` (`room in $jwt.rooms` is read as `in
-[$jwt.rooms]`, which `bind` spreads), more than `MAX_CLAIM_VALUES` (1 000)
-refuses the token, and claims are read exact (`json::parse_json`): a list
-of numbers read the quick way was `f32`s, team 123456789 matching
-123456792. A `match` the token reads through a filter is `Match::within`:
-BM25's count, mean length and document frequencies over the rows its
-filter selects (`TextIndex::search_within`), so a score is the one a
-collection of those rows alone gives -- alice's memo went 9.87 -> 4.79
-once bob wrote 200 holding the word -- 0.16 -> 0.24 ms for 2.5% of 100
-000 rows; the browser module leaves the counting out.
-
-**A read rule may name the fields it shows, and a field it withholds is
-held out of what a statement does, not only of its rows**
-(`fenec-http/src/access/fields.rs`). `read(pickup, run_at)` grants the
-rows its filter admits with those fields and `id`
-(`Rule::read_fields`); a row shows the union of the fields of the read
-rules admitting it, the rest `null` (`Scope::shown`, asked of each row
-over its own columns -- the fields the rules read appended to the list
-where it leaves them out, `Level::added`, and taken off after), in
-`/query`, `/batch`, REST, each `lookup` level by its own collection's
-rules, `returning`, a stream's seed and changes and the MCP tools. A field
-no rule grants is not there: dropped from `select *`, from `describe`,
-`/collections`, `/_schema` and MCP `schema` (`Scope::shown_schema`), and
-refused by name (403) as a name the collection lacks is, so a name tried
-says nothing. Masking alone leaked the field through everything else a
-statement does with it: `where dropoff = $1` answered the order going
-there, `order dropoff` sorted the doors, `{n: dropoff}` wrote one into a
-field the token reads, `1 / n` failed with an error naming the division.
-So `fields::hold` and `fields::write` run before the rules are ANDed in:
-each `where` term reading a field a row may not show becomes
-`(showing_f and term)`, `showing_f` the `or` of the filters of the rules
-granting it (`View::guard`) -- false, under any `not`, wherever the row
-does not show it, and never worked out there since `and` stops at the
-first false (the bound `Filter` and `eval` alike) -- in a `get`, a `set`,
-a `del`, a `lookup` level, a facet's rest and an inner `get`, whose column
-is listed from the rows showing it; `order`, `group`, `having`, `facet`,
-an aggregate, `match`, `near`, `rerank`, a highlight, a `lookup` key (both
-sides) and a `set`'s or upsert's values are refused (403, naming the
-field) unless every row they reach shows it (`View::open`): every read
-rule grants it, or one granting it has no filter or one whose `and` terms
-are each an `and` term of the statement's own `where`, parameters bound
-(`Reach::implies`, structural: a courier's `where courier = $1` is their
-rule's `courier = $jwt.sub`) -- nothing finer is proved. A computed column
-over one is `case when showing_f then <it> end`, null and never worked out
-where hidden. Writes reach the rows they reached: a field every read rule
-grants is as exposed to an update rule wider than the read rules as every
-field was before field lists. A stream keeps a digest of each row as sent
-(`sse::Seen`) and sends no row a write left showing the same, which would
-tell it when a hidden field changed, as the scoped poll's content tag
-keeps it from a poll. PostgreSQL's column privileges are a role's, the
-same on every row, and refuse a statement naming the column, `SELECT *`
-included; a per-row column is a view of `CASE WHEN` columns, whose
-`WHERE` reads `NULL` where this reads false. A token none of whose rules
-name fields takes the path it took (`Scope::fielded`, one bool a
-statement, its mask `None`, its plain `get`s through `query_json`): in
-eight ABBA turns against main a scoped `set` in process took 1 988 ns
-against 1 981, over HTTP 26.9-27.2 us against 26.8-27.1, and `make
-requests-bench` stayed at 0.022 ms a row by id either way. The mask goes
-out beside the statement (`rewrite_with`'s out-parameter): returned in a
-pair, the kilobyte `Statement` was copied twice more, 1 990 -> 2 060 ns.
-One whose rules do name fields pays its rules over each row answered:
-a row by id 2.12 -> 2.75 us in process and a page of twenty 12.6 -> 15.1
-(0.13 us a row), over HTTP 26.0 -> 28.0 and 34.4 -> 39.5 us, the rest of
-that the stored-bytes path a masked `get` gives up. Each attack is
-a test of `tests/fields.rs` (and `mcp.rs`), every one failing with its
-part of the holding taken out. Native only: the browser module is the
-same to the byte.
-
-**A rule may read another collection, answered before each statement**
-(`access.rs`: `inner_gets`, `ring`, `Scope::held`, `Scope::bound`).
-`positions read where courier in (get orders select courier where
-customer = $jwt.sub and ...)` lets a customer read the courier carrying
-their order; a rule took no `in (get ...)`, since `admits` tests a lone
-document inside the `Check` hook, where no query runs (`eval` refuses an
-`InSelect`). `$jwt` binds inside the inner `get`'s `where`, and nowhere
-else in it (`max_param` of the rest, at startup); the inner `get` is held
-to the token's read rules on its collection once a token (`held`, from the
-rules as bound: none granting `read` is `false`, no rows, as PostgreSQL's
-RLS gives a policy's subquery none of a table no policy grants -- refused
-as missing, it would fail every read of `positions`). Rules reading each
-other's collections at any depth and whatever their roles, a `*` rule
-reading one, `new.` or `expired()` inside one, are refused at startup
-(`ring`). Under the lock that runs a statement, the rules of the
-collections it reads or writes (`statement_reads`) are answered as the
-`in` lists they are (`bound`, through lib.rs's `scoped_under` and
-`run_bound`): the statement then holds lists the engine reads as any, and
-`within` installs the bound scope, so `Check` -- an insert's document, an
-update's pair, a transition's, an upsert's row written over, `answering`
--- tests by them; and the mask (`fields::hold`'s `showing_f` guards and
-`case` wraps, made by `rewrite_with` over the bound rules) and its
-application (`Scope::shown`, called on the bound scope), a stream's view
-and digests, are the bound scope's too: a rule naming fields that reads
-another collection shows each row the fields of the rules admitting it as
-their lists stand, where unanswered `eval` refuses the `InSelect` and the
-rule admits no row asked of alone (`tests/reach.rs` fails with either the
-statement's or the stream's bound scope taken out). The inner `get`'s own
-fields are the policy's, not held to the token's field lists: its list is
-never shown, only what it admits. The rewrite before the lock stays, with the rules
-unanswered: it refuses a scoped schema change before `Database::maintain`
-could build it beside the database, and it is what a held write is planned
-from (`waits::plan`), so its look reads what the rule reads and a write
-there wakes it. A `/batch` answers them for each line (a claim, then the
-read the claim opened, one round trip), a read loop and a read batch again
-for each lock they take, the MCP tools as `/query`. The list is held to
-`MAX_CLAIM_VALUES` and refused past it, never cut (`listed`: the inner
-`get` read up to 1 002 rows, and grouped by its field for its distinct
-values only when it fills them -- grouped every time, a `set` under such
-a rule took 4.5 -> 5.1 us). A scoped stream of a collection whose rules reach out
-(`sse::Reach`) binds them again under each look's lock where a collection
-they read was written since its change (every look where an inner `get`
-reads the time), runs the shape where the list moved and diffs by id
-against what it sent (`enter_and_leave`), a row leaving a deletion only of
-a row it was sent: a customer's stream gains the courier as the order is
-claimed and loses them at the delivery, no write to `positions` between.
-It costs one inner `get` a statement -- `make policy-bench`, a crew's
-bucket of two: a `set` 2.1 us over a plain rule in process, 4.1 against
-2.0, a read by id 1.7 (3.9 against 2.2), over HTTP 4.7 and 4.3 us of 32.0
-and 30.6 -- and a stream one at each write to what its rules read: beside
-10 and 100 scoped streams a write, half of them to `orders`, took 162 us
-and 1.89 ms of the process's CPU against 129 us and 1.65 ms under a rule
-naming the courier as a claim (`ARGS=streams`), every scoped stream
-looking at every write either way; examples/dispatch's beat, which writes
-`orders`, beside 50 customers following `positions` so took 1.94 ms
-against 0.69 with the courier's point on the order, so Plover keeps
-`courier_loc` and reads the courier's name through such a rule, its code
-withheld by a field list (`ARGS=beats`). A token with no such rule runs
-as it did: `Who::reaches_out` is a field read and the rest is untouched
--- the policy bench's common sides in four ABBA quartets against main on
-a quiet machine, a `set` in process 1 313-1 335 ns against 1 312-1 327
-under the server's token and 1 975-2 012 against 1 976-2 014 under a
-plain rule, over HTTP 25.1-25.4 us p50 against 24.8-25.3 and a read by
-id 23.7-23.9 either way; `make requests-bench` in three quartets, one
-client the same to the microsecond and eight inside the spread. A read
-in process moved 1-1.5% either way as the bench's own functions were
-laid out (the server token's reaches nothing this changed, only
-`Database::query`), and nothing below fenec-http changed: the browser
-module is the same to the byte.
-
-**A token is bound to the tenant it names** (`Scope::reaches`,
-`route_tenant`). The policy is the node's, not a tenant's, so `owner =
-$jwt.sub` matched alice's rows in every tenant's file: a token minted for
-one tenant read and subscribed to every other, on its node and through the
-router. On a `--dir` node a JWT reaches `/t/<t>/` only when its tenant
-claim (`--jwt-tenant-claim`, `tenant`) names `<t>`, a text or a list
-holding it; one naming none is 403 unless `--jwt-unbound-tenants`. It is
-asked once in `route_tenant`, before the tenant is looked up -- so a
-refusal says nothing of which tenants exist -- and every route below the
-prefix passes there: a new one cannot skip it. The router forwards
-`Authorization` and holds no keys, so the node enforces it. A tenant is
-created with its schema through the router (`PUT /_shard/tenants/<t>
-{schema}`, FenecQL text read before anything is placed, applied on the
-node by `POST /_admin/tenants/<t>/schema` with the admin token the router
-holds, once the lease names the tenant, and the tenant taken back off the
-node and the directory when refused): applying it took the nodes'
-`--http-token`, which reaches every tenant, so the app creating tenants
-held it. A tenant's
-database installs the `Check` hook as a single one does
-(`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
-and a scoped write to a tenant went unchecked.
-
-**An empty token is no token.** Every check reads a request carrying no
-`Authorization` as the empty token (`unwrap_or("")` before the constant-time
-compare), so an empty token configured matched everyone: an empty
-`FENEC_SHARD_TOKEN` -- an environment file's line left blank -- opened
-`/_shard/` and passed the router's check against a public address with no
-token, and an empty `--admin-token` opened `/_admin/`. Every token and key
-variable is read through a filter, set and empty being unset
-(`env_secret` in fenec-server, `env` in fenec-shard's main,
-`FENEC_HTTP_TOKEN` and `FENEC_SHARD_ENTRY_TOKEN` as they were), and every
-token flag given empty is refused at the start (`--http-token
-"$TOKEN"` with `TOKEN` unset), as is an empty JWT secret's file; the
-library holds an embedder to the same -- `Config::settled` in each
-`Server` constructor, `Router::assemble`, `Replication::new` and
-`Tenants::replication_token` take an empty token for none. The archiver's
-`FENEC_REPLICATION_TOKEN` is unset when empty and its `--token` refused,
-and an empty key file (`--key-file`, `FENEC_KEY_FILE`) is refused, never
-none, which would write an archive in the clear. `tests/tokens.rs` in
-fenec-server, fenec-shard and fenec-cli and fenec-http's
-`tests/empty_tokens.rs` fail without it. A node also reads `--admin-token`
-from `FENEC_ADMIN_TOKEN` and a router `--replication-token` from
-`FENEC_SHARD_REPLICATION_TOKEN`, the two that had no variable, so no token
-need be on a command line `ps` shows.
-
-**A tenant is held to its quota by its node, a block as it lands**
-(`fenec_http::quota`, `fenec_core::engine::limit`). A node's tenants
-share its disk, memory and threads, and only `--max-connections` and
-`--max-memory` bounded them together. The node's flags
-(`--tenant-max-bytes`, `-rows`, `-streams`, `-requests`,
-`--tenant-writes-per-sec`, `--tenant-write-bytes-per-sec`) are every
-tenant's, and a tenant's own set (`PUT /_admin/tenants/<t>/quota`, kept as
-`<t>.quota` beside its file, written beside and renamed) goes over them, 0
-for none. The file's bytes (`appended`, no system call) and the rows of
-its collections (`Database::documents`, the `_`-named being the server's)
-are asked as each block lands (`Database::set_limit`, a `Landing`): the
-record's length is known to the byte there, so a block that would take the
-file past its quota is put back as a failed one is, 507 -- asked before
-the write ran, one `set` over every row would double a file at 99% of it
--- and so is each spill of a block past 16 MB, before it is written, or
-every refused block left its spills dead in the file past the quota. A
-block that only takes away (`grows` false: deletes, a drop, the server's
-own rows, a keyed `del`'s key among them) always lands and a `compact`
-always runs, and a file within a quarter of its quota is compacted by the
-node once an eighth of the quota is dead (`link::quota_policy`), where the
-policy every file has waits for 64 MB and a tenant at a 10 MB quota would
-have deleted to no avail. Streams (subscriptions, `/_changes` waits,
-`Fenec-After` waits -- once `after` has looked and must wait, its `slot`
-taken then: taken for every request sent with the header, a tenant whose
-live queries' subscriptions filled its quota, 25 of a default node's
-connections, had every read after a write the node held refused 429, each
-run of a live query reading near and every SDK's read-your-writes read
-that reached home, `tests/quotas.rs` failing with the slot taken first;
-a request without the header looks once as before: `make requests-bench`
-in three ABBA quartets under the bench lock at loads of 3.4-4.9, a row by
-id 0.022 ms p50 in every run either way, eight clients 143.6-147.2k a
-second against main's 143.9-147.4k, a put 0.022-0.023 ms and 124.9-129.2k
-against 0.022-0.023 and 127.5-128.6k, one branch run at a load of 4.7 left
-out), held writes (`held`, `Fenec-Wait`'s: a plan sizes how
-many workers wait apart from how many dashboards stream, and counted
-together forty couriers waiting left a dispatcher's map no stream to open)
-and requests in flight are counters a request takes in `serve_connection`,
-`respond` and `handle_tenant`, only where the quota is set; rows and bytes
-written a second are token buckets a second deep, a write let through
-where it is known to be one (`quota::writing`, a thread-local as
-`access::within` is) while a row's worth is left, and charged by the limit
-as it lands -- the record's writes to the app's collections
-(`Landing::writes`, `Database::app_writes`: an `Idempotency-Key`'s row is
-the server's), on a request's own thread alone (`writing_here`: the sweep,
-a compact, a replica's apply are the node's) -- so a write larger than a
-second's worth goes through, the next waits its debt out, and a write that
-wrote nothing costs nothing: taken as a write started, 45 claims held at
-once by a fleet on a small plan were refused for `writes` before any for
-being held. A held claim the rate refuses as it is to run stays held
-(`Ticket::pause`, `rated_out`, `Held::write_wait`) and runs once a row's
-worth is back, rather than come back at the end of every group. 429 with
-`Retry-After` in whole seconds rounded up, as HTTP has it, and
-`retry_after_ms` the wait itself (`quota::millis`): a bucket of 600 a
-second refills a row in 1.7 ms, and fifty couriers told a second waited
-fifty seconds between them. On a `--dir` node that sets neither
-`--tenant-max-streams` nor `--tenant-max-held`, each is a quarter of
-`--max-connections` (`quota::shared`, logged at the start): every stream
-and held write is a connection and its thread, `--http-max-streams` counts
-a database's own -- each tenant's on a node, not all of theirs together --
-and nothing counted a tenant's held writes, so a hundred workers of one
-tenant took every connection of a default node and its neighbours were
-answered 503. Every refusal carries `Fenec-Quota`
-and `"quota"` (with `"retry_after"`, a rate's `"retry_after_ms"` too, which
-SDKs reading no header take),
-and `quota::noted` counts it by quota (`fenec_quota_refused_total`, never
-a tenant label) and logs it as an audit `quota` event; its message names
-the bound, never what the tenant holds, so a scoped user is told the
-tenant is full and not how many rows the others make. Left out: memory
-(`memory_bytes` counts what has been built, which a read changes), a
-statement's time (the engine stops no scan) and rows per collection. The
-router enforces nothing -- it parses no query, and a tenant lives on one
-node -- but keeps each tenant's quota in its directory's `quotas` and
-sends it to the tenant's node, standby and replica, to a move's target
-before the flip, and to a promoted copy again. The tests hold eight
-writers to a file's quota and eight to a rows quota exactly, and a tenant
-at its streams or requests quota beside another answered, by what each is
-answered. A lone put held to bytes and rows took 593 ns against 566 in
-process, and 618 with the bytes bucket's mutex and clock besides; over
-HTTP a tenant with every quota answered as one with none, reads 20.9 us
-either way and writes 23.7 against 23.6 (`make quota-bench`, in turns).
-And a tenant with none costs nothing measurable: against main in ABBA
-turns, `make requests-bench`'s one client stayed 0.021-0.022 ms a row by
-id and 0.020-0.023 a put (main 0.022-0.029 and 0.022-0.029), eight
-clients' 137-144k and 115-121k a second inside main's 122-143k and
-89-153k; `make shard-bench`'s tenant request 19.5-21.7 us straight to the
-node and 43.7-46.0 through the router, main 19.9-21.8 and 43.6-45.7, in
-twelve runs before the machine grew busy. The limit is native only, as the
-fence is: the browser module grew 63 bytes, the new error's words, and
-brotli made it 49 smaller.
-
-**fenec studio is a page with no authority of its own** (`studio/`,
-`fenec_http::studio`, `--studio` on `fenec-server` and `fenec-shard`; off,
-`/_studio/` is a 404 as an unknown path is). Plain ES modules and CSS with
-no build step, importing `web/client.js` as any page would; the files are
-embedded by `include_bytes!` under fenec-http's `studio` feature, which the
-two binaries turn on and the shell does not: +210 KB of each release binary
-on aarch64-apple-darwin, the files 193 KB of it, and the later views 116
-KB more of `fenec-server` and 99 of `fenec-shard`, their files 106 KB.
-They are served before any token is asked, with a strict CSP (`script-src 'self'`, no inline script,
-`connect-src 'self'` and the one `--studio-connect` origin, which is
-checked to be an origin since it is written into a header), `DENY` framing,
-the page `no-store` and the rest revalidated by an `ETag` of their bytes;
-the names are not hashed, since the modules import each other by name. The
-token is pasted into the page, kept in its tab's `sessionStorage` and sent
-as a client sends it, so the server's scope rewrite holds the grid, the
-counts and the facets to a scoped token's rows. Every statement is written
-in `studio/statements.js` -- the later views' in `statements-views.js`,
-under the same rules: values as parameters, a name refused unless it is
-one FenecQL writes, the typed `where` held inside parentheses it cannot
-close; writes are `/batch`es under an `Idempotency-Key`, a cell's `set ...
-where id = $2 require 1`, so a row deleted meanwhile is a 412. `GET
-/_whoami` is what it shows a token by: `open`, `full` or `scoped` with the
-rules that apply to it, the filter as the policy writes it
-(`Scope::summary_into`). The grid reads 100 rows a block, the block after
-one in id order by `id > $last`, a jump or an order by offset, and draws
-only the rows in view: a scroll down 100 000 rows and back took no long task,
-the longest frame 18.7 ms in headless Chrome. Its first load is 65 KB of JS
-and CSS gzipped (`site/build.py` holds the docs to it), served uncompressed.
-The query editor, the schema, the live rows and the admin view are modules
-fetched the first time each opens (`app.js`'s `LOAD`, their stylesheet
-`views.css`): 19, 19, 7 and 13 KB gzipped with what they share, none of
-it on the first load (`statements.test.mjs` holds both). The editor runs
-the text as typed -- cut at each `;` outside strings and comments, one
-statement to `/query`, several one `/batch` -- and shows the status,
-`Fenec-Seq`, `X-Request-Id` (exposed to CORS for it) and `explain` of a
-`get`; it is coloured by `studio/highlight.js`, `site/highlight.js` with
-build.py's rules written in (`make studio-highlight`;
-`site/test_highlight.py` refuses a stale copy), whose mirror is text
-nodes, never `innerHTML`. The schema view shows a collection as the
-engine writes it (`GET /_schema?as=fenecql`) and every change as its
-statement and `/_schema/plan` of the collection as it would be; a drop
-runs once its name is typed, and a text box's `change` on blur no longer
-asks the plan again, which held the apply button back. The live view is a
-subscription of the typed shape, refused past 10 000 rows since its seed
-holds them all; the admin view, for the server's token, reads
-`/_stats/statements`, `/_metrics` and on a router `/_shard/tenants?bytes`
-(each node's `/_admin/sizes`). The site's playground is the same studio
-over a database in the page: every view reads through `state.db`, one
-surface -- `run`, `batch` and `subscribe` as `FenecHttp` has them,
-`request(path)` for an answer shown whole, `stats()` -- which
-`connect.js`'s `Remote` answers over HTTP (its `request` the views'
-`kit.js` code, fetched with them) and `local.js`'s `Local` from the
-browser module in a dedicated worker (`worker.js`), as a server would
-(`engine.js`): `/query`, `/batch` as one block over calls
-(`Fenec.batch`, the module's `fenec_block`), `/_schema` and
-`?as=fenecql` (`Fenec.describe`, `fenec_schema` modes 3 and 4),
-`/_schema/plan` (the JSON description written as FenecQL, which alone
-the module reads), every refusal with the status `api::status_of` gives
--- a parse's message kept whole, as a server keeps it -- and a
-subscription as a `Fenec.live` of the shape whose differences are the
-change. The token, the tenant, the admin view and the file's sizes are
-left out rather than faked, "Running in your browser." where the token
-was, with Keep it in this browser (`persist`, off by default) and Reset
-data. `studio/test/transport.test.mjs` sends the same statements, batches,
-schema requests and a subscription's writes to a debug fenec-server and to
-the module and holds every answer equal; a server's change also names as
-deleted a written row its shape never held, which a view passes over, and
-the test drops those. `site/build.py` serves the studio's own files in
-`dist/studio/`, minified and named by their hash with every import
-rewritten, the page `studio/index.html` with `data-mode="local"`, which
-`app.js` takes to wait for `site/playground.js` to call `local(db,
-{examples, first})`, and `local.css`; the playground frames it between the
-site's header and footer, since both stylesheets name `.top`, `.btn` and
-`--sun`, and `_headers` lets the site alone frame `/studio/*`. A
-server's first load names none of it (`statements.test.mjs`) and grew
-1.1 KB gzipped for `Remote` and the branches; the module 3.4 KB, 1.0 KB
-brotli, `describe` 1.5 KB of it. The playground's studio is 72 KB of JS
-and CSS gzipped beside the module's 200 KB brotli, its first answer
-150 ms after the page is asked for with the cache off on this machine and
-1.6 s over a throttled 4G, Lighthouse 98, 100, 100 on a phone.
-`make studio-test` runs it in Chrome (puppeteer-core, `studio/`'s one dev
-dependency) against a debug server, a tenant node and a router; on macOS
-Chrome 148's new headless mode never answered puppeteer's clicks, so the
-harness prefers the headless shell, and it builds the site and drives the
-playground as well (`local.test.mjs`). Before a process's first launch the
-harness reads Chrome's own files through (`warm`): on a fresh GitHub runner
-a cold launch faulted its binary in for 5 to 20 s of the 30 puppeteer waits
-for its endpoint, and once past them every e2e test failed in its hook;
-read first, 457 MB in 2.5 to 13 s, the launch took 0.2 to 1.6. The router
-run's one timeout did not come back in twelve runs at a load of 27 (busy
-loops on every core, three suites at once); a run filtered by name charges
-its first test with the `before` hook's 100 000-row seed, about 10 s, which
-is the hook's and not the router's.
-
-**An agent's MCP tool is a statement, held to the token as `/query` is**
-(`fenec_http::mcp`, `fenec-server --mcp`, `fenec mcp`). One `answer`
-serves the stateless 2026-07-28 revision -- its version and the client's
-capabilities in every request's `_meta`, `server/discover`, no session --
-and the handshake revisions 2025-11-25, 2025-06-18 and 2025-03-26 (an
-`initialize`), without a session either: the official TypeScript client
-of October 2026 opens in the old era unless told. Streamable HTTP is
-`POST /_mcp`, its underscore keeping it out of a collection's way as
-`/_metrics`'s does (a tenant's `/t/<t>/_mcp`, which a router forwards as any
-tenant path; GET and DELETE 405, a batch refused, an answer one JSON
-object, never a stream), with the 2026-07-28 headers held to the body
-(`-32020`); stdio is `fenec mcp --file` (`serve_lines`) and `--url`
-(`bridge`, the token from `FENEC_TOKEN`, never argv). The tools are
-`schema`, `search` (`match`, its `fuzzy` and `prefix` too, `near` or
-`fuse`, a snippet in `**bold**`),
-`query`, `get`; `write` with `--mcp-write` (put, insert, set and del:
-never a schema change or a compact, by any token); `remember`, `recall`
-and `forget` with `--mcp-memory`, whose collection `remember` makes at the
-first memory (`memory_schema`: `expires timestamp @ttl(1ms)` for a
-memory's own expiry, the vector field added at the first vector). A
-filter a model writes is parsed alone, `get <c> where <raw>`, and refused
-unless the `Select` is the bare one with a filter (its `PartialEq`), its
-condition put into a statement built here, never its text; names are
-checked against FenecQL's rule, values are parameters. A read past
-`--mcp-max-rows` is asked for one row more and refused (413), one past
-`--mcp-max-bytes` refused, never cut: a model told nothing of the cut
-takes half an answer for the whole. Refusals are the tool's result with
-`isError` and `/query`'s status, which a model corrects from; an unknown
-tool or a malformed call is JSON-RPC's error. The origin is asked before
-the token, and a server with no token answers only a `Host` naming
-localhost or an address, which a rebound DNS name cannot. A served
-session reads pinned and writes through `handle_query` (read-only mode,
-quotas, the ceiling, the fsync); a local one (`Run::local`) runs under the
-lock -- a function pointer, not a flag, since a flag kept `/query`'s path
-in the shell: `fenec mcp` added 243 KB to `fenec` with it (`maintain_with`
-alone 24 KB) and 130 KB without, `fenec-server` 97 KB, `fenec-shard` and
-the browser module not a byte. `<file>.lock` (`fenec_abi::lock`, moved
-from fenec-ffi) is taken by `fenec mcp --file`, `fenec-server --file` and
-the native library alike, so any two refuse each other. Calls are held to
-`--mcp-calls-per-sec` by a scoped token's subject or the caller's address,
-counted in `fenec_mcp_tool_calls_total` once a process serves MCP, and a
-write tool's call is an `mcp` line of the audit log. A row by id costs
-3.8 us through the `query` tool against `/query`'s 1.2 in process, 21.9
-against 17.7 us p50 over HTTP, a search 1-2% more (`make mcp-bench`);
-a server without `--mcp` pays a comparison a request, and `make
-requests-bench` in eight runs in turns against main moved inside its
-own spread (a row by id 0.027 against 0.028 ms p50).
-`integrations/mcp` holds it to `@modelcontextprotocol/client` in both
-eras over both transports, with every configuration `mcp.html` gives
-(`make mcp-test`).
-
-**A server's `create index` and `compact` run beside the database**
-(`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied
-under the read lock, the build holds no lock, and the write lock is taken only
-to apply the writes made meanwhile and put the result in place. Those writes
-are known exactly, not from the change ring a long build would overflow: every
-write passes through `Database::note`, which hands the id to the `Tail` of each
-maintenance on that collection -- so a write path that skipped `note` would
-leave a built index missing it. A schema change there (another index, a drop)
-fails the maintenance rather than installing what no longer fits. At 100 000 x
-128 reads waited at most 21 ms through an HNSW build and 30 ms through a compact
-(file rewrite included), against the full ~20 s under the write lock. Over a
-mapped file a compact copies no record: the graphs holding tombstones are
-rebuilt beside the database, then each store is cloned under the read lock --
-the records in the old file and the sealed segments shared (`SegmentBytes` is
-an `Arc`, in the browser module too now), the index copied, each graph's record written -- the live
-records written into `<file>.beside` with no lock held and fsynced, and
-the clones relocated onto it without reading it back (`relocate_live`). Under
-the write lock only the documents written meanwhile go in, as a data record
-inside the image, whose header then takes the counter as it stands, and the
-side file is renamed into place (`Sink::adopt`, through a primary's `Tee`
-too). What they superseded stays in the new file, dead, for the next compact.
-At 1.8 million x 128, a 1.1 GB file, writes waited at most 24 ms against 1.22
-s, for a peak of +67 MB; cloning the segments rather than sharing them held
-the read lock 508 ms and took +1.16 GB. One side file at a time; a collection
-created, dropped or altered meanwhile fails it. Only a lone statement takes
-this path; a batch, the shell and `execute` hold the lock.
-
-**A file compacts itself once half of it is dead** (`engine/garbage.rs`).
-An update appends the whole record and leaves the version it replaced dead
-until a `compact`, which nothing ran on its own: under YCSB's updates a
-million 1 KB records grew a buffered file to 4.7-6.5 GB on an 8 GB machine,
-a live record a few to a page among dead ones, and one read in five waited
-for the disk (C at one thread 30.1k ops/s, 443k over the file freshly
-loaded). `Database::garbage` is the file's bytes as written (`appended`)
-against the live records' (`Store::total_bytes - dead_bytes`, which the
-stores counted as writes landed already and an image's index carries) and
-what the last compact kept besides the documents (`kept`: schemas,
-counters, graphs, the file less every record the stores hold -- the
-versions a compact beside the writes copied and saw written over are dead,
-and counted as kept they left a 307 KB file of 53 KB of rows not due
-again) -- a sum over the collections, nothing added to the write
-path: a lone put, put over and del measured 570/700/532 ns in memory either
-way, and 666/797/595 against 660/785/593 over a mapped file, inside the base
-build's own spread. `CompactPolicy` is the one rule (half the file dead and
-64 MB, `compact_due`), `compact_when_due` a look under the read lock and a
-compact beside the database, `Compactor` a thread that looks every 5 s. The
-look waits for a write under way: under `try_read` 10 looks in 12 runs of
-`make compact-bench` found the lock taken and put a due compact off 5 s,
-the file growing 100-160 MB a second meanwhile.
-`fenec_http::link` runs one thread over every database the process serves
-(`--auto-compact <ratio>|off`, default 0.5), apart from the graph keeper so
-its graphs do not wait out a compact of a gigabyte; the native library
-starts a `Compactor` a file (`FENEC_OPEN_NO_AUTO_COMPACT`); a replica and a
-following tenant compact too, since `may_write` lets a compact run there and
-their files grow with every update sent, and an image adopted during a
-maintenance marks every tail changed (`Tails::all_changed`), or a replica's
-compact put back what it copied before the image. The browser has no thread:
-`snapshot` writes the live records alone, so a page's persisted image drops
-them, and its memory keeps them until it reloads. The swap was the cost:
-the writes made during a 4-6 s compact of a 1 GB file, 200 000 records, were
-copied under the write lock (409-811 ms); they are copied in rounds before
-it, the ids drained from the tails at once and their documents looked up
-4 096 at a time under the read lock and copied after it (`Store::snapshot`:
-a payload in the file by its place, which an append never moves, one in
-memory copied out; 95-245 us held at the median, 3.1 ms at most) -- copied
-under it, one round of 408 708 held the readers 592 ms behind the waiting
-writer, and with its pages touched first a writer at 170-180k updates a
-second ran at 1.5-37k through the worst 100 ms of a 1.2 GB file's compact,
-83-144k now -- until a round finds fewer than 1 000. The rounds' frames are
-handed over to the side file before the swap (`Beside::hand_over`; left to
-the first write after it, 400 MB under the write lock, 158 ms), every page
-of the new file is asked for 16 MB at a time ahead of its reads and read in
-before it (`fs::touch`, `MADV_WILLNEED`: a fault at a time a 1.2 GB file
-took 3.0-3.3 s on this 8 GB Mac, the writer beside it at 11-15k, and its
-pages were out of memory again by the swap, the 2 s after it at 21-39k;
-asked for, 0.6-0.8 s and 90-150k; left to the readers, the read p50 went 2
--> 100 us for two seconds), and the stores it replaces are dropped after the
-lock (their unmapping was 10-15 ms of it). Under the lock: the last few ids,
-the side file's fsync and the rename, 6.1-12.6 ms over a 1 GB file and
-13.7-15.7 durable (`make compact-bench`: 5M updates of a field over a
-million 1 KB records from one writer, buffered, the file 1.03 -> 2.1-3.0 ->
-1.1-1.6 GB three or four times where it reached 6.2 GB without, and after
-the updates 435k reads/s from the first second where the 6.2 GB file
-started at 19k and took 25 s to 400k). Over nine runs each in turns, the
-median 100 ms of a compact went 27.1k -> 30.6k, its worst 1.1k -> 3.6k, a
-compact 10.9 -> 7.8 s, the reads during it p99 2.3-6.5 -> 1.3-5.3 ms; at
-250 000 records, whose file fits, 143k -> 153k, the worst 16.9k -> 129k
-against 180k with none, a compact 1.0 -> 0.3 s, the reads p99 0.5-1.3 ->
-0.14-0.35 ms and 52 -> 18 ms at most. Paced to half and to a quarter of its
-speed a compact left the writer where it was (30-35k) and took 56 and 95 s
-against 10; at utility QoS its reads were throttled behind the writer's and
-it took 138 s; with its side file uncached (`F_NOCACHE`) in a compact that
-began once the file had outgrown the cache (below), or at utility QoS for
-the CPU alone, nothing moved. A database
-read into memory compacts beside itself too, the live records copied into
-fresh segments with no lock held; it used to copy them under the read lock
-and build every index again, though the indexes are keyed by id.
-
-**A file is compacted before it outgrows the page cache** (`cache.rs`,
-`CompactPolicy::memory`, `due_in`). There is no cache of fenecdb's own, so
-what the reads need in memory is the file's pages holding a live record --
-and under updates at uniform keys that is every page until a compact: a
-million 1 KB records updated until the file stood at 2.1 GB left one on
-every 16 KB page and 94% of 4 KB ones (a simulation of the bench's keys).
-Past the cache every read and update waits for the disk in turn, whatever
-is dead: in a container held to 2 GB (`docker run --memory 2g`), at half
-the file dead, the file stood over 2 GB 69-74% of the time and 5M updates
-took 358-511 s, 3.5-4.1k a second at the median 100 ms against 79k while
-it fitted, 0.81-0.90M major faults, compacts of 38-99 s; on this Mac beside
-1 GB wired by a ballast (`mlock`), 82-535 s. So a file is compacted too
-once a third of what the compact writes is dead -- four bytes written a
-byte updated at most, against two -- where its live records fit the room
-the page cache has for it (`cache::room`) and either the file has reached
-three quarters of that room (`ROOM_SHARE`) or the process takes 500 major
-faults a second (`cache::faulting`, `getrusage`, over a second or more).
-The room is exact on Linux -- `MemAvailable`, and a cgroup's limit less
-what the group holds that is not file pages, from its own group up -- and
-not on macOS, whose figure (physical memory less the apps', wired and
-compressed pages) grows under the pressure as it compresses the apps:
-2.4-2.9 GB while a 1.5 GB file was read from the disk at 5-7k faults a
-second. The faults are the macOS half: beside the ballast, the rule
-without them took 226-361 s, with them 191-260. A compact's own
-faults -- the old file's records read, the new file read in -- are
-forgotten once it is done (`cache::forget_faults`): counted, the next
-look found the process faulting, and a 1.6 GB file that took none was
-compacted every 6 s. A compact whose old and new files would not fit
-together, or that starts while the process faults, writes the new one past
-the cache (`SideFile::past_cache`: `F_NOCACHE`, or synced and
-`POSIX_FADV_DONTNEED` every 64 MB, since written pages stay until they are
-on disk) and reads it in after the swap rather than before: through the
-cache its pages pushed out the old file's, which the reads need until the
-swap, and the writer ran at 5-6k updates a second through a compact, 8k
-with the pages dropped once the image was written, 18-25k dropped as it
-went; read in before the swap, the writer ran at 6.2k a second through
-a compact and the swap held the lock 24-60 ms, after it 18.6k and 6-14 ms.
-With all of it the container's 5M updates took 80-100 s against 358-511,
-the file at most 1.9 GB, 34-39k major faults against 0.81-0.90M, compacts
-of 3-6 s, the reads during them p99 0.44-0.49 ms against 4.6-6.5 (max
-113-517 ms against 220-534: a read meeting the new file as it comes in
-after the swap), for 3.0-3.2 bytes written a byte updated against 1.9-2.0;
-on the Mac, 191-260 s against 82-535 and 3.3-3.6 bytes written a byte --
-macOS gives a growing file more of the machine as it compresses the apps,
-which main's 82 s run had and its 535 s one did not, and a file kept small
-is not given it: steadier, never the best case. A file that fits moves
-nothing: 250 000 records (29-31 s, the median 100 ms 174-181k, through a
-compact 153-156k), YCSB A, B and F in process (with the memory free A at
-16 threads 82-92k -> 133k, the rest within the runs' spread; beside a 1
-GB ballast on a quiet machine, against the same build with `memory` off,
-two ABBA quartets, A at 1 thread 50-99k -> 101-148k and at 16 47-60k ->
-72-127k, B at 16 197-460k -> 475-576k, F at 1 78-90k -> 111-202k and at
-16 71-83k -> 102-115k, B at 1 313-476k against 412-477k -- one pair
-beside other agents' builds had A at 1 at 29.7k -> 24.1k),
-`make concurrency-bench` and `make requests-bench` in ABBA turns as on
-main, the browser module byte for byte (`cache.rs` is `std-fs`'s). Rejected: `MADV_RANDOM` (Linux reads 128 KB
-around a fault, the neighbours the next reads want: 806-811 s, 561-608
-with the rule), a look every second rather than 5 s (13 compacts for 10,
-3.8 bytes written a byte, no faster), writing an update over its old
-record (its torn write is no torn tail to cut but a corrupt record mid-file,
-and a pin, a handover's `Landed`, the sync log, a replica's apply and the
-archive all take the file as only growing), dropping the pages only dead
-records hold (none, by the count above), a compact ordering the records by
-heat (a uniform workload has none; YCSB's hottest quarter of 16 KB pages
-takes 77% of reads in id order against 96% by heat, which matters only
-once the live records outgrow memory, and E's scans want id order).
-
-**File format** (see README *File format*): every record is
-`[kind][collection-id][length][body]`. The length is written even for an empty
-body and the reader **must** consume it, or the stray byte is read as the next
-record kind. A last record a crash cut short is cut off the file on open
-(`Database::load` says where, `fs::open` and `replication::open` cut): only
-skipped, it swallowed the next append, an acknowledged write lost on the open
-after. Only past the checkpoint image, though: an image is renamed into place
-whole, so a record cut short inside it -- or an image longer than the file --
-is refused as corrupt; cut there as a torn tail is, one flipped bit deleted
-every record after it. A tool that only looks (`fenec types`) opens with
-`fs::open_read_only`, which cuts, creates and writes nothing: a server's
-append in flight looks torn from outside. The change counter record (kind 6) is at the front and fixed width;
-the id counter (kind 7) exists so `compact` cannot hand out a deleted id again,
-and in an image carries behind the counter the index of the data record right
-after it (`Store::image_index`) -- each live document's id, payload length and
-place, 4 bytes a document -- which a mapped open takes (`adopt_index`) rather
-than walking the frames' heads, a chain of cache misses: 100 000 x 128 opened
-in 8.4 ms against 14.4, and every reader of the record reads the counter
-alone. Behind its documents the index says where each 16 384 of them end --
-the byte, the id and the place the next share counts from, 24 bytes each,
-and their number (`FRAMES_SPLIT`) -- and an open reads the shares on every
-core, each into its own stretch of the dense id array (`adopt_shares`). Read
-in turn through `get_uvarint` and `insert`, the index was 9.5 ms of a
-million rows' open; a byte read inline and the next id pushed onto the dense
-array (`push_above`), 4.8; in shares, a million rows of no vector open in
-1.3 ms against 10.3 (`make opens-bench`). Ids that would leave the array a
-quarter empty or reach the sparse map are read in turn, as `insert` places
-them, and so is an index whose shares do not read as it says. A binary that
-knows only `FRAMES_MARK` walks the record of a `FRAMES_SPLIT` image, as it
-walks one with no index. Read into memory, a load copies each frame as it stands into the
-segment `append` would put it in (`replay_noting`): framed afresh into a `Vec`
-of its own first and copied again, it was 17 of a 25 ms load, now 9.6;
-the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
-appended records that are not writes; a block (kind 9) holds a record for
-each of its writes: a data record, or a create's, a drop's, an index's or
-an alter's (kind 12).
-A head is written in one place (`head`, the counter's `image_head` aside)
-and read in one (`record_at`), and a walk over a file's records is a
-`Walk` -- a load, a repoint and the search for the last graphs each wrote
-their own once -- which steps over the counter's fixed-width head and
-stops at a record cut short for its caller to judge.
-
-**The HNSW graph is derived data, not a cache.** It is written by
-`snapshot`, `compact` and `checkpoint`, and by a server into its file's tail
-(below) — never on the write path. On open the
-version, dimension, precision and link bounds are validated, and the live nodes
-against the documents holding a vector -- one each, no two of one document,
-and counted by reading every document's field only when the nodes are fewer
-than the documents: the scan was 5.4 ms of a 36 ms open at 100 000 x 128,
-where every document held one. Anything off means a silent full
-rebuild. A corrupt graph can therefore never lose data. It is restored where
-its last record is -- a checkpoint's image holds one after each collection's
-data; `last_graphs` walks the record heads for it first, since restoring each
-record read every vector again -- against the documents as they stood there,
-and the writes after it are applied as the write path would (a touched
-document keeps its node while it holds the same vector, and has it retired for
-the new one otherwise) -- restored after the whole file, one write in the
-tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99.
-An index added in the tail (`create index`) leaves the graphs restored
-before it, as a replica leaves them; reset with the rest, it had the next
-open build them all again. A
-tombstone carries its own vector in the record, since its document may be gone:
-without that, one `del` rebuilt the graph on every open until `compact`.
-`compact` rebuilds a graph holding tombstones and leaves the rest: nothing
-else takes one out, every write that changes or deletes a vector leaves one,
-and they crowd the beam `near` walks. A rewrite touches only the indexes
-whose field it changes (`unindex_doc` and `index_scalar` take both versions,
-and `VectorIndex::insert` keeps a node that already holds the vector): an
-update of a title took the vector out of the graph and back in, 1.89 ms at
-20 000 x 768 and a tombstone, against 0.006 ms now. "Unchanged" is to the
-bit, since `==` says -0.0 is 0.0 and a hash key is the value's encoding. An unfiltered `near` they cut short walks
-again with the beam wider by their number -- no more than all of them can be
-in it -- or searches exactly where that walk costs more than reading every
-vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
-
-**A restore gives back the arena it had, to the bit.** Restoring a graph
-reads each live node's vector out of its document and normalises it as the
-write path did, the flat sum's order and all (`flat_sq`: the 8-strip `norm`
-rounds otherwise, and the graph would be another). One add waiting on the
-one before made that a third of an open, so natively eight vectors are
-summed side by side, each in its own order (`flat_sqs8`), and the links --
-two or three bytes each -- are decoded inline (`graph_varint`), their list
-buffer kept: a checkpointed 100 000 x 128 file opened in 29.8 ms against
-41.0, 100 000 x 768 in 70 against 134, and
-`a_restored_arena_holds_the_vectors_it_had_bit_for_bit` holds the arena to
-the one it restored. The browser loads a 20 000 x 128 image 13% faster from
-the rest; summing side by side gained it nothing there, and would have cost
-0.5 KB brotli. Natively the arena is filled a share of `FILL_SHARE` nodes at
-a time by whichever thread is free, each writing its nodes' slots where they
-stand (`fill_restored`) rather than reading a vector, copying it into a
-batch and pushing it: 100 000 x 128 opens in 16.5 ms against 21.8, x 768 in
-42 against 61, any share from 256 to 4 096 nodes the same. The mapped
-file's pages it reads are most of what is left of that; `MADV_WILLNEED` took
-off 3%. The browser fills in turn: the shares were 1.3 KB brotli of its
-module for the same load. Each document's node is a `DocMap` (`store.rs`),
-a dense array where the ids are, as the store's id index, which the text
-index's lengths share: filled as a `HashMap` it was 2.1 of a 16.7 ms open.
-
-**A graph record is laid out flat.** Versions 7, an image's, and 8, a
-server's tail -- 9 and 10, the aliases added, are what is written now
-(below) -- hold the nodes' documents, flags, levels and level-0 lengths
-as arrays, then every list sorted, its first link in as many bytes as the
-node count needs and its steps in as many as its widest (`put_links`).
-Decoding a varint a link was a quarter of an open; written 4 bytes a link
-and 8 a document, a 100 000 x 128 graph took 12.4 MB against the varints'
-6.2, and a file 5% more. Laid out so, that file opens in 35.9 ms against
-43.5 at 58.97 MB against 58.49, and 100 000 x 768 in 63.6 against 67.5.
-Both layouts are read into the same arrays (`Read`) and the index is built
-from them in one place (`build_restored`);
-`a_flat_graph_record_restores_as_the_varint_one_did` holds 3 to 6 and 7 to
-8 to the same index, which a binary before 7 builds again. The browser
-module carries the reader -- 1.8 KB brotli -- to open a server's file
-without building its graphs again, and loads its own no faster for it.
-Natively a graph of `LISTS_SHARED` (8 192) nodes or more has its level-0
-lists decoded `LIST_SHARE` (2 048) nodes at a time on every core, once a
-walk over the lists' widths has found where each share starts, and its
-levels above beside them on a thread of their own (`lists_in_shares`), each
-share held to end where the next starts: in turn they were 2.6 ms of an
-8.6 ms open at 100 000 x 128, a stretch no other core worked in, and are 1.3
--- the walk 0.7 of it. Below 8 192 nodes the threads cost more than they share: a
-graph of 1 000 opened in 0.197 ms that way against 0.166 in turn. Each width
-of a document id is its own loop, and the flags are checked before they are
-copied: a `memcpy` a document, the arrays were 0.7 ms, and are 0.3. The
-browser decodes in turn as it did, its module 325 bytes smaller raw.
-
-**A batch links in parallel, into the graph it would link in turn.**
-`insert_batch` finds a batch's neighbours on every core against the graph
-before it (`compute_candidates`); `link_batch` then sets each node's own
-lists and groups what they add to their neighbours' lists by list, each
-group applied in node order on whichever thread is free (`spread`). A
-pruning reads only the list it prunes and the vectors, so every list ends
-as linking the nodes one after another left it, and
-`a_batch_links_as_its_nodes_would_one_after_another` holds the graph
-records to that byte for byte over every arena. Linked on one core, the
-pruning was 70% of a 100 000 x 128 build: 10.6 s then, 5.3 after (3.6-3.8
-s since, with NEON's strips and the prefetch, below); 48.9 -> 23.4 s at
-768 dimensions, and 50.6 -> 22.0 s for a crashed file's vectors linked at
-the open. A share of the work a thread left the M1's efficiency
-cores finishing last while the rest waited, so the work goes out an item
-at a time. The browser has one thread and links in turn (`link_node`),
-through the same pruning (`GraphView::pruned`).
-
-**The upper layers are walked with a beam.** A search and a node joining
-the graph walk each layer above level 0 with a beam of four (`UPPER_BEAM`,
-`descend_beam`) and start level 0 from all four, where the greedy descent
-took one node at a time. Over a million 128-dim vectors in 64 clusters it
-left 20 of 1 000 queries in another cluster, and level 0 has too few links
-across clusters for any beam to cross back: 12 found none of their ten,
-and recall stopped at 97.4% from a beam of 200 up to 800. With the beam,
-92.5, 99.1 and 99.8% at 40, 100 and 200 against 89.9, 96.4 and 97.4 --
-pgvector's at the same m and ef_construction 93.0, 97.4 and 97.8 -- for a build
-3 to 7% longer and a search as fast (`make scale-bench`). Both ways are
-needed: in the search alone it gave 98.2% at 100, in the build alone a
-graph the greedy search lost 32 queries in. The browser module grew 150
-bytes brotli.
-
-**`make scale-bench` holds fenec-server to pgvector, each over its own
-protocol.** fenec-server is asked over HTTP by a keep-alive client written
-in the bench crate (`fenec-bench/src/http.rs`), PostgreSQL by the
-`postgres` crate with pgvector-rust's types, with the same vectors and m and
-ef_construction, and each side takes its best way: fenec-server keeps its
-graph as JSON arrays of rows land (`POST /<collection>`), pgvector builds
-after a binary COPY in memory on every core (`parallel_workers`: 768-dim
-vectors live in TOAST, and PostgreSQL planned one process for them), reads
-its index into its buffers and searches a filter with `iterative_scan`; the
-container needs 2 GB of shared memory for that build (`pgvector-up`).
-At a million 128-dim vectors fenec-server loads and indexes in 49.6 s against
-108.5, on 612 MB of disk against 1 432, its engine counting 738 MB against
-PostgreSQL's 1 131 (its container's anonymous memory and the shared memory
-of its buffers, from its cgroup; macOS puts fenec-server's physical
-footprint at 992), answers a beam of 100 with 99.1% recall in 0.141 ms
-against 98.6% in 2.08, a filter keeping 1% in 0.67 ms against 16.1, and
-eight clients at 18 852 queries/s against 2 289; at 250 000 x 768, 39.9 s
-against 79.9 and 99.8% in 0.431 ms against 98.1% in 4.22 (`site/content/docs/benchmarks.html#scale`). The laptop this was
-measured on is a fanless M1 Air, which slows to a third under minutes of
-load on every core: a comparison runs its sides in turns (`--only fenec`,
-then `--only pg`), each after idle minutes, and a figure from a hot run is
-not one.
-
-**`make ycsb` is fenecdb as a general database.** YCSB's core workloads
-A-F written in the bench crate (`fenec-bench/src/bin/ycsb.rs`) rather than
-run through the Java YCSB, to its definitions: ten fields of 100 random
-characters, a read the whole record, an update one field, its scrambled
-zipfian (0.99, FNV-hashed over ten billion items), its skewed-latest for
-D, scans of 1 to 100 records for E. The key is an integer from 1
-(`insertorder=ordered`, no `user` prefix), so each system keys by what it
-keys best by: `id`, `INTEGER PRIMARY KEY`, a `bigint` primary key,
-`_id`; E's scan is `where id >= $1 limit n`, the id index walked from
-the key, no `@sorted`. A key not yet acknowledged is never drawn: an
-insert publishes a bound below its key before it takes one (`Keys`).
-fenecdb in process against SQLite (a connection a thread, WAL, mapped),
-fenec-server over HTTP against PostgreSQL 17 and MongoDB 8, each started
-in a container for its turn and removed with its volume, so the VM holds
-one at a time; `server-docker` is the same server in a container, which
-shows Docker's share -- its network, and an fsync in the VM that is not
-macOS's `F_FULLFSYNC`. Durable is an fsync a write in each engine's own
-terms (a flush and its durability, `synchronous=FULL` with `fullfsync`,
-`synchronous_commit=on`, `j: true`), buffered its default
-(`--sync 250`, `NORMAL`, `off`, `j: false`); C writes nothing and runs
-once. A server switching modes is stopped with SIGTERM, which syncs: a
-kill lost the last 250 ms of the load, and the next update found no row.
-Redis 7 (`redis`, redis-rs 1.7.1, a connection a thread) keeps a record
-as YCSB's own binding does -- a hash a key, `HGETALL` and `HSET`, every
-key in the `_indices` sorted set a scan reads by `ZRANGEBYSCORE` -- but
-scored by the key, not a hash of its text, so a scan reads keys in order
-as elsewhere, an insert's `HSET` and `ZADD` one `MULTI`/`EXEC` and a
-scan's `HGETALL`s one pipeline. Durable is `appendfsync always`,
-buffered `everysec`, and `snapshot` -- its image as it comes, RDB
-snapshots alone, minutes of writes a crash loses -- a mode of its own
-the others pass over (`System::modes`); the default snapshots stay on in
-all three, as Redis's persistence page advises. Its container starts
-afresh for each load, which ends with a `BGSAVE` and a `BGREWRITEAOF`
-run out, so no fork the load made due falls in a cell. After each phase
-a container's memory -- `anon` and `shmem` of its cgroup, read through a
-container sharing its processes, fenec-server's image having no `cat` --
-is a `memory-<phase>` line beside the size. A size read through a
-container or a connection of its own -- fenec-server's in Docker, Redis's,
-PostgreSQL's -- is read once a cell's clients stop, not every 100 ms
-beside them (`System::size_beside`): two `docker run`s a second in the VM
-took fenec-server's C at one client from 3.14-3.17 k to 2.33-2.38 k.
-benchmarks.html's Redis part
-sits between `ycsb redis` markers that `site/build.py` takes out until
-the results hold a Redis cell, its figures written in from the medians
-(`ycsb_redis`); `ycsb/run-redis.sh` is its run, a `--verify` pass first.
-Each cell is 30 s after a 5 s warm-up, and starts once a one-core probe
-runs within 4% of its idle time (`cool`), the probe's ratio written with
-the cell; the systems take turns with three idle minutes between them.
-Latencies go into a log-linear histogram, 64 steps an octave.
-`--verify` holds every answer to what was written (`check`): each
-thread logs its operations and answers into its own `Vec`, and after the
-cell a read must hold, field by field, a value a write that could have
-been the last one left (one ended before it and not followed by another
-that did, or one overlapping it), a scan consecutive keys as far as it
-could see, a write one record -- every write logged, since a read under
-concurrent writes is judged by every write's span, and nothing compared
-in an operation's time. A pass over all six systems found no mismatch
-(`ycsb/verify.tsv`). `ycsb/results.tsv` is the three runs the site
-quotes, appended to and never rewritten -- a run's cell measured again
-counts as its last line, and a run a later one replaced is named in
-`ycsb/superseded.tsv` and counts in no median (`ycsb report`, `site/build.py`)
--- and `site/build.py` holds every YCSB figure on the site to its median
-there, the full grid row by row. Docker's VM syncs a
-write in 0.08-0.10 ms where the Mac's `F_FULLFSYNC` takes 3.9
-(`ycsb/fsync.txt`), so the durable server comparison is `server-docker`
-against PostgreSQL and MongoDB, all in the VM, the native server beside
-them. fenecdb's buffered reads lost to SQLite's after the updates for the
-engine's reason, not the harness's: an update writes the record again at
-the file's end, the file outgrew the page cache, and a profile put 86% of
-a one-thread read on its page coming in (`ycsb/profile-c1.txt`). Runs
-`c1`-`c3` measured fenecdb and fenec-server again with the file compacting
-itself (below; the harness starts the engine's `Compactor` as an app's
-library does, `--no-auto-compact` for neither): C at one thread 30.1k ->
-438k against SQLite's 279k, B 30.8k -> 410k, D 62.6k -> 432k, and fenecdb
-ahead of SQLite in every in-process cell; the buffered file stood at 3.7-4.0
-GB after D, between compacts of a file A grows by 100 MB a second. Official
-YCSB 0.17.0 against the same containers came within -14% to +2% of the
-harness (`ycsb/calibration/`). Docker's network moves from day to day --
-PostgreSQL's C at one client was 3.34 k, 3.00 k and 3.53 k on three -- so
-the one-client server cells were measured again on 2026-10-04 with
-PostgreSQL beside them in turns, under the same run ids (`c1`-`c3`,
-`r1`-`r3`), each cell counting as its run's last line. `make
-roundtrip-bench` took the round trip apart: of a 0.29 ms read in Docker
-about 0.25 is Docker's port forwarding, the server's part 0.023 ms and
-PostgreSQL's bind and execute 0.016, so the published guess that a binary
-protocol answers sooner was not the cause; the durable gap was the fsync
-of a growing file (the sync log, above): durable A 2.24 k -> 3.27 k at one
-client against PostgreSQL's 2.60 k, even at 16. E's scans were
-fenec-server's own -- 213-220 us inside for 50 rows, 37 page faults --
-and a plain `get` written as JSON from the stored rows (below) took E at
-one client 1.03 k -> 1.62 k buffered against 1.34 k, 1.06 k -> 1.82 k
-durable against 1.39 k. B, C, D and E were measured again on 2026-10-05,
-servers and PostgreSQL in turns under the same ids, run 1 again on a quiet
-machine after its idle probe was taken at a load of five; C stays 3.19 k
-against 3.66 k, with each server's part of a read under 0.02 of 0.29 ms
-and PostgreSQL's own B at 2.65 k beside its C: the rest moves with the VM.
-Then every server cell, 1, 4 and 16 clients, was measured in one night,
-2026-10-13 (`rx1`-`rx3`: fenec-server natively and in Docker, PostgreSQL,
-MongoDB and Redis in turns), superseding the servers' `c`, PostgreSQL's
-and MongoDB's `r` runs and the `rd` attempt sized beside the cells: the
-server in Docker leads the other three in every cell but buffered C and
-F at one client, 3.07 k against PostgreSQL's 3.14 k and 2.07 k against
-2.09 k, and Redis in every one.
-
-**A block's `put`s link their vectors together.** A block
-`Database::begin` opened -- a `/batch`, a keyed write -- is natively its
-statements' batch: a `put` in it leaves its vectors waiting
-(`defer_batch`, `Block::waiting`), and they are linked on every core 512
-at a time a field (`LINK_AT`, `link_waiting`), the rest as the block lands,
-before its record is written, so that a block put back after all is put
-back as any other. A search in the block measures the waiting ones
-exactly, as it does a server's backlog, and a rollback drops those its
-undo made tombstones (`forget_waiting`) -- the newest of the waiting, since
-nothing else leaves one while a block is open. A lone statement links as
-it did, and so does the browser module's `run` of several: its one thread
-links a vector as it is written (`DEFERS`), the waiting being 843 bytes
-brotli of it for nothing. Linked a row at a time, as a `/batch` of single puts would have
-them, 100 000 128-dim rows went in at 5.3k rows/s with the graph kept;
-linked together, at 16.0k, and 18.3k as a `/batch` of single puts over HTTP now (`make load-bench`).
-
-**A server answers before its graph is linked.** A server checkpoints only
-on its way down, so a crash after a long run leaves every vector written
-since in the tail, and linking them at the open kept the port closed for as
-long as they took: at 100 000 x 768 never checkpointed, `fenec-server` answered
-its first `near` 67.7 s after it started, and linking at the open still
-took 18.4 s with the lists pruned in parallel (14.9-16.3 s now, below). `fenec-server`, a tenant and a replica
-open with `fs::open_serving` instead, and it answers after 1.23 s: those
-vectors go into the arena unlinked (`VectorIndex::defer_batch`, every vector
-of a graph the open cannot restore too), a search measures each of them
-beside what its walk finds -- so an answer is never missing one -- and
-`fenec_http::link::beside` links them on a thread of its own, slices of
-about 10 ms under the write lock, each at most twice the last (a pace taken
-over a small graph had a slice hold the lock for 112 ms). `near` takes the
-exact scan's 10.5 ms until the 19.2 s of linking are done and 0.31 ms after,
-recall 0.976 against 0.978 (`make reopen-bench`). A checkpoint meanwhile
-writes the waiting nodes flagged -- a node's flag in the flat layout, where
-the varint one, which only the tests write now, took graph record version 5
-and only then -- and an open that does not
-defer links them there. The linking needs the
-lock to let a waiting writer in: Linux's std lock does, while on macOS
-readers slip past it, and four clients asking back to back kept it from
-finishing in eleven minutes -- as they would keep any write waiting. The
-browser has none of it (`vector::UNLINKED`: 1.1 KB brotli).
-
-**A server keeps its graphs in its file.** It checkpoints only on its way
-down, so a crash after a long run left every vector written since the start
-to link again. `fenec_http::link::keep` looks at every database the process
-serves every 5 s, and appends to the tail each graph that changed in 10 000
-nodes since it last reached the file, has none waiting to be linked, and
-whose record the file has grown three times over since
-(`Database::save_graphs`, under the read lock, which keeps the writes out
-while the graph is written). A database whose lock is taken is passed over
-until the next look (`try_read`): a block of 100 000 128-dim vectors loaded
-with the graph kept held the keeper 3.0 to 4.3 s, and every other database
-it keeps with it. The record holds the whole graph, so a bound
-on the linking alone would have a big graph written over and over for a
-little of it; waiting for the linking kept a crash from leaving the nodes
-waiting again. It is a graph record (kind 4) of version 6, 8 laid out flat
-and 10 with the aliases (below), which an older binary does not know and rebuilds from -- it restored a record in the tail
-against the documents the whole file left, and a vector rewritten after it
-kept the links of the one before -- and like the history it moves no
-counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
-leaves at most 10 000 vectors to link, 2.6 s with `near` at 1.56 ms p50
-meanwhile, where every vector waited 19.1 s in the same run with `near` at
-the exact scan's 11.96 ms; the ten records were 33.8 MB of a 372.7 MB file
-until the next checkpoint. Every write waits out a record's read lock, so
-its lists go out a part of `LIST_PART` nodes at a time on every core
-(`put_all_lists`), each link as its eight bytes cut to its width rather
-than a `memcpy` of the width, and the file's sink leaves the record to the
-durability run once the lock is let go (`Sink::append_deferred`) rather
-than write its megabytes under it: a record held the lock 5.0 ms p50 and
-7.9 at most, against 18.3 and 33.3, the same bytes (`make reopen-bench`,
-in turns).
-
-**`/_changes` reads the writes on disk, documents and all** (`cdc.rs`,
-`fenec-server --cdc`; a primary's feed with `--replication-token`). A
-subscription keeps a query's rows and is reseeded past its ring of ids,
-which holds no documents; change data capture has to see every write once.
-So it reads the records the feed keeps for replicas (`Feed::changes_after`:
-from the record holding the write after the cursor, where a replica is sent
-an image) and has the engine read them out a write at a time
-(`Database::changes_in`, native only): numbered as the counter numbered
-them, each document by its collection's schema as the database knows it or
-as a create among the records made it. `since` is the last write a
-consumer has and `Fenec-Next` the last one an answer holds; a cursor inside
-a block's record goes on after the write it names. `Fenec-Seq` on every
-answer is the last write the database holds (`Feed::seq`, read after the
-page, so never short of it), on disk or not and of the collections the
-stream leaves out: a `Fenec-Next` that has reached it has every write
-there is, where an empty page alone could not tell a consumer that had
-caught up from one whose writes were not on disk yet, and Kestrel's
-worker waited out 600 ms of empty pages to be sure. Only what an fsync
-covered is handed over, a cursor the feed no longer reaches is answered 410
-with the first `since` it does -- never with writes missing -- one past the
-last write 409, and `wait` waits on the feed's `Condvar` for a write. A
-scoped token is refused: its filter could not hold back the deletion of a
-row it never saw. A consumer with no state of its own has the server keep
-where it is (`/_changes/consumers/<name>`, rows of `_consumers`, made by a
-`POST` at the last write on disk -- read from "now" each time, it missed
-what came between two reads -- and moved by a `POST` of `since`), each
-write at least once; the stream leaves `_consumers`' own writes out, the
-cursor going past them, and a `wait` waits on past them rather than answer
-nothing at once, while a commit to where nothing but cursors were written
-since the consumer's place writes nothing (`unmoved`, the change ring's
-`changed_collections_since`): a sink that committed every answer
-committed its own commit's empty answer, 30 000 fsynced writes in a few
-idle minutes. A feed kept for it alone has no token (`Replication`'s
-token is an `Option`: an empty one matched an empty `Bearer`). Keeping it
-cost nothing measurable, 16 400 single puts a second over HTTP either way,
-and 9 000 rows of 128 dimensions read back at 283 000 a second.
-
-**An `Idempotency-Key` makes a write once** (`idempotent.rs`). A `put`
-with no id makes a row each time, so a retry after a timeout wrote it
-twice. A keyed REST write, `/query` or `/batch` runs as a block under the
-write lock, and its answer is kept in the same block as a row of
-`_idempotency` -- the key the subject's for a scoped token, and the
-request's hash beside it -- so the write and its key land together, a
-second request with the key waits for the lock and is handed the answer
-(`Idempotent-Replayed`), the key with another request is 422, a failed
-write keeps none, and a `compact`, which cannot be put back, takes none.
-Kept for `--idempotency-ttl` (a day): `at` is `@ttl`, so a key past its
-time is out of every read and the sweeper deletes it; the change stream
-leaves them out.
-A write without a key is rendered after the lock as before; with one, 16
-200 single puts a second over HTTP against 18 300 -- with its statements
-parsed each time and the collection made if missing every time, 14 600.
-
-**A read can wait for a write on a replica** (`after` in `lib.rs`,
-`Hub::reached`). A write's answer carries `Fenec-Seq`, the change it left
-the database at -- a field of `Response`, written into the head with no
-allocation -- and a request sent with `Fenec-After: <n>` is served once
-the database holds change `n`, or answered 504 with where it stands after
-`Fenec-Wait` (5 s, 30 at most): never from before the write. A replica's
-applied records reach the hub through `Database::apply`'s watcher, so the
-wait is the subscriptions' `Condvar`. Held back, a replica answered a read
-without the header from before the write and with it after 300 ms, as the
-test holds it. It costs the server nothing measurable -- 37 500 puts a
-second against 37 700 from a client that does not parse headers -- while
-Python's `http.client`, parsing one more, went 18 200 -> 17 900. Only a
-request `handle` would take past its token waits (`admitted`: the MCP
-endpoint's own checks where it goes there, `authenticate` elsewhere, and
-before either `route_tenant`'s token and tenant); a refused one goes on to
-`handle` at once, refused and counted by `audit` as any. On a single
-database the wait ran first: a guessed token held a thread for up to 30 s,
-enough of them every one `--max-connections` allows, and its 504 said
-where the database stood. Every other wait already came after its token
--- a held claim is planned only past `authenticate`, `/_changes` and a
-subscription ask first, a replication stream its own token, `/_admin/` the
-admin token -- and the router forwards what the node refuses at once
-(`tests/token_first.rs`, fenec-shard's
-`a_refused_token_waits_for_nothing_through_the_router`: each refusal asks
-30 s for a write made only once it is in, so one that waited would be the
-wait's 504, never 401). A request without the header asks nothing more:
-`make requests-bench` in ABBA turns against main kept every p50 and its
-rates within 0.5%. A subscription and `/_changes` wait the same way: the
-stream in `sse::serve` once its token, its tenant's stream slot and the
-database's `--http-max-streams` slot are taken, and before the shape is
-read -- a collection the client made may not be on the copy yet -- and
-before the head, so its 504 is a read's and a router's replica path sends
-it home; `/_changes` once its token, a scoped token's 403 and a feed are
-asked, holding a stream slot as its `wait` does. Both came before the
-wait: on a single server `GET /t/changes` sent `Fenec-After: 999999` and
-`Fenec-Wait: 300` was seeded at once where `/query` was 504 after 0.31 s,
-and through a router a stream marked by Go's `Read()` or .NET's
-`AsRead()` -- a router sends a marked request near whatever its route --
-seeded from a read replica behind the client's own write, or left on the
-branch a failover abandoned, and a page's `Fenec-Seq` behind the write
-read as every write there is. A stream resumed with `since` waits too:
-`since` is the stream's cursor and the header the client's position, and
-`since` alone asks no wait -- a primary that lost writes in a failover
-never reaches a cursor of the old branch in its history, and reseeds as
-before. The server writes no `id:` line, so no client sends
-`Last-Event-ID`. A page waits for the change to be in the database, not
-on its disk: its `Fenec-Seq` is never behind the write, and the write
-comes on a later page once an fsync covers it (`/_changes`' own `wait`
-waits for writes after `since`). A marked stream on a copy that has not
-caught up, or refused another lineage's primary, is 503 before any of
-it, as a read is, and one open as the copy deletes itself ends with the
-hub (`release`). Go's `Subscribe` and .NET's `SubscribeAsync` take a
-stream's 504 near as a read's (`toldBy`, `SentHome`): home's position
-taken and the stream opened home unmarked -- an error, every stream near
-after a write lost in a failover was refused for good. `Hub::after_waiting`
-counts the requests in the wait, what the tests wait on before the write
-comes: `tests/replication.rs` holds a stream, a stream resumed and a page
-on a replica whose follower is halted, each seen waiting, then served
-with the write, and 504 past the wait; `tests/token_first.rs` each refused
-at once with the header, and a good token's stream answered by the wait
-(its `ask` reads to the end its head names, so a stream served instead
-fails rather than hangs on its keep-alives); fenec-shard's
-`a_marked_stream_after_a_write_waits_on_the_replica_or_goes_home` a
-stream and a page going home past the replica's wait, and a stream
-answered by the replica once it catches up, home cut off; Go's
-`TestAStreamAfterAWriteWaitsForItOnAReplica` and .NET's
-`AStreamAfterAWriteWaitsForItOnAReplica` a real replica's stream after a
-write it cannot hold -- its link to the primary through a proxy the test
-cuts -- answered 504, and seeded with it once healed -- each failing with
-its wait taken out. A stream's head names where the database stood
-as it opened, as an answer does: `Fenec-Seq`, the change its seed is at
-or after, and `Fenec-History` where the database has a history of its
-own -- read under the lock the shape is parsed under, no lock of its own
--- so a client re-running its reads near while the stream stays home
-sends them after an event's `seq` of that history, which a number alone
-does not name across a failover (`tests/replication.rs`, a primary's and
-its replica's head; `tests/changes.rs`, the root's naming none). The head
-carries every answer's CORS headers (`cors::push_into`): it wrote the
-origin alone, and a page on another origin could read no header of it.
-Without the header a stream and a page look for
-it once, as a read does: `make requests-bench` in three ABBA quartets
-against main, a row by id 0.021-0.022 ms p50 against 0.022, a put
-0.021-0.023 against 0.022-0.027, eight clients' rates inside main's
-spread (by id 136-147k a second against 126-145k); a subscription opened
-to its seed of a row, its head naming its position, 1 000 opens a side in
-each of four ABBA runs a build: over a database with a history of its own
-245.2-251.2 us p50 against main's 250.6-254.6 (the root's, no history
-written, 248.1-251.6 against 251.0-254.4), and sent after a change the
-database holds already 247.8-252.7.
-
-**`insert` never writes over; `put` does.** `Statement::Put` carries
-`insert` (the parser sets it for the keyword, `POST /<name>` over REST):
-a document naming an id the store holds is `Error::Duplicate` -- 409 over
-HTTP, as `Exists` is for a collection -- and the statement, a block of
-one, is put back whole. JWT scoping keeps
-the flag as it rewrites the statement; made a `put` there, a scoped insert
-would write over. The JS builder's `.insert()` still sends `put`: the sync
-layer writes rows back through it when it undoes an optimistic write.
-
-**SQL's spellings are FenecQL, read by the one parser into the same
-statements** (`fenec-ql`'s `values`, `on_conflict`, `assignments`,
-`worded`, `in_list`; `query::sql_like`; `site/content/docs/sql.html`).
-The pg wire, its SQL subset and its `pg_catalog` went on 2026-10-01 and
-stay gone; what came back is spelling, with no mode and no second front
-end, so HTTP, MCP, the shell, the browser module and the native library
-read it alike. `INSERT INTO t (a, b) VALUES (..), (..)` is `insert t
-[{a: .., b: ..}]`, `UPDATE t SET a = e` `set t {a: e}`, `x IN (1, 2)` `x
-in [1, 2]` (a `(` after `in` took a `get` alone, so no text that parsed
-reads otherwise), `x [NOT] BETWEEN a AND b` `[not] (x >= a and x <= b)` --
-its `and` read by `worded` before `and_expr` sees one, and its operand a
-field or a parameter, copied as one: any expression's copy was `Expr`'s
-whole clone, 2 KB of the browser module -- `NOT IN`, `NOT LIKE` `not`
-over the test, `IS [NOT] DISTINCT FROM` `!=` and `=`, `IS [NOT] TRUE`
-`[not] (x = true)`, `count(x)` the rows where `x` is not null
-(`Fold::add` skips a null for `Count` too, `count(*)` being handed `true`),
-`'it''s'` a quote (`Tok::Single`), `||` the `+` it lexes to, `NULLS
-FIRST`/`LAST` where it says what the order does, `values {..}, {..}` and
-`put t {..}, {..}` a list without its brackets, `ON CONFLICT DO NOTHING`
-`if absent` and `DO UPDATE SET` `if absent else set`, `excluded.f` made
-`new.f` and `<collection>.f` `f`. A conflict target, `ON CONFLICT
-(email)`, rides in `Pick::conflict` and the engine takes it only where it
-names the one unique key the collection's rows are found by
-(`Schema::arbiter`): `if absent` is held by every unique key, so with a
-second, or an `id` named beside it, the two would part. The fields of an
-insert are named (the parser reads no schema, `id` is no field, an alter
-adds last); a row of another arity, `INSERT … SELECT` and `DO UPDATE …
-WHERE` are refused naming the FenecQL to write, as are `CREATE TABLE`,
-`CREATE INDEX` (a name, no kind), `ALTER`/`DROP TABLE`, `TRUNCATE`,
-`BEGIN`/`COMMIT`, `JOIN` and a comma between collections (both ways a
-`lookup` runs, its `where` before it), an alias, `SELECT DISTINCT` (outside
-`in (select distinct …)`, where it is passed over), `EXISTS`, a scalar
-subquery, `MATCH(…)`, `@@` and `->>` -- refused without consuming the word
-they start at, which the shell's statement cutting reads. A `get` whose
-clauses stop at a join or an alias says so before its `check`, whose
-refusal of a grouping over the join's columns came first and hid the
-hint. An agent eval (row 40) found agents recovered whenever an error named
-the FenecQL form and never from ``unknown command `x` ``; on this branch
-SQL's first tries went 30–35% -> 61–71%. Past the parser: `rowid` and
-`_id` are told `id` (`schema::no_field`), a field a `lookup` level lacks
-that the clauses after `lookup` are its collection's, `users.email` that a
-field is named bare (`path_of`), `json_extract()` a path,
-`contains()`/`starts_with()`/`ends_with()` `like`, and `/_schema?as=fenecql`
-and the MCP `schema` tool name the `id` in a comment (`with_id_note`), which
-`/_schema/plan` reads past. `like`/`ilike` are calls, as `case` is, so no
-walk over an expression grew a variant: `eval` special-cases them
-(`sql_like`: a `nocase` field by its fold, as its `=`; `ilike` by
-Unicode's full fold, refused without `nocase`; no escape unless named; a
-pattern ending in its escape refused whatever the text), and
-`Filter::bind` binds one over a text field to `Test::Pattern` through the
-out-of-line `apart` arm, so `test` gained no arm. Through `eval` a scan of
-100 000 rows by `%99 of%` took 42.8 ms against `~`'s 8.3; bound, 29.0;
-with a literal after a `%` found by a byte scan, 10.4. **Two traps
-refused.** SQL's `"name"` is a column, FenecQL's text: `where "name" =
-'a'` answered every row or none. A double-quoted word is a name where only
-a name stands (`ident`, `path`) and text where a value does, and is
-refused (`Parser::quoted`) where SQL reads a column and text makes the
-answer the same in every row: alone on the left of a test against
-literals or parameters, on the right against a literal, a select item, an
-`order` or `group` key, an aggregate's argument -- never `$1 = "admin"`
-(a policy's claim) nor `name = "x"`. PostgreSQL's `~` is a regular
-expression: a `~` literal anchored (`^a`, `a$`) or holding `.*`/`.+` is
-refused pointing at `like` (`regex_like`; 85 `~` literals in the
-repository, none refused). `<>` stays `!=`, null and all: it was read so
-before any other SQL, and SQL's unknown runs through every `not` above it,
-which no rewrite of one comparison carries. The corpus of every FenecQL
-text the repository holds -- the docs' blocks, both golden files, the
-Rust crates' literals, the web tests' -- parsed on main and on the branch,
-4 085 texts: none parsed to another statement, the trap's own tests aside.
-`cmp_expr` keeps its frame: the worded tests are out of line (`worded`),
-or the depth test's 512 levels outgrew 8 MiB in a debug build; out of
-line, 511 parentheses parse in 1 091 KiB of stack in release against
-main's 1 187. The browser module grew 20.2 KB, 7.9 KB gzip, 6.7 KB brotli
-(733.7, 301.4, 250.5), the one with no feature 19.9 and 6.5: the parser's
-SQL forms and their refusals 9.9 KB raw, `like` 2.6 (`sql_like` 1.0,
-`like_pattern` 0.8, `bind_pattern` 0.8), the conflict target's check and
-the hints past the parser 2.0 (`Schema::arbiter` and `no_field` 1.3, the
-engine's calls of them 0.7). The trap's error first found by
-`str::contains` brought the standard library's two-way searcher and a
-slice's panic, 4.1 KB, where `ends_with` brings none. Part 2:
-`JOIN` read as `lookup`, `DISTINCT`/`EXISTS`/a scalar subquery,
-`CREATE TABLE`'s types, pgvector's `<->`.
-
-**A `set` reads the row it writes, and every write says what it did.**
-`Expr::Arith` is `+ - * /` (`query::arith`): ints stay ints and one past
-64 bits is refused, never wrapped; `/` between ints divides whole toward
-zero; an int and a float make a float, refused once not finite; a
-timestamp moves by milliseconds; a null is null (`coalesce(n, 0) + 1`
-counts from nothing); `+` joins two texts and only two (`$1 + ":dr"`, an
-entry id made of its movement's, which travelled as a parameter of its
-own) -- `+` rather than a `concat()`, since every client language joins
-text so and the builders' `expr` already passes it, and a text and a
-number stay a type error, never a number made text unasked; anything
-else is a type error, and the result meets
-the field's type check as a literal does. The lexer reads `-` after what
-ends a value (`n-1`, `n - 1`) as a subtraction and before a value as a
-number's sign (`subtracts`), and the parser folds a `-` over a number back
-into it, so every text that parsed before parses to the same tree;
-`arith_level` is two frames a level of parentheses, `operand` out of line
-so `primary` is in one place (inlined three times it was 2.9 KB of the
-browser module). A `set`'s pairs are bound once a statement
-(`Assign`, `Calc`, as `Filter` binds a filter): a field by its position, a
-value reading no field -- a literal, a parameter, `now()` -- worked out
-once, the rest `eval` over the row, so an error comes at the first row and
-never over none. The row is read once (it was read twice, for the values
-and for the indexes it took out), and the registry is taken out of the
-database for the statement so a row's expression can call it while the
-row is written. Under the single writer the read and the write are one, so
-an increment is atomic: 16 threads x 10 000 on one key end at 160 000,
-320 000 a second, 16 HTTP clients the same at 102 000
-(`make counters-bench`); over 100 000 rows `{n: 7}` took 85.5 ms
-and takes 65.0, `{n: n + 1}` 66.6. `now()` is the database's
-clock where one is set (`EvalCtx::clock`, the browser module's every
-statement) and the system's otherwise, worked out once a statement. The
-record holds the document written, never the expression: replicas,
-`/_changes`, archives and a sync replica's server see the result, and a
-replica's optimistic apply works the same text out over its own row while
-the server works it out again -- two replicas' offline increments both land
-(the scenario file holds it). `put ... if absent` (`Statement::Put`'s
-`if_absent`, which sets `insert`) passes over a document whose id or
-`@unique` value a live row holds and counts what it wrote -- `SET NX`
-without a 409 that aborts a `/batch` or an exception to catch. A row past
-its `@ttl` is out of a write's way as of every read: an insert naming its
-id writes over it, and a `@unique` value it holds is let go of with it, the
-row deleted in the same statement (`expired`, `erase`); left to the
-sweeper, a lock that expired stayed held up to a minute. The builders
-render `inc(n)` as `f: coalesce(f, 0) + $k` and `expr(text, ...)` with its
-`?`s bound, every SDK to the golden file. The browser module grew
-7.9 KB, 2.7 KB brotli: the parser's arithmetic, the binding, `if
-absent` and the expired row's place. `site/content/docs/redis.html` is the
-recipes, each FenecQL block run by `tests/redis_docs.rs`.
-
-**`require <n>` makes a write's count a condition.** A write that matched
-no row answered `affected 0` and its `/batch` went on: a transfer's debit
-that found too little money was passed over and the credit made money,
-2 400 transfers taking the sum from 200 000 to 411 409. `put`, `insert`,
-`set` and `del` carry `require: Option<u64>` (the parser's `require` after
-the statement, an integer and never a parameter: the count is what the
-statement guards, a constant of the code that never makes a text of its
-own, where a page's `limit` is a request's data and takes one, below),
-and `execute_inner` hands the answer to `required`, which refuses
-any other count as `Error::Unmet` -- after the writes, which the block they
-are in puts back as it puts back any statement that failed: a lone one's
-block of one, a `/batch` whole, the browser module's `run` of several. A
-clause of the write rather than an `assert (get ...)` statement: the count
-is the write's own, taken under the lock that wrote it, with no second
-read to race or to scope, and a scoped token's count is of the rows its
-filter let it write. 412 over HTTP (`api::status_of`), apart from 409 so a
-client tells a lost race from a value taken, and a `/batch` that stops says
-which statement did (`"at"`, from 0, `render_batch_stop`), and so does
-a text of several through `fenec-abi` (`Refused::Error`'s third field,
-`"at"` in the module's and the native library's error, `FenecError.at`
-from `Fenec.run`): a ledger's debit and credit are both `set accounts`,
-and a page ran a text's prefixes again to tell which had stopped it --
-202 bytes of the browser module, 8 brotli; `FENEC_UNMET` 14
-over the native library, after the boundary's own 11-13; `unmet` in each
-SDK's errors, and `{ require: n }` in every builder, held to the golden
-file. A replica's sync sends it with the write and holds it locally too,
-and refuses one that would reach a row of an unanswered insert
-(`REQUIRE_UNANSWERED`): that row is reached on the server by a second line,
-its key, which would split the count. `tests/require.rs` (both crates)
-moves money between few accounts from eight threads in process and eight
-HTTP clients as `/batch`es, a credit in eight to an account that is not
-there: the sum stays and no balance goes below zero. The browser module
-grew 1 479 bytes, 310 brotli. A `get` takes it too (`Select::require`,
-parsed among its clauses, before a `lookup`): the rows it answers, after
-`offset` and `limit` -- `limit 1 require 1` is "one exists" -- must number
-`n`, or `read_required` refuses it as `Unmet` where the `get` is answered
-(`query`, `execute_inner`; `query_json` leaves a required one to `query`),
-and a `/batch`'s write lock makes the read a checkout's guard on the
-writes around it. Not beside `count` or an aggregate without `group`,
-which answer one row, nor in an inner `get`. Builders have it as a step,
-`.require(n)`; a replica's sync refuses one beside a synced write
-(`GUARDED`, the browser's `batch()` in the same words): the replica's
-count, which the server landing the batch would never see. The module
-grew 1 017 bytes, 471 brotli.
-
-**`limit`, `offset` and `top` take a parameter, read where the plan reads
-them** (`query::Count`). A page's size and place are a request's data:
-written into the text, each page of a list was a text of its own, which
-`/query`'s parse cache (16 shards of 64, a shard emptied when full) kept
-apart and parsed again once it was gone, and every client spliced a number
-into its statement -- `/_stats/statements` already counted them as one
-shape, a literal being a place there. `limit $n`, `offset $n` and a
-facet's `top $n` parse to `Count::Param` wherever a number goes: a `get`, a
-`lookup` level, an inner `get`, a `set`'s or a `del`'s pick, and a REST
-`facet=` (which has no parameters, and says which one it lacks).
-`answered_select` holds each to what the number written is held to
-(`Select::check_counts`, the inner `get`s' where each is answered,
-`page_of` a pick's): a value `as_count` refuses -- a whole number from 0,
-a float with no fraction its number, past `usize` every row, where `as`
-wrapped a literal `limit 5000000000` to 705 million in the browser module
--- is refused by `count_refused` in the words the literal is (the parser
-reads one as an operand, so `limit -1` and `limit "x"` say what a
-parameter of -1 or "x" says), and a `top` outside 1 to 10 000 by
-`top_in_range`, `check()`'s for a number written. The plan reads it where
-it reads the number (`Count::at`): the `@sorted` walk's page, the scan's
-stop, `near`'s and `match`'s 10 000 rows, a lookup's page a parent, a
-facet's `top`, `explain`'s steps, `query_json`'s page. Bound into a copy of
-the select instead, a read by id took 472 -> 710 ns in process; read in
-place, 454-468 ns either way (in turns against main), an ordered page 2.63
--> 2.68 us and a hashed filter's 12.8 -> 13.0 us, where a neutral
-`#[inline(never)]` on main moved the page 0.8% and taking the check out
-left the gap: the code's layout. What judges a statement by its shape
-reads the parameter as there -- `count` and an aggregate refuse `offset $1`
-as they refuse `offset 5`, a sync replica refuses a synced `limit $1` --
-and the pin reads the number it is handed (`Count::of`). Every builder
-sends `limit`, `offset` and `top` as parameters (the golden file's texts
-changed with them), so do the stores and the studio's grid, and Grafana's
-`limit $__max_data_points` is now a statement the server takes. Over 5 000
-rows paged at random in sizes of 10 to 50, 1 050 texts written in, the
-parse cache held 84.2-84.7% of them, its phase 1.36-1.88 us a request,
-against 100% and 0.73-0.84 us as parameters (`make pages-bench`, a
-`--features timing` server); pages a second (105-109k at eight clients on
-a quiet machine) and `make wasm-speed` stayed within the runs' noise
-either way, a parse being a microsecond of a 33 us round trip. The
-browser module grew 2 331 bytes, 947 gzip, 791 brotli: the parser's
-`count`, the check and its refusal, `top_in_range`.
-
-**`put ... if absent else set {..}` is an upsert; `put <c> $n` takes its
-documents from a parameter.** A rollup's row is "made at zero if missing,
-then added to", and was two statements a key -- `if absent`, then `set {n:
-n + $k}` -- or a read of which keys exist before the block. `else set`
-(`Statement::Put`'s `else_set`, only after `if absent`) sets the row
-holding a document's id or first `@unique` value as `set` sets a row
-(`Database::set_row`, which `update_rows` now calls a row), its values
-over that row and `new.f` the document's `f` (`Calc::New`, `Upserting` for
-an expression; `new.id` the id it names, or null; a name the collection
-does not have refused, never read as null), and counts it with the rows
-made; a row past its `@ttl` is made again, not set. The document's own
-hooks run as an insert's, the row's as a `set`'s. A key twice in one
-statement adds to the row the first made: the vectors written before a
-row is set are linked first (`index_written`), or the batch at the end
-put the first one's vector back over the set's. A scoped token needs
-update beside insert for it, and the row it sets must pass its update
-filter (`Check::before_overwrite` asks `admits` of the row written over,
-as PostgreSQL's `ON CONFLICT DO UPDATE` asks the row its `USING`): found
-by a value any row may hold, it was anyone's. `put <c> $n` (`docs_param`)
-writes the parameter's object, or each of its list of objects, a member a
-field (`documents_in`, `Database::document_of`): an object is read exact
-from the start, as a body's json field is, and a list of numbers in it
-becomes a vector's `f32`s through the field's type, so a beacon is one
-text whatever its size -- a page's statements were texts of up to 500
-documents, past the 1 KB the parse cache keeps. Scoped, `scoped()` writes
-the documents in first (`Statement::with_documents`), so each is held to
-the rules a written one is. A page of 1 000 events parsed and written
-takes 2.30 ms as `put ev $1` against 5.31 written out; a rollup page of
-1 000 keys, half new, 1.13 ms as one upsert against 1.47 for the read and
-the two writes, in process (`make analytics-bench`'s `writes`). The
-browser module grew 5.0 KB, 1.3 KB brotli -- 7.5 KB more while `new.` was
-cut off a name by a slice that can panic (`strip_prefix` now). Every
-builder writes it -- JS `upsert(docs, patch, { require })` and
-`toUpsert`, Python's `upsert`/`to_upsert`, Go's `Upsert`/`ToUpsert` (the
-documents a slice, so the patch comes after them), .NET's, Swift's,
-Kotlin's and Dart's -- the documents bound first and the patch as an
-update's (`inc`, `expr`), held to the golden file. A sync replica sends
-the text as written and the server works the set out again, as it does an
-expression; the replica, whose `@unique` is a plain hash, finds each
-document's row by its id or the shape's key, runs the upsert by id (the
-rest made under temporary ids, a key twice in the page the row the first
-made) and reads the rows it sets first to put back (`Sync::upsert`,
-`#applyUpsert`); a document naming neither is refused (`UPSERT_KEY`), in
-both, which the scenario file holds.
-
-**A `set` or a `del` picks its rows with `order` and `limit`, and
-`returning` answers them.** A job queue's claim was a read of the ready
-page and a compare-and-set of it, and two workers that read the same page
-raced, one of them told only by an `affected` short of its page. `Update`
-and `Delete` carry `pick: Option<Box<Pick>>` (boxed: most writes have
-none), and `picked_ids` hands the filter, `order` and `limit` to a `get`'s
-`page_ids`, so `set jobs {owner: $1, run_at: now() + 30000, attempts:
-attempts + 1} where run_at <= now() order run_at limit 10 returning *`
-walks `@sorted` to its page and writes it under the one lock --
-PostgreSQL's `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)
-RETURNING *`, the single writer standing in for the row locks.
-`returning` (`*`, or fields and paths) reads each row out of the store, a
-`set`'s after it wrote them and a `del`'s before (`returned`), and
-`required` counts the rows answered: `limit 1 require 1` is one job or a
-412. A `take` statement of its own was weighed and not made: the same
-clauses are a pop (`del ... order ... limit 10 returning *`), an `UPDATE
-... RETURNING` anyone reads, and any picked write, where a `take` would be
-a queue's alone. The lease is the ready time moved on, so one `@sorted`
-field holds ready, leased and delayed jobs and a lapsed lease is ready
-again with nothing to sweep. That needed `now()` in a filter to be a range:
-`Expr::fold_now` works it out once in `answer_filter`, with the `+ - * /`
-over it, and `Database::pin` judges the folded filter; left a call, the
-walk tested every leased and delayed job after the ready ones and, short
-of a page, gave up past an eighth of the collection for the scan. A
-scoped token picks among the rows its update or delete rules reach, and
-`returning` holds what it answers to its read rules as the write leaves
-each row (`Scope::returning`, `Hook::answering`, above), as PostgreSQL
-holds `RETURNING` to the `SELECT` policies; `WITH CHECK`, `update(..)`
-grants and transitions judge each row as any `set`'s. A sync replica refuses one on a
-synced collection (`PICKED`, the scenario file), since it would pick and
-answer the replica's rows. Builders take `order` and `limit` before an
-update or a delete, which a `limit` lets go unfiltered, and `returning`
-as an option (JS and Python resolve to the rows, Go's `Result.Rows`,
-.NET's `ExecResult.Rows`, Swift's, Kotlin's and Dart's `updateReturning`
-and `deleteReturning`), held to the golden file. Over a million jobs a
-claim of ten takes 18.7 us p50 against a scan's 132.7 ms; 16 threads
-claimed and acked them all at 185.8k jobs/s, against 93.8k for read,
-compare-and-set and read back, which lost 43% of the jobs it read to
-another worker; 16 HTTP clients 138.5k against 48.2k, 77% lost (`make
-queue-bench`). The browser module grew 5.2 KB, 1.9 KB brotli -- the
-clauses' parse, the pick and its answer (`page_of`, `returned`, each out
-of line so a write that picks nothing keeps its code), the fold, and
-`page_ids` out of line now that two call it (+0.7 KB net); `returned`
-reads by `select`'s places cost 1.4 KB more. A write or a read that picks
-nothing measured as before in process, 200 000 statements a round: an
-increment 1.15 us against 1.16-1.18, a lock renewed 2.15 against
-2.13-2.17, a read by a `@unique` key 0.61 against 0.59-0.60, which taking
-the time's check out did not move (0.61-0.62) -- where the code lands; a
-`set` over 100 000 rows 1-2% slower in `make counters-bench`, whose runs
-of one build move as much, and `make requests-bench` inside its spread.
-
-**A key of `order` may be an expression** (`Sort::expr`), in a `get` and
-in a write that picks its rows: `set orders {courier: $1} where run_at <=
-now() and distance(pickup, $2) <= 3000 order distance(pickup, $2) limit 1
-returning *` is a courier's claim of the nearest ready order, which the
-dispatch example wrote in three steps (a read of the six nearest with
-`near`, a `/batch` of a conditional `set` a candidate, a held claim of
-the oldest) while `order` took fields alone. `order_list` parses an
-expression: a field, or an aggregate of one, stays a name -- over groups a
-key names a column -- and anything else is `Sort::expr`, `field` empty.
-`page_ids` hands a key list holding one to `order_ids_by` (out of line,
-so an order of fields keeps its path): the computed columns' `Reader`
-decodes every field and path the keys read in one pass a row, a field key
-keeps its collation and fold, an expression's text orders by its bytes
-or the `collate` named, and ties go in id order, as the scan leaves them
-(`tests/order_expr.rs` holds 7 keys x 4 filters x 5 pages x both ways to
-the rows read with the key as a column and sorted in the test).
-`distance(<field>, <point>)` ascending with a `limit` over a field with
-`@geo` walks the point index to the page (`walk_distance`, through
-`walk_geo_near`) where no row the filter passes can lack a point -- the
-index holds every row, or the filter's `and` chain puts a radius or a box
-on the field -- since the scan puts a null distance first and the index
-holds no such row; natively only, the browser module sorting the same
-rows, where the walk was 1.9 KB of it, 0.9 KB brotli. A pin declines it,
-`exactly` walks a key's points, and `check_order` refuses an inner `get`,
-an aggregate and `expired()` in a key (a `get`'s `check`, a pick's
-`page_of`), an expression over groups (named with `as` first) and one in
-a `lookup` level. A write takes no `near`: the parser says to write the
-distance as a key. Over HTTP, 300 000 ready orders over a 20 km city
-(`make nearest-bench`): one claimer 0.059 ms p50 against the three
-steps' 0.135, 16 at once 0.61 ms and 19.3-20.5k claims/s against 1.06-1.10
-and 12.9-13.6k, 50 at once 2.24-2.42 ms p50 and 12.5-13.3 p99 against
-3.09-3.86 and 14.3-21.2, 15.2-15.8k/s against 10.7-10.9k; the inner
-`get`'s `near` (`set ... where id in (get ... near pickup $2 limit 1)`)
-answers as the `order` does. 16 threads claiming 3 000 orders one at a
-time each took the nearest still ready, none twice, both ways. An order
-of fields alone measured as before in process, in ABBA turns on a quiet
-machine: a scan of 50 000 matches put in order 6.70 and 6.68 ms against
-6.78 and 6.68, a pick of one 5.54 against 5.63 and 5.53, a lone put and
-a read by id inside their spread; `make wasm-speed` the same or a little
-quicker in every column. With a `put`'s `returning` (below), the exact
-walk and a clash's stored value, the browser module grew 4.4 KB, 1.9 KB
-gzip, 1.5 KB brotli -- `order_ids_by` 1.3 KB of it, the parser's clauses
-0.4 -- after the distance walk and the refusals' long texts came out.
-
-**A `put` answers the rows it wrote with `returning`.** An app inserting
-an order read it back by a key of its own in the same `/batch` to learn
-its id (`insert ... returning id` was `unknown command returning`, `POST
-/<name>` `{"inserted": n}`). `Statement::Put` carries a `pick` too, its
-`returning` alone (`order` and `limit` are a parse error after a `put`),
-so `Statement::pick` and `returns_rows` take it as they take a `set`'s;
-`put_with` gathers each written row's id and the write it was -- an
-insert, an update of a row written over or an upsert's `else set` -- only
-when asked, and `returned` reads them back as the statement left them, in
-the documents' order: a row `if absent` passed over is not one, a key
-twice is its row twice, and `require` counts them. Each row goes to
-`Hook::answering` as the write it was (`returned` takes one op for every
-row or one a row), so a scoped token's insert is held to its read rules
-as written and refused whole (403) where one falls outside them, with no
-rule of `access.rs` of its own. `POST /<name>?returning=id,...` answers
-the rows (201). A sync replica refuses one on a synced collection as it
-refuses a claim (`PICKED`, a scenario step): its ids are the replica's
-until the server answers. Every builder takes it (`insert(docs, {
-returning })`, Python's `returning=`, Go's `Returning` among the
-documents, .NET's `returning:`, Swift's, Kotlin's and Dart's
-`insertReturning`/`upsertReturning`), held to the golden file.
-
-**`Fenec-Wait` holds a `set` or a `del` that writes nothing until it
-can** (`fenec_http::waits`, `Database::wakes_at` in `engine/wake.rs`). A
-worker whose claim found no job slept and claimed again: late by its
-sleep, or a claim under the write lock every few milliseconds a worker.
-Sent to `/query` or `/batch` with `Fenec-Wait: <ms>` (30 s at most; beside
-`Fenec-After` the header stays that read's wait), a request whose `set`s
-and `del`s wrote nothing -- no row, or a `require` unmet, its block put
-back -- is held and run again once it may write: the same request at a
-later moment, answered with what it wrote, or at the end of the wait with
-what it answered last. A header, not a clause: a statement runs under the
-write lock, where nothing may wait, and a page's or an app's database has
-no other worker to wait for, so the builders refuse `wait` there
-(`LOCAL_WAIT`) and no builder's text changed. A `put` in the request, or a
-filter reading the time other than as a field compared with `now()` plus
-or minus integers and parameters (`bucket(now(), ..)`, `run_at + 1000 <=
-now()`, `= now()`), is refused before it runs (400, `holdable`,
-`engine::placeable`). Two things wake one: a write to a collection it
-reads -- `Hub::landed` under the write lock, with the collections the
-block wrote (below), a load when nothing is held -- and the time reaching
-a row's moment, which nothing announces:
-`wakes_at` (native only) takes each such comparison anywhere in the filter,
-inner `get`s too, and each `@ttl`, and asks the least value past the bound
-(`get c select f where f > bound order f limit 1`, a step of `@sorted`),
-the run's own time the bound so a row due between the run and the
-question wakes it at once. Every living row's value counts: counted among
-the rows the other `and`s let through it was exact, and walked the index
-past every one they refused -- a claim held on an empty queue beside
-200 000 jobs scanned them at each look, the busy workers beside it 144 000
--> 20 200 jobs a second. `tests/wakes.rs` walks generated filters and rows
-moment to moment and holds the matching set unchanged between two. Held
-requests are grouped by what they would pick -- each `set`/`del` as the
-`get` of one row it amounts to, scope and parameters bound in -- and only
-a group's head, the one held longest, is woken: it looks under the read
-lock (the collections written since it last looked, then the gets), runs
-the request only when a get finds a row, and having written has the next
-look at once; one that found nothing is the group's answer, so a job goes
-to the worker held longest, as Redis serves `BLPOP`, and a write costs a
-group a look, not a run a worker (20 held, one job: one run, at most
-three looks). A
-look that found nothing is not repeated for `LOOK_GAP` (1 ms) however many
-writes land, a write in the gap a counter: beside 16 claims held on an
-empty queue, 16 busy HTTP workers took 148 000 jobs a second against
-150 600 with none held, the heads looking 730 times a second, where woken
-at every write they looked 3 400 times and the workers took 142 000. A
-held request runs `handle` whole each time -- its token asked again, a
-tenant's gate entered and let go, so a freeze goes through beside it --
-and its time is out of the slow log; a tenant closed answers it 503 with
-`Retry-After` and `retry_after`, a wait that ran out answers its last
-answer though a write it has not looked at landed in the moment before
-(its head woken late: the job is the next claim's, never lost), a SIGTERM
-answers every one at once with its last answer before the sync
-(`end_all`, `HELD_GRACE`), a client gone hands the row to the next (a
-`peek` before each run), a keyed one keeps no key while it writes nothing
-(sent again it waits again), a replica refuses it as any write, and the
-router waits `--upstream-timeout` plus the wait (`Pool::send_held`: cut
-at the timeout, a 502 while the node leased the job to no one). `/_metrics`
-counts `fenec_held_requests` and the heads' looks and runs. A job
-enqueued reached one of 8 held workers in 0.38 ms p50, 0.76 p99, against
-0.83/10.1 polling every 10 ms (ten times the claims) and 15.5/85.8 every
-100 ms; a delayed job 0.04/1.9 ms after its time against 1.2/8.4 and
-45.8/99.4. A thousand claims held ten seconds on an empty queue took no
-measurable CPU and 46 KB of memory and a thread each -- a subscription's
-45 KB, a connection counted against `--max-connections` -- where a
-thousand polling every 100 ms took 86% of a core. Each claim sent with the
-header on a busy queue: 150 000 jobs a second either way; `make
-requests-bench` in ABBA turns against main inside its spread (a row by id
-0.021 ms p50 both, eight clients 125-134k a second against main's
-123-149k). The browser
-module compiles none of it: the same size to the byte, 149 bytes moved
-where `engine.rs`'s panics carry their line numbers (`mod wake` declared
-at the file's end, identical). The JS client grew 0.6 KB brotli (`wait`,
-`signal`, the page's refusal). Every client has it: JS `{ wait, signal }` on `run`, `batch`, `update` and
-`delete`, Python `wait=` seconds (the socket's timeout that much longer;
-`AsyncClient` closes a cancelled one's connection, whose answer would be
-the next request's), Go `db.Wait(d)` and .NET `WithWait(d)` copies under
-the context or token, Swift `withWait(seconds)`, Kotlin `withWait(ms)` (a
-cancelled coroutine disconnects the `HttpURLConnection`, whose read heeds
-no interrupt) and Dart `withWait(Duration)`.
-
-**A write wakes the held writes that read what it wrote, and a row several
-groups would take goes to the one ranking it first** (`Watcher::landed`,
-`waits::settle`). Woken by every write, each group's head looked under the
-read lock whatever was written: 150 claims held on `orders`, each a group
-of its own as couriers' claims are (a point and a `sub` in each filter),
-took a put of `positions` beside them from 22 us p50 to 50-95 and from
-30-90 us p99 to 200-480, the heads looking 115 000-132 000 times a second
-(`make queue-bench`'s `held other`, in turns). The engine tells its
-watcher the change a block landed from (`Watcher::landed`, a default
-method calling `notify`; native only, so the browser module, which holds
-no write, is the same size to the byte, 196 bytes moved where
-`engine.rs`'s panics carry their line numbers); `Hub::landed` asks
-`changed_collections_since(before)` only while something is held
-(`Waits::holds`), and `Waits::wrote` marks stale and wakes the groups
-whose collections -- their tests' and their inner `get`s' -- it names
-alone, `None` (a load, a drop, a compact) every one: the same put 22-25
-us p50 and 30-97 p99 beside 150 held, as beside none, and no look. And a
-row several groups would take went to whichever head ran first: of 10
-claims each a group of its own the one held longest took it 4-16% of the
-time, of 100 1-2%, of 1 000 2-4%, and each head that found it ran under
-the write lock, 3.2-6.4 runs a job (`held contested`). A head that finds a
-row bids for it now (`Bid`: the row, its rank by the claim's own order --
-`near`'s `_score`, a sparse dot product turned round, `None` under fields
--- and when its head was held) and waits; `settle` gives each row to the
-bid ranking it first, the head held longest on a tie, the rest behind the
-winner's run (`behind`): a tie's in a line by arrival (`line`), the next
-looking once the run before ends -- looking all at once after each run, a
-burst of N jobs to N claims was N rounds of N looks -- and a look in the
-line that finds nothing disbanding it; a ranked loser looks again at once.
-A round waits for every group a write before its first bid woke (`horizon`,
-the writes announced as the bid lands: a look waits for the read lock and
-reads what landed meanwhile, and held to the look's start a job went to a
-later claim), told to look, come to its moment or behind a run
-(`Group::owes`), each once, so a round ends however many writes land; but
-a tie settles as soon as no group held before the best bid is still to
-bid. Groups are kept in their heads' order (`remove`, and a group whose
-head left re-placed by its next; `swap_remove` shuffled them), so `settle`
-scans to the first still to bid: a full scan and a sort at every look held
-the mutex every look waits for through a thousand of each, 38-60 ms a job
-at 1 000 claims. A bid for a row given to a run under way goes behind it
-at once; one for a row a run took after its look began (`gone`) looks
-again; a round ends the gap of a head it waits for, and only then (ended at
-every look, a claim beside a busy queue looked 1 500 times a second
-against 700). One job every 2 ms at least: the one held longest took it
-every time, one run a job; from the put to a claim holding it 0.43-0.47 ms
-against 0.37-0.43 at 10 claims, 0.83-0.99 against 0.57-0.68 at 100, 11-13
-against 2.6-5.2 at 1 000 -- the longest held's look, which a hundred or a
-thousand threads woken at once reach late, against the fastest of them --
-and the server's CPU a job 2.0-2.1, 12.6-13.9 and 110-131 ms against
-1.8-2.1, 11-14 and 138-144. Not opt-in: the claim's order says what "first"
-means and a tie keeps the order requests came in, `BLPOP` across groups as
-within one, and the one run a job against five under the write lock is
-every other writer's. A line of workers of one claim is served as before:
-a job enqueued reached one of 8 in 0.34-0.36 ms p50 either way, and 16 busy
-workers beside 16 claims held took 143 000-148 000 jobs a second against
-146 000-148 000, the claims looking 734-779 times a second against
-719-775. `tests/waits.rs` holds the longest held to every job of twelve
-groups, a burst of sixteen to the order they came at three looks a claim at
-most, and a gap to a look a millisecond beside eight writers;
-`waits::tests` a claim ranked by `near` to the job though it was held last.
-A claim ordered by a key worked out of the row -- a courier's `order
-distance(pickup, $2) limit 1` -- has the key bound with the request's
-parameters, as its filter is (copied unbound, the test ran with a `$2`
-it had no value for), and answers it beside the id (`_rank`, a computed
-column), so a row goes to the claim nearest it: one order at a time to
-couriers each claiming the order nearest it, the nearest took every one
-at 10, 100 and 1 000 waiting, run for once, 0.4-0.7, 1.4-1.6 and 19 ms
-from the put, against a raced 0.2-0.4 ms to a courier a median of 3.3-5
-km further and two runs an order (`held nearest`, in turns) -- the
-price every courier's look, 2-2.8, 14-17 and 160-168 ms of the server's
-CPU an order.
-
-**One held request looks for every group, and a group that found
-nothing looks among the rows written since** (`waits::look_all`,
-`Known`; `Database::written_since`, `passing_among`, `picked_among` in
-`engine/wake.rs`). Each head woken to look for itself, an order placed
-beside 1 000 couriers' claims woke 1 000 threads, each taking the mutex,
-the read lock and its whole pick -- 80-86 us a claim in process, the
-point index walked past 2 000 leased orders -- 20-21 ms from the put and
-174-179 ms of the server's CPU an order (`held nearest`, in turns). Now
-the first held request to wait while none does is the leader
-(`State::leader`): it takes every group with a look to make (`jobs`:
-told to, its moment come, a write past its gap), looks for each under one
-read lock -- let go each `LOOK_HOLD` (2 ms), so a writer waits out a part
--- records the bids and settles once, and sleeps to the next moment, gap
-end or rate's pause (`deadline`); a head is woken only when its group's
-bid won or its own wait ends, and the leader hands the looks on as it
-leaves (`resign`, to any request waiting but a head about to run). A
-write, a release, a join that brings a moment sooner or a pause tells it
-(`kick`), a group in its gap only at the first write in it: told of each,
-a claim held beside a busy queue would wake it at every write. It asks a
-timed wait for two thirds of the way (`asked_for`): macOS runs one late
-by half again, 3 ms took 4.5 every time, and a delayed job went from 0.2
-ms after its time to 1.3 at the median, 29 at p99, until it did. A look
-knows what its group's one test passes (`Known`: no row after a whole
-pick that found none, every row a look among rows found, up to `AMONG`)
-at its change, its writes' epoch and its time, and until the test's next
-moment (`wakes_at`, each index step asked once a batch, `Moments`) no
-row starts or stops passing but by a write; so the next look tests those
-rows and the ring's rows written since alone, as a scan tests a row
-(`Filter`, the time folded as `answered` folds it) and in its order
-(`order_ids_by`, `order_ids`; one row needs none), the rows a filter
-passes found once for every group of it (`Passed`, four filters a
-batch). The whole pick runs where that cannot be shown the same: a ring
-that no longer reaches back, a schema mark, a load, a compact or a
-maintenance (`epoch`, moved by `wrote(None)`), a collection made again
-(`cid`), more than 32 rows, an inner `get`, `@ttl` or `expired()`, a
-time in the order, two tests, the clock set back, a moment come, an
-error (the whole pick's to meet). A test holds it
-(`waits::tests::a_look_among_the_rows_written_picks_as_the_whole_pick`)
-over 3 000 generated waves -- points, radii, kinds, priorities, `or`s,
-orders by distance, a field, an expression and two keys, ties of each,
-couriers' tokens' rules, orders placed, moved and cancelled, rounds of
-winners taking theirs, the time past moments and back, bursts past 32,
-alters, compacts, inner `get`s -- to the whole pick's row and rank, what it then knows to every row the
-test passes in the test's order, and each row's winner to the whole
-picks' arbiter's: 35 000 looks among rows beside 10 300 whole picks, two
-mutations of it (the known rows left out, the moment ignored) each
-failing within two seeds. One order to couriers each claiming the
-nearest: 0.18, 0.31-0.32 and 1.67-1.68 ms from the put at 10, 100 and
-1 000 against 0.27, 1.42-1.52 and 20.0-20.7, the server's CPU an order
-0.2, 0.4-0.5 and 3.1-3.2 ms against 1.2, 13.4-16.8 and 174-179; a look
-among rows 1.1 us in process, 2.1 before a filter's rows were shared and
-one row went unordered. One job to claims of their own (`held
-contested`): 0.30-0.39, 0.75-0.80 and 2.4 ms against 0.38-0.49,
-0.86-0.91 and 9.9-12.5, the CPU 0.7-0.9, 1.8-2.3 and 5.9 ms against
-1.9-2.3, 12.3-13.2 and 110-126, at 29, 298 and 2 540 looks a job
-against 27, 205 and 1 290-1 470: a claim behind the winner looks again at
-once, and again after the ack, each among rows. A line of one claim is
-served as before -- a job to one of eight 0.31-0.34 ms either way; 16
-busy workers beside 16 claims 149 000-167 000 jobs a second against
-146 000, the claims looking 670-830 times a second against 770 -- a put
-of another collection beside 150 claims 23 us either way, a delayed job
-p99 0.0 ms after its time against 1.5-2.2, and a thousand held claims
-use no CPU and 46 KB each against 63, their threads no longer each
-running a pick. `fenec-server` grew 16.2 KB (aarch64-apple-darwin), and
-the browser module not by a byte: `wake.rs` is native only.
-
-**`@unique` is a `@hash` that asks its bucket before a write.**
-`IndexKind::Hash { unique }`, written as index kind 8 so a binary from
-before refuses the file rather than open it as a plain hash and take the
-duplicates. `put`, `insert` and `set` ask `Collection::unique_clash` after
-the hooks and before anything is written: the bucket the value would go in
-holding another id is `Error::Duplicate` (409), the statement put
-back whole -- and the id `put` handed out for the document handed out
-again, since nothing of it reached the store for the block's mark. A block's
-earlier writes are in the bucket as a write keeps a built index up, so it
-may free a value and take it again; `null` is no value; equality is the
-hash key's, so `-0.0` meets `0.0`. The index is a `Derived` like any hash,
-and the first ask after an open builds it from the documents, which is what
-makes the answer exact: an open costs nothing more (19 ms for an image of a
-million rows either way), the first write 15 ms over 100 000 rows and 259
-ms over a million, and a put after it 940 ns against 850 under `@hash`; a
-collection with no unique field writes as before (848 against 852). `create
-index ... @unique` over a value held twice is refused naming it and two of
-its documents, under the lock or beside the database, where it is asked of
-the index once the writes made meanwhile are in. `Database::apply` builds
-it and asks nothing: the primary did. The clash names the value as the
-row holding it stores it, read from that row (the refusal alone pays it):
-under `nocase` the spelling written is not that one, and a sign-up as
-`SAMI.lindqvist@...` was told the row held `SAMI...` where it held
-`sami...`. A scoped token is told the field alone (`access::told`, in
-`within`): the clash names the other row's id and echoes its value, which
-told alice that bob's profile existed, where, and what it held.
-
-**A `@hash` bucket holds its ids ascending, in runs** (`engine/bucket.rs`).
-A bucket was a `Vec` in the order its ids came, and a row left it by
-`retain`, a walk of the whole bucket: with a field of a few values -- a
-country, a device, an event's name -- every delete walked a fifth of the
-collection, and the `@ttl` sweep held the write lock 370 to 500 ms a
-thousand rows of an analytics site's 594 000 events, every dashboard read
-waiting behind it. Now an id is found by binary search, and past 512 ids a
-bucket is runs of at most 512 (`Bucket::Runs`, behind a box so a bucket
-is the size of a `Vec`), so a removal moves one run's tail -- the sweep
-takes the oldest rows, which one ascending list holds first and would
-move all of. A run left a quarter full joins the next where both fit; a
-bucket of one run is a list again, so a `@unique` value's costs what it
-did. Over 10 000 000 rows with a field of five values the sweep holds the
-lock 0.79 ms a thousand rows against 825 (`make ttl-bench`'s `hash`); a
-lone `del` among a million rows 1.09 us against 76 to 134, a lone `put`
-699 to 708 ns against 708 to 754 (`writes`). Readers take a bucket's ids
-in order through one iterator (`Bucket::iter`, `Ids`), so `lookup`'s
-children no longer sort them, and the maps a group's or a facet value's
-number is kept in are of the index's own type (`Bucket::one`): through
-`flatten` and a second map type the change was 1.3 KB brotli of the
-browser module. Its buckets stay one sorted list (the runs `cfg`'d out,
-a removal a `memmove` of the rest): 390 bytes, 0.4 KB brotli.
-
-**A hash index's table grows a 256th at a time, and a text index's
-terms too** (`maps::Sharded`). A `HashMap` that is full moves every key
-into a table twice its size in the insert that found it full -- under the
-write lock, every request waiting -- and a `@unique` field holds a key a
-row: `make recon-bench`'s journal passing 1 835 008 entries held one
-transfer and everything behind it 120 to 137 ms in every run, and `make
-growth-bench`'s 4 million puts one at a time took 7, 19, 49, 109 and
-235-267 ms at each doubling from 229 376 keys. A `@text` index's terms were
-the same map, and a field whose rows bring terms of their own -- an id, a
-code, a name -- doubled it as often: 9-10, 23-25, 55-59, 125-132 and
-276-324 ms over the same doublings (`growth-bench`'s `text`, four new terms
-a row to 4 million). Past `SPLIT_AT` (114 688 keys, a table of 2^17
-buckets' worth) the map is 256 maps, each growing on its own: the longest
-put is the split's, 2.5-3.6 ms for a hash index's keys and 4.9-5.3 for a
-text index's terms, against 6.2-8.2 and 8.5-10.6 while the split hashed
-every key again. A text index's terms are a table of their own since,
-split the same way (below). Each key is kept beside its hash (`Hashed`), which its
-table takes as it is (`Pass`): a lookup is one SipHash under the map's own
-random keys, and the shard is bits 49 to 56 of it -- below the seven a
-table tags its buckets with: by the top byte, every key of a shard had one
-tag and a probe read every key it passed. Picked by an `Fx` of the key, the
-shard then hashing it again with keys of its own read from the shard, a
-lookup in a loop over a million keys took 94-135 ns and over four million
-121-144, against 68-87 and 83-93 now, and 33-42 -> 24-34 under the split;
-an index built after an open is 15-25% faster, its tables growing with no
-key hashed again. The cost is 8 bytes a slot: 48 -> 56 a hash index's, 80
--> 88 a text index's then. A put's p50 is as it was (1.08-1.29 us), and so is
-`match` (a new term 1.05-1.29 us against 1.09-1.37, three 1.37-1.65 against
-1.41-1.72). Rejected:
-one table taken into a new one 4 096 keys at a time, looked up in both
-meanwhile -- lookups 163 ns, since a map that stops taking keys never
-finishes its steps, and builds a third slower. The browser module keeps
-the one map and its `Fx` (`cfg`), byte for byte the size it was.
-
-**`in (get ...)` is answered before the query, as the list it is.**
-`Expr::InSelect` holds an inner `Select`; `Database::answered` (from
-`query`, `query_json` and `execute_inner`, and `explain` inside its
-plan) runs each inner `get` once, with the statement's parameters, and puts an
-`Expr::In` of its one column's values in its place -- so every place a
-filter goes, and the planner's "every element resolves or the list goes
-to the scan" rule, take it unchanged, and `eval` never meets one. Only
-a statement holding one, reading a collection whose rows expire, or
-calling `now()` over a collection with an ordered index (`fold_now`,
-above) is cloned: the rest costs a look at its filters. A null is left out of the
-list; past `MAX_SUBQUERY_VALUES` (100 000) distinct values it is a query
-error: an inner `get` with no `limit`, `group` or ranking lists its
-matches' ids, as `count` does, and reads its column, the values told
-apart by their encodings only once there are more than the bound
-(`distinct_column`) -- cut at that many rows, 125 000 `buy` events of
-937 users were refused, and told apart as they came, a bucket of 1 967
-went 0.15 -> 0.36 ms; one with them is read one row past the bound; past
-`MAX_SUBQUERY_DEPTH` (4) refused in the parser and the engine. The inner
-`get` selects one column -- a field or one aggregate -- and no `lookup`,
-`count` or `require` (`Select::check_subquery`). A scoped token's `scoped()` holds
-each inner `get` to the read rules as any `get` (`Scope::inner`), and a
-rule's filter may hold one too, answered before each statement as the
-list it is (`Scope::bound`, above). A long `in` list is looked up, not walked (`Test::InSet`,
-`IN_SET_AT` = 8, over an int, a text, a timestamp or a boolean typed
-field and `id`, the values' encodings in a `HashIndex` made at the first
-row tested): 2 000 codes over a scan of 200 000 rows took 2 302 ms
-compared a value at a time and take 16. One country's 2 000 customers'
-orders by `@hash` take 0.83 ms against 0.72 written out; customers with
-a rare order 0.20 against `lookup ... required`'s 0.44 (`make
-subquery-bench`). A subscription's REST shape cannot hold one, and the
-JS builder's `{ f: { in: query } }` renders one with the outer query's
-parameters.
-
-**`@ttl` is an ordered index whose rows expire, and every read leaves
-them out at once.** `IndexKind::Sorted { ttl }`, written as index kind 9
-and the milliseconds behind it, so a binary from before refuses the
-file rather than hand out rows past their time; a timestamp field's
-alone. Every filter over the collection -- each `lookup` level's, an
-inner `get`'s, a `set`'s and a `del`'s, `changes_since`'s shape -- has
-`not (field <= now - ttl)` ANDed in (`Database::alive`): a `not` so the
-planner never takes it for a range, and a row whose field is null, with
-no time to expire from, lives. `now` is the system's clock natively and
-`Database::set_clock`'s where set -- the browser module's, handed
-`Date.now()` (`db.now`) as `fenec_query`'s last argument, and refused
-without one rather than answered at a time it was not. A server's
-`fenec_http::sweep` looks at every database it serves once a minute and
-deletes what is past its time, a range of the index found under the
-read lock (`Database::expired`) and 1 000 rows deleted under the write
-lock as a block of ordinary deletes (`Database::sweep`, the filter
-written there, since a `del` leaves expired rows out): replicas,
-`/_changes`, archives and subscriptions see deletes. A replica, a
-following tenant and the browser never sweep. `expired()` in a filter
-reads the rows past their time (`Expr::asks_expired`, answered in
-`answer_filter` as `field <= now - ttl`, a range of the index, the alive
-test left out; `not expired()` is the default read), in every place a
-filter goes, `set` and `del` too: a reaper's, which gives back what a
-lapsed hold reserved -- `del holds where expired() and id = $1 require 1`
-beside the give-back, one block, the delete the once-only guard -- where
-a ledger kept holds `@sorted` and reaped by hand, since a row the sweep
-deleted unseen kept its money in `held` for good. The sweeper deletes a
-row a sweep's period past its time (`sweep::GRACE`, `pass_after`), so a
-reaper as frequent sees every one; at the first pass after its time a row
-that lapsed a moment before went unseen whatever the reaper's period. A
-scoped token reaches them only by the policy's `expired` grant
-(`Scope::reaping`), never through `write` or `*`; a rule's own filter
-takes none. A collection without `@ttl` refuses it by name (the registry
-has no `expired`, and says so). 100 000 rows past their
-time out of 200 000 went in 0.56 s, the lock held 1.06 ms a batch at the
-median and 2.3 at most; a read tests each row's time, so a `count` over
-a million rows half past their time is a scan, 68.8 ms against 1.1 with
-no expiry, and a collection with none reads as it did (`make
-ttl-bench`). `create index ... @ttl(d)` gives a timestamp field one, and
-`alter collection c alter field f @ttl(d) | @sorted` sets or takes it
-off (field change 4, the index kept). `_idempotency`'s `at` is the first
-user: its purge on the write path went. A subscriber hears a row reach its
-time at that time (`sse::Expiry`): told at the sweep, a minute and its
-grace later, a courier whose phone went quiet stayed on a dispatcher's map
-73 s after it had gone from every read. A stream of a collection with
-`@ttl` works out when its next row expires (`wakes_at` with no filter, a
-step of the index, 1.3 us over 100 000 rows, again only after a change to
-the collection or a look), sleeps until then if no write comes first --
-`Hub::wait`'s timeout, writing no keep-alive for it -- and reads the rows
-that reached their time since it last looked: `expired()` and the field's
-window, the shape ANDed in, every row of the collection for an unscoped
-shape that holds nothing (`FenecHttp.live`'s, told of any write to it),
-sent as deletions at the change the stream stands at -- a scoped stream's
-held to the ids it was sent, a quiet one's emptied -- and a resumed stream
-tells every row past its time not yet swept. The sweep's delete comes
-after, a deletion of what is gone. About 10 ms after the row's time in the
-test, which holds the row still in the file as `expired()` once heard, and
-a scoped stream silent at another user's row's time. The two features cost
-the browser module 16.4 KB, 5.7 KB brotli -- 18.7 KB more while a ttl printed back
-through a float, which brought the standard library's float formatting.
-`expired()` cost it 561 bytes, 98 brotli.
-
-**`alter collection` rewrites no document; positions are not places.** A
-document is its values in field order, so a field added goes last and a
-document written before it ends before its place -- `skip_field` skips
-nothing at the end, and the read is `null` (`Schema::read_doc`,
-`Store::read_field`, `read_fields`); a rename is the schema alone; a drop
-leaves the place in `Schema::dropped`, written as a nameless field of type
-tag 12, skipped on read, written as `null`, refused by name, its index
-taken off (`Collection::take_indexes`), until `compact` writes each
-document without it (`strip_dropped`, the kept values' bytes copied: 95
-ms over a million rows in memory against 56 for a compact with none). A
-field's position -- what `field_pos` gives and every reader passes -- is
-its index in `fields`; its place in a payload is past the dropped ones
-before it (`Schema::place`). The store keeps the dropped places
-(`Store::set_dropped`, set wherever the schema changes) and works a
-place out per read for `read_field`; `read_fields` takes places, worked
-out once a query by its callers (`Filter::new`, the aggregate, the
-rebuild): worked out a row, the compare took a million-row scan 21.2 ->
-21.8 ms. Natively the end is told inside the skip's own tag lookup
-(`skip::<true>`); asked in the loop, a scan reading two fields three apart
-took 39.1 -> 40.4 ms; the browser module asks the compare, a second copy of
-the skip being 1.1 KB of it. After both, five scans of a million rows went
-from 1.7% slower to 1.7% faster (21.2 -> 21.6 ms, 36.8 -> 36.2, 39.1 ->
-39.3), as the same build with `read_fields` written as before did (+1.3%
-to +3.1%) -- where the code lands, not what it does -- and the browser's
-1.70 -> 1.71 ms. An alter is record kind 12 -- `[change][field]
-[new name][schema]` (`FieldChange`) -- not a kind-5 record with a change
-byte, which a binary from before would read as an index added; it counts
-one write, rides in a block, and is undone as an index built is
-(`Undo::Altered`: the schema before, a dropped field's indexes to put
-back). The load keeps a graph restored before it under its field's new
-name; a replica applies it through `Collection::alter_fields`, as the
-write path does, checking nothing; `changes_in` reads the documents after
-it by the schema it made. A field added under a dropped one's name is a new
-field: the old values stay in the dropped place. A type change is refused:
-it would rewrite every document under the write lock. A compact over a
-collection holding a dropped place holds the lock (`compact_online`): the
-copies made beside the database are the records as they stand. An add, a rename and a drop take 0.025,
-0.021 and 0.004 ms over a million rows; the browser module grew 12.2 KB,
-4.0 KB brotli -- the reading side, which a file from a server needs, and
-the writing side, which a page's own database does.
-
-**A `json` field holds any value, and a path is a name.**
-`DataType::Json` (type tag 14) holds an object (`Value::Object`, value tag
-13 -- 11 and 12 being a collation's and a dropped place's, in a number space
-the two share), a list or a scalar; a typed field still refuses an object.
-An object's members are sorted and unique (`Value::object`: a key twice is
-refused, never one of them kept), so a member is found by binary search, two
-equal objects encode alike and a hash index files them as one. A field's
-name holds no dot (`Schema::new`), so a path -- `meta.source.rank` -- is an
-`Expr::Field` whose name `Schema::path_of` splits, and every place a name
-went takes it unchanged: `select`'s columns, `order`'s keys, `Fields`, the
-planner's equalities and ranges; an `Expr::Path` would have been a variant
-for every match over an expression in six crates. A path that leads nowhere
-is `null`. `Filter` binds one as a field (`Slot::Path`) and reads it off the
-row's bytes (`Store::read_paths`, `codec::decode_path_into`: the members
-before the key passed over undecoded, a text into the text its slot held);
-the reading is out of line and `matches` inlined natively, since left to the
-compiler a scan by a text field went 3.05 -> 3.17 ms with no path in the
-filter at all. A path's index is a field of its own beside the fields
-(`Schema::paths`), written inside its json field's schema entry, and kept up
-from `Document::at`; `Collection::fit_paths` makes the structures match the
-schema after an alter or an undo, unbuilt, rather than move them by name.
-`@hash` files a whole float as the int it equals (`hash_key`), and a lookup
-over json takes only what a bucket answers exactly (`lookup_key`: not an int
-past 2^53, not a timestamp); `@sorted` keys numbers as `f64`s and text by its
-bytes, numbers first, and holds apart what it cannot order -- a boolean, a
-list, an object, an int past 2^53 -- answering nothing while it holds one
-(`SortedIndex::answers`); `tests/json.rs` holds both to a twin collection
-row for row. Nesting is 64 levels and a path 64 keys, refused past either
-(`MAX_JSON_DEPTH`, `MAX_PATH_KEYS`), the JSON reader's recursion bounded
-with them. A json field keeps a number as written, and a list of numbers
-alone is read the quick way, into a vector's `f32`s, by every reader that
-has no schema -- the lexer (`Tok::Vector`), a query's parameters, the
-browser module's vectors handed apart -- so a vector given to one, or
-compared with a path into one, is refused (`json_value`,
-`Database::refuse_inexact`) and the caller reads that part again as
-written: `Database::exactly` names it (the text, or parameters by place),
-walking every place a statement holds a value, each collection by its
-own schema (`statement_needs`, `Known`) -- an inner `get` at any depth, a
-`lookup` level, a disjunctive facet's filter, `having`, `group`, each
-item of the list, an `order` key, a `set`'s values, a comparison under
-any call, `case`'s among them. It walked the statement's own filter, list
-and `lookup` levels alone, so a point in an inner `get` stayed `f32`s
-that `distance` refused as no point (the dispatch example's claim of the
-nearest); `exactly_for`, which knows one collection, reads another's
-lists as written, slower for a vector and never wrong. Then
-`fenec_ql::parse_for` / `parse_exact`, `json::parse_params_exact`,
-`/query`, `/batch`, a REST `where=`, and the module, which answers
-`"exact": [places]` for `run` to send those as JSON. A statement with no
-list of numbers costs the walk of its literals, one into a collection with
-no json field a look at its fields: 0.03 us for a `put` of 1 000 128-dim
-rows, 14 us with a json field beside the vector, against its 9.0 ms, which
-parsed and ran as before natively and in the browser module (`make
-wasm-speed`'s `put`). A typed array handed to the module goes as the
-numbers it holds, each an `f32` exactly. An object, an HTTP body
-(`parse_documents_json`) and an imported `jsonb` cell (`json::parse_json`)
-are read exact from the start. Over 100 000 documents a path
-filter scans in 5.7 ms against a text field's 4.2, 0.025 ms through `@hash`;
-a scan with no json field moved by noise alone. The browser module grew
-29.8 KB, 9.6 KB brotli -- 3.7 KB of it reading a list as written, a second
-lexer 2.9 KB of that until it took its flag at run time there
-(`lex_with`); the standard library's sort for the members (4.1 KB) and a
-walk generic over its callback (3.8 KB) were taken out on the way.
-
-**A vector written again is one node** (`VectorIndex::place`,
-`aliases`, `Same`). Written hundreds of times, a node each filled its
-neighbours' lists with copies -- the diversity rule takes a candidate at
-distance 0 from the owner, `0 < 0` being false -- and a walk could not
-leave them: 1 812 of 6 019 copies over 20 000 x 128 found by no search,
-other queries' recall 0.82 -> 0.67. Skipping copies in the heuristic took
-the recall back to 0.72 and orphaned the copies, since no list took them
-in. Now every insert, batch and deferral goes through `place`, which
-finds a live node storing the same vector to the bit -- `Same`, open
-addressing over `node + 1` beside the hash's top half, made on the first
-insert rather than at an open, 16 to 32 bytes a node -- and makes the
-document one of its `aliases` (`(node, doc)` sorted, not a map: another
-hashbrown in the browser) rather than a node. A search hands a node out as
-its documents in id order, the exact paths by `(node, doc)` pairs put in
-node order through the `u64` sort; a document leaving a node hands it to
-another holding its vector, and only the last makes it a tombstone
-(`detach`). Over codes the stored codes are compared, which `near` puts in
-order by the documents' own vectors anyway. The level is drawn only for a
-new node, so a graph with no vector twice is byte for byte the graph it
-was. Graph records 9 and 10 carry the aliases after the tombstones (and
-the copies table's hash halves after those, below); a restore
-checks each alias's document holds the node's vector. Tests whose
-data repeated vectors (`i % 13`) to count nodes and tombstones now write a
-vector a row. The browser module 2.2 KB brotli; builds, searches and
-opens as fast.
-
-**Natively the table that finds a copy grows from its own slots**
-(`Same`, `SameTable`). In the browser `Same` is one table, made again from
-the arena once it is half full; natively that was the write that found it
-full hashing every live vector again under the write lock -- 118-132 and
-242-281 ms at 2^19 and 2^20 nodes of 128 dimensions, 166-169 and 376-377
-ms at 2^17 and 2^18 of 768 and 1.45 s at 2^19 (`make growth-bench`'s
-`vector`). A slot's place is the low bits of the half of the hash it
-holds, so a table made twice the size reads its slots and no vector,
-leaving the tombstones' behind, and past `SAME_SPLIT` (2^16 slots, an
-index of 32 768 nodes) the table is 256, by that half's top byte, each
-growing on its own: the split moves its slots in 0.72-0.80 ms and a shard
-at 2 million nodes grows in 0.15, and over 1.1 million 128-dim puts one at
-a time and 300 000 768-dim ones no put at a doubling took 10 ms. A place
-taken from the half leaves fewer of its bits to tell two vectors apart --
-a slot of another vector at the same place passes the half's test once in
-2^(24 - k) for a shard of 2^k slots, a vector compared for nothing about
-once in 4 000 puts at a million nodes. Where its graph record carries no
-hash halves (below), the first put after an open makes the table from the
-arena, every vector hashed -- made at the open it would cost a database
-that only reads, and under `--warm` a read-only server 16 to 32 bytes a
-node -- on every core, `SAME_SHARE` nodes at a
-time, through four chains of multiplies and MurmurHash3's finish
-(`hash_lanes`) where one chain waited on its multiply a word (a 768-dim
-vector in cache 1.18 us against 0.17): 275-441 ->
-33-169 ms at 1.1 million x 128, 444-741 -> 24-175 ms at 300 000 x 768, and
-1.18-1.37 -> 0.31-0.59 s at 600 000 x 768, where on this 8 GB machine the
-arena and the file outgrew memory. An open whose tail holds vectors makes
-it there: `make reopen-bench`'s deferred open of 100 000 x 768 never
-linked 0.59-0.75 -> 0.35 s, the linked one 16.2-17.3 -> 14.9-16.3 s. A
-put's p50, a batch's build (100 000 x 128 in 3.63-3.74 s against
-3.72-3.85), `near` and an open of a checkpointed file are as they were.
-The browser module kept its table and its hash (`cfg`): 618 010 bytes as
-on main, every function the size it was, until it took the native hash
-with the halves (below).
-
-**A graph record carries the halves the copies table is made from**
-(`HALVES`, `Same::halves`). The first put after an open read and hashed
-every vector to make the table: 33-169 ms over 1.1 million of 128
-dimensions. Hashed as the restore fills the arena, each vector in cache,
-the table would cost no put, but the open of a checkpointed 100 000 x 128
-took 0.45 ms longer (3.8%) and of 100 000 x 768 2 ms (6.7%), and four
-vectors' chains side by side hashed only 1.65 times as fast. So a version
-9 or 10 record ends with a `HALVES` byte and the top half of each node's
-hash, 4 bytes a node, a tombstone's 0: 0.68% of a 128-dim file, 0.13% of
-a 768-dim one. The restore keeps them -- once the nodes at 64 places
-spread over the arena hash to theirs (`keep_halves`) -- and the first
-vector placed makes the table from them with no vector read, gathered by
-shard and each shard's table filled on whichever core is free
-(`Same::spread`: 1.1 million halves in 4.0-4.4 ms, where put in where
-they fell they took 10.5-10.9). The first put after an open went 4.7-5.5
--> 3.4-4.2 ms at 100 000 x 128, 12.8-15.8 -> 6.4-9.7 at 100 000 x 768,
-30-244 -> 7.6-8.5 at 300 000 x 768, and in `make growth-bench` 47-160
--> 16-31 at 1.1 million x 128 and 68-312 -> 4.4-27 at 300 000 x 768;
-the opens as they were, 11.65-11.98 against 11.68-11.83 ms and 28.2-29.1
-against 28.7-30.1 in turns, and the puts after (growth-bench's p50 264
-and 263 us, 690 and 676). What is left is the first growth of the arrays
-a restore sized exactly and the caches an open leaves cold. On this 8 GB
-machine an open that paged the arena out had main's first put, reading
-every vector, bring it all back; now the puts after it fault it in as
-they walk -- 3.4 -> 8.4-9.7 ms p50 at 300 000 x 768 there, the first
-twenty puts 339 -> 224 ms in all. A
-database that is only read keeps the halves, 4 bytes a node -- 0.6% of a
-128-dim index. A writer has them from the restore, or reads them off the
-table's slots (`halves_by_node`, on every core past `SAME_SPLIT` nodes:
-8.3 -> 2.3 ms at 1.1 million) -- natively, a split table's on the threads
-that write the record's lists, a share of the shards to each besides its
-part (`put_all_lists`): read after the lists, they held a server's read
-lock as it keeps a graph of 110 000 nodes 6.07-6.34 ms p50 against
-5.85-5.88 without them, and beside them 5.83-5.98 (100 saves a run, five
-runs each in turns) -- or hashes the arena where neither holds them, so a
-record is the same whatever way its index came to be. The record keeps
-its version: the reader before stops at the aliases, so a binary from
-before reads it without them -- this build refuses anything else there --
-and a record without them, a binary's from before, has the table made
-from the arena.
-
-**The browser module hashes as a native build does, and takes the
-halves.** Its `Same` hashed with one chain of multiplies (`hash_words`),
-so it could use no server's halves, and its first put after a load hashed
-every vector: 13.1-14.6 ms at 20 000 x 384, 21-34 at 100 000 x 128, the
-puts after it 0.3-0.5. It hashes with `hash_lanes` now, a slot placed by
-its half as natively, and reads and writes the halves as a native build
-does; `web/fenec.test.js` finds the bytes
-`the_halves_a_record_carries_are_the_browsers` holds a native record to in
-the module's image of the same vectors. Its first put after a load went
-13.1-14.6 -> 1.3-2.1 ms at 20 000 x 384 from its own image and 12.7-13.1
--> 1.2-1.9 from a native file, 21.6-24.1 -> 2.8-4.2 and 21.3-30.7 ->
-3.0-5.9 at 100 000 x 128; its loads (65.4 against 65.6 ms median, 25.8
-against 26.0), builds, puts, `near`, filters and JSON (`make wasm-speed`)
-as they were, and the graph and its aliases the same bytes. 1 221 bytes,
-543 gzip, 197 brotli (`make size-report`): the module holds one copy of
-the hash, over the bytes the arena would hold -- an f32 vector written
-out as a code is -- where another over the floats was 0.4 KB more;
-checking the halves in a plain loop rather than through `filter`,
-`step_by` and `all` took 0.5 KB off, and appending them a half at a time
-rather than into room made first 0.4 KB.
-
-**An archive and a backup can be sealed** (`seal.rs`, `fenec key`,
-`--key-file`). A copy in a bucket is out of reach of the disk's
-encryption, so with a key every archive file and a backup file is
-ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors and 2 000 random cases
-against node:crypto): ChaCha20 over AES-GCM because it has no secret-indexed
-tables in software, Poly1305 in 26-bit limbs. Frames carry a random nonce
-and their place and last-ness in the AAD; an image and the history are
-sealed whole (`open_whole` refuses a file cut short), a segment a frame for
-each batch of writes, whole records in each, so a crash cuts off a frame as
-it cut a record (`open_appended`, the segment's `sealed` state). A file of
-the other kind than the archive is refused. About 400 MB/s either way on
-one core. The live file stays plain -- mapped and read in place -- for the
-disk to encrypt. A checksum a record was measured and not taken: hardware
-CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
-lock, and the browser has no hardware CRC.
-
-**Refusals and schema changes are logged; a refusal waits**
-(`fenec_http::audit`, `--audit`, `--auth-delay`). A JSON line an event: an
-HTTP 401, a statement whose shape starts with
-`create`/`drop`/`alter`/`compact` -- found where `statements::record` shapes
-every statement, so no literal reaches the log -- and a
-`/_admin/` or `/_shard/` request that changes something. Who is a
-thread-local set as the connection starts, a connection being a thread. A
-refusal waits 100 ms, doubled for each more from its address within a
-minute, 5 s at most, and only a token verified clears the count
-(`audit::verified`): called where a token is compared or a JWT's signature
-checked and found good -- `authenticate`'s server token and JWT,
-`admin::handle`, `metrics::allowed`, `Replication::authorized`, a tenant's
-replication token in `route_tenant`, the router's `refused` -- and nowhere
-else, asking the table only when an address has one (`FAILING`): the
-hooks cost a request 5.4 ns in process, 5.7 with a token verified, where
-reading the answer -- `Authorization` looked for among the headers -- took
-5.8 and 8.6. It was inferred from the answer, any status
-but 401 to a request carrying `Authorization`, and most answers verify
-nothing: an unknown path's 404 on a node or the router, `/_studio/`, an
-open `/_metrics` or `/_shard/`, `POST /_whoami`'s 405, a body past
-`max_body` (read whole where an admin token raises the ceiling) refused
-413, a `--metrics` listener's 404, `/_admin/` off, a preflight the router
-forwarded, and every answer of a server that asks for no token but holds a
-replication or an admin one (`Who::Full` there verifies nothing) -- a
-client guessing tokens sent `GET /nosuch` between its guesses and never
-waited past the first 100 ms. A good token answered 400, 403, 404, 409 or
-412 was verified all the same, and clears. Behind the router the node
-verifies and the router keeps the count, so `verified` under the router's
-mark sets a thread-local instead, which the answer's head carries as
-`Fenec-Verified: 1` (`audit::push_verified`, in `Response::write` and a
-subscription's and a replication stream's heads), taken as it is written
-and reset as each request is read, so the request before on a pooled
-connection says nothing of the next; the router drops it from what it
-sends on and clears its client's count on it alone. Against main in
-three ABBA rounds (`make requests-bench` with and without a token, `make
-shard-bench`'s latency, a node and the router asked with a data token and
-a JWT; one side of twelve left out, the machine's load past 6 from other
-builds), every median stayed inside the runs' spread. The count is an
-address's, not a token's: a client holding any good token -- a JWT an app
-hands every user among them -- clears its own between guesses at another,
-as it always could. `tests/audit.rs` (fenec-http) and `tests/refusals.rs`
-(fenec-shard) send a guessed token to each of those answers and hold the
-count where it was, a good token to the others and see it cleared, and
-fail with the inference put back.
-Behind `fenec-shard` every request came from the router's address -- four
-forged tokens made a fifth client's expired one wait 1.6 s, and any good
-token cleared the attacker's count -- so the router waits out a refusal
-itself, by its client's address (`forward` calls `audit::http`), and a node
-waits none for a request bearing `Fenec-Router: <address> <mark>`, the mark
-16 bytes of an HMAC of its admin token (`audit::router_mark`,
-`Config::router_mark`), the address the log's `peer` (the router `via`):
-the router drops the header from what a client sends, and a node believes
-it from no one else. At the router the count is one across every node.
-Behind the global entry the router's peer is Cloudflare's address, so with
-`--entry-token` it counts, clears, logs and names onwards the address the
-entry's `Fenec-Client` names (`audit::entry`, `NAMED`; under *One URL
-reaches every region*). As two headers and the whole HMAC it added 2.5 us to the 22 a request
-through the router took; as one, with the forwarded headers borrowed
-rather than cloned and written without `format!` (`Pool::send`), 0.85 us
-on average over four turns against main, inside its spread of 21.2-23.0. A browser's preflight is
-answered 204 before any token is asked, where `--http-cors` lets its origin
-in (`cors_allows`): authenticated first, it was 401 and a page on another
-origin could send nothing.
-Reads and writes are no events, but for an MCP write tool's call (`mcp`)
-and a quota's refusal (`quota`), above. A test that opens the log is a
-`[[test]]`
-of its own: the log and the counts are the process's.
-
-**Every request has an id, in its answer and in every line it wrote**
-(`fenec_http::request_id`). Taken from `X-Request-Id` when it is printable
-ASCII of at most 128 bytes, made otherwise -- 16 hex characters,
-SplitMix64's finalizer over a key read from the system once a process, the
-thread's number and its count of requests, so no system call a request --
-and set as a thread-local where the request is read, as the audit log's
-peer is: `Response::write`, a subscription's and a replication stream's
-head send it, `audit::line` writes it as `request_id`, and `log!` ends a
-line with `request_id=<id>` while one is set. The slow statements are JSON
-lines on stderr through `audit::line` (`event` `slow`, `duration_ms`,
-`kind`, `tenant`, `statement`), so one parser reads both logs, and every
-line has a `level`; an admin event's status is `http_status`, since
-Datadog takes a `status` for the level. `--slow-ms 0` logs every statement,
-as PostgreSQL's `log_min_duration_statement = 0`. The router takes the
-client's id or makes one, drops the client's header, and `Pool::send` sends
-the thread's id with every request to a node, which takes it as its own;
-the router's answer carries its own id in place of the node's. An id costs 15 ns
-to make and 12 to keep a client's; in `make requests-bench`, eight
-runs in ABBA turns a minute apart, one client's p50 stayed 0.016-0.022 ms
-for a row by id either way, and eight clients' medians moved -12% to +6%
-by case with no sign shared -- the runs' own spread, the machine busy with
-other builds. `fenec_refused_total` (and the router's
-`fenec_router_refused_total`) count the 401s the audit log names.
-`monitoring/datadog/` holds the Agent's `conf.yaml` (OpenMetrics check,
-`namespace: fenecdb`, `raw_metric_prefix: fenec_`), `pipeline.json` and
-`dashboard.json`: `fenec-shard`'s `tests/datadog.rs` scrapes a primary, its
-replica, a tenant node and a router in process and fails on a metric the
-check keeps or the dashboard asks for that none of them sends, and
-`fenec-server`'s `tests/logs.rs` on an attribute the pipeline or the
-dashboard reads that no real line has.
-
-**A request is a trace, sent over OTLP** (`fenec_http::trace`,
-`--otlp-endpoint`, `--otlp-header`, `--trace-sample`, the standard `OTEL_*`
-variables). A W3C `traceparent` is continued -- a sampled parent followed
-whatever the ratio (`parentbased`), `tracestate` passed on unchanged -- and
-a trace with none starts at the ratio, its id's low 56 bits against it
-(`TraceIdRatioBased`, so a router and its nodes keep the same traces). The
-trace is a thread-local, as the request id is: `begin` where a request is
-read past the health check, the scrape, the preflight and the studio's
-files (most of the requests and none of the time), `end` once the answer is
-written, `discard` before a subscription or a replication stream takes the
-connection over (its spans would be held for as long as it lasts), a trace
-64 spans at most. The spans are the waits: the server span (`http.route` a
-template, `db.query.text` the statement's shape from `statements::record`,
-never a value -- a REST target's query string holds words the shape keeps,
-so it has its route alone -- `fenec.request_id`, `fenec.tenant`),
-`lock.wait` in `held::read`/`write`, `execute`, `durability` in
-`await_durable` holding the `Tee`'s `fsync` and `replication.wait_sent`,
-`fenec.wait_for_write` for `Fenec-After`, and the router's `forward`, a
-client span whose id `Pool::send` sends the node as its `traceparent` --
-the client's dropped from the forwarded headers while the router traces,
-passed through as they came while it does not. Every start and end is a
-read of the wall clock (`now_unix`), as OpenTelemetry's Go, Rust and
-Python SDKs take theirs: a request's children were timed by the monotonic
-clock from an anchor of both, two reads that land past 100 us apart about
-once in 45 000 and up to 83 ms beside load, so two requests of one process
--- a router's `forward` and the node's span under it -- were each off by
-their own; a step of the clock shows inside a span, macOS reads it in
-microseconds, and a read costs what the monotonic one did. A server span
-ends once its answer is written, so a node's outlasts the router's
-`forward` by its write: `fenec-shard`'s test held the whole span inside the
-forward and failed 22 runs of 203 in three cores beside six busy loops,
-the node ending 82 us to 1.3 ms after; it holds the start and every span
-the node ended before writing, none of 300 failing. A finished trace goes
-into a queue (`OTEL_BSP_MAX_QUEUE_SIZE`, 2 048 spans) under a mutex held for a
-push, the exporter taking it whole in one swap; full, the spans are dropped
-and counted (`fenec_trace_spans_dropped_total{reason}`), so a request never
-waits on the collector, and a thread posts it every second or at 512 spans
-as OTLP/HTTP JSON written with `json::escape_into` and a client of a page,
-the connection kept alive, a post bounded by `OTEL_EXPORTER_OTLP_TIMEOUT`.
-fenecdb speaks no TLS, so an `https://` endpoint and a `grpc` protocol are
-refused at the start: the endpoint is a collector on loopback -- the
-OpenTelemetry Collector, the Datadog Agent's OTLP receiver -- forwarding
-over TLS. Off, each hook is one relaxed load: in `make requests-bench`,
-six runs in turns against main, one client's p50 stayed 0.022, 0.034, 0.059
-and 0.022 ms (main 0.022, 0.033, 0.059, 0.021) and eight clients' medians
-inside the runs' spread; on at 100% to a sink on loopback 0.022, 0.034,
-0.060 and 0.024, eight clients 2 to 9% fewer requests a second, the
-exporter's JSON a core of the eight. `fenec-server` grew 49.7 KB,
-`fenec-shard` 82.7 KB (aarch64-apple-darwin), and the browser module not by
-a byte: nothing below `fenec-http` changed. `fenec-server`'s
-`tests/tracing.rs` holds the spans an in-process receiver (`tests/otlp.rs`)
-is sent to OTLP's JSON, their parents and attributes, a ratio of 0 to
-nothing but a sampled parent's trace, and a collector that hangs or is down
-to costing no request its time; `fenec-shard`'s, a `[[test]]` of its own
-since tracing is the process's, a trace through the router into the node.
-
-**Limits error, they do not truncate.** `near`, `match` and `fuse` results
-cap at 10 000 rows (`limit + offset`), expression depth at 512 levels, a
-`lookup` chain at 8 and an `in (get ...)` at 100 000 values and 4 levels;
-all of them return a query error, because a silently cut result is a wrong
-answer believed right. Full table in `site/content/docs/limits.html`.
-
-**Threads are `cfg`'d out of WASM.** The parallel HNSW build path must not enter
-the wasm32 target. Likewise wasm32-unknown-unknown has no clock: `now()` reads
-the time the module is handed with every statement (`fenec_query`'s last
-argument, `db.now`'s `Date.now()`, through `Database::set_clock`) and
-errors where it is handed none.
-
-**The wasm32 build has SIMD, and its kernels match the scalar ones bit for
-bit.** `.cargo/config.toml` turns on `simd128` for that target, and
-`vector::simd` holds the distance kernels written against it: the module is
-built at `opt-level = "z"`, where LLVM does not vectorise the scalar strips
-(a 20 000 x 384 HNSW build went 28.0 -> 9.95 s). They keep the scalar loop's
-eight accumulators and reduction order, so a graph built in the browser is the
-graph built natively; `web/fenec.test.js` checks that order against a
-`Math.fround` reference. The same config links the module with
-`--compress-relocations`: wasm-ld wrote each call's function index and each
-address the code takes as a padded five-byte LEB, 36 KB of the module and
-2.2 KB brotli, and V8, which tiers a function up by its size in bytes, runs
-the smaller one faster -- `near` 12%, a page of vectors as JSON 15% (`make
-wasm-speed`). A build that keeps the names strips the debug information
-the flag refuses (`strip = "debuginfo"`, as `make size-report` does).
-
-**aarch64's strips are written out as well, to the same bits.**
-`vector::neon` holds every distance strip on aarch64 -- f32, f16 and int8
-codes -- over one `strips`, eight accumulators as two four-lane registers,
-each lane doing the scalar loop's multiply and add (no fused multiply-add)
-and the lanes summed in `strip8!`'s order. Left to the vectoriser, the f32
-and f16 strips read through four-way de-interleaving loads into two-lane
-registers, half of NEON's width: a 128-dim dot product took 21 ns in cache
-against 9.4, and 91 against 60 out of an arena of 100 000; the int8 ones
-chained every strip to the one before. f16 is widened with `half`'s own
-masks, shifts and multiply, not NEON's conversion, which would turn
-infinities and NaNs into what `half` does not.
-`f32_and_f16_kernels_match_the_scalar_strips` holds them to the scalar
-strips bit for bit. A 100 000 x 128 build went 5.2 -> 4.3 s (f16 6.0 ->
-4.5), and `near` at 768 dimensions over f16 0.54 -> 0.34 ms p50. x86_64's
-vectoriser keeps four-lane SSE registers and is left as it is.
-A walk measures a node's unvisited neighbours four at a time there
-(`distances4`, `Arena::dists_to`) and takes them in the order it did: read
-together, four vectors wait on memory once -- out of an arena of 100 000 a
-128-dim distance took 60 ns alone and 47 four at a time, a 768-dim one 242
-and 149 -- so `near` at 768 dimensions went 0.35 -> 0.29 ms p50 over f16
-and 0.35 -> 0.28 over f32, a build 3-10% faster, and
-`the_walk_scores_as_the_exact_search_does` holds the walk's scores to the
-exact search's bit for bit. The browser's module built a graph 4% slower
-four at once and grew 9 KB, and gathering the neighbours before measuring
-them one at a time still cost its `near` 7%, so everywhere but aarch64 the
-walk is as it was (`cfg`). There the walk also asks for the next
-candidate's list and the fresh neighbours' vectors ahead of reading them
-(`prefetch`, a `prfm` hint): each read was a cache miss waited on after
-the one before, and a 100 000 x 128 build went 3.96-4.25 -> 3.58-3.80 s,
-`near` 0.10 -> 0.08 ms p50. The diversity heuristic measures a candidate
-against four chosen neighbours at once (`any_nearer`), 5 to 9% off a build
-at 768 dimensions. Neither changes a bit of the graph.
-
-**The indexes are features, and a build without one opens a file that
-declares it.** `fenec-core`'s `vector`, `text`, `sparse`, `sorted` and
-`composite` (an index over several fields, which needs `sorted`; the five
-are `indexes`, and with `language` below make `full`, on by default) are
-what a browser module may leave out: `make wasm FEATURES="text sorted"`,
-`FEATURES=none` for none, and `make wasm-sizes` weighs each (below). What stands in for a missing one is a type of no value with
-the real one's methods (`off.rs`: a field of an empty enum), so the engine
-compiles unchanged and the compiler drops every path through it; only the
-places that make one are `cfg`'d (`Collection::new`,
-`reset_index_structures`, `build_index`, the maintenance build). The file
-does not change with the build: a collection declaring the index is made
-and opened and its documents read and written, a `near` over it measures
-every vector and a sparse `near` scores every document, as `exact` does
-(below), a `match` over it is refused naming the feature (`not_built`), and
-so is a `create index` of its kind -- while one replayed from the log is taken and
-not built, since refusing it would refuse the file. A `@sorted` field's
-comparisons and orders are the scan's, the same rows, so which types it
-takes is the type's answer in both builds (`sorted::orderable`). A graph in
-the file is passed over, and a checkpoint without one holds none, which a
-full build rebuilds on open like a graph that does not validate. `rerank`
-reads vectors out of the store and needs only `text`. The checks for a
-missing index ask `EVERY_INDEX` first: the lookup of a field is a loop the
-compiler cannot prove ends, and one left in cost the full module 197 bytes
-brotli; asked first, `EVERY_INDEX` left it the size it had been before the
-features, to the byte. A crate that depends on `fenec-core` names `full`
-itself (the workspace takes it without default features), and `fenec-ql`
-only as a dev dependency -- in its normal ones it would put them back into
-every browser module. Without `composite` an index over several fields is
-the scan's, and a unique one is asked by reading the rows, as it was
-without `sorted`.
-`tests/features.rs` and the unit tests run without them in `make test`,
-`web/fenec.test.js` hands files between the full module and the one
-`make wasm-lite` makes, both ways, and CI runs clippy over none and each
-alone.
-
-**The rest of the language is features too, and the smallest module is
-149 KB brotli.** `language` is what a page may go without past the
-indexes: `geo` (`distance`, `within`, `near` over a point and `@geo`,
-which needs `sorted` too), `nocase`, `collate`, `facets`, `highlight`
-(which marks what `match` found, so needs `text`) and `analytics` (the
-HLL sketches and `bucket`; every other aggregate -- `count`, `sum`,
-`avg`, `min`, `max`, `count(distinct)`, `first` and `last` -- and
-`having` are in every build). `make wasm-sizes` builds each added to the
-module with none (432.5 KB, 149.0 brotli, against 713.8 and 244.1 with
-every one) and left out of the full one, brotli added and saved:
-`vector` 20.4 and 19.0, `sorted` 8.7 and 23.5 with `composite`,
-`composite` beside it 11.6 and 10.9, `collate` 8.9 and 8.4, `text` 13.1
-and 15.2 with `fuzzy`, `prefix` and its term table (5.7 and 7.3 before
-the first two, 10.9 and 13.0 before the table), `facets` 3.6 and 4.5, `highlight` beside `text` 3.8 and 3.6, `nocase` 2.8 and 2.6, `geo`
-2.5 and 6.0 (its index with it), `analytics` 5.5 and 5.1, `sparse` 2.4
-and 1.4, the schema check 9.5 and 9.5. The module with every feature is the code
-it was (`make size-report BASE=main`: 14 bytes less of it, functions moved
-and closures renumbered, brotli within noise), each check for a missing
-one behind `crate::FULL`, a `cfg!` of them all as `EVERY_INDEX` is: a
-message for a function a missing feature brings, asked before the check,
-was 140 bytes of it. The ways a feature goes, each so the compiler sees
-the paths dead rather than skipped: a type of no value where a value
-would carry it -- `CaseFold` an empty enum without `nocase`, so every
-`Option<CaseFold>` is `None` and every folded key, test, order and group
-goes with `case.rs`'s fold; `Test::Distance`, `Within` and `Fold::Hll`
-`cfg`'d out with their arms -- or the one place that makes one asking the
-feature first: `Collation::compare` answers the bytes' order without
-`collate`, never asked, and `collate::PARTIAL` takes the chunk machinery
-and the module's Latin chunk out with it; `split_facets`, the facet
-counts and `mark_plans` behind `cfg!`; `distance`, `within`, `bucket` and
-`hll_estimate` left unregistered, a call refused by name
-(`missing_function`). A build without one opens every file. A point is
-read, written and checked as one, and a radius, a box or `near` over one
-refused. A `nocase` or collated field's text compared as written would be
-a wrong answer, so every statement over its collection is refused
-(`refuse_unbuilt`, asked in `answered` and `answered_select`, which every
-read, write, inner `get` and `lookup` level passes), as is a `create
-collection` or an `alter` declaring one and `order ... collate`; the
-file's other collections answer, and a drop takes the collection away.
-`facet`, `highlight` and `snippet` are refused where a select is checked,
-at its parse through `fenec_ql`, the sketches where their fold is made. The
-parser keeps all of it: its code for these is about 2 KB of the module
-(`facet_list` 1.0, a composite's keys 0.8, `collate` 0.3), well under 1 KB
-brotli, and the engine's refusal names the feature where a parse error
-would not. Measured and left in: `json` -- a path refused and a json
-value with it took 0.6 KB brotli off the module with none and nothing off
-the full one, since a path is read wherever a field is (the filter's
-slots, the aggregate's reader, `order`'s keys, the hash, ordered and
-composite keys) and an object is also a document handed as a parameter --
-and `@ttl`, 0.7 KB, against refusing every collection whose rows expire.
-`tests/features.rs` runs without the indexes (`std-fs,language`) and
-without anything in `make test`, opening `tests/language.fenec`, which
-only a build with the features can write (`tests/language_file.rs` holds
-it to the full build's answers, `FENEC_WRITE_FIXTURE=1` writes it again);
-`web/fenec.test.js` opens the full module's file in the one `make
-wasm-min` makes and holds it to each refusal; CI's clippy runs the module
-with none, each feature alone and each group, a check of no code made,
-about 10 s a set.
-
-**What is core, and why one module ships.** What a general-purpose
-database is expected to do for any app is core and goes in every module:
-storage and FenecQL, the hash, ordered, unique and composite indexes, the
-schema check, search -- `match`, `highlight` and `snippet`, facets,
-`near` with its graph, `fuse` -- and the standard query features. A
-plugin is an extra one kind of app needs: geo, sparse vectors, a
-language's collation, `bucket` and the HLL sketches. Held to that rule
-the core is about 223 KB brotli and the extras about 21 together (`geo`
-6.0, `collate` 8.4, `sparse` 1.4, `bucket` and the sketches 5.1), 9% of
-the full module's 244: too little to pay for modules built ahead
-for sets of features and a choice of one per page, let alone a module a
-plugin loaded beside the engine, which would carry its own copy of the
-standard library's allocator and panic machinery and reach into the write
-path, the undo, the file and replication through a boundary. So
-`@fenecdb/web` ships the one full module, the features stay for a page
-that builds its own and for the tests of the invariant above, and bytes
-are won by making the core smaller (below). `count(distinct)`, `having`
-and `first`/`last` are standard, and are in the core.
-
-**One module and a client entry, by where the queries run, and a test
-build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
-check, 244.1 KB brotli) and `@fenecdb/web/client`, so a user has two
-clear choices: queries on a server through the client entry and no
-module, or a database in the page or a synced replica through the full
-module. `fenec-lite.wasm` (no index, no schema check, 173 KB brotli; `make
-wasm-lite`, as `make wasm FEATURES=language SCHEMA=0` now) was shipped
-beside it and is a test build now -- built in CI, packed and released by
-nothing -- because it holds the invariant above: a build without an index
-opens a file that declares one, and `web/fenec.test.js` hands files
-between it and the full module both ways. `fenec-min.wasm` (`make
-wasm-min`, no feature at all) is the same kind of test build. The client entry is `web/client.js`: the builder (`builder.js`) and the HTTP client
-(`http.js`) re-exported, the two modules `fenec.js` imports beside its
-glue, persistence and sync. The entry's worth is that it cannot pull in
-the engine, sync or storage, not the bytes: a `connect`-only app never
-fetched the `.wasm` through `fenec.js` either (only `Fenec.open` does),
-and bundling `connect` and a builder query's rows is 8.8 KB brotli
-through the entry against 11.7 through `fenec.js` (5.7 against 8.2 when
-the entry was made, 7.5 through `fenec.js` before `FenecHttp.live`), whose `Fenec` class a bundler cannot drop -- its static
-block is a side effect. `web/fenec.client.test.js` walks the client's imports and fails
-if they reach anything but those three files or hold the module's glue,
-`FenecSync`, IndexedDB or files. `FenecHttp.live` is `Fenec.live`'s
-contract over a server: a subscription to each collection the query reads
-of a shape that holds nothing (`select=id&where=false`), every change a
-write to it, the query run again on the server; the first rows wait for
-every seed, a stream that ends is opened again and its seed runs the
-query, and a text names what it reads or is refused -- so `useLiveQuery`
-takes `connect()` as it takes `sync()`. A stream is a server thread
-(45 to 57 KB resident) and a wake-up at every write -- a write's p50 went
-0.26 -> 0.94 ms beside 60 streams and 3.1 beside 500 -- so `{ poll: ms }`
-holds none: the query is sent with `If-None-Match` and the server answers
-304 without running it while no collection it reads was written (`etag`,
-`unchanged` in `fenec-http`, the change ring's
-`changed_collections_since`; a read of rows that expire, calling `now()`
-or holding an inner `get` is never tagged), 54 us against 95 for a page
-of 24 run. On a client reading near (`reads: 'nearest'`) the streams stay
-home, unmarked, and every run -- the first rows too -- is a read near, sent
-after the furthest of the client's position and the live query's own
-(`AFTER`, kept apart: another client's change is no write of this one's,
-which its other reads near would wait for): the furthest its streams named,
-each event's `seq` of the history the head names (`Fenec-History`; the
-seed's `seq` is at or past the head's `Fenec-Seq`), ordered as the client's
-(`later`), so a stream opened again after a failover names the later term
-and the old primary's moves nothing -- and the furthest its runs' answers
-named, since a marked `/query` read's answer carries where the copy that
-answered stood (`cfg.marked`, `At::of` under the read lock it reads under,
-at the pin for a pinned read; every SDK takes a marked answer's position
-for nothing of the client's): a run the router answered from home, past a
-change whose event was still on its way, showed rows the next run sent
-after the last event alone could have a replica behind answer without --
-`[a,b,b2,c]` -> `[a,b,b2]` -> `[a,b,b2,c]` in review. A run waits a second
-on the replica (`Fenec-Wait: 1000`), not the node's five: a replica has a
-write once home's fsync covers it, 283 ms behind at most under `--sync 250`,
-and a link later, and home answers in a region's round trip; a replica's 504
-rests the copy at the router (above), so a replica cut off costs a live
-query one second each `RESTING`, not five each change. The second assumes
-a primary syncing at `--sync 250` or faster and links under about half a
-second: at `--sync 1000` and up every near run misses it and is answered
-home (`fallback` rising, the rows a round trip late), right but slower than
-reading home, which `sharding.html` says; not an option of `live`, since a
-deployment that slow reads home. Home's 504 -- the change lost in a
-failover -- sets back whichever position the run was sent after and asks
-near again after home's, home unmarked only where that fails too, since an
-unmarked answer names nothing -- and so a run after that one may show rows
-from before it, left so: it takes a failover that lost writes, whose lost
-write the rows lose anyway. A head naming no history -- a server from
-before heads named one, or a database never replicated -- sends the runs
-home until every stream's head names one again (`bare`, by collection: set
-for good, a stream reopened after an upgrade left the live query home):
-term-0 positions never pass the client's. The rows are
-never older than a change a stream told of or a run showed, and a stream
-tells of every change home takes. The polls stay home: a tag is a change of
-the copy that answered, and a replica holding that change of its history
-(`Fenec-After`) judges it as home does up to where it stands -- behind,
-`unchanged` reads a tag past its change as changed and runs the query, rows
-older than those shown -- but nothing in a poll names a change home took
-since, as a stream's events do, so a replica behind or cut off from home
-would answer 304 to a write home holds. `web/fenec.replicas.test.js` holds
-it to two routers, two nodes and a read replica that follows its primary
-through a proxy parking what the primary sends (`parking`, which counts
-what the routers ask the replica's node too), the tenant's `streams` quota
-set so the replica's node counts a run held there (`usage.streams`): the
-first rows and a change's run held on the replica, answered by it once
-released (`fenec_router_replica_reads_total`'s `replica`), one never
-released sent home after its second, and the changes after it home at once,
-the replica asked once for three (`fallback`), the stream unmarked --
-failing at once with the streams' position, its history or the mark taken
-out, a stream marked, or the router's rest; runs through the home region's
-router at a tenant whose one stream its live query holds answered, failing
-with the slot taken first; and scripted tests: two streams' seeds and
-changes, one behind another's, the client's own write further, a stream
-reopened on the next term, the old primary's change ignored, home's 504
-asked near again after home's position and home unmarked after a second, a
-marked answer moving the live query's position and not the client's; a
-replica behind home answering the run after a home answer -- failing with
-answers' positions left out as the review's rows did; a head with no
-history and a poll going home, unmarked. `useLiveQuery` passes the client
-through and needs nothing. An app's bundle of `connect`, rows and `live`
-went 29 684 -> 30 124 bytes, 9 728 -> 9 891 brotli; `http.js` 26 412 ->
-29 298, 7 787 -> 8 586 brotli, which took the client the docs quote to 194
-KB, 51 brotli, and the studio's first load to 66 KB gzipped.
-`db.subscribe(collection, shape, onEvent, { onError, onState })`
-keeps a shape over a server -- a seed, then each change -- opened again with
-backoff and seeding again, stopped by a 401; `sseEvents` is exported with
-it, the types beside (`ShapeFilter`, `ShapeEvent`, `SubscribeOptions`; a
-sync shape was `Shape` already), and an app bundling `connect`, rows and
-`live` went 7 905 -> 8 277 bytes brotli, `FenecHttp` one class a bundler
-keeps whole. `db.batch([...], { idempotencyKey })` posts `/batch` -- a
-builder query, a text or `[text, params]` a statement -- and a stopped one
-throws `FenecError` with `at`, `status` and `completed`; `run` takes a key,
-`withIdempotencyKey` makes a copy sharing `seq`, and every SDK has the same
-(Go's `Error.At`, .NET's `FenecException.At`, Python's `idempotency_key=`,
-the Swift, Kotlin and Dart remotes' `batch`). A replayed answer carries the
-database's change as its `Fenec-Seq`, which holds the write. `Rows<P, {}>`
-carries `facets?: Facets`: a `let` keeps its declared type, so a facet
-asked after it was lost to the type. The client grew 6 -> 7.4 KB brotli in
-an app's bundle. `FenecHttp` calls `fetch` on its
-own (`#request`): as its method, a browser's `fetch` throws "Illegal
-invocation", which Node's does not. `sync()` opens
-the full `./fenec.wasm` unless given `wasm` or `local`. A replica's module
-was shipped beside them for a while (text, sparse and sorted, no graph and
-no schema check, 154.0 KB) and taken out: it left out too much for 27 KB
-brotli -- no graph, so a `near` 2 to 40 times slower (0.27 -> 0.54 ms at
-1 000 x 128, 0.68 -> 8.5 at 10 000 x 384, 0.98 -> 40 at 50 000 x 384), no
-schema check, `create index @hnsw` refused. Without `vector`,
-`near` over a field declaring `@hnsw` is `Database::near_stored`: every
-vector read out of the store and measured as the full build's exact
-search measures its arena (`vector::search_stored`: made a unit one as
-`Arena::push` makes it, halved for f16, the same kernel, the page kept
-through `best_first`, ties in id order -- the arena's when its nodes are
-in id order), or over codes by `order_exactly` as the full build's exact
-search over codes is, a bit index taken to hold its vectors whole while
-fewer than `BIT_TRAIN` distinct ones are stored (`stored_hash`); its
-tombstones, which count there, are not known here. Without `sparse`, a
-sparse `near` takes the `exact` scan. `match` without `text` is refused:
-BM25 needs the index's statistics. `web/fenec.test.js` holds the test
-build's `near` to the full one's `near ... exact` over 9
-declarations, filters and pages, row for row and score for score. The scan
-costs the modules without the graph 2.2 KB brotli; in the test build at
-10 000 x 128 it takes 2.4 ms against 0.22 through a graph and 0.49 for the
-full module's exact scan, at 50 000 x 384 29, 0.75 and 3.9 (`make
-wasm-exact-speed`): each
-vector is read out of its document and made a unit one per query, four
-lengths summed side by side (`flat_sqs4`; 4.3 -> 3.3 ms), where the arena
-holds them made. An f16 field's vector goes into the arena as its record
-holds it (`VectorIndex::as_held` in `place`): placed as written, cosine
-made other unit vectors than an open did, and `near ... exact` scored
-differently after a reopen.
-
-**The browser module holds one copy of a generic where it can.** Every
-type a sort, a map or a `collect` is compiled for is its own copy of the
-code, and `make size-report` lists them; `WHY=<pattern>` names what pulls
-one in. The sorts go through few: ids as `u64`s (`sort_unstable`),
-`(DocId, f32)` by `text::best_first` -- which the text index's cursors take
-too, as `(position, -ceiling)`, the stable order they had -- and rows by
-`order_rows`, which a `lookup` level's order shares (its children in
-ascending id first, a tie's order as before; 10 to 30% faster, its own
-`(Vec<Value>, DocId)` sort gone). The vector index's candidates keep a
-stable sort of their own: through `best_first` a 30 000 x 128 build took
-2.5% longer, for 0.4 KB brotli. A collection's indexes by field are
-`Fields`, a `Vec` searched by name, as `sorted` and `sparse` were, and the
-registry's functions a `Vec` too -- each map was a copy of hashbrown, and
-the registry's lowered the name into a new `String` on every call of every
-row (17% of two calls a row). Against 11.2 the module lost 28.5 KB, 3.9 KB
-brotli. A `str` slice that can panic keeps its panic's formatting of a
-`char` -- `escape_debug` and Unicode's tables of what prints: 16.5 KB of
-the module with the standard library's `to_lowercase`, `to_uppercase` and
-`contains`, which slice that way. So the browser path slices with `get` and
-`split_at_checked`, case is `case`'s, and `~` searches the folded bytes;
-`make size-report WHY=slice_error_fail` finds a slice that brings it back.
-
-**The core lost what it held twice or for one use.** With every feature
-the module went 689.9 -> 662.3 KB, 229.3 -> 224.2 KB brotli (gzip 277.1
--> 269.8), and with none 431.7 -> 414.5 KB, 145.3 -> 142.4 brotli, after
-`count(distinct)`, `first`/`last` and `having` came into every build (3.4
-KB of the one with none, 1.2 brotli) and with no feature taken out. A
-function `#[inline(always)]` for a caller the module does not link had two
-it does: `build_index` (`create index` and `alter`, 2.2 KB, 0.4 brotli)
-and `reset_index_structures` (0.6 KB), each inlined natively alone now;
-and `facet`, inlined, was called from two arms of `facets` (2.5 KB, 0.5),
-one call now. Each export's closure was a `LocalKey::with` and a
-`RefCell` borrow of its own, 2.7 KB, 0.7 brotli, until the handles' table
-was reached through a pointer (`fenec-wasm`'s `table`: one thread, and no
-export calls another); `Parser::err` was ten copies of its `format!` (1.0,
-0.3), `Error`'s `Display` a `write!` a kind (0.5); the builtins a type,
-vtable, `arity` and `doc` each (0.9, 0.2), one `Builtin` in a table now --
-its arity kept in the registry as it is registered, or the second
-indirect call took `lower()` over a scan 158 -> 160 ns a row (kept: 156
--> 152). Standard library code a call brought in for one use:
-`str::parse::<i64>`, inlined at the JSON reader, the lexer and a date
-(1.5 KB with the `Display` of an `i32` a counter's type brought, 0.6
-brotli -- `num::parse_i64`, held to `str::parse` over 60 000 strings);
-`from_utf8_lossy` (0.8 KB, 0.3: `Utf8Error` names the same sequences, held
-to it in `fenec-wasm`'s tests); a float's 8 bytes through
-`try_into().unwrap()`, which kept `Debug` formatting and its `PadAdapter`
-(1.2 KB, 0.3); `clamp`'s check of its bounds, `usize`'s `Debug`, and a
-`char` formatted (0.5). The `in` union's stable sort of ids was there to
-find the runs a bucket already gives (2.8 KB, 0.4): one bucket is its own
-answer now, up to eight are merged where they end and more sorted
-unstable, quicker than it every way (2 runs of 200 random ids 0.5 us
-against 1.6, 2 000 runs of 10 166 us against 233). The collections by name are a
-`Vec` in the order of their names' `Fx` hashes (`Names`, 2.4 KB, 0.3,
-SipHash over text with it) -- searched by the names themselves, every
-statement's look-up compared texts and a read by id over 41 collections
-went 450 -> 514 ns -- and a load's ids a `Vec` (`ById`, 1.7 KB).
-`collect`s into a `Result` -- `near`'s vector and the functions over
-vectors, one `Value::floats` now, bytes from a list, a `put $n`'s
-documents, a list literal's constants, the folds a group's row takes --
-are loops (4.7 KB, 0.9). A derived index is a `OnceCell` in the browser,
-which has one thread to wait for (1.0 KB), and the rest is a few hundred
-bytes each: `fenec_abi::refused` out of line, the search scratch made at
-compile time, the chunks' names a `static`, `count`'s answer made once.
-Tried and left out: `best_first` sorted unstable, a total order (1.1 KB,
-0.1 brotli, `match ... limit 1000` 1.4% slower);
-constructors for an error of a literal (`.into()` is a call already: +0.1
-KB, +0.2 brotli); `index_doc` and `index_vectors_batch` out of line
-(brotli +70 and +180 bytes); `Tok::describe` making one `String`; LLVM's
-inline threshold at 0 and at 25 (+6.9 and +18.8 KB). What is left is each
-crate's: `-Zshare-generics` is the default at opt-level "z" already, and
-`drop_glue<Statement>`, `Expr` and `Select` and the standard library's
-`#[inline]` code are compiled in fenec-ql, fenec-abi and the core each,
-6.7 KB no stable flag merges; dlmalloc's 8.5 KB stays, against an
-allocator of the module's own under memory a page never gets back.
-Measured in turns against main, in process (load 3-5 from another
-agent's YCSB through all of it, on both): a put -0.6 to -4.8%, a read by
-id -1 to -3%, `in` over a hash index -6 to -22%, `lower()` and
-`coalesce()` a row -3 to -4%, `match` -2%, a JSON page of ints -0.4%,
-`make subquery-bench`'s union of 2 000 buckets 0.526 -> 0.444 ms; the
-module in Node, interleaved over 21 rounds: `near`, a build, a filter,
-`match`, a read by id and a page of vectors as JSON within 1.5%, a put
--3.3%, an `in` -6.1%; `make bench` at 30 000 x 128, twelve runs a side
-twice, its writes and ANN within 1%. The same source took 19.6 KB of code off
-`fenec-server` (2 407.4 -> 2 387.8 KB, `make size-report
-BIN=fenec-server`) and 17.5 KB off the shell (1 526.9 -> 1 509.4).
-
-**A vector goes out as its `f32`s.** JSON writes a vector's components
-and a row's `_score` as the shortest text that reads back as the `f32`
-(`json::num32_into`), as pgvector and a sparse vector's weights
-do: `0.1`, where the `f64` each widens to wrote
-`0.10000000149011612`. JavaScript reads it as an `f64` and a
-`Float32Array` rounds that again, which gives every `f32` back but
-`7.038531e-26`: as an `f64` it lands exactly between itself and the `f32`
-above, and the tie goes to the even one, so it keeps its `f64`'s text
-(`json::TIE`; `every_f32_reads_back_through_an_f64` tries all 2^32). The
-digits of an `f32` from 2^-24 to 2^25 are exact 64-bit products
-(`num::shortest`), where Ryu's multipliers took 128-bit ones that wasm
-emulates (`__multi3`), and they go out in one `push_str` rather than a
-`char` at a time: a page of 200 768-dim vectors as JSON, 43% shorter, went
-27.7 -> 10.5 ms in the browser module, and a `near` answering ten 128-dim
-rows 0.373 -> 0.226 ms (`make wasm-speed`), for 37 bytes brotli.
-
-**A number is read three ways, each exact.** `num::parse_f64` takes
-Clinger's path where the digits fit in 53 bits, divides a whole number of
-up to 19 digits by `5^n` for `10^-1` to `10^-25` (`divided`; `div128`
-divides in two 32-bit digits, since a `u128` division took the compiler's
-own, 1.4 KB, into the browser module), and shifts decimal digits
-otherwise. JavaScript writes most floats, every `f32` it widens among
-them, with seventeen digits, past Clinger's 53 bits. A page of 200
-768-dim vectors took 74.6 ms to read in the browser module; divided, 51.9;
-with the JSON reader walking the text's bytes rather than collecting it
-into `char`s first, 23.7; read where the page left it rather than copied
-(`str_from`), 21.9. 10 000 128-dim vectors went in with their graph in
-1 281 ms against 1 706 (`make wasm-speed`), for 368 bytes brotli.
-Natively an array of numbers alone is read straight into a vector's `f32`s,
-each number in the one pass that finds its end where Clinger's path takes
-it (`num::clinger`) and handed to the readers above otherwise: read a
-`Value` at a time, each number's text found and then read twice over, a
-128-dim vector took 5.26 us, now 2.05, and 100 000 128-dim rows without an
-index go in at 220k rows/s over HTTP against 123k (`make load-bench`;
-213k as REST arrays, 146k as a `/batch` of single puts now). A page's
-vectors come into the browser module as `f32`s already, and the reader
-stays out of it: there it was 474 bytes brotli for nothing.
-
-**A vector parameter goes into the module as `f32`s.** `web/fenec.js`'s
-`run` takes each parameter that is a typed array or an array of finite
-numbers -- which the module reads as a vector either way -- out of the
-JSON, where it leaves `null`, and hands it over beside it: its place, its
-length and its values (`vectorsApart`; `fenec_query`'s two arguments
-before its last, the clock; `with_vectors`). A `-0` goes over as `0`, as JSON writes it,
-so the file is the same either way (`web/fenec.test.js`). 200 768-dim
-vectors went in in 21.9 ms as JSON and take 4.4, and `make wasm-speed`
-builds 10 000 128-dim ones with their graph in 1 165 ms against 1 307.
-
-**A quantized index holds codes, and `near` orders by the documents'
-vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a
-vector, `quant=bit` the signs of its distance from a centre (cosine only). A
-code only estimates a distance,
-so `Space` (`engine.rs`) takes the beam's `ef` candidates and puts them in
-order by the vectors read out of the store, as `rerank` does, so every score
-is exact -- reading one only while it can still make the page. An int8 code
-is off by its rounding, a step a component, and `VectorIndex::floor` is the
-nearest its vector can plausibly lie (six standard deviations of that
-rounding, wrong less than 1.5e-8 of the time); a candidate whose floor is past
-the k-th exact distance held is neither tested nor read. At 100 000 x 768 that
-is 16.8 of a beam of 100, and of 400, and 20 over a million, with recall
-unchanged; a bit code bounds nothing and reads the whole beam. A filtered set under the ANN budget is
-ranked by its codes and its beam's worth ordered the same way -- read whole it
-was up to 12 800 vectors a query under bit codes -- and `exact` reads every
-vector. Bit codes take the wider beam `BIT_EF_SEARCH` -- 200: over a million
-clustered 768-dim vectors a beam of 100 held 97.9% of the true ten and 200
-held 99.7% in 0.66 ms, int8 codes 97.1% at 100 (`make quant-bench`); over
-the vectors' own signs the beam was 400, for 98.4% in 2.16 ms. The core settles it
-wherever a spec comes in -- `VectorIndexSpec::default()` leaves `ef_search`
-0 for `resolved` to fill by the codes -- since only the parser knew it once,
-and the Rust API's bit indexes searched 100. How well bits estimate
-depends on the vectors: spread in every dimension, 89.7% at 100 and 97.5% at
-200. The code
-kernels add in `strip8!`'s order on every target, so a graph over codes is the
-browser's graph bit for bit; on aarch64 the int8 strips are NEON intrinsics
-(`vector::neon`, as every strip there is), because the vectoriser widened
-codes through a register it also accumulated in, which chained every strip to
-the one before -- 5x slower, or not, depending on the code around it. A graph
-over codes was record version 4, every other graph 3, so no file was rebuilt
-for the feature; laid out flat (7), every record carries its quantization.
-
-**A bit code is a residual's signs, from a centre the index learned.** The
-vectors' own signs were the code before: most of a crowded cluster's signs
-are its centre's, and over 100 000 x 768 spread in every dimension a beam of
-100 held 36.1% of the true ten, 400 held 74.9%. A bit index learns 128
-centres by k-means++ and four Lloyd rounds over its first 2 048 vectors
-(`BIT_TRAIN`), holding those whole until then -- an index under that
-searches exactly -- in one order on every target, so the browser learns a
-server's centres; the insert that learns them takes 195 ms at 768
-dimensions. A code is the signs `b` of `r = v - C`, the centre's byte, and a
-word after the signs holding `σ = |r|²/|r|₁` and `κ = ⟨C, r⟩ - σ⟨b, C⟩`;
-`⟨q, v⟩` is estimated as `⟨q, C⟩ + κ + σ⟨b, q⟩` -- RaBitQ's estimator
-without its rotation, the query taken from the centre so that only its part
-off the centre goes through the signs (`⟨q, r⟩` estimated whole held
-38.7% over centres that gave 92.8%). `query_for` appends the query's
-product with each centre, once a search, and a distance between two codes
-counts both `κ` (`Arena::offset`), which a widened code leaves out. The same
-beams hold 89.7% and 99.6%, and over 32 directions a beam of 100 went 96.8%
--> 100% at 100 000 and 82.5% -> 97.9% at a million, for 105 bytes a 768-dim
-vector against 96. In an array of their own the factors were a cache miss
-more a distance: the build took 69.7 s against 62.8, a query at a beam of
-100 0.414 ms against 0.378. `⟨b, q⟩` is counted, not summed: `query_for`
-also cuts the query to six bits a component (`QUERY_BITS`), two's
-complement bit planes after the centre products, and `dot_planes` takes the
-planes' popcounts under the signs -- 72 over 768 dimensions where `dot_bits`
-added a float a component, whole numbers exact on every target. RaBitQ cuts
-to four bits the query's distance from a centre; cut whole, a query is
-mostly its own centre, and four bits held 84% of a crowded cluster's ten
-against the 91.5% six hold, as the query whole does. At a million a query
-at a beam of 200 went 1.30 -> 0.66 ms at 99.8% -> 99.7%, filtered 1.36 ->
-0.97, the build 1 012 -> 874 s; the browser module's 0.557 -> 0.470 ms at
-20 000 x 384. The planes ride in the query's `Vec<f32>` as the bits of two
-floats a word, since every search hands that vector on. The centres travel in the graph record behind
-quantization code 3 (`BIT_CENTRED`): a graph over the plain signs (code 2)
-is built again, and a binary from before them builds its own. The browser
-module grew 6.9 KB, 2.2 KB brotli, most of it the k-means.
-
-**Filtered `near` needs its fallback.** The filter's rows are probed first -- in
-blocks spread over the collection, and only until more than `ef × m0` match,
-which is all the plan needs to know. A set that stays under that is searched
-exactly; a larger one goes through the ANN with each candidate tested against the
-filter. That second path *must* fall back to searching the whole set (the probe
-carries on from where it stopped) when the result lands under the limit —
-otherwise a filter correlated with the vector eliminates every candidate and
-returns empty. The probe decides when rows are read, never the answer:
-`tests/filtered.rs` checks it against the plan with the whole set found first.
-That fallback, a set under the budget and `exact` read every vector they
-measure, so natively they measure a share of 8 192 at a time on every core,
-each share's nearest kept and all of those kept again in the shares' order
--- the rows, and the order of their ties, one walk in turn keeps
-(`nearest_of`) -- and keep the nearest `k` as they come rather than sort
-every one (`nearest`). At 1 000 000 x 128 a filter matching a quarter of the
-rows, none of them near the query, took 20.8 ms and takes 5.1; `exact`
-31.6 and 12.2, which is reading 512 MB. A scan asks for the vectors two
-groups ahead of those it measures (`dists_to::<true>`), each a wait on
-memory otherwise: 10 000 of a million 128-dim vectors in 0.41 ms against
-0.82. A set an index names -- a hash bucket, the buckets of an `in` -- is
-sized before it is gathered (`indexed_size`): past the budget the walk runs
-with the filter as a row test, its beam widened until about twice the page
-passes the filter, and where that beam would measure as many vectors as
-the set holds the set is searched exactly at once, as the walk would have
-ended doing. Gathered, a quarter's 250 000 ids -- copied, sorted, each
-looked up -- were most of the 0.71 ms a filter keeping 25% of a million
-128-dim rows took at a beam of 100, against 0.15 unfiltered, and at a beam
-of 40, which a quarter passes about the page of, 43% of the walks came up
-short and searched the 250 000 exactly (p99 8.9 ms); now 0.16 and 0.15 ms,
-and a filter keeping 1% 0.69 against 1.22 (`make scale-bench`). The
-browser module grew 2.9 KB, 1.0 KB brotli.
-
-**Only an `and` chain reaches an index** -- equality (`=` or `in [..]`) over a
-`@hash` field or over `id`, comparisons over a `@sorted` field, the leading
-parts of an index over several fields and a radius or a box over `@geo`
-(both below). `in` is a set
-of equalities written short, so it is answered as the union of one bucket per
-element, and only when *every* element resolves to something the field's type
-can express: one it cannot sends the whole list back to the scan, because a
-union missing an element's rows is a wrong answer rather than a slow one. `id`
-has no `@hash` and cannot have one -- `Schema::new` reserves the name -- so the
-store's id index answers it directly; before that it was a full scan, 383 us
-against 0.50 us over 20 000 documents. Everything else -- `!=`, `~`, `has`, a
-comparison on a field without `@sorted`, anything under `or` -- is a full scan.
-`~` is unranked substring matching; ranked text retrieval is `match` over an
-`@text` field, which does reach one. `order` reads every match's key but puts
-only `offset + limit` rows in order -- unless it is one key over a `@sorted`
-field with a `limit`, which walks the index and stops at the page; with no
-`order`, the scan stops at `offset + limit` matches.
-
-**A filter is bound to its collection once a query.** A scan, the
-probe of a filtered `near`, an ordered walk and each `lookup` level test
-rows through `Filter` (`engine.rs`): each field compared with a value by
-its position, the value worked out once, and a row decoded in one pass for
-every field the filter reads (`Store::read_fields`). What it cannot bind --
-a field it does not know, a parameter not given, a call, two fields
-compared -- stays an `eval` node over the stored row, so every error comes
-where and as it came before: at the first row tested, and never over no
-rows. Both take their comparison from one `query::compare`. Looked up by
-name and cloned value by value, a scan of 20 000 rows with two comparisons
-and an order took 1.91 ms natively and 2.88 in the browser module; bound,
-1.07 and 1.70, and a count over an `in` and an `or` 2.24 -> 0.90 ms. The
-positions are kept sorted as they come: sorted after, `usize` was a sort of
-its own, 3 KB of the browser module. A row's text lands in the text its
-slot held (`Store::read_fields`), a malloc and a free a row less: a count
-by text equality 1.49 -> 0.96 ms natively, 1.86 -> 1.42 in the browser;
-resized rather than truncated, the row cost numeric filters 7 to 13%.
-Reading an `order`'s keys with the filter's own pass, rather than finding
-each matched row again (`order_ids`), took 6 to 9% off an ordered scan
-natively but made the unordered ones 4 to 6% slower in the browser and the
-module 1.9 KB larger, so it is not in.
-
-**`@sorted` must give the scan's answer, row for row.** Its keys order exactly
-as `Value::cmp_value` orders the field's values (ints and timestamps through a
-sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
-`0.0`), `null` is held apart below every key, and `NaN` apart from both: it
-compares equal to everything, so it matches every inclusive comparison and no
-strict one, and an index holding one is never walked for `order`. A literal the
-key space cannot express exactly (`12.5` against an `int`, an int past 2^53
-against a `timestamp`) is left out of the range and evaluated per row. Ties come
-out in ascending id both ways, since that is the order the scan leaves them in
--- a descending walk reverses each run of equal keys. A walk tests the rest of
-the filter row by row and gives up past an eighth of the collection, so a filter
-that matches almost nothing costs 1.25x the scan rather than 2x in random reads.
-The structure is a sorted `Vec` of chunks of at most 256 entries, not a
-`BTreeSet`, which made the browser module 75 KB larger, each chunk found among
-`firsts`, the chunks' first entries side by side: searched over the chunks'
-own, each probe was a cache miss into a buffer of its own, and a lone put
-beside an ordered index over a random int took 1 324 ns, 1 098 now (512 to 256
-moved what a write shifts; the reads did not move). `tests/sorted.rs` checks
-every filter, order and page against a twin collection without the index. It is
-derived data like the hash and text indexes: built when a statement first reads
-it after an open (below), never in the file.
-
-**An index over several fields is its parts' bytes laid end to end**
-(`composite.rs`, `Schema::composites`). `@sorted(owner, created desc)` among
-a `create collection`'s fields or `create index on posts (owner, created
-desc) @sorted`, `@unique(org, slug)` the same refusing a second holder of
-every part, `drop index on posts (owner, created)` by its fields; 2 to 8
-parts of bool, int, float, timestamp, text or json, a path among them. The
-schema writes them one nameless place past its last behind type tag 16
-(`TAG_COMPOSITES`), which a binary from before refuses. A part's value is
-encoded so its bytes order as `cmp_value` orders the values -- an int's sign
-bit flipped, a float's bits made to order with `-0.0` folded, a bool a tag,
-text escaped (`00` as `00 FF`) and ended (`00 01`), a json number as its
-`f64` below json text -- null a tag below every value, a descending part's
-bytes inverted; a collated text is kept as written behind a tag naming the
-collation, and an index holding one compares part by part (`cmp_keys`),
-the rest as bytes. A float's `NaN` and a json bool, list, object or int past
-2^53 are apart: their codec bytes are their part (a unique index finds them
-by them), the rows are listed, and while one is no walk answers and a
-filter's run takes them as candidates to test. Entries are `(KeyBytes,
-DocId)` in the ordered index's `Chunked`, a key of up to 22 bytes held in the
-32-byte entry (an int and a time are 18), longer on the heap, two held ones
-compared as a `u128` and a `u64` big-endian and then by length: each boxed,
-a million keys counted 48 MB and a put cost 2.0 us; `memcmp` a comparison
-was 13% of an insert. Natively the build sorts the keys once (1 015 -> 148
-ms over a million); the browser module inserts them, a sort of these entries
-being code of its own there. The planner (`composed`) fixes the parts the
-`and` chain's equalities name, in order -- an `in` whose every element it
-can say makes a span each, `MAX_SPANS` (256) at most together -- narrows the
-part after them by its comparisons, and calls the plan exact when it took
-every term and nothing is apart; any term it did not take is tested row by
-row, so a literal it cannot say (`null`, `12.5` against an int) changes
-nothing. `filter_candidates` takes its spans by exact count, two searches
-each, under a range's rule; `walk_composite` an `order` on the parts after
-the fixed ones in their directions or every one reversed (an `in`'s part is
-no fixed one for an order), the spans merged by the order's parts
-(`CompositeIndex::walk`), ties gathered and put in id order, a walk testing
-the filter only while its run is no longer than `indexed_size`'s smallest
-set and giving up past an eighth of the collection; `count_composed` counts
-an exact plan off the chunks. A read names it only by its first part
-(`names_first`), so one it cannot help neither builds it nor, pinned, meets
-it -- and `pin` declines a read naming a composite's first part. Over a
-million posts and 10 000 owners `where owner = $1 order created desc limit
-20` took 6.3 us p50 against 11.8 through `owner @hash` and 24.4
-ms through `created @sorted`, a feed over ten owners 22 us against
-100, built in 147 ms in 40 MB; a lone put 715 ns, 1 561
-beside it (its first part puts a write anywhere in it), 851 beside
-`created @sorted` and `owner @hash`; `@unique(org, slug)` 1 745 ns a put
-against 1 285 for `@unique` on the two joined, a read by both 2.5 us
-against 1.3 -- a hash index over several fields would answer that by a
-microsecond sooner, not worth a third index's code (`make composite-bench`).
-`create index` builds it beside the database (`begin_composite` copies the
-keys under the read lock); a block puts one made or dropped back
-(`Undo::Composed`, `Uncomposed`); a field renamed renames its parts, one
-dropped takes it off, either way unbuilt for the first read
-(`fit_composites`). A replica builds what the schema declares, a sync
-replica a unique one as an ordered one (`schema_ddl`, `schemaDDL`, from
-`/collections`' `indexes`). Without `sorted` a file declaring one opens, its
-queries the scan's and a unique one asked by reading the rows
-(`holds_tuple`). `tests/composite.rs` holds every filter, order and page --
-`limit $1` too -- to a twin collection without it through writes, a block
-put back, a reopen, an index made later and one beside the database, a
-rename and a drop, NaN, nulls, `-0.0`, collations and json paths. The
-browser module grew 43.6 KB, 14.1 KB brotli -- the index, its planner, its DDL
-and its declared schema, no one function past 4 KB -- and the test build
-without the indexes 12.8 KB, 3.9 KB brotli.
-
-**`collate und` and `collate tr` are ICU's orders, a query's or a field's.**
-The weights are ICU's own for every assigned code point --
-`tools/collate/gen.py` reads ICU 76.1 out of macOS's libicucore into
-`collate/`: the root cut into twelve chunks by script and each tailoring as
-what it changes, with ICU's own contractions (a letter and a mark it
-composes with, a two-part vowel sign, a Thai or Lao vowel written before its
-consonant; up to three characters) and Hangul syllables decomposed into
-jamo. ICU gives 133 535 primary weights, which no packed entry has the bits
-for, so consecutive code points that alone give consecutive primaries share
-a rank and are told apart by their code points (`BY_CODE_POINT`), a run of
-them one range (`UNIFORM`), and a table's words are written as differences
-in LEB128: 24 931 ranks, 154 KB for every script (324 KB plain), 161 KB of
-`make small`'s 1331. A comparison walks ICU's three levels, letters then
-accents then case, over the whole string before it falls back to the
-bytes, so the order is total.
-It starts at the first byte the two strings do not share, stepped back past
-any character that can continue a contraction (`CONTINUES`; a fixed step is
-wrong, Gurung Khema's overlap), and a Latin letter's element is made once
-per collation (`Collation::latin`): 68 -> 30 ns before the root, and 33.5 ns
-for `tr` and 35.2 for `und` now over a million Turkish names -- 41 while
-every letter went through the tailoring's table and the root's chunk. Held
-to ICU itself over 1 250 000 random pairs, five apart -- marks that compose
-with their letter across another mark or out of canonical order, which
-ICU's normalisation and discontiguous contractions find and fenecdb does
-not -- and to `Intl.Collator` in `web/fenec.test.js`.
-`order name collate und` names it for one key; a field declared `name text
-collate und` has it wherever its text compares -- `order` naming none, `<`
-and `>` in `where` (`RowAccess::text_order`), `min` and `max`, and a
-`@sorted` index over it, whose chunks order through `sorted::Entry` with the
-collation passed in. Equality stays the bytes' (a `nocase` field's is its
-fold's, below). The schema writes a collated field behind type tag 11 (`TAG_COLLATED`) and the collation's code (1 `tr`,
-2 `und`), which an older binary refuses rather than read the field in byte
-order. A native build carries every
-chunk. The browser module carries `latin` (9 KB) and is handed the rest
-(`fenec_add_chunk`), which `make wasm` puts in `web/collate/`: a comparison
-that meets a script it has not got notes the chunk (`collate::take_missing`)
-and the statement is refused (`collate::refuse`) -- a read after it ran, a
-write before it changes anything (`put`, `update`'s pass of its own,
-`delete`'s filter), a load after it (`fenec_load`: its `@sorted` indexes
-were built without the chunk) -- and `Fenec.query`, the builder, `restore`
-and the sync layer fetch the chunks and run it again. So every stored
-collated value's chunks are there, which keeps a `@sorted` index in order.
-A chunk carries the tables' stamp, and another version's is refused. The
-root cost the browser module 17.5 KB, 8.2 KB gzip and 6.8 KB brotli,
-over the 10.4 KB `tr` and the field had; the other chunks are 145 KB, 67
-KB gzip, 61 KB brotli, where plain words were 102 and 90.
-
-**`nocase` is a text compared by its case fold wherever it is compared.**
-`email text nocase` (`Field::nocase`, schema tag 17 before the type,
-`TAG_NOCASE`, so a binary from before refuses the file rather than take a
-second `Alice@x.com` its `@unique` refuses): `=`, `!=`, `in`, `<` and
-`>`, `~`, the keys of `@hash`, `@unique`, `@sorted` and a composite's part,
-`order`, `group`, `count(distinct)`, `approx_count_distinct`, `facet`,
-`min`, `max`, `first ... by`, a `lookup`'s child key and a scoped token's
-rules all go through one rule (`Field::text_order`, a `collate::TextOrder`
-of a collation and a `case::CaseFold`) -- an index option alone would have
-left `=` comparing bytes beside a `@unique` that folds, and a `lookup` on
-it finding what `where` did not. The text is kept as written; a group's
-and a facet's value is the first row holding its fold, in id order (the
-bucket's first member, read). The fold is Unicode's full case folding,
-CaseFolding.txt's C and F -- Python's `str.casefold()`, which
-`tests/nocase.rs` holds it to at every code point (`tests/casefold.txt`,
-`tools/casefold.py`) -- with Turkish's T mappings under `collate tr`
-(`ISTANBUL` is `ıstanbul`, `İSTANBUL` is `istanbul`). Full rather than
-simple: simple folding keeps `ß` apart from `SS`, and would be a table of
-its own, where the full one is the standard library's lowercase mapping,
-already in the browser module -- and for the 297 code points whose fold is
-not their lowercase (`UNLIKE_LOWER`, 41 runs, which a test derives from
-the standard library again), its lowercase, uppercase and lowercase again,
-`ı` left alone and Cherokee's small letters made its capitals. Nothing is
-normalised: `é` and `e` with a combining accent stay apart, and a
-full-width letter is not ASCII. A collated `nocase` field orders by the
-collation over the folds, which ties exactly the texts that fold to one,
-so its order and its equality agree. The indexes hold folds
-(`HashIndex::key`, `folded_key`, `encode_folded` writing an ASCII text's
-lowercased as it copies it; `sorted::Ordered`'s `fold`; `composite::Part`'s);
-the bound `Filter` folds a value once a query and a row as it compares it
-(`Test::Folded`, `case::cmp_to_folded`: the ASCII both start with byte by
-byte, the rest a character at a time until the two part): folded whole as
-a row was read, a scan for one name over 100 000 rows, a third past ASCII,
-went 5.4 -> 17.0 ms, and goes to 6.8. An order folds its `nocase` keys
-once a row in a pass after the reading (`folded_keys`, so an order over
-none reads as it did), 8.5 -> 16.2 ms, where folding both sides at every
-comparison was 17.4; a `@sorted` one is walked. A collection without a
-`nocase` field reads and writes as it did (`make nocase-bench`'s plain
-column against main's, in turns). Made `nocase` or no longer, a field is
-rebuilt -- the declared schema's `nocase_changed` refusal names
-`rebuild`, which a `@unique` refuses where two values become one. A
-text's alone: a list's elements meet `has`, an index each and a facet a
-value at a time. `fenec import` takes PostgreSQL's `citext` and SQLite's
-`COLLATE NOCASE` as it. The browser module grew 11.5 KB, 3.7 KB brotli
-(the engine's paths 6.4 KB, `case` 2.1); its scans of a plain field moved
-within 2% of main's under load, once a `nocase` field's tests shared a
-point's out-of-line arm of `Filter::test` and `compare` stopped asking the
-order of a text `=` (an arm of their own and that question were 5 and 7%
-of a count by numbers and by a text over 20 000 rows).
-
-**`lookup` chains, and the chain is still positional.** `lookup a ... lookup b
-...` hangs `b` off `a`'s rows: what follows a `lookup` binds to *its*
-collection, and `on child = parent` names a field of the level immediately
-above -- so exactly one collection is in scope at any point and it is the last
-one named, which is what keeps qualified names out of the language at any
-depth. `Nested` holds the tree one level at a time: a level's `groups` has one
-entry per row of the level above, read left to right and concatenated, so the
-alignment is the same sentence at every depth and a level costs one vector
-rather than a node per row. A collection may appear once per query, at any
-depth -- put the driving one back in scope two levels down and `on child =
-parent` reaches a level that could be either. The second level is what a
-`/batch` cannot answer in one round trip: its keys live in rows that have not
-come back yet. Over 2 000 / 20 000 / 200 000 for a 20 x 3 x 5 page, 49.1 us in
-process against 139.8 us for the same page as 81 separate queries, and 0.204 ms
-for one HTTP request against 0.415 ms for two `/batch` trips. `required` stays
-a statement about its own level -- it drops rows of the level immediately above
-and stops there, so it composes by being written at each level rather than by
-reaching down.
-
-**`lookup` is one bucket probe per parent, not a join.** It attaches another
-collection's matching documents to the row they belong to, and a `limit` after
-it counts children *per parent* -- the shape a join cannot express. It is
-terminal in the grammar: everything before it binds to the driving collection,
-everything after to the looked-up one, which is exactly why there are no
-qualified names (`reviews.stars`) in the language and no filter splitting in
-the planner. The child key must be `id`, carry `@hash` or lead an index over
-several fields (below); refusing an unindexed one follows `near` and `match`,
-because a silent full scan of the child collection would be a different
-feature under the same name. Nesting
-lives in `ResultSet.nested`, never in `Value` -- JSON transports nest all the
-way down, and a flat one flattens (`ResultSet::flatten`: one row per
-root-to-leaf path, nulls below the first level that ran out); a
-`Value::Object` is a `json` field's value, not a level of children.
-Measured at 22.7 us in process against 0.332 ms for the same
-page as a `/batch` of 21 queries merged on the client.
-
-**`required` is the other half, and it is a pass.** `lookup ... required`
-drops a parent no child matches, tested before `offset` and `limit` so the page
-still fills. It is also the only shape where `count` combines with `lookup`,
-since nothing is being attached. There is no index from "a child matching this
-filter" back to its parent, so every candidate parent is probed -- it stops at
-the first child that passes, which is why the unfiltered form is an order
-cheaper. It is answered from whichever side is smaller -- walk the parents probing each,
-or read the children a `@hash` equality in the child filter names and take their
-parents -- and the counts that decide (candidate parents, bucket length, child
-collection size) are all exact, so the choice is derived rather than estimated:
-child-driven when `|ids| * n > |bucket|^2`. Over 20 000 parents and 200 000
-children that is 12.07 ms against 15.63 ms for the parent side, 2.19 ms with no
-child filter, and 0.02 ms for a `bool @hash` field on the parent maintained on
-write. Ad hoc, use `required`; on every page load, use the field.
-
-**A `lookup` over a key of several fields is a run of an index over several
-fields.** `on (org, order) = (org, id)` pairs a child field with a field of
-the level immediately above for each part, the positional rule unchanged;
-`Lookup::on` and `parent` are two lists of names, since a `Vec<String>` is
-code the browser module had and pairs were a clone and a collect of their
-own. The child side is a `Tuple` (`engine.rs`): the child's index over
-several fields whose first parts are its fields in any order
-(`Tuple::resolve`, one the level's order walks before the first), refused
-otherwise naming the `@sorted(...)` to declare. A parent's values, each made
-its child field's type as a single key's is and laid end to end by the
-index's own encoding (`Tuple::prefix`, `CompositeIndex::key`), are the start
-of its children's keys, so they are one span, two searches -- and equality
-is the index's: a `nocase` part finds every spelling of its fold, a collated
-one its bytes, as a `@hash` key does. Where the level's `order` is the
-index's next parts, in its directions or every one reversed (`walks`, which
-`walk_composite` shares), each parent's run is walked in it and stops at
-`offset + limit`, ties in id order; otherwise read, put in id order and
-sorted as a bucket is. One field leading such an index goes the same way
-where it has no `@hash` or the order walks it -- "the latest three reviews
-of each product" over `@sorted(product_id, created desc)`. `required`'s
-child side, where a part pairs with the parent's `id`: each candidate child
-names its parent by that part and is held to the rest of the key by its own
-parts' bytes against the parent's (`Tuple::holds`); probing each parent so
-named for the whole key read every child again -- 11.7 ms against 5.7 for 20
-000 orders whose 200 000 lines a tenth named, the parents' side alone 9.5 --
-and mapping the keys back whole sorted `(u64, KeyBytes)`, a sort of its own,
-4.5 KB of the module. Without `composite` a `Tuple` holds `off::Never`
-(`Built`), so every path through one is dead code, and a key the index would
-answer is refused naming the feature. `tests/composite_lookup.rs` holds
-every lookup over several fields -- order, ties, page, `required` at each
-level and counted, three levels, `flatten` -- to a reference worked out from
-plain `get`s over a twin without the indexes, through writes, key parts
-moved on both sides, a block read inside and put back, a reopen and rows
-past their `@ttl`. A parent's run read forwards over every part -- the
-probe, `required`'s witness, a walk whose order is the index's whole -- is
-one search and read until a key leaves the prefix (`CompositeIndex::run`): a
-span searched for its end too, a score of comparisons of keys on the heap,
-and the page below took 125 us against 96. A tenant's 20 shops x 3 latest
-orders x 5 lines, over 2 000 shops in 100 tenants, 20 000 orders and 200 000
-lines (`make lookup-bench`): 89 us by `(org, shop)` and `(org, order)`,
-against 123 through the key joined into one `@hash` text field of each side
--- kept up by hand on every write -- 99 through `@hash` keys that leave the
-tenant out, and 64 through those keys leading an index walked; at 500 orders
-a shop, 146 us against 1 987, 1 962 and 56, the buckets read whole and
-sorted for three. A single key's page as it was: 89.2 us on main and 90.2
-here at the quiet runs' median, their instructions retired within 0.2% (the
-key a value or an index's bytes through one enum, it was 1 to 2% slower:
-`Step::ids`, `Step::any` ask a `Tuple` apart). The browser module grew 8.5
-KB, 3.1 KB brotli (`Tuple::resolve` the most of it, 1.7 KB), the one without
-the indexes 2.5 KB, 0.8 KB brotli, and the one with no feature 2.5 KB, 0.9
-KB brotli: the parse, the check and the refusal by name.
-
-**A `lookup` level may fold its children, and a `lookup` hangs off
-groups.** `Lookup` carries `aggregate`, `group` and `having`: a level whose
-list aggregates (`Lookup::folds`) answers each parent's children -- probed
-once by the code a plain level runs (`kept_children`), held to its `where`
-and to any `required` level below -- folded by one `Folding` bound for the
-level (`engine/aggregate.rs`: the list, its keys, its `having`, the `Fold`
-each item starts at, which a `get`'s aggregate goes through too), its
-`Groups` emptied a parent. A level is the `get` its children would be with
-the parent's key in its `where`, so its clauses mean what they mean there:
-ungrouped, `order`, `limit` and `offset` pick the children folded -- a
-courier's latest 50, walked off `@sorted(courier, at desc)` to the page --
-and grouped they order and page each parent's groups (a level that groups
-takes no walk: its `order` names columns). A `get`'s ungrouped aggregate
-takes them the same way now (`page_ids`, the `lookup` left out), where
-they were refused, and a column of the list among its keys is refused
-(`picks_by_rows`). A `lookup` after a list that aggregates -- a `get`'s or
-a level's -- hangs off its rows: `Parents::Rows`, the key read from a
-column (`Above::Rows`, `Step::ids_of`, `Tuple::prefix_of`), which must
-carry a field's values -- a key, its `bucket`, its `min`, `max`, `first` or
-`last` -- so the key's types are held before a row is read
-(`check_key_types`). `required` on a level that folds asks of its
-children, as on any level (an ungrouped list answers a row for every
-parent, so asked of its rows it would keep them all); a `required` level
-below one that folds drops its groups (`Folding::rows`'s `keep`), before
-the order and the page, and `survives` does not reach past a level that
-folds. Grouping parents by a field of theirs beside their children's folds
-would be two collections in one list -- the qualified names the scoping
-keeps out -- and is no shape. `tests/lookup_aggregate.rs` holds every fold,
-page and level to a reference folded by hand from plain `get`s over a twin
-without indexes, through writes, a block read inside and put back, a reopen
-and `@ttl`; dropping the level's `offset` or letting `survives` past a
-folding level each fails it. Over 2 000
-couriers and 200 000 deliveries, a page of the 20 busiest with each one's
-latest 50 folded takes 53 us in process against 81 for the 50 attached and
-folded by the client, every delivery of each 3.5-4.1 ms against 6.4-6.5,
-and the ten busiest with their names off a week's groups 8.3 ms, as the
-groups and a query for the names apart do less the round trip between them
-(`make analytics-bench`'s `folds`). The `get`'s aggregate through the same
-`Folding` lost nothing: the aggregates of before over a million rows, eight
-runs each in turns against main, 52.0 -> 49.0 ms in 100 groups, 29.6 ->
-29.2 whole, 5.5 -> 5.2 over a range; the lookup page (`make lookup-bench`)
-89.9-94.4 us against 90.2-93.8 by `@hash`, the same within its spread for
-the composite and the walk. An ungrouped level's one row is not put in
-order: through `page`, a page of 20 parents took 24 us against 18. The
-browser module grew 11.6 KB, 4.0 KB brotli -- the `Folding` split out of
-`select` into functions its two callers share, `fold_level`,
-`kept_children`, the key read off a column -- and the builders took
-`select` of aggregates and `group` on a level, held to the golden file.
-
-**`match` prunes with MaxScore.** The exhaustive merge is not selective --
-on BEIR FiQA the average query reaches 86% of the corpus -- so terms whose
-remaining ceiling cannot beat the worst kept score stop driving the frontier.
-Measured, with identical output: SciFact 179 -> 47 us, FiQA 1918 -> 311 us,
-Turkish WebFAQ 401 -> 82 us. `pruning_never_changes_the_answer` compares it
-against an exhaustive reference over 25 000 generated cases; scores accumulate
-in `f64` so the two orders of summation agree once rounded back to `f32`.
-
-**`@text` is word-boundary matching unless told otherwise.** `prefix=N` also
-indexes each word's prefixes, which is a dictionary-free stemmer for inflected
-languages: on Turkish WebFAQ it is worth +14.6% nDCG@10 for 3.4x the postings
-(58 MB -> 182 MB, 82 -> 485 us per query). Off by default — the corpus
-decides. The tokenizer also folds `I`, `İ`, `ı`, `i` onto one term, because the
-locale-blind Unicode mapping turns `İ` into two code points nobody can type and
-would hide every capitalised Turkish word. A script written without spaces
-is split into runs of characters rather than words (`text::grams`): pairs of
-Han, kana and Hangul, triples of Thai, Lao, Khmer and Myanmar letters --
-pairs of Thai letters were too common to tell documents apart, 0.495 against
-0.547 at a query three times as slow. nDCG@10 went 0.006 -> 0.439 on
-C-MTEB's Chinese EcomRetrieval, 0.162 -> 0.868 on its CovidRetrieval, 0.119
--> 0.582 on the Japanese JaGovFaqs and 0.537 -> 0.682 on WebFAQ's Korean;
-English scores to the fourth decimal what it did. `@text(chars)` adds each
-character of Han, kana and Hangul, worth 0.439 -> 0.528 on product titles
-and a little less on longer text, for 1.6 to 1.9x the postings: an index
-kind of its own (7), as a quantized graph is, so a binary that knows no
-`chars` refuses the file. The tokenizer takes its callback as `&mut dyn
-FnMut`: generic, it was compiled six times, 8 KB of the browser module.
-
-**The text index is derived data as well, but it is not persisted.** `@text`
-builds an inverted index from the documents the first time a statement reads it
-after an open — 16 µs per document against the HNSW graph's ~34 µs. Nothing
-about it reaches the file, so there is no validation path and no stale-index
-case to handle. It is shrunk to fit where it is known complete (its build,
-`create index`); live ingest keeps `Vec` growth slack. Its terms grow a
-256th at a time, as a hash index's keys do (below).
-
-**A text index's word is 9 bytes of a table, 16 of a term, and its bytes**
-(`text/terms.rs`). A map of `String` to two `Vec`s, its hash beside it, was
-a slot of 88 bytes and three allocations a word: a `--dir` node's tenant of
-200 notes of 30 words held 565 KB of anonymous memory for its text index
-over a Zipf vocabulary and 1 135 over made-up words (musl, in Docker, 500
-tenants) -- 11 to 22 times the tenant's 51 KB, its hash and ordered indexes
-4-5 KB each, the map's table 729 KB of the second -- and `memory_bytes`
-counted 28% of the tenant, no table and no allocator. A slot is now a
-word's place under half its hash, with a control byte; its bytes are in an
-arena after their length; a word one document holds (three in four over a
-Zipf vocabulary) is a `One` of 16 bytes, the document and its count, no
-allocation; a word of more a `List` the slot names directly, as the map's
-slot held it. The same tenants' indexes hold 192 and 225 KB, a tenant 594
--> 221 and 1 164 -> 255 KB, and 500 of them building their indexes as they
-were written 375 -> 173 and 703 -> 172 MB; in musl's slots (`make
-text-memory`) SciFact's index 15.0 -> 10.4 MB and FiQA's 75.8 -> 66.5.
-`memory_bytes` counts the table, the arrays and what each list's allocation
-takes past its bytes (`ALLOC`, 12): within a tenth of musl's slots where it
-was a third (a tenant's notes) to four fifths (FiQA), and 79 and 86% of a
-tenant's anonymous memory. A word that goes leaves its place to the next
-(`free`, and `spare` for a list, its arrays kept to 16 documents: moved
-into by the last, its slot found by its hash again, a browser's update of a
-note took 12% longer) and its bytes dead in the arena, written again once
-half of it is; a slot that goes moves the ones after it back, no tombstone;
-a build closes the places up and shrinks every array. A probe reads a group
-of 8 slots by their control bytes, as hashbrown does without SIMD
-(`GROUP`): a slot at a time, a word past its own slot cost a mispredicted
-exit and `make search-bench`'s build took 149 ms against the map's 142 --
-though FiQA, its common words in their own slots, built in 505 against 536
-by groups. A word is compared by its length and first seven bytes as one
-masked word (`Key`): through `memcmp` a length's branch mispredicted at
-each. Past 98 304 words natively the table, arrays and arena are 256 shards
-by the hash's top byte, as `maps::Sharded` splits a map: `make growth-bench
-GROWTH=text`'s put p50 1.21-1.25 -> 0.83-0.88 us, p99 2.9-7.1 -> 1.6-2.0,
-the split's 5.2-6.3 ms -> 3.4-4.7, the index built after an open 1.8-2.6 s
--> 0.46-0.58. In ABBA turns against main, load 2-5: search-bench's build
-140-146 -> 139-142 ms and `match` 0.054 either way, SciFact's build 90-91
--> 87 ms (one run of six 94) and FiQA's 559-565 -> 535-539, `match` over
-them 4-6% quicker, 400 000 words each in one document 113-178 -> 38-47 ms,
-BEIR's nDCG@10 the same to the fourth digit and its loose `match`es as
-quick or quicker, an update of a FiQA document 1% slower on macOS (306-309
--> 310-312 us, though its own instructions only +0.23%: the same binary
-search, out of line in both, 5-8% apart in samples, and `#[inline(never)]`
-on main's own `drop_doc` moved main's up to 0.8%, its removals 0.4-1.2%; a
-list's record a cache line, its word's head in it, or its drop out of line,
-no nearer) and the same on Linux in Docker's VM, in turns (musl 1 505-1 521
-against 1 509-1 514 us, glibc 2 100-2 160 against 2 105-2 161), and of a
-SciFact one the same; the browser module's build of SciFact 151-154 ->
-145-146 ms (one run of six 155) and of 20 000 notes of made-up words 75-77
--> 32, `match` 3-7% quicker, `make wasm-speed` as it was, for 2.2 KB brotli
-of the module, 3.1 KB raw (hashbrown's copy for the map, 3.0 KB raw, gone).
-Rejected: control bytes in each group's cache line beside its slots, FiQA
-533 ms and search-bench 147; a group's tags compared one by one, 171; the
-first two slots picked without a branch, 155.
-
-**`match ... fuzzy` and `prefix` walk a sorted copy of the index's words**
-(`fuzzy.rs`, `TextIndex::search_loose`). `fuzzy [N]` reads a query's word
-within the edits its length allows -- none under 5 characters, one up to 8,
-two from 9, Meilisearch's bounds, `N` lowering them -- in restricted
-Damerau distance (a swap one edit, as Lucene, Elasticsearch and Meilisearch
-count it), an edit touching a word's first character counting two
-(Meilisearch's rule: allowed at one, the walk took 4.6x the nodes for 9%
-more words, mostly words no one meant); `prefix` reads the last word as the
-start of one too. The words are a `Dictionary`: the index's terms but the
-`^` ones, in byte order, in chunks of up to 256 a byte arena and their ends
-each (1.3 MB for 60 000 words, where a `Box<str>` a word was twice that and
-25% slower to walk), sorted by the first loose `match` -- a `OnceLock`, a
-`OnceCell` in the browser, as `Derived` is -- and kept up by every write
-after it, never in the file. A prefix is a range of it; the words within
-`k` edits are found walking it as the trie it is, a row of the table a
-character banded to `2k + 1` cells, a node's children by binary search --
-only the query's characters near the depth where any other would end the
-row -- and a branch with no edit left looked up as the rest of the query
-rather than walked (a swap, counted from the row above, keeps it walking
-one row more). Over FiQA's 135 500 words, 2 000 typo'd words a bound: 14 us
-a word at one edit, 120 at two, 4 a prefix; SymSpell's deletions 9 us but
-304 MB and 2 s to build, an index of trigrams 8.4 MB and 316 us and no
-prefixes, the table over every word 4.3 ms; comparing through `memcmp` was
-a third of the walk. Each word's variants of one distance are one more
-term -- their lists merged two at a time (`union`), a document's counts
-summed, so BM25 saturates over them and their idf is theirs together, a
-rare misspelling ranking no higher than its word -- at the word's weight
-one edit away or begun, a quarter two away (`NEAR_WEIGHT`: on BEIR with a
-typo in each query, the whole weight for one edit took SciFact 0.636 ->
-0.663 where half took it to 0.657, a quarter for two took FiQA 0.213 ->
-0.229 where the whole took it to 0.226). Where the index holds the word as
-typed, its variants together are scaled below the least it adds to a
-document -- once, in the longest document there is (`longest`, only
-raised) -- so a one-word query ranks every document holding it first, and
-queries written whole lose nothing (0.662 -> 0.665 and 0.232 -> 0.233;
-unscaled, at half the weight a word one edit away, 0.656 and 0.229). They
-are cursors as any term's, so MaxScore stays rank-safe
-(`pruning_never_changes_a_loose_answer`). A word reaching
-more than `MAX_EXPANSIONS` (10 000) words is refused, never cut: FiQA's
-80 426 words hold no one-letter prefix past 7 020. `highlight()` marks the
-variants (`Terms::add`), `facet` counts their rows (`matching_loose`). A
-plain `match` takes the path it did, `search_within` split into
-`query_terms`, `cursor` and `ranked`, the last in line natively: FiQA's
-0.261 ms p50 on main, 0.257 here (0.269 called), SciFact's 0.042 either
-way, `make search-bench`'s 0.056 ms and `make wasm-speed`'s `match` 0.81 ms
-either way. Core, in `text` and no feature of its own -- a search box is no
-domain's extra: the browser module grew 17.1 KB, 6.0 KB brotli, the
-standard library's sort for `&[u8]` (3.7 KB) a merge of its own there.
-
-**An open builds no hash, text, ordered or sparse index.** Each is a
-`Derived` -- a `OnceLock` of the index or of the error its build met -- which
-an open leaves empty and the first statement that reads it fills from the
-documents, under the read lock too, a second reader waiting for the first
-one's build (`Collection::hash`, `text`, `sorted_index`, `sparse_index`). A
-write skips an unbuilt one, since its build reads the documents as they stand
-then; a block undone after a read built one takes its writes back out as it
-does from any other. An ordered index over a collated field is built at the
-open still: in the browser a comparison meeting a script whose chunk it lacks
-has the load refused and run again with the chunk, and one built by a read
-would keep the order it had without it. `stats` and `memory_bytes` count
-what is built -- counted by building, every metrics scrape would build them
-all. With one `@hash` field, 100 000 x 128 opens in 21.9 ms against 31.0,
-and the browser module loads 20 000 x 128 with a hash, an ordered and a text
-index in 19.0 ms against 41.8; the first read of each pays its build. It
-cost the module 0.7 KB brotli, most of it a builder and a cell a kind. Nor
-does an open list a collection's ids where nothing is built from its
-documents (`rebuild_indexes_with`): listed for every collection, they were
-2.1 ms of a million rows' open.
-
-**An open of a file with a graph copies its vectors, and that is most of
-it.** `make compare`'s reopen once read 9 ms against SQLite's 0.9: one open
-and an ANN query of fenecdb's against SQLite's open and a count through its
-index, two different first questions. It now times each side's open alone,
-then with a read by id, then with a vector top-10 -- SQLite's a full scan --
-the median of 31 each: 6.0, 6.0 and 6.1 ms against 0.07, 0.46 and 30.5.
-SQLite reads nothing until it is asked. Of fenecdb's 6.2 ms at 100 000 x 128
-(`examples/opens.rs`, timers in each part), 3.6 are the arena -- 51 MB of
-vectors read out of the mapped file, made unit ones and written into pages
-the open allocates, on every core -- which the pages bound: each page of the
-62 MB file touched once took 1.5 ms on eight threads, each of 62 MB newly
-allocated 4.8 (2.7 on one), and with the arena filled on one core the open
-took 17.7 ms against 10.5. Then 1.8 the graph record (`Read`), 0.3 `by_doc`
-and 0.3 the id index. Before, 8.6: the graph record 3.5, the id index 1.0,
-every collection's ids listed for nothing 0.2 (all above). A million rows of
-128 dimensions open in 60 ms against 86, a million of no vector in 1.3
-against 10.3, a thousand of 128 in 0.156 against 0.165, and the browser
-module loads as fast as it did. Rejected: the arena's pages written once each
-on a thread beside the record's read, as `MAP_POPULATE` would -- 7.63 ms
-against 7.50, the two's faults contending; a restore left to the first
-statement that needs the graph, as the derived indexes are -- an open would
-no longer validate the graph it holds, and the first `near` or write would
-pay the 6 ms; the arena kept in the file for an open to map rather than copy
--- every 100 000 x 128 file 51 MB larger, its vectors twice.
-
-**A server warms what an open left for the first read** (`--warm`,
-`fenec_http::warm`). The first `match` after a start built its `@text`
-index inside the request: a shop's first search page took 2.68 s to its
-largest paint against 1.40 warm. `Database::unbuilt_indexes` lists the
-derived indexes nothing has built, `warm_index` builds one as its first read
-would, and a thread of the server's builds them one at a time, each under
-the read lock on its own -- reads go on, one needing the index waits for
-that build, a write waits out one index at most. So a bench times nothing
-until its warm-up has read every index the writes keep up: `make
-recon-bench`'s read all but the journal's `@hash` on its account, which no
-statement there reads, and `--warm` built it -- 100 to 150 ms over a million
-entries -- as the first round began, every transfer and every read behind
-them waiting; a read of it waits for that build, or makes it. The thread starts once the
-HTTP endpoint is up: `Server::new` takes the write lock for its watcher,
-and a build's read lock held the listener back by its 141 ms. Over 100 000
-products with a text, two hash and an ordered index the first answer came
-16 ms after the start either way, the indexes were built 208 ms after it,
-and the first `match` took 1.4 ms against 166; the process held 99 MB
-against 88 for a cold one that had searched. On by default for a file (an
-index is declared to be read; `--warm off`, or a list of collections and
-`collection.field`s), off for a `--dir` node's tenants, which open per
-request and close when idle (`Tenants::with_warm` when asked). The native
-library has `fenec_warm` (and each binding a `warm`), embedded Rust
-`Database::warm`.
-
-**`rerank` deliberately uses no index.** `match ... rerank` takes candidates
-from the inverted index and reorders them by exact distance over vectors read
-straight out of the store — so a collection can do vector retrieval with no
-HNSW graph to build, hold, validate or rebuild. Measured on BEIR it matches or
-beats a full dense scan while scoring under 2% of the corpus. It requires
-`match`: without candidates there is nothing to reorder.
-
-**`fuse` adds ranks, not scores.** `match ... near ... fuse` runs both searches
-to their own depth -- `candidates`, 20 unless given, never under the page --
-with the filter applied to each, and a document scores `1 / (k + rank)` from
-each list it is on (`k` 60). A BM25 score and a cosine distance share no
-scale, and a weight between them would need retuning per corpus. Measured
-with `make beir` (nDCG@10): SciFact 0.700 against 0.662 for `match` and 0.645
-for `near`; FiQA 0.366 against 0.232 and 0.366 -- the one path near the top
-of both. The depth is the knob that matters: up to 61 a side a document both
-searches found outranks every document only one found, and at 100 a side
-both scores fall (0.688, 0.359). It is built from what the engine already
-had -- both searches, the `HashMap<DocId, u32>` a `DocMap` keeps sparse ids
-in, the text index's `best_first` sort -- because in types of its own it was 11 KB of the
-browser module; this way it is 2.
-
-**`highlight()` reads the text again; `facet` counts beside the rows.**
-`highlight(body)` and `snippet(body, N)` are select-list items (`Mark`,
-its arguments one `Vec<Expr>`: Select's clone of them as fields was 432
-bytes of the browser module), answered under their label, after the fields
-or after `*`; the same one twice is refused, since a JSON row holds a name
-once. They need `match`, and go with `fuse` and `rerank` -- a row only
-`near` found has no marks. Nothing is kept in the index for them: the
-row's text is split again by the tokenizer of the `@text` index the
-`match` searched (`text::terms` hands each term its byte span, which the
-index passes over: the build and `match` measured as before),
-`highlight::Terms` holds the query's terms in the text index's own map (a
-sorted `Vec<String>` was a sort of its own, 3.5 KB), and a span is marked
-where a term the text yields is one of them -- so a mark is what the index
-matched: a word whatever its case, the whole word a `prefix=N` term was cut
-from, the characters of a Han or Thai run's matched pairs or triples,
-overlapping ones merged. A span is widened over the marks of the characters
-at its ends (`highlight::extends`, the blocks a text puts combining marks,
-joiners, selectors and Hangul jamo in, not Unicode's whole table), and the
-offsets go out as UTF-16 code units, what every client but Go's and
-Python's indexes a string by. Without tags a column is `[start, end]`
-pairs, a snippet's `{marks, text}`; with them the marked text, not escaped.
-A snippet is the window of `N` words (a Han character a word) with the most
-marks, centred on them. `facet f [top N]` counts over the rows the query
-selects before `offset` and `limit` -- the filter's, `match`'s
-(`TextIndex::matching`, every row holding a term, the filter tested on
-those), a required `lookup`'s -- and is refused beside `near`, which ranks
-every row the filter passes rather than selecting some. A `@hash` field
-of text, int, bool or timestamp, whose bucket key is the value's encoding,
-counts from the buckets (a bitset of the set when there is a filter); the
-rest reads the field of every row, a list once a row for each value, null
-a value, counted under `codec::encode_value` as `group` keys its rows, so
-`tests/facets.rs` holds a scalar facet to `group ... count` over the same
-filter. Ordered most first, then by value in the field's collation,
-through `order_rows`; past `MAX_FACET_VALUES` (10 000) without `top`
-refused, never cut. The counts live in `ResultSet::facets`, beside `nested`,
-never in a `Value`, and a JSON answer carries them as `"facets"` after the
-rows -- over HTTP the bare array becomes `{"rows", "facets"}` only when a
-query asked for them. Over 100 000 documents a row's marks cost 1 to 3 us,
-a snippet's 2 to 4; a facet over every row 0.01 ms through `@hash` and 6.1 by
-the scan (`make search-bench`). The browser module grew 20.2 KB, 7.0 KB
-brotli; the one without indexes 3.9 KB brotli, which counts facets and
-refuses a `match` and its marks.
-
-**A disjunctive facet's filter is split where the filter is written.**
-`facet brand disjunctive` counts over the rows the query selects with the
-`and` chain's terms that read the field alone left out (`Facet::rest`,
-`Select::split_facets`); a term reading it beside another field is
-refused, not guessed at. The split is the parser's and a REST `facet=`'s,
-from the filter as written: `scoped()` and `@ttl`'s `alive` reach the
-split filters through `each_filter_mut`, so a token's rules and an expiry
-are never what is left out -- split after them, `facet owner disjunctive`
-counted every user's rows (`tests/access.rs`). A select built in code is
-split in `answered_select`, before the expiry; one that leaves nothing
-out is a plain facet. Each disjunctive facet finds its own rows
-(`facet_set`: `matching_ids`, `match`'s `matched_set`, a required
-`lookup`) in the same statement under the same lock. `facet price ranges
-[0, 2500, 5000]` counts a number by range, every range in order, value
-`[from, to]` (`facet_ranges`): through a `@sorted` field's index when every
-bound is a key it holds exactly (`SortedIndex::range_counts`: over every
-row two searches and the chunks' lengths between, `Chunked::count`; under a
-filter its entries walked against the set's bits) and by reading the field
-otherwise; the lexer keeps `ranges [..]` as written, as it keeps `in
-[..]`, an `f32` vector holding no bound past 2^24 exactly. Over 100 000
-rows: six ranges 0.004 ms through the index against 4.7 read, 0.15
-against 0.19 under a filter keeping 3%; a page with two disjunctive facets
-0.75 ms in process as its three statements were, over HTTP 0.95 against
-1.19 in turn. The value-count scan keeps its own loop (`each_value` serves
-the ranges): through a shared one, inlined and all, it went 4.8 -> 5.2
-ms, and with `facet` out of line 4.8 -> 5.6 (`#[inline(always)]`). The
-two cost the browser module 2.9 KB brotli -- the split, the ranges'
-read and index paths, the parser -- kept in it, so a replica or a page
-answers a shop's sidebar as its server does.
-
-**An item of a select list is an expression, and an aggregate folds
-one** (`engine/aggregate.rs`). `Select::aggregate` and `computed` are
-`Column`s, an expression and the name it answers under (`as`, or for a
-field or an aggregate of one the text it was written as, `label_of`;
-anything else is refused without `as`, since a name would have to be the
-expression written back), and `group` is a list of expressions, a name of
-the list standing for its item (`group_keys`). Aggregates are calls, so no
-walk over an expression grew a variant: `count()` is `count(*)`,
-`count(distinct e)` a call of `distinct` inside `count`, `first(e by k)` a
-call of two, and `case when ... end` a call of its conditions and values,
-which `eval` works out lazily; `bucket`, `greatest` and `least` are
-registry functions, so `where` and `set` have them too. A key is matched to
-an item by being the same field or the very item its name gives
-(`is_key`), not by comparing expressions -- `PartialEq` over `Expr` was 1.5
-KB of the browser module. `Reader` binds a list once a query: every field
-and path read decoded in one pass into slots, `bucket` over a constant
-interval and any other expression (its fields made parameters past the
-query's own, `Expr::rewrite`) worked out into slots of their own once a
-row, so a fold reads a `&Value` by its place. An expression over
-aggregates (`sum(px * qty) / sum(qty)`) is the same rewrite over the
-group's keys and folds. `count(distinct)` keeps every group's values in one
-map of the hash index's type, refused past `MAX_DISTINCT_VALUES` (a
-million, about 70 MB), never counted short; `first`/`last` keep the row
-least/greatest by `(k, id)`, boxed so a fold stays the size it was, and
-both are folded out of line (`row_held`): in the loop the fixed
-aggregates took 15% longer. Natively `Fold::add` is inlined and the
-paths' and expressions' reading out of line: as they first stood, a
-million rows in 100 groups took 52.8 -> 54.5 ms and the whole set 32.1
--> 33.9; now 51 and 31. A `count(*)` by `bucket` of an `@sorted` or
-`@ttl` timestamp or int whose filter is a range of it and nothing more
-reads the index's keys and no row (`counted_by_index`, native only): a
-day's per-minute counts over a million events 19.5 ms by a stored minute
-field, 4.0 now. One-minute bars of a symbol for an hour out of a million
-ticks, 1.7 ms where open and close were 120 queries, 195 ms (278 over
-HTTP); VWAP of 50 symbols 118 ms against reading every tick out, 173;
-distinct users an hour over a week 125 ms against 7.7 s (`make
-analytics-bench`). The browser module grew 19.5 KB, 6.8 KB brotli, the
-test build 6.6: the parser's calls and `case` (2.2 KB raw), binding and
-folding (8 KB), the checks and names (1.4 KB), `bucket`'s calendar.
-`site/content/docs/analytics.html` is the recipes, each FenecQL block run
-by `tests/analytics_docs.rs` through `redis_docs.rs`'s runner.
-
-**`approx_count_distinct` is HyperLogLog, and `having` keeps groups**
-(`hll.rs`, `Fold::Hll`). `count(distinct)` stops at a million values, and
-a day's count cannot be added to the next: Kestrel's month had 2.4 million
-visitors. A sketch is 2^14 registers, a standard error of 0.81% (the root
-mean square over thirty sketches of 200 000 values is 0.77%, and every
-count from 1 to 2 000 000 is within 3% in `hll::tests`), read by Ertl's
-improved raw estimator -- no bias tables, no switch to linear counting --
-and sparse, `(index, rank)` words, until those would take a quarter of the
-16 KB dense ones, so a group of a few values costs a few words. Its hash
-is its own (`hll::hash`, MurmurHash3's finalizer a word), over the value's
-encoding as `count(distinct)` keys it, the same on every target, so a
-sketch the browser made merges with a server's. `hll_accumulate(e)`
-answers the sketch as bytes (`Sketch::to_bytes`, sparse while shorter),
-`hll_combine(s)` merges them and `hll_estimate(s)` (a registry function)
-reads a count off one; a bytes field takes the list of numbers JSON writes
-bytes as, so a sketch read out goes back in through `put $1`. A query's
-sketches are held to 64 MB (`hll::MAX_BYTES`) and refused past it, as
-`count(distinct)` is. The fold goes through `row_held` with the distinct
-one, out of the loop the fixed aggregates fold in. Per hour over a million
-events it takes 121 ms against `count(distinct)`'s 128, the furthest of 169
-hours 1.3% off (`make analytics-bench`). `having <expr>` after `group`
-(`Select::having`) is worked out a group as a column is, its own
-aggregates folded after the list's and the list's columns read by name
-(`grouped` checks it with them as keys), and a group it does not hold for
-is taken back out, keys and all, before `order` and the page; `count`
-after `group` counts the groups that pass. The ordered funnel -- each
-visitor's first start and first finish, `having b >= a count` -- is one
-row where every visitor's row left the node: 968 ms of Kestrel's month at
-ten million events. The browser module grew 9.1 KB, 2.9 KB brotli, the
-estimator, the sketch's bytes and `having`'s rewrite most of it.
-
-**`bucket(at, 1d, 'Europe/Berlin')` reads a zone's clock** (`tz.rs`). A
-third argument names the zone: an offset written out (`'+03:00'`,
-`'-0530'`, `'Z'`, `'UTC'`) or one of IANA's names, read from a table of
-their rules since 2000 that `tools/tz/gen.py` writes out of the system's
-compiled tzdata (`tz/zones.bin`, 2026c: 597 names in 196 tables, a zone the
-offset it had at the start of 1999, its transitions since that its TZif
-footer's POSIX rule does not make, and that rule from its first change --
-not from the year's start: Turks and Caicos kept -4 into 2018 -- 30.6 KB,
-10.1 gzip, 8.5 brotli). A day, a week, a month or a year starts at local
-midnight, the first instant whose clock reads it or jumps past it, so a
-day is 23 or 25 hours where daylight time begins or ends; a shorter
-interval starts at the last instant at or before the time whose clock read
-its start or jumped past it, so an hour a clock shows twice is two buckets
-and one it skips none. Both are a walk over the zone's pieces (stretches of
-one offset) near the time, the last piece asked kept (`Rules::last`): rows
-in time order ask one piece for months of them. A time before 2000 in a
-named zone is refused rather than answered by rules the table does not
-hold; an offset answers any time. Native builds carry the table
-(`include_bytes!`); the browser module is handed it as it is handed the
-collation chunks -- listed after them as `zones` by `fenec_collation`,
-taken by `fenec_add_chunk`, `make wasm` putting it in `web/collate/` -- a
-statement naming a zone before refused with `chunks: ["zones"]`, which
-`Fenec.query` fetches and runs again (8.5 KB brotli of every page
-otherwise). A select list binds a constant zone once a query (`Calc::Bucket`
-with the zone); a `where`'s `bucket` keeps the zone it named last
-(`tz::cached`); the count off an ordered index looks a zoned group up by
-its key, since such a bucket may come back (an interval cut across a
-fall-back), where UTC's walk asks none. `tests/zones.rs` holds every zone's
-offsets, sampled over 45 years and hashed, to zoneinfo's, and the start of
-seven intervals around the transitions of twelve zones -- midnight skipped
-(Havana, Santiago, Beirut), a day skipped (Apia, 2011), half an hour (Lord
-Howe), daylight time in winter (Dublin), Gaza -- worked out in Python by
-the definition, not the walk (`zones.txt`), through a select list's, a
-`where`'s and the index's paths. Over a million events, a week's days
-counted off the index by Istanbul's clock take 29-34 ms against 23-27 in
-UTC, where the offset written in -- `bucket(at + 10800000, 1d)` -- read
-every row in 133-154; hours by Berlin's 31 against 25 (252 before the piece
-was kept); with a filter that reads the rows, 94-103 against 91-98. The
-table is read where it lies (a header, offsets and rules as records of a
-fixed size, an index of entries): parsed into lists, its names front-coded,
-the reader was 7.5 KB of the browser module against 5.9, for a table 5.4 KB
-smaller. The module grew 7.8 KB, 3.1 KB brotli, with the table out of it;
-every native binary carries the table's 30.6 KB.
-
-**`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
-sparse vector is held as its non-zero entries, `(index, weight)` ascending
-with indices from 0, and travels everywhere in pgvector's text form,
-`{1:0.5,3:0.25}/N` with indices from 1 -- a JSON string, a FenecQL
-literal, an imported `sparsevec` -- so a pgvector table and `fenec import`
-carry the same vector.
-Every way in goes through `sparse::normalise` (order, an index given twice
-refused, zeros dropped), and the index relies on it. `@inverted` is the text
-index's shape with weights where the counts were; `near` by dot product sums
-the query's lists a list at a time into a slot a document, a window of 65 536
-ids at a time (`sparse::summed`), where they are dense in the ids they span,
-and walks them with MaxScore where they are not -- rank-safe, the bounds
-compared once rounded to `f32` after a 1e-9 slack, so a tie-break never
-depends on the pruning; the browser always sums, and has no walk. A SPLADE
-query's dozens of lists reach most of a collection, and the walk, choosing a
-document at a time among their heads, took 2.54 ms p50 on FiQA against 0.68
-summed, 0.60 against 0.10 on SciFact; bounds per block of a list's postings
-(2.69 ms) and per range of ids across the lists (443 of 451 ranges still read,
-35 MB more) did not pay. `pruning_never_changes_the_answer` holds both ways to
-an exhaustive walk, and `tests/sparse.rs` holds `near` to `near ... exact` row
-for row. Only a document sharing a dimension with the query is ranked. Like
-the text index it is derived and never persisted. It sorts through the
-engine's one `(DocId, f32)` sort and maps dimensions through `DocMap`'s
-`HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
-feature cost 16.2 KB, 4.3 KB brotli, as it came, and `make wasm-sizes`
-weighs it at 2.7 KB brotli added to the module with none and 0.9 left out
-of the full one, the sort and the map being the other indexes' too.
-SPLADE++ (`beir/splade.mjs`) scores
-nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
-0.232 (the dense vectors 0.366), at 0.68 ms p50 over 57 638 documents: its
-queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut texts
-themselves: transformers.js drops the closing [SEP] when it truncates, SPLADE
-without it took SciFact to 0.23, and the dense vectors (`embed.mjs`) moved by
-up to 0.003.
-
-**A point is two `f64`s on Redis's sphere, and `@geo` is Morton keys in the
-ordered index's chunks** (`geo.rs`). A `geo` field (type tag 15) holds
-`[lon, lat]` in degrees as written, 16 bytes behind value tag 15, refused
-past 180 or 90 degrees rather than wrapped, and once read is a
-`Value::List` of two floats: a `Value::Geo` of its own broke `Value`'s
-niche, 16 -> 24 bytes on wasm32 and 6 KB more of the browser module.
-`distance(a, b)` is the haversine on Redis's radius (6 372 797.56 m), so it
-is `GEODIST`: over 2 000 pairs within 0.05 mm of Redis's answer from the
-points it keeps (`GEOPOS`, its 52-bit geohash's cells) and 0.54 m from the
-points as written; PostGIS's sphere is the mean radius, 0.03% less. Its
-`sin`, `cos` and `asin` are series of `geo.rs`'s own, held to the standard
-library's within a few units in the last place: the platform's libm rounds
-its last bit its own way, so a point on a radius's edge could be in on a
-server and out in a page, and in the browser module it brought libm's range
-reduction and tables. A list of numbers going to a `geo` field, a
-`distance`, a `within` or a `near` over one is read again as written
-(`DataType::keeps_numbers`, `geo::is_geo_call` in `exactly_for`'s
-walk), as a json
-field's is: read the quick way into `f32`s, a point moved by up to 1.7 m at
-the antimeridian. `within(p, [w, s, e, n])` holds the box's edges, a west
-east of its east crossing the antimeridian; `near loc p` orders by
-`(distance, id)`, `_score` the metres as an `f32`, `ef` refused; a build
-without `sorted` answers every one of them by the scan. `@geo` (index kind
-10) is derived, built at the first read as `@sorted` is: each row's key --
-its longitude and latitude cut to 32 bits each, monotonely, and interleaved
--- in a `Chunked<(u64, DocId)>`, the ordered index's own chunks. A
-radius's bounding box (padded 1e-7; every longitude over a pole; two boxes
-across the antimeridian) or a box is covered by at most 32 cells of the
-quadtree over the keys, each a range of them, each key's own cut
-coordinates tested against the box with no margin, the ids left tested by
-the filter; `filter_candidates` takes it by the rule a range is taken by,
-while it names fewer rows than what is in hand. `near` walks the cells
-best first by the nearest a cell's points can lie (`cell_floor`, a metre
-and 1e-7 under), a cell ahead of a point as near so ties come out by id,
-and stops at the page or at a radius the filter puts on the same point; a
-hash bucket of 4 096 rows or fewer (`GEO_SET`) is measured whole instead,
-and past an eighth of the collection tested the walk gives up for the
-filter's set. Not a radius's own box: over 100 000 rows round cities a 50
-km box held thousands of rows where the walk met a few dozen, 440 us
-against 32. A row whose
-latitudes alone put it past a radius (`geo::past`: the meridian arc
-between them, less a metre and 1e-9 of it, which the haversine is never
-under) is answered with no trigonometry, so a scan by a radius over a
-million rows went 136 -> 22 ms, and `near ... exact`'s page of ten, kept
-in order as the rows come rather than put in order by `order_rows`, 147 ->
-6.1 ms; the test is out of `Filter::test`'s line (`geo_test`), which it
-grew by a quarter. The browser module's scans run 3% slower than main's
-(`make wasm-speed`'s filter 1.71 -> 1.75 ms) with no point anywhere in
-their path -- the read, the test and the binding taken out, the same -- as
-main's own did with 26 KB of float formatting that nothing calls: where
-the code lands, not what it does. `tests/geo.rs` holds every filter,
-order, page and nearest to a twin collection without the index over 2 000
-rows round both poles, the antimeridian and a city, radius 0 to past half
-the earth, through writes, an index made later and a block put back, and
-Redis's own `GEOSEARCH` examples. Over a million points round 48 cities (`make
-geo-bench`: fenecdb in process; PostGIS 3.5 and Redis 7 in Docker, each
-server's own mean time read from `pg_stat_statements`, planning included,
-and `INFO commandstats`): the index builds in 34 ms and holds 20 MB
-(PostGIS's GiST 5.4 s and 82 MB, Redis's sorted set 86 MB); within 100 m
-7.2 us p50 against Redis's 12.6 and PostGIS's 1 262 (its plan read 132
-pages of the GiST); 1 km 12.6 against 34 and 1 310; 10 km, 2 543 rows,
-0.56 ms against 1.73 and 4.84; 100 km, 36 341 rows, 5.9 ms against 7.6 and
-32.2, the scan 22-28 ms; the ten nearest 33 us anywhere and 38 within 50
-km, against Redis's 198 ms and 6.0 ms (its search sorts every member of
-the cells it reads) and PostGIS's KNN 1.75 and 1.77 ms. A put with `@geo`
-costs 1.19 us against 0.62 without and a `@sorted` float's 0.98. The
-browser module grew 23.1 KB, 8.0 KB brotli -- the index's cover and walk
-4.4 KB of the 23.1 -- and the one without indexes 11.3 KB, 4.2 brotli.
-
-**`--follow` confirms nothing that is not on disk.** `fenec import --follow`
-reads a logical replication slot through `pgoutput` and applies every change
-through the copy's own mapping (`fenec-import/src/follow.rs`). The slot's
-confirmed position only moves past a transaction an fsync has covered, and
-every write is a put or a delete by id, so a broken stream or a killed
-follower resumes from the slot and replays what it had applied without
-changing it. The slot is made before the copy is read, so the stream starts
-with changes the copy may already hold; the same idempotence converges them.
-A `_follow` collection in the file records whether a collection's copy
-finished: a copy cut short is made again rather than streamed on top of,
-which would lose the rows it never reached. An update arrives without its
-TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
-follower takes them from its pending writes or the collection; flushing
-before each such read cost the batching, 5 900 rows/s against 17 100. Commit
-to visible: p50 0.16 ms (`make follow-bench`). `fenec-server --follow` runs the
-same follower on a thread of the server's, over the database it serves, so
-the mirror is served over HTTP and subscriptions with no second process
-over the file -- two corrupt it (`fenec-server/src/mirror.rs`). The
-importer's options come as `--follow-index` and the rest
-(`fenec_import::args`, which `fenec import` reads its own with too). The
-collection takes no write but the follower thread's (a write hook, 403):
-the next change from PostgreSQL would write over one, or a copy made again
-forget it. The follower stops at the server's shutdown flag, and the
-shutdown waits for it (`durability::before_shutdown`, 5 s at most, past which a
-copy still being made is left for the next start) before its checkpoint;
-an error it cannot wait out ends the process rather than leave it serving
-a mirror that no longer moves. This is why the PostgreSQL client is
-`fenec-wire`'s, below the importer: in the server it made the importer
-depend on the server, which could then not run it. A message's length is
-held to PostgreSQL's gigabyte (`proto::MAX_MESSAGE`, its MaxAllocSize)
-before anything is allocated, and under it the body's buffer is the
-length believed, allocated so its failure is an error (`proto::zeroed`,
-as the router's `zeroed`, and for its reasons: no copy at any size, a
-lying length costing the pages its bytes reach): a length from the
-server, or from anyone on the path (fenecdb speaks no TLS), that a system
-refused -- one that does not overcommit, Linux's heuristic on a machine
-smaller than the gigabyte -- aborted `fenec import`, and `fenec-server
---follow` with everything it served, and is a broken stream now, which
-the follower connects again after. The counts a message carries are held
-to it too: a column count is an Int16 never negative, read unsigned
-(`be_count`: read signed, `0xFFFF` sized a `Vec` by `usize::MAX` and
-panicked), and a TRUNCATE's relations are given room for what the
-message holds, where its count alone asked for 16 GiB. The reader is the
-code it was, `calloc` either way, the loop reading messages the same
-instructions in other registers once the refusal's message went out of
-line (`refused`: formatted in place, the length was stored to the stack
-at every message): over messages in memory, twelve runs a side in ABBA
-turns, 120 B 30.2 ns a message against 30.3, 3 500 B 248.4 against
-250.0, 64 KiB 8.53 us against 8.61, 2 MiB 58.5 against 58.6. A subscriber hears a PostgreSQL
-commit 0.09 ms after it returned at the median, a row inserted with a
-vector under HNSW 0.19 ms, p99 4.0 and 3.3 (`make mirror-bench`; the code
-before the pg wire went gave 3.7 and 3.7 the same day); a server killed
-while the table was written to held every row 370 ms after it started
-again. The
-follower adds 178 KB to `fenec-server`.
-
-**`/_metrics` counts at the edge, a shard per thread.** A statement is timed
-around `handle`, from arrival to answer, so
-the lock wait and the `--sync always` fsync are in it; whether it wrote is a
-thread-local set where the write lock is taken (`metrics::wrote`), since a
-connection is a thread running one statement at a time. The counters are
-sixteen 128-byte-aligned shards handed to threads in turn: eight threads
-counting into one set cost 720 ns a statement, 6.7 ns with the shards. The
-path has an underscore because a collection may be called `metrics`.
-`--metrics <addr>` is a listener for it alone that never attaches a watcher
--- a second one would take the HTTP endpoint's subscription wake-ups -- and a
-tenant node publishes counts of its tenants, never a tenant's collection
-names. The router counts its own the same way (`fenec-shard/src/metrics.rs`,
-over `fenec_http::metrics::Timings`): requests by route and status class, a
-forwarded one's time at its node, the nodes it could not reach and its moves,
-never a tenant in a label -- 13.3 ns a request with eight threads counting,
-beside the 17 µs the router adds. A subscription is timed to its head, and a
-standby's replication stream only counted: both last as long as their
-client. The node and the router alike count a request before its answer is
-written, so a client holding its answer finds it in the next scrape: the
-router counted after the write, and `entry.test.js` read eu's router a
-relayed request short and then one over (CI) -- 8 runs of 10 with the
-router's thread held 5 to 10 ms past the write, none once it counts first
-(`fenec_shard::metrics::counted`). The router times a request once its
-answer is written, as before: count, clock and histogram all moved ahead of
-the write took its added p50 up 0.1 us, the count alone nothing measurable.
-
-**`/_stats/statements` counts by shape, a tenant's apart.** Every
-statement is also counted by its text with each literal and parameter as
-`$n` and a list of literals alone as one (`fenec_http::statements::shape`)
--- over HTTP by the FenecQL of `/query` and `/batch`, noted as
-`api::parse_query` reads it (`statements::text`), since the strings of the
-JSON would all have been one shape. The counts are shards a thread each
-behind a mutex only a reader of the whole also takes, 5 000 shapes at most,
-the least called forgotten: 0.34 us for a statement of 87 bytes, against the
-2.2 us its parse takes (`make statements-bench`). A shape is made only as
-far as the 1 000 bytes an entry keeps of it, which is as far as two can be
-told apart where they are shown: shaped whole, a `put` of 1 000 128-dim
-rows spent 1.7 ms of its 12.6 there. They need what reads the data without a JWT's scope, or the admin
-token -- a shape names every collection -- and a tenant node keeps each
-tenant's apart (`statements::View`): its own under `/t/<tenant>/`, every
-tenant's, named, to the admin alone.
-
-**A statement is parsed once, and an answer goes out in one write.**
-`POST /query` keeps what `api::parse_query` parsed by the text's hash, 16
-shards of at most 64, a shard emptied when full and a text over 1 KB,
-which holds its literals, never kept; a JWT's scope is ANDed into a copy
-(`Arc::unwrap_or_clone`), never into the shared one. An HTTP answer goes
-out in one `writev`, its head written without `format!`: head and body
-apart put the head in a packet of its own on a socket that sends at once,
-and cost a second send each answer. One client asking a row by id over
-10 000 x 128 went 40.4k -> 47.1k requests a second, and eight 14 to 20%
-more (`make requests-bench`). The router writes the answer it forwards
-the same way (`answer_out`, `http::write_parts`): its added p50 went 23.6
--> 20.6-20.8 us (`make shard-bench ARGS=latency`). FenecQL's lexer walks a text's bytes,
-reading a character whole only outside ASCII and a number where it stands,
-and a list of numbers alone becomes its vector without an expression each
-(`numbers_in_brackets`): a query holding a 128-dim vector parsed in 16.9 us
-and takes 6.2, a row by id 1.1 and takes 0.9. Natively the lexer reads a
-list of numbers alone at once, into the vector the parser would make of it
-(`Tok::Vector`, `tokenize_vectors`), each number in the one pass that finds
-its end (`num::clinger`, the JSON reader's), and not after `in`, whose list
-keeps its integers and `f64`s: a token a number and a comma, and each
-number's text read for its end, for a `_` and for its value, a `put` of
-1 000 128-dim rows parsed in 5.4 ms, now 2.4, and
-`a_list_read_as_a_vector_parses_as_its_tokens_did` holds 20 000 generated
-texts to the token-at-a-time parse. The browser module reads such a list
-into a vector too, at once, each number the general way, for its memory
-rather than the time: read a token a number, a `put` of 1 000 768-dim rows
-as text took it from 58 to 130 MB, which it never gives back. The text is sliced with
-`get`: an index that can panic brought 2.7 KB brotli of a `char`'s
-formatting back into the browser module, which is 1 KB smaller instead.
-`the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and
-errors to the old lexer's over 40 000 generated texts.
-
-**The shell runs a statement once nothing after it can go on with it**
-(`fenec_ql::reading`, fenec-cli's `Reader`). A statement has no end of its
-own -- `del notes` is whole, and so is it with `where id = 3` on the line
-under it -- and the shell ran every line whose brackets closed, so that
-`del` deleted every row before the `where` was refused. `reading` gives
-the statements a `;` or the next statement ended (`whole`) and what is
-left: a statement whole so far (`Rest::Last`), or one refused so far
-(`Refusal`), at the text's end (`end`) or at what begins no statement
-(`begins`: an unknown command, `wher`, a clause past a `;`), which refuses
-the statement before it too, `;` or no `;`, since it may have meant to go
-on with it -- `del notes; where id = 3` deletes nothing, as `-c` refuses
-it. Piped, the next line says whether a refusal stands
-(`Refusal::stands`: the same words, not at the end, and where the earlier
-one was not at the end, the same `place` -- which a reader that lets go
-of the text before shifts, where the words' `position` it cannot), so a
-script reads as `-c` and `POST /query` read it, and the text refused ends
-where it did (`Held::Refused`'s length: from the latest line instead, the
-lines read inside a string were dropped and the last run alone).
-`a_script_piped_writes_what_minus_c_writes` holds that over generated
-scripts (`FENEC_SHELL_CASES` for more). Typed, a read or a schema change
-on one line runs at Enter, and a write or a read over lines waits for the
-next line: an empty one runs it, a `.` command leaves it waiting, as
-`psql`'s meta-commands leave its buffer, and `.quit` or Ctrl-D leaves it
-unrun; with no next line to ask, a refusal stands where `limit 1` after
-it leaves it standing (`stands_alone`). A paste is read as a pipe, its
-next line waiting already (`pending`, a `poll` of 40 ms: iTerm2 paces a
-paste about 15 ms apart), an empty line waiting as the line before was
-judged is white space (`waiting`), and in a script or a paste a `.`
-command -- `.quit` too -- waits behind the statement before it
-(`deferred`), as does a statement a `;` ends at a line's end (`take`'s
-`hold`): run there, `del notes;` then `where id = 3` deleted every row,
-and a `.quit` between `del notes` and its `where` ran the `del` alone.
-Bracketed paste is not read: it needs the terminal out of its line mode. A new
-statement form or lexer syntax owes this: a place in fenec-cli's `kind`
-(every statement named, so a new write cannot run at Enter by default); a
-mark in `Parser::cut` where the end of the text decides a reading the
-parser then backtracks over (the SQL order's list before its `from`,
-`alter field f` before its `@`) -- a check at the end of a list that a
-next line could satisfy belongs there too; `lexer::Unclosed` taught any
-new string, comment or bracket; and a line in the corpus of
-`a_statement_written_over_lines_reads_as_one`, which fails where a
-statement written over lines would be refused piped. A `;` is a token
-(`Tok::Semi`) that ends a statement in the parser, where it was white
-space and `del notes; where id = 3` one statement; a query string's
-`select=`, `group=` and `facet=` take one after their list as before.
-`lexer::Unclosed` keeps a document of many lines from being parsed again
-at each, and `spans` and `reading` place statements in bytes: in
-characters, a synced text's second write was sliced a byte early per
-letter outside ASCII before it, and the server refused its first. The
-shell's code grew 8.6 KB (`__text`, aarch64-apple-darwin; 9.3 in
-`make small`): the reader, `reading`, and the lexer out of line once it
-had a second caller there (+0.4 KB net) -- `meta` called from two places
-went out of line, 2.2 KB, and is called from one. The browser module grew
-242 bytes, 52 gzip (brotli within noise); parsing moved by noise alone.
-
-**A plain `get` is written as JSON from the stored documents**
-(`Database::query_json`). Fields alone, in the order the payload holds
-them -- `select *` and most lists, with no `match`, `near`, `lookup`,
-`facet`, aggregate or `count` -- are answered over HTTP by writing each
-row's bytes out as JSON under the read lock, a text escaped where it lies
-(`codec::text_at`), rather than decoded into a `Value` each, rendered after
-the lock and dropped; anything else returns `None` and goes through `query`.
-It must write byte for byte what `json::rows_array_into` writes of
-`query`'s rows (`tests/query_json.rs`: every type, a field added after a
-document, a dropped one, a mapped file, rows past their time). In the
-container, musl's allocator gives a freed group of blocks back to the
-system and faults it in again at the next request: a YCSB scan of 50 1 KB
-records took 37 page faults and 213-220 us inside fenec-server, a read by
-id a page mapped and unmapped while its columns were `Vec`s -- so the
-columns sit in an array on the stack, and an answer's body is the
-connection's spare buffer (`http::spare_body`, given back after the
-`writev`, up to 1 MB): no fault, 50-60 us, and a read by id 22.4 -> 17.7
-(`make roundtrip-bench`, `--measure scan50`). In process a 1 KB row took
-0.95 us to decode, a field a look-up and a skip of the fields before it,
-and 1.17 to write out; `select` reads a row in one pass now (`one_pass`,
-0.43), `json::escape_into` tests eight bytes at a time (`needs_escape`,
-0.39), and `query_json` takes 0.46 for both. The browser module's scan of
-100 such rows went 0.355 -> 0.254 ms for 353 bytes brotli; `make
-load-bench`'s pages read back 165.8k -> 212.0k rows a second.
-
-**A Durable Object keeps a database as a file would** (`integrations/cloudflare`,
-`@fenecdb/cloudflare`). A Worker imports a `.wasm` compiled, and `Fenec.open`
-takes the module so -- it read `.instance.exports` off what `instantiate`
-gives a module, and the engine could not start in a Worker at all.
-`persist` writes an image into `ctx.storage` and then only the writes since
-(`journal`/`drain`), until they outgrow half the image and 64 KiB. An object
-is billed by the row written ($1 a million), and a SQLite-backed one -- the
-only kind a new account makes -- has `storage.sql`: there a generation is a
-table, `<key>:<gen>` (`id INTEGER PRIMARY KEY, image, data`: an index is a
-row written more), the image's rows under the 2 MB a row takes (`ROW`),
-then a row a flush of the writes, and nothing beside them says where the
-database stands, so a write is one row. A new image is written and the
-tables before dropped in one `transactionSync`: workerd counts a table made
-as two rows, one dropped as none and a `DELETE` a row each. The key-value
-layout -- values under 128 KiB, a record naming the whole generation
-written last -- is kept for an object without `sql`, and read through
-it alone: a database an earlier version kept in values on a SQLite-backed
-object is moved by restoring through the key-value methods and persisting
-(README), not by code. Before, a single-row write was a value, the record
-and the example's `setAlarm` (a row too), 3.4 rows; a checkpoint of
-10 000 x 128 (5.7 MB) 101 rows and of 50 000 x 128 (27.6 MB) 479, its
-128 KiB values and a delete each of the generation before. Now one row, 5
-and 16 (`make cloudflare-bench`'s rows.mjs, every storage call counted
-under `wrangler dev`). A flush goes out at once unless the one before is
-not yet durable (`storage.sync()`); the writes that land meanwhile -- a
-Durable Object takes the next request in while one waits -- go out after
-it as one: 0.52 rows a write from 8 writers at once, 0.15 from 32, every
-`persist` resolving once its own flush is durable and a read's once what
-it may have read is. Waited out with a timer, a turn of the event loop for
-requests to land, it cost a lone write 3.2 ms p50 against 1.4; this way
-2.0-2.3 against the 2.4-3.1 before. A flush that fails leaves the storage
-as it was and every `persist` on that database rejecting after: the
-example lets it go and the next request restores, where it answered 400
-and kept the write in memory for the next image to store. The example
-opens and restores inside `blockConcurrencyWhile` (a cold object sent
-requests at once could open an engine each, appending under the same
-indices; `wrangler dev` never showed it in a burst of 128),
-and keeps its database from its alarm (below); `checkpoint` writes nothing
-until the writes since reach `{min}` (64 KiB), and then a new image: a restore takes the graphs in it, where the
-vectors written after the last image are linked one after another in the
-browser module's one thread -- which no longer costs a start much: the
-first `near` over 10 000 x 128 after a restart 39 ms as written, 47 after
-a checkpoint, 50 000 175 and 157, where it was 792 and 1 455 against 36
-and 84 when first measured (`make cloudflare-bench`, under `wrangler dev`,
-which runs from the example Worker's own `--config`: below the repository
-it took the site's `wrangler.jsonc`). A restore copies each row or value
-into the allocation the module keeps the image in as it reads it
-(`Fenec.loadParts`, JS only): read whole into a `Map`, joined, and copied
-in, a 27.6 MB image held 60 MB of JavaScript beside the module's 42 at
-the peak, now 4 (memory.mjs, in Node), and the start of 50 000 rows went
-186-196 -> 175 ms. A Worker's isolate has 128 MB with the module's memory,
-which grows and never gives back. A checkpoint writes the image a mebibyte
-at a time (`fenec_snapshot_chunks`, `snapshotChunks`), each into storage
-before the next is made: built into one `Vec` the image doubled as it grew,
-old and new side by side, and `boxed` copied it again -- 30 000 x 128 went
-from 60 to 128 MB, and goes to 70. Made all at once, the chunks stood
-beside the rows until the first was stored: 50 000 x 128 at 73 MB went to
-109. So each is made as it is taken (`Chunks::take`), out of the stores'
-own bytes held rather than copied (`ImageOut::write_kept`, `Kept`: the
-image a load kept, and each segment -- an `Arc` in the module too now,
-copied by a write while an image holds it, so the image is the database
-as it stood when begun): 83 MB, and a checkpoint of 10 000 x 768 holds no
-more than the rows, for 0.6 KB brotli; puts and the image as fast. About
-60 000 rows of 128 dimensions or 12 000 of 768 fit, 97 and 102 MB at the
-most; `wrangler dev` does not hold a Worker to it.
-
-**An object's alarm keeps its database** (`maintain`, `schedule`, `due`
-in `integrations/cloudflare`). A server sweeps `@ttl`, compacts and keeps
-its graphs on threads; an object has one alarm, a row written each time
-it is set and a wake-up -- a restore, if it was evicted -- each time it
-rings. The example set one after every first write and checkpointed past
-64 KiB of writes, and nothing deleted a row past its time: read past, kept
-for good. `schedule`, after a write, sets the alarm only once something is
-due -- a row that will expire, an image owed -- `quiet` (5 s) after the
-write at the soonest, leaving one set no later than `every` (60 s) after
-that, and asks nothing where one rings that soon (`due` is 8 us a write in
-the module, 29 beside 100 000 rows that expire, a put 5); a write that
-brings nothing due and every read set none, so an idle object costs
-nothing. `maintain` deletes the rows `grace` (60 s, the server's `GRACE`,
-so a reaper reading `expired()` as often sees each) past their time,
-10 000 a call in statements of 1 000 -- `del c where expired() and f <= $1
-order f limit $2`, which walks the `@ttl` index to the batch, so the module
-took no export and not a byte (`Database::expired` and `sweep` are native
-only): 0.46 ms a batch over 100 000 rows, an alarm's 10 000 holding the
-object about 5 ms -- and sets the alarm again at once past the bound;
-writes a new image once the writes since reach half the image and 64 KiB,
-or half of what storage holds is dead and a mebibyte, which the writes'
-size alone does not see (the module's dead record bytes less those it held
-as the stored image was taken, `deadAtImage`: an image holds the live
-records alone, and every write after lands in both), so an alarm woken to
-sweep stores its deletes, one row, and no image -- under a mebibyte an
-image of a churning 70 KB was three rows a sweep where the deletes were
-one; and sets the alarm for the next row's time and grace, no sooner than
-`every` after the sweep, or none, the alarm that rang forgotten either way
-(kept, `schedule` took it for one still set and set none again). A failure
-to set it -- `getAlarm`, read on every alarm that wakes an evicted object,
-or `setAlarm` -- is `maintain`'s `error`, its work stored, never a
-rejection: thrown, the example's handler let the database go as for a
-storage failure (below). The names its statements write are the lexer's
-(`\p{Alphabetic}`, then `\p{N}` too): ASCII alone, a `müşteri` was never
-swept. A year past 9999 is written `10000-01-01T00:00:00Z` and one
-before year 0 `-001-01-01T00:00:00Z`, four wide with its sign, which
-`Date.parse` reads as `NaN`: the alarm was set at `NaN`, and a row of year
--1 past its time passed its whole collection over. Both are read in
-ECMAScript's six-digit form; a time past any date JavaScript has is taken
-as due now for a row past its time and passed over for a living one. Taken at
-a quarter of the image, rewrites of 1 000 128-dim rows a request, a row
-each, brought an 11 MB image, 8 rows, every 6; at half, where `persist` folds, the
-images are as many as before, and a request folds only past the whole image
-once `schedule` ran (`BACKSTOP`), so the alarm takes them and no request
-waits. Under `wrangler dev` (rows.mjs, every storage call counted, in ABBA
-turns against main): 30 bursts of 20 single-row writes over 10 000 x 128,
-a second apart, 600 rows against 651-652; 12 bursts of 500 rows 19 against
-100; 20 000 rows past their time deleted in two alarms, a row each. The
-module never gives memory back and holds every record version written
-since its open (20 000 x 128 restored held 18 MB, 74 after its titles were
-set thrice and its vectors once): once its dead record bytes reach half
-of what it holds, between 4 and 16 MiB, `maintain` makes sure storage holds
-an image without them and answers `reload`, once a database, and the
-example restores a new module -- 50 000 x 128, three in five expired, held
-42.7 MB through two sweeps, 51.6 at the image the third owed and 19.2
-restored (memory.mjs, in Node). Every database the example lets go -- a
-reload, writes not stored, a `maintain` that failed -- goes one way
-(`#retire`): calls arriving wait while those holding it finish, a write
-on its way to storage among them, then it is `release`d -- nothing of it
-stored after, resolved once its flush under way has settled -- closed, and
-another restored. `release` remembers the database (a `WeakSet`), not only
-its state: one never kept, or restored from empty storage, had none to
-mark, and a `persist` after made one afresh and wrote an image over the
-generation stored; `restore` into a released one is refused, where it
-made a state anew. Let go of at once, as the alarm's handler first did when
-`maintain` threw with storage sound, it lost answered writes: a request's
-flush waited to be durable and another's waited behind it, the next
-request restored a second database and wrote id 3, the first then stored
-the waiting write as id 3 too, and the next restore read the first's. And
-a refused `persist`, `checkpoint` or `maintain` on a failed or released
-database answers only once no flush of it is under way, so a caller that
-drops it and restores -- the README's alarm, a request's write not stored
--- reads all it stored and is alone: refused at once, it answered while a KV
-flush still put its pieces, which would land after that restore. `example.test.js` drives the
-example's class in Node over the storage stand-in (`module.registerHooks`
-giving it `cloudflare:workers` and the compiled `.wasm`), holding a flush
-at `sync` to put the alarm between two requests' writes; it fails on the
-code before, and with the wait for the holders taken out. A `compact` in the module rebuilds every
-graph holding tombstones and builds its image whole, and gives nothing back.
-A restore reads its generation's sums to their end: left at the first row,
-the statement held the table and a new image's `DROP TABLE` was refused
-under node:sqlite. The first `near` after a restart, a lone write's p50
-(2.00-2.07 ms against 1.96-2.35) and a restore's memory moved by noise
-alone. `make cloudflare-test` holds the rules to the fakes -- storage
-failing after every operation of a sweep's flush and of its image included
--- and the example under `wrangler dev`, on the port it says it bound
-(`--port 0`, `Ready on`; dev.mjs, which rows.mjs and coldstart.mjs start
-it through too): an idle object setting no alarm, 350 rows swept over four
-alarms and kept across a restart, an image by the rule and none without
-it, a reload. wrangler is started with no colour and its line read past
-the escapes besides -- under FORCE_COLOR the address sat between them,
-and the harness waited for good -- a start that ends before the line
-fails, and an `after` hook ends any wrangler a test cut short by its
-timeout left, which held the test process open.
-
-**The browser module grows nothing by doubling past a mebibyte.** Its
-memory is never given back, so a peak stays for good. An index's vectors
-are `Rows` (`vector.rs`): natively a `Vec`, in the module chunks of about
-`ROWS_CHUNK` (1 MiB), a whole number of rows each, reached through where
-each starts (`starts`) in a load and one bounds check -- through the
-chunks' own `Vec`s a 10 000 x 128 build took 11% longer, and `row` out of
-line 5% (`#[inline(always)]`). A segment of documents doubles only up to
-the record that seals it (`Store::append`), where it went to 12.7 MB for
-8, and the lexer sets aside a token every four bytes up to 65 536 only: a
-list of numbers is one token (`Tok::Vector`, in the module too now), and
-a `put` of 1 000 768-dim rows had 39 MB set aside for 7 000. 5 000 x 768
-written 1 000 a request held 100 MB and holds 58, written as text 130 and
-62, 10 000 of them 150 and 84; a put of 200 of them as text went 10.1 ->
-7.0 ms, and builds and searches as fast (`make wasm-speed`), for 768
-bytes brotli. `web/fenec.test.js` holds an index over three chunks to the
-exact search, before and after an image.
-
-**A live query learns what a write changed from the change ring.**
-`Fenec.live` and `FenecSync.live` share one `Lives` (`web/fenec.js`): a
-query's rows now, and again once a collection it reads is written --
-`Query.reads` names them, each `lookup`'s and inner `in` query's too, `null`
-for a `raw` holding a `get`, and a text names them with `{collections}` or
-runs after every write. Which collections were written is
-`fenec_changes(since)`, `Database::changed_collections_since`: a block's
-writes reach the ring as it lands, so one put back names nothing, a schema
-change names its collection, and a drop answers `None` -- everything --
-since a dropped collection has no name left (a name kept for each would be
-kept for good). A statement's answer does not carry it: asked once in a
-microtask after the task that wrote (a replica: at the next frame, a seed
-landing in chunks), it costs a write nothing -- a write no live query reads
-about 2 us in Node, the module 33 bytes, `make wasm-speed`'s `put` as it
-was. A `load` (`restore`, `openFile`) runs every live query, since the
-image's counter may be the cursor's. The client grew 1.9 KB gzip.
-
-**An app keeps its database through `fenec-ffi`.** The engine as a native
-library -- a cdylib and a staticlib, zero dependencies, its header
-`include/fenec.h` written by hand and held to the exports by a test -- for
-the Swift (`integrations/swift`, `Package.swift` at the root since SwiftPM
-fetches a package by its repository), Kotlin (`integrations/kotlin`) and
-Dart/Flutter (`integrations/dart`) bindings -- Maven Central's
-`com.fenecdb:fenecdb` and `com.fenecdb:fenecdb-android`, Kotlin package
-`com.fenecdb`, the JNI symbols `Java_com_fenecdb_FenecNative_*` with it.
-A text is answered through
-`fenec-abi`, the code the browser module answers through too -- prepare,
-the exact pass, the block, the answer's JSON, the change notice -- so a page
-and an app get the same bytes; out of the module's crate the optimizer at
-`opt-level = "z"` kept those functions out of line (+762 bytes), and
-`#[inline(always)]` left the module 161 bytes larger and 216 smaller in
-brotli. A handle is a number into a table of `Arc`s, never a pointer: a use
-after close finds nothing, and a call holds its database while it runs. A
-read takes the shared lock -- a long one only to pin what it reads, and
-reads with none held, as a server's does (`Database::pin`; a text of
-several reads is one pin) -- a write the exclusive one, a lone `create
-index` or `compact` runs beside the database (`Database::maintain`), and a
-write's fsync runs once the lock is let go (`Database::flush`'s
-`Durability`, a failure to `Database::fail`), as a server's do. Every call
-runs under `catch_unwind` and returns a code -- an `Error`'s kind 1-10, 14
-(`FENEC_UNMET`) or 15 (`FENEC_QUOTA`), or `FENEC_PANIC`, `FENEC_MISUSE`,
-`FENEC_LOCKED` -- with the error's JSON, so
-the library is built in the `ffi` profile, which unwinds. `<file>.lock` is
-held while a file is open (a checkpoint renames a new file over the
-database, which a lock on it would not survive): a second open, here or in
-an app extension, is refused -- by a record lock (`fcntl`'s `F_SETLK`), the
-process's, and a list of this process's lock files. An `flock` was the open
-file's, which a child spawned meanwhile shares until its exec: a close and
-an open again beside a thread spawning children were refused 48-66 times
-in 3 000, and once in CI's `swift test`, whose servers start beside the
-other tests. Every write is fsynced unless
-`FENEC_OPEN_NO_SYNC`; `fenec_flush` is `Database::write_out`, the buffer
-written with no fsync; `fenec_close` saves a graph once the file grew three
-times its record since its last save, and syncs. A handle opened so writes
-its buffer behind the lock as a server does (`Native::after`, `behind`):
-`Database::write_behind` is asked after every write no fsync follows --
-what a sync applies from its server, on either kind of handle, among them
-(a fsynced handle so asked then hands over at a block's start, as a server
-written behind does) -- and what it hands back runs once the lock is let
-go, a failure the call's error and `Database::fail`'s, so the writes stop. Written under the
-lock as it outgrew a mebibyte, a read by id beside texts of 1 000 128-dim
-rows waited 0.24-0.25 ms p50, 2.30-4.44 at p99 and 12.9-61.3 at most, read
-267-296k times a second beside a writer's 640-705k rows; behind it,
-0.14-0.19, 1.15-1.28 and 1.33-1.86, 341-354k reads and 678-717k rows
-(`ffi_bench beside`, twelve runs a side in ABBA turns at loads of 1.8-2.5).
-A fsynced handle's bytes were the durability's already, written with no
-lock held: beside fsynced texts a read waited 0.13-0.15 ms, 1.19-1.36 and
-1.22-1.68 either way (`beside durable`). What either still writes under the
-lock is a record of a mebibyte or more, where it lies (a server's too), and
-on a fsynced handle the record a handover lands with. A lone buffered put
-is 2.71 us p50 either way over sixteen runs a side, the mean 3.17 against
-3.21 inside the runs' 2.27-3.27 and 2.63-3.73 (`ffi_bench put`), and `make
-ffi-bench`'s put beside a graph 4.4 us p50 either way over ten, `near` and
-the open as they were: written behind, the buffer goes out in writes of 64
-KB rather than of a mebibyte. `open_wrapped` takes a wrap for the file's
-sink, at which `tests/behind.rs` holds the write behind or fails it, and
-the library's code grew 512 bytes. The Kotlin binding's JNI
-functions are the library's (feature `jni`), four entries of the JNI table
-by hand, a call one `byte[]` -- its code, its JSON -- and text as UTF-8
-bytes, since JNI's modified UTF-8 splits an emoji. Each binding runs its
-calls off the main thread (a dispatch queue, `Dispatchers.IO`, a worker
-isolate a database), sends a vector as its `f32` bytes and a json field's
-`exact` refusal again as JSON, holds its builder to every golden case, and
-has live queries as `Lives` has them, the looks of a burst gathered a frame
-(16 ms) and taken once no write is under way. The libraries are built alone
-(`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
-the shared one 4% larger. 1.68 MB stripped on aarch64-apple-darwin, 1.88 on
-x86_64 Linux with JNI, the sync (below) 165 and 198 KB of them; a buffered put of a 128-dim vector 4.6 us against
-the server handler's 23.2, a fsynced one 4.0 ms on an M1, `near` 97.8 us
-against 151.4 (`make ffi-bench`). The XCFramework is assembled by hand
-(`build-xcframework.sh`), so the Command Line Tools build every slice; a
-release's zip is built before its tag (`swift-binary.yml`), since the tag's
-`Package.swift` must name its checksum. Swift links a static library; the
-Flutter plugin vendors a dynamic `FenecFFI.xcframework` (`--dynamic`,
-`FenecFFI.framework` a slice, install name `@rpath/FenecFFI.framework/...`)
-and Dart opens `FenecFFI.framework/FenecFFI`: a static one kept whole with
-`-force_load` had the Runner link a file CocoaPods' "Copy XCFrameworks"
-phase makes with no order declared against it, and `flutter build ios`
-failed on it.
-
-**A replica's sync is a state machine; the network is the binding's.**
-iOS (ATS) and Android refuse cleartext HTTP by default and a server sits
-behind TLS, which fenecdb's own client does not speak and should not: the
-platform's client has the trust store, proxies, pinning and power
-management. So `fenec_abi::sync` does no I/O -- a binding feeds it events
-(`Sync::response`, `opened`, `bytes`, `closed`, `timer`, `signal`; FFI
-`fenec_sync_feed`) and performs the JSON actions it hands back (`request`,
-`stream`, `cancel`, `wait`, `token`, `changed`, `refused`, `status`) with
-`URLSession`, `HttpURLConnection` (Android's and the JVM's, one loop for
-both) or `dart:io`'s `HttpClient`, every event handed to the core in turn on
-one serial queue so a stream's bytes stay in order and no action outruns
-its cancel. Porting `FenecSync` would have been three more copies of the
-optimistic writes, the key reconciliation and the cursors, tested apiece;
-here the logic is once, held to the scenario file (below), and each
-binding's loop is a page. A write
-through `fenec_query` to a shape's collection is the sync's
-(`Sync::claims`, `write`): applied to the replica with what puts it back,
-and queued with an `Idempotency-Key`, in one block; DDL over a synced
-collection is refused, a collection with no shape is the app's own. What
-`FenecSync` holds in memory is in the file, written in the blocks it
-describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
-keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
-a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
-30% jitter) or the `retry_after` a quota names where longer, 401 asks for
-a token, a 507 naming a tenant's quota and any other 4xx are a refusal put
-back (below). A
-replica reopened sends its queue before opening its streams. An update of
-an unanswered insert reaches the server's copy by its key as well
-(`fenec_ql::spans` keeps each statement's own text for the `/batch` lines,
-an insert rendered as the builders render it, every value a parameter); an
-insert the shape does not hold loses its temporary row once a stream passes
-the write's `Fenec-Seq`; a seed writes over and deletes the rest, keeping
-unanswered writes' rows, rather than clearing first (a row that stayed
-keeps its vector's node). A change with `"schema": true`, or rows naming a
-field the replica has not got, has the collection made again from `GET
-/collections`, its rows kept in the fields left (`remake`), and the shape
-seeded whole (`Shape::fresh`): applied as they came, the rows of an alter
-failed the put and the stream retried the same change for good. A one-row change
-costs 18.4 us against 7.1 for the same put alone, rows in changes of 100
-3.8 us either way, a 128-dim row under HNSW 482 against 465, a seed of 10
-000 rows 72 ms against 44 (`make sync-bench`). It adds about 165 KB to the
-native library -- 1.51 -> 1.68 MB on aarch64-apple-darwin, 1.68 -> 1.88 on
-x86_64 Linux, about 77 KB of it the sync's own code -- and the browser module is built without it:
-`fenec-abi`'s `sync` feature, which only `fenec-ffi` turns on. Compiled
-in as dead code, it still moved LLVM's inlining and left the module 155
-bytes larger; off, the module is the size it was, 512 400 bytes. Dart's is
-`Fenec.openSynced`, since a static `sync` cannot sit beside the instance's
-fsync `sync()`.
-
-**The browser's sync and the native core are held to one scenario file.**
-Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
-the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 71 scenarios, each a
-script of shapes, app writes and server events -- a seed, a change, a
-stream dropped, the status each write's request is answered with, a seed
-past the horizon, the network's signal, a token -- with what the replica,
-the queue, the requests sent (method, path, body, the idempotency key
-reused or new), the timers and the refusals are after every step.
-`crates/fenec-abi/tests/scenarios.rs` drives the sans-IO core through it,
-and `web/fenec.sync.scenarios.test.js` drives `FenecSync` through a fetch
-and a clock the script plays, its replica persisted over an in-memory
-IndexedDB so a restart is a page opened again; each writes the names that
-passed to `target/sync-scenarios/`, and `make sync-scenarios-check` (in
-`make test` where the module is built, and its own CI step) fails unless
-both ran every one -- under `CI` the JS runner fails rather than skip
-without `web/fenec.wasm`. A behaviour of either changes in the file first.
-A step's values are the builders' texts, so a write's fields are written
-in alphabetical order (the native runner's JSON sorts them, JavaScript
-keeps them as given); `<name>` binds a value made at run time -- a key, an
-`Idempotency-Key` -- and `@name` is a fixture. Where the platforms differ
-on purpose a scenario says why in `differs` and a step holds
-`expect_js`/`expect_native`; none does now. What is left between them is
-the platforms': a JS write's promise settles with the server's answer
-where a native write returns once kept, JS has `batch()` where a native
-text of several statements is one write, tabs elect a leader, and the
-browser fetches collation chunks. Bringing the browser to the core fixed
-what it got wrong: a network failure or a 5xx put a write back, an update
-or a delete of an unanswered insert went by the temporary id the server
-never saw, an insert the shape did not hold kept its row until the next
-seed, a seed cleared the collection and every pending row with it, a
-write made offline was gone with the page, and each tab sent its own
-writes. Its state is now the core's, in the replica: `_sync_shapes`,
-`_sync_queue` and `_sync_temps`, stored the moment a write is made
-(`persist`'s journal, or the file of an `openFile`d `local`); a follower
-tab applies its write and hands it to the leader, which keeps it in its
-own queue and tells every tab the answer, and a tab taking the lead reads
-the queue its predecessor stored (`#lead`, through a `sibling` database).
-`fenec-http`'s CORS allows `Idempotency-Key` and exposes `Fenec-Seq`,
-without which a page on another origin could not send the one or read the
-other. `fenec.js` grew 113.3 -> 132.5 KB, 31.1 -> 35.8 KB brotli -- 3.1 KB
-of it code, the rest the comments -- and the browser module did not change
-by a byte.
-
-**A tenant's quota is a refusal where waiting makes no room, a wait the
-server names otherwise.** A synced write a tenant node refused 507 for its
-quota of `bytes` or `rows` was retried as a 5xx: room comes only from
-deletes, and writes go in order, so every write after it -- the delete
-that would make the room among them, which the engine lands on a tenant
-past its quota (`engine/limit.rs`) -- waited behind it for good, and the
-app was never told. A 507 whose body names a `quota` is a refusal now
-(`Sync::on_answer`, `#pump`): put back, `refused` and `onRefused` told
-with the quota, the queue going on; one naming none -- `--max-memory`'s,
-which a handover or an idle tenant's close brings back under, or a
-proxy's -- is waited out as a 5xx. A retried answer's `retry_after_ms`,
-the wait itself where the body says it, or its `retry_after` otherwise, is
-waited where it is longer than the backoff (a scenario holds both runners
-to a 2 ms wait waited as the backoff's 250 and a 900 ms one as itself; every
-SDK's error reads the milliseconds first, Go's and .NET's as a duration), never cut to the backoff's 15
-s and an hour at most (`RETRY_AFTER_MAX_MS`: a browser's `setTimeout`
-fires at once past 2^31 ms), the 30% jitter on top, since a bucket tells
-every client it refused in one moment the same wait. A stream a 429 of
-`streams` refuses waits the same way, its shape not `connected`: the
-status reads `offline`, as for the network, its error naming the quota
-(`error.quota`, JS `status()[i].quota`) rather than a state of its own --
-why a replica is not live is the error's to say, as a 401's is. `online`
-forgets the backoff but keeps a server's wait (each timer flagged, the
-third member of `Sync::timers`, `#wait`'s `server`) and lets the streams
-open past a write held so. Both runners read the body, not the headers:
-`Sync::response` is handed a body, a header would be a parameter more
-through the C ABI and three bindings, and a page on another origin reads
-`Retry-After` only where CORS lists it -- so every 503 says it in its body
-too (below). Five scenarios hold both runners to it, and the Swift,
-Kotlin, Dart and browser tests a real tenant node at its rows quota: the
-insert refused naming `rows`, the keyed delete behind it landing.
-`fenec.js` grew 99.4 -> 102.4 KB, 27.0 -> 27.9 KB brotli, 0.26 KB of
-that code (minified, 12.2 -> 12.5 KB); the native library's code 2.3 KB,
-its file 16 bytes on aarch64-apple-darwin; the browser module not by a
-byte, the sync being outside it.
-
-**Every 503 says when to come back, in its body too.** A move's or a
-failover's 503 carried `Retry-After: 1` as a header alone, and the sync,
-which reads bodies, came back after its own 250 and 500 ms where the node
-had said a second. `Response::retry_after` writes `{"error",
-"retry_after"}` beside the header, as `quota::refusal` writes a 429's: a
-write to a frozen tenant or one the lease does not let this node take
-(`handle_admitted`, the schema's apply), a held claim on a tenant closed
-here, a standby router without its directory, the ceilings of connections
-(node and router) and subscriptions (JSON now, plain text before), a node
-going down (`Refused::response`, the 503 of a tenant opened during the
-shutdown), `/_changes` over a database going. Both runners already waited
-a 5xx's `retry_after`; two scenarios hold them to a write's 503s of a move
-and a lapsed lease, waited a second and not cut short by `online`, and a
-stream's 503 from a standby router. Every SDK's error carried a body's
-`retry_after` for any status; the Go and .NET tests freeze a tenant on a
-real node and read it. A page on another origin reads the router's own
-answers -- a standby's 503, a 404, a 502 -- once the router has
-`--http-cors` (below).
-
-**The router tells a page one CORS rule, its own** (`fenec-shard
---http-cors`, `fenec_http::cors`, the one list a node and the router
-send). Without it the router's own answers -- an unknown tenant's 404, a
-node's 502, a standby's 503, the connection ceiling's 503, `/_shard/`'s
-401 -- carried no CORS header while the nodes' answers through it carried
-the nodes', so a page read each as the network failing and the sync and
-`FenecHttp.live` backed off from an answer; and a preflight was
-forwarded, so where the tenant was unknown or its node unreachable the
-request after it was never sent (a node's own connection ceiling went
-without them too, and has them now). With it the router answers a preflight
-itself (`cors::allows`) before the directory is read, puts the headers
-on every answer it writes but the studio's files (a node's go without
-too), and on a forwarded answer, a stream's head included, drops the
-node's (`cors::is_cors_header`: `Access-Control-*`, a `Vary: Origin`
-alone) for its own: kept both, a node allowing `*` behind a router
-allowing one origin answered two `Access-Control-Allow-Origin`s, which
-Chrome refuses whole (`studio/test/router-cors.test.mjs` holds it in the
-browser), and the answer has to say what the router's preflight said.
-Without the flag nothing changes: a node's headers pass through and a
-preflight goes to the node. The preflight is answered without
-`audit::http`, which clears an address's refusal count for any answer to
-a request bearing `Authorization`. The headers are the semantics a node's
-are: the configured origin on every answer whatever the request's
-`Origin`, the browser comparing. Off, a request through the router costs
-what it did: `make shard-bench`'s added p50 22.6 us against main's 23.3,
-six runs each in ABBA turns (20.7-25.2 and 20.5-25.7); on, 24.3
-(21.9-27.6), six header lines more in every answer.
-
-**The router looks at a pooled connection before it writes, and sends a
-request again only where the node cannot have run it or may run it
-twice** (`fenec-shard/src/upstream.rs`). A node closes a keep-alive
-connection silent past `--idle-timeout`, and on macOS the router's end is
-reset about a minute after the node's FIN (`setsockopt` fine 59 s after
-the close, refused 62 s after; `net.inet.tcp.fin_timeout` is 60 s), after
-which XNU's `setsockopt` refuses it with EINVAL: `set_read_timeout`
-returned that before a byte was written, the retry knew EOF, a broken
-pipe and a reset, and a request after a quiet minute was answered 502
-(the dispatch example ran its nodes with `--idle-timeout 0` for it). A
-pooled connection is looked at first (`open`: a `recv` of `MSG_PEEK |
-MSG_DONTWAIT`, declared by hand) -- 0 is the node's FIN, an error its
-reset, a byte an answer nobody asked for, each let go of and the next
-looked at -- and a failure is judged by how far the exchange got
-(`Stage`), not by the errno, which each system names its own way (one
-reset connection: EINVAL then EPIPE on macOS, EPIPE or ECONNRESET on
-Linux). Failing before the request's last byte was handed to the system
--- the read timeout's `setsockopt`, a write, not a write's timeout -- the
-node never read a whole request, so it goes again on a fresh connection
-whatever it is. Written whole, with the connection ending before the
-first byte of an answer, the node may have run it: a node that ran a
-`put` and went down looks just like a close on its way, so only a `GET`,
-`HEAD`, `OPTIONS` or a request carrying an `Idempotency-Key` goes again
-(Go `net/http`'s rule), anything else is the client's 502. The retry it
-replaced sent every request again on that EOF, and made such a `put`
-twice. What the look cannot see is a close in the microseconds between
-it and the node's read; a bound on how long the pool keeps a connection
-would need each node's `--idle-timeout`, which the router is not told,
-and a guessed one below the default narrows nothing for a node set
-lower. `tests/upstream.rs` puts a relay between the router and a node
-that passes the node's close on as a reset (`SO_LINGER` 0, macOS's state
-a minute on) or as the FIN, or swallows an answer, the directory written
-before the router starts so no request but the test's meets the node's
-200 ms idle timeout. The look is one system call, 0.31 us on an M1
-(`set_nonblocking`, `peek` and `set_nonblocking` again 0.74), and the
-two `setsockopt`s every exchange made, 0.67 us, are gone from a reused
-connection: the write timeout is set at the connect, the read timeout
-only when it changes (a `Fenec-Wait`), kept with the pooled connection.
-`make shard-bench`'s added p50 stayed 23.3 us against main's 23.3, six
-runs each in ABBA turns (23.1-24.8 and 20.0-24.4). A connection's name is
-looked up within the bound its connect has (`dial` through
-`fenec_http::dial::resolve`, which every dial of the router's goes
-through: a forwarded request, a relay to a region's router, a query
-across tenants, a read replica's read and upkeep, a health probe, a lease
-grant): `getaddrinfo` takes no timeout, and a node recorded by a name its
-resolver was slow to refuse -- a container gone, whose name Docker's
-resolver forwards upstream -- held every dial to it for the resolver's 5
-s, a lease grant's among them. The lookup runs on a thread of its own
-that the caller walks away from at its bound; a caller asking a name
-whose lookup began under 500 ms before, or that has eight out, waits on
-the newest (`JOIN_WITHIN`, `MAX_IN_FLIGHT`), since every request to a dead
-node's tenants would otherwise leave a thread waiting out the resolver.
-Nothing is cached -- Docker hands a stopped container's address to the
-next one it starts, and kept, a node's old address would send its grant
-there -- and an address written out is read where it stands, with no
-thread: `make shard-bench ARGS=latency`'s added p50 stayed 20.7 us against
-main's 20.5, eight runs a side in ABBA turns at loads of 2.2-2.8
-(20.2-21.3 and 17.0-20.8), and the whole bench's 20.4 against 20.7.
-`fenec-shard`'s code grew 59.9 KB with the leasing beside it, the held
-tenants and the refusal's lineage and history -- 9.3 KB of it the promotion
-that sends them and records its answer in one block -- and
-`fenec-server`'s 14.5, 2.0 of it the copy's word of its primary's hello
-(aarch64-apple-darwin); the follower's dial answers
-through a slot and a condvar, an `mpsc` channel 13 KB more of each. A
-request the node may
-hold (`Fenec-Wait`) watches its client while its head is waited for
-(`answered_or_gone`: one `poll` of the node's socket and the client's,
-declared by hand as `recv` is, `nfds_t` each system's own, until either
-moves), and passes on what the client did as the node would read it from
-a client of its own. The client's end -- closed, or half-closed and
-reading on, which read alike -- is the node's connection shut for
-writing, not pooled after: the node's held claim sees it before its next
-run and hands its row on, and the node's answer goes on to the client as
-any. A reset, which can read nothing more, is the client gone
-(`Stage::Abandoned`, `upstream::client_gone`): the node's connection let
-go of, nothing written, sent again or counted against the node, the
-request counted in `fenec_router_requests_total`'s `gone` class (counted
-nowhere before) and its trace ended 499. `gone` counts resets alone: an
-end cannot be told from a half-close, so a client gone with its end --
-most timeouts and aborts -- is passed on as one, its claim leaving at the
-node's next run or its wait's end and its answer counted by its status,
-as asked of the node itself, the job handed on all the same. Taken for
-gone as a reset is, an end let go of the node's connection, and a client
-that half-closed after its claim -- which the node answers as any, its
-first run looking at no client -- was answered nothing while its claim
-took a job on a busy queue. Bytes from the client
-are a next request sent ahead, after which the node alone is waited for,
-as the node lets a client be whose next request it holds; so is a client
-whose next request the router's reader holds already. Blocked in the
-head's `read_line`, a claim whose client went through the router took the
-next job, leased to nobody until the lease ran out. A router relaying the
-request watches its client the same way (`relay_send`), so the end goes on
-hop by hop. `tests/upstream.rs` holds two claims through one router,
-through a global router relaying to a region's, and through a region's
-router finding the node in its copy of the global directory
-(`Target::Node`), the first one's client closed or reset and the job put
-once the relay saw the router let go: the job is the second's, failing
-with either hop's watch taken out; and a half-closed claim on a busy queue
-answered its job through the router as straight to the node, failing with
-the end taken for gone. The `poll` is a `Fenec-Wait` request's alone: one
-with no such header passes no socket to watch and makes the system calls
-it made: with the body's buffer and the read replicas' health below,
-`make shard-bench ARGS=latency`'s added p50 stayed 20.5 us against main's
-20.5, sixteen runs a side in ABBA turns at loads of 2.7-2.9 (20.0-21.2 and
-19.8-23.0). A claim
-answered at once came through the router 61.3 us p50 against 60.8 on
-main, 0.3 us more past the node's answer at the median (27.4 against
-27.1), and a held claim woken by a job put straight to the node 332
-against 324 (70.1 against 61.8 past the node), eight runs a side in ABBA
-turns of 20 000 and 2 000 claims (a scratch bench), on macOS; the review
-measured 0.7 us there and 1.2 on Linux on a claim answered at once. A
-watcher thread, prototyped in the review, was worse; the head read in
-slices with the client looked at between was left on its reasoning, every
-one of a thousand held claims woken each slice for nothing and a client's
-end seen a slice late.
-A node's answer is read into a buffer of the length it says, allocated
-so its failure is an error (`zeroed`: `alloc_zeroed`, the allocation
-`vec![0u8; len]` makes, the system's zero pages taken up as the bytes
-reach them, null a 502), by `read_body`, `read_body_kept` and
-`read_body_by` alike: through `vec!`, a node -- buggy, or not the
-router's -- declaring a petabyte and sending three bytes aborted the
-router on the allocation's failure, every tenant's clients with it, and is
-a 502 now, the router answering on (`tests/upstream.rs`'s stand-in node,
-and each reader in the unit tests, both aborting without it). A buffer
-grown as the bytes came, from a mebibyte fourfold, copied what came at
-each growth -- a body of 4 MiB and a byte 596 us against 440 in the
-review's measure, every forwarded answer past a mebibyte slower -- and a
-node sending without end
-under such a length met a growth whose allocation aborted all the same;
-one of 64 MiB first was as fast, past which the growth was the same; a
-bound on the length would refuse a tenant's image on its way through a
-move. So the length is believed as far as the system lends it: macOS
-refuses a petabyte, the refusal the 502, and Linux, overcommitting, lends
-it -- two pages of it taken up in the review's Docker run -- the 502 then
-the answer broken off at its three bytes; either way a lying length costs
-the pages its bytes reach, and a node that keeps sending grows the
-router's memory as any large answer does, as it did before. It costs
-what `vec!` did: through `Pool::call` off loopback, eight runs a side in
-ABBA turns, 200 B 20.3 us either way, 64 KiB 28.1 against 28.2, 1.5 MiB
-126.4 against 126.1, 4 000 000 B 332 against 327 (325-338 and 324-336),
-4 MiB and a byte 350 against 350, 16 MiB and a byte 2.96 ms either way, 64
-MiB 12.7 against 12.5 (12.65-12.75 and 10.9-12.7). A query across tenants
-refuses a declared length past `--fanout-max-bytes` before it adds it to
-the query's sum, which one near `usize::MAX` overflowed.
-An answer with no length is refused by `read_body` as by the other two,
-a 502 at its head and its connection let go of: read to its close, it
-grew the router's memory for as long as its peer sent, the request
-waiting all the while. What reads a body there is the router's own call
--- `Pool::call` to a node's `/_admin/`, `call_routers_by` to a router's
-`/_shard/` -- and every answer of those peers carries its length
-(`Response::write`, a tenant's image among them), none of them a stream;
-a stream a client asked for goes out as it comes (`answer_out`, which
-reads a body only where it has a length: `router.rs`'s
-`a_subscription_streams_through_the_router`, `entry.rs`'s `_changes`).
-Refused rather than capped as a request's body is: a cap is a bound
-picked for an answer that never comes, and reading up to it held the
-thread as long as the peer trickled it in. `tests/upstream.rs` registers
-a node standing in with stats of no length and 64 MiB, which the router
-read whole and recorded the node by (201), and the unit tests send each
-reader such a body without end; both fail with the read to the close put
-back. A declared length is still believed, as above. `make shard-bench
-ARGS=latency`'s added p50 stayed 20.6 us against main's 20.5, 24 runs a
-side in ABBA turns over three rounds at loads of 1.3-2.7 (20.1-23.8 and
-18.6-21.5; the third round 20.5 against 20.55): `forward`, `answer_out`
-inlined in it, is main's to the instruction, and `read_body`'s path for a
-body with a length the same instructions in other registers.
-
-**A failover ends what the router has out to the node for the tenants it
-moved** (`upstream::Pool::cut`, `Router::after_cut`, `cut_moved`). A node
-that dies with no reset -- a machine lost, a network cut -- answers
-nothing and closes nothing, and what the router had out to it waited for
-`--upstream-timeout` though its tenants answered on their new primaries:
-in V5's drill, at a lease of 2 s and the kit's timeout of twice that, the
-router failed the killed node over 1.9-2.6 s after the kill and its
-writers wrote again at 3.90-4.02 s, their requests let go of at the
-timeout. The pool knows every connection it made, by node, among the
-idle ones under the lock a request takes anyway (`Kept::flights`, a
-connection put among them as it is made, a lock a connect), and each
-connection's `Flight` is one word: the state in its low bits beside a
-mark of the tenant whose request is out on it, so a cut compares and
-changes both at once -- read apart, a request of another tenant out on
-the connection a moment later could be the one cut. The mark (`mark_of`)
-is a multiply chain keyed by a number the process draws from
-`RandomState`, MurmurHash3's finisher and its high 60 bits: kept low, the
-first cut's `(h | 1) << 3` dropped the top three, and the low 61 bits of a
-product depend on the low 61 of what is multiplied alone, so two names of
-a multiple of 8 bytes differing only in their last byte's top bits --
-`tenant-1` and `tenant-q` -- always shared one (603 592 groups among
-`shop` and four of `[a-z0-9_-]`, none now), and a failover of one cut the
-other's write on a node that still served it, a 502 for a write whose 200
-was on its way; keyed, nobody naming tenants can make two share one. A
-request's word is `WAITING` from the moment the pool hands it the
-connection (`take`, `register`, written under the pool's lock) and it
-claims its answer with a compare-and-swap to `ANSWERING` once the head has
-begun;
-`into_stream` marks a stream `STREAMING` and asks its bucket's cut count
-again (below), sequentially consistent with the cut's look, so a stream
-whose tenant was failed over between its head and then -- its answer
-begun, which the cut passes over -- ends there for its client to open
-again, where it was copied for good; asked at the head instead, every
-forward read its answer's headers for a length once more.
-`promote_on`, once the directory places the tenant on its copy, has the
-pool shut down (`shutdown`, both ways) each connection `WAITING` or
-`STREAMING` with the tenant's mark, through `CUTTING` to `CUT`: a thread
-waiting on one wakes to its end, sees it was cut (`was_cut`,
-`Ended::Cut`) and is answered by what the node may have run -- not run, a
-read, a request marked as one or a write under an `Idempotency-Key` sent
-to the new primary, anything else 502 saying it may have run, the rule
-`replayable` already was; a held request by the same rule with what is
-left of its wait (the router cannot tell one held from one the node had
-just run as it died, and a claim run twice takes two jobs) -- and a
-stream ends for its client to open it again. An answer begun is never
-cut: the swap to `ANSWERING` and the cut's from `WAITING` are one word's,
-so the first wins whole, and macOS's `shutdown` drops what the socket had
-read but not handed over (a cut stream's last events, which its client's
-next seed brings). A connection is marked `CLOSED` before its descriptor
-is (`Conn`'s `Drop`), waiting out a cut in `CUTTING`, so a cut never
-shuts a descriptor another connection took since. Only a failover cuts,
-by hand or on a lease, a pair's or a replica's: a node merely suspected
-may be slow, its lease running, and a write cut there would be a 502 for
-one that may well land. A forward that read the directory before the flip
-and goes out after the cut looked would wait as before, so the pool
-counts its cuts in 64 buckets by the mark's top bits (`Pool::moved`), and
-a forward reads its bucket's before the directory, acquired -- a count a
-cut moved comes with the directory as its failover left it -- and again
-before its first byte -- moved, it writes nothing, puts its connection
-back
-(`Ended::Moved`, `unsent_moved`) and reads the directory again, which
-mostly places it where it was. One count for every tenant, any failover
-had each forward straddling it close a healthy connection and count as
-cut. The second read needs no fence: the cut moves the count and then
-takes the pool's lock to list the node's connections, under which the
-forward's `WAITING` was written, so the cut's lock came after and finds
-`WAITING`, or before and the count is read. Written and read sequentially
-consistent instead, the two were an `stlr` and an `ldar` on aarch64, the
-load waiting for the store to drain, and an `xchg` on x86, every
-request. Its dial tries a second at a time (`connect_watching`,
-`CONNECT_LOOK`) and gives up once the count moved, and a connect refused
-as it moved reads the directory again rather than answer 502: past the
-node's pooled connections, each held by a request waiting on it, a
-machine gone answers no connect, and those waited out the timeout too.
-Under leases a copy takes its tenant's writes once the router's grant
-names it there, which a failover sends each node it moved tenants to as
-it ends -- a lapse's from `granted_after`, and one by hand now too
-(`failover_by_hand`, before the operator is answered): left to the next
-round, a third of a lease away, the copy refused every write of a tenant
-failed over by hand until then. A write a cut sent there before is
-refused unrun 503 -- every time in a test of four writes -- so the router
-grants that node its list (`grant_cut_onto`: one grant a node at a time
-on a thread of its own, every request refused meanwhile waiting on it two
-thirds of a lease at most, since a grant each was a reading of every
-node's list each and a turn waited on the request's thread) and asks
-again, twice (`CUT_ASKS`): the grant it joins may have read the list
-before its tenant was placed there, begun for another tenant's request a
-promotion earlier, and asking once, such a request was answered the
-copy's 503; the second grant began after the first ended, so it reads
-the tenant there. Only for a cut, and onto another node than the one it
-was cut from. A standby router and a region's router forwarding by its copy of the
-global directory fail nothing over and cut nothing: their requests wait as
-before. Cuts are counted by what became of them
-(`fenec_router_cut_requests_total{outcome}`), besides each answer's status
-class. `tests/cuts.rs` (a binary of its own) stands a wire that falls
-silent between the router and a node, carrying nothing and closing
-nothing, with the router's timeout at a minute and each client's at half
-of it: by hand, a read, a keyed and an unkeyed write the node ran with
-their answers swallowed, a keyed and an unkeyed held claim and a
-subscription, each unanswered as the failover begins and answered within
-the client's wait -- the read and the keyed write by the copy promoted,
-the latter from its key, the unkeyed write and claim 502 and run once, the
-keyed claim held there and handed the job put after; the same on a lease
-of 10 s, so its five requests are out well before it lapses; the keyed
-write and claim under leases answered by the copy, not refused; a tenant
-failed over by hand under a lease whose rounds come twenty minutes apart
-taking a write as soon as the failover answers; two tenants promoted onto
-one node, the second's write joining a grant that read the node's list
-before its promotion -- the grant and the second promotion parked at the
-node's wire, and a hook counting the requests waiting on a grant
-(`cut_grants_waiting`) -- and asking again; an answer
-whose first 16 MB had reached the router as the failover ran coming
-whole; `tenant-1`'s write whose answer had begun short of a status line
-answered 200 through `tenant-q`'s failover; and the cut passed on through
-a global router relaying to the region's router that failed the node
-over. Each fails with its part taken out -- the cut, the replay rule, the
-claim of the answer, the stream's mark, the grant, the failover's grant,
-the second ask, the mark kept low --
-and the unit tests hold the flight's states, a sweep of 110 000 names of
-8 and 16 bytes to no shared mark, a stream failed over between its head
-and its copy ending as it is handed over, the count read before a request
-goes out --
-the connection put back, another bucket's failover passed over -- and a
-dial to a listener that answers no SYN (its queue made one long, `listen`
-again with 1 -- macOS reads 0 as its most -- and filled) and to one
-refused. In `make drill` the dead node's writers wrote again as it was
-failed over, 2.52 and 1.93 s after the kill, against main's 3.94 and 3.95
-(two runs a side in turns, 0 lost); natively, the drill's flags and a
-proxy falling silent, at 3.27-3.32 s against 4.02-4.04 at the drill's
-timeout of 4 s and 5.02-5.04 -- the writers' own 5 s -- at the kit's 10,
-the failover at 3.26-3.30 either way. A new write landing on a copy
-between its promotion and the failover's grant is refused 503 with
-`Retry-After`, as during any failover under leases; one a cut sent there
-asks for the grant itself. A forward hashes its tenant's name, reads its
-bucket's count twice -- acquired, then relaxed -- and writes its
-connection's word once, under the pool's lock it takes anyway, and swaps
-it once: `make shard-bench ARGS=latency`'s added p50 20.45 us against
-main's 20.55, 8 runs a side in ABBA turns at loads of 3.7-4.8 (lower in 3
-rounds of 4); with the word stored and the count read sequentially
-consistent it was 20.55 against 20.4 over 24 runs a side (the rounds'
-differences' median +0.08 us, 9 of 12 positive). Marking a stream at its
-head rather than as it is handed over had every forward read its answer's
-headers for a length once more, and that build ran +0.2-0.3 us. A read
-through a read replica's region's router (`ARGS=reads`, 8 runs a side at
-loads of 1.9-4.2) took 63.9 us p50 against main's 66.75, sent home 61.75
-against 64.15, lower in every round: the replica's connection itself goes
-back to the pool once its body is read and the answer keeps none
-(`Answer::reader` an `Option`), where main pools a copy of its descriptor,
-a `dup` and a `close` more a read, and a first version of this change
-registered that copy under a flight of its own, a lock more and 0.4-0.5
-us. `fenec-shard`'s code grew 29.4 KB (aarch64-apple-darwin): `after_cut`
-9.3, one out-of-line copy of `answer_out` for the cold callers 8.6 -- a
-read replica's answer goes through it too, `forward_near` 8.8 KB smaller
--- `grant_cut_onto` and its thread 5.3, the grants after a failover by
-hand 2.2 (a set of the nodes and a thread each were 8); `forward` itself
-is 3.1 KB smaller, `elsewhere` out of line now that two inline `toward`.
-On x86_64 the answer's claim is a `lock cmpxchg`, some 20 cycles, and the
-`xchg` the store before a request's first byte was is a plain `mov` now;
-Docker on this Mac runs that architecture only emulated, which times the
-emulator, so it was not measured.
-
-**A query across tenants is the router's admin's, merged by what the
-request says** (`fenec-shard/src/fanout.rs`, `POST /_shard/query`). An
-operator asked every tenant themselves for a count each or the newest
-sign-ups of all. Tenants are the boundary, so it sits behind the
-router's `--token` like the rest of `/_shard/`: a JWT bound to a tenant
-and the nodes' data token are 401 there. Each tenant is asked through its
-node's `POST /_admin/tenants/<t>/query` (`fenec_http::admin_query`) with
-the admin token the router holds -- one that exports a tenant's whole
-image learns nothing more by reading it; the data token reaches every
-tenant and writes -- which refuses a statement that writes before it runs
-and runs the rest in read-only mode besides. The router parses no FenecQL:
-`query` and `params` go to every node as their JSON came (validated with
-`parse_json`, never re-encoded), and the merge is the request's own JSON,
-three kinds exact from the answers alone -- none (rows one after another,
-a `tenant` column spliced in), `order` with `limit` (a k-way merge of rows
-each tenant gives in that order, checked, a tenant out of it failed rather
-than merged wrong) and a fold (`sum`, `min`, `max` by `group`; every
-column grouped or folded or the tenant fails, since a column dropped is an
-answer cut; no `avg`). A text column the tenants compare otherwise than by
-its bytes -- a field's `collate tr` or `und`, a statement's `order ...
-collate`, a `nocase` field's fold -- is said again, since the router reads
-no schema: an object in place of its name (`{"column", "collate",
-"nocase", "desc"}`, `column_of`), an `order` key or a `min`, `max` or
-`group` column alike, `"nocase": true` the fold a field in that collation
-has (Turkish's under `tr`) and `"tr"` or `"und"` the field's own where the
-statement's `collate` names another. It compares by fenec-core's
-`TextOrder` as the engine's `order` does (`value_in`, `cmp_in`): read as
-text, never as the time an ISO form names; folded once as it is read, as
-`folded_keys` folds; the collation over the folds; and the texts folding
-to one tied -- tied by their bytes, a tenant's `ada@x` before its `Ada@x`
-in id order failed it -- so a `nocase` group is one for every text folding
-to it. Not named, an order key fails such a tenant as before, while a
-collated `min` was, and is, the bytes' least of each tenant's least,
-unrefused; a collation other than `tr` or `und` is 400, named.
-`a_text_order_named_compares_as_the_engine_orders` holds the check and the
-ties to the engine's own `order`, both ways, over 240 words of `I ı İ i`,
-`ß ẞ`, `Ç` and ISO forms in eight ways a text orders, failing with an ISO
-form read as a time or ties broken by bytes, and a tenant told the other
-fold fails. The router linked every collation chunk already, through its
-directory's engine: its code grew 8.0 KB (`__text`, aarch64-apple-darwin),
-its file not by a byte (3 117 168). Rows are passed on as the nodes wrote them
-(`scan`: extents found, only the merge's values decoded, no key allocated
-a member), and a timestamp, which travels as ISO text with its
-milliseconds left out where they are 0 so its bytes do not order as its
-time, is read from its digits (`iso_ms`, held to `format_iso` over 200 000
-instants): read through `time::parse` and on the request's thread after
-the last answer, 2 000 rows held it 0.69 ms, now read by the worker that
-fetched each answer. A tenant failing, timing out (one timeout a query,
-every connect and read bounded by it: `Pool::send_by`,
-`Answer::read_body_by`) or not fitting the merge is named with node,
-status and why; the query fails with them (the first stops the asking)
-unless `"partial": true`. A tenant moved under the query is asked again
-where the directory places it now, one deleted is a failure. Rows and
-bytes gathered are bounded (`--fanout-max-rows`, `--fanout-max-bytes`,
-the bytes before a body is read) and refused past, 413, never cut.
-Consistency is a tenant's: no one moment across them. Calls go out
-`--fanout-concurrency` at once, node by node in turn; one span a node
-under a `fanout` span (`trace::Remote`, recorded by the request's thread
-for the workers' calls), the request id on every call, three metric
-families with no tenant label, one audit line at the router (the nodes'
-reads are not admin changes, `audit::http`). Over 100 tenants on three
-nodes a summed count took 1.15-1.23 ms and a merged top 20 1.35-1.39,
-against 4.3-5.5 asking each in turn through the router and 1.9-2.2
-sixteen at once with no merge (`make shard-bench ARGS=fanout`), a top 20
-of `collate tr nocase` names 1.33-1.48 -- in twelve ABBA turns beside other
-agents' work (load 3.5-6.4), the plain top 20 1.34-1.46 against main's
-1.34-1.49, medians 1.40 and 1.395; a forwarded request's added p50 23.0
-us against main's 23.8 in ABBA turns.
-The SDKs have no `/_shard/` call, so none for this; the studio does not ask it.
-
-**A schema declared in code is checked at every open, in the engine.**
-Two front ends compile to one description (`fenec_core::declared`,
-versioned JSON: `{"format": 1, "collections": [...] | "fenecql": "...",
-"migrations": [...]}`): tables written Drizzle 1.0's way in TypeScript
-(`web/schema.js`, its own entry point `@fenecdb/web/schema`, so a page that
-declares nothing loads none of it), and FenecQL `create collection` text --
-a `schema.fenecql` -- which every SDK hands over with no builder of its own
-(`fenec_ql::schema_text`). `declared::plan` compares a database's schemas
-with it: what only adds (a collection, a field, an index where there is
-none, a path index) comes back as statements; a field the code lacks
-(dropped, or renamed? never guessed), a type, a collation or `required`
-changed, an index changed or taken off, a required field new to a
-collection that exists, are refusals with their resolution; a collection
-the code does not declare is left alone. `Mode::Follow` is for a database
-another owns -- a replica's server, a client without the right -- where
-the code's must be there and the rest is the owner's. `fenec_abi::schema`
-runs the migrations not yet recorded (known by their place in the list,
-held to their text: one edited after it ran, or a database holding more
-than the code lists, is refused), records each in `_migrations (n, text,
-at)`, plans and applies the additions, all one block, put back on any
-refusal or error; a database holding none of its own collections is made
-from the description and records its migrations without running them. A
-plan runs the pending migrations in a block put back. `rebuild` is the
-migration that changes an index or a collation: the field added again as
-declared, `set` from the old, the old dropped, the new renamed. The module
-exports `fenec_schema` (feature `schema`, on by default, `make wasm
-SCHEMA=0` without; reading the collections' JSON was 8 KB of it, so the
-module reads FenecQL alone), the native library `fenec_schema` (plan,
-apply, follow, describe), the server `GET /_schema`, `POST /_schema/plan`
-(`?mode=follow` for a scoped token) and `/_schema/apply` (the server's
-token, under the write lock). `Fenec.open`, `restore` and `openFile`
-apply; `sync` follows (the server owns a replica's schema); `connect`
-follows, or applies with `migrate: true`; Python's, Go's and .NET's
-`schema(...)`, Swift's `Fenec.schema(...)`, Kotlin's and Dart's
-`schema(...)` (JNI's `schema`, Dart's worker op) take the text. A `load`
-adds an image's collections to what a database holds, so one that holds
-only what its schema made, and nothing since, is emptied before a restore
-or an openFile loads into it (`untouched`). `integrations/schema-golden.json`
-holds declarations, texts and plans (`make schema-golden` writes it
-through the module; `fenec-abi`'s tests run every case natively, the JSON
-and the FenecQL form of each). The check costs an open of 10 collections
-0.09 ms in Node and the module 7.5 KB brotli (8.1 until the plan's two
-modes were one const generic and its messages one helper each); `fenec.js` grew 1.8 KB
-brotli for the hooks and the check's errors, and `schema.js` is 5.9. `fenec types` reads a
-`.fenecql` as it reads a database, and writes Python, Go, C#, Swift,
-Kotlin and Dart rows (`--lang`; Kotlin's and Dart's tests compile the
-golden file and read a row into it), the tables as code (`--schema`) and the schema as FenecQL
-(`--fenecql`); `integrations/types-golden/` holds each for one schema.
-
-**`integrations/` may use outside packages; the crates may not.** The
-LangChain and LlamaIndex vector stores (`integrations/python`, one package,
-the standard library for its client) and `useLiveQuery`
-(`integrations/react`) are held to their frameworks' own tests, and each
-language's docs example to a real server (`integrations/languages`: the
-same flow over HTTP in Python, JavaScript, Go, C#, Java, PHP, Ruby and
-Rust, each with its own HTTP client) -- `make python-test` runs LangChain's
-standard suite and the tests LlamaIndex's integrations run from a
-`python:3.13` container against a fenec-server started here, `make
-languages-test` the eight examples (Python, Java, PHP and Ruby from their
-images, the others with the toolchain on the machine), `make react-test`
-runs the hook against a real replica, and CI runs all three
-(`integrations`). The Go and .NET SDKs (`integrations/go`, module
-`github.com/fenecdb/fenec/integrations/go`, package `fenecdb`;
-`integrations/dotnet`, NuGet's `FenecDb`, `net8.0`) are the standard
-library alone, the Python client's surface -- a statement and its rows,
-typed rows, writes with their `Fenec-Seq`, `/batch`, an idempotency key,
-`After` for a replica, a subscription, `/_changes`, a tenant, `/_health`,
-a typed error -- and write a `float32` as the shortest text that reads back
-as it through an `f64`, which is how the server reads a number, but for
-`json::TIE`, which goes as its `f64`'s text: `encoding/json` wrote its
-shortest `f32` text and the server stored the float above. A request is
-bounded through its context or token, never the HTTP client's timeout,
-which would cut a subscription short. `make go-test` and `make
-dotnet-test` start the servers they need (`FENEC_SERVER`, else
-`target/debug/fenec-server`), CI runs both, and `make languages-test`
-runs the docs' Go and C# examples through each SDK too (`go-sdk`,
-`dotnet-sdk`). Python, Go and .NET have the JS builder too
-(`fenecdb/builder.py`'s `db.collection(...)`, Go's `db.From(...)` and
-.NET's `db.From(...)`), and all four make the same text of the same chain,
-to the byte, refusals by the same message: `integrations/builder-golden.json`
-holds the chains (`{op, args}`, the JS builder's names, what JSON has no
-word for an object of one `$` key) and what the JS builder made of each --
-`web/golden.mjs` holds the chains and writes the file (`make
-builder-golden`), `web/fenec.test.js` runs every case through the JS
-builder again so the file cannot drift, and `make python-test`, `go-test`
-and `dotnet-test` run every case through their own builder, the
-endpoints' statements read off a recording transport. A builder change
-starts in `web/builder.js` and a case in `golden.mjs`, then the three
-follow, and the Swift, Kotlin and Dart builders with them. Go's object conditions are `Fields`/`Ops` and a document a
-`D(...)`, names and values in turn, since a map has no order and the order
-is the text's; its options are functional, since a struct cannot tell
-`limit 0` from none. CI also builds the five packages as a release
-publishes them and installs and uses them (`integrations/packages.sh`):
-PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, the module and
-`collate/`, `web/package.json`, and no test build -- `@fenecdb/react`,
-`@fenecdb/cloudflare` and `@fenecdb/langchain`. They go out when a
-release's draft is published (`packages.yml`), only after that same check,
-with a token where the registry's secret holds one (`NPM_TOKEN`,
-`PYPI_API_TOKEN`), with the workflow's OIDC identity (trusted publishing)
-where it does not (RELEASING.md). NuGet's `FenecDb` is packed, installed
-into a fresh console app and used against a server
-(`integrations/dotnet/package.sh`) and only then pushed with
-`NUGET_API_KEY`, its job skipped with a notice without the secret; the Go
-module has no registry, and `release.yml` pushes the tag
-`integrations/go/vX.Y.Z` it is fetched by beside `vX.Y.Z`. With
-`full_text=True` a store indexes its text for BM25 as well and searches by
-the words (`match`) or by the words and the vector fused (`fuse`):
-LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and
-`"hybrid"`. `alpha` is not read, since `fuse` adds ranks; `quant` passes
-`int8` or `bit` codes to `@hnsw`. The same store for LangChain.js
-(`integrations/langchain`, `@fenecdb/langchain`) runs over anything with
-`run(sql, params)` -- a `Fenec` keeps a RAG index in the page -- and is
-held, LangChain.js publishing no standard suite, to what its own vector
-store integrations are tested for, over a database in the page and over a
-fenec-server's HTTP endpoint (`make langchain-test`); the Vercel AI SDK has no
-store interface, so `integrations/ai-sdk/rag.js` is three functions to copy,
-held to the SDK's mock models (`make ai-sdk-test`). `web/fenec.d.ts` is
-held to `web/fenec.js` by `make types-check`: every export and class method
-read at run time and touched from a generated file, and a caller's code with
-the lines the types must refuse, under `tsc --strict` -- the module stays
-JS with no build step. A store names
-its collection and metadata columns in the statement's text, so both are
-checked against FenecQL's name pattern; values always go in as parameters,
-and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
-value and not a list.
-
-**Grafana's data source binds a dashboard's values; it never splices them**
-(`integrations/grafana`, plugin id `fenecdb-datasource`). The Infinity
-plugin wrote variables into a body's text, sorted a frame's columns by name
-and alerted on nothing a browser fills in, so a backend plugin (Go,
-grafana-plugin-sdk-go 0.297, the Go SDK through `replace ../go`) and a
-TypeScript frontend in `@grafana/create-plugin` 7.12.2's layout run the
-queries server side. The backend reads a statement only where it must agree
-with fenec-ql's lexer -- strings, comments, words, a `$` (`fenecql.go`) --
-and makes each name a `$n` after the editor's parameter list: `$__from`,
-`$__to`, `$__interval_ms`, `$__max_data_points` from the request, which an
-alert rule has too, and `$sym` or `${n:int}` from the values the browser
-sends beside the query (`values.ts`), a multi-value one after `in` a bracket
-of them. Only `get`, `select` and `explain` are sent. The answer is read in
-its order (`answer.go`: encoding/json's maps lose it, so the SDK grew
-`QueryRaw`/`BatchRaw` and `IfNoneMatch`) and typed by the
-`collections` schema, kept 30 s, where a column is a field and by its values
-where computed; a group by time and a text column is a series a label (long
-to wide), which a rule evaluates an instance a symbol. One query goes with
-its last answer's `ETag` and a 304 is answered from the kept body: 3-5 ms
-with the server's token against 10-82 ms run, nothing gained with a scoped
-JWT, whose tag the server makes by running the query (`make grafana-check`'s
-stack, `monitoring/grafana/bench.mjs`); several are one read-only `/batch`.
-The client follows no redirect and sends the token alone, to the configured
-URL and the plugin's paths. `monitoring/` builds Grafana with it
-(`integrations/grafana/Dockerfile`), and `make grafana-check` holds every
-panel's, variable's and annotation's frame to fenec-server's own answer, in
-the select list's order, and the provisioned rule's firing instances to the
-server's rows. A jest test importing `datasource.ts` -- `@grafana/runtime`
-and `@grafana/ui` with it -- sat at 0% CPU for ten minutes, so the logic
-jest runs lives in modules importing types alone. `site/build.py` writes
-the editor's FenecQL colours into `src/fenecql/highlight.js` as it writes
-the studio's.
-
-**`deploy/` is the kit for running regions, held to the binaries by two
-checks** (`deploy/RUNBOOK.md`). systemd units for a tenant node, a region's
-router and its standby, the global router and its standby, a node's
-archiver (`fenec-archive@<node>`) and its rclone copy to a bucket, and
-cloudflared; their environment files (`deploy/env/`), alert rules for
-Prometheus and Grafana (`deploy/alerts/`) and the runbook. A token goes in
-an environment file systemd reads as root (`EnvironmentFile=`, 0600), the
-archive key and the tunnel's and rclone's credentials through
-`LoadCredential=`, and never on a command line, which `ps` shows every user
-(every token has a variable, and an empty one is none: An empty token is
-no token, above). Each role runs as a user of its own (`fenec-node`,
-`fenec-router`, `fenec-archive`, `fenec-sync`): a process reads
-`/proc/<pid>/environ` of its own user's processes, which `ProtectProc=`
-hides only from other users, so one `fenec` user let rclone read the
-archiver's replication token. No `ProcSubset=pid`: it hid `/proc/meminfo`,
-and with it `cache::room`, the compact before a file outgrows the page
-cache. The tunnel's hostname is public, so `cloudflared/config.yml` sends a
-tenant's paths alone to the router and answers 404 to the rest -- a
-tenant's `/t/<t>/_replication` first, which the router would forward to the
-node and the one replication token opens: let through, it was every
-tenant's rows behind one token from anywhere. cloudflared matches the path
-decoded, so `%5F` and `%2F` meet that rule, and `deploy/test/ingress.py`
-asks cloudflared's own matcher (`tunnel ingress rule`) of 28 paths. Access
-in front says who: the entry sends a service token
-(`ACCESS_CLIENT_ID`/`ACCESS_CLIENT_SECRET`, both or neither) and the router
-drops `CF-Access-Client-*` before a node (`forwarded_headers`, which
-`forward` now shares with `forward_near`: its own copy of the filter kept
-the token once only the shared one dropped it). The bucket copy is
-`deploy/bin/fenec-archive-sync`, `rclone copy` (never `sync`: a lost
-archive takes nothing from the bucket, whose lifecycle rule expires what
-`--keep` let go of) with `--local-no-check-updated` -- rclone refused a
-segment growing as it read it, so a busy tenant's newest segment never
-reached the bucket, every run failing in the test -- and `--fast-list`;
-it refuses a first copy from an archive it has not copied before (the
-directory's filesystem and inode, noted in its state directory) where the
-bucket holds a file the disk does not, since a rebuilt machine's new
-archive rewrote the bucket's `history`, `began` and `presence` within the
-timer's first five minutes; and writes each success into node_exporter's
-textfile collector 0644 -- under the unit's `UMask` it was 0600,
-node_exporter read nothing and `FenecArchiveSyncStale` could never fire,
-so the test scrapes a real node_exporter (`FenecTextfileUnread`,
-`FenecArchiveSyncUnreported` over the absent case). Access outside strict
-service token authentication answers a service token's request with a
-`CF_Authorization` cookie for the hostname, so the entry drops `Set-Cookie`
-from every answer (no router or node sets one), the router drops every
-`Cf-Access-*` header (the JWT Access adds too), and the entry refuses an
-`http://` router with a token set. `FenecAutoFailoverIncomplete` is read
-off the directory -- `fenec_router_tenants > 0` on a node
-`fenec_router_node_failed_over` -- since the count of failed failovers,
-reset only by a restart, held it after the fix and paged again at the next
-node failed over whole; `FenecLeaseRenewalLate` passes over a node failed
-over in the last ten minutes (its five-minute window held the outage
-after the node came back) and holds a minute (the scrape before a failover
-marks its node). The rules read
-Prometheus's `up` by job for processes that export nothing because they
-are down, a router's role (primary, standby) taken from its last
-`fenec_router_following`; `tests/datadog.rs` passes over `job` and
-`instance` matchers, holds the jobs to the rules' scrape config and the
-textfile metric to the unit writing it. A standby router's
-unit carries its primary's flags and the same directory file and conflicts
-with the primary's, and a promotion is `POST /_replication/promote` and the
-switch of units at once: `--replica-of` makes any file follow again
-(`replication::settle_history`), so the standby's unit started after a
-promotion would have the promoted file follow the dead router. `make
-deploy-check` runs promtool over the rules and their tests, then boots
-systemd in two privileged containers (`deploy/Dockerfile`'s `systemd`, whose
-boot script makes `/` shared first: systemd in a container leaves it
-private, and `LoadCredential=` then hands a service an empty directory) and
-installs, verifies, starts and uses every unit (`deploy/test/units.py`:
-real rclone into a `local` remote while a tenant takes 64 KB rows as fast
-as it can, the copy verified as an archive; every role's user refused
-every other role's environment; `/proc/meminfo` read in the node's mount
-namespace);
-fenec-shard's `tests/datadog.rs` holds every metric and label value the
-rules read to a scrape of every kind of process, a leasing router and a
-replicated node among them, and Grafana's rules to Prometheus's. `make
-drill` (`deploy/drill/drill.py`, the standard library and the Docker CLI)
-runs two regions -- a router keeping each one's directory and its standby,
-two nodes in two zones under `--lease --replicas --sync always`, an
-archiver a node, the global router and its standby -- every token in the
-environment and no port fixed, a writer a tenant putting rows by id 1..K
-through the routers; it cuts the global routers off (each region writes
-on), cuts a node off the network and `docker kill`s it -- a machine lost:
-killed alone, its kernel closed its sockets and delivered what they held --
-and starts it again, kills a region's router and promotes its standby as
-the runbook does, restores a tenant from its node's archive to a moment it
-marked, and reads every acknowledged write back from each primary and its
-replica, the router's failover read off its log against the killed
-container's end (`failed_over_after`, both by the Docker VM's clock). Three
-runs at a lease of 2 s and an upstream timeout of 4 s, what they saw and
-not bounds (a reviewer's machine saw a repair of 1.07 s, writes stopping
-1.31 s after a router's kill before grants were numbered and gaps of 28-30
-ms): 41 577
-acknowledged, 0 lost; the node failed over 1.92, 2.56 and 1.90 s after the
-kill, its tenants' writers writing again 3.90, 3.97 and 3.93 s after the
-kill, the tenant whose replica it held losing 17, 18 and 17 ms at most, every other tenant
-16, 18 and 17; the repair 0.51, 0.51 and 0.50 s after the node's start; a region
-whose router was killed stopped writing 1.67, 1.61 and 1.66 s after and wrote
-again 0.43-0.51 s after its standby's promotion -- since grants are
-numbered, 1.02, 0.83 and 1.00 s and 0.42-0.48, the node killed failed over
-1.90, 2.06 and 2.56 s after, its writers again 3.90-3.94 s, 40 588
-acknowledged and 0 lost (three runs of this kit's drill). The writers' figure
-was the upstream timeout's, not the failover's: a writer's request in
-flight to the dead node waited there until the router let it go, which at
-fenec-shard's 60 s was the writer's own 5 s client timeout, every run's
-4.86-4.92 s -- quoted at first as a promotion waiting out the replica's
-reconnect. The failover answers it now (the paragraph on what a failover
-ends, above): in two runs a side in turns, the writers wrote again 2.52 and
-1.93 s after the kill as the router failed the node over at 2.53 and 1.93,
-against main's 3.94 and 3.95 beside failovers at 2.49 and 2.26. CI's runs met a worse one before #340 -- a dead node's name its
-resolver was slow to refuse held up the router's whole lease round, the
-region's healthy nodes unrenewed and failed over, 26.5-31.4 s to write again
-and 12-18 s without a write for a tenant on a healthy node, the repair
-missing its 60 s in four of six runs -- which #340 fixed (the lease
-paragraph above). The kit's routers run `--upstream-timeout` at 10 s
-(`FENEC_UPSTREAM_TIMEOUT`), the drill's at twice its lease: chosen at twice
-the lease so a failed-over node's requests were let go of, it now bounds
-only what no failover ends -- a node not failed over, a relay to a router
-gone, a standby's forwards -- and need not follow the lease; past it a
-slow statement is a 502 while the node finishes it, and a request
-carrying `Fenec-Wait` is allowed the timeout plus its wait. When
-the drill fails it prints the last 300 lines of every router's and node's
-log (`DRILL_LOG_LINES`), since the cleanup takes the containers and CI
-leaves nothing else to read. CI's `deploy` job runs both checks.
-
-**Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
-abort`, single process, nothing to recover). `fenec-server` stays on `release`: a
-panicking connection thread unwinds and drops only its own request. A cold
-crate is built for size in the profile it is cold in: in `cli`, `fenec-http`, which the shell reaches only for
-`backup`, `archive` and `restore`, waiting on the network and the disk,
-and for `fenec mcp`, waiting on a model (16.3 KB of the released binary,
-measured before `mcp`). Not the importer, whose SQLite import of
-200 000 rows took 285 ms against 251 for 32.6 KB, nor the root crate, which
-built for size made the binary 129 KB larger (`make size-report BIN=fenec`).
-Both binaries hold 72 KB of the standard library's backtrace symbolizer
-(`gimli`, `addr2line`, `rustc_demangle`, `object`), which only a nightly
-`build-std` leaves out.
+**[`nocase` text compares by its case fold wherever it
+compares.](docs/design/text.md#nocase)** Every such place goes through
+`Field::text_order`; the fold is `str.casefold()`'s, Turkish's under
+`collate tr` (`tests/nocase.rs`), and a field made `nocase` or no longer
+is a `rebuild`.
+
+**[`match` prunes with MaxScore.](docs/design/text.md#maxscore)** Scores
+add in `f64`; `pruning_never_changes_the_answer` holds it to an
+exhaustive merge.
+
+**[`@text` matches whole words unless told
+otherwise.](docs/design/text.md#tokenizer)** It folds `I`, `İ`, `ı`, `i`
+together; unspaced scripts go by grams (`text::grams`).
+
+**[The text index is derived and never
+persisted.](docs/design/text.md#text-index-is-derived)** Nothing of it
+reaches the file.
+
+**[A text index's words are a table of their own
+(`text/terms.rs`).](docs/design/text.md#term-table)** `memory_bytes`
+counts each list's allocation past its bytes (`ALLOC`).
+
+**[`fuzzy` and `prefix` walk a sorted copy of the
+words.](docs/design/text.md#fuzzy-and-prefix)** Every write keeps it up
+once built, never in the file; a word reaching more than
+`MAX_EXPANSIONS` (10 000) words is refused, never cut.
+
+**[`rerank` deliberately uses no index.](docs/design/text.md#rerank)** It
+reorders `match`'s candidates by exact distance over stored vectors.
+
+**[`fuse` adds ranks, not scores.](docs/design/text.md#fuse)** Each search
+runs `candidates` deep, filtered; a row scores `1 / (k + rank)` from
+each, `k` 60.
+
+**[`highlight()` re-reads the text; `facet` counts beside the
+rows.](docs/design/text.md#highlight-and-facet)** Marks are the searched
+index's tokens; a facet past `MAX_FACET_VALUES` (10 000) without `top` is
+refused, never cut.
+
+**[A disjunctive facet's filter is split as
+written.](docs/design/text.md#disjunctive-facets)** `scoped()`, `@ttl`'s
+`alive` and anything else ANDed in after must reach every split filter
+through `each_filter_mut`.
+
+### lookup and aggregates
+
+**[`lookup` chains, and the chain is still
+positional.](docs/design/lookup-and-aggregates.md#lookup-chains)** `on
+child = parent` names the level just above, and a collection appears once
+a query, so no name needs qualifying.
+
+**[`lookup` is one bucket probe per parent, not a
+join.](docs/design/lookup-and-aggregates.md#lookup)** An unindexed child
+key is refused; nesting is never a `Value`.
+
+**[`required` is the other half, and it is a
+pass.](docs/design/lookup-and-aggregates.md#required)** It drops a parent
+no child matches before `offset` and `limit`.
+
+**[A `lookup` over a key of several fields is a run of an index over
+several fields.](docs/design/lookup-and-aggregates.md#lookup-over-several-fields)**
+`tests/composite_lookup.rs` holds it to plain `get`s.
+
+**[A `lookup` level may fold its children, and a `lookup` hangs off
+groups.](docs/design/lookup-and-aggregates.md#folded-levels)** A level is
+the `get` its children would be; `tests/lookup_aggregate.rs` holds it.
+
+**[An item of a select list is an expression, and an aggregate folds
+one](docs/design/lookup-and-aggregates.md#select-expressions)**: an
+aggregate is a call, never an `Expr` variant, and `count(distinct)` past
+`MAX_DISTINCT_VALUES` is refused.
+
+**[`approx_count_distinct` is HyperLogLog, and `having` keeps
+groups](docs/design/lookup-and-aggregates.md#hyperloglog-and-having)**
+(`hll.rs`): its own hash, the same on every target, so sketches merge.
+
+**[`bucket(at, 1d, 'Europe/Berlin')` reads a zone's
+clock](docs/design/lookup-and-aggregates.md#time-zones)** (`tz.rs`):
+`tools/tz/gen.py` writes `tz/zones.bin`; before 2000 a named zone is
+refused.
+
+### The native library and sync
+
+**[An app keeps its database through
+`fenec-ffi`.](docs/design/native-and-sync.md#the-native-library)** A text
+is answered through `fenec-abi`, as in the browser module, so both give
+the same bytes. A handle indexes a table of `Arc`s, never a pointer; every
+call returns a code under `catch_unwind`, built in the `ffi` profile,
+which unwinds; `include/fenec.h`, by hand, is held to the exports by a
+test. A long read pins, the fsync runs after the lock and a buffered write
+goes behind it (`Native::after`), as a server's; JNI passes text as UTF-8
+bytes; `<file>.lock` is an `fcntl` record lock, never `flock`.
+
+**[A replica's sync is a state machine; the network is the
+binding's.](docs/design/native-and-sync.md#sync-core)** `fenec_abi::sync`
+does no I/O: a binding feeds it events in turn and performs its actions.
+Only `fenec-ffi` turns on `fenec-abi`'s `sync` feature; the browser module
+has none of it.
+
+**[Both sync runners are held to one scenario
+file.](docs/design/native-and-sync.md#sync-scenarios)** A behaviour of
+either changes in `integrations/sync-scenarios.json` first; `make
+sync-scenarios-check` fails unless both ran every scenario.
+
+### The router
+
+**[The router tells a page one CORS rule, its
+own.](docs/design/router.md#cors)** With `--http-cors` it answers
+preflights and puts its own CORS headers in place of a node's
+(`cors::is_cors_header`), never both.
+
+**[The router looks at a pooled connection first, and resends only what
+cannot have run or may run twice.](docs/design/router.md#pooled-connections)**
+A request not sent whole goes again, one sent whole only if `replayable`
+(a `GET`, `HEAD`, `OPTIONS`, keyed or marked read), judged by `Stage`, not
+errno. Every dial goes through `dial::resolve`, caching nothing; every
+body read allocates through `zeroed` and refuses an answer with no length.
+A held request watches its client for the head (`answered_or_gone`,
+`relay_send` at a relay): an end goes on to the node, never taken for
+gone; a reset lets the node's connection go.
+
+**[A failover ends what the router has out to the node for the tenants
+it moved.](docs/design/router.md#failover-cuts)** `promote_on` has
+`Pool::cut` shut what is out to the node under the tenant's keyed mark
+(`mark_of`), one word with the connection's state, never an answer begun
+(`ANSWERING`) nor a descriptor reused (`CLOSED` before the close); a cut
+request follows `replayable`'s rule, and a forward reads `Pool::moved`
+before the directory and before its first byte. Only a failover cuts, and
+each grants the nodes it moved tenants to as it ends (`granted_after`).
+
+**[A query across tenants is the router's admin's, merged as the request
+says.](docs/design/router.md#queries-across-tenants)** Nodes run it
+read-only; the router parses no FenecQL, fails and names a tenant its
+merge cannot hold exactly, and refuses (413) past its bounds, never cuts.
+
+### Integrations and deploy
+
+**[`integrations/` may use outside packages; the crates may
+not.](docs/design/integrations.md#integrations)** A builder change starts
+in `web/builder.js` and a case in `golden.mjs`, then every SDK's follows,
+held to `integrations/builder-golden.json`; `make types-check` holds
+`fenec.d.ts` to `fenec.js`. Go's and .NET's SDKs bound a request by its
+context or token, never the HTTP client's timeout; a store checks its
+names against FenecQL's and passes values as parameters.
+
+**[Grafana's data source binds a dashboard's values; it never splices
+them.](docs/design/integrations.md#grafana)** Names become `$n`s
+(`fenecql.go`); only `get`, `select` and `explain` go out.
+
+**[`deploy/` is the regions' kit, held to the binaries by two
+checks.](docs/design/integrations.md#deploy)** Tokens go in env files or
+`LoadCredential=`, never on a command line, a role a user each; no
+`ProcSubset=pid`. The tunnel passes only tenant paths, never
+`_replication` (`deploy/test/ingress.py`); the bucket copy is `rclone
+copy`, never `sync`; a standby router's unit conflicts with its primary's,
+promoted by `POST /_replication/promote` and the units switched at once;
+`tests/datadog.rs` holds the alerts to scrapes.
 
 ## Conventions
 
@@ -7225,6 +1076,10 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   artifact), so after sections change, the next deploy's artifact is
   committed as `site/search-embeddings.json` (`gh run download <run> -n
   search-embeddings`) where it differs.
+- An invariant's rule goes in CLAUDE.md in a few sentences: what must
+  hold, what must never be done, what enforces it and what a change owes.
+  Its measurements, rejected alternatives and history go in its
+  `docs/design/` file, in the same pull request; a new invariant gets both.
 - Comments explain *why* a thing is the way it is — a measured cost, a trap that
   was hit, an alternative that was rejected. Match that when adding code.
 - All prose in the repo (comments, docs, README) is English.
