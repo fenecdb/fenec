@@ -255,7 +255,15 @@ fn what_was_out_to_a_node_failed_over_by_hand_is_answered() {
 /// any of them -- the router cannot tell -- so the keyed write runs once on
 /// the new primary and the unkeyed one nowhere. The lease is ten seconds,
 /// so the five requests are out and seen unanswered well before it lapses:
-/// at three, a loaded machine could have the failover come first.
+/// at three, a loaded machine could have the failover come first. The
+/// claims wait thirty seconds, the most a request may: the router judges
+/// the lapse a lease and a tenth after n1's last renewal, at a round, a
+/// third of a lease apart, once the grant to n1 out then has given up, a
+/// third of a lease at most -- 17.7 s in all before it promotes -- and at
+/// twenty the keyed claim's wait ran out before the job was put, beside
+/// three other suites and eight busy loops at background QoS (2 runs of
+/// 3). The job is put once the keyed write is answered, which the new
+/// primary does once it holds the lease naming the tenant there.
 #[test]
 fn what_was_out_to_a_node_failed_over_on_its_lease_is_answered() {
     let c = cluster("lease", Some(LONG_TERM));
@@ -283,14 +291,14 @@ fn what_was_out_to_a_node_failed_over_on_its_lease_is_answered() {
         c.port,
         "POST",
         PATH,
-        "Fenec-Wait: 20000\r\nIdempotency-Key: claim-1\r\n",
+        "Fenec-Wait: 30000\r\nIdempotency-Key: claim-1\r\n",
         &claim("with-key"),
     );
     let held = asking(
         c.port,
         "POST",
         PATH,
-        "Fenec-Wait: 20000\r\n",
+        "Fenec-Wait: 30000\r\n",
         &claim("no-key"),
     );
     for marker in [
@@ -324,11 +332,8 @@ fn what_was_out_to_a_node_failed_over_on_its_lease_is_answered() {
         !head.to_ascii_lowercase().contains("idempotent-replayed"),
         "{head}"
     );
-    let (status, _, b) = answer(&unkeyed, "the unkeyed write");
-    assert_eq!(status, 502, "{b}");
-    let (status, _, b) = answer(&held, "the unkeyed claim");
-    assert_eq!(status, 502, "{b}");
-    assert_eq!(stream.recv_timeout(WITHIN), Ok(true), "the stream");
+    // The new primary took the keyed write: it holds the lease naming
+    // `acme`, and the job goes in while the keyed claim waits there.
     let (status, b) = query(c.port, PATH, "put jobs {run_at: 1}");
     let tok = format!("adm-cut-lease{}", &replica[1..]);
     let lease = call(rport, "GET", "/_admin/lease", "", Some(&tok));
@@ -336,6 +341,11 @@ fn what_was_out_to_a_node_failed_over_on_its_lease_is_answered() {
     let (status, _, b) = answer(&held_keyed, "the keyed claim");
     assert_eq!(status, 200, "{b}");
     assert!(b.contains(r#"[{"id":"#), "the job: {b}");
+    let (status, _, b) = answer(&unkeyed, "the unkeyed write");
+    assert_eq!(status, 502, "{b}");
+    let (status, _, b) = answer(&held, "the unkeyed claim");
+    assert_eq!(status, 502, "{b}");
+    assert_eq!(stream.recv_timeout(WITHIN), Ok(true), "the stream");
     assert_eq!(titled(rport, "plain"), 0);
     assert_eq!(titled(rport, "keyed"), 1);
 }

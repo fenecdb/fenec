@@ -286,7 +286,12 @@ pub fn call(
     auth: Option<&str>,
 ) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    // As long as the router waits on any one node it calls ([`upstream`]):
+    // a client giving up sooner measured the machine. At twenty seconds a
+    // tenant's create through `cuts.rs`' router -- a minute a node call --
+    // went unanswered beside three other suites and eight busy loops at
+    // background QoS, in 2 runs of 3.
+    s.set_read_timeout(Some(WITHIN)).unwrap();
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
         s,
@@ -296,10 +301,10 @@ pub fn call(
     )
     .unwrap();
     let mut out = String::new();
-    // No answer in 20 s is status 0 and the error, for the test to say what
+    // No answer in time is status 0 and the error, for the test to say what
     // it means: a panic here named only the read that timed out.
     if let Err(e) = s.read_to_string(&mut out) {
-        return (0, format!("no answer from the router in 20 s: {e}"));
+        return (0, format!("no answer from the router in {WITHIN:?}: {e}"));
     }
     let Some(status) = out.get(9..12).and_then(|s| s.parse().ok()) else {
         return (0, format!("not an answer: {out:?}"));
