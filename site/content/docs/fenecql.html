@@ -11,11 +11,13 @@ documents and search them by vector, by text or by filter.</p>
 
 <p>FenecQL is a small language with vectors in the core. It is not SQL and
 does not try to be, but it reads SQL's everyday spellings as the statements
-they mean — <code>select … from</code>, <code>INSERT INTO … VALUES</code>,
-<code>UPDATE … SET a = …</code>, <code>IN (…)</code>,
-<code>BETWEEN</code>, <code>LIKE</code>, <code>ON CONFLICT</code> — and
-refuses the rest saying what to write: see <a href="/docs/sql">From
-SQL</a>. These are all its statements.</p>
+they mean — <code>select … from</code>, <code>CREATE TABLE</code>,
+<code>INSERT INTO … VALUES</code>, <code>UPDATE … SET a = …</code>,
+<code>JOIN</code> as a <code>lookup</code>, <code>IN (…)</code>,
+<code>EXISTS</code>, <code>DISTINCT</code>, <code>BETWEEN</code>,
+<code>LIKE</code>, <code>ON CONFLICT</code> — and refuses the rest saying
+what to write: see <a href="/docs/sql">From SQL</a>. These are all its
+statements.</p>
 
 <pre data-lang="fenecql">create collection [if not exists] &lt;name&gt; ( &lt;field&gt; &lt;type&gt; [required] [collate und|tr] [nocase] [@index], ...
                                          [, @sorted(&lt;field&gt; [desc], ...) | @unique(&lt;field&gt;, ...)] )
@@ -671,14 +673,16 @@ so counting the parents that have a match is a question with an answer.</p>
   probing each, or — when the child filter carries a <code>@hash</code>
   equality and the parent's key is <code>id</code> — reading the children that
   equality names and taking their parents. Both counts that decide are exact,
-  so the choice is not a guess; what neither plan escapes is that one full
-  pass has to happen. Over 20 000 products and 200 000 reviews, for a page of
-  twenty:</p>
+  so the choice is not a guess; what neither plan escapes, once the page is
+  put in order or a facet counts every parent, is that one full pass has to
+  happen. With no <code>order</code> the page is the first parents kept, and
+  walking the parents stops once it holds them. Over 20 000 products and
+  200 000 reviews, for a page of twenty:</p>
   <table>
   <tbody>
   <tr><td><code>required</code>, child filter on a <code>@hash</code> field</td><td>12.07 ms</td></tr>
   <tr><td>the same, walking the parents instead</td><td>15.63 ms</td></tr>
-  <tr><td><code>required</code>, no child filter</td><td>2.19 ms</td></tr>
+  <tr><td><code>required</code>, no child filter, no <code>order</code></td><td>0.036 ms</td></tr>
   <tr><td><code>count … required</code></td><td>4.50 ms</td></tr>
   <tr><td>a <code>bool @hash</code> field on the parent</td><td>0.02 ms</td></tr>
   </tbody>
@@ -1890,7 +1894,9 @@ refused, and asks for <code>as</code>.</p>
 <p>Put <code>count(*)</code>, <code>count(…)</code>, <code>count(distinct …)</code>,
 <code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>,
 <code>first</code> or <code>last</code> in the select list to get totals.
-Add <code>group</code> for one row per distinct set of its keys' values.</p>
+Add <code>group</code> for one row per distinct set of its keys' values;
+a list of the keys alone, <code>select city group city</code>, answers each
+set once, as SQL's <code>select distinct city</code> does.</p>
 
 <pre data-lang="fenecql">get orders select count(*), sum(total), avg(total), min(at), max(at)
 get orders select status, count(*), avg(total) where year = 2026 group status

@@ -491,6 +491,12 @@ fn an_answer_past_its_bound_is_refused_never_cut() {
         .map(|i| format!("{{n: {i}, pad: \"{}\"}}", "x".repeat(200)))
         .collect();
     sql.push(format!("put many [{}]", rows.join(", ")));
+    // Five children of each of the first three: a join's fifteen rows.
+    sql.push("create collection kids (parent int @hash, k int)".into());
+    let kids: Vec<String> = (0..15)
+        .map(|i| format!("{{parent: {}, k: {i}}}", 1 + i / 5))
+        .collect();
+    sql.push(format!("put kids [{}]", kids.join(", ")));
     let sql: Vec<&str> = sql.iter().map(String::as_str).collect();
     let n = serve(
         Config {
@@ -528,6 +534,19 @@ fn an_answer_past_its_bound_is_refused_never_cut() {
     assert_eq!(at(&s, &["count"]), &Value::Int(4));
     let (_, s) = n.call(Some(ROOT), "query", r#"{"query":"get many count"}"#);
     assert_eq!(at(&s, &["rows", "0", "count"]), &Value::Int(25));
+    // A join's rows are its flat ones: three parents' fifteen rows are
+    // past the bound, which counted the parents and answered them all.
+    let join = "SELECT m.n, k.k FROM many m JOIN kids k ON k.parent = m.id";
+    let (err, s) = n.call(Some(ROOT), "query", &format!(r#"{{"query":"{join}"}}"#));
+    assert!(err, "{s:?}");
+    assert_eq!(at(&s, &["status"]), &Value::Int(413));
+    let (err, s) = n.call(
+        Some(ROOT),
+        "query",
+        &format!(r#"{{"query":"{join} ORDER BY m.n LIMIT 8"}}"#),
+    );
+    assert!(!err, "{s:?}");
+    assert_eq!(at(&s, &["count"]), &Value::Int(8));
     // Ten rows of 200 bytes and more: past 2 000 bytes.
     let (err, s) = n.call(Some(ROOT), "query", r#"{"query":"get many limit 10"}"#);
     assert!(err);

@@ -138,14 +138,211 @@ const SAME: &[(&str, &str)] = &[
         r#"create index on t ("a") @hash"#,
         "create index on t (a) @hash",
     ),
+    // SQL's keys by their place in the list.
+    (
+        "SELECT city, count(*) AS n FROM users GROUP BY 1 ORDER BY 2 DESC LIMIT 3",
+        "get users select city, count(*) as n group city order n desc limit 3",
+    ),
+    // A name without `AS`, where the list goes on or ends at `FROM`.
+    (
+        "SELECT status s, count(*) n FROM orders GROUP BY status",
+        "get orders select status as s, count(*) as n group status",
+    ),
+    // An aggregate's `FILTER`: what `case` leaves of it, a null passed over.
+    (
+        "SELECT count(*) FILTER (WHERE tier IS NULL) AS nulls, sum(total) FILTER (WHERE status \
+         = 'paid') AS paid, count(DISTINCT c) FILTER (WHERE total > 5) AS buyers FROM orders",
+        "get orders select count(case when tier is null then 1 end) as nulls, sum(case when \
+         status = 'paid' then total end) as paid, count(distinct case when total > 5 then c \
+         end) as buyers",
+    ),
+    (
+        "SELECT name, age, age * 2 AS twice FROM users ORDER BY 2 DESC, 3, 1",
+        "get users select name, age, age * 2 as twice order age desc, age * 2, name",
+    ),
+    // An alias alone: the names it qualifies, bare.
+    ("SELECT * FROM users u WHERE u.id = 1", "get users where id = 1"),
+    (
+        "SELECT u.name, count(u.id) FROM users AS u WHERE u.age > 30 GROUP BY u.name ORDER BY \
+         count(u.id) DESC",
+        "get users select name, count(id) where age > 30 group name order count(id) desc",
+    ),
+    ("SELECT u.* FROM users u", "get users"),
+    // DISTINCT, and GROUP BY with no aggregate: a group of the keys.
+    (
+        "SELECT DISTINCT city FROM users WHERE age > 1 ORDER BY city",
+        "get users select city where age > 1 group city order city",
+    ),
+    (
+        "SELECT city, country FROM users GROUP BY city, country",
+        "get users select city, country group city, country",
+    ),
+    ("SELECT DISTINCT * FROM t", "get t"),
+    (
+        "SELECT DISTINCT city, count(*) FROM users GROUP BY city",
+        "get users select city, count(*) group city",
+    ),
+    // EXISTS: the one equality with the row around it, the rest the
+    // query's.
+    (
+        "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = users.id)",
+        "get users where id in (get orders select user_id)",
+    ),
+    (
+        "SELECT email FROM customers c WHERE NOT EXISTS (SELECT * FROM orders o WHERE \
+         c.id = o.customer_id AND o.status = 'paid')",
+        r#"get customers select email where not (id in (get orders select customer_id where status = "paid"))"#,
+    ),
+    (
+        "DELETE FROM customers WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = \
+         customers.id LIMIT 1)",
+        "del customers where not (id in (get orders select customer_id))",
+    ),
+    (
+        "get customers where exists (select 1 from orders where customer_id = customers.id and \
+         total > $1)",
+        "get customers where id in (get orders select customer_id where total > $1)",
+    ),
+    // A query's one value: an aggregate, or `limit 1`.
+    (
+        "SELECT * FROM t WHERE at = (SELECT max(at) FROM t)",
+        "get t where at in (get t select max(at))",
+    ),
+    (
+        "UPDATE orders SET status = 'paid' WHERE id = (SELECT id FROM orders WHERE status = \
+         'pending' ORDER BY placed LIMIT 1) RETURNING id",
+        r#"set orders {status: "paid"} where id in (get orders select id where status = "pending" order placed limit 1) returning id"#,
+    ),
+    (
+        "get t where (select count(*) from u) = n",
+        "get t where n in (get u select count(*))",
+    ),
+    // A join whose other table is a filter: one table's rows, each once.
+    (
+        "SELECT o.id FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.email = $1 \
+         ORDER BY o.placed DESC LIMIT 3",
+        "get orders select id where customer_id in (get customers select id where email = $1) \
+         order placed desc limit 3",
+    ),
+    (
+        "SELECT SUM(ol.qty) AS total FROM order_lines ol INNER JOIN products p ON ol.product_id \
+         = p.id WHERE p.category = 'lighting' AND ol.qty > 1",
+        r#"get order_lines select sum(qty) as total where qty > 1 and product_id in (get products select id where category = "lighting")"#,
+    ),
+    (
+        "SELECT DISTINCT c.name FROM customers c JOIN orders o ON c.id = o.customer_id WHERE \
+         o.status = 'cancelled'",
+        r#"get customers select name where id in (get orders select customer_id where status = "cancelled") group name"#,
+    ),
+    // The joined table's rows, the first's key read as theirs.
+    (
+        "SELECT c.id, COUNT(o.id) AS n FROM customers c JOIN orders o ON c.id = o.customer_id \
+         WHERE c.country = 'IT' GROUP BY c.id",
+        r#"get orders select customer_id as id, count(id) as n where customer_id in (get customers select id where country = "IT") group customer_id"#,
+    ),
+    (
+        "select o.customer_id as customer_id, count(*) as n from orders o join customers c on \
+         o.customer_id = c.id where c.country = $1 group by customer_id",
+        "get orders select customer_id, count(*) as n where customer_id in (get customers select \
+         id where country = $1) group customer_id",
+    ),
+    (
+        "SELECT o.* FROM customers c, orders o WHERE o.customer_id = c.id AND c.country = 'IT'",
+        r#"get orders where customer_id in (get customers select id where country = "IT")"#,
+    ),
+    // A LEFT JOIN's rows with none.
+    (
+        "SELECT c.email FROM customers c LEFT JOIN orders o ON c.id = o.customer_id WHERE o.id \
+         IS NULL ORDER BY c.email",
+        "get customers select email where not (id in (get orders select customer_id)) order email",
+    ),
+    // A LEFT JOIN by `id` reads each row of the first table once.
+    (
+        "SELECT o.total FROM orders o LEFT JOIN customers c ON c.id = o.customer_id",
+        "get orders select total",
+    ),
+    // CREATE TABLE, each type as `fenec import` maps it.
+    (
+        "CREATE TABLE users (id serial PRIMARY KEY, name text NOT NULL, email varchar(200) \
+         UNIQUE, age integer, score double precision, at timestamp with time zone, tags text[], \
+         emb vector(3), meta jsonb, ok boolean)",
+        "create collection users (name text required, email text @unique, age int, score float, \
+         at timestamp, tags [text], emb vector<3>, meta json, ok bool)",
+    ),
+    (
+        "create table if not exists p (sku text primary key, n bigint, h halfvec(4), s sparsevec(9))",
+        "create collection if not exists p (sku text required @unique, n int, h vector<4, f16>, \
+         s sparse<9>)",
+    ),
+    (
+        "CREATE TABLE l (a INT, b INT, CONSTRAINT k PRIMARY KEY (a, b))",
+        "create collection l (a int required, b int required, @unique(a, b))",
+    ),
+    (
+        "CREATE TABLE l (id INTEGER PRIMARY KEY AUTOINCREMENT, a INT NULL)",
+        "create collection l (a int)",
+    ),
+    (
+        r#"CREATE TABLE u (id bigint GENERATED ALWAYS AS IDENTITY, email citext, name TEXT COLLATE "C", n TINYINT, d DATETIME, PRIMARY KEY (id), UNIQUE (name, n))"#,
+        "create collection u (email text nocase, name text, n int, d timestamp, @unique(name, n))",
+    ),
+    (
+        "create table v (title text collate tr, v vector<2>)",
+        "create collection v (title text collate tr, v vector<2>)",
+    ),
+    // CREATE INDEX: btree, unique, hash, hnsw by its operator class, gin.
+    ("CREATE INDEX users_age ON users (age)", "create index on users (age) @sorted"),
+    ("create index on users (age desc nulls last)", "create index on users (age) @sorted"),
+    ("CREATE UNIQUE INDEX ON users (email)", "create index on users (email) @unique"),
+    ("CREATE INDEX ON t USING hash (k)", "create index on t (k) @hash"),
+    (
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (a, b DESC)",
+        "create index if not exists on t (a, b desc) @sorted",
+    ),
+    ("CREATE UNIQUE INDEX ON t (a, b)", "create index on t (a, b) @unique"),
+    (
+        "CREATE INDEX ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16, ef_construction \
+         = 64)",
+        "create index on docs (emb) @hnsw(cosine, m=16, ef_construction=64)",
+    ),
+    ("CREATE INDEX ON docs USING hnsw (emb)", "create index on docs (emb) @hnsw(l2)"),
+    ("CREATE INDEX ON docs USING hnsw (emb halfvec_ip_ops)", "create index on docs (emb) @hnsw(dot)"),
+    ("CREATE INDEX ON docs USING hnsw (s sparsevec_ip_ops)", "create index on docs (s) @inverted"),
+    (
+        "CREATE INDEX docs_body ON docs USING GIN (to_tsvector('english', body))",
+        "create index on docs (body) @text",
+    ),
+    // SQL's arrays every way written: the length not held.
+    (
+        "CREATE TABLE t (a int ARRAY, b text array, c integer ARRAY[3], d int[], e text[4])",
+        "create collection t (a [int], b [text], c [int], d [int], e [text])",
+    ),
+    // An `exists` asks no page: a `limit` from 1 changes nothing.
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT 1)",
+        "get t where id in (get u select k)",
+    ),
 ];
+
+/// `st` with what a join read without flat rows carries for the engine
+/// set aside -- its names, held to its tables' fields, and whether its list
+/// may be probed ([`fenec_core::query::Flat`]) -- which FenecQL has no
+/// words for.
+fn written(mut st: Statement) -> Statement {
+    if let Statement::Select(s) = &mut st {
+        if s.flat.as_ref().is_some_and(|f| f.columns.is_empty()) {
+            s.flat = None;
+        }
+    }
+    st
+}
 
 #[test]
 fn sql_spellings_parse_to_the_fenecql_they_mean() {
     for (sql, fenecql) in SAME {
         let a = parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
         let b = parse_one(fenecql).unwrap_or_else(|e| panic!("{fenecql}: {e}"));
-        assert_eq!(a, b, "{sql}");
+        assert_eq!(written(a), b, "{sql}");
     }
 }
 
@@ -202,44 +399,226 @@ const REFUSED: &[(&str, &str)] = &[
     (r#"select max("at") from t"#, r#"`at`, not "at""#),
     (r#"select count(distinct "u") from t"#, r#"`u`, not "u""#),
     // SQL with no statement of its own here
-    (
-        "CREATE TABLE t (a int)",
-        "FenecQL writes `create collection`",
-    ),
     ("DROP TABLE t", "FenecQL writes `drop collection`"),
     (
         "ALTER TABLE t ADD COLUMN a int",
         "FenecQL writes `alter collection`",
     ),
-    ("CREATE INDEX t_a ON t (a)", "an index is `create index on"),
     (
-        "CREATE UNIQUE INDEX t_a ON t (a)",
-        "an index is `create index on",
-    ),
-    ("create index on t (a)", "it names its kind"),
-    (
-        "SELECT * FROM a JOIN b ON a.id = b.a_id",
-        "FenecQL has no `join`: `get orders where ... lookup items on order_id`",
+        "get orders join customers on id = customer_id",
+        "FenecQL has no `join`",
     ),
     (
-        "SELECT * FROM a x JOIN b y ON x.id = y.a_id",
-        "FenecQL has no `join`: `get orders where ... lookup items on order_id`",
+        "SELECT * FROM users u WHERE u.id = 1 v",
+        "unknown command `v`",
+    ),
+    // A join whose meaning would change
+    (
+        "SELECT * FROM a RIGHT JOIN b ON a.id = b.a_id",
+        "a RIGHT JOIN a LEFT JOIN with its tables the other way round",
     ),
     (
-        "SELECT * FROM users u WHERE u.id = 1",
-        "unknown command `u`: an alias",
+        "SELECT * FROM a FULL JOIN b ON a.id = b.a_id",
+        "inner JOIN or a LEFT JOIN",
     ),
     (
-        "SELECT * FROM items JOIN orders ON orders.id = items.order_id",
-        "`get items where ... lookup orders on id = order_id`",
+        "SELECT * FROM a JOIN b",
+        "a JOIN names the columns it pairs",
     ),
     (
-        "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = users.id)",
-        "`get users lookup orders on user_id required`",
+        "SELECT * FROM a JOIN b ON a.x > b.y",
+        "a JOIN pairs its columns by `=`",
     ),
     (
-        "SELECT * FROM t WHERE at = (SELECT max(at) FROM t)",
+        "SELECT * FROM a JOIN b ON a.x > b.y WHERE a.k = 1",
+        "a join pairs a column of each table",
+    ),
+    ("SELECT * FROM a, b", "a join pairs a column of each table"),
+    (
+        "SELECT a.x, b.y FROM a JOIN b ON b.a_id = a.id ORDER BY b.y",
+        "put in order by the first table's columns",
+    ),
+    (
+        "SELECT a.x, count(*) FROM a JOIN b ON b.a_id = a.id GROUP BY a.x",
+        "an aggregate or `distinct` over a join reads one table's columns",
+    ),
+    (
+        "SELECT DISTINCT a.x, b.y FROM a JOIN b ON b.a_id = a.id",
+        "an aggregate or `distinct` over a join reads one table's columns",
+    ),
+    (
+        "SELECT * FROM a LEFT JOIN b ON b.a_id = a.id WHERE b.x IS NULL",
+        "reads the rows it kept with nulls",
+    ),
+    (
+        "SELECT * FROM a LEFT JOIN b ON b.a_id = a.id AND a.k = 1",
+        "a condition there on a table before it keeps that table's rows",
+    ),
+    (
+        "SELECT * FROM a JOIN b ON b.a_id = a.id WHERE a.x = b.y",
+        "a condition reads one table's columns",
+    ),
+    (
+        "SELECT * FROM a JOIN b ON b.a_id = a.id JOIN c ON c.a_id = a.id",
+        "a join hangs off the table just before it",
+    ),
+    (
+        "SELECT * FROM a LEFT JOIN b ON b.a_id = a.id JOIN c ON c.b_id = b.id",
+        "an inner JOIN after a LEFT JOIN",
+    ),
+    (
+        "SELECT a.x * b.y AS z FROM a JOIN b ON b.a_id = a.id",
+        "a column worked out of a row reads the first table's",
+    ),
+    (
+        "SELECT * FROM a JOIN b ON b.a_id = a.id ORDER BY emb <-> $1 LIMIT 3",
+        "a join takes SQL's clauses",
+    ),
+    (
+        "SELECT name FROM users ORDER BY 3",
+        "a key `3` names an item of the list by its place, and the list holds 1",
+    ),
+    (
+        "SELECT DISTINCT ON (city) city, name FROM users",
+        "`distinct on` is a group",
+    ),
+    // A subquery that would answer otherwise
+    (
+        "SELECT * FROM t WHERE x = (SELECT y FROM u)",
+        "`= (select ...)` compares one value",
+    ),
+    (
+        "SELECT * FROM t WHERE x > (SELECT avg(y) FROM u)",
         "a query stands after `in`",
+    ),
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.x > t.y)",
+        "an `exists` reads the row around it by one equality",
+    ),
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u)",
+        "an `exists` reads the row around it by one equality",
+    ),
+    (
+        "SELECT DISTINCT FROM t",
+        "`distinct` makes each row of the list once",
+    ),
+    ("SELECT * FROM t ORDER BY 2", "`*` names none"),
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT 0)",
+        "an `exists` query's `limit` is a number from 1",
+    ),
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k = t.id LIMIT $1)",
+        "an `exists` query's `limit` is a number from 1",
+    ),
+    (
+        "CREATE INDEX ON docs USING hnsw (emb vector_l2_ops) WITH (m = 1)",
+        "pgvector's `m` is from 2 to 100",
+    ),
+    (
+        "CREATE INDEX ON docs USING hnsw (emb) WITH (m = 16, ef_construction = 20)",
+        "at least twice `m`",
+    ),
+    (
+        "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a AND u.b = t.b)",
+        "an `exists` reads the row around it by one equality",
+    ),
+    (
+        "SELECT (SELECT name FROM p WHERE id = l.pid) AS name, qty FROM l",
+        "another collection's row beside each row is a join",
+    ),
+    // CREATE TABLE's rules fenecdb holds none of
+    ("CREATE TABLE t (a numeric(10,2))", "fenecdb has no decimal"),
+    ("CREATE TABLE t (a int DEFAULT 0)", "no `default`"),
+    (
+        "CREATE TABLE t (a int REFERENCES u(id))",
+        "no `default`, `references`",
+    ),
+    (
+        "CREATE TABLE t (a int, CHECK (a > 0))",
+        "no `default`, `references`, `check`",
+    ),
+    (
+        "CREATE TABLE t (a int, FOREIGN KEY (a) REFERENCES u(id))",
+        "no `default`",
+    ),
+    (
+        "CREATE TABLE t (id uuid PRIMARY KEY, a int)",
+        "a row's `id` is an int fenecdb makes",
+    ),
+    (
+        "CREATE TABLE t (id int, a int)",
+        "a row's `id` is an int fenecdb makes",
+    ),
+    (
+        "CREATE TABLE t (a serial, b int)",
+        "a sequence counts a row's `id` alone",
+    ),
+    ("CREATE TABLE t (emb vector)", "`vector` has its dimension"),
+    ("CREATE TABLE t (a interval)", "`interval` is no type here"),
+    ("CREATE TABLE t (a)", "a column has a type"),
+    (
+        "CREATE TABLE t (a int GENERATED ALWAYS AS (1) STORED)",
+        "no `default`",
+    ),
+    (
+        "CREATE TABLE t (a text COLLATE \"de_DE\")",
+        "unknown collation `de_DE`",
+    ),
+    (
+        "CREATE TABLE t AS SELECT * FROM u",
+        "a table is made of its columns",
+    ),
+    ("CREATE TEMP TABLE t (a int)", "kept in the file"),
+    (
+        "CREATE TABLE t (a int PRIMARY KEY, b int PRIMARY KEY)",
+        "a table has one primary key",
+    ),
+    ("CREATE EXTENSION vector", "no extension to create"),
+    // CREATE INDEX with no counterpart
+    (
+        "CREATE INDEX ON t USING ivfflat (emb vector_l2_ops)",
+        "fenecdb's vector index is a graph",
+    ),
+    (
+        "CREATE INDEX ON t (a) WHERE a > 1",
+        "a partial index's `where`",
+    ),
+    ("CREATE UNIQUE INDEX ON t (a) @hash", "not both"),
+    (
+        "CREATE INDEX ON t USING gist (loc)",
+        "an index is `using btree`",
+    ),
+    (
+        "CREATE INDEX ON t USING hash (a, b)",
+        "an index is `using btree`",
+    ),
+    (
+        "CREATE INDEX ON t USING hnsw (emb vector_l1_ops)",
+        "`vector_l1_ops`",
+    ),
+    ("CREATE INDEX ON t (lower(name))", "an index is over fields"),
+    // pgvector's distance where it ranks nothing
+    (
+        "SELECT * FROM docs ORDER BY emb <-> $1 DESC LIMIT 3",
+        "pgvector's distance orders alone, nearest first",
+    ),
+    (
+        "SELECT * FROM docs ORDER BY emb <=> $1, id LIMIT 3",
+        "pgvector's distance orders alone, nearest first",
+    ),
+    (
+        "SELECT id, emb <-> $1 AS d FROM docs ORDER BY emb <-> $1 LIMIT 3",
+        "`_score` the L2 distance for `<->`",
+    ),
+    (
+        "SELECT * FROM docs WHERE emb <#> $1 < -0.5",
+        "pgvector's distance ranks rows",
+    ),
+    (
+        "UPDATE docs SET n = 1 ORDER BY emb <-> $1 LIMIT 1",
+        "pgvector's distance ranks a `get`: `where id in (get ... near",
     ),
     (
         "SELECT * FROM docs WHERE MATCH(body) AGAINST ('rust')",
@@ -256,10 +635,6 @@ const REFUSED: &[(&str, &str)] = &[
     ("get users where name ~ '^Ad'", "not a regular expression"),
     ("get users where name ~ 'A.*a'", "not a regular expression"),
     (
-        "SELECT DISTINCT city FROM users",
-        "FenecQL has no `distinct`",
-    ),
-    (
         "get t where lower(a) between 'a' and 'm'",
         "`between` takes a field",
     ),
@@ -271,13 +646,15 @@ const REFUSED: &[(&str, &str)] = &[
 
 #[test]
 fn what_has_no_exact_meaning_is_refused_saying_what_to_write() {
+    let mut wrong = Vec::new();
     for (sql, says) in REFUSED {
-        let e = match parse(sql) {
-            Ok(s) => panic!("{sql} parsed: {s:?}"),
-            Err(e) => e.to_string(),
-        };
-        assert!(e.contains(says), "{sql}: {e}");
+        match parse(sql) {
+            Ok(s) => wrong.push(format!("{sql} parsed: {s:?}")),
+            Err(e) if !e.to_string().contains(says) => wrong.push(format!("{sql}: {e}")),
+            Err(_) => {}
+        }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// Where a double-quoted text is no column in SQL either, or stands beside
@@ -649,50 +1026,41 @@ fn the_hint_an_agent_needs_comes_first() {
             .unwrap_or_else(|e| e.to_string());
         assert!(e.contains(what), "{q}: {e}");
     };
-    // A join is named before the grouping over its columns is refused,
-    // after an alias, behind `distinct`, and as a comma between two.
-    let join = "FenecQL has no `join`";
+    // A join the eval refused for its grouping, read now; one over both
+    // tables' columns says what to write.
+    for read in [
+        "SELECT * FROM orders JOIN customers ON orders.cid = customers.id",
+        "SELECT DISTINCT c.name FROM orders o JOIN customers c ON o.cid = c.id",
+        "SELECT * FROM orders o, customers c WHERE o.cid = c.id",
+        "SELECT u.city, count(*) FROM users u GROUP BY u.city",
+    ] {
+        parse(read).unwrap_or_else(|e| panic!("{read}: {e}"));
+    }
     says(
         "SELECT c.name, count(*) FROM orders o JOIN customers c ON o.cid = c.id GROUP BY c.name",
-        join,
-    );
-    says(
-        "SELECT * FROM orders JOIN customers ON orders.cid = customers.id",
-        join,
-    );
-    says(
-        "SELECT DISTINCT c.name FROM orders o JOIN customers c ON o.cid = c.id",
-        join,
-    );
-    says(
-        "SELECT * FROM orders o, customers c WHERE o.cid = c.id",
-        join,
-    );
-    says("SELECT * FROM orders, customers", join);
-    // Its `lookup` puts the rows above's `where` first.
-    says(
-        "SELECT * FROM a JOIN b",
-        "`get items where ... lookup orders on id = order_id`",
-    );
-    // An alias alone, before the grouping over its columns.
-    says(
-        "SELECT u.city, count(*) FROM users u GROUP BY u.city",
-        "unknown command `u`: an alias",
+        "`get o select k, count(*) as n group k lookup c on id = k select name`",
     );
     // PostgreSQL's `->>`.
     says(
         "SELECT * FROM t WHERE meta->>'source' = 'web'",
         "a json field's member is read by a path: `meta.source`",
     );
-    // `distinct`'s hint names a group with its aggregate; in an `in`'s
-    // query it changes nothing.
-    says(
-        "SELECT DISTINCT city FROM users",
-        "a `group` needs an aggregate",
-    );
+    // In an `in`'s query `distinct` changes nothing.
     assert_eq!(
         parse_one("get t where x in (select distinct a from u where b = 1)").unwrap(),
         parse_one("get t where x in (get u select a where b = 1)").unwrap()
+    );
+    // SQL's list refused for its own fault, a `from` ahead: read as
+    // FenecQL's `select <collection>`, it was answered that FenecQL has
+    // no `join`. And `->>` in the list as in a `where`.
+    says(
+        "SELECT status, sum(case when discount is null then 1 else 0 end) FROM orders GROUP BY \
+         status",
+        "answers under a name: `<expr> as <name>`",
+    );
+    says(
+        "SELECT meta->>'source' AS s, count(*) AS n FROM t GROUP BY meta->>'source'",
+        "a json field's member is read by a path: `meta.source`",
     );
 }
 
@@ -781,4 +1149,111 @@ fn a_field_after_lookup_is_the_looked_up_collections() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("`meta.source`"), "{e}");
+}
+
+/// pgvector's `order by emb <op> $1 limit k` is `near`, its operator's
+/// distance held to the index's: the same rows where they agree, refused
+/// naming the operator to write where they do not. A row's `_score` is the
+/// L2 distance `<->` orders by, 1 minus the cosine distance `<=>` does,
+/// and the inner product `<#>` orders by turned round.
+#[test]
+fn pgvector_s_distance_is_near_where_the_index_measures_it() {
+    use fenec_core::schema::Metric;
+    for (sql, metric, fenecql) in [
+        (
+            "SELECT id FROM docs ORDER BY emb <-> $1 LIMIT 5",
+            Metric::L2,
+            "get docs select id near emb $1 limit 5",
+        ),
+        (
+            "select * from docs where k = 1 order by $1 <=> emb asc limit 3",
+            Metric::Cosine,
+            "get docs where k = 1 near emb $1 limit 3",
+        ),
+        (
+            "SELECT id FROM docs ORDER BY emb <#> '[1, 2.5, -3]' LIMIT 2",
+            Metric::Dot,
+            "get docs select id near emb [1, 2.5, -3] limit 2",
+        ),
+    ] {
+        let Statement::Select(mut s) = parse_one(sql).unwrap() else {
+            panic!()
+        };
+        let near = s.near.as_mut().unwrap();
+        assert_eq!(near.metric.take(), Some(metric), "{sql}");
+        assert_eq!(Statement::Select(s), parse_one(fenecql).unwrap(), "{sql}");
+    }
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection d (emb vector<2> @hnsw(cosine), s sparse<4> @inverted, loc geo, k int)",
+    );
+    let put = fenec_ql::parse_one_for(
+        &db,
+        "put d [{emb: [1, 0], s: '{1:1}/4', loc: [0, 0], k: 1}, {emb: [0.6, 0.8], s: '{2:2}/4', \
+         loc: [1, 1], k: 2}, {emb: [0, 1], s: '{1:0.5,2:1}/4', loc: [2, 2], k: 3}]",
+    )
+    .unwrap();
+    db.execute(&put).unwrap();
+    assert_eq!(
+        texts(&mut db, "SELECT k FROM d ORDER BY emb <=> '[0, 1]' LIMIT 3"),
+        texts(&mut db, "get d select k near emb [0, 1] limit 3")
+    );
+    assert_eq!(
+        texts(&mut db, "SELECT k FROM d ORDER BY s <#> '{2:1}/4' LIMIT 2"),
+        texts(&mut db, "get d select k near s '{2:1}/4' limit 2")
+    );
+    for (q, says) in [
+        (
+            "SELECT k FROM d ORDER BY emb <-> $1 LIMIT 3",
+            "`emb <->` orders by the l2 distance, and its index measures cosine: `<=>`",
+        ),
+        (
+            "SELECT k FROM d ORDER BY s <=> $1 LIMIT 3",
+            "its index measures dot: `<#>`",
+        ),
+        (
+            "SELECT k FROM d ORDER BY loc <-> $1 LIMIT 3",
+            "`loc` holds points",
+        ),
+        (
+            "SELECT k FROM d ORDER BY k <-> $1 LIMIT 3",
+            "no vector index",
+        ),
+    ] {
+        let st = parse_one(q).unwrap();
+        let point = Value::List(vec![Value::Float(0.0), Value::Float(1.0)]);
+        let v = match q.contains("loc") {
+            true => point,
+            false => Value::Vector(vec![0.0, 1.0]),
+        };
+        let e = db.execute_with(&st, &[v]).unwrap_err().to_string();
+        assert!(e.contains(says), "{q}: {e}");
+    }
+}
+
+/// SQL's `not null` is `required`: a write must give the field a value,
+/// and a `null` given is none -- as `fenec types` and the declared
+/// schema's `.notNull()` read it.
+#[test]
+fn a_required_field_takes_no_null() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "CREATE TABLE t (a text NOT NULL, b int); insert t {a: 'x', b: 1}",
+    );
+    for q in [
+        "insert t {b: 2}",
+        "insert t {a: null, b: 2}",
+        "INSERT INTO t (a, b) VALUES (NULL, 3)",
+        "UPDATE t SET a = NULL WHERE b = 1",
+        "put t {a: null}",
+    ] {
+        let e = db
+            .execute_with(&parse_one(q).unwrap(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("field `a` is required"), "{q}: {e}");
+    }
+    assert_eq!(texts(&mut db, "get t select a"), ["x"]);
 }

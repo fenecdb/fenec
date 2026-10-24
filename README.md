@@ -8,7 +8,7 @@ with the server, many clients writing into one file through one writer
 and sharing their disk syncs, a server with no cache in front of it, a file
 per tenant in every region, and search built in --
 BM25 over text with typos, highlights and facets, and vectors for meaning.
-Written in Rust with no dependencies, it runs inside a web page as 301 KB of
+Written in Rust with no dependencies, it runs inside a web page as 330 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FenecQL**).
@@ -176,7 +176,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-301 KB of gzipped WebAssembly and a 60 KB gzipped client — no wasm-bindgen, no
+330 KB of gzipped WebAssembly and a 60 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
 `@fenecdb/web/client`, 9 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fenecdb.com/docs/javascript#packages)). With live
@@ -287,7 +287,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`; imported from PostgreSQL's `jsonb`) `geo` (a point, `[lon, lat]`; imported from PostGIS) `vector<N[, f16]>` `sparse<N>` |
 | **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@sorted(a, b desc)` and `@unique(a, b)` over several fields, `@ttl(30m)`, `@text(k1=.., b=.., prefix=..)`, `@geo`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@inverted`; `@hash`, `@unique` and `@sorted` on a path into a `json` field too |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `in (get ...)` (another collection's rows, run once, up to 100 000 values), `is null`, `between`, `like` and `ilike` |
-| **SQL's spellings** | `INSERT INTO … VALUES`, `UPDATE … SET a = …`, `IN (…)`, `BETWEEN`, `LIKE` and `ILIKE`, `ON CONFLICT DO NOTHING` and `DO UPDATE SET`, `IS DISTINCT FROM`, single quotes and `\|\|` read as the FenecQL they mean, through every client; `CREATE TABLE`, `JOIN` and the rest refused with the FenecQL to write ([From SQL](https://fenecdb.com/docs/sql)) |
+| **SQL's spellings** | `CREATE TABLE` and `CREATE INDEX` (types as `fenec import` maps them), `INSERT INTO … VALUES`, `UPDATE … SET a = …`, `JOIN` and `LEFT JOIN` on a key (a `lookup`, answered flat), `IN (…)`, `EXISTS`, `DISTINCT`, `BETWEEN`, `LIKE` and `ILIKE`, `ON CONFLICT`, pgvector's `ORDER BY emb <=> $1`, single quotes and `\|\|` read as the FenecQL they mean, through every client; what would answer otherwise refused with the FenecQL to write ([From SQL](https://fenecdb.com/docs/sql)) |
 | **Aggregates** | `count(*)` `sum` `avg` `min` `max`, whole or per `group`, ordered and paged by any of them |
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, keyed by one field or several (`on (org, order) = (org, id)`), chainable to 8 levels |
 | **Expiry** | `seen timestamp @ttl(30m)` — a row gone that long after its time: out of every read at once, deleted by the server's sweeper as ordinary deletes |
@@ -306,14 +306,15 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Regions** | nodes in regions and zones, a tenant's replica in another zone of its region · a region keeping its own directory, leased and failed over by its own router while cut off ([its own directory](https://fenecdb.com/docs/sharding#region-directories)) · one URL for every region: a Cloudflare Worker that learns each tenant's home from the routers and names each client to them under an HMAC, so a refused token waits by the client's address ([global entry](https://fenecdb.com/docs/sharding#global-entry)) · read replicas in other regions: the reads a client marks, through any SDK (`reads: 'nearest'` in JavaScript), answered near it and never from before its own write, a subscription sent after that write waiting for it too, and a JavaScript live query's runs after each change its stream at home tells of ([read replicas](https://fenecdb.com/docs/sharding#read-replicas)) · a kit to run them: systemd units, alert rules, a runbook and a failover drill ([deploy/](deploy/RUNBOOK.md)) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, `--slow-ms`, and OpenTelemetry traces over OTLP (`--otlp-endpoint`) |
 | **Studio** | `fenec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own |
-| **Runtime size** | 301 KB gzip wasm + 60 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
+| **Runtime size** | 330 KB gzip wasm + 60 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1880–3013 KB binary · 2.99 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
 What it deliberately does **not** do — no second writer (a batch holds the
 database from its first write to its end), no interactive transactions, no
 SQL dialect (SQL's everyday spellings are read as FenecQL) and no PostgreSQL
-wire protocol, no JOIN (an uncorrelated `in (get ...)` aside),
+wire protocol, no join of arbitrary conditions (a JOIN on an indexed key is
+a `lookup`, and an uncorrelated `in (get ...)` a filter),
 no change of a field's type in place, no multi-writer replication, no decimal
 type, no TLS (a terminator goes in front) — is listed
 with its reasoning in [Limits](https://fenecdb.com/docs/limits), alongside every
@@ -331,7 +332,7 @@ query; it is not a join and is not trying to be one.
 | [Quickstart](https://fenecdb.com/docs/quickstart) | Build it, open a file, write a row and query it |
 | [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, the mapped file, why there is no page cache and exactly one writer, and HNSW with a filter |
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
-| [From SQL](https://fenecdb.com/docs/sql) | The SQL FenecQL reads as written, what it refuses and what to write instead, where the meaning is not SQL's: nulls, double quotes, text |
+| [From SQL](https://fenecdb.com/docs/sql) | The SQL FenecQL reads as written — tables, joins, subqueries, pgvector's distances — what it refuses and what to write instead, where the meaning is not SQL's: nulls, double quotes, text, joins |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state, a schema declared in code |
 | [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, raw FenecQL, batches, SSE, vector search over POST, a read marked for a replica |

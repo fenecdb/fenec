@@ -37,6 +37,8 @@ FenecQL summary
            [lookup <name> on (<child>, ...) = (<parent>, ...) ...]   -- a key over several fields
   explain get <name> ...                  -- the path the query took, one row a step
   select a, b from <name> ...             -- the classic SQL order works too
+  select o.id, c.name from orders o join customers c on c.id = o.customer_id
+                                          -- a JOIN on a key is a lookup; CREATE TABLE, INDEX too
   set <name> { field: value } [where <expr>]
   del <name> [where <expr>]
   set | del ... [order <field> [desc]] [limit N] [returning * | a,b]   -- pick the rows, answer them

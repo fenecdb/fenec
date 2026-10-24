@@ -110,8 +110,8 @@ should live.</p>
 <table>
 <thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
 <tbody>
-<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">301 KB gzip<br><small>the wasm module</small></td></tr>
-<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1331–1897 KB</td></tr>
+<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">330 KB gzip<br><small>the wasm module</small></td></tr>
+<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1880–3013 KB</td></tr>
 <tr><td>Server</td><td><code>fenec-server</code>: HTTP, replication and tenants in one process</td><td class="n">2.99 MB image</td></tr>
 <tr><td>Embedded</td><td><code>fenec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
 </tbody>
@@ -124,7 +124,7 @@ should live.</p>
 
 <ul>
   <li><b>One writer.</b> Many readers, but one write or batch at a time.</li>
-  <li><b>No SQL dialect and no JOIN.</b> Every client speaks FenecQL, over HTTP or in process; it reads SQL's everyday spellings as the statements they mean (<a href="sql.html">From SQL</a>).</li>
+  <li><b>No SQL dialect, and a join only on a key.</b> Every client speaks FenecQL, over HTTP or in process; it reads SQL's everyday spellings as the statements they mean, a <code>JOIN</code> on an indexed key among them (<a href="sql.html">From SQL</a>).</li>
   <li><b>No decimals.</b> Store money as cents.</li>
 </ul>
 
@@ -137,13 +137,16 @@ than a roadmap.</p>
     holds the write lock for as long as it runs and lands whole or not at
     all; readers read beside it. There are no interactive transactions held
     open across requests.</li>
-  <li><b>No JOIN.</b> A query reads one collection, plus the children
-    <code>lookup</code> attaches to each of its rows — and, chained, the
-    children of those — and filters by another's rows only through an
-    uncorrelated <code>in (get …)</code>.</li>
+  <li><b>A join only on a key.</b> A query reads one collection, plus the
+    children <code>lookup</code> attaches to each of its rows — and,
+    chained, the children of those — and filters by another's rows only
+    through an uncorrelated <code>in (get …)</code>. SQL's
+    <code>JOIN</code> on an indexed key reads as one of those, answered flat;
+    a join of any other condition is none.</li>
   <li><b>No SQL dialect.</b> FenecQL is the one language, in the page, in
-    Rust and over HTTP. It reads <code>INSERT … VALUES</code>,
-    <code>UPDATE … SET</code>, <code>IN (…)</code>, <code>BETWEEN</code>,
+    Rust and over HTTP. It reads <code>CREATE TABLE</code>, <code>INSERT …
+    VALUES</code>, <code>UPDATE … SET</code>, <code>JOIN</code>,
+    <code>IN (…)</code>, <code>EXISTS</code>, <code>BETWEEN</code>,
     <code>LIKE</code> and <code>ON CONFLICT</code> as the statements they
     mean and refuses the rest saying what to write; there is no wire
     protocol for SQL drivers, and no ORM speaks it.</li>

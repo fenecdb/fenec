@@ -1,6 +1,6 @@
 <!--
 title: From SQL — fenecdb
-description: The SQL spellings FenecQL reads as written — INSERT … VALUES, UPDATE … SET, IN (…), BETWEEN, LIKE and ILIKE, ON CONFLICT, IS DISTINCT FROM, single quotes and || — each the statement it means, what is refused with the FenecQL to write instead, and where the meaning differs from SQL's: nulls, double quotes, text.
+description: The SQL spellings FenecQL reads as written — CREATE TABLE and CREATE INDEX, INSERT … VALUES, UPDATE … SET, JOIN, IN (…), EXISTS, DISTINCT, BETWEEN, LIKE and ILIKE, ON CONFLICT, pgvector's <-> — each the statement it means, what is refused with the FenecQL to write instead, and where the meaning differs from SQL's: nulls, double quotes, text, joins.
 -->
 
 <h1>From SQL</h1>
@@ -9,14 +9,16 @@ description: The SQL spellings FenecQL reads as written — INSERT … VALUES, U
 here.</p>
 
 <p>FenecQL is not SQL, but the everyday spellings of SQL are FenecQL too.
-The parser reads <code>INSERT INTO … VALUES</code>, <code>UPDATE … SET a =
-…</code>, <code>IN (…)</code>, <code>BETWEEN</code>, <code>LIKE</code> and
-the rest of the table below into the very statements FenecQL writes, so a
-text in either reaches the engine the same way — over HTTP, through
-<a href="/docs/mcp">MCP</a>, in the <code>fenec</code> shell, in the page
-and in an app. There is no SQL mode and no second parser: the two
-spellings mix in one statement. What has no exact meaning here —
-<code>CREATE TABLE</code>, <code>JOIN</code>, a transaction left open — is
+The parser reads <code>CREATE TABLE</code>, <code>INSERT INTO …
+VALUES</code>, <code>UPDATE … SET a = …</code>, <code>JOIN</code>,
+<code>IN (…)</code>, <code>EXISTS</code>, <code>DISTINCT</code>,
+<code>LIKE</code> and the rest of the tables below into the very
+statements FenecQL writes, so a text in either reaches the engine the same
+way — over HTTP, through <a href="/docs/mcp">MCP</a>, in the
+<code>fenec</code> shell, in the page and in an app. There is no SQL mode
+and no second parser: the two spellings mix in one statement. What would
+answer otherwise than SQL does — a <code>RIGHT JOIN</code>, an aggregate
+over two tables' rows, a <code>DEFAULT</code>, a transaction left open — is
 refused with the FenecQL that does it, so an agent writing SQL by habit
 learns the language from its first error.</p>
 
@@ -28,9 +30,9 @@ the same statement — or refused.</p>
 
 <h2 id="session">A session written as SQL</h2>
 
-<pre data-lang="fenecql">create collection users (name text, email text nocase @unique, age int @sorted, city text, visits int)</pre>
-
-<pre data-lang="sql">INSERT INTO users (name, email, age, city) VALUES ('Ada', 'ada@example.com', 36, 'London'), ('Bob', 'bob@example.com', 25, 'Leeds'), ('Cem', 'cem@example.com', 52, 'İzmir') RETURNING name  -- → "Ada"
+<pre data-lang="sql">CREATE TABLE users (id serial PRIMARY KEY, name text, email citext NOT NULL UNIQUE, age integer, city text, visits integer)
+CREATE INDEX users_age ON users (age)
+INSERT INTO users (name, email, age, city) VALUES ('Ada', 'ada@example.com', 36, 'London'), ('Bob', 'bob@example.com', 25, 'Leeds'), ('Cem', 'cem@example.com', 52, 'İzmir') RETURNING name  -- → "Ada"
 SELECT name FROM users WHERE age BETWEEN 25 AND 36 ORDER BY age DESC LIMIT 10  -- → "Ada"
 SELECT name FROM users WHERE city IN ('Leeds', 'İzmir') AND name LIKE 'C%'  -- → "Cem"
 SELECT count(*) AS n FROM users WHERE email ILIKE '%@EXAMPLE.COM'  -- → 3
@@ -40,13 +42,29 @@ INSERT INTO users (email) VALUES ('bob@example.com') ON CONFLICT DO NOTHING  -- 
 INSERT INTO users (email, visits) VALUES ('bob@example.com', 1) ON CONFLICT (email) DO UPDATE SET visits = excluded.visits RETURNING visits  -- → 1
 SELECT name || ' <' || email || '>' AS who FROM users WHERE id IN (SELECT id FROM users WHERE age > 30) ORDER BY id  -- → "Ada <ada@example.com>"
 SELECT name FROM users WHERE visits IS DISTINCT FROM 2  -- → "Bob"
+SELECT city, count(*) AS n FROM users GROUP BY 1 ORDER BY 2 DESC, 1  -- → "Leeds"
+CREATE TABLE orders (id serial PRIMARY KEY, user_id integer NOT NULL, total integer, status text)
+CREATE INDEX ON orders USING hash (user_id)
+INSERT INTO orders (user_id, total, status) VALUES (1, 1200, 'paid'), (1, 800, 'open'), (2, 450, 'paid')  -- → 3
+SELECT u.name, o.total FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status = 'paid' ORDER BY o.total DESC  -- → "Ada"
+SELECT u.name, o.total FROM users u LEFT JOIN orders o ON o.user_id = u.id ORDER BY u.id DESC  -- → "Cem"
+SELECT count(*) AS n FROM orders o JOIN users u ON u.id = o.user_id WHERE u.city = 'London'  -- → 2
+SELECT DISTINCT u.city FROM users u JOIN orders o ON o.user_id = u.id ORDER BY u.city  -- → "Leeds"
+SELECT name FROM users u WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)  -- → "Cem"
+SELECT name FROM users WHERE age = (SELECT max(age) FROM users)  -- → "Cem"
 DELETE FROM users WHERE age NOT BETWEEN 20 AND 40  -- → 1
+CREATE TABLE docs (id serial PRIMARY KEY, body text, emb vector(3))
+CREATE INDEX ON docs USING hnsw (emb vector_cosine_ops)
+INSERT INTO docs (body, emb) VALUES ('north', [0, 1, 0]), ('east', [1, 0, 0]), ('up', [0, 0, 1])  -- → 3
+SELECT body FROM docs ORDER BY emb <=> '[0.9, 0.1, 0]' LIMIT 1  -- → "east"
 </pre>
 
-<p>The collection is made in FenecQL: <code>CREATE TABLE</code> is not read
-yet. <code>email</code> is <code>nocase</code>, so its <code>=</code>,
-its <code>@unique</code> and its <code>LIKE</code> compare by the case
-fold, and <code>'ADA@example.com'</code> is Ada's row.</p>
+<p><code>email</code> is <code>citext</code>, a <code>nocase</code> field,
+so its <code>=</code>, its <code>@unique</code> and its <code>LIKE</code>
+compare by the case fold, and <code>'ADA@example.com'</code> is Ada's row.
+Each join reads as the <code>lookup</code> it is, or as one table's rows
+filtered by the other's (<a href="#joins">below</a>); the last statement
+is <code>near</code>, by the cosine distance the index measures.</p>
 
 <h2 id="read">Read as written</h2>
 
@@ -86,9 +104,118 @@ last expression.</p>
 <tr data-same><td><code>UPDATE "t" SET "n" = 1 WHERE id IN (1, 2) RETURNING "n"</code></td><td><code>set t {n: 1} where id in [1, 2] returning n</code></td><td>a quoted name where only a name can stand (<a href="#quotes">below</a>)</td></tr>
 <tr data-same><td><code>SELECT count(DISTINCT u), max(at) FROM t WHERE at &gt;= $1</code></td><td><code>get t select count(distinct u), max(at) where at &gt;= $1</code></td><td></td></tr>
 <tr data-same><td><code>SELECT a, CASE WHEN n &gt; 1 THEN 'big' ELSE 'small' END AS size FROM t</code></td><td><code>get t select a, case when n &gt; 1 then "big" else "small" end as size</code></td><td></td></tr>
+<tr data-same><td><code>SELECT u.name FROM users AS u WHERE u.age &gt; 30</code></td><td><code>get users select name where age &gt; 30</code></td><td>an alias, and the names it qualifies, written bare</td></tr>
+<tr data-same><td><code>SELECT DISTINCT city FROM users ORDER BY city</code></td><td><code>get users select city group city order city</code></td><td>a group of the list's items, each set of values once (<a href="#distinct">below</a>)</td></tr>
+<tr data-same><td><code>SELECT city FROM users GROUP BY city</code></td><td><code>get users select city group city</code></td><td>a group with no aggregate answers its keys</td></tr>
+<tr data-same><td><code>SELECT city, count(*) AS n FROM users GROUP BY 1 ORDER BY 2 DESC</code></td><td><code>get users select city, count(*) as n group city order n desc</code></td><td>a key by its place in the list</td></tr>
+<tr data-same><td><code>SELECT city c, count(*) n FROM users GROUP BY city</code></td><td><code>get users select city as c, count(*) as n group city</code></td><td>a name without <code>AS</code>, where the list goes on or ends at <code>FROM</code></td></tr>
+<tr data-same><td><code>SELECT count(*) FILTER (WHERE age IS NULL) AS unknown, sum(total) FILTER (WHERE paid) AS paid FROM t</code></td><td><code>get t select count(case when age is null then 1 end) as unknown, sum(case when paid then total end) as paid</code></td><td>what <code>case</code> leaves of each row: every aggregate passes a null over</td></tr>
+<tr data-same><td><code>SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id AND o.total &gt; 100)</code></td><td><code>get users where id in (get orders select user_id where total &gt; 100)</code></td><td>the one equality with the row around it is the list, the rest the query's</td></tr>
+<tr data-same><td><code>SELECT * FROM users u WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)</code></td><td><code>get users where not (id in (get orders select user_id))</code></td><td>a row whose key is null has no match: kept, as SQL keeps it</td></tr>
+<tr data-same><td><code>SELECT * FROM t WHERE at = (SELECT max(at) FROM t)</code></td><td><code>get t where at in (get t select max(at))</code></td><td>a query's one value: an aggregate, or <code>LIMIT 1</code></td></tr>
+<tr data-same><td><code>UPDATE jobs SET owner = $1 WHERE id = (SELECT id FROM jobs ORDER BY run_at LIMIT 1)</code></td><td><code>set jobs {owner: $1} where id in (get jobs select id order run_at limit 1)</code></td><td></td></tr>
+<tr data-same><td><code>CREATE TABLE users (id serial PRIMARY KEY, name text NOT NULL, email varchar(200) UNIQUE, age integer, tags text[], meta jsonb)</code></td><td><code>create collection users (name text required, email text @unique, age int, tags [text], meta json)</code></td><td>the row's <code>id</code> is the database's; types as <a href="/docs/import"><code>fenec import</code></a> maps them (<a href="#create-table">below</a>)</td></tr>
+<tr data-same><td><code>CREATE TABLE lines (order_id int, n int, sku text, PRIMARY KEY (order_id, n))</code></td><td><code>create collection lines (order_id int required, n int required, sku text, @unique(order_id, n))</code></td><td>a primary key is its rules: unique, and present</td></tr>
+<tr data-same><td><code>CREATE INDEX users_age ON users (age)</code></td><td><code>create index on users (age) @sorted</code></td><td>a btree is <code>@sorted</code>; the index's name is not kept</td></tr>
+<tr data-same><td><code>CREATE UNIQUE INDEX ON users (email)</code></td><td><code>create index on users (email) @unique</code></td><td></td></tr>
+<tr data-same><td><code>CREATE INDEX ON orders USING hash (user_id)</code></td><td><code>create index on orders (user_id) @hash</code></td><td></td></tr>
+<tr data-same><td><code>CREATE INDEX ON posts (owner, created DESC)</code></td><td><code>create index on posts (owner, created desc) @sorted</code></td><td>over several columns, an index over several fields</td></tr>
+<tr data-same><td><code>CREATE INDEX ON docs USING hnsw (emb vector_cosine_ops) WITH (m = 16)</code></td><td><code>create index on docs (emb) @hnsw(cosine, m=16)</code></td><td>pgvector's operator class names the distance</td></tr>
+<tr data-same><td><code>CREATE INDEX ON docs USING gin (to_tsvector('english', body))</code></td><td><code>create index on docs (body) @text</code></td><td>full text, for <a href="/docs/fenecql#the-text-clause"><code>match</code></a></td></tr>
 </tbody>
 </table>
 </div>
+
+<h2 id="joins">Joins</h2>
+
+<p>A <code>JOIN</code> on a key is a <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a>
+from each row of the first table to its matches in the next, answered as
+SQL answers it: flat rows, a row a pair — and, for a <code>LEFT
+JOIN</code>, a row of <code>null</code>s where nothing matched — the
+columns the list names under SQL's names. Where only one table's columns
+are answered and each of its rows is answered once — the other table found
+by its <code>id</code>, or <code>DISTINCT</code> — it is that table's
+<code>get</code>, the other's rows a filter. Each line below is the
+FenecQL it parses to; a <code>lookup</code>'s line answers flat, which no
+FenecQL text asks for.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>SQL</th><th>FenecQL</th><th>Notes</th></tr></thead>
+<tbody>
+<tr data-as><td><code>SELECT o.id, u.name FROM orders o JOIN users u ON u.id = o.user_id WHERE o.total &gt; 100 ORDER BY o.placed DESC LIMIT 20</code></td><td><code>get orders select id where total &gt; 100 order placed desc limit 20 lookup users on id = user_id required select name</code></td><td>each order's user; <code>required</code> keeps an order only where a user matched</td></tr>
+<tr data-as><td><code>SELECT u.name, o.total FROM users u LEFT JOIN orders o ON o.user_id = u.id AND o.status = 'paid' ORDER BY u.name</code></td><td><code>get users select name order name lookup orders on user_id select total where status = "paid"</code></td><td>a user with no paid order is a row, <code>total</code> null</td></tr>
+<tr data-as><td><code>SELECT l.qty, o.status, u.name FROM lines l JOIN orders o ON o.id = l.order_id JOIN users u ON u.id = o.user_id</code></td><td><code>get lines select qty lookup orders on id = order_id required select status lookup users on id = user_id required select name</code></td><td>a chain: each join hangs off the table before it</td></tr>
+<tr data-same><td><code>SELECT o.id FROM orders o JOIN users u ON u.id = o.user_id WHERE u.email = $1</code></td><td><code>get orders select id where user_id in (get users select id where email = $1)</code></td><td>the users only a filter: each order found once</td></tr>
+<tr data-same><td><code>SELECT DISTINCT u.name FROM users u JOIN orders o ON o.user_id = u.id WHERE o.status = 'open'</code></td><td><code>get users select name where id in (get orders select user_id where status = "open") group name</code></td><td></td></tr>
+<tr data-same><td><code>SELECT u.id, count(*) AS n FROM users u JOIN orders o ON o.user_id = u.id WHERE u.city = 'Leeds' GROUP BY u.id</code></td><td><code>get orders select user_id as id, count(*) as n where user_id in (get users select id where city = "Leeds") group user_id</code></td><td>the orders' rows, the users a filter: <code>u.id</code> is each order's <code>user_id</code></td></tr>
+<tr data-same><td><code>SELECT sum(o.total) AS t FROM orders o, users u WHERE u.id = o.user_id AND u.city = 'Leeds'</code></td><td><code>get orders select sum(total) as t where user_id in (get users select id where city = "Leeds")</code></td><td>a comma is a join, its key in the <code>WHERE</code></td></tr>
+<tr data-same><td><code>SELECT u.email FROM users u LEFT JOIN orders o ON o.user_id = u.id WHERE o.id IS NULL</code></td><td><code>get users select email where not (id in (get orders select user_id))</code></td><td>the rows a <code>LEFT JOIN</code> finds none for</td></tr>
+<tr data-as><td><code>SELECT id, body FROM docs WHERE kind = 'note' ORDER BY emb &lt;=&gt; $1 LIMIT 10</code></td><td><code>get docs select id, body where kind = "note" near emb $1 limit 10</code></td><td>pgvector's distance is <code>near</code> where the index measures it (<a href="#pgvector">below</a>)</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>What a join is read as, and what it cannot be:</p>
+
+<ul>
+  <li><b>The key.</b> <code>ON</code> pairs a column of the joined table
+    with one of the table joined just before it — several, joined by
+    <code>AND</code>, are a key over several fields. Where the answer is
+    the joined rows beside each row — read as a <code>lookup</code> — the
+    joined table is read by its column, which must be its <code>id</code>,
+    a field with <code>@hash</code> or the first fields of an index over
+    several, as a <code>lookup</code>'s child key must be; anything else
+    is refused naming the index to declare. Where only one table's columns
+    are answered and the other is a filter, <code>key in (get …)</code>,
+    no index is needed, and a small joined table is answered through the
+    first table's index — that list is held to 100 000 values, as any
+    <code>in (get …)</code> is. A join that finds the joined table by its
+    <code>id</code> looks each row's match up by that id past them, at any
+    size, whichever table comes first and with the joined table filtered,
+    where the other key is an <code>id</code>, an int, a float or a
+    timestamp;
+    an aggregate, <code>DISTINCT</code>, <code>EXISTS</code> or
+    <code>LEFT JOIN … IS NULL</code> over a larger joined table is refused,
+    never cut. Its other conditions read one table's columns. A comma between tables is a join
+    whose key is in the <code>WHERE</code>, and <code>USING (k)</code> pairs
+    <code>k</code> of each.</li>
+  <li><b>The names.</b> A column is named by its table's name or alias,
+    <code>o.total</code>; a name with no table is the first table's — the
+    parser reads no schema, and SQL would have refused one two tables
+    hold — and one the first table has no field of is refused, saying to
+    name it with its table. A column no table has is refused, as SQL refuses
+    it, wherever the statement names it — an <code>ON</code> term too — and
+    so is a table no database holds. A
+    column answers under its name, <code>total</code>, or its
+    <code>AS</code>; two that would answer under one name — every table's
+    <code>id</code> under <code>SELECT *</code> — are refused, since a row
+    holds a name once: <code>SELECT o.*, u.name AS who</code>.</li>
+  <li><b>The order and the page</b> are the first table's, whose rows the
+    others are found for: <code>ORDER BY</code> names its columns, and
+    <code>LIMIT</code> counts the flat rows, the first table read as far
+    as the page could need. Ordering by a joined table's column would put
+    each row's matches in order rather than the rows: refused, saying to
+    name that table first.</li>
+  <li><b>Aggregates and <code>DISTINCT</code></b> read one table's columns,
+    the other's rows a filter, where each row of it is counted once:
+    folded over pairs, a row matching three times would be counted three
+    times. Grouping one table's rows with another's column beside each
+    group is a <code>lookup</code> after the groups: <code>get orders
+    select user_id, count(*) as n group user_id lookup users on id =
+    user_id select name</code>.</li>
+  <li><b>A <code>LEFT JOIN</code>'s table in the <code>WHERE</code></b>
+    reads the rows it kept with nulls: <code>o.id IS NULL</code> is the rows
+    with none, and anything else is refused — a condition on its rows goes
+    in <code>ON</code>, and one that drops the rows kept with nulls makes it
+    an inner join, written <code>JOIN</code>. A condition in a
+    <code>LEFT JOIN</code>'s <code>ON</code> on a table before it keeps that
+    table's rows and drops only their matches, which no <code>lookup</code>
+    says: refused.
+    An inner join after a <code>LEFT JOIN</code>, a <code>RIGHT</code>,
+    <code>FULL</code> or <code>CROSS JOIN</code> and a condition between two
+    tables' columns other than the key are refused.</li>
+</ul>
 
 <h2 id="refused">Refused, and what to write</h2>
 
@@ -98,19 +225,22 @@ last expression.</p>
 <table>
 <thead><tr><th>SQL</th><th>FenecQL</th><th>Why</th></tr></thead>
 <tbody>
-<tr data-refused><td><code>CREATE TABLE t (a int)</code></td><td><code>create collection t (a int)</code></td><td>not read yet</td></tr>
-<tr data-refused><td><code>CREATE INDEX t_a ON t (a)</code></td><td><code>create index on t (a) @hash</code></td><td>an index has no name, and says its kind: <code>@hash</code>, <code>@sorted</code>, <code>@unique</code></td></tr>
 <tr data-refused><td><code>ALTER TABLE t ADD COLUMN a int</code></td><td><code>alter collection t add field a int</code></td><td></td></tr>
 <tr data-refused><td><code>DROP TABLE t</code></td><td><code>drop collection t</code></td><td></td></tr>
 <tr data-refused><td><code>TRUNCATE t</code></td><td><code>del t</code></td><td></td></tr>
 <tr data-refused><td><code>BEGIN</code></td><td>a <code>/batch</code></td><td>no transaction is held open across requests; a <a href="/docs/http#batches"><code>/batch</code></a> lands whole or not at all, and <a href="/docs/fenecql#require"><code>require</code></a> makes a count its condition</td></tr>
-<tr data-refused><td><code>SELECT * FROM orders o JOIN users u ON u.id = o.user_id</code></td><td><code>get orders lookup users on id = user_id</code></td><td>no join: <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a> attaches each order's user, and <code>get users lookup orders on user_id</code> each user's orders; <code>in (get …)</code> filters by another collection's rows. A <code>where</code> of the orders goes before <code>lookup</code>: the clauses after it are the users'</td></tr>
-<tr data-refused><td><code>SELECT * FROM orders o, users u WHERE u.id = o.user_id</code></td><td><code>get orders lookup users on id = user_id</code></td><td>a comma between two collections is a join</td></tr>
-<tr data-refused><td><code>SELECT u.name FROM users u WHERE u.age &gt; 30</code></td><td><code>get users select name where age &gt; 30</code></td><td>no alias: one collection is in scope, its fields written bare</td></tr>
-<tr data-refused><td><code>SELECT DISTINCT city FROM users</code></td><td><code>get users select city, count(*) group city</code></td><td>a <code>group</code> takes an aggregate; or <code>count(distinct city)</code></td></tr>
+<tr data-refused><td><code>CREATE TABLE t (n int DEFAULT 0, u int REFERENCES users(id))</code></td><td><code>create collection t (n int, u int @hash)</code></td><td>no default, foreign key or <code>CHECK</code>: dropped, the collection would take writes SQL refuses (<a href="#create-table">below</a>)</td></tr>
+<tr data-refused><td><code>CREATE TABLE t (price numeric(10, 2))</code></td><td><code>create collection t (price_cents int)</code></td><td>no decimal: an <code>int</code> of the smallest unit keeps it exact</td></tr>
+<tr data-refused><td><code>CREATE TABLE t (id uuid PRIMARY KEY, n int)</code></td><td><code>create collection t (uuid text required @unique, n int)</code></td><td>a row's <code>id</code> is an int the database makes</td></tr>
+<tr data-refused><td><code>CREATE INDEX ON docs USING ivfflat (emb vector_l2_ops)</code></td><td><code>create index on docs (emb) @hnsw(l2)</code></td><td>the vector index is a graph</td></tr>
+<tr data-refused><td><code>SELECT o.id FROM orders o JOIN users u ON u.id = o.user_id ORDER BY u.name</code></td><td><code>get users order name lookup orders on user_id required select id</code></td><td>a join's rows are put in order by the first table's columns: name the table it orders by first</td></tr>
+<tr data-refused><td><code>SELECT u.name, count(*) FROM users u JOIN orders o ON o.user_id = u.id GROUP BY u.name</code></td><td><code>get orders select user_id, count(*) as n group user_id lookup users on id = user_id select name</code></td><td>an aggregate over a join reads one table's columns; the groups, then each one's user</td></tr>
+<tr data-refused><td><code>SELECT * FROM users u RIGHT JOIN orders o ON o.user_id = u.id</code></td><td><code>select * from orders o left join users u on u.id = o.user_id</code></td><td>a <code>RIGHT JOIN</code> is a <code>LEFT JOIN</code> the other way round; <code>FULL</code> and <code>CROSS</code> are none</td></tr>
+<tr data-refused><td><code>SELECT u.name FROM users u LEFT JOIN orders o ON o.user_id = u.id WHERE o.total IS NULL</code></td><td><code>select u.name from users u left join orders o on o.user_id = u.id and o.total is null</code></td><td>the <code>WHERE</code> would read the rows kept with nulls; in <code>ON</code> it filters the orders</td></tr>
+<tr data-refused><td><code>SELECT * FROM t WHERE x = (SELECT y FROM u)</code></td><td><code>get t where x in (get u select y)</code></td><td>the query may answer several rows, where SQL's <code>=</code> refuses a second: <code>IN</code>, or <code>LIMIT 1</code></td></tr>
+<tr data-refused><td><code>SELECT (SELECT name FROM products p WHERE p.id = l.product_id) AS name FROM lines l</code></td><td><code>select p.name from lines l join products p on p.id = l.product_id</code></td><td>another table's row beside each row is a join</td></tr>
 <tr data-refused><td><code>SELECT * FROM t WHERE meta-&gt;&gt;'source' = 'web'</code></td><td><code>get t where meta.source = 'web'</code></td><td>a json field's member is a path; <code>json_extract(meta, '$.source')</code> is answered so too</td></tr>
-<tr data-refused><td><code>SELECT * FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)</code></td><td><code>get users lookup orders on user_id required</code></td><td>the users with an order</td></tr>
-<tr data-refused><td><code>SELECT * FROM t WHERE at = (SELECT max(at) FROM t)</code></td><td><code>get t order at desc limit 1</code></td><td>a query stands after <code>in</code>; one value is a statement of its own</td></tr>
+<tr data-refused><td><code>SELECT id, emb &lt;-&gt; $1 AS d FROM docs ORDER BY emb &lt;-&gt; $1 LIMIT 5</code></td><td><code>get docs select id near emb $1 limit 5</code></td><td>each row's <code>_score</code> holds what the distance is turned into: the L2 distance, the cosine similarity, the inner product (<a href="#pgvector">below</a>)</td></tr>
 <tr data-refused><td><code>SELECT * FROM docs WHERE to_tsvector(body) @@ to_tsquery('rust')</code></td><td><code>get docs match body "rust"</code></td><td>full text is <a href="/docs/fenecql#the-text-clause"><code>match</code></a> over an <code>@text</code> field; MySQL's <code>MATCH … AGAINST</code> too</td></tr>
 <tr data-refused><td><code>SELECT * FROM users WHERE email ~ '@example\.org$'</code></td><td><code>get users where email like '%@example.org'</code></td><td><code>~</code> is <i>contains</i>, not a regular expression (<a href="#tilde">below</a>)</td></tr>
 <tr data-refused><td><code>SELECT * FROM t ORDER BY x NULLS LAST</code></td><td><code>get t order x is null, x</code></td><td>a null comes first ascending</td></tr>
@@ -127,7 +257,8 @@ last expression.</p>
 <p>Not read, with no error of its own: <code>WITH</code>, window
 functions, <code>CAST</code> and <code>::</code>, <code>LIMIT x,
 y</code>, <code>UNION</code>, <code>INSERT OR IGNORE</code> and
-<code>REPLACE</code>, MySQL's <code>ON DUPLICATE KEY</code>.</p>
+<code>REPLACE</code>, MySQL's <code>ON DUPLICATE KEY</code>, <code>?</code>
+placeholders (<code>$1</code> is a parameter).</p>
 
 <h2 id="differs">Where the meaning is not SQL's</h2>
 
@@ -293,3 +424,118 @@ refused.</p>
     with <code>LIKE</code>; <code>users.email</code> — a column named with
     its table — with the field written bare.</li>
 </ul>
+
+<h3 id="distinct"><code>DISTINCT</code>, <code>EXISTS</code> and a query's one value</h3>
+
+<p><code>SELECT DISTINCT a, b</code> is a group of its items, which
+answers each set of their values once, as does a <code>GROUP BY</code>
+with no aggregate; <code>ORDER BY</code> then names the list's columns, as
+SQL requires of <code>DISTINCT</code>. Over an aggregating list whose keys
+it lists it changes nothing, and <code>DISTINCT ON</code> is refused:
+<code>first(name by signup)</code> is the row of each key it asks for.
+<code>ORDER BY 2</code> and <code>GROUP BY 1</code> name the list's items
+by their places — written with <code>BY</code>, as SQL writes them: in
+FenecQL's <code>order 1</code> and <code>group 1</code> the number is a
+key, as it always was. Over <code>*</code>, whose places the parser
+reading no schema cannot count, a number is refused, saying to name the
+columns; one naming an aggregate as a group's key is refused as SQL
+refuses it.</p>
+
+<p><code>EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id AND …)</code>
+takes the one equality between a column of its query's table and one of
+the row around it as the list an <code>in (get …)</code> holds, and the
+rest of its <code>WHERE</code> as that query's: <code>u.id in (get orders
+select user_id where …)</code>. A row whose key is null has no match — so
+<code>NOT EXISTS</code> keeps it, as in SQL — and a name with no table is
+the query's own, as SQL reads it first. Correlated any other way, it is
+refused. <code>= (SELECT …)</code> is the same list where its query answers
+one row — an aggregate with no group, or <code>LIMIT 1</code> — and refused
+where it may answer several, which SQL would refuse at the second; where
+it answers none, SQL's comparison is unknown and FenecQL's <code>in</code>
+false, the same under <code>NOT</code> as <a href="#nulls"><code>NOT
+IN</code></a>.</p>
+
+<h3 id="create-table"><code>CREATE TABLE</code></h3>
+
+<p>Each column's type is the one <a href="/docs/import"><code>fenec
+import</code></a> gives a column of it — one table for both, PostgreSQL's
+names and then SQLite's affinity rules for any other word:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>SQL</th><th>FenecQL</th></tr></thead>
+<tbody>
+<tr><td><code>smallint</code> <code>integer</code> <code>bigint</code> <code>serial</code>, SQLite's <code>INT…</code></td><td><code>int</code></td></tr>
+<tr><td><code>real</code> <code>double precision</code> <code>float</code></td><td><code>float</code></td></tr>
+<tr><td><code>text</code> <code>varchar(n)</code> <code>char(n)</code> <code>uuid</code></td><td><code>text</code></td></tr>
+<tr><td><code>citext</code></td><td><code>text nocase</code></td></tr>
+<tr><td><code>boolean</code></td><td><code>bool</code></td></tr>
+<tr><td><code>timestamp</code> <code>timestamptz</code> <code>date</code> <code>datetime</code></td><td><code>timestamp</code></td></tr>
+<tr><td><code>bytea</code> <code>blob</code></td><td><code>bytes</code></td></tr>
+<tr><td><code>json</code> <code>jsonb</code></td><td><code>json</code></td></tr>
+<tr><td><code>text[]</code> <code>integer[]</code></td><td><code>[text]</code> <code>[int]</code></td></tr>
+<tr><td><code>vector(n)</code> <code>halfvec(n)</code> <code>sparsevec(n)</code></td><td><code>vector&lt;n&gt;</code> <code>vector&lt;n, f16&gt;</code> <code>sparse&lt;n&gt;</code></td></tr>
+<tr><td><code>point</code></td><td><code>geo</code></td></tr>
+<tr><td><code>numeric</code> <code>decimal</code> <code>money</code>, <code>interval</code> <code>time</code> <code>inet</code></td><td>refused: no counterpart</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>The row's <code>id</code></b> is an int the database makes: a
+    column <code>id</code> of an integer type that is the primary key —
+    <code>serial</code>, <code>generated … as identity</code>,
+    <code>AUTOINCREMENT</code> — is it, and is no field. An <code>id</code>
+    of another type, or that is no primary key, is refused.</li>
+  <li><b>A primary key on other columns</b> is its two rules,
+    <code>@unique</code> and <code>required</code>, over several columns an
+    index over them — beside the row's <code>id</code>, which every row
+    still has. <code>ON CONFLICT (k)</code> finds a row by it.</li>
+  <li><b><code>NOT NULL</code> is <code>required</code></b>: a write must
+    give the field a value, and a <code>null</code> is none.
+    <code>UNIQUE</code> is <code>@unique</code>, <code>COLLATE NOCASE</code>
+    <code>nocase</code>, <code>COLLATE "C"</code> the bytes' order.</li>
+  <li><b>A type's own rules are not held</b>, as SQLite holds none:
+    <code>varchar(80)</code> takes a longer text, and <code>char(n)</code>
+    is not padded with spaces; a <code>uuid</code> is text as written, its
+    case kept, where PostgreSQL writes it lowercase; a <code>date</code> is
+    a timestamp, which keeps a time written with it; <code>smallint</code>
+    and <code>integer</code> take any 64-bit int, past their 16 and 32 bits;
+    <code>real</code> is a 64-bit float, more precise than its 32 bits.</li>
+  <li><b>What fenecdb has no rule of is refused</b> rather than dropped,
+    which would take writes SQL refuses: <code>DEFAULT</code>,
+    <code>REFERENCES</code> and <code>FOREIGN KEY</code>, <code>CHECK</code>,
+    a computed column, a sequence on another column. A key a join reads is
+    a field with <code>@hash</code> — <code>CREATE INDEX … USING hash</code>.</li>
+  <li><b><code>CREATE INDEX</code></b> keeps no name. A btree is
+    <code>@sorted</code> (<code>UNIQUE</code>, <code>@unique</code>), over
+    several columns an index over them; <code>USING hash</code>
+    <code>@hash</code>; <code>USING hnsw</code> <code>@hnsw</code> by its
+    operator class — <code>vector_l2_ops</code>, pgvector's default,
+    <code>vector_cosine_ops</code>, <code>vector_ip_ops</code> — with
+    <code>WITH (m, ef_construction)</code>, held to pgvector's bounds; <code>USING gin
+    (to_tsvector(…, body))</code> <code>@text</code>. A partial index, an
+    expression's and <code>ivfflat</code>, <code>gist</code> or
+    <code>brin</code> have no counterpart.</li>
+</ul>
+
+<h3 id="pgvector">pgvector's distances</h3>
+
+<p><code>ORDER BY emb &lt;-&gt; $1 LIMIT 10</code> is <code>near emb $1
+limit 10</code>, nearest first, where the field's index measures the
+operator's distance: <code>&lt;-&gt;</code> L2 over <code>@hnsw(l2)</code>,
+<code>&lt;=&gt;</code> cosine over <code>@hnsw(cosine)</code>,
+<code>&lt;#&gt;</code> the negative inner product over <code>@hnsw(dot)</code>
+or a sparse field's <code>@inverted</code>. Another index's order would be
+another, and is refused naming the operator to write. The vector is a
+parameter, a list, or pgvector's text <code>'[1, 2, 3]'</code>. The search
+walks the graph, as pgvector's HNSW index scan does: the nearest are found
+approximately, and <code>near … exact</code> measures every row.</p>
+
+<p>Each row's distance is in its <code>_score</code>, turned to a
+similarity: for <code>&lt;-&gt;</code> it is the L2 distance itself, for
+<code>&lt;=&gt;</code> 1 minus the cosine distance — the cosine similarity
+— and for <code>&lt;#&gt;</code> the inner product, minus pgvector's
+value. The operator in the list or the <code>WHERE</code>, <code>DESC</code>
+and a second key are refused: <code>near</code> ranks the rows, and the
+distance is the score.</p>

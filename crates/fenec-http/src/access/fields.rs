@@ -248,6 +248,20 @@ impl<'a> View<'a> {
         self.rules.iter().any(|r| Self::grants(r, f))
     }
 
+    /// The fields some row may show, where every read rule lists its own:
+    /// `None` where one shows every field.
+    fn shown_fields(&self) -> Option<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        for r in &self.rules {
+            for f in r.read_fields.as_ref()? {
+                if !out.contains(f) {
+                    out.push(f.clone());
+                }
+            }
+        }
+        Some(out)
+    }
+
     /// Whether every row the token reads shows `f`.
     fn everywhere(&self, f: &str) -> bool {
         self.rules.iter().all(|r| Self::grants(r, f))
@@ -532,7 +546,14 @@ pub(super) fn hold(
             _ => Level::idle(&sel.collection),
         });
     }
+    // A SQL join's `*` of each level, held to what the level shows
+    // before the engine checks its names ([`Flat::shown`]).
+    let mut shown: Vec<(usize, Vec<String>)> = Vec::new();
+    if let Some(f) = top.as_ref().and_then(View::shown_fields) {
+        shown.push((0, f));
+    }
     let (mut above, mut above_reach, mut above_folds) = (top, reach, folds);
+    let mut depth = 0;
     let mut level = sel.lookup.as_mut();
     while let Some(l) = level {
         let v = View::of(scope, &l.collection);
@@ -575,8 +596,29 @@ pub(super) fn hold(
                 _ => Level::idle(&l.collection),
             });
         }
+        depth += 1;
+        if let Some(f) = v.as_ref().and_then(View::shown_fields) {
+            shown.push((depth, f));
+        }
         (above, above_reach, above_folds) = (v, reach, folds);
         level = l.next.as_deref_mut();
+    }
+    if let Some(f) = &mut sel.flat {
+        f.shown = shown;
+        // The names a join writes, which the engine holds to its tables'
+        // fields ([`Flat::names`]) -- a LEFT JOIN's `on` term among them
+        // that the reading leaves out: one withheld is refused here, as
+        // anywhere, rather than pass there as a field the table has, and
+        // the engine's refusal names no other table's field.
+        if let Some(n) = &mut f.names {
+            let fenec_core::query::JoinNames { names, tables } = std::sync::Arc::make_mut(n);
+            for (t, name, bare) in names.iter_mut() {
+                if let Some(v) = tables.get(*t).and_then(|(_, c)| View::of(scope, c)) {
+                    v.named(name)?;
+                }
+                *bare = false;
+            }
+        }
     }
     Ok(levels.iter().any(|l| !l.idle).then_some(Mask { levels }))
 }

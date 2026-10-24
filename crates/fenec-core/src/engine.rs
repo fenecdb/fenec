@@ -2395,6 +2395,49 @@ fn hash_key(v: &Value) -> Vec<u8> {
     out
 }
 
+/// How many `in (get ...)` lists this process refused past
+/// [`MAX_SUBQUERY_VALUES`]: what a test counts a list's walks by.
+static LISTS_PAST_BOUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [`LISTS_PAST_BOUND`], for a test of a binary of its own.
+#[doc(hidden)]
+pub fn lists_past_bound() -> u64 {
+    LISTS_PAST_BOUND.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The rows a scan reads in the time the probe looks one row's match up
+/// by its id and tests it -- 29 ns a row of a filter's scan against 122 for
+/// the probe's, with its flat row, over 100 010 users and 1 000 orders --
+/// doubled, so the probe is read only where it is surely the faster.
+const SCANNED_A_PROBE: usize = 8;
+
+/// Whether an index of `c` may name the rows `f` passes, as the planner
+/// takes one: an equality or an `in` over `id`, a hashed field or an
+/// ordered one, a range over an ordered field, any of them over the first
+/// part of an index over several, a radius or a box over a point, an inner
+/// `get`'s list. Otherwise `f` is answered by reading every row.
+fn index_names(c: &Collection, f: &Expr, params: &[Value]) -> bool {
+    if f.has_subquery() {
+        return true;
+    }
+    let ordered = |n: &str| {
+        c.sorted.iter().any(|(s, _)| s == n) || c.composites.iter().any(|(k, _)| k.keys[0].0 == n)
+    };
+    let keyed = |n: &str| n == "id" || c.hashes.contains_key(n) || ordered(n);
+    let mut eqs = Vec::new();
+    f.conjunct_equalities(params, &mut eqs);
+    let mut ins = Vec::new();
+    f.conjunct_in_sets(params, &mut ins);
+    let mut ranges = Vec::new();
+    f.conjunct_ranges(params, &mut ranges);
+    let mut shapes = Vec::new();
+    crate::geo::conjunct_shapes(f, params, &mut shapes);
+    eqs.iter().any(|e| keyed(e.0))
+        || ins.iter().any(|i| keyed(i.0))
+        || ranges.iter().any(|r| ordered(r.0))
+        || shapes.iter().any(|s| c.geo.iter().any(|(n, _)| n == s.0))
+}
+
 /// 2^53: the ints an `f64` holds every one of.
 const EXACT_INT: f64 = 9_007_199_254_740_992.0;
 
@@ -2431,7 +2474,9 @@ fn encode_folded(out: &mut Vec<u8>, v: &Value, fold: Option<CaseFold>) {
             out.push(crate::codec::TAG_TEXT);
             crate::codec::encode_str(out, &crate::case::fold(t, f));
         }
-        _ => crate::codec::encode_value(out, v),
+        // `-0.0` one group, one value counted and one facet value with
+        // `0.0`, as SQL makes them.
+        _ => crate::codec::encode_key(out, v),
     }
 }
 
@@ -2496,6 +2541,89 @@ fn lookup_key(schema: &Schema, field: &str, v: &Value) -> Option<Vec<u8>> {
             .ok()
             .map(|k| folded_key(&k, fd.case_fold())),
     }
+}
+
+/// pgvector's operator, by the distance it orders by.
+fn operator(m: Metric) -> &'static str {
+    match m {
+        Metric::L2 => "<->",
+        Metric::Cosine => "<=>",
+        Metric::Dot => "<#>",
+    }
+}
+
+/// Refuses `order by <field> <op> $1`, read as `near`, where the field's
+/// index measures another distance than the operator: `near` orders by
+/// the index's, and the order would not be the one asked for. A field
+/// with no index is refused by `near` in its own words.
+#[inline(never)]
+fn metric_held(c: &Collection, field: &str, m: Metric) -> Result<()> {
+    let held = c.schema.field(field).and_then(|f| match (&f.ty, &f.index) {
+        (_, IndexKind::Vector(spec)) => Some(spec.metric),
+        (DataType::Sparse(_), IndexKind::Inverted) => Some(Metric::Dot),
+        _ => None,
+    });
+    // PostGIS's `<->` measures a plane, or a spheroid, and a point's
+    // `near` the sphere: read so, the order would be another.
+    if c.schema
+        .field(field)
+        .is_some_and(|f| matches!(f.ty, DataType::Geo))
+    {
+        return Err(Error::Query(format!(
+            "`{field}` holds points: the nearest are `near {field} <point>`"
+        )));
+    }
+    match held {
+        Some(h) if h != m => Err(Error::Query(format!(
+            "`{field} {}` orders by the {} distance, and its index measures {}: `{}` does",
+            operator(m),
+            m.name(),
+            h.name(),
+            operator(h),
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// A SQL join's flat page as its answer carries it ([`Nested::flat`]): its
+/// numbers worked out, and refused where two of its columns would answer
+/// under one name -- a row holds a name once, and SQL's `select *` over a
+/// join answers each table's `id`. `columns`: the `get`'s own.
+#[inline(never)]
+fn flat_page(f: &Flat, columns: &[String], n: &Nested, params: &[Value]) -> Result<Box<Flat>> {
+    let mut levels: Vec<&[String]> = vec![columns];
+    let mut level = Some(n);
+    while let Some(l) = level {
+        levels.push(&l.columns);
+        level = l.nested.as_deref();
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for c in &f.columns {
+        let all = levels.get(c.level).copied().unwrap_or_default();
+        let one = std::slice::from_ref(&c.name);
+        // A `*`'s columns as the token is shown them ([`Flat::shown`]).
+        let shown = f.shown.iter().find(|(l, _)| *l == c.level).map(|(_, s)| s);
+        for name in if c.column.is_empty() { all } else { one } {
+            let hidden = c.column.is_empty()
+                && name != "id"
+                && shown.is_some_and(|s| !s.iter().any(|f| f == name));
+            if hidden {
+                continue;
+            }
+            if names.contains(&name.as_str()) {
+                return Err(Error::Query(format!(
+                    "the join answers two columns named `{name}`: name one with `as`"
+                )));
+            }
+            names.push(name);
+        }
+    }
+    Ok(Box::new(Flat {
+        columns: f.columns.clone(),
+        offset: Count::N(f.offset.at(params)),
+        limit: f.limit.map(|l| Count::N(l.at(params))),
+        ..Flat::default()
+    }))
 }
 
 /// Where a query reads `name`: the position of its field, and for a path
@@ -6147,6 +6275,16 @@ impl Database {
         let Statement::Select(sel) = &*stmt else {
             return Ok(None);
         };
+        // A SQL join's probe, read in its list's place, is a `lookup`'s,
+        // its rows written here as `query` would answer them: left to
+        // `query`, which answers the statement again, a list tried first
+        // and past its bound was walked twice.
+        if sel.lookup.is_some() {
+            let rs = self.select(sel, params)?;
+            let n = rs.answered().rows.len();
+            crate::json::rows_array_into(out, &rs);
+            return Ok(Some(n));
+        }
         let c = self.collection(&sel.collection)?;
         sel.check()?;
         // Each column's name and its field's place in the payload, `ID` for
@@ -6407,10 +6545,11 @@ impl Database {
         }
         let (collection, filter) = match stmt {
             Statement::Select(sel) => {
-                return Ok(match self.answered_select(sel, params, 0)? {
-                    Cow::Borrowed(_) => Cow::Borrowed(stmt),
-                    Cow::Owned(s) => Cow::Owned(Statement::Select(s)),
-                })
+                return Ok(match self.answered_top(sel, params)? {
+                    Cow::Borrowed(s) if std::ptr::eq(s, sel) => Cow::Borrowed(stmt),
+                    // A join's probe, read in its place.
+                    s => Cow::Owned(Statement::Select(s.into_owned())),
+                });
             }
             Statement::Update {
                 collection, filter, ..
@@ -6451,6 +6590,148 @@ impl Database {
         }))
     }
 
+    /// A SQL join's names held to its tables' fields ([`JoinNames`]): an
+    /// unknown column refused, as SQL refuses one, and one with no table
+    /// that another table has said to be written with that table's name.
+    #[inline(never)]
+    fn join_names(&self, f: &crate::query::JoinNames) -> Result<()> {
+        // Every table, read or not, as SQL refuses an unknown one: `left
+        // join nothere o on o.id = s.order` was answered, its `on` naming
+        // nothing but `id`.
+        for (_, c) in &f.tables {
+            self.collection(c)?;
+        }
+        let has =
+            |c: &Collection, n: &str| c.schema.field(n.split('.').next().unwrap_or(n)).is_some();
+        for (t, name, bare) in &f.names {
+            let Some((at, coll)) = f.tables.get(*t) else {
+                continue;
+            };
+            if has(self.collection(coll)?, name) {
+                continue;
+            }
+            let other = (f.tables.iter()).find(|(_, c)| {
+                *bare && c != coll && self.collection(c).is_ok_and(|c| has(c, name))
+            });
+            return Err(Error::Query(match other {
+                Some((a, c)) => format!(
+                    "`{name}` is no column of `{coll}`, the join's first table, which a column \
+                     with no table is read as: `{a}.{name}` names `{c}`'s"
+                ),
+                None => format!("`{at}.{name}`: `{coll}` has no column `{name}`"),
+            }));
+        }
+        Ok(())
+    }
+
+    /// [`Self::answered_select`] for a statement's own `get`: a SQL join
+    /// read as `key in (get ...)` whose list passed its bound is answered
+    /// as the same join through the `lookup`'s probe ([`Flat::probe`]) --
+    /// and read so at once where the list is past the bound before a row is
+    /// read, or would read more of the joined table than the probe reads of
+    /// `first`, the table it drives ([`Self::probe_wins`]).
+    fn answered_top<'s>(
+        &self,
+        sel: &'s Select,
+        params: &[Value],
+    ) -> Result<std::borrow::Cow<'s, Select>> {
+        if !sel.flat.as_ref().is_some_and(|f| f.probe) {
+            return self.answered_select(sel, params, 0);
+        }
+        // The probe made where it is read, and only then, and only over a
+        // key its `lookup` takes beside the joined table's `id`
+        // ([`Self::probe_keyed`]).
+        let probe = || sel.probed().filter(|p| self.probe_keyed(p));
+        let probed = |p: Select| {
+            plan(|| "join: its list past the bound, the lookup probed instead".into());
+            Ok(std::borrow::Cow::Owned(
+                self.answered_select(&p, params, 0)?.into_owned(),
+            ))
+        };
+        // Read at once where the list would read more than the probe, or
+        // be refused before a row was read.
+        if (sel.filter.as_ref()).is_some_and(|f| self.probe_wins(f, &sel.collection, params)) {
+            if let Some(p) = probe() {
+                return probed(p);
+            }
+        }
+        OVERFLOWED.with(|o| o.set(false));
+        match self.answered_select(sel, params, 0) {
+            Err(e) if OVERFLOWED.with(|o| o.get()) => match probe() {
+                Some(p) => probed(p),
+                None => Err(e),
+            },
+            answered => answered,
+        }
+    }
+
+    /// Whether the probe's `lookup`, found by the joined table's `id`, takes
+    /// the first table's key as it stands: `id`, or a field of an int, a
+    /// float or a timestamp, which a `lookup`'s key types hold to an `id`
+    /// (`check_key_types`). A json, text or bool key keeps the list, which
+    /// `in` compares as values -- probed, `on b.id = u.jk` over a json `jk`
+    /// was refused as key types that do not match, naming a `lookup` the
+    /// statement never wrote.
+    fn probe_keyed(&self, p: &Select) -> bool {
+        let Some(key) = p.lookup.as_ref().and_then(|l| l.parent.first()) else {
+            return false;
+        };
+        key == "id"
+            || self.collection(&p.collection).is_ok_and(|c| {
+                c.schema.field_pos(key).is_some_and(|i| {
+                    matches!(
+                        c.schema.fields[i].ty,
+                        DataType::Int | DataType::Float | DataType::Timestamp
+                    )
+                })
+            })
+    }
+
+    /// Whether `e`'s `and` chain holds a SQL join's list -- `in (get <c>
+    /// select id ...)`, `c` holding more rows than the list may -- better
+    /// read as its probe, which reads at most a row of `c` for each of the
+    /// `first` table's: asking nothing of `c`, which expires none
+    /// (`@ttl`), its every id is past the bound before a row is read;
+    /// where a hash index names more of `c`'s rows than the bound and than
+    /// the first table holds, the list reads those and the probe fewer;
+    /// and where no index names a set, the list reads every row of `c`,
+    /// against the probe a row of the first table each for no more than
+    /// [`SCANNED_A_PROBE`] of them. Where an ordered index's range names the
+    /// set, the list is tried and the probe read once it passes the bound:
+    /// a range of a few rows would have the probe read every row of the
+    /// first table for them.
+    fn probe_wins(&self, e: &Expr, first: &str, params: &[Value]) -> bool {
+        match e {
+            Expr::And(a, b) => {
+                self.probe_wins(a, first, params) || self.probe_wins(b, first, params)
+            }
+            Expr::InSelect(_, s)
+                if matches!(s.project.as_deref(), Some([c]) if c == "id")
+                    && s.limit.is_none()
+                    && s.lookup.is_none() =>
+            {
+                let Ok(c) = self.collection(&s.collection) else {
+                    return false;
+                };
+                if c.store.len() <= MAX_SUBQUERY_VALUES {
+                    return false;
+                }
+                let first = || self.collection(first).map_or(usize::MAX, |c| c.store.len());
+                match &s.filter {
+                    None => self.ttl_of(&s.collection).is_none(),
+                    Some(f) => match self.indexed_size(c, f, params).ok().flatten() {
+                        Some(n) => n > MAX_SUBQUERY_VALUES && first() <= n,
+                        None => {
+                            !index_names(c, f, params)
+                                && first().saturating_mul(SCANNED_A_PROBE) <= c.store.len()
+                        }
+                    },
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// [`Self::answered`] for a `get`, which an inner one is as well,
     /// `depth` levels down.
     fn answered_select<'s>(
@@ -6479,6 +6760,9 @@ impl Database {
         // included, since each is answered through here too -- and read
         // where the plan reads it (`Count::at`).
         sel.check_counts(params)?;
+        if let Some(n) = sel.flat.as_ref().and_then(|f| f.names.as_deref()) {
+            self.join_names(n)?;
+        }
         // Every collection a read reads passes here, so here is where one
         // declaring what this build lacks is refused.
         if !crate::FULL {
@@ -6674,6 +6958,8 @@ impl Database {
             whole.then_some(items)
         };
         let Some(items) = items else {
+            OVERFLOWED.with(|o| o.set(true));
+            LISTS_PAST_BOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Err(Error::Query(format!(
                 "`in (get {} ...)` found more than {MAX_SUBQUERY_VALUES} values: a set is not cut \
                  short, so narrow the inner `get` or ask with `lookup ... required`",
@@ -6714,7 +7000,12 @@ impl Database {
         let mut seen: Option<HashIndex> = None;
         let mut key = Vec::new();
         let mut items = Vec::new();
-        for id in self.matching_ids(&sel.collection, &sel.filter, params)? {
+        // Each id once: one past the bound is all the list need find --
+        // a scan stops there, and a range an index names is read as it
+        // would be with no bound (`want`): a bound there narrows the ranges
+        // an index is read for.
+        let cap = at.is_none().then_some(MAX_SUBQUERY_VALUES + 1);
+        for id in self.matching_ids_to(&sel.collection, &sel.filter, params, cap, usize::MAX)? {
             let v = match at {
                 Some(at) => read_source(&c.store, id, at)?,
                 None => Value::Int(id as i64),
@@ -7581,12 +7872,29 @@ impl Database {
     /// every document: over a million rows `where price >= 0 limit 20` took
     /// 69.6 ms and now 0.002 ms, and `limit 20` with no filter at all took
     /// 2.4 ms, spent listing every id first.
+    #[inline(always)]
     fn matching_ids_capped(
         &self,
         collection: &str,
         filter: &Option<Expr>,
         params: &[Value],
         cap: Option<usize>,
+    ) -> Result<Vec<DocId>> {
+        self.matching_ids_to(collection, filter, params, cap, cap.unwrap_or(usize::MAX))
+    }
+
+    /// [`Self::matching_ids_capped`], `want` -- how many matches bound how
+    /// wide a range an index is read for ([`Self::filter_candidates`]) --
+    /// given apart from the cap. One body for both: inlined into each,
+    /// it was 1.0 KB more of the browser module.
+    #[inline(never)]
+    fn matching_ids_to(
+        &self,
+        collection: &str,
+        filter: &Option<Expr>,
+        params: &[Value],
+        cap: Option<usize>,
+        range_want: usize,
     ) -> Result<Vec<DocId>> {
         let c = self.collection(collection)?;
         let ctx = EvalCtx {
@@ -7607,7 +7915,7 @@ impl Database {
         let mut out = Vec::new();
         let mut tested = 0usize;
         let test = Filter::new(c, f, &ctx);
-        let scanned = match self.filter_candidates(c, f, params, want)? {
+        let scanned = match self.filter_candidates(c, f, params, range_want)? {
             // The filter is exactly what the index answered: no row needs a
             // second look.
             Some((mut b, true)) => {
@@ -8614,6 +8922,9 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
+        if let Some(m) = near.metric {
+            metric_held(c, &near.field, m)?;
+        }
         match c.schema.field(&near.field).map(|f| &f.ty) {
             Some(DataType::Sparse(dim)) => {
                 return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
@@ -8976,6 +9287,7 @@ impl Database {
             vector: Expr::Lit(Value::Null),
             ef: None,
             exact: false,
+            metric: None,
         };
         let want = limit.saturating_add(sel.offset.at(params));
         plan(|| format!("order: distance from a point on {field}, by its point index"));
@@ -9511,6 +9823,19 @@ impl Database {
         ids: Vec<DocId>,
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
+        self.retain_with_children_to(parent, l, ids, ctx, None)
+    }
+
+    /// [`Self::retain_with_children`], the first `stop` kept, in the order
+    /// of `ids`, enough: the parents after them are not probed.
+    fn retain_with_children_to(
+        &self,
+        parent: &Collection,
+        l: &Lookup,
+        ids: Vec<DocId>,
+        ctx: &EvalCtx,
+        stop: Option<usize>,
+    ) -> Result<Vec<DocId>> {
         let steps = self.lookup_chain(parent, l, None)?;
         let child = steps[0].child;
 
@@ -9547,7 +9872,8 @@ impl Database {
                     let b = cands.map_or(0, Bucket::len) as u64;
                     if (ids.len() as u64).saturating_mul(n) > b.saturating_mul(b) {
                         let parents = ids.len();
-                        let kept = self.retain_via_children(&steps, ids, cands, ctx)?;
+                        let mut kept = self.retain_via_children(&steps, ids, cands, ctx)?;
+                        kept.truncate(stop.unwrap_or(usize::MAX));
                         plan(|| {
                             format!(
                                 "required: from the child side, {} children in a hash bucket, \
@@ -9563,8 +9889,13 @@ impl Database {
         }
 
         let mut out = Vec::new();
-        let parents = ids.len();
+        let (parents, mut probed) = (ids.len(), 0);
+        let stop = stop.unwrap_or(usize::MAX);
         for id in ids {
+            if out.len() >= stop {
+                break;
+            }
+            probed += 1;
             // A child only counts if it survives what is below it too: with
             // a `required` level further down, a child that passes its own
             // `where` may still have nothing hanging off it.
@@ -9573,9 +9904,12 @@ impl Database {
             }
         }
         plan(|| {
+            let of = match probed < parents {
+                true => format!("{probed} of {parents}"),
+                false => parents.to_string(),
+            };
             format!(
-                "required: from the parent side, {} parents probed in {}, {} kept",
-                parents,
+                "required: from the parent side, {of} parents probed in {}, {} kept",
                 l.collection,
                 out.len()
             )
@@ -9786,6 +10120,7 @@ impl Database {
             columns,
             groups,
             nested,
+            flat: None,
         })
     }
 
@@ -9795,7 +10130,7 @@ impl Database {
         PLAN.with(|p| *p.borrow_mut() = Some(Vec::new()));
         // The inner `get`s run inside the plan, which names what each found.
         let result = self
-            .answered_select(sel, params, 0)
+            .answered_top(sel, params)
             .and_then(|sel| self.select(&sel, params));
         let mut steps = PLAN.with(|p| p.borrow_mut().take()).unwrap_or_default();
         let rs = result?;
@@ -9986,13 +10321,18 @@ impl Database {
         // `check` has already refused `count`, `near` and `match` alongside
         // `lookup`, which is what lets this sit at the end of every path
         // rather than forking one.
-        let nested = match &sel.lookup {
+        let mut nested = match &sel.lookup {
             None => None,
             Some(l) => {
                 let ids: Vec<DocId> = rows.iter().map(|r| r.id).collect();
                 Some(self.run_lookup(c, l, &ids, &ctx)?)
             }
         };
+        // A SQL join's: its rows answered flat, which a writer makes of
+        // the levels once a token's masks have read them.
+        if let (Some(f), Some(n)) = (&sel.flat, &mut nested) {
+            n.flat = Some(flat_page(f, &columns, n, params)?);
+        }
 
         Ok(ResultSet {
             columns,
@@ -10032,13 +10372,14 @@ impl Database {
             // in id order, so the scan can stop there. `required` drops
             // parents after the filter and so still needs every candidate,
             // and so do facets, which count every one -- the page is then
-            // the front of what they count.
-            let cap = if sel.order.is_empty() && !required {
-                sel.limit
-                    .map(|l| l.at(params).saturating_add(sel.offset.at(params)))
-            } else {
-                None
+            // the front of what they count. Its probe stops at the page:
+            // the parents in id order, the first that many kept are it,
+            // where a page of 20 probed every parent the filter passed.
+            let page = match sel.order.is_empty() {
+                true => (sel.limit).map(|l| l.at(params).saturating_add(sel.offset.at(params))),
+                false => None,
             };
+            let cap = page.filter(|_| !required);
             let counted = wants_facets && !all;
             let mut facet_ids = None;
             let mut ids = self.matching_ids_capped(
@@ -10053,7 +10394,8 @@ impl Database {
             // survive.
             if let Some(l) = &sel.lookup {
                 if l.required {
-                    ids = self.retain_with_children(c, l, ids, ctx)?;
+                    let stop = page.filter(|_| !counted);
+                    ids = self.retain_with_children_to(c, l, ids, ctx, stop)?;
                 }
             }
             if counted {
@@ -11693,11 +12035,10 @@ fn build_docs(
 /// refused for a required one.
 fn doc_done(schema: &Schema, mut doc: Document) -> Result<Document> {
     for f in &schema.fields {
-        if doc.get(&f.name).is_none() {
-            if f.required {
-                return Err(Error::Type(format!("field `{}` is required", f.name)));
-            }
-            doc.set(&f.name, Value::Null);
+        match doc.get(&f.name) {
+            None | Some(Value::Null) if f.required => return Err(not_null(&f.name)),
+            None => doc.set(&f.name, Value::Null),
+            Some(_) => {}
         }
     }
     Ok(doc)
@@ -11875,11 +12216,26 @@ fn updated(
         }
         let v = a.calc.value(schema, old, ctx, new)?;
         match a.at {
-            Some(p) => doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?,
+            Some(p) => {
+                if schema.fields[p].required && matches!(v, Value::Null) {
+                    return Err(not_null(&schema.fields[p].name));
+                }
+                doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?
+            }
             None => set_field(schema, &mut doc, a.key, v)?,
         }
     }
     Ok(doc)
+}
+
+/// A required field left out or given `null`: SQL's `not null`, which
+/// `required` is -- the types `fenec types` writes, and the declared
+/// schema's `.notNull()`, read it never null.
+#[inline(never)]
+fn not_null(name: &str) -> Error {
+    Error::Type(format!(
+        "field `{name}` is required: it holds a value, never null"
+    ))
 }
 
 thread_local! {
@@ -11889,6 +12245,12 @@ thread_local! {
     /// would touch every signature on the way for a statement most queries
     /// never are. Outside an `explain` a step costs one check of this cell.
     static PLAN: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    /// Whether an `in (get ...)` was refused past [`MAX_SUBQUERY_VALUES`]
+    /// since [`Database::answered_top`] cleared it, which reads a SQL
+    /// join's probe then. A flag rather than the refusal's words looked
+    /// for: `str::contains` brought its two-way searcher and a slice's
+    /// panic into the browser module, 9.6 KB of it and 3.6 KB brotli.
+    static OVERFLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Records a step of the plan while an `explain` runs; `step` is called only

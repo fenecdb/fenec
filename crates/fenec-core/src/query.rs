@@ -69,6 +69,14 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// A copy, made by this crate's `clone`: the derive's is `#[inline]`,
+    /// so another crate calling it compiled a copy of its own -- fenec-ql's
+    /// was 2.2 KB of the browser module.
+    #[inline(never)]
+    pub fn duplicate(&self) -> Expr {
+        self.clone()
+    }
+
     /// Collects the field names used in the expression (for the planner).
     pub fn referenced_fields(&self, out: &mut Vec<String>) {
         match self {
@@ -1076,6 +1084,12 @@ pub struct Near {
     pub ef: Option<usize>,
     /// When true HNSW is skipped and an exact scan is run.
     pub exact: bool,
+    /// The distance pgvector's operator named -- `<->` L2, `<=>` cosine,
+    /// `<#>` the inner product -- which the field's index must measure, so
+    /// that `near`'s order is the operator's: SQL's `order by emb <-> $1
+    /// limit 10`. None for FenecQL's `near`, which measures as the index
+    /// does.
+    pub metric: Option<crate::schema::Metric>,
 }
 
 /// The `match` clause: BM25 over a full-text index.
@@ -1994,9 +2008,185 @@ pub struct Select {
     /// a write's `require` is: a checkout's "the price is still 12" or "the
     /// coupon is still good", read under the block's lock.
     pub require: Option<u64>,
+    /// SQL's join, answered as SQL answers one: flat rows rather than the
+    /// `lookup`'s children nested in their parents ([`Flat`]). Set by the
+    /// SQL spelling alone -- `select o.id, c.name from orders o join
+    /// customers c on c.id = o.customer_id` -- so no FenecQL text answers
+    /// otherwise than it did.
+    pub flat: Option<Box<Flat>>,
+}
+
+/// SQL's join read as a `lookup` and answered as its rows: one row for
+/// each path down the chain -- a parent no child matched one row, `null`s
+/// in the children's place, as [`ResultSet::flatten`] makes them -- each
+/// column picked from its level and named as SQL names it, and the page
+/// cut from those rows. Rendered as the answer is written
+/// ([`ResultSet::answered`]), after a token's masks have read the levels:
+/// a level's fields are held to its own collection's rules, as the
+/// `lookup`'s are.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Flat {
+    /// The columns of a flat row, in the order SQL's list names them.
+    pub columns: Vec<FlatColumn>,
+    /// The page of flat rows: where a level may hold several children of
+    /// a row, its rows are not the parents', and the `get` reads as many
+    /// parents as the page could need ([`Lookup`]'s keys).
+    pub offset: Count,
+    pub limit: Option<Count>,
+    /// The fields a level shows, where a token's rules list them
+    /// (fenec-http's `fields::hold`): the engine checks a `*`'s names for a
+    /// clash before the levels are masked, and a field no rule grants,
+    /// named in its refusal, told the token it was there -- `x.*` beside
+    /// `s.place as code` was refused where `as nosuch` was answered.
+    pub shown: Vec<(usize, Vec<String>)>,
+    /// The names the join's statement writes ([`JoinNames`]). A statement
+    /// read off a join without flat rows carries them in a `Flat` with no
+    /// columns. Shared: every statement whose `in (get ...)` is answered
+    /// is copied first, and a copy of the names would be allocations of
+    /// every such join.
+    pub names: Option<std::sync::Arc<JoinNames>>,
+    /// Whether the join, read as `key in (get <joined> select id ...)`,
+    /// may be read as the `lookup`'s probe instead ([`Select::probed`]),
+    /// which the engine reads where that list would hold more than
+    /// [`MAX_SUBQUERY_VALUES`] values. The list answers a small joined
+    /// table through the first table's index, where the probe looks every
+    /// row of the first table up. A flag, the probe made where it is read:
+    /// made beside the list by the parser, it took a join's parse 2.25 ->
+    /// 3.0 us.
+    pub probe: bool,
+}
+
+/// The names a SQL join's statement writes, which the engine holds to its
+/// tables' fields: the parser reads no schema.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct JoinNames {
+    /// The join's tables, each as the statement names it -- its alias, or
+    /// its collection -- and its collection, in the order of `from`.
+    pub tables: Vec<(String, String)>,
+    /// Every column the statement names, its table's place among `tables`
+    /// and whether it was written with no table, which the parser takes for
+    /// the first table's: the engine refuses a name its table has no field
+    /// of, as SQL refuses an unknown column -- read as written, one only a
+    /// joined table has was null in every row, a condition over one failed
+    /// at the first row and over no rows not at all, and a LEFT JOIN's
+    /// `on` the reading leaves out was never read.
+    pub names: Vec<(usize, String, bool)>,
+}
+
+/// The last term of `filter`'s `and` chain that is `<field> in (get <c>
+/// select id ...)` asking nothing but a filter of `c`, taken out: the field
+/// and the inner `get`.
+fn take_id_list(filter: &mut Option<Expr>) -> Option<(String, Box<Select>)> {
+    fn listed(e: &Expr) -> bool {
+        let Expr::InSelect(lhs, s) = e else {
+            return false;
+        };
+        matches!(&**lhs, Expr::Field(_))
+            && matches!(s.project.as_deref(), Some([c]) if c == "id")
+            && s.limit.is_none()
+            && s.offset == Count::N(0)
+            && s.lookup.is_none()
+            && s.aggregate.is_empty()
+            && s.group.is_empty()
+            && s.computed.is_empty()
+            && s.near.is_none()
+            && s.matcher.is_none()
+            && s.require.is_none()
+            && !s.count
+    }
+    // The term out of its `and`, the other side in the `and`'s place.
+    fn take(e: &mut Expr) -> Option<Expr> {
+        let Expr::And(a, b) = e else {
+            return None;
+        };
+        if let Some(t) = take(b) {
+            return Some(t);
+        }
+        let right = listed(b);
+        if !right && !listed(a) {
+            return take(a);
+        }
+        let Expr::And(a, b) = std::mem::replace(e, Expr::Lit(Value::Null)) else {
+            return None;
+        };
+        let (kept, term) = if right { (a, b) } else { (b, a) };
+        *e = *kept;
+        Some(*term)
+    }
+    let term = match filter {
+        Some(e) if listed(e) => filter.take()?,
+        Some(e) => take(e)?,
+        None => return None,
+    };
+    let Expr::InSelect(lhs, inner) = term else {
+        return None;
+    };
+    let Expr::Field(key) = *lhs else {
+        return None;
+    };
+    Some((key, inner))
+}
+
+/// A column of a [`Flat`] row: the level it is read from -- 0 the `get`'s
+/// rows, 1 its `lookup`'s and so on down -- its column there, and the name
+/// it answers under. An empty `column` is every column of the level, each
+/// under its own name: SQL's `o.*`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlatColumn {
+    pub level: usize,
+    pub column: String,
+    pub name: String,
 }
 
 impl Select {
+    /// A SQL join read as `key in (get <c> select id where <f>)` read as
+    /// the `lookup`'s probe ([`Flat::probe`]): the list's term taken out of
+    /// the `and` chain -- the last such term, the one the join made -- and
+    /// `lookup <c> on id = key required where <f>` hung off the rows, which
+    /// answer flat as they stand. `key` is in that list exactly where `c`
+    /// holds a row of that `id` passing `f`, which is what `required`
+    /// keeps a row for, a null key in neither. `None` where `self` holds
+    /// no such term or already a `lookup`.
+    pub fn probed(&self) -> Option<Select> {
+        if self.lookup.is_some() || !self.flat.as_ref().is_some_and(|f| f.probe) {
+            return None;
+        }
+        let mut out = self.clone();
+        let (key, inner) = take_id_list(&mut out.filter)?;
+        let Select {
+            collection, filter, ..
+        } = *inner;
+        out.lookup = Some(Lookup {
+            collection,
+            on: vec!["id".to_string()],
+            parent: vec![key],
+            project: Some(Vec::new()),
+            filter,
+            required: true,
+            ..Lookup::default()
+        });
+        let columns = match &out.project {
+            None => vec![FlatColumn {
+                level: 0,
+                column: String::new(),
+                name: String::new(),
+            }],
+            Some(list) => (list.iter())
+                .map(|c| FlatColumn {
+                    level: 0,
+                    column: c.clone(),
+                    name: c.clone(),
+                })
+                .collect(),
+        };
+        out.flat = Some(Box::new(Flat {
+            columns,
+            names: self.flat.as_ref().and_then(|f| f.names.clone()),
+            ..Flat::default()
+        }));
+        Some(out)
+    }
+
     /// `count` does not combine with the other clauses: projection, ordering
     /// and pagination are meaningless over a count, and `near` already cuts
     /// at its own ceiling -- it would answer "how many are there" wrongly.
@@ -2120,6 +2310,19 @@ impl Select {
                 step.check_key()?;
                 step.check_level(above)?;
                 above = step.folds().then_some(step.aggregate.as_slice());
+            }
+        }
+        // A SQL join's flat rows are its `lookup`'s, levels and all.
+        if let Some(f) = self.flat.as_deref().filter(|f| !f.columns.is_empty()) {
+            let levels = self.lookup.as_ref().map_or(0, |l| l.chain().count());
+            if levels == 0
+                || self.count
+                || !self.aggregate.is_empty()
+                || f.columns.iter().any(|c| c.level > levels)
+            {
+                return Err(Error::Query(
+                    "flat rows are a join's: a `lookup`, its rows not folded".into(),
+                ));
             }
         }
         check_order(&self.order, !self.group.is_empty())?;
@@ -2318,6 +2521,9 @@ impl Select {
             })
             .unwrap_or(0);
         let mut marks = counts(&self.limit, &self.offset);
+        if let Some(f) = &self.flat {
+            marks = marks.max(counts(&f.limit, &f.offset));
+        }
         for f in &self.facets {
             marks = marks.max(f.top.map_or(0, Count::param));
         }
@@ -2384,6 +2590,15 @@ impl Select {
         for f in &self.facets {
             if let Some(t @ Count::Param(_)) = f.top {
                 top_in_range(&f.field, t.of("top", params)?)?;
+            }
+        }
+        // A SQL join's flat page, as the select's own.
+        if let Some(f) = &self.flat {
+            if let Some(l @ Count::Param(_)) = f.limit {
+                l.of("limit", params)?;
+            }
+            if let o @ Count::Param(_) = f.offset {
+                o.of("offset", params)?;
             }
         }
         // The select's own, then each `lookup` level's, in one loop.
@@ -3080,6 +3295,9 @@ pub struct Nested {
     /// one vector rather than a node per row -- which matters, because the
     /// row count multiplies going down.
     pub nested: Option<Box<Nested>>,
+    /// The first level's alone: the rows answered flat, a SQL join's
+    /// ([`Select::flat`]), its page's numbers worked out.
+    pub flat: Option<Box<Flat>>,
 }
 
 impl Nested {
@@ -3147,10 +3365,83 @@ impl ResultSet {
     /// nobody who could be misled by it.
     /// Borrowed unchanged when there is nothing nested, so the transports
     /// that call it on every query do not pay for a clone they do not need.
+    ///
+    /// A SQL join's ([`Nested::flat`]) is its rows as SQL answers them: the
+    /// columns its list names, under SQL's names, and its page.
     pub fn flatten(&self) -> std::borrow::Cow<'_, ResultSet> {
         let Some(n) = &self.nested else {
             return std::borrow::Cow::Borrowed(self);
         };
+        let all = self.paths(n);
+        std::borrow::Cow::Owned(match &n.flat {
+            None => all,
+            Some(f) => self.picked(n, f, all),
+        })
+    }
+
+    /// What a transport writes: a SQL join's flat rows ([`Select::flat`]),
+    /// and any other result as it is, its children nested. Every JSON
+    /// writer asks it, after a token's masks have read the levels.
+    pub fn answered(&self) -> std::borrow::Cow<'_, ResultSet> {
+        match self.nested.as_ref().is_some_and(|n| n.flat.is_some()) {
+            true => self.flatten(),
+            false => std::borrow::Cow::Borrowed(self),
+        }
+    }
+
+    /// The flat rows of a SQL join out of every path's: each column its
+    /// list names, read from its level's block -- a column a token's mask
+    /// took off reads `null` -- and the page cut from them.
+    #[inline(never)]
+    fn picked(&self, n: &Nested, f: &Flat, all: ResultSet) -> ResultSet {
+        // Each level's columns, and where its block starts in a path.
+        let mut levels: Vec<(&[String], usize)> = vec![(&self.columns, 0)];
+        let (mut level, mut at) = (Some(n), self.columns.len());
+        while let Some(l) = level {
+            levels.push((&l.columns, at));
+            at += l.columns.len();
+            level = l.nested.as_deref();
+        }
+        let (mut places, mut columns) = (Vec::new(), Vec::new());
+        for c in &f.columns {
+            let Some(&(cols, start)) = levels.get(c.level) else {
+                continue;
+            };
+            if c.column.is_empty() {
+                for (j, name) in cols.iter().enumerate() {
+                    places.push(start + j);
+                    columns.push(name.clone());
+                }
+                continue;
+            }
+            let j = cols.iter().position(|x| *x == c.column);
+            places.push(j.map_or(usize::MAX, |j| start + j));
+            columns.push(c.name.clone());
+        }
+        let limit = f.limit.map_or(usize::MAX, |l| l.at(&[]));
+        let mut rows = Vec::new();
+        for r in all.rows.into_iter().skip(f.offset.at(&[])).take(limit) {
+            let mut values = Vec::with_capacity(places.len());
+            for &p in &places {
+                values.push(r.values.get(p).cloned().unwrap_or(Value::Null));
+            }
+            rows.push(Row {
+                id: r.id,
+                values,
+                score: None,
+            });
+        }
+        ResultSet {
+            columns,
+            rows,
+            nested: None,
+            facets: all.facets,
+        }
+    }
+
+    /// Every path down the nesting as a row: the parent's columns, then
+    /// each level's under `<collection>.<field>`.
+    fn paths(&self, n: &Nested) -> ResultSet {
         let mut columns = self.columns.clone();
         // Each level contributes a block of columns, and the prefix sums of
         // its groups turn "row `t` of group `k`" into the single index the
@@ -3176,12 +3467,12 @@ impl ResultSet {
             path.extend(row.values.iter().cloned());
             flatten_level(&mut rows, &mut path, &levels, 0, i, row, width);
         }
-        std::borrow::Cow::Owned(ResultSet {
+        ResultSet {
             columns,
             rows,
             nested: None,
             facets: self.facets.clone(),
-        })
+        }
     }
 }
 
@@ -3357,6 +3648,7 @@ mod tests {
                         vector: Expr::Param(0),
                         ef: None,
                         exact: false,
+                        metric: None,
                     })
                 }) as fn(&mut Select),
             ),

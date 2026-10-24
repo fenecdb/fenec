@@ -182,6 +182,7 @@ fn pgvector_columns_become_vectors() {
                 vector: Expr::Lit(Value::Vector(vec![0.0, 1.0, 0.0])),
                 ef: None,
                 exact: true,
+                metric: None,
             }),
             limit: Some(Count::N(1)),
             ..Default::default()

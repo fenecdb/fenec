@@ -5,5 +5,6 @@
 //! without the indexes.
 
 mod e2e;
+mod join;
 mod sql;
 mod text;

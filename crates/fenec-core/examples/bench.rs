@@ -169,6 +169,7 @@ fn main() {
                 vector: Expr::Lit(Value::Vector(q.clone())),
                 ef: None,
                 exact: false,
+                metric: None,
             }),
             limit: Some(Count::N(10)),
             ..Default::default()
@@ -211,6 +212,7 @@ fn main() {
                     vector: Expr::Lit(Value::Vector(q.clone())),
                     ef: Some(200),
                     exact: false,
+                    metric: None,
                 }),
                 limit: Some(Count::N(10)),
                 ..Default::default()
@@ -240,6 +242,7 @@ fn main() {
                 vector: Expr::Lit(Value::Vector(q.clone())),
                 ef: None,
                 exact,
+                metric: None,
             }),
             limit: Some(Count::N(10)),
             ..Default::default()

@@ -83,9 +83,271 @@ SQL forms and their refusals 9.9 KB raw, `like` 2.6 (`sql_like` 1.0,
 the hints past the parser 2.0 (`Schema::arbiter` and `no_field` 1.3, the
 engine's calls of them 0.7). The trap's error first found by
 `str::contains` brought the standard library's two-way searcher and a
-slice's panic, 4.1 KB, where `ends_with` brings none. Part 2:
-`JOIN` read as `lookup`, `DISTINCT`/`EXISTS`/a scalar subquery,
-`CREATE TABLE`'s types, pgvector's `<->`.
+slice's panic, 4.1 KB, where `ends_with` brings none. Part 2 below.
+
+## SQL joins, subqueries and schema
+
+**A JOIN on a key is a `lookup` answered flat, or one table's `get` with
+the other's rows a filter** (`fenec-ql`'s `join.rs`: `relate`,
+`correlate`; `Select::flat`, `ResultSet::answered`). SQL's `from orders o
+join customers c on c.id = o.customer_id`, `left [outer] join`, `using
+(k)` and a comma whose key is in the `where` are read by `tables_after` into
+the tables and their `on`s, the statement's clauses parsed as any `get`'s
+with qualified names (`o.total`, a path to the lexer), and `relate` makes
+of them the statement they mean. Each `on` pairs a column of the joined
+table with one of the table joined just before it -- several by `and` are a
+key over several fields -- so the tables are a `lookup` chain, the joined
+table read by its column as a child key must be (`id`, `@hash`, the lead of
+an index over several, which the engine holds it to); its other terms, and
+the `where`'s, go to the level of the one table they read. A name no table
+qualifies is the first table's: the parser reads no schema, and SQL would
+have refused one two tables hold. Where the answer reads one table's
+columns and each of its rows is answered once -- the other table found by
+its `id`, or `distinct` -- it is that table's `get`, the other's rows `key
+in (get ...)` (`semi`), the first table's key read as the joined table's
+where the joined table's rows are answered and the first is found by its
+`id` (an inner join's rows hold one value in both); an aggregate or
+`distinct` otherwise reads both tables' rows and is refused, since over
+pairs a row is counted once a match. Otherwise it is the `lookup`, each
+level `required` for an inner join, and the answer is SQL's rows: the
+select carries a `Flat` -- each column's level, column and SQL's name, the
+page -- which no FenecQL text sets, so no text that parsed answers
+otherwise; the engine refuses a name two columns would take (`flat_page`:
+`select *`'s every `id`), and every JSON writer and the shell render
+`answered()` -- the paths of `ResultSet::flatten`, picked and paged
+(`picked`) -- after a token's masks have read the levels, which hold each
+level's fields to its own collection's rules as the `lookup`'s are. The
+order is the first table's, whose rows the chain hangs off; an order by a
+joined table's column would order each row's children, and is refused. The
+page is the first table's where every level is found by its `id`, at most
+one row a parent; otherwise it is cut from the flat rows, the first table
+read as far as the page could need (`limit + offset` of them where both
+are numbers written, all where a parameter). A `left join`'s table in the
+`where` reads the rows it kept with nulls: `o.id is null` (or its key) is
+the rows with none, `not (key in (get ...))`; anything else is refused --
+one that drops the rows kept with nulls, a comparison with a value, makes
+it an inner join, written so, since telling which conditions do was code
+for a spelling SQL's own style guides warn of -- as are `right`, `full`
+and `cross` joins, an inner join
+after a left one, and a condition over two tables other than the key.
+`tests/join.rs` holds 720 generated joins -- inner and left, to one row
+and to many, a chain of three, filtered, ordered, paged, `distinct`,
+`count(*)` -- to rows worked out by nested loops over each table, each
+reading reached over 40 times, and fails with the page rule or the
+semi-join's once taken out; and three joins to their `lookup` written by
+hand, flattened. **`exists`** (`Parser::exists`, `correlate`) takes the one
+equality between a column of its query's table and one qualified by a
+table around it as `around in (get inner select col where <the rest>)`,
+`not exists` `not` over it, which keeps a row whose key is null as SQL
+does; any other correlation is refused. **`= (select ...)`**
+(`Parser::scalar`) is the same list where the query answers one row -- an
+aggregate with no group, `limit 1` -- and refused where it may answer
+several, which SQL refuses at the second. **`select distinct`** is a group
+of the list's items, and a list of keys alone with a `group` -- FenecQL's
+`select city group city` and SQL's `group by city` with no aggregate, both
+refused before -- is that group (`keys_alone`); `order by 2`/`group by 1`
+name the list's items in SQL's order (`ordinals`), where a number was a
+key the same in every row. **`create table`** (`create_table`,
+`sql_column`) maps each type by `fenec_ql::sqltypes`, PostgreSQL's names
+and then SQLite's affinity rules, the table `fenec import` maps its columns
+by (`pg::map_oid` and `sqlite::map_decl` call it; each crate's test holds
+`create table`'s reading to the import's type by type). A column `id` of
+an integer type that is the primary key is the row's id; a primary key on
+other columns is `required` and `@unique`, over several an index over
+them; `not null` is `required`, which refuses a `null` now -- it took one,
+where `fenec types` and the declared schema's `.notNull()` read it never
+null -- `unique` `@unique`; a length is not held, as SQLite holds none;
+`default`, `references`, `check`, a computed column, a sequence on another
+column and a decimal are refused rather than dropped, which would take
+writes SQL refuses. **`create [unique] index [name] on t [using m]
+(...)`**: btree `@sorted` or an index over several fields, `@unique`, hash
+`@hash`, hnsw `@hnsw` by its operator class (pgvector's default
+`vector_l2_ops`) and `with (m, ef_construction)`, gin over
+`to_tsvector(...)` `@text`; a partial index and ivfflat, gist or brin are
+refused. **pgvector's `order by emb <-> $1 limit k`** -- `<->`, `<=>`,
+`<#>`, lexed as `Tok::Distance` (`<#>` was a `<` and a comment; the shell's
+`Unclosed` reads it so) -- is `near` with `Near::metric`, which the engine
+holds to the index's distance (`metric_held`), refusing another with the
+operator to write; `_score` is the L2 distance, 1 minus the cosine
+distance, and the inner product. The corpus of every FenecQL text main's
+tree holds -- the docs' `fenecql` and `sql` blocks and inline code, both
+golden files, the brief, every JS, Python, Go, C#, Swift, Kotlin and Dart
+string and the Rust crates' literals that begin a statement, with the
+review's own texts: 7 620 texts, 15 240 parses with `parse` and
+`parse_exact` -- parsed on main and the branch: of the repository's texts
+no tree changed and none broke; 34 parse that were refused, 42 are refused
+in other words. **The exception, deliberate:** SQL's `order by <n>` and
+`group by <n>` in a `select ... from` -- written with `by`; FenecQL's
+`order 1` and `group 1` keep their trees -- name the list's items, where
+main read the number as a key the same in every row, which ordered nothing
+and grouped every row as one: never SQL's meaning, and no text of the
+repository's writes it. So `select name from users order by 1`, `select
+name, n from t order by 2 desc`, `select a, b from t order by 1, 2`,
+`select name, age, age * 2 as twice from users order by 2 desc, 3, 1` and
+`select status, count(*) from t group by status, 1` parse to other trees --
+`order by (1)` is the ordinal as well, as PostgreSQL reads it, its brackets
+no node of their own -- and `select * from t order by 2` (a number over
+`*`, whose places a parser reading no schema cannot count), `select
+count(*) from t group by 1` (an aggregate as a group's key, which SQL
+refuses) and a number that names no item -- `order by 0`, `order by -1`,
+`order by 3` over two items, each refused by SQL -- are refused where main
+parsed them; `select distinct from t`, refused on main for its
+`distinct`, is refused in other words.
+
+**What the eval refused after the first pass.** An item's name without
+`as` -- `count(*) c` -- is read where the list goes on or ends at `from`
+after it (`item_alias`; at the text's end the next line says which, `cut`),
+a word no clause or statement begins with (`TAKEN`, the aliases' list). An
+aggregate's `filter (where c)` is what `case` leaves of each row --
+`count(*) filter (where c)` is `count(case when c then 1 end)`, `sum(x)
+filter (...)` `sum(case when c then x end)`, `count(distinct x)` the case
+inside the `distinct` -- since every aggregate passes a null over and
+`count(*)` alone counts rows; `c` reads nulls as a `where` does. And SQL's
+list refused for its own fault, a `from` ahead outside brackets
+(`sees_from`), is refused with its own words: read as FenecQL's `select
+<collection>`, an unnamed `sum(case ...)` or `count(*) c` was answered that
+FenecQL has no `join`, and `meta->>'source'` in the list "expected a
+command". Not taken: `?` placeholders (one run of 160, and of #358's 240),
+`= (select ...)` over a query that may answer several rows -- exact only
+with a check at run time that it answers one at most, PostgreSQL's "more
+than one row returned by a subquery used as an expression", which the
+engine has no place for -- and `->>`, whose text is not the json value a
+path reads (`'5'` against `5`).
+
+**What the review found.** An ungrouped aggregate over a join counted
+each row once a match: `items` takes the list out of the select before
+`folds` was asked of it, so `select distinct count(*) from users u join
+orders o on o.user_email = u.email` took the semi-join and answered 2
+where SQLite answers 4, and `count(*)` or `sum` over pairs was refused
+with "unknown function" where FOLDED's words belong; `folds` reads the
+items now (`items_fold`). A token's `x.*` beside `s.place as code` told it
+a field it may not read was there (`Flat::shown`, access.md). An inner
+join found by the joined table's `id` read every one of its ids as the
+list of an `in (get ...)`, refused past 100 000. The list stays -- a small
+joined table answers through the first table's index, `select u.n from
+users u join vip v on v.id = u.n` three values of `vip` through `users.n`'s
+`@hash` -- and the parser marks where the same join may be read through
+the `lookup`'s probe instead (`Flat::probe`), which the engine makes of
+the list's reading where it reads it (`Select::probed`): the list's term
+taken out and `lookup <c> on id = key required where <its filter>` hung
+off the rows, which answer flat as they stand -- a row's match looked up by
+its id, whichever table the statement names first and with the joined
+table filtered (a `required` level's filter is exact). Made by the parser
+beside the list, the probe took a join's parse 2.25 -> 3.0 us. The engine
+reads the probe (`answered_top`) at once where the list asks every id of a
+table holding
+more rows than the bound, which is past it before a row is read, or an
+index names more of its rows than the bound and than the probe would read
+(`probe_wins`: the bucket's count and the tables' sizes, exact, as
+`required`'s side is chosen by); otherwise it tries the list, its ids
+listed to one past the bound at most (`distinct_column`), and reads the
+probe once that passes -- where no index names a set, a range of a few
+rows would have had the probe read every row of the first table. Read as
+the probe alone, as the first round of fixes had it, that join to three
+rows looked up each of 100 001 users; and the probe drives the table whose
+rows are answered, so `select o.total from users u join orders o on
+o.user_id = u.id order by u.id` reads `orders` by `user_id` with `users` a
+`required` level found by its id. The probe is offered only over a key
+its `lookup` takes beside an `id` -- `id`, or an int, float or timestamp
+field (`probe_keyed`): a json, text or bool key keeps the list, which `in`
+compares as values, and its refusal past the bound, where the probe was
+refused as key types that do not match, naming a `lookup` the statement
+never wrote. The list tried first lists its ids to one past the bound and
+stops a scan there, but hands an index the bound it would have with none
+(`matching_ids_to`'s `want`): handed to `filter_candidates`, it lowered
+the ordered and composite indexes' range bound to 6.4 million rows, and a
+wide range over a collection past 12.8 million was passed over for the
+scan. Over HTTP and pinned, `query_json` writes the probe's rows itself:
+declined, as a statement holding a `lookup`, the server had `query` answer
+the statement again and walk the list a second time
+(`fenec-http/tests/join_lists.rs` counts the lists refused past their
+bound, `lists_past_bound`). The names are shared (`Arc`) by the copy every
+statement holding an `in (get ...)` is answered in, which would otherwise
+copy them. A scoped token's join keeps the list alone (access.md). In turns against main and the branch before these fixes, four
+runs a side each begun at a load under 3: the join to three rows of `vip`
+1.50 us against main's `in (get ...)` reading at 1.44 (2 322 as the probe
+alone); 1 000 orders to 100 010 users 123 us in either order (122 as the
+probe alone, which refused the other order; `lookup ... required` 147 on
+main); `where u.n != 4`, which no index names, 168 against `lookup ...
+required where`'s 189 -- 3 061 while the list was tried first; a join's
+parse 2.25-2.29 -> 2.42 us. An aggregate, `distinct`, `exists`
+and `left join ... is null` -- no row to look a missing match up by --
+over a larger joined table still read the list and are refused past it,
+never cut. `exists (... limit 0)` was true, and a `limit` there is held to
+a number from 1. `int array` mapped to an `int` (`array` read into the
+type's words). `--mcp-max-rows` counted a join's parents: it bounds the
+flat rows, its `limit` put on the flat page, and the parents to as many as
+that page past its offset could need, one flat row each at least -- the
+probe of a `required` level stops at the page where there is no `order`
+and no facet (`retain_with_children_to`), as every `lookup ... required
+limit n` now does, where an 11-row page probed every parent; a join read
+without flat rows is bounded as a `get` is. `-0.0` and `0.0` were two
+groups, two distinct values, two facet values and two values of
+`approx_count_distinct` (`encode_folded`, the group key, which a sketch
+hashes): a sketch `hll_accumulate` stored before, merged with one made
+after, may count them as two. Left as main has it: `3` and `3.0` under a
+json path are two groups and two values of a facet read by the scan, but
+one value of a facet a `@hash` index counts, which files a whole float as
+the int it equals (`hash_key`) where `encode_key` keeps the two apart. A
+LEFT JOIN's `on` condition on a table before it was told to go in the
+`where`, which drops the rows; `hnsw with (m = 1)` was clamped, where
+pgvector refuses it; and a name only a joined table has, read as the first
+table's, read null in every row or failed at the first, and over no rows
+not at all. The engine looks every table of a join up, read or not --
+`left join nothere o on o.id = s.order` was answered, as SQL refuses an
+unknown table -- and holds every column a join names to its table's
+fields (`Flat::names`, `join_names`) and refuses one no table has, as SQL
+refuses an unknown column -- a key with no table (`on cu.id = cid`), a
+LEFT JOIN's `on` term the reading leaves out (`... and o.nosuch = 'x'`
+was answered), an item -- and one with no table that another table has
+naming it as the statement does (`` `cu.country` names `c`'s ``).
+`tests/join.rs` evaluates each table's conditions through FenecQL, so
+`fenec-bench`'s `tests/joins_sqlite.rs` holds 1 248 joins, `exists`, `not
+exists`, `left join ... is null`, names with no table and aggregates and
+`distinct` over pairs to SQLite's answer over rows with nulls in keys and
+conditions: 1 008 answered as SQLite does, 240 refused, and the 240 probes
+beside a list, answered at once, to the same rows -- the split pinned, on
+CI's clippy job (`cargo test -p fenec-bench --test joins_sqlite`).
+
+**What it costs.** The agent eval (`tools/agent-eval`, condition C, two
+runs a task and model, B on main the same day): SQL's first try 60% ->
+74-75% for haiku and 75% -> 91-94% for sonnet, within three 98% -> 98-100%
+and 100%, refused statements 36 -> 7 over 160 runs. The browser module grew
+70.6 KB, 29.2 KB gzip, 22.9 KB brotli (802.6, 329.9, 272.9), the test
+builds 24.0 and 24.4 KB brotli -- the reviews' fixes 10.8 KB and 3.5 KB
+brotli of it, the second's 6.8 and 2.5 (the probe made of the list and
+when to read it 3.2 KB, every name held to its table, `required`'s stop
+at the page), the third's 0.5 and nothing brotli: `join.rs` 18.0 KB
+(`exists`'s `correlate`
+2.5 of it), the parser's readings 24.1 (`create table` and `create index`
+with their columns and keys about 11, `exists` 1.3, the select's
+`distinct`, ordinals, distance and alias 3.7), `sqltypes` 1.9, the flat
+rows and the metric in `query` and the engine 4.8, the refusals' text 6.9,
+the standard library's instances 4.9. Slimmed from 79 KB and 25.3 KB
+brotli: a copy of `Expr::clone` compiled into fenec-ql (2.2 KB, out of the
+core now, `Expr::duplicate`), `str::contains` and `rsplit` in the type map
+and the operator class bringing the two-way searcher, a slice's panic and
+its `char` formatting (about 5.5 KB), the SQL readings out of line (0.4 KB
+brotli), the
+refusals' text shortened and their `String`s made `&'static str`.
+Natively `fenec-server` grew 113 KB, its code 95.2 (fenec-ql 103.6 ->
+179.0 at `opt-level = 3`), `fenec-shard` 97 KB, the shell 113 (97 under
+`--profile cli`). The parse, ABBA against main, ns, medians of eight runs
+a side each run at a load under 3: a row by id 790.6 -> 830.3 (+5.0%), a
+filtered `get` 2 369 -> 2 488 (+5.0%), a `set` 1 179 -> 1 189 (+0.9%), a
+128-dim `near` 3 606 -> 3 634 (+0.8%), a `put` of 1 000 128-dim rows 2.528
+-> 2.525 ms (-0.2%) -- where the code lands: with every function aligned
+to 64 bytes on both sides (`-C llvm-args=-align-all-functions=6`) the same
+source measured 795.2 -> 791.9 by id (-0.4%), 2 370 -> 2 349 (-0.9%), 1 173
+-> 1 177 (+0.3%), 3 623 -> 3 568 (-1.5%) and 2.526 -> 2.519 ms (-0.3%);
+the build before the review's fixes measured +1.2% and +1.0% by id and
+filtered in its own layout. A first pass was 8% slower by id: every `get`, `set` and `del`
+copied its collection's name into the tables an `exists` reads its row
+around in (`Around::At` keeps the token's place now), and `scalar_ahead`,
+asked of every comparison, was a call. 511 parentheses parse in 995 KiB
+of stack against main's 979 (`or_expr`'s and `and_expr`'s frames 16 bytes
+larger each): a `format!` in `cmp_expr`'s refusal of a distance outside
+`order by` was 16 KiB more, one text now (`DISTANCE`).
 
 ## Count parameters
 

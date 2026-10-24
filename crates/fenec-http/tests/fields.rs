@@ -480,6 +480,92 @@ fn a_lookup_is_keyed_by_shown_fields_and_masked_a_level_each() {
     );
 }
 
+/// A SQL join's `x.*` beside a column named as a field no rule grants: the
+/// engine checked the names before the levels were masked, so `as
+/// dropoff` was refused as two columns named `dropoff` where `as nosuch`
+/// was answered -- the hidden field's name told. A name the token is shown
+/// twice is still refused.
+#[test]
+fn a_joins_star_names_no_field_the_token_is_not_shown() {
+    let policy = "orders read(pickup, status) for spy\nstops read for spy\n";
+    let n = start_with(policy, SETUP, false);
+    let spy = n.token(r#"{"sub":"s","role":"spy"}"#);
+    let sql = |name: &str| {
+        format!("SELECT s.place AS {name}, o.* FROM stops s JOIN orders o ON o.id = s.order")
+    };
+    let (a, hidden) = n.query(&spy, &sql("dropoff"), "");
+    let (b, missing) = n.query(&spy, &sql("nosuch"), "");
+    assert_eq!((a, b), (200, 200), "{hidden}\n{missing}");
+    assert_eq!(
+        hidden.replace("dropoff", "X"),
+        missing.replace("nosuch", "X"),
+        "a hidden field and a missing one are answered alike"
+    );
+    assert_eq!(rows_of(&hidden).len(), 4);
+    assert!(
+        hidden.starts_with(r#"[{"dropoff":"s1","id":1,"status":"ready","pickup":"P1"}"#),
+        "{hidden}"
+    );
+    let (status, body) = n.query(&spy, &sql("pickup"), "");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("two columns named `pickup`"), "{body}");
+    // The names a join writes are held to its tables' fields: a withheld
+    // one where the reading leaves it out -- a LEFT JOIN's `on` -- or
+    // written with no table answers as a missing one, and the refusal of a
+    // name with no table names no other table's field.
+    for sql in [
+        "SELECT s.place FROM stops s LEFT JOIN orders o ON o.id = s.order AND o.X = 'x'",
+        "SELECT s.place FROM stops s JOIN orders o ON o.id = s.order WHERE X = 'x'",
+        "SELECT o.status FROM orders o JOIN stops s ON s.order = o.id WHERE X = 'x'",
+    ] {
+        let (a, hidden) = n.query(&spy, &sql.replace('X', "dropoff"), "");
+        let (b, missing) = n.query(&spy, &sql.replace('X', "nosuch"), "");
+        assert_eq!(a, b, "{sql}: {hidden}\n{missing}");
+        assert!(a == 403 || a == 400, "{sql}: {hidden}");
+        assert_eq!(
+            hidden.replace("dropoff", "X"),
+            missing.replace("nosuch", "X"),
+            "{sql}"
+        );
+        assert!(!hidden.contains("names `"), "{sql}: {hidden}");
+    }
+}
+
+/// A join's tables are held to the token's grants whether its reading
+/// reads them or not: a LEFT JOIN whose `on` term the reading leaves out
+/// told a token granted nothing on `orders` its columns -- `o.dropoff`
+/// answered, `o.nosuch` refused naming them -- where `orders` does not
+/// exist for it, as a plain `JOIN orders` says. And a table no database
+/// holds is refused for any token, the server's too, as SQL refuses an
+/// unknown table: `on` naming nothing of it but `id`, it was answered.
+#[test]
+fn a_joins_tables_are_held_to_the_grants_and_the_schema() {
+    let n = start_with("stops read for spy\n", SETUP, false);
+    let spy = n.token(r#"{"sub":"s","role":"spy"}"#);
+    let left = "SELECT s.place FROM stops s LEFT JOIN orders o ON o.id = s.order AND o.X = 'x'";
+    let answers = [
+        n.query(&spy, &left.replace('X', "dropoff"), ""),
+        n.query(&spy, &left.replace('X', "nosuch"), ""),
+        n.query(
+            &spy,
+            "SELECT s.place FROM stops s JOIN orders o ON o.id = s.order",
+            "",
+        ),
+    ];
+    for (status, body) in &answers {
+        assert_eq!(*status, 404, "{body}");
+        assert!(body.contains("collection `orders`"), "{body}");
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0], answers[2]);
+    let nothere = "SELECT s.place FROM stops s LEFT JOIN nothere o ON o.id = s.order";
+    for token in [ROOT.to_string(), spy] {
+        let (status, body) = n.query(&token, nothere, "");
+        assert_eq!(status, 404, "{body}");
+        assert!(body.contains("collection `nothere`"), "{body}");
+    }
+}
+
 /// An inner `get`'s column is made of the rows showing it: a list of the
 /// ready orders' doors was the doors themselves, read through `in`.
 #[test]

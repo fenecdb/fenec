@@ -112,11 +112,14 @@ pub(crate) fn run_blocks(page: &str, langs: &[&str]) -> (usize, usize) {
             };
             let got = match &answer {
                 Response::Affected(n) => n.to_string(),
-                Response::Rows(rs) => match rs.rows.first().and_then(|r| r.values.first()) {
-                    Some(Value::Text(t)) => format!("\"{t}\""),
-                    Some(v) => fenec_core::json::to_string(v),
-                    None => "no row".into(),
-                },
+                // A SQL join's rows as a transport writes them, flat.
+                Response::Rows(rs) => {
+                    match rs.answered().rows.first().and_then(|r| r.values.first()) {
+                        Some(Value::Text(t)) => format!("\"{t}\""),
+                        Some(v) => fenec_core::json::to_string(v),
+                        None => "no row".into(),
+                    }
+                }
                 other => format!("{other:?}"),
             };
             assert_eq!(got, want, "`{}` answered {got}", code.trim());

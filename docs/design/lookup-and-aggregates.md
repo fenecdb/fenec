@@ -57,7 +57,11 @@ collection size) are all exact, so the choice is derived rather than estimated:
 child-driven when `|ids| * n > |bucket|^2`. Over 20 000 parents and 200 000
 children that is 12.07 ms against 15.63 ms for the parent side, 2.19 ms with no
 child filter, and 0.02 ms for a `bool @hash` field on the parent maintained on
-write. Ad hoc, use `required`; on every page load, use the field.
+write. Ad hoc, use `required`; on every page load, use the field. With
+no `order` and no facet the page is the first parents kept in id order, so
+the parent side stops once it holds them (`retain_with_children_to`): it
+probed every parent the filter passed, a page of twenty over 20 000
+products 1.41-1.43 ms, and probes until twenty are kept, 0.036.
 
 ## lookup over several fields
 
@@ -221,7 +225,10 @@ and sparse, `(index, rank)` words, until those would take a quarter of the
 16 KB dense ones, so a group of a few values costs a few words. Its hash
 is its own (`hll::hash`, MurmurHash3's finalizer a word), over the value's
 encoding as `count(distinct)` keys it, the same on every target, so a
-sketch the browser made merges with a server's. `hll_accumulate(e)`
+sketch the browser made merges with a server's -- `-0.0` folded onto `0.0`
+since the SQL spellings' review (`codec::encode_key`), so a sketch
+`hll_accumulate` stored before, merged with one made after, may count the
+two as two values. `hll_accumulate(e)`
 answers the sketch as bytes (`Sketch::to_bytes`, sparse while shorter),
 `hll_combine(s)` merges them and `hll_estimate(s)` (a registry function)
 reads a count off one; a bytes field takes the list of numbers JSON writes

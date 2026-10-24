@@ -119,7 +119,7 @@ and is alpha software.</p>
 
 <details class="deep"><summary>Details</summary>
 <p>What fenecdb gives up for its size is listed in <a
-href="limits.html">Limits</a>: no SQL dialect (<a href="sql.html">its everyday spellings</a> aside) and no join (a query reads one
+href="limits.html">Limits</a>: no SQL dialect (<a href="sql.html">its everyday spellings</a> aside) and a join only on a key (a query reads one
 collection and attaches related rows with <code>lookup</code>), one writer
 a file, no transaction held open across requests, and no TLS on the
 server. PostgreSQL's server has none of those limits.</p>

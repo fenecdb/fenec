@@ -413,6 +413,7 @@ fn reference(plain: &Database, top: &Top, levels: &[Level], count: bool) -> Resu
             columns: known[d].columns.clone(),
             groups,
             nested: None,
+            flat: None,
         });
     }
     let mut chain: Option<Nested> = None;

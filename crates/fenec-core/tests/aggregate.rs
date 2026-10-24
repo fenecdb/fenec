@@ -266,7 +266,7 @@ fn what_does_not_combine_is_refused() {
             "get t select n, count(*) group g",
             "neither aggregated nor grouped",
         ),
-        ("get t select g group g", "needs an aggregate"),
+        ("get t group g", "needs an aggregate"),
         ("get t select median(n)", "answers under a name"),
         ("get t select median(n) as m", "unknown function"),
         ("get t select g, count(*) group g order n", "not a column"),
@@ -294,4 +294,35 @@ fn explain_shows_the_index_and_the_fold() {
         .collect();
     assert!(plan.iter().any(|s| s.contains("hash")), "{plan:?}");
     assert!(plan.iter().any(|s| s.starts_with("aggregate:")), "{plan:?}");
+}
+
+/// `-0.0` is `0.0` to `=`, so one group of them, one value counted, one
+/// facet value -- SQL's `GROUP BY` and `DISTINCT` make one row of them --
+/// as `@hash` and `@sorted` keys already fold them.
+#[test]
+fn minus_zero_is_one_group_with_zero() {
+    let mut db = Database::new();
+    exec(&mut db, "create collection t (x float, k text)");
+    exec(
+        &mut db,
+        "put t [{x: -0.0, k: \"a\"}, {x: 0.0, k: \"a\"}, {x: 1.5, k: \"b\"}]",
+    );
+    let (_, groups) = rows(&db, "get t select x, count(*) as n group x order n desc");
+    assert_eq!(groups.len(), 2, "{groups:?}");
+    assert_eq!(groups[0][1], Value::Int(2), "{groups:?}");
+    let (_, two) = rows(&db, "get t select k, x, count(*) as n group k, x");
+    assert_eq!(two.len(), 2, "{two:?}");
+    let (_, d) = rows(&db, "get t select count(distinct x) as d");
+    assert_eq!(d, [vec![Value::Int(2)]]);
+    let r = db
+        .query(&fenec_ql::parse_one("get t facet x").unwrap(), &[])
+        .unwrap();
+    let facets = &r.rows().unwrap().facets;
+    assert_eq!(facets[0].values.len(), 2, "{facets:?}");
+    // A sketch hashes the key a group is filed by: -0.0 and 0.0 one value,
+    // the sketch made and read at once or read off its bytes.
+    let (_, a) = rows(&db, "get t select approx_count_distinct(x) as a");
+    assert_eq!(a, [vec![Value::Int(2)]]);
+    let (_, s) = rows(&db, "get t select hll_estimate(hll_accumulate(x)) as a");
+    assert_eq!(s, [vec![Value::Int(2)]]);
 }

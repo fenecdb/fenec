@@ -8,8 +8,10 @@
 //! let stmt = parse_one(r#"get docs where year >= 2020 near embed [0.1, 0.2] limit 5"#).unwrap();
 //! ```
 
+mod join;
 pub mod lexer;
 pub mod parser;
+pub mod sqltypes;
 
 pub use parser::{
     parse, parse_exact, parse_facet_list, parse_for, parse_group_list, parse_one, parse_one_for,

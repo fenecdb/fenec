@@ -201,7 +201,7 @@ pub(super) fn list_into(out: &mut String, opts: &Options) {
         r#"","inputSchema":{{"type":"object","properties":{{"collection":{{"type":"string"}},"text":{{"type":"string","description":"The words to search for"}},"fuzzy":{{"type":"boolean","description":"Words within a typo of the index's match too -- one edit for words of 5 to 8 letters, two from 9 -- for words a user may have misspelt; the words as typed rank first"}},"prefix":{{"type":"boolean","description":"The last word also matches the words it begins, as a search box sends what is being typed"}},"vector":{{"type":"array","items":{{"type":"number"}},"description":"A query embedding, of the vector field's dimension"}},"filter":{{"type":"string","description":"A FenecQL condition every row must meet, its values as $1, $2 in params: year >= $1 and tags has $2"}},"params":{{"type":"array","description":"The filter's values, $1 first"}},"limit":{{"type":"integer","minimum":1,"maximum":{rows},"default":10}},"fields":{{"type":"array","items":{{"type":"string"}},"description":"The fields to return; every one but vectors when absent"}},"text_field":{{"type":"string","description":"The @text field to search, where there are several"}},"vector_field":{{"type":"string","description":"The vector field to search, where there are several"}}}},"required":["collection"],"additionalProperties":false}},"annotations":{READS}}}"#
     ));
     defs.push(format!(
-        r#"{{"name":"query","title":"Run a FenecQL read","description":"Runs one FenecQL read and answers its rows: get <collection> [select a, b] [where <condition>] [order <field> [desc]] [limit n]; aggregates (get orders select status, count(*), sum(total) group status); get <collection> where ... count; lookup <collection> on <field> for related rows; explain get .... SQL's SELECT ... FROM ... WHERE, IN (..), BETWEEN and LIKE are read too; double quotes are text, so a field is written bare. Values go in params as $1, $2. An answer of more than {rows} rows or {bytes} bytes is refused, not cut: add a limit or narrow the where. Vector fields are left out unless include_vectors."#
+        r#"{{"name":"query","title":"Run a FenecQL read","description":"Runs one FenecQL read and answers its rows: get <collection> [select a, b] [where <condition>] [order <field> [desc]] [limit n]; aggregates (get orders select status, count(*), sum(total) group status); get <collection> where ... count; lookup <collection> on <field> for related rows; explain get .... SQL's SELECT ... FROM ... WHERE, a JOIN on a key, IN (..), EXISTS, DISTINCT, BETWEEN and LIKE are read too; double quotes are text, so a field is written bare. Values go in params as $1, $2. An answer of more than {rows} rows or {bytes} bytes is refused, not cut: add a limit or narrow the where. Vector fields are left out unless include_vectors."#
     ) + &format!(
         r#"","inputSchema":{{"type":"object","properties":{{"query":{{"type":"string","description":"One FenecQL read"}},"params":{{"type":"array","description":"The values of $1, $2, ..."}},"include_vectors":{{"type":"boolean","default":false,"description":"Keep vector fields in the rows"}}}},"required":["query"],"additionalProperties":false}},"annotations":{READS}}}"#
     ));
@@ -624,6 +624,8 @@ fn rows(resp: Response2, vectors: bool, rename: &[(&str, &str)], extra: &str) ->
             *c = to.to_string();
         }
     }
+    // A SQL join's rows flat, and counted so.
+    let rs = rs.answered();
     let mut out = String::from("{\"rows\":");
     json::rows_array_into(&mut out, &rs);
     json::facets_into(&mut out, &rs);
@@ -1038,22 +1040,11 @@ fn query(ctx: &Ctx, args: Args) -> Checked<String> {
     // More rows than the bound would be fetched only to be refused: asked
     // for one past it, a read that has more says so with one row more.
     if let Statement::Select(sel) = &mut stmt {
-        let one_row = sel.count || (!sel.aggregate.is_empty() && sel.group.is_empty());
-        let asked = match sel.limit {
-            None => None,
-            Some(Count::N(n)) => Some(n),
-            Some(Count::Param(i)) => match params.get(i) {
-                Some(Value::Int(n)) if *n >= 0 => Some(*n as usize),
-                _ => None,
-            },
-        };
-        if !one_row && asked.is_none_or(|n| n > max) {
-            sel.limit = Some(Count::N(max + 1));
-        }
+        row_bound(sel, &params, max);
     }
     let resp = read(ctx, stmt, &params)?;
     if let Response2::Rows(rs) = &resp {
-        if rs.rows.len() > max {
+        if rs.answered().rows.len() > max {
             return Err(Outcome::refused(
                 413,
                 format!(
@@ -1065,6 +1056,42 @@ fn query(ctx: &Ctx, args: Args) -> Checked<String> {
         }
     }
     rows(resp, vectors, &[], "")
+}
+
+/// `sel` asked for one row past `max` at most, so a read with more says so
+/// with one row more and reads no more than that.
+fn row_bound(sel: &mut Select, params: &[Value], max: usize) {
+    let one_row = sel.count || (!sel.aggregate.is_empty() && sel.group.is_empty());
+    let at = |c: Option<Count>| match c {
+        None => None,
+        Some(Count::N(n)) => Some(n),
+        Some(Count::Param(i)) => match params.get(i) {
+            Some(Value::Int(n)) if *n >= 0 => Some(*n as usize),
+            _ => None,
+        },
+    };
+    // A SQL join's rows are the flat ones, several a parent where a level
+    // holds several: bounded there, and its parents to as many as that
+    // page past its offset could need -- each parent kept answers a flat
+    // row at least -- where an unbounded join probed every parent for an
+    // 11-row page. A join read without flat rows, its `Flat` the names
+    // alone, answers its parents' rows, bounded as any `get`'s.
+    match sel.flat.as_deref_mut().filter(|f| !f.columns.is_empty()) {
+        Some(f) => {
+            if at(f.limit).or(at(sel.limit)).is_none_or(|n| n > max) {
+                f.limit = Some(Count::N(max + 1));
+            }
+            let parents = (max + 1).saturating_add(at(Some(f.offset)).unwrap_or(0));
+            if at(sel.limit).is_none_or(|n| n > parents) {
+                sel.limit = Some(Count::N(parents));
+            }
+        }
+        None => {
+            if !one_row && at(sel.limit).is_none_or(|n| n > max) {
+                sel.limit = Some(Count::N(max + 1));
+            }
+        }
+    }
 }
 
 fn get(ctx: &Ctx, args: Args) -> Checked<String> {
@@ -1391,6 +1418,69 @@ fn forget(ctx: &Ctx, args: Args) -> Checked<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A join bounded for `--mcp-max-rows` reads no more parents than its
+    /// page could need -- each parent kept answers a flat row at least --
+    /// where the flat rows alone were bounded and every parent probed; and
+    /// a join read without flat rows is bounded as a `get` is.
+    #[test]
+    fn a_bounded_join_reads_as_many_parents_as_its_page_needs() {
+        let mut db = Database::new();
+        for sql in [
+            "create collection users (n int)",
+            "create collection orders (uid int @hash, k int)",
+        ] {
+            db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+        }
+        for i in 0..50 {
+            let put = format!("put users {{n: {i}}}");
+            db.execute(&fenec_ql::parse_one(&put).unwrap()).unwrap();
+            let put = format!(
+                "put orders [{{uid: {}, k: 1}}, {{uid: {}, k: 2}}]",
+                i + 1,
+                i + 1
+            );
+            db.execute(&fenec_ql::parse_one(&put).unwrap()).unwrap();
+        }
+        let probed = |sql: &str| {
+            let Statement::Select(mut sel) = fenec_ql::parse_one(sql).unwrap() else {
+                panic!()
+            };
+            row_bound(&mut sel, &[], 10);
+            let r = db.query(&Statement::Explain(sel), &[]).unwrap();
+            let steps = format!("{:?}", r.rows().unwrap().rows);
+            // "from the parent side, 11 of 50 parents probed in ..."
+            let at = steps.find("parent side, ").expect(&steps) + "parent side, ".len();
+            let n: String = steps[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            n.parse::<usize>().unwrap()
+        };
+        // A user's two orders: rows of the orders, many to a parent.
+        assert_eq!(
+            probed("SELECT u.n, o.k FROM users u JOIN orders o ON o.uid = u.id"),
+            11
+        );
+        assert_eq!(
+            probed("SELECT u.n, o.k FROM users u JOIN orders o ON o.uid = u.id LIMIT 20 OFFSET 3"),
+            14
+        );
+        // An order's user, found by its `id`: the page is the parents'.
+        assert_eq!(
+            probed("SELECT o.k, u.n FROM orders o JOIN users u ON u.id = o.uid"),
+            11
+        );
+        // The orders alone, the users a filter: a `get` bounded.
+        let Statement::Select(mut sel) = fenec_ql::parse_one(
+            "SELECT o.k FROM orders o JOIN users u ON u.id = o.uid WHERE u.n > 5",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        row_bound(&mut sel, &[], 10);
+        assert_eq!(sel.limit, Some(Count::N(11)));
+    }
 
     #[test]
     fn a_duration_reads_as_ttl_spells_one() {

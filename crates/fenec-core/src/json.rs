@@ -216,6 +216,8 @@ pub struct Children<'a> {
 /// `rows_json` -- and `lookup` would have made a third place to forget, so
 /// both now come through here.
 pub fn rows_array_into(out: &mut String, rs: &ResultSet) {
+    // A SQL join's rows are flat ([`ResultSet::answered`]).
+    let rs = &*rs.answered();
     // One cursor per nested level: the index of the next row to be emitted
     // there. A level's groups are keyed by the position of the owning row in
     // the level above, and emission walks rows in exactly that order, so a
@@ -289,6 +291,7 @@ pub fn row_object_into(
 }
 
 pub fn result_set_into(out: &mut String, rs: &ResultSet) {
+    let rs = &*rs.answered();
     out.push_str("{\"columns\":[");
     for (i, c) in rs.columns.iter().enumerate() {
         if i > 0 {

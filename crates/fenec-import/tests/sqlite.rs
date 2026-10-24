@@ -312,6 +312,7 @@ fn blob_vectors_load_and_index() {
                 vector: Expr::Lit(Value::Vector(vec![0.0, 1.0, 0.0])),
                 ef: None,
                 exact: true,
+                metric: None,
             }),
             limit: Some(Count::N(1)),
             ..Default::default()
