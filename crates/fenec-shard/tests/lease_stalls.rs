@@ -1021,6 +1021,15 @@ fn a_copy_attached_after_its_primary_died_is_never_promoted() {
         "get notes select title",
         "\"u\"",
     );
+    // Still no replica for `t` as n1 is cut off ([`leased_until_cut`]): n1
+    // failed over during the setup and back would have had the repair
+    // after its answer give `t` one, as it should, from n1 alive.
+    assert_eq!(
+        placed(port, "t"),
+        ("n1".to_string(), None),
+        "t got a replica before the test cut n1 off: the router failed n1 over as its \
+         renewals ran past its lease, and the repair after gave t one"
+    );
     // n1 goes, and a repair runs at once, well before n1's lease lapses.
     nodes[0].proxy.cut();
     let (_, repaired) = call(port, "POST", "/_shard/replicas", "", None);
