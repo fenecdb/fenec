@@ -2,7 +2,7 @@
 
 The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Tenants and leases*: scaling out by tenant, the router's directory, moves, failovers and leases. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
-## Tenants and leases
+## Scaling out by tenant
 
 **Scaling out is by tenant, one file each** (`fenec-server --dir`, `fenec-shard`,
 whose directory replicates to a standby router like any other file, the

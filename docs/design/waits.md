@@ -2,7 +2,7 @@
 
 The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Held writes*: `Fenec-Wait`, the writes that wake held ones, the bids that settle a row, and the leader's looks. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
-## Held writes
+## Fenec-Wait
 
 **`Fenec-Wait` holds a `set` or a `del` that writes nothing until it
 can** (`fenec_http::waits`, `Database::wakes_at` in `engine/wake.rs`). A

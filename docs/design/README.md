@@ -1,6 +1,6 @@
 # Design notes
 
-The long form of the invariants in [CLAUDE.md](../../CLAUDE.md): what each measured, the alternatives it rejected and how it came to be. CLAUDE.md keeps each invariant's rule in a few sentences and links to its section here, and the paragraphs under the headings in these files were moved from it word for word. An invariant added or changed is written in both, in the same pull request.
+The long form of the invariants in [CLAUDE.md](../../CLAUDE.md): what each measured, the alternatives it rejected and how it came to be. CLAUDE.md keeps each invariant's rule in a few sentences and links to its section here, and the paragraphs under the headings in these files were moved from it word for word, but for two facts the review of the move corrected: the collate generator's path in [text.md](text.md#collations) and `fenec-abi` beside `fenec-ql` in [browser-module.md](browser-module.md#index-features). An invariant added or changed is written in both, in the same pull request.
 
 The invariants were written as one sequence, and "above" and "below" in them refer to that sequence, not to the file a paragraph is in now: [the original order](#the-original-order) lists it, each with the file that holds it. The files below are in the order of the first invariant each holds.
 
@@ -47,11 +47,11 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 11. [A durable write syncs a log beside the file, not the file](durability.md#the-sync-log)
 12. [Replication ships only what is on disk, numbered by the change counter](replication.md#replication)
 13. [A node's tenants are archived over one stream](replication.md#a-nodes-archive)
-14. [Scaling out is by tenant, one file each](tenants.md#tenants-and-leases)
+14. [Scaling out is by tenant, one file each](tenants.md#scaling-out-by-tenant)
 15. [A node is in a region and a zone, and a tenant in its node's region](regions.md#regions-and-zones)
 16. [A region may keep its own directory, and leases and fails over inside itself](regions.md#region-directories)
 17. [One URL reaches every region: a Worker learns each tenant's home from the routers](regions.md#the-global-entry)
-18. [A tenant may keep read replicas in other regions, which a router near them answers the reads its clients mark from](read-replicas.md#read-replicas)
+18. [A tenant may keep read replicas in other regions, which a router near them answers the reads its clients mark from](read-replicas.md#marked-reads)
 19. [A scoped token is held to its rules at every level, twice for writes](access.md#scoped-tokens)
 20. [A read rule may name the fields it shows, and a field it withholds is held out of what a statement does, not only of its rows](access.md#field-lists)
 21. [A rule may read another collection, answered before each statement](access.md#rules-reading-another-collection)
@@ -86,7 +86,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 50. [A `set` or a `del` picks its rows with `order` and `limit`, and `returning` answers them](writes.md#picked-writes)
 51. [A key of `order` may be an expression](writes.md#order-by-expression)
 52. [A `put` answers the rows it wrote with `returning`](writes.md#put-returning)
-53. [`Fenec-Wait` holds a `set` or a `del` that writes nothing until it can](waits.md#held-writes)
+53. [`Fenec-Wait` holds a `set` or a `del` that writes nothing until it can](waits.md#fenec-wait)
 54. [A write wakes the held writes that read what it wrote, and a row several groups would take goes to the one ranking it first](waits.md#waking-held-writes)
 55. [One held request looks for every group, and a group that found nothing looks among the rows written since](waits.md#the-leaders-looks)
 56. [`@unique` is a `@hash` that asks its bucket before a write](indexes.md#unique)

@@ -6,7 +6,7 @@ The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Text*:
 
 **`collate und` and `collate tr` are ICU's orders, a query's or a field's.**
 The weights are ICU's own for every assigned code point --
-`tools/collate/gen.py` reads ICU 76.1 out of macOS's libicucore into
+`crates/fenec-core/tools/collate/gen.py` reads ICU 76.1 out of macOS's libicucore into
 `collate/`: the root cut into twelve chunks by script and each tailoring as
 what it changes, with ICU's own contractions (a letter and a mark it
 composes with, a two-part vowel sign, a Thai or Lao vowel written before its

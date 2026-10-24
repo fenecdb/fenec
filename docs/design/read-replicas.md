@@ -2,7 +2,7 @@
 
 The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *Read replicas*: a tenant's read replicas in other regions, the reads marked for them, and reading one's own writes across a failover. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
-## Read replicas
+## Marked reads
 
 **A tenant may keep read replicas in other regions, which a router near
 them answers the reads its clients mark from** (`fenec-shard/src/readers.rs`,

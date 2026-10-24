@@ -8,7 +8,7 @@ before -- so it is written from CLAUDE.md instead, and CI fails when the
 two differ.
 
 `--check` also fails once CLAUDE.md passes MAX_BYTES. Every session and
-every agent reads it whole before a word of its task: it had grown to 505 KB,
+every agent reads it whole before a word of its task: it had grown to 511 KB,
 some 120 000 tokens, each invariant's measurements, history and rejected
 alternatives among them, which live in docs/design/ now."""
 

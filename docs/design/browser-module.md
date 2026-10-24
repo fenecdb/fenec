@@ -38,8 +38,8 @@ compiler cannot prove ends, and one left in cost the full module 197 bytes
 brotli; asked first, `EVERY_INDEX` left it the size it had been before the
 features, to the byte. A crate that depends on `fenec-core` names `full`
 itself (the workspace takes it without default features), and `fenec-ql`
-only as a dev dependency -- in its normal ones it would put them back into
-every browser module. Without `composite` an index over several fields is
+and `fenec-abi` only as a dev dependency -- in their normal ones it would put
+them back into every browser module. Without `composite` an index over several fields is
 the scan's, and a unique one is asked by reading the rows, as it was
 without `sorted`.
 `tests/features.rs` and the unit tests run without them in `make test`,
