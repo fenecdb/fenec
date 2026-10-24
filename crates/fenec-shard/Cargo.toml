@@ -64,3 +64,9 @@ path = "tests/lease_stalls.rs"
 [[test]]
 name = "late_grants"
 path = "tests/late_grants.rs"
+
+# Apart: each test holds a thread a request beside three nodes, their
+# replication and a router.
+[[test]]
+name = "cuts"
+path = "tests/cuts.rs"

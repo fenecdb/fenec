@@ -224,16 +224,22 @@ router on a region's router -- for each read of an answer: the connect,
 the answer's head, and every read after it but a stream's, which reads
 with none. Past it the client is answered 502, the request perhaps run.
 
-- **What it buys.** A request in flight to a node whose machine is gone
-  waits out the timeout, its client unanswered, unless the client gives up
-  first; at fenec-shard's 60 s every client without a bound of its own
-  waited a minute. At twice the lease it is let go of once the node's
-  tenants have been failed over (a lease and a tenth), so a client's
-  retry of a read or a keyed write reaches the new primary. With
-  `make drill`'s lease of 2 s and a timeout of 4 s, the router failed the
-  killed node over about 2 s after the kill and its tenants' writers wrote
-  again at about 4 s, where at 60 s their own 5 s client timeout had them
-  at 4.9.
+- **What it buys.** A request out to a machine that is gone waits out the
+  timeout, its client unanswered, unless the client gives up first -- but
+  for what a failover ends. When a router fails a node over, by hand or on
+  its lease, what it had out to the node for each tenant it moved is
+  answered then, not at the timeout: a read, a keyed write and a request
+  the node cannot have run go to the tenant's new primary, any other write
+  is a 502 saying it may have run, and a subscription ends for its client
+  to open again (`sharding.html#in-flight`). With `make drill`'s lease of
+  2 s the killed node's writers write again just after its failover, where
+  they waited for the timeout's 4 s before. What is left to the timeout is
+  what no failover ends: a node gone whose tenants have no copy, or whose
+  copy will not be promoted (A node lost); a relay -- the global router's to a
+  region's, a region's router's to another's -- to a router whose machine
+  is gone, which tries the next router of that region only past it; and a
+  standby router's forwards, which fail nothing over. At fenec-shard's
+  60 s each of those holds its client a minute.
 - **What it costs.** An answer slower than the timeout to begin is a 502
   while the node goes on with it: a `create index` over a large
   collection, a `compact` of a large tenant, a large batch or a heavy
@@ -252,8 +258,10 @@ with none. Past it the client is answered 502, the request perhaps run.
   subscription, a replication stream -- read with no timeout once their
   head is in.
 
-Raise it with the lease, keeping it at twice the lease; lower it no
-further than the slowest statement your clients send through the routers.
+It need not follow the lease any more, which a failover no longer waits
+on: keep it no shorter than the slowest statement your clients send
+through the routers, and no longer than you would have a client wait on a
+machine no failover covers. The kit's 10 s does both for most.
 
 ## Bring-up
 
@@ -410,9 +418,12 @@ machine lost) -- three runs on one laptop, which are observations, not
 bounds: another machine's runs fall outside them. The router failed the
 node over 1.92, 2.56 and 1.90 s after the kill -- a lease and a tenth
 after its last renewal, then the promotions; its own tenants' writers
-wrote again 3.90, 3.97 and 3.93 s after the kill, the request each had in
-flight to the dead node let go of at the upstream timeout (The routers'
-upstream timeout); the tenants whose replica it
+wrote again as it did, the request each had in flight to the dead node
+answered by the failover (a 502, the drill's writes carrying no key) and
+the next sent to the new primary -- 2.52 and 1.93 s after the kill in two
+later runs whose failovers came at 2.53 and 1.93, where they waited for
+the upstream timeout before, 3.94 and 3.95 s in two runs beside them (The
+routers' upstream timeout); the tenants whose replica it
 held, whose primaries went on writing, went at most 17, 18 and 17 ms
 between two answered writes, and every other tenant 16, 18 and 17; none
 of 41 577 acknowledged writes was lost. The second kind waits up
@@ -1005,8 +1016,11 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   (`/t/<t>/_replication/status` on the primary's node has each), and **no
   archive lag**: `fenec archive` exports nothing, and the node's
   `fenec_node_streams` says only whether an archiver is connected.
-- **Requests in flight to a dead machine** wait at the router for its
-  upstream timeout (10 s in the kit, The routers' upstream timeout) where
-  the machine's address swallows packets, unless the client gives up
-  first, even once the node has been failed over: clients should bound
-  their requests and retry with an `Idempotency-Key`.
+- **Requests out to a dead machine no failover covers** wait at the router
+  for its upstream timeout (10 s in the kit, The routers' upstream timeout)
+  where the machine's address swallows packets, unless the client gives up
+  first: a node whose tenants were not failed over, a router a relay goes
+  to, and anything a standby router forwards -- a failover ends what the
+  router that made it had out to the node, and no other router's. Clients
+  should bound their requests and retry with an `Idempotency-Key`, which
+  is also what has a write the failover answered 502 sent again safely.
