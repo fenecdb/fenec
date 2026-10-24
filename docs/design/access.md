@@ -125,7 +125,15 @@ refused by name (403) as a name the collection lacks is, so a name tried
 says nothing -- a SQL join's `x.*` too, whose names the engine checks for
 a clash before the levels are masked: `hold` hands it what each level
 shows (`Flat::shown`), where `s.place as code` beside `x.*` was refused as
-two columns named `code` and `as nosuch` answered. Masking alone leaked the field through everything else a
+two columns named `code` and `as nosuch` answered; and every other name a
+join writes, which the engine holds to its tables' fields (`Flat::names`),
+is held here first -- a LEFT JOIN's `on` term the reading leaves out was
+answered naming a withheld field and refused naming a missing one -- with
+the engine's refusal of a name written with no table naming no other
+table's field. A scoped token's join keeps its list alone (`Flat::probe`
+cleared): the probe the engine reads past the list's 100 000 values hangs
+a level off the rows that the token's masks, made for the list's one
+level, would not reach, so such a join is refused past them. Masking alone leaked the field through everything else a
 statement does with it: `where dropoff = $1` answered the order going
 there, `order dropoff` sorted the doors, `{n: dropoff}` wrote one into a
 field the token reads, `1 / n` failed with an error naming the division.

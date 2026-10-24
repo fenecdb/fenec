@@ -78,6 +78,12 @@ jobs:
       # which the workspace's run builds without.
       - run: cargo clippy -p fenec-ffi --features jni --all-targets -- -D warnings
 
+      # SQL's joins held to what SQLite answers for the same rows: in the
+      # bench crate, where SQLite is, which `make test` leaves out. About
+      # 32 s to build and 0.3 s to run, with this job's target cached.
+      - name: SQL's joins answer what SQLite answers
+        run: cargo test -p fenec-bench --test joins_sqlite
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

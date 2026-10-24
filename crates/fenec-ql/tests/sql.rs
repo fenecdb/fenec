@@ -324,12 +324,25 @@ const SAME: &[(&str, &str)] = &[
     ),
 ];
 
+/// `st` with what a join read without flat rows carries for the engine
+/// set aside -- its names, held to its tables' fields, and whether its list
+/// may be probed ([`fenec_core::query::Flat`]) -- which FenecQL has no
+/// words for.
+fn written(mut st: Statement) -> Statement {
+    if let Statement::Select(s) = &mut st {
+        if s.flat.as_ref().is_some_and(|f| f.columns.is_empty()) {
+            s.flat = None;
+        }
+    }
+    st
+}
+
 #[test]
 fn sql_spellings_parse_to_the_fenecql_they_mean() {
     for (sql, fenecql) in SAME {
         let a = parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
         let b = parse_one(fenecql).unwrap_or_else(|e| panic!("{fenecql}: {e}"));
-        assert_eq!(a, b, "{sql}");
+        assert_eq!(written(a), b, "{sql}");
     }
 }
 

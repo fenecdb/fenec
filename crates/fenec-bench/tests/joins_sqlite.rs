@@ -3,7 +3,9 @@
 //! out by a SQL engine, not by FenecQL -- `crates/fenec-ql/tests/join.rs`
 //! reads each table's conditions through FenecQL, so a reading that took
 //! a null otherwise than SQL could not fail there. A statement fenecdb
-//! refuses passes; one it answers must answer SQLite's rows. The conditions
+//! refuses passes; one it answers must answer SQLite's rows, and so must
+//! the probe a join read as a list may be read as; how many of each is pinned,
+//! and CI runs it on the clippy job. The conditions
 //! keep clear of what FenecQL documents reading otherwise (`!=` and `NOT
 //! IN` beside a null, sql.html#nulls). Here and not in fenec-ql, since
 //! SQLite is this crate's alone: `cargo test -p fenec-bench`.
@@ -149,7 +151,12 @@ fn sqlite_rows(lite: &rusqlite::Connection, sql: &str) -> Vec<Vec<Value>> {
 /// fenecdb's flat rows, or the refusal.
 fn fenec_rows(db: &Database, sql: &str) -> std::result::Result<Vec<Vec<Value>>, String> {
     let st = fenec_ql::parse_one(sql).map_err(|e| e.to_string())?;
-    let r = db.query(&st, &[]).map_err(|e| e.to_string())?;
+    statement_rows(db, &st)
+}
+
+/// The flat rows `st` answers, or the refusal.
+fn statement_rows(db: &Database, st: &Statement) -> std::result::Result<Vec<Vec<Value>>, String> {
+    let r = db.query(st, &[]).map_err(|e| e.to_string())?;
     let rs = r.rows().ok_or_else(|| "no rows".to_string())?;
     let rs = rs.answered();
     Ok(rs.rows.iter().map(|r| r.values.clone()).collect())
@@ -206,15 +213,27 @@ fn statements(rng: &mut Rng) -> Vec<String> {
             format!("SELECT li.id, od.status FROM l li JOIN o od ON od.id = li.oid LEFT JOIN c cu ON cu.id = od.cid AND {cc}"),
             format!("SELECT od.id FROM o od, c cu WHERE cu.id = od.cid AND {cc}"),
             format!("SELECT cu.country, count(*) FROM c cu JOIN o od ON od.cid = cu.id GROUP BY cu.country"),
+            // The joined table's rows, the first a filter, and the joined
+            // table found by its `id` and filtered: each read as a list,
+            // its probe beside it.
+            format!("SELECT od.id, od.total FROM c cu JOIN o od ON od.cid = cu.id WHERE {cc} AND {oc}"),
+            format!("SELECT od.id, od.status FROM o od JOIN c cu ON cu.id = od.cid WHERE {cc}"),
+            format!("SELECT li.qty FROM l li JOIN o od ON od.id = li.oid WHERE {oc}"),
         ]);
     }
     out
 }
 
+/// What the statements come to: answered as SQLite answers, refused, and
+/// read as a list with a probe beside it.
+const ANSWERED: usize = 1008;
+const REFUSED: usize = 240;
+const PROBED: usize = 240;
+
 #[test]
 fn joins_answer_what_sqlite_answers() {
     let mut rng = Rng(0xD1B5_4A32_D192_ED03);
-    let (mut answered, mut refused) = (0, 0);
+    let (mut answered, mut refused, mut probed) = (0, 0, 0);
     for _ in 0..4 {
         let (db, lite) = load(&mut rng);
         for sql in statements(&mut rng) {
@@ -223,6 +242,19 @@ fn joins_answer_what_sqlite_answers() {
                 Ok(got) => {
                     assert_eq!(sorted(got), want, "{sql}");
                     answered += 1;
+                    // A join read as a list may be read as the `lookup`'s
+                    // probe, which the engine answers once the list would
+                    // pass 100 000 values: answered here at once, held to
+                    // SQLite's rows as well.
+                    let Ok(Statement::Select(s)) = fenec_ql::parse_one(&sql) else {
+                        continue;
+                    };
+                    if let Some(p) = s.probed() {
+                        let got = statement_rows(&db, &Statement::Select(p))
+                            .unwrap_or_else(|e| panic!("{sql}: its probe: {e}"));
+                        assert_eq!(sorted(got), want, "{sql}: its probe");
+                        probed += 1;
+                    }
                 }
                 Err(e) => {
                     // A refusal names what to write; a missing field or a
@@ -236,6 +268,12 @@ fn joins_answer_what_sqlite_answers() {
             }
         }
     }
-    eprintln!("{answered} answered as SQLite does, {refused} refused");
-    assert!(answered > 600, "{answered} answered, {refused} refused");
+    eprintln!("{answered} answered as SQLite does, {refused} refused, {probed} probes");
+    // Pinned: a reading that comes to refuse what it answered, or the
+    // other way, says so here.
+    assert_eq!(
+        (answered, refused, probed),
+        (ANSWERED, REFUSED, PROBED),
+        "answered, refused, probed"
+    );
 }

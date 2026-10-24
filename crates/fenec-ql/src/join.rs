@@ -13,8 +13,11 @@
 //! index as a `lookup`'s.
 
 use fenec_core::query::MAX_LOOKUP_DEPTH;
-use fenec_core::query::{label_of, CmpOp, Count, Expr, Flat, FlatColumn, Lookup, Select, Sort};
+use fenec_core::query::{
+    label_of, CmpOp, Count, Expr, Flat, FlatColumn, JoinNames, Lookup, Select, Sort,
+};
 use fenec_core::value::Value;
+use std::sync::Arc;
 
 /// A table of `from`, and the name the statement calls it by.
 #[derive(Clone)]
@@ -118,9 +121,15 @@ impl From {
     }
 
     /// The key pair a term of join `j`'s `on` is -- `c.id = o.customer_id`
-    /// -- as the joined table's column and the one before's. A side with
-    /// no table is the other side's other: SQL places it by the schema.
-    fn key(&self, t: &Expr, j: usize) -> Result<Option<(String, String)>, &'static str> {
+    /// -- as the joined table's column and the one before's, each with
+    /// whether it was written with no table. A side with no table is the
+    /// other side's other: SQL places it by the schema.
+    #[allow(clippy::type_complexity)]
+    fn key(
+        &self,
+        t: &Expr,
+        j: usize,
+    ) -> Result<Option<((String, bool), (String, bool))>, &'static str> {
         let Expr::Cmp(CmpOp::Eq, a, b) = t else {
             return Ok(None);
         };
@@ -128,13 +137,14 @@ impl From {
             return Ok(None);
         };
         let ((ta, ra), (tb, rb)) = (self.owner(a), self.owner(b));
+        let (a, b) = ((ra, ta.is_none()), (rb, tb.is_none()));
         let pair = match (ta, tb) {
-            (Some(x), Some(y)) if x == j && y + 1 == j => (ra, rb),
-            (Some(x), Some(y)) if y == j && x + 1 == j => (rb, ra),
-            (Some(x), None) if x == j => (ra, rb),
-            (None, Some(y)) if y == j => (rb, ra),
-            (Some(x), None) if x + 1 == j => (rb, ra),
-            (None, Some(y)) if y + 1 == j => (ra, rb),
+            (Some(x), Some(y)) if x == j && y + 1 == j => (a, b),
+            (Some(x), Some(y)) if y == j && x + 1 == j => (b, a),
+            (Some(x), None) if x == j => (a, b),
+            (None, Some(y)) if y == j => (b, a),
+            (Some(x), None) if x + 1 == j => (b, a),
+            (None, Some(y)) if y + 1 == j => (a, b),
             (Some(x), Some(y)) if (x == j) != (y == j) => {
                 return Err(
                     "a join hangs off the table just before it: name the tables in \
@@ -143,7 +153,10 @@ impl From {
             }
             _ => return Ok(None),
         };
-        Ok(Some((pair.0.to_string(), pair.1.to_string())))
+        Ok(Some((
+            (pair.0 .0.to_string(), pair.0 .1),
+            (pair.1 .0.to_string(), pair.1 .1),
+        )))
     }
 }
 
@@ -221,6 +234,8 @@ pub(crate) fn relate(
     // Each table's own terms, and each join's key.
     let mut filters: Vec<Vec<Expr>> = Vec::new();
     let mut keys: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+    // Every column the statement names, with its table ([`Flat::names`]).
+    let mut names: Vec<(usize, String, bool)> = Vec::new();
     for _ in 0..n {
         filters.push(Vec::new());
         keys.push((Vec::new(), Vec::new()));
@@ -243,7 +258,9 @@ pub(crate) fn relate(
             }
         };
         for t in on {
-            if let Some((child, parent)) = from.key(&t, j)? {
+            if let Some(((child, cb), (parent, pb))) = from.key(&t, j)? {
+                names.push((j, child.clone(), cb));
+                names.push((j - 1, parent.clone(), pb));
                 keys[j].0.push(child);
                 keys[j].1.push(parent);
                 continue;
@@ -357,14 +374,35 @@ pub(crate) fn relate(
         reads |= 1 << t;
         first_more |= t == 0 && !(one_key && bare == keys[1].1[0]);
     }
-    // The names no table qualifies, read as the first table's: the engine
-    // holds them to its fields ([`Flat::bare`]), since a name only a joined
-    // table has read null there, or failed at the first row.
-    let mut bare = read.clone();
-    for t in &filters[0] {
-        t.referenced_fields(&mut bare);
+    // The rest of the names the statement writes, each its table's: the
+    // engine holds them to the tables' fields ([`Flat::names`]).
+    let mut written = read.clone();
+    for f in &filters {
+        for t in f {
+            t.referenced_fields(&mut written);
+        }
     }
-    bare.retain(|f| from.owner(f).0.is_none() && f != "id" && !f.contains('('));
+    for f in written {
+        let (t, name) = from.owner(&f);
+        names.push((t.unwrap_or(0), name.to_string(), t.is_none()));
+    }
+    // Each once: the engine asks each of every run of the statement.
+    let mut each = Vec::with_capacity(names.len());
+    for n in names {
+        if n.1 != "id" && !n.1.contains('(') && !each.contains(&n) {
+            each.push(n);
+        }
+    }
+    let names = each;
+    let tables = (from.tables.iter())
+        .map(|t| {
+            (
+                t.alias.clone().unwrap_or_else(|| t.collection.clone()),
+                t.collection.clone(),
+            )
+        })
+        .collect();
+    let names = Some(Arc::new(JoinNames { tables, names }));
     let folds = items_fold(&items) || !sel.group.is_empty() || sel.having.is_some();
     let inner: Vec<bool> = from.joins.iter().map(|j| !j.left).collect();
     if one_key {
@@ -381,13 +419,16 @@ pub(crate) fn relate(
         // row, by its `id`, or where `distinct` counts a row once -- or,
         // for `where o.id is null`, the rows it holds none for.
         //
-        // Not where the joined table is found by its `id` with nothing
-        // asked of it but to be there, and the rows are the first table's
-        // as they come: the `lookup`'s probe, a row's id looked up, reads
-        // what the list would have read whole -- held to 100 000 values, a
-        // join over a larger table failed.
-        let probe = child == "id" && inner[0] && filters[1].is_empty() && !folds && !distinct;
-        if none || reads & !1 == 0 && (child == "id" || once) && !probe {
+        // Where the joined table is found by its `id` and the rows are
+        // the first table's as they come, the same join may be read
+        // through the `lookup`'s probe ([`Flat::probe`]): the list answers
+        // a small joined table through the first table's index, and past
+        // its 100 000 values the engine reads the probe, a row's match
+        // looked up by its id, where the plain join was refused. Read as
+        // the probe alone, a join to three rows of `vip` looked up each of
+        // 100 001 users.
+        if none || reads & !1 == 0 && (child == "id" || once) {
+            let probe = child == "id" && inner[0] && !none && !folds && !distinct;
             if inner[0] || none {
                 let some = semi(from, 1, child, parent, &mut filters[1]);
                 filters[0].push(match none {
@@ -395,36 +436,36 @@ pub(crate) fn relate(
                     false => some,
                 });
             }
-            sel.flat = bare_flat(bare);
+            sel.flat = join_flat(names, probe);
             return Ok(driving(sel, from, items, filters.swap_remove(0), None));
         }
         // The joined table's, the first table's a filter -- its key read
-        // as the joined table's, which an inner join's rows hold too.
+        // as the joined table's, which an inner join's rows hold too. Its
+        // probe drives the joined table, the first table a `required`
+        // level found by its `id`.
         if inner[0] && reads & !3 == 0 && !first_more && (parent == "id" || once) {
-            let mut some = semi(from, 0, parent, child, &mut filters[0]);
-            if let Expr::InSelect(_, first) = &mut some {
-                first.flat = bare_flat(bare);
-            }
+            let probe = parent == "id" && !folds && !distinct;
+            let some = semi(from, 0, parent, child, &mut filters[0]);
             filters[1].push(some);
             let own = filters.swap_remove(1);
+            sel.flat = join_flat(names, probe);
             return Ok(driving(sel, from, items, own, Some((parent, child))));
         }
     }
     if folds || distinct {
         return Err(FOLDED);
     }
-    flat(sel, from, items, filters, keys, &inner, bare)
+    flat(sel, from, items, filters, keys, &inner, names)
 }
 
-/// What a statement read off a join carries of its names with no table
-/// ([`Flat::bare`]): no flat rows of its own, only the names.
-fn bare_flat(bare: Vec<String>) -> Option<Box<Flat>> {
-    (!bare.is_empty()).then(|| {
-        Box::new(Flat {
-            bare,
-            ..Flat::default()
-        })
-    })
+/// What a statement read off a join without flat rows carries: the names
+/// it writes ([`Flat::names`]) and whether its list may be probed.
+fn join_flat(names: Option<Arc<JoinNames>>, probe: bool) -> Option<Box<Flat>> {
+    Some(Box::new(Flat {
+        names,
+        probe,
+        ..Flat::default()
+    }))
 }
 
 /// The item a name with no table names -- by its `as`, or its label
@@ -662,7 +703,7 @@ fn flat(
     mut filters: Vec<Vec<Expr>>,
     keys: Vec<(Vec<String>, Vec<String>)>,
     inner: &[bool],
-    unqualified: Vec<String>,
+    names: Option<Arc<JoinNames>>,
 ) -> Result<Select, &'static str> {
     let n = from.tables.len();
     order_by_items(&mut sel, from, &items);
@@ -764,7 +805,7 @@ fn flat(
     let by_id = keys[1..].iter().all(|(c, _)| c.len() == 1 && c[0] == "id");
     let mut page = Flat {
         columns,
-        bare: unqualified,
+        names,
         ..Flat::default()
     };
     if !by_id {

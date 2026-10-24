@@ -509,6 +509,26 @@ fn a_joins_star_names_no_field_the_token_is_not_shown() {
     let (status, body) = n.query(&spy, &sql("pickup"), "");
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("two columns named `pickup`"), "{body}");
+    // The names a join writes are held to its tables' fields: a withheld
+    // one where the reading leaves it out -- a LEFT JOIN's `on` -- or
+    // written with no table answers as a missing one, and the refusal of a
+    // name with no table names no other table's field.
+    for sql in [
+        "SELECT s.place FROM stops s LEFT JOIN orders o ON o.id = s.order AND o.X = 'x'",
+        "SELECT s.place FROM stops s JOIN orders o ON o.id = s.order WHERE X = 'x'",
+        "SELECT o.status FROM orders o JOIN stops s ON s.order = o.id WHERE X = 'x'",
+    ] {
+        let (a, hidden) = n.query(&spy, &sql.replace('X', "dropoff"), "");
+        let (b, missing) = n.query(&spy, &sql.replace('X', "nosuch"), "");
+        assert_eq!(a, b, "{sql}: {hidden}\n{missing}");
+        assert!(a == 403 || a == 400, "{sql}: {hidden}");
+        assert_eq!(
+            hidden.replace("dropoff", "X"),
+            missing.replace("nosuch", "X"),
+            "{sql}"
+        );
+        assert!(!hidden.contains("names `"), "{sql}: {hidden}");
+    }
 }
 
 /// An inner `get`'s column is made of the rows showing it: a list of the

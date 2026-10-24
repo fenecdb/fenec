@@ -2039,13 +2039,92 @@ pub struct Flat {
     /// named in its refusal, told the token it was there -- `x.*` beside
     /// `s.place as code` was refused where `as nosuch` was answered.
     pub shown: Vec<(usize, Vec<String>)>,
-    /// The names the join's statement wrote with no table, which the
-    /// parser, reading no schema, takes for the first table's: the engine
-    /// refuses one its collection has no field of, which was a joined
-    /// table's -- read as the first's it was null in every row, or failed
-    /// at the first row, and over no rows not at all. A statement read off
-    /// a join without flat rows carries them in a `Flat` with no columns.
-    pub bare: Vec<String>,
+    /// The names the join's statement writes ([`JoinNames`]). A statement
+    /// read off a join without flat rows carries them in a `Flat` with no
+    /// columns. Shared: every statement whose `in (get ...)` is answered
+    /// is copied first, and a copy of the names would be allocations of
+    /// every such join.
+    pub names: Option<std::sync::Arc<JoinNames>>,
+    /// Whether the join, read as `key in (get <joined> select id ...)`,
+    /// may be read as the `lookup`'s probe instead ([`Select::probed`]),
+    /// which the engine reads where that list would hold more than
+    /// [`MAX_SUBQUERY_VALUES`] values. The list answers a small joined
+    /// table through the first table's index, where the probe looks every
+    /// row of the first table up. A flag, the probe made where it is read:
+    /// made beside the list by the parser, it took a join's parse 2.25 ->
+    /// 3.0 us.
+    pub probe: bool,
+}
+
+/// The names a SQL join's statement writes, which the engine holds to its
+/// tables' fields: the parser reads no schema.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct JoinNames {
+    /// The join's tables, each as the statement names it -- its alias, or
+    /// its collection -- and its collection, in the order of `from`.
+    pub tables: Vec<(String, String)>,
+    /// Every column the statement names, its table's place among `tables`
+    /// and whether it was written with no table, which the parser takes for
+    /// the first table's: the engine refuses a name its table has no field
+    /// of, as SQL refuses an unknown column -- read as written, one only a
+    /// joined table has was null in every row, a condition over one failed
+    /// at the first row and over no rows not at all, and a LEFT JOIN's
+    /// `on` the reading leaves out was never read.
+    pub names: Vec<(usize, String, bool)>,
+}
+
+/// The last term of `filter`'s `and` chain that is `<field> in (get <c>
+/// select id ...)` asking nothing but a filter of `c`, taken out: the field
+/// and the inner `get`.
+fn take_id_list(filter: &mut Option<Expr>) -> Option<(String, Box<Select>)> {
+    fn listed(e: &Expr) -> bool {
+        let Expr::InSelect(lhs, s) = e else {
+            return false;
+        };
+        matches!(&**lhs, Expr::Field(_))
+            && matches!(s.project.as_deref(), Some([c]) if c == "id")
+            && s.limit.is_none()
+            && s.offset == Count::N(0)
+            && s.lookup.is_none()
+            && s.aggregate.is_empty()
+            && s.group.is_empty()
+            && s.computed.is_empty()
+            && s.near.is_none()
+            && s.matcher.is_none()
+            && s.require.is_none()
+            && !s.count
+    }
+    // The term out of its `and`, the other side in the `and`'s place.
+    fn take(e: &mut Expr) -> Option<Expr> {
+        let Expr::And(a, b) = e else {
+            return None;
+        };
+        if let Some(t) = take(b) {
+            return Some(t);
+        }
+        let right = listed(b);
+        if !right && !listed(a) {
+            return take(a);
+        }
+        let Expr::And(a, b) = std::mem::replace(e, Expr::Lit(Value::Null)) else {
+            return None;
+        };
+        let (kept, term) = if right { (a, b) } else { (b, a) };
+        *e = *kept;
+        Some(*term)
+    }
+    let term = match filter {
+        Some(e) if listed(e) => filter.take()?,
+        Some(e) => take(e)?,
+        None => return None,
+    };
+    let Expr::InSelect(lhs, inner) = term else {
+        return None;
+    };
+    let Expr::Field(key) = *lhs else {
+        return None;
+    };
+    Some((key, inner))
 }
 
 /// A column of a [`Flat`] row: the level it is read from -- 0 the `get`'s
@@ -2060,6 +2139,54 @@ pub struct FlatColumn {
 }
 
 impl Select {
+    /// A SQL join read as `key in (get <c> select id where <f>)` read as
+    /// the `lookup`'s probe ([`Flat::probe`]): the list's term taken out of
+    /// the `and` chain -- the last such term, the one the join made -- and
+    /// `lookup <c> on id = key required where <f>` hung off the rows, which
+    /// answer flat as they stand. `key` is in that list exactly where `c`
+    /// holds a row of that `id` passing `f`, which is what `required`
+    /// keeps a row for, a null key in neither. `None` where `self` holds
+    /// no such term or already a `lookup`.
+    pub fn probed(&self) -> Option<Select> {
+        if self.lookup.is_some() || !self.flat.as_ref().is_some_and(|f| f.probe) {
+            return None;
+        }
+        let mut out = self.clone();
+        let (key, inner) = take_id_list(&mut out.filter)?;
+        let Select {
+            collection, filter, ..
+        } = *inner;
+        out.lookup = Some(Lookup {
+            collection,
+            on: vec!["id".to_string()],
+            parent: vec![key],
+            project: Some(Vec::new()),
+            filter,
+            required: true,
+            ..Lookup::default()
+        });
+        let columns = match &out.project {
+            None => vec![FlatColumn {
+                level: 0,
+                column: String::new(),
+                name: String::new(),
+            }],
+            Some(list) => (list.iter())
+                .map(|c| FlatColumn {
+                    level: 0,
+                    column: c.clone(),
+                    name: c.clone(),
+                })
+                .collect(),
+        };
+        out.flat = Some(Box::new(Flat {
+            columns,
+            names: self.flat.as_ref().and_then(|f| f.names.clone()),
+            ..Flat::default()
+        }));
+        Some(out)
+    }
+
     /// `count` does not combine with the other clauses: projection, ordering
     /// and pagination are meaningless over a count, and `near` already cuts
     /// at its own ceiling -- it would answer "how many are there" wrongly.

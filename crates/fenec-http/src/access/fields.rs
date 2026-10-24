@@ -605,6 +605,20 @@ pub(super) fn hold(
     }
     if let Some(f) = &mut sel.flat {
         f.shown = shown;
+        // The names a join writes, which the engine holds to its tables'
+        // fields ([`Flat::names`]) -- a LEFT JOIN's `on` term among them
+        // that the reading leaves out: one withheld is refused here, as
+        // anywhere, rather than pass there as a field the table has, and
+        // the engine's refusal names no other table's field.
+        if let Some(n) = &mut f.names {
+            let fenec_core::query::JoinNames { names, tables } = std::sync::Arc::make_mut(n);
+            for (t, name, bare) in names.iter_mut() {
+                if let Some(v) = tables.get(*t).and_then(|(_, c)| View::of(scope, c)) {
+                    v.named(name)?;
+                }
+                *bare = false;
+            }
+        }
     }
     Ok(levels.iter().any(|l| !l.idle).then_some(Mask { levels }))
 }

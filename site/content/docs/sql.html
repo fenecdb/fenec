@@ -168,19 +168,23 @@ FenecQL text asks for.</p>
     several, as a <code>lookup</code>'s child key must be; anything else
     is refused naming the index to declare. Where only one table's columns
     are answered and the other is a filter, <code>key in (get …)</code>,
-    no index is needed — that list is held to 100 000 values, as any
-    <code>in (get …)</code> is: an aggregate, <code>DISTINCT</code> or
-    <code>EXISTS</code> over a larger joined table is refused, never cut.
-    A join found by the joined table's <code>id</code> that asks nothing
-    else of it looks each row's match up by that id, at any size. Its other
-    conditions read one table's columns. A comma between tables is a join
+    no index is needed, and a small joined table is answered through the
+    first table's index — that list is held to 100 000 values, as any
+    <code>in (get …)</code> is. A join that finds the joined table by its
+    <code>id</code> looks each row's match up by that id past them, at any
+    size, whichever table comes first and with the joined table filtered;
+    an aggregate, <code>DISTINCT</code>, <code>EXISTS</code> or
+    <code>LEFT JOIN … IS NULL</code> over a larger joined table is refused,
+    never cut. Its other conditions read one table's columns. A comma between tables is a join
     whose key is in the <code>WHERE</code>, and <code>USING (k)</code> pairs
     <code>k</code> of each.</li>
   <li><b>The names.</b> A column is named by its table's name or alias,
     <code>o.total</code>; a name with no table is the first table's — the
     parser reads no schema, and SQL would have refused one two tables
     hold — and one the first table has no field of is refused, saying to
-    name it with its table. A column answers under its name, <code>total</code>, or its
+    name it with its table. A column no table has is refused, as SQL refuses
+    it, wherever the statement names it — an <code>ON</code> term too. A
+    column answers under its name, <code>total</code>, or its
     <code>AS</code>; two that would answer under one name — every table's
     <code>id</code> under <code>SELECT *</code> — are refused, since a row
     holds a name once: <code>SELECT o.*, u.name AS who</code>.</li>

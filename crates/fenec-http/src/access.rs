@@ -1755,6 +1755,13 @@ impl Scope {
         params: &[Value],
         mask: Option<&mut Option<fields::Mask>>,
     ) -> Result<Select> {
+        // A SQL join's probe, the engine's reading of it once its list
+        // passes the bound, hangs a level off the rows that the masks made
+        // below for the list's one level would not reach: a token's join
+        // is held to the list's bound.
+        if let Some(f) = &mut sel.flat {
+            f.probe = false;
+        }
         // What a rule withholds is held out of what the statement does
         // with it before the rules are ANDed in, which read it as they must.
         if self.fielded {

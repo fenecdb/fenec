@@ -49,7 +49,15 @@ fn each_spelling_is_the_fenecql_beside_it() {
     assert!(same.len() >= 25, "{} rows", same.len());
     for codes in same {
         let (sql, fenecql) = (&codes[0], &codes[1]);
-        let a = fenec_ql::parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let mut a = fenec_ql::parse_one(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        // A join read without flat rows carries its names, held to its
+        // tables' fields, and whether its list may be probed, which FenecQL
+        // has no words for: set aside.
+        if let Statement::Select(s) = &mut a {
+            if s.flat.as_ref().is_some_and(|f| f.columns.is_empty()) {
+                s.flat = None;
+            }
+        }
         let b = fenec_ql::parse_one(fenecql).unwrap_or_else(|e| panic!("{fenecql}: {e}"));
         assert_eq!(a, b, "{sql}");
     }

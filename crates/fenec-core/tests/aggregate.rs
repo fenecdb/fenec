@@ -319,4 +319,10 @@ fn minus_zero_is_one_group_with_zero() {
         .unwrap();
     let facets = &r.rows().unwrap().facets;
     assert_eq!(facets[0].values.len(), 2, "{facets:?}");
+    // A sketch hashes the key a group is filed by: -0.0 and 0.0 one value,
+    // the sketch made and read at once or read off its bytes.
+    let (_, a) = rows(&db, "get t select approx_count_distinct(x) as a");
+    assert_eq!(a, [vec![Value::Int(2)]]);
+    let (_, s) = rows(&db, "get t select hll_estimate(hll_accumulate(x)) as a");
+    assert_eq!(s, [vec![Value::Int(2)]]);
 }

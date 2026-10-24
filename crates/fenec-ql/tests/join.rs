@@ -425,10 +425,11 @@ fn a_join_answers_the_rows_sql_does() {
             let Statement::Select(s) = parse_one(&sql).unwrap() else {
                 panic!()
             };
-            let at = match (&s.flat, s.filter.as_ref().is_some_and(|f| f.has_subquery())) {
-                (Some(_), _) => 0,
-                (None, true) => 1,
-                (None, false) => 2,
+            let flat = s.flat.as_ref().is_some_and(|f| !f.columns.is_empty());
+            let at = match (flat, s.filter.as_ref().is_some_and(|f| f.has_subquery())) {
+                (true, _) => 0,
+                (false, true) => 1,
+                (false, false) => 2,
             };
             ways[at] += 1;
         }
@@ -521,19 +522,63 @@ fn a_join_is_its_lookup_flattened() {
         .to_string();
     assert!(e.contains("needs a hash index"), "{e}");
     // A name only the joined table has, read as the first table's, is
-    // refused naming the table to write -- over no rows of it too, where a
-    // filter over a field it lacks failed at the first row or not at all.
-    for q in [
-        "SELECT od.id FROM o od JOIN c cu ON cu.id = od.cid WHERE country = 'IT'",
-        "SELECT od.id, name FROM o od JOIN c cu ON cu.id = od.cid",
-        "SELECT od.id FROM o od JOIN c cu ON cu.id = od.cid WHERE od.total > 999 AND rank > 1",
+    // refused naming the table to write as the statement names it -- over
+    // no rows of it too, where a filter over a field it lacks failed at the
+    // first row or not at all.
+    for (q, name) in [
+        (
+            "SELECT od.id FROM o od JOIN c cu ON cu.id = od.cid WHERE country = 'IT'",
+            "cu.country",
+        ),
+        (
+            "SELECT od.id, name FROM o od JOIN c cu ON cu.id = od.cid",
+            "cu.name",
+        ),
+        (
+            "SELECT od.id FROM o od JOIN c cu ON cu.id = od.cid WHERE od.total > 999 AND rank > 1",
+            "cu.rank",
+        ),
+        (
+            "SELECT o.id FROM o JOIN c ON c.id = o.cid WHERE rank > 1",
+            "c.rank",
+        ),
     ] {
         let e = db
             .query(&parse_one(q).unwrap(), &[])
             .unwrap_err()
             .to_string();
         assert!(
-            e.contains("is no field of `o`, the join's first table"),
+            e.contains("is no column of `o`, the join's first table")
+                && e.contains(&format!("`{name}` names `c`'s")),
+            "{q}: {e}"
+        );
+    }
+    // A column no table has is refused as SQL refuses one: in a key with
+    // no table, in a LEFT JOIN's `on` the reading leaves out, in the list.
+    for (q, name) in [
+        (
+            "SELECT od.id, cu.name FROM o od JOIN c cu ON cu.id = nosuch",
+            "od.nosuch",
+        ),
+        (
+            "SELECT od.id FROM o od LEFT JOIN c cu ON cu.id = od.cid AND cu.nosuch = 'x'",
+            "cu.nosuch",
+        ),
+        (
+            "SELECT od.id, cu.nosuch FROM o od JOIN c cu ON cu.id = od.cid",
+            "cu.nosuch",
+        ),
+        (
+            "SELECT cu.name FROM c cu JOIN o od ON od.cid = cu.id WHERE od.nosuch = 1",
+            "od.nosuch",
+        ),
+    ] {
+        let e = db
+            .query(&parse_one(q).unwrap(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(&format!("`{name}`: `")) && e.contains("has no column `nosuch`"),
             "{q}: {e}"
         );
     }
@@ -550,7 +595,7 @@ fn a_join_is_its_lookup_flattened() {
         )
         .unwrap_err()
         .to_string();
-    assert!(e.contains("`city` is no field of `o`"), "{e}");
+    assert!(e.contains("`city` is no column of `o`"), "{e}");
     // A page with a parameter, cut from the flat rows.
     let st = parse_one(
         "SELECT cu.name, od.total FROM c cu JOIN o od ON od.cid = cu.id ORDER BY cu.id LIMIT $1 \
@@ -592,29 +637,134 @@ fn a_join_is_written_flat_and_a_lookup_nested() {
     assert!(nested.contains("\"c\":["), "{nested}");
 }
 
-/// A join that finds the joined table's row by its `id`, and asks nothing
-/// else of it, reads each row's match by that id, the `lookup`'s probe:
-/// read as `user_id in (get users select id)`, the list held every user's
-/// id, and past 100 000 of them the plain join was refused.
+/// A join read as a list -- `user_id in (get users select id)` -- whose
+/// list would pass 100 000 values is answered through the `lookup`'s probe,
+/// each row's match looked up by its `id`, in each order of the tables and
+/// with the joined table filtered; one to a small table keeps its list, the
+/// first table's index answering it. The probe is read at once where the
+/// list is past the bound before a row is read, an index names more rows
+/// than the bound and than the probe reads, or no index names a set and
+/// the probe reads far fewer rows than the scan; under a range the list is
+/// tried first, as a narrow one keeps it. Read as the probe alone, a
+/// join to three rows of `vip` looked up each of 100 010 users; read as
+/// the list alone, every join here but the ones to a few rows was refused.
 #[test]
-fn a_join_by_id_over_a_large_table_is_probed_not_listed() {
+fn a_join_past_the_list_bound_is_probed_and_a_small_one_listed() {
     let mut db = Database::new();
     run(
         &mut db,
-        "create collection users (n int); create collection orders (user_id int @hash, total int)",
+        "create collection users (n int @hash, g int @hash, s int @sorted); create collection \
+         orders (user_id int @hash, total int); create collection vip (tier int)",
     );
-    let docs: Vec<Value> = (0..100_001)
-        .map(|i| Value::object(vec![("n".into(), Value::Int(i))]).unwrap())
+    let docs: Vec<Value> = (0..100_010)
+        .map(|i| {
+            let g = Value::Int(i64::from(i < 100_005));
+            let (n, s) = (Value::Int(i), Value::Int(i));
+            Value::object(vec![("n".into(), n), ("g".into(), g), ("s".into(), s)]).unwrap()
+        })
         .collect();
     db.execute_with(&parse_one("put users $1").unwrap(), &[Value::List(docs)])
         .unwrap();
     run(
         &mut db,
-        "put orders [{user_id: 5, total: 1}, {user_id: 100001, total: 2}, {user_id: 100002, total: 3}]",
+        "put orders [{user_id: 5, total: 1}, {user_id: 100001, total: 2}, {user_id: 200000, total: 3}]; \
+         put vip [{tier: 1}, {tier: 2}, {tier: 3}]",
     );
-    let (_, rows) = answer(
-        &db,
-        "SELECT o.total FROM orders o JOIN users u ON u.id = o.user_id ORDER BY o.id",
-    );
-    assert_eq!(rows, [vec![Value::Int(1)], vec![Value::Int(2)]]);
+    let plan = |q: &str| {
+        let st = parse_one(&format!("explain {q}")).unwrap_or_else(|e| panic!("{q}: {e}"));
+        let r = db.query(&st, &[]).unwrap_or_else(|e| panic!("{q}: {e}"));
+        format!("{:?}", r.rows().unwrap().rows)
+    };
+    let (one, two) = (vec![Value::Int(1)], vec![Value::Int(2)]);
+    // Each join, its rows, and whether the list was tried first.
+    for (q, want, tried) in [
+        (
+            "SELECT o.total FROM orders o JOIN users u ON u.id = o.user_id ORDER BY o.id",
+            vec![one.clone(), two.clone()],
+            false,
+        ),
+        // The orders' rows, the users a filter: driven from the orders, a
+        // user's `id` read as the order's `user_id`.
+        (
+            "SELECT o.total FROM users u JOIN orders o ON o.user_id = u.id ORDER BY o.total",
+            vec![one.clone(), two.clone()],
+            false,
+        ),
+        (
+            "SELECT o.total FROM users u JOIN orders o ON o.user_id = u.id ORDER BY u.id DESC",
+            vec![two.clone(), one.clone()],
+            false,
+        ),
+        // User 5 is `n` 4, and every other user passes: more than 100 000,
+        // which no index says, and the scan of 100 010 users is past the
+        // three orders' probe.
+        (
+            "SELECT o.total FROM orders o JOIN users u ON u.id = o.user_id WHERE u.n != 4 \
+             ORDER BY o.id",
+            vec![two.clone()],
+            false,
+        ),
+        (
+            "SELECT o.total FROM users u JOIN orders o ON o.user_id = u.id WHERE u.n != 4 \
+             AND o.total < 3",
+            vec![two.clone()],
+            false,
+        ),
+        // A range of the ordered index names the users, how many unsaid:
+        // the list first.
+        (
+            "SELECT o.total FROM orders o JOIN users u ON u.id = o.user_id WHERE u.s != 4 \
+             AND u.s >= 0 ORDER BY o.id",
+            vec![two.clone()],
+            true,
+        ),
+        (
+            "SELECT o.total FROM users u JOIN orders o ON o.user_id = u.id WHERE u.s >= 0",
+            vec![one.clone(), two.clone()],
+            true,
+        ),
+        // `g = 1` names 100 005 users through its index.
+        (
+            "SELECT o.total FROM orders o JOIN users u ON u.id = o.user_id WHERE u.g = 1 \
+             ORDER BY o.id",
+            vec![one.clone(), two.clone()],
+            false,
+        ),
+    ] {
+        assert_eq!(answer(&db, q).1, want, "{q}");
+        let steps = plan(q);
+        let at = steps.find("the lookup probed instead");
+        let before = &steps[..at.unwrap_or_else(|| panic!("{q}: {steps}"))];
+        assert_eq!(before.contains("filter:"), tried, "{q}: {steps}");
+    }
+    // `g = 0` names five users, and `s` a range of three: the list, and no
+    // probe.
+    for (q, want) in [
+        (
+            "SELECT o.total FROM orders o JOIN users u ON u.id = o.user_id WHERE u.g = 0",
+            vec![],
+        ),
+        (
+            "SELECT o.total FROM orders o JOIN users u ON u.id = o.user_id WHERE u.s >= 2 \
+             AND u.s < 5",
+            vec![one.clone()],
+        ),
+    ] {
+        assert_eq!(answer(&db, q).1, want, "{q}");
+        assert!(!plan(q).contains("probed"), "{q}: {}", plan(q));
+    }
+    // Three rows of `vip`: the list, through `users.n`'s index.
+    let q = "SELECT u.n FROM users u JOIN vip v ON v.id = u.n ORDER BY u.n";
+    let rows: Vec<Vec<Value>> = (1..4).map(|n| vec![Value::Int(n)]).collect();
+    assert_eq!(answer(&db, q).1, rows);
+    let steps = plan(q);
+    assert!(!steps.contains("probed"), "{steps}");
+    assert!(steps.contains("hash"), "{steps}");
+    // Nothing to look up a missing row by: past the bound, still refused.
+    let st = parse_one(
+        "SELECT o.total FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE u.id IS NULL",
+    )
+    .unwrap();
+    let e = db.query(&st, &[]).unwrap_err().to_string();
+    assert!(e.contains("more than 100000 values"), "{e}");
 }
