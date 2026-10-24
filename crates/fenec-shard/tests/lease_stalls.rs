@@ -551,6 +551,17 @@ fn a_tenant_held_through_its_node_s_failover_is_failed_over_once_let_go() {
         )
     });
     until_failed_over(port, "n1", 1.0, "n1 was never judged lapsed");
+    // The failover leaves a held tenant to be failed over once let go of
+    // only where it has a copy to go to; one whose replica went with a
+    // failover of the replica's node -- at background QoS beside busy loops,
+    // that node run past its lease -- stays on n1, named by n1's grants,
+    // and was read as a grant naming it by mistake (2 runs of 20).
+    let (on, copy) = placed(port, "t");
+    assert!(
+        copy.is_some(),
+        "t lost its replica before n1's failover (on {on}): the router failed the replica's \
+         node over as its renewals ran past its lease"
+    );
     let from = nodes[0].proxy.heard().len();
     let deadline = Instant::now() + WITHIN;
     while grants_heard(&nodes[0].proxy.heard()[from..]).is_empty() {
