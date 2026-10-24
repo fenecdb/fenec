@@ -339,3 +339,36 @@ at a statement's cost.
   parent's `where order_id = 1` after the `lookup`, where it reads the
   child (``field `order_id` ``), and were refused once more before getting
   it right.
+
+### The SQL-spellings branch, part 2 (`sql-spellings-2`)
+
+Joins, `distinct`, `exists`, scalar subqueries, `create table` and `create
+index`, pgvector's distance. B on main (dc60e41d, part 1 in) and C against
+the branch's fenec-server, the same day, twice a task and model; C again
+after the refinements below (`sql-spellings-2b`). Each fixture was made by
+its server. `results/2026-10-24-sql-spellings-2.tsv` holds the 480 runs,
+$1.56.
+
+| condition | model | runs | first try | within 3 | mean statements |
+|---|---|---:|---:|---:|---:|
+| B main | haiku | 80 | 48 (60%) | 78 (98%) | 1.54 |
+| B main | sonnet | 80 | 60 (75%) | 80 (100%) | 1.39 |
+| C sql-spellings-2 | haiku | 80 | 60 (75%) | 80 (100%) | 1.36 |
+| C sql-spellings-2 | sonnet | 80 | 73 (91%) | 80 (100%) | 1.20 |
+| C sql-spellings-2b | haiku | 80 | 59 (74%) | 78 (98%) | 1.34 |
+| C sql-spellings-2b | sonnet | 80 | 75 (94%) | 80 (100%) | 1.19 |
+
+Main's B now reads as #356's C did (61-71% first, 89-98% within three).
+Refused statements went 36 -> 10 -> 7. On main: a JOIN 16 (14 next ran),
+`GROUP BY` with no aggregate 5, `EXISTS` 4, a scalar subquery 3, an alias
+2; on the branch no JOIN, `DISTINCT`, `EXISTS` or `GROUP BY` was refused.
+The first pass's ten: a scalar subquery over a `@unique` field the parser
+cannot know is one row (2), `->>` (2), `count(*) c` with no `AS` and an
+unnamed `sum(case ...)` both answered with the JOIN hint (3), `count(*)
+FILTER (WHERE ...)` (2), `?` placeholders (1). The refinements read the
+name without `AS` and `FILTER`, and answer SQL's list refused for its own
+fault in its own words; the second pass's seven are `->>` (4, its hint
+followed every time), the scalar subquery (2, `in` next every time) and an
+unnamed expression (1, named next). Its two wrong runs read the task, not
+the language: T17 summed `total - discount` where the task asked for
+`total`, and T30 ran `meta.source` and miscounted its answer.
