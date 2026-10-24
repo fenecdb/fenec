@@ -226,6 +226,14 @@ fn bucket(mark: u64) -> usize {
     (mark >> (64 - MOVED_BUCKETS.trailing_zeros())) as usize
 }
 
+/// Whether `a`'s and `b`'s requests count in one bucket of
+/// [`Pool::moved`], this process's marks being keyed: how a test finds a
+/// tenant whose failover moves another's count.
+#[doc(hidden)]
+pub fn same_bucket(a: &str, b: &str) -> bool {
+    bucket(mark_of(a)) == bucket(mark_of(b))
+}
+
 /// What a connection is doing, in its flight's low bits beside the mark of
 /// the tenant whose request is out on it.
 const STATE: u64 = 7;
@@ -662,8 +670,77 @@ impl Pool {
     /// its answer is the node's. The connections are looked at with no
     /// lock held, a shutdown each.
     pub fn cut(&self, addr: &str, tenant: &str) -> Cuts {
-        let mark = mark_of(tenant);
-        self.moved[bucket(mark)].fetch_add(1, Ordering::SeqCst);
+        let mark = [mark_of(tenant)];
+        self.move_marks(&mark);
+        self.shut_marks(addr, &mark)
+    }
+
+    /// [`Pool::cut`] of every `(node's address, tenant)` of `failed` at once:
+    /// what a router following the directory does with what one catch-up
+    /// shows failed over, its directories' write locks held. Every bucket
+    /// of theirs is moved first, once, and only then is a node's connection
+    /// shut: moved a node at a time, a request cut off the first node read
+    /// its count again, and the second node's move had the count it read
+    /// move under it -- [`Ended::Moved`], and the cut was lost. Then one
+    /// look at each node's connections for all of its tenants, each tested
+    /// against their marks: a cut a tenant listed and copied the node's
+    /// every connection a tenant, a failover of a whole node read at once
+    /// its tenants times its connections under the lock. The nodes are
+    /// found by a walk of the list each: a catch-up names one node, or a
+    /// few.
+    pub fn cut_all(&self, failed: &[(&str, &str)]) -> Cuts {
+        let marks: Vec<u64> = failed.iter().map(|&(_, t)| mark_of(t)).collect();
+        self.move_marks(&marks);
+        let mut cuts = Cuts::default();
+        let mut done: Vec<&str> = Vec::new();
+        for &(addr, _) in failed {
+            if done.contains(&addr) {
+                continue;
+            }
+            done.push(addr);
+            let mut theirs: Vec<u64> = failed
+                .iter()
+                .zip(&marks)
+                .filter(|((a, _), _)| *a == addr)
+                .map(|(_, &m)| m)
+                .collect();
+            theirs.sort_unstable();
+            theirs.dedup();
+            let shut = self.shut_marks(addr, &theirs);
+            cuts.waiting += shut.waiting;
+            cuts.streams += shut.streams;
+        }
+        cuts
+    }
+
+    /// Moves the bucket of each of `marks` once ([`Pool::moved`]): a
+    /// forward of theirs that read the count before and goes out after
+    /// finds it moved.
+    fn move_marks(&self, marks: &[u64]) {
+        const _: () = assert!(MOVED_BUCKETS <= 64, "the buckets moved are a word's bits");
+        let mut bumped = 0u64;
+        for &mark in marks {
+            let b = bucket(mark);
+            if bumped & (1 << b) == 0 {
+                bumped |= 1 << b;
+                self.moved[b].fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Ends each connection to `addr` whose request or stream is one of the
+    /// tenants' whose marks are `marks`, sorted, their buckets moved before
+    /// ([`Pool::move_marks`]). A connection's word is read and then
+    /// compared and changed ([`Flight::cut`]), so one taken for another
+    /// tenant's request between the two is left: the count it read moved
+    /// first.
+    fn shut_marks(&self, addr: &str, marks: &[u64]) -> Cuts {
+        #[cfg(test)]
+        SHUTTING.with_borrow_mut(|told| {
+            if let Some(told) = told {
+                told(self, addr)
+            }
+        });
         let flights = {
             let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
             match idle.get_mut(addr) {
@@ -676,6 +753,10 @@ impl Pool {
         };
         let mut cuts = Cuts::default();
         for f in flights {
+            let mark = f.word.load(Ordering::SeqCst) & !STATE;
+            if mark == 0 || marks.binary_search(&mark).is_err() {
+                continue;
+            }
             match f.cut(mark) {
                 Some(WAITING) => cuts.waiting += 1,
                 Some(_) => cuts.streams += 1,
@@ -1262,6 +1343,38 @@ enum Watched {
     Ended,
 }
 
+/// Told, on the thread cutting, each node's address as its connections
+/// are about to be shut ([`Pool::shut_marks`]): what a test reads the
+/// buckets' counts at then.
+#[cfg(test)]
+type Shutting = Option<Box<dyn FnMut(&Pool, &str)>>;
+#[cfg(test)]
+thread_local! {
+    static SHUTTING: std::cell::RefCell<Shutting> = const { std::cell::RefCell::new(None) };
+}
+
+/// `poll`, declared by hand: the crate takes no `libc`.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+mod sys {
+    #[repr(C)]
+    pub(super) struct PollFd {
+        pub(super) fd: i32,
+        pub(super) events: i16,
+        pub(super) revents: i16,
+    }
+    // `nfds_t`: an `unsigned int` on Apple's systems and in Android's
+    // bionic, an `unsigned long` in glibc and musl.
+    #[cfg(any(target_vendor = "apple", target_os = "android"))]
+    pub(super) type Nfds = std::ffi::c_uint;
+    #[cfg(all(target_os = "linux", not(target_vendor = "apple")))]
+    pub(super) type Nfds = std::ffi::c_ulong;
+    extern "C" {
+        pub(super) fn poll(fds: *mut PollFd, n: Nfds, timeout: i32) -> i32;
+    }
+    // The same on both: `<sys/poll.h>`'s and `<asm-generic/poll.h>`'s.
+    pub(super) const POLLIN: i16 = 0x1;
+}
+
 /// Waits up to `within` for the node's answer on `node` to begin, watching
 /// `client` -- the held request's own client -- meanwhile: one `poll` of
 /// both until either moves. The node's socket moving, by an answer, a
@@ -1298,23 +1411,7 @@ fn answered_or_gone(
     within: Duration,
 ) -> Result<Watched, Failure> {
     use std::os::fd::AsRawFd;
-    #[repr(C)]
-    struct PollFd {
-        fd: i32,
-        events: i16,
-        revents: i16,
-    }
-    // `nfds_t`: an `unsigned int` on Apple's systems and in Android's
-    // bionic, an `unsigned long` in glibc and musl.
-    #[cfg(any(target_vendor = "apple", target_os = "android"))]
-    type Nfds = std::ffi::c_uint;
-    #[cfg(all(target_os = "linux", not(target_vendor = "apple")))]
-    type Nfds = std::ffi::c_ulong;
-    extern "C" {
-        fn poll(fds: *mut PollFd, n: Nfds, timeout: i32) -> i32;
-    }
-    // The same on both: `<sys/poll.h>`'s and `<asm-generic/poll.h>`'s.
-    const POLLIN: i16 = 0x1;
+    use sys::{poll, PollFd, POLLIN};
     let deadline = Instant::now() + within;
     let mut watched = 2;
     loop {
@@ -1365,6 +1462,89 @@ fn answered_or_gone(
 #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
 fn answered_or_gone(_: &TcpStream, _: &TcpStream, _: Duration) -> Result<Watched, Failure> {
     Ok(Watched::Answering)
+}
+
+/// What became of a client while its request waited out a pause
+/// ([`pause_watching`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Paused {
+    /// The pause ran out, the client there -- or not watched.
+    Here,
+    /// The client's end came: closed, or half-closed and still reading.
+    Ended,
+    /// The client reset its connection: nobody is left to answer.
+    Gone,
+}
+
+/// Waits `pause`, `client` -- the request's own client, where the router
+/// can look at it -- watched meanwhile as a held request's is
+/// ([`answered_or_gone`]): one `poll`, the pause ending early at the
+/// client's end or reset. What a following router's request asks a copy
+/// again after (`Router::copy_pause`): re-sent past its client's leaving,
+/// a request whose copy had no grant yet was sent every pause for as long
+/// as the pauses ran. Bytes of a next request a client sent ahead say it is
+/// there, and the rest of the pause is waited; so is it where the `poll`
+/// fails other than interrupted, as [`answered_or_gone`] stops watching:
+/// asked again at once, a `poll` that kept failing spun for the pause.
+pub fn pause_watching(client: Option<&TcpStream>, pause: Duration) -> Paused {
+    let Some(client) = client else {
+        std::thread::sleep(pause);
+        return Paused::Here;
+    };
+    let deadline = Instant::now() + pause;
+    let rest = || std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Paused::Here;
+        }
+        match readable(client, left) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => {
+                rest();
+                return Paused::Here;
+            }
+        }
+        match peek_now(client) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Ok(1..) => {
+                rest();
+                return Paused::Here;
+            }
+            Ok(0) => return Paused::Ended,
+            Err(_) => return Paused::Gone,
+        }
+    }
+}
+
+/// Whether `s` has something to read -- bytes, its end, its reset --
+/// within `within`: `Ok(false)` past it, the `poll`'s own failure an error.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn readable(s: &TcpStream, within: Duration) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    use sys::{poll, PollFd, POLLIN};
+    // Rounded up: a wait of what rounds down to 0 ms would spin.
+    let ms = within.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
+    let mut fd = PollFd {
+        fd: s.as_raw_fd(),
+        events: POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one entry, which outlives the call.
+    match unsafe { poll(&mut fd, 1, ms) } {
+        n if n < 0 => Err(io::Error::last_os_error()),
+        n => Ok(n > 0 && fd.revents != 0),
+    }
+}
+
+/// No `poll` declared here: the pause is slept whole, the client looked at
+/// once after it.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn readable(_: &TcpStream, within: Duration) -> io::Result<bool> {
+    std::thread::sleep(within);
+    Ok(true)
 }
 
 impl Answer {
@@ -1802,6 +1982,42 @@ mod tests {
         );
     }
 
+    /// A pause watching its client ends early at the client's end, closed
+    /// or half-closed, and at its reset, and runs out with the client
+    /// there, bytes of a next request sent ahead among them, or not
+    /// watched.
+    #[test]
+    fn a_pause_watching_its_client_ends_at_its_end_or_reset() {
+        let long = Duration::from_secs(30);
+        let (client, client_end) = pair();
+        drop(client_end);
+        assert_eq!(pause_watching(Some(&client), long), Paused::Ended);
+        let (client, client_end) = pair();
+        client_end.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(pause_watching(Some(&client), long), Paused::Ended);
+        let (mut client, client_end) = pair();
+        client.write_all(b"x").unwrap();
+        client_end
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        assert_eq!(client_end.peek(&mut [0u8]).unwrap(), 1);
+        drop(client_end);
+        assert_eq!(pause_watching(Some(&client), long), Paused::Gone);
+        let short = Duration::from_millis(50);
+        let (client, _client_end) = pair();
+        let at = Instant::now();
+        assert_eq!(pause_watching(Some(&client), short), Paused::Here);
+        assert!(at.elapsed() >= short);
+        let (client, mut client_end) = pair();
+        client_end.write_all(b"GET / HTTP/1.1\r\n").unwrap();
+        let at = Instant::now();
+        assert_eq!(pause_watching(Some(&client), short), Paused::Here);
+        assert!(at.elapsed() >= short);
+        let at = Instant::now();
+        assert_eq!(pause_watching(None, short), Paused::Here);
+        assert!(at.elapsed() >= short);
+    }
+
     /// An answer to one request, its head and `body`, from a node's end
     /// that reads the request first and closes after: the head read.
     fn answered(pool: &Pool, length: usize, body: Vec<u8>) -> Answer {
@@ -2106,6 +2322,85 @@ mod tests {
             let end = came.recv_timeout(Duration::from_secs(10)).unwrap();
             assert!(end.is_empty(), "{end:?}");
         });
+    }
+
+    /// A cut of several tenants off a node at once -- a catch-up's of a
+    /// whole node's failover -- ends their requests and no other's, and
+    /// moves each of their buckets once: two in one bucket move it one
+    /// count, a tenant named twice is cut once, and a tenant in another
+    /// bucket out on the node is left to its answer, its bucket unmoved.
+    #[test]
+    fn a_cut_of_several_tenants_ends_theirs_alone_and_moves_each_bucket_once() {
+        let pool = Pool::new(Duration::from_secs(60));
+        let (beta, other) = (bucketed("acme", true), bucketed("acme", false));
+        let seen = |t: &str| pool.moved(mark_of(t));
+        let (acme_was, other_was) = (seen("acme"), seen(&other));
+        std::thread::scope(|s| {
+            let mut outs: Vec<_> = ["acme", beta.as_str(), other.as_str()]
+                .into_iter()
+                .map(|t| out(s, &pool, Flying::of(t, &pool)))
+                .collect();
+            for (theirs, _) in outs.iter_mut() {
+                request_on(theirs);
+            }
+            let failed = [("n1", "acme"), ("n1", beta.as_str()), ("n1", "acme")];
+            let cuts = pool.cut_all(&failed);
+            assert_eq!(
+                cuts,
+                Cuts {
+                    waiting: 2,
+                    streams: 0
+                }
+            );
+            assert_eq!(seen("acme"), acme_was + 1);
+            assert_eq!(seen(&beta), acme_was + 1);
+            assert_eq!(seen(&other), other_was);
+            let (mut other_end, other_out) = outs.pop().unwrap();
+            for (_, exchange) in outs {
+                assert_eq!(ended(exchange.join().unwrap()), Ended::Cut { whole: true });
+            }
+            other_end
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            let Ok(answer) = other_out.join().unwrap() else {
+                panic!("the other tenant's request was cut");
+            };
+            assert_eq!(answer.status, 200);
+        });
+    }
+
+    /// A cut of tenants off several nodes at once moves every bucket before
+    /// it shuts any node's connections: a request cut off the first node,
+    /// gone on with a count read then, would find it moved again by the
+    /// second node's cut before its first byte -- `Ended::Moved`, and the
+    /// cut lost (a copy's 503 under leases, passed on). Moved a node at a
+    /// time, the first node's connections were shut with the bucket one
+    /// short of where the cut left it.
+    #[test]
+    fn a_cut_off_several_nodes_moves_every_bucket_before_it_shuts_any() {
+        let pool = Pool::new(Duration::from_secs(60));
+        let (beta, other) = (bucketed("acme", true), bucketed("acme", false));
+        let was = [pool.moved(mark_of("acme")), pool.moved(mark_of(&other))];
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let told = std::rc::Rc::clone(&seen);
+        let (b, o) = (mark_of("acme"), mark_of(&other));
+        SHUTTING.set(Some(Box::new(move |pool: &Pool, addr: &str| {
+            let at = [pool.moved(b), pool.moved(o)];
+            told.borrow_mut().push((addr.to_string(), at));
+        })));
+        let failed = [
+            ("n1", "acme"),
+            ("n2", beta.as_str()),
+            ("n1", other.as_str()),
+        ];
+        let cuts = pool.cut_all(&failed);
+        SHUTTING.set(None);
+        assert_eq!(cuts, Cuts::default());
+        let after = [was[0] + 1, was[1] + 1];
+        assert_eq!(
+            *seen.borrow(),
+            [("n1".to_string(), after), ("n2".to_string(), after)]
+        );
     }
 
     /// A stream whose tenant is failed over between its head and being

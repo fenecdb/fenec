@@ -1,6 +1,6 @@
 # The router
 
-The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The router*: the router's CORS, its pooled connections, the cuts a failover makes and queries across tenants. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
+The long form of the invariants [CLAUDE.md](../../CLAUDE.md) lists under *The router*: the router's CORS, its pooled connections, the cuts a failover makes -- by the router failing the node over and by the routers following its directory -- and queries across tenants. Each section below is a paragraph moved word for word from CLAUDE.md, which keeps its rule in a few sentences and links here; "above" and "below" in them refer to the order the invariants had there, which [README.md](README.md#the-original-order) lists.
 
 ## CORS
 
@@ -294,8 +294,9 @@ promotion earlier, and asking once, such a request was answered the
 copy's 503; the second grant began after the first ended, so it reads
 the tenant there. Only for a cut, and onto another node than the one it
 was cut from. A standby router and a region's router forwarding by its copy of the
-global directory fail nothing over and cut nothing: their requests wait as
-before. Cuts are counted by what became of them
+global directory fail nothing over, and end what they had out as their
+copy of the directory shows the failover, by the same rules (the next
+paragraph). Cuts are counted by what became of them
 (`fenec_router_cut_requests_total{outcome}`), besides each answer's status
 class. `tests/cuts.rs` (a binary of its own) stands a wire that falls
 silent between the router and a node, carrying nothing and closing
@@ -363,6 +364,214 @@ On x86_64 the answer's claim is a `lock cmpxchg`, some 20 cycles, and the
 `xchg` the store before a request's first byte was is a plain `mov` now;
 Docker on this Mac runs that architecture only emulated, which times the
 emulator, so it was not measured.
+
+**A router following the directory ends what it had out to a node failed
+over, as its copy shows the failover** (`Router::catch_up_directories`,
+`directory::FailedOver`, `tenants.failed_from`). Only the router failing
+a node over cut, and a standby router -- asked by clients a load balancer
+sends there, or by the global entry trying a region's routers in turn --
+and a region's router forwarding by its copy of the global directory
+(`Target::Node`) fail nothing over: what they had out to a node gone with
+no reset waited for `--upstream-timeout` though the tenant answered on its
+new primary. Each now reads the failover off the directory it follows and
+cuts by the leading router's rules (`Pool::cut`, `after_cut`). What tells
+a failover from a move is a field of the placement itself:
+`failed_from`, the node a failover took the tenant off, written by
+`place_promoted` in the very statement that places the tenant on the copy
+promoted, and cleared by every other placement (`place`: a create, a
+move's two steps, a home). A move must end nothing: its source still
+answers, and refuses its frozen writes on its own -- cut, an unkeyed write
+out to it as the move ran was a 502 saying it may have run, where the
+source answered it. The history `place_promoted` writes into `lineages`
+in the same block was weighed and not taken: it is written only where
+the tenant's lineage is known, the node names a history in its answer
+and the field is there -- a tenant made before lineages, or a node from
+before histories, writes none, and its failover would cut nothing -- and
+it names no node, so a move and then a failover read in one catch-up
+cut the move's source; nor the `state` a promotion writes, which says
+`active` as a create and a move's flip do. A follower cuts what it had out
+to node `L` for tenant `t` only where its maps placed `t` on `L`, the row
+places it elsewhere now and names `L` as the node failed over off
+(`Directory::failed_over_off`, asked of the maps before they take the
+changes, through the change ring and through a reading of them alike):
+a move and then a failover read at once names the move's target, not
+`L`; a failover and then a move clears it, and a failover off `L` and
+then another off `Z` names `Z`, and what was out to `L` waits as before
+either way -- a cut missed, never one made wrong; a later change of a row
+a failover wrote leaves `L` in it, but the maps no longer place the
+tenant there. `failed_from` is a field of `tenants` (`TENANT_FIELDS`),
+added to a directory from before it as `nodes` took its region; a router
+from before it neither writes nor reads it, so a router following a
+directory such a router leads cuts nothing, as before, and such a router
+writing placements into a newer directory leaves `failed_from` as it
+was -- a tenant failed over off `L`, moved back onto `L` and off again
+by that router is the one case where a follower cuts a move, which an
+older standby promoted in the middle of a rolling upgrade over a
+directory with the field makes as a downgrade does: so the RUNBOOK has
+the standbys upgraded first. A standby read the directory's
+changes only as its next request did, and one asked nothing more kept
+what it had out waiting: a directory a router follows now tells a thread
+of the router's as each write lands (`Arrived`, a `Watcher` on its
+database, which the follower's `apply` and an image adopted call under
+that database's lock, taking nothing but its own), and the thread brings
+the maps up and cuts, as a request finding them stale does. A thread a
+router: the `all` test binary, near macOS's 2 048 threads a process
+already, lost 14 of its 120 tests to `thread::spawn` failing, so only a
+router that follows a directory -- a standby, a region's router -- starts
+one, a router leading its own never following it after (a promotion goes
+the other way). Each directory is asked under its read lock first and its
+write lock taken only where it moved, as each request asked before:
+std's lock holds new readers behind a waiting writer, and both write
+guards taken for nothing at each wake-up had every forward's `read_dir`
+wait on them. The cuts are made under the directory's write lock, so
+whoever reads the maps after reads them cut: a request ended goes where
+they place its tenant, a forward that read them before and goes out after
+finds its bucket's count moved (`Flying`), as the leader's do, and a test
+waiting for a standby to place a tenant elsewhere knows whatever it cut
+is cut. Both directories are caught up first, their write locks held
+together, and what either shows failed over is cut at once
+(`cut_failed_over`, `Pool::cut_all`): every bucket of the tenants moved
+once, before any connection is shut -- moved a node or a directory at a
+time, a request cut off the first went on with the count it read and met
+the next one's move before its first byte -- then each node's
+connections listed once and each one's mark looked up among its tenants',
+where a cut a tenant copied the node's every connection a tenant
+-- a node of 1 000 tenants failed over at once, 300 connections open to
+it and 100 of them out for those tenants, held the write lock 0.68-0.78
+ms, its cuts 0.16-0.20 of it, against 7.35-8.44 and 6.8-7.8 a tenant at a
+time, the refresh 0.50-0.66 either way (a scratch test over a directory
+and a pool, the median of nine a run, four runs a side in ABBA turns at
+loads of 1.5-3.0, the node's tenants grouped through a map; through the
+walk of the list it is now, three runs at 3.3, 0.78-0.91 and 0.18-0.26).
+Only where the directory follows another router's: the leader's own maps
+took its failover as it made it, and it cut then. Under leases a
+write a follower replays may reach the copy before the leading router's
+grant names the tenant there -- the leader sends it as its failover ends,
+and the follower may read the placement first -- and the copy refuses it,
+unrun, 503. The leader grants the copy then (`grant_cut_onto`); a follower
+grants nothing (`places_as_leader`; `grant_cut_onto` refuses on a
+following directory, as `grant_term` did already): the leases are the
+leading router's, and a follower's lists may lag its -- a list read
+before a failover names the tenant on the node failed over, and granted
+it there that node takes writes beside the new primary. Nor can it be
+told when the grant lands: the leader records none, and the copy is what
+knows. So it asks the copy again, the copy having run nothing
+(`copy_pause`: 5 ms first, each wait twice the one before up to a third
+of the lease, the leading router's rounds' apart), for two thirds of the
+lease the directory records or `--upstream-timeout`, whichever is sooner
+(`lease_record`, never shorter than the leading router's own; its own
+grant to a copy waits as long), and passes the copy's 503, which says
+when to come back, on past that or where no lease is recorded: two
+thirds of the tests' hour-long lease, a request was sent again for 40
+minutes. Its client is watched between the asks, as a held request's is
+(`pause_watching`, one `poll`, watching no more where the `poll` fails):
+its end has the router answer it 503 -- saying it ran nowhere where the
+cut came before it was sent whole, and otherwise that the node failed
+over may have run it and its key sends it again once -- and its
+reset lets it go; asked on past its client, a request went to the copy
+every pause for as long as the pauses ran. A request asked again that
+finds its bucket's count moved before its first byte -- a second
+failover in its bucket, read by a catch-up or made by the leader -- wrote
+nothing, and stays what it was, cut off its node with its asks where
+they stood, a try spent: taken for one never cut, it went on to a copy
+not yet granted and passed its 503 on. And it is
+counted sent again once, however many times the copy is asked or its
+bucket moves: counted at each ask, one request a grant kept waiting was
+seven. Fencing is the
+leader's, and a follower's cut adds nothing to what may write: it cuts
+only on a placement the leader recorded once the copy answered its
+promotion -- under a lease, after the node's lease lapsed by its own
+clock; by hand, on the operator's word that the node is gone, the leader
+cutting at the same moment -- and it replays only what may run twice, a
+read, a marked read or a keyed write, which the new primary answers from
+its key or makes once, or what never reached the node whole; a write
+that reached the node is a 502. `tests/follower_cuts.rs` (a binary of its
+own; the wire and the requests are `cuts.rs`'s, moved to `cut_wire.rs`)
+holds a standby router's clients, n1 failed over by hand at the primary,
+with nothing asked of the standby after: a read, a keyed write and an
+unkeyed one n1 ran, a keyed and an unkeyed held claim and a subscription,
+each unanswered as the failover begins and answered within the client's
+half of the routers' minute -- the read and the keyed write by the copy
+promoted, the latter from its key, the unkeyed write and claim 502 and
+run once, the keyed claim handed the job put after, the stream ended; the
+same through a region's router whose copy of the global directory places
+the tenant; a write out to n1 as the tenant moves, held at n1's wire all
+through the move, n1's to answer once the standby places the tenant on
+its target; a forward whose dial of n1 -- named by a name the test's
+resolver holds -- straddles the failover and the standby's catch-up, n1
+alive and taking writes, going to the replica promoted; under leases a
+keyed write the standby replays before the primary's grant -- held at the
+copy's wire -- refused and asked again, then answered by the copy once
+the grant lands, the standby waiting on no grant of its own and counting
+it sent again once; the same write's client leaving while the standby
+waits to ask again, the standby stopping at once and the write landing
+nowhere once the copy is granted; and a region's router that leads its
+own directory under leases cutting a tenant its copy of the global
+directory places, waiting for the global router's grant to the copy and
+granting nothing -- taken for its own, the tenant no tenant of the
+directory it leads, it granted the copy that directory's list, naming
+nothing there, twice, and passed the copy's 503 on; and a keyed write
+the standby cut off n1 whose dial of the copy -- its name held at the
+test's resolver -- straddles the standby's catch-up of a second tenant of
+n1, in its bucket, its promotion held at its copy's wire: the write meets
+its bucket moved, and waits for the grant as before, counted once. The
+binary's tests run
+one at a time, since the cuts counted are the process's, every router's
+in it, and each is held to what its own routers counted exactly; the job
+a keyed claim takes is put once the claim has been sent to the copy, so
+its wait bounds nothing. Each fails with its part taken out: no cut (seven
+of the eight, all but the move's), no thread (five: nothing asked them
+after the failover), a cut on any node changed (the move's), no
+`failed_from` written (seven), no bump of the bucket's count (the dial's),
+no asking again (the three lease tests'), a standby that grants -- both
+its checks and `grant_term`'s refusal taken out (the same three: its own
+grant held at the wire), a count at each ask (the two lease tests that
+count), the client unwatched (the leaving client's), `places_as_leader`
+asking `following` alone (the region leader's), a move after a cut taken
+for a request never cut (the bucket's: the copy's 503 passed on), a count
+at each turn of the cut's (the bucket's, two); `directory::tests` hold
+the rule over each order of a failover and a move read at once, from the
+ring and from a reading, and `upstream::tests` a cut of several tenants,
+each bucket moved once (a tenant at a time, two in a bucket moved it
+twice), every bucket of a cut off several nodes moved before any
+connection is shut (read on the cutting thread as each node's are, a node
+at a time it read one short), and a pause watching its client; the
+lib's `tests` the asks of a copy over every lease to 12 s and three
+upstream timeouts, ending at two thirds of the lease or the timeout,
+whichever is sooner, a third of the lease apart at most (either bound
+taken out, it fails). Nothing on the forward path
+changed but the client's socket handed on to a cut request -- `toward` is
+main's code, `connection` asks the same two `stale` reads as before with
+the refresh behind them out of line now -- and a router leading its own
+directory and keeping no copy of the global one sets no watcher and
+starts no thread: `make shard-bench ARGS=latency`'s added p50 was 23.0 us
+against main's 23.35 (22.1-23.9 and 21.5-29.4, eight runs a side in ABBA
+turns at loads of 1.9-2.9 beside other agents' work, the runs'
+differences' median -0.45 us), `ARGS=standby`'s standby 22.5 against 22.7
+(22.2-23.3 and 22.1-23.1, the differences' median +0.10), and
+`ARGS=regions`' region's router 62.85 against 62.75 (-0.10), its relay
+40.95 against 41.2 (-0.25), and its failover as it was: at a lease of 1 s
+the node cut off stopped 560 ms after the cut against 526 (533-631 and
+470-572, the cut's phase against rounds a third of a lease apart) and its
+tenants wrote again 1 516-1 550 ms after against 1 528-1 560, at 5 s 4 105
+and 5 998-6 028 against 4 105 and 6 001-6 033, medians of eight a side;
+the change's first form, on a quieter machine, ran 20.8 against 20.9 and
+21.1 against 21.45 through a standby. A standby's catch-up reads
+`failed_from` beside each placement and asks the maps of a failover's
+row: 4.08 us p50 a change that moves one of 100 000 tenants and 4.25 one
+a failover made, against 3.88-3.92 on main, and 3.94 and 4.22 at 10 000
+against 3.85-3.88 (a scratch harness applying a primary directory's
+records to a follower's database, 4 000 changes a run, four runs a side
+in ABBA turns) -- off the request path now, the thread the writes wake
+catching up before a request finds the maps stale. `fenec-shard`'s code
+grew 24.8 KB (`__text`, aarch64-apple-darwin, `size_report.py --bin` in
+each tree): `catch_up_directories` 6.7, `after_cut`'s asking again, its
+client watched and counted once, 6.0, the directory's field, its
+statements and the row's check 4.9, the thread and `serve_on`, which
+`main` inlines no more, 3.4, the watchers 2.8, `cut_failed_over` and
+`Pool::cut_marks` 2.6, `grant_cut_onto`'s refusal 1.2, `connection` 1.6
+smaller. The browser module is the same to the byte: no crate it is built
+from changed.
 
 ## Queries across tenants
 

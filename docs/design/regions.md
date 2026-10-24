@@ -108,7 +108,12 @@ refuse a router from before terms put back in front of them until they
 restart, which forgets it. A router from before regional directories reads
 a home as a node it does not know: 404 for the tenant, every change of it
 refused, none of the region's nodes leased. A query across tenants asks the
-router's own directory's and names each of another's as failed.
+router's own directory's and names each of another's as failed. A tenant
+the global directory places is forwarded by the region's router's copy of
+it (`Target::Node`), which fails nothing over: what the region's router
+had out to a node the global router failed over is ended as the copy
+shows the failover, as a standby router's is
+([router.md](router.md#failover-cuts)).
 `tests/region_leases.rs` cuts a region off from the global router through
 proxies and holds it writing past every lease granted before the cut, its
 node fenced before the region's router promotes the replica, the move and

@@ -29,7 +29,7 @@ The invariants were written as one sequence, and "above" and "below" in them ref
 - [text.md](text.md) -- collations, `nocase`, `match`, the text index, `fuzzy` and `prefix`, `rerank`, `fuse`, `highlight()` and facets
 - [lookup-and-aggregates.md](lookup-and-aggregates.md) -- `lookup`, `required`, keys of several fields, folded levels, select-list expressions, HyperLogLog and time zones
 - [native-and-sync.md](native-and-sync.md) -- `fenec-ffi`, the sans-IO sync core and the scenario file both sync runners are held to
-- [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes and queries across tenants
+- [router.md](router.md) -- the router's CORS, its pooled connections, the cuts a failover makes, the leading router's and its followers', and queries across tenants
 - [integrations.md](integrations.md) -- `integrations/`, the Grafana data source and the `deploy/` kit
 
 ## The original order
