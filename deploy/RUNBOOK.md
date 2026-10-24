@@ -228,17 +228,22 @@ with none. Past it the client is answered 502, the request perhaps run.
   timeout, its client unanswered, unless the client gives up first -- but
   for what a failover ends. When a router fails a node over, by hand or on
   its lease, what it had out to the node for each tenant it moved is
-  answered then, not at the timeout: a read, a keyed write and a request
-  the node cannot have run go to the tenant's new primary, any other write
-  is a 502 saying it may have run, and a subscription ends for its client
-  to open again (`sharding.html#in-flight`). With `make drill`'s lease of
+  answered then, not at the timeout -- and what a router following its
+  directory had out, a standby or a region's router forwarding by its copy
+  of the global directory, as soon as that copy shows the failover: a
+  read, a keyed write and a request the node cannot have run go to the
+  tenant's new primary, any other write is a 502 saying it may have run,
+  and a subscription ends for its client to open again
+  (`sharding.html#in-flight`). With `make drill`'s lease of
   2 s the killed node's writers write again just after its failover, where
   they waited for the timeout's 4 s before. What is left to the timeout is
   what no failover ends: a node gone whose tenants have no copy, or whose
   copy will not be promoted (A node lost); a relay -- the global router's to a
   region's, a region's router's to another's -- to a router whose machine
-  is gone, which tries the next router of that region only past it; and a
-  standby router's forwards, which fail nothing over. At fenec-shard's
+  is gone, which tries the next router of that region only past it; and
+  what a standby router, or a region's router, had out to a node failed
+  over while it was cut off from the router it follows, which it ends only
+  once the failover reaches its copy of the directory. At fenec-shard's
   60 s each of those holds its client a minute.
 - **What it costs.** An answer slower than the timeout to begin is a 502
   while the node goes on with it: a `create index` over a large

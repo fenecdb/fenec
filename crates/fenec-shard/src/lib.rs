@@ -281,6 +281,9 @@ pub struct Router {
     /// The requests waiting on one of [`Router::cut_grants`]: how a test
     /// knows a request has joined a grant under way.
     cut_waiting: AtomicUsize,
+    /// Told as a write lands in a directory this router follows: its own,
+    /// as a standby, or its copy of the global one ([`Arrived`]).
+    arrived: Arc<Arrived>,
 }
 
 /// What a node said of a grant it answered 200 (`fenec_http::admin`'s
@@ -415,6 +418,55 @@ const CUT_TRIES: usize = 3;
 /// once, such a request was answered the copy's 503.
 const CUT_ASKS: u8 = 2;
 
+/// The first wait, and the longest, of a request a following router's cut
+/// sent to the copy promoted where the copy refused it, unrun, 503, before
+/// the leading router's grant named the tenant there
+/// ([`Router::copy_pause`]): the grant goes out as the failover ends, so
+/// most such requests are answered at the first ask after it, and one
+/// whose grant comes later -- a failover of many tenants, the node granted
+/// once every one is promoted -- is asked a few times a second.
+const COPY_ASK_FIRST: Duration = Duration::from_millis(5);
+const COPY_ASK_MOST: Duration = Duration::from_millis(200);
+
+/// What wakes the thread that brings a followed directory's maps up to
+/// what has arrived ([`Router::catch_up_directories`]): told by every
+/// write the follower applies to the directory's database -- the leading
+/// router's -- and by an image adopted, under that database's lock, so it
+/// takes nothing but its own. Left to the next request, a standby that was
+/// asked nothing more kept what it had out to a node failed over waiting
+/// for its timeout.
+#[derive(Default)]
+struct Arrived {
+    due: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+impl Watcher for Arrived {
+    fn notify(&self, _seq: u64) {
+        *self.due.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.wake.notify_one();
+    }
+}
+
+impl Arrived {
+    /// Told by `db`'s writes from now on.
+    fn watch(self: &Arc<Self>, db: &Arc<RwLock<Database>>) {
+        db.write()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_watcher(Arc::clone(self) as Arc<dyn Watcher>);
+    }
+
+    /// Waits until a write has landed since the last wait.
+    fn wait(&self) {
+        let due = self.due.lock().unwrap_or_else(|e| e.into_inner());
+        let mut due = self
+            .wake
+            .wait_while(due, |d| !*d)
+            .unwrap_or_else(|e| e.into_inner());
+        *due = false;
+    }
+}
+
 /// Where a forward goes ([`Router::toward`]): the node's name -- or what
 /// stands for a region's routers -- its address, the mark its node believes
 /// the router's word by, the region's routers where it is relayed, and the
@@ -462,6 +514,18 @@ impl Router {
         let mut cfg = cfg;
         cfg.token = cfg.token.filter(|t| !t.is_empty());
         cfg.entry_token = cfg.entry_token.filter(|t| !t.is_empty());
+        // The directories this router follows -- its own, as a standby,
+        // and its copy of the global one -- tell it as their writes land.
+        // A router leading its own from the start never follows it after
+        // (a promotion goes the other way), so it is told nothing, and
+        // keeps no thread waiting to be ([`Self::serve_on`]).
+        let arrived = Arc::new(Arrived::default());
+        if dir.following() {
+            arrived.watch(dir.db());
+        }
+        if let Some(g) = &global {
+            arrived.watch(read(g).db());
+        }
         Arc::new_cyclic(|me| Router {
             me: me.clone(),
             repairs: Mutex::new((false, false)),
@@ -503,6 +567,7 @@ impl Router {
             follow_soon: (Mutex::new(false), std::sync::Condvar::new()),
             cut_grants: Mutex::new(Default::default()),
             cut_waiting: AtomicUsize::new(0),
+            arrived,
             cfg,
         })
     }
@@ -532,6 +597,20 @@ impl Router {
         // The read replicas this router keeps follow their tenants'
         // primaries wherever those go ([`readers`]).
         self.start_following()?;
+        // A followed directory's maps kept up as its writes land, and what
+        // a failover they show had this router wait on ended
+        // ([`Self::catch_up_directories`]): from what arrived before it was
+        // told of any, first. Only where it follows one: a router leading
+        // its own and keeping no copy of the global one has none to keep up.
+        if self.read_dir().following() || self.global.is_some() {
+            let router = Arc::clone(self);
+            std::thread::Builder::new()
+                .name("fenec-directory".into())
+                .spawn(move || loop {
+                    router.catch_up_directories();
+                    router.arrived.wait();
+                })?;
+        }
         // The directory read once, under one guard let go of before the
         // line is written. Read twice in the line's arguments, both guards
         // lived to its end: a writer queued between the two -- the leasing
@@ -1518,18 +1597,10 @@ impl Router {
             };
             // A standby's directory moves as the primary's writes arrive:
             // the maps are read again before the request is answered from
-            // them, and only then.
-            if self.read_dir().stale() {
-                if let Err(e) = self.write_dir().refresh() {
-                    fenec_http::log!("could not read the directory: {e}");
-                }
-            }
-            if let Some(global) = &self.global {
-                if read(global).stale() {
-                    if let Err(e) = write(global).refresh() {
-                        fenec_http::log!("could not read the global directory: {e}");
-                    }
-                }
+            // them, and only then -- here, or by the thread their writes
+            // wake, whichever comes first.
+            if self.directories_stale() {
+                self.catch_up_directories();
             }
             let keep = match req.segments().first() {
                 Some(&"t") => {
@@ -1895,6 +1966,8 @@ impl Router {
         let mut node = node.to_string();
         let mut ended = upstream::ended_by(&ended).unwrap_or(upstream::Ended::Moved);
         let (mut tries, mut asks) = (1, CUT_ASKS);
+        // A follower's asks of a copy refusing it ([`Self::copy_pause`]).
+        let mut asking = None;
         loop {
             let flying = upstream::Flying::of(tenant, &self.pool);
             let Toward {
@@ -1971,26 +2044,41 @@ impl Router {
                 // cut's, onto another node than the one it was cut from: a
                 // request moved back to where it was, or one whose node
                 // answers 503 for its own reasons, grants nothing.
-                Ok(answer)
-                    if answer.status == 503
-                        && cut
-                        && asks > 0
-                        && to != node
-                        && routers.is_none()
-                        && self.leases.is_some() =>
-                {
+                //
+                // A router following the directory that placed it -- a
+                // standby, or a region's router forwarding by its copy of
+                // the global one -- grants nothing: it asks the copy again,
+                // the copy having run nothing, until the leading router's
+                // grant reaches it, for two thirds of the lease the
+                // directory records at most ([`Self::copy_pause`]).
+                Ok(answer) => {
+                    // Asked again after a grant (`None`) or a pause, or
+                    // answered: anything but a cut's 503 from another node.
+                    let again = match answer.status == 503 && cut && to != node && routers.is_none()
+                    {
+                        false => None,
+                        true => match self.places_as_leader(tenant, &to) {
+                            true => (asks > 0 && self.leases.is_some()).then_some(None),
+                            false => self.copy_pause(tenant, &mut asking).map(Some),
+                        },
+                    };
+                    let Some(pause) = again else {
+                        return self.answer_out_cold(
+                            req, out, arrived, peer, &to, answer, None, sent, forwarding, &home,
+                        );
+                    };
                     forwarding.error("503");
                     let _ = answer.read_body(&self.pool, head_only);
                     drop(forwarding);
-                    asks = match self.grant_cut_onto(&to) {
-                        true => asks - 1,
-                        false => 0,
-                    };
-                }
-                Ok(answer) => {
-                    return self.answer_out_cold(
-                        req, out, arrived, peer, &to, answer, None, sent, forwarding, &home,
-                    )
+                    match pause {
+                        Some(p) => std::thread::sleep(p),
+                        None => {
+                            asks = match self.grant_cut_onto(&to) {
+                                true => asks - 1,
+                                false => 0,
+                            }
+                        }
+                    }
                 }
                 Err(e) if upstream::client_gone(&e) => {
                     forwarding.error(e.to_string());
@@ -2046,6 +2134,11 @@ impl Router {
         let Some((leases, _)) = &self.leases else {
             return false;
         };
+        // A standby grants nothing: its lists may lag the leading router's
+        // ([`Self::copy_pause`]).
+        if self.read_dir().following() {
+            return false;
+        }
         let bound = leases.term * 2 / 3;
         let slot = {
             let mut grants = self.cut_grants.lock().unwrap_or_else(|e| e.into_inner());
@@ -2088,12 +2181,148 @@ impl Router {
         *done
     }
 
+    /// Whether this router's own directory places `tenant` on `node` and
+    /// leads: its failovers and grants are this router's to make. A
+    /// standby's and its copy of the global directory are a router's it
+    /// follows.
+    fn places_as_leader(&self, tenant: &str, node: &str) -> bool {
+        let dir = self.read_dir();
+        !dir.following() && dir.placement(tenant).is_some_and(|p| p.node == node)
+    }
+
+    /// How long a request a following router's cut sent to the copy
+    /// promoted waits before it asks again, the copy having refused it,
+    /// unrun, 503 ([`Self::after_cut`]): under leases a copy takes its
+    /// tenant's writes once the leading router's grant names the tenant
+    /// there, which that router sends as its failover ends, and this one
+    /// may have read the failover first. `None` once it has asked for two
+    /// thirds of the lease the directory placing the tenant records -- the
+    /// leading router's own grant waits as long for its copies, its rounds
+    /// a third of it apart -- or where it records none, no router having
+    /// leased from it: the copy's 503, which says when to come back, is
+    /// the answer then. `asking` keeps, from the first refusal on, until
+    /// when and how long the next wait is.
+    ///
+    /// It never grants: a grant goes from the router holding the leases,
+    /// and this one's lists may lag that one's -- a list read before the
+    /// failover would name the tenant on the node failed over, which, back
+    /// and granted it, would take writes beside the new primary. Nor does
+    /// it wait on anything it could be told by: the leading router records
+    /// no grant, and the copy is the one that knows; asked again, it has
+    /// run nothing until it answers otherwise.
+    fn copy_pause(
+        &self,
+        tenant: &str,
+        asking: &mut Option<(Instant, Duration)>,
+    ) -> Option<Duration> {
+        let now = Instant::now();
+        let (until, next) = match asking {
+            Some(a) => a,
+            None => {
+                let lease = self.followed_lease(tenant)?;
+                asking.insert((now + lease * 2 / 3, COPY_ASK_FIRST))
+            }
+        };
+        let left = until.saturating_duration_since(now);
+        if left.is_zero() {
+            return None;
+        }
+        let wait = (*next).min(left);
+        *next = (*next * 2).min(COPY_ASK_MOST);
+        Some(wait)
+    }
+
+    /// The lease recorded by the directory that places `tenant` for this
+    /// router: its own, or its copy of the global one.
+    fn followed_lease(&self, tenant: &str) -> Option<Duration> {
+        {
+            let dir = self.read_dir();
+            if dir.placement(tenant).is_some() {
+                return dir.lease_record();
+            }
+        }
+        self.global.as_ref().and_then(|g| read(g).lease_record())
+    }
+
     /// The requests a failover's cut sent on waiting for a grant to the
     /// node they were sent to ([`Self::grant_cut_onto`]): how a test knows
     /// a request has joined a grant under way.
     #[doc(hidden)]
     pub fn cut_grants_waiting(&self) -> usize {
         self.cut_waiting.load(Ordering::SeqCst)
+    }
+
+    /// Whether a directory this router reads has moved since its maps were
+    /// read: its own, which a standby's follower writes, or its copy of
+    /// the global one. Two reads under shared locks, as every request
+    /// asked before.
+    #[inline(always)]
+    fn directories_stale(&self) -> bool {
+        if self.read_dir().stale() {
+            return true;
+        }
+        match &self.global {
+            Some(g) => read(g).stale(),
+            None => false,
+        }
+    }
+
+    /// Brings the maps of the directories this router follows up to what
+    /// has arrived -- its own as a standby, its copy of the global one --
+    /// and ends what it had out for each tenant they show failed over off
+    /// the node it was sent to ([`directory::FailedOver`]), as the router
+    /// that failed it over ended its own at the promotion
+    /// ([`Self::promote_on`]). A standby, and a region's router forwarding
+    /// by its copy of the global directory, fail nothing over, and what
+    /// they had out to a node gone with no reset waited for
+    /// `--upstream-timeout` though the tenant answered on its new primary.
+    /// Ended by the rules the leading router's cuts follow
+    /// ([`Self::after_cut`]); only once the maps place the tenant on its
+    /// new node, so a request ended reads it there, and a forward that read
+    /// the maps before and goes out after finds its bucket's count moved
+    /// ([`upstream::Flying`]). Only where the directory follows another
+    /// router's: a leading one's own changes cut as they were made, and are
+    /// in its maps already. A move ends nothing: its source still answers,
+    /// and refuses its frozen writes on its own.
+    ///
+    /// The cuts are made before the maps are let go of, so whoever reads
+    /// the maps as they now are -- a request ended, which goes where they
+    /// place its tenant, or an operator asking where the tenant is -- reads
+    /// them with what they ended answered or on its way: a lock held over a
+    /// shutdown a request out, on a failover's rare path.
+    #[cold]
+    #[inline(never)]
+    fn catch_up_directories(&self) {
+        {
+            let mut dir = self.write_dir();
+            if dir.stale() {
+                match dir.refresh() {
+                    Ok(failed) => {
+                        if dir.following() {
+                            for f in failed {
+                                self.cut_moved(&f.tenant, &f.addr);
+                            }
+                        }
+                    }
+                    Err(e) => fenec_http::log!("could not read the directory: {e}"),
+                }
+            }
+        }
+        if let Some(global) = &self.global {
+            let mut g = write(global);
+            if g.stale() {
+                match g.refresh() {
+                    Ok(failed) => {
+                        if g.following() {
+                            for f in failed {
+                                self.cut_moved(&f.tenant, &f.addr);
+                            }
+                        }
+                    }
+                    Err(e) => fenec_http::log!("could not read the global directory: {e}"),
+                }
+            }
+        }
     }
 
     /// Ends what is out to `addr` for `tenant`, which a failover has just
@@ -3518,8 +3747,7 @@ impl Router {
             }
             let from = dir
                 .placement(tenant)
-                .and_then(|p| dir.node(&p.node))
-                .map(|n| n.addr.clone());
+                .and_then(|p| Some((p.node.clone(), dir.node(&p.node)?.addr.clone())));
             (
                 dir.node(to).cloned(),
                 dir.lineage(tenant),
@@ -3552,10 +3780,15 @@ impl Router {
         ) {
             Ok((200, body)) => {
                 self.quota_after_failover(tenant, to);
-                self.promoted(tenant, to, &body).map_err(|e| message(&e))?;
+                let left = from.as_ref().map(|(name, _)| name.as_str());
+                self.promoted(tenant, to, left, &body)
+                    .map_err(|e| message(&e))?;
                 // Placed on `to` now: what is out to the node it left is
-                // answered from here rather than wait for that node.
-                if let Some(from) = &from {
+                // answered from here rather than wait for that node. A
+                // router following this one's directory reads the node it
+                // left beside the placement (`failed_from`), and ends its
+                // own ([`Self::catch_up_directories`]).
+                if let Some((_, from)) = &from {
                     self.cut_moved(tenant, from);
                 }
                 match own_replica {
@@ -4362,8 +4595,15 @@ impl Router {
     /// refuse it. A tenant whose lineage was not known is of the one said;
     /// a node from before lineages says none. Then the history the
     /// promotion forked (`"history"`), which the copy promoted at the next
-    /// failover must hold.
-    fn promoted(&self, tenant: &str, to: &str, answer: &[u8]) -> fenec_core::error::Result<()> {
+    /// failover must hold. `from`, the node the tenant was failed over
+    /// off, goes into the placement's own statement (`failed_from`).
+    fn promoted(
+        &self,
+        tenant: &str,
+        to: &str,
+        from: Option<&str>,
+        answer: &[u8],
+    ) -> fenec_core::error::Result<()> {
         let fields =
             fenec_core::json::parse_object(&String::from_utf8_lossy(answer)).unwrap_or_default();
         let said = |key: &str| {
@@ -4380,7 +4620,7 @@ impl Router {
             (Some(l), Some(known)) if known != l => dir.succeed_lineage(tenant, &l)?,
             _ => {}
         }
-        dir.place_promoted(tenant, to, said("history").as_deref())
+        dir.place_promoted(tenant, to, said("history").as_deref(), from)
     }
 }
 
