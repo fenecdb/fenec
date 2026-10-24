@@ -292,52 +292,25 @@ fn a_dead_node_whose_name_never_resolves_holds_up_no_other_node_s_lease() {
 /// granted again and again and n2's tenant takes a write
 /// ([`renewed_meanwhile`]). n3 takes no lease, so it is never failed over
 /// itself: the grants a failover of it sends every other node would renew
-/// n1 beside a repair holding n1's own.
+/// n1 beside a repair holding n1's own. And it joins once the tenants have
+/// their replicas, keeping none: kept on n3, a replica made a failover of
+/// its tenant's node -- at background QoS beside busy loops, n2 run past
+/// its lease -- wait on n3 too, in n2's turn, and n2 was granted no more.
 #[test]
 fn a_repair_waiting_on_a_node_that_hangs_holds_up_no_lease() {
     let nodes = [1, 2, 3].map(|i| node(&format!("repair{i}"), i != 3));
-    let cfg = Config {
-        addr: "127.0.0.1:0".into(),
-        // The repair's wait on n3 lasts past the end of the test, so what
-        // it held up would not come while the test counts.
-        upstream_timeout: Duration::from_secs(600),
-        replicas: true,
-        auto_failover: Some(TERM),
-        ..Config::default()
-    };
-    let router = Router::new(Directory::in_memory(), cfg);
-    let listener = router.bind().unwrap();
-    let port = listener.local_addr().unwrap().port();
-    router.start_leasing().unwrap();
-    let serving = Arc::clone(&router);
-    std::thread::spawn(move || {
-        let _ = serving.serve_on(listener);
-    });
-    for (i, nd) in nodes.iter().enumerate() {
-        let body = format!(
-            r#"{{"addr":"{}","token":"adm-repair{}"}}"#,
-            nd.proxy.addr,
-            i + 1
-        );
-        let (status, body) = call(
-            port,
-            "PUT",
-            &format!("/_shard/nodes/n{}", i + 1),
-            &body,
-            None,
-        );
-        assert_eq!(status, 201, "{body}");
-    }
-    tenant_on(port, "a", "n1");
+    // The repair's wait on n3 lasts past the end of the test, so what it
+    // held up would not come while the test counts.
+    let (router, port) = leasing_replicas(Duration::from_secs(600));
+    put_node(port, "n1", &nodes[0].proxy.addr, "adm-repair1");
+    put_node(port, "n2", &nodes[1].proxy.addr, "adm-repair2");
+    // `b` first, its replica on n1, then `a`, its replica on n2.
     tenant_on(port, "b", "n2");
+    tenant_on(port, "a", "n1");
     written(port, "a", r#"put notes {id: 1, title: "one"}"#);
-    let replica = placed(port, "a").1.expect("a has a replica");
-    until(
-        by_name(&nodes, &replica).port,
-        "/t/a/query",
-        "get notes select title",
-        "one",
-    );
+    until(nodes[1].port, "/t/a/query", "get notes select title", "one");
+    put_node(port, "n3", &nodes[2].proxy.addr, "adm-repair3");
+    leased_until_cut(port, "a", "n1", "n2");
     // n1 goes, and its tenant is failed over.
     nodes[0].proxy.cut();
     writes_again(port, "a");
