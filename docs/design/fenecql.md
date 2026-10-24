@@ -244,8 +244,8 @@ nulls in keys and conditions: 864 answered as SQLite does, 240 refused
 runs a task and model, B on main the same day): SQL's first try 60% ->
 74-75% for haiku and 75% -> 91-94% for sonnet, within three 98% -> 98-100%
 and 100%, refused statements 36 -> 7 over 160 runs. The browser module grew
-63.4 KB, 26.1 KB gzip, 20.6 KB brotli (795.6, 326.9, 270.6), the test
-builds 20.7 and 21.0 KB brotli -- the review's fixes 3.6 KB and 1.1 KB
+63.3 KB, 26.0 KB gzip, 20.5 KB brotli (795.5, 326.8, 270.5), the test
+builds 20.5 and 20.8 KB brotli -- the review's fixes 3.5 KB and 1.0 KB
 brotli of it: `join.rs` 16.4 KB (`exists`'s `correlate`
 2.5 of it), the parser's readings 24.1 (`create table` and `create index`
 with their columns and keys about 11, `exists` 1.3, the select's
@@ -260,16 +260,22 @@ brotli), the
 refusals' text shortened and their `String`s made `&'static str`.
 Natively `fenec-server` grew 113 KB, its code 95.2 (fenec-ql 103.6 ->
 179.0 at `opt-level = 3`), `fenec-shard` 97 KB, the shell 113 (97 under
-`--profile cli`). The parse, ABBA against main at loads of 2.6-2.9, ns,
-medians of four runs a side: a row by id 782.8 -> 792.6 (+1.2%), a filtered
-`get` 2 368 -> 2 392 (+1.0%), a `set` 1 184 -> 1 188 (+0.3%), a 128-dim
-`near` 3 632 -> 3 608 (-0.7%), a `put` of 1 000 128-dim rows 2.565 -> 2.553
-ms (-0.5%). A first pass was 8% slower by id: every `get`, `set` and `del`
+`--profile cli`). The parse, ABBA against main, ns, medians of eight runs
+a side each run at a load under 3: a row by id 790.6 -> 830.3 (+5.0%), a
+filtered `get` 2 369 -> 2 488 (+5.0%), a `set` 1 179 -> 1 189 (+0.9%), a
+128-dim `near` 3 606 -> 3 634 (+0.8%), a `put` of 1 000 128-dim rows 2.528
+-> 2.525 ms (-0.2%) -- where the code lands: with every function aligned
+to 64 bytes on both sides (`-C llvm-args=-align-all-functions=6`) the same
+source measured 795.2 -> 791.9 by id (-0.4%), 2 370 -> 2 349 (-0.9%), 1 173
+-> 1 177 (+0.3%), 3 623 -> 3 568 (-1.5%) and 2.526 -> 2.519 ms (-0.3%);
+the build before the review's fixes measured +1.2% and +1.0% by id and
+filtered in its own layout. A first pass was 8% slower by id: every `get`, `set` and `del`
 copied its collection's name into the tables an `exists` reads its row
 around in (`Around::At` keeps the token's place now), and `scalar_ahead`,
-asked of every comparison, was a call. 511 parentheses parse in 1 090 KiB
-of stack either way: a `format!` in `cmp_expr`'s refusal of a distance
-outside `order by` was 16 KiB of it, one text now (`DISTANCE`).
+asked of every comparison, was a call. 511 parentheses parse in 995 KiB
+of stack against main's 979 (`or_expr`'s and `and_expr`'s frames 16 bytes
+larger each): a `format!` in `cmp_expr`'s refusal of a distance outside
+`order by` was 16 KiB more, one text now (`DISTANCE`).
 
 ## Count parameters
 

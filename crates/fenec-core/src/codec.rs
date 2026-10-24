@@ -216,8 +216,10 @@ pub fn geo_value((lon, lat): (f64, f64)) -> Value {
 /// [`encode_value`] of a value a group, a set of distinct values or a facet
 /// counts by: `-0.0` as `0.0`, which `=` holds equal and SQL makes one row
 /// of -- adding `+0.0` turns it into `0.0` and leaves every other float
-/// alone. Written here, a float's bytes put once, where a `Value` made
-/// again went through `encode_value`'s own match a second time.
+/// alone. Written here, a float's bytes put once: a `Value` made again
+/// went through `encode_value`'s own match a second time, and a group by
+/// a float over a million rows took 1.9% longer that way; this way as long
+/// as before (ABBA, functions aligned to 64 bytes on both sides).
 #[inline]
 pub fn encode_key(out: &mut Vec<u8>, v: &Value) {
     match v {
