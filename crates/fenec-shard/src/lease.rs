@@ -97,6 +97,24 @@ pub fn lapse(term: Duration) -> Duration {
     term + term / 10
 }
 
+/// When a round that starts `now` counts as due, the next one coming
+/// `period` after that: the moment it was due -- a `period` after the last
+/// was -- where it woke within a period of it, and `now` where it woke
+/// later still, a process stopped, so the rounds it missed are not run
+/// back to back. Counted from when each woke, every wake's lateness put
+/// the rounds after it as late: at background QoS, where a park of a
+/// second wakes up to 0.2 s late, the rounds of a 3 s lease came 1.18 s
+/// apart on average and two of them up to 2.40 s, so the next grant had
+/// 0.6 s to be late in before the node's lease lapsed, which beside busy
+/// loops it was; counted from when each was due, 1.00 s apart and two up
+/// to 2.04-2.18 s.
+pub fn round_due(last: Option<Instant>, now: Instant, period: Duration) -> Instant {
+    match last.map(|at| at + period) {
+        Some(due) if now < due + period => due,
+        _ => now,
+    }
+}
+
 /// `d` in whole milliseconds, as a grant names a lease.
 fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
@@ -177,6 +195,8 @@ struct Held {
     /// A round's grant to it is under way: the next round sends it none
     /// ([`Leases::begin_grant`]).
     granting: bool,
+    /// How many of the rounds' grants to it have ended ([`Leases::rounds`]).
+    rounds: u64,
     /// Its lease looked lapsed, and a failover of it waits for its turn to
     /// judge again ([`Leases::suspects`]).
     failing: bool,
@@ -489,6 +509,7 @@ impl Leases {
             lost: false,
             refuses: false,
             granting: false,
+            rounds: 0,
             failing: false,
         })
     }
@@ -508,7 +529,16 @@ impl Leases {
     pub fn end_grant(&self, node: &str) {
         if let Some(h) = self.held().get_mut(node) {
             h.granting = false;
+            h.rounds += 1;
         }
+    }
+
+    /// How many of the rounds' grants to `node` have ended, answered or
+    /// not: what a test counts to know a node is granted round after round
+    /// while something else hangs. A grant a failover or a create sends is
+    /// not a round's, and does not count.
+    pub fn rounds(&self, node: &str) -> u64 {
+        self.held().get(node).map_or(0, |h| h.rounds)
     }
 
     /// The epoch of the list `node` holds, as far as the router knows.
@@ -899,6 +929,30 @@ mod tests {
         l.leading(|| None);
         l.know("n1");
         assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
+    }
+
+    /// A round woken late counts as due when it was, so the one after it is
+    /// as early as it would have been: counted from the wake, every round
+    /// after one woken late came as late, the leeway of each wake adding up.
+    /// One woken more than a round late -- the process stopped -- counts
+    /// from the wake, so the rounds it missed are not run back to back.
+    #[test]
+    fn a_round_woken_late_puts_none_after_it_late() {
+        let period = Duration::from_millis(1_000);
+        let start = Instant::now();
+        assert_eq!(round_due(None, start, period), start);
+        let mut due = start;
+        for late in [300, 370, 0, 999] {
+            let woke = due + period + Duration::from_millis(late);
+            let next = round_due(Some(due), woke, period);
+            assert_eq!(next, due + period, "a round woken {late} ms late");
+            due = next;
+        }
+        assert_eq!(due, start + period * 4, "the rounds drifted");
+        let stopped = due + period * 3;
+        assert_eq!(round_due(Some(due), stopped, period), stopped);
+        let at_two = due + period * 2;
+        assert_eq!(round_due(Some(due), at_two, period), at_two);
     }
 
     #[test]

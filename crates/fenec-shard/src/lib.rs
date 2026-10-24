@@ -594,7 +594,10 @@ impl Router {
     /// third of its own lease after the start, a router whose lease is
     /// longer than the one before it -- the record raised, or not
     /// writable -- left every node without a lease from the end of the
-    /// shorter one to its first round.
+    /// shorter one to its first round. Each round after it is due a third
+    /// after the last was due, not after the last woke
+    /// ([`lease::round_due`]): a wake late by the scheduler's leeway does
+    /// not put every round after it as late.
     pub fn start_leasing(self: &Arc<Router>) -> std::io::Result<()> {
         let Some((leases, _)) = &self.leases else {
             return Ok(());
@@ -608,13 +611,16 @@ impl Router {
         let thread = std::thread::Builder::new()
             .name("fenec-lease".into())
             .spawn(move || {
+                // When the last round was due, which the next is due a
+                // third of a lease after ([`lease::round_due`]).
                 let mut last: Option<Instant> = None;
                 loop {
                     let Some((leases, _)) = &router.leases else {
                         return;
                     };
                     let now = Instant::now();
-                    if let Some(due) = last.map(|at| at + leases.granting() / 3) {
+                    let period = leases.granting() / 3;
+                    if let Some(due) = last.map(|at| at + period) {
                         if now < due {
                             // Woken early by a shorter lease, or for nothing:
                             // the third is read again either way.
@@ -622,7 +628,7 @@ impl Router {
                             continue;
                         }
                     }
-                    last = Some(now);
+                    last = Some(lease::round_due(last, now, period));
                     router.round(false);
                 }
             })?;
@@ -2086,6 +2092,14 @@ impl Router {
             .unwrap_or_else(|e| e.into_inner());
         self.cut_waiting.fetch_sub(1, Ordering::SeqCst);
         *done
+    }
+
+    /// How many of the leasing thread's grants to `node` have ended
+    /// ([`lease::Leases::rounds`]): how a test knows a node is granted round
+    /// after round while another node, a repair or a failover hangs.
+    #[doc(hidden)]
+    pub fn round_grants(&self, node: &str) -> u64 {
+        self.leases.as_ref().map_or(0, |(l, _)| l.rounds(node))
     }
 
     /// The requests a failover's cut sent on waiting for a grant to the
