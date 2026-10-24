@@ -389,18 +389,19 @@ fn until_heard(proxy: &Proxy, request: &str, what: &str) {
 /// A failover holds up no lease. Promoting a node's tenants calls the nodes
 /// they go to, each call as long as its node takes, and the leasing thread
 /// ran it between rounds: a promotion's node that hung held every other
-/// node's renewal for the router's upstream timeout. Here n1 is cut off as
-/// n2, which keeps its tenant's replica, hangs: n1's failover waits on n2
-/// past the end of the test, and meanwhile n3 is granted again and again
-/// and its tenant takes a write ([`renewed_meanwhile`]). n2 takes no lease,
-/// so it is never failed over itself: its failover drops the replicas it
-/// keeps, and one that came before n1's -- the two lapse a lease and a
-/// tenth after their last renewals, whichever was earlier -- left n1's
-/// failover nothing to promote and nothing to wait on (1 run in 8 at
-/// background QoS beside seven busy loops).
+/// node's renewal for the router's upstream timeout. Here n1 is cut off and
+/// its tenant's promotion is held at the door of n2, which keeps the
+/// tenant's replica: n1's failover waits on n2 past the end of the test,
+/// and meanwhile n2 and n3 are granted again and again and n3's tenant takes
+/// a write ([`renewed_meanwhile`]). Only the promotion is held: n2 hung
+/// whole lapsed as n1 did, and its failover, first in 1 run of 8 at
+/// background QoS beside seven busy loops, dropped the replica n1's was to
+/// promote; and taking no lease, it lapsed all the same where the test hung
+/// it before a round had heard it say so (2 runs of 20).
 #[test]
 fn a_failover_waiting_on_a_promotion_that_hangs_holds_up_no_lease() {
-    let nodes = [1, 2, 3].map(|i| node(&format!("promote{i}"), i != 2));
+    let nodes = [1, 2, 3].map(|i| node(&format!("promote{i}"), true));
+    let n2 = Filter::to(format!("127.0.0.1:{}", nodes[1].port), b"/promote ");
     // The promotion's wait on n2 lasts past the end of the test, so what it
     // held up would not come while the test counts.
     let (router, port) = leasing_replicas(Duration::from_secs(600));
@@ -408,23 +409,25 @@ fn a_failover_waiting_on_a_promotion_that_hangs_holds_up_no_lease() {
     put_node(port, "n3", &nodes[2].proxy.addr, "adm-promote3");
     tenant_on(port, "w", "n3");
     put_node(port, "n1", &nodes[0].proxy.addr, "adm-promote1");
-    put_node(port, "n2", &nodes[1].proxy.addr, "adm-promote2");
+    put_node(port, "n2", &n2.addr, "adm-promote2");
     // n3 holds `w`, so `a`'s replica goes to n2, which holds nothing.
     tenant_on(port, "a", "n1");
     assert_eq!(placed(port, "a").1.as_deref(), Some("n2"));
     written(port, "a", r#"put notes {id: 1, title: "one"}"#);
     until(nodes[1].port, "/t/a/query", "get notes select title", "one");
     leased_until_cut(port, "a", "n1", "n2");
-    nodes[1].proxy.hang();
+    n2.armed.store(true, Ordering::SeqCst);
     nodes[0].proxy.cut();
-    until_failed_over(port, "n1", 1.0, "n1 was never judged lapsed");
-    until_heard(
-        &nodes[1].proxy,
-        "/a/promote ",
-        "n1's failover never asked n2 to promote a",
-    );
+    let deadline = Instant::now() + WITHIN;
+    while n2.held() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "n1's failover never asked n2 to promote a in {WITHIN:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let hang = "n1's failover waiting on n2";
-    renewed_meanwhile(&router, &["n3"], hang);
+    renewed_meanwhile(&router, &["n2", "n3"], hang);
     written_meanwhile(port, "w", hang);
 }
 
