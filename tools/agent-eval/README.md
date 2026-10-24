@@ -340,7 +340,7 @@ at a statement's cost.
   child (``field `order_id` ``), and were refused once more before getting
   it right.
 
-### The SQL-spellings branch, part 2 (`sql-spellings-2`)
+### The SQL-spellings branch, part 2 (#367)
 
 Joins, `distinct`, `exists`, scalar subqueries, `create table` and `create
 index`, pgvector's distance. B on main (dc60e41d, part 1 in) and C against
