@@ -668,7 +668,10 @@ fn a_join_past_the_list_bound_is_probed_and_a_small_one_listed() {
     run(
         &mut db,
         "put orders [{user_id: 5, total: 1}, {user_id: 100001, total: 2}, {user_id: 200000, total: 3}]; \
-         put vip [{tier: 1}, {tier: 2}, {tier: 3}]",
+         put vip [{tier: 1}, {tier: 2}, {tier: 3}]; \
+         create collection keyed (jk json, tk text, bk bool); \
+         put keyed [{jk: 5, tk: \"5\", bk: true}, {jk: 100001, tk: \"x\", bk: false}, \
+                    {jk: 200000, tk: \"7\", bk: true}]",
     );
     let plan = |q: &str| {
         let st = parse_one(&format!("explain {q}")).unwrap_or_else(|e| panic!("{q}: {e}"));
@@ -760,6 +763,31 @@ fn a_join_past_the_list_bound_is_probed_and_a_small_one_listed() {
     let steps = plan(q);
     assert!(!steps.contains("probed"), "{steps}");
     assert!(steps.contains("hash"), "{steps}");
+    // A key of json, text or bool keeps the list, which `in` compares as
+    // values, and its bound: probed, a `lookup` by `id` refused the json
+    // key as key types that do not match, naming a `lookup` never written.
+    for key in ["jk", "tk", "bk"] {
+        let sql = format!(
+            "SELECT k.{key} FROM keyed k JOIN users u ON u.id = k.{key} WHERE u.n < 10 ORDER BY k.id"
+        );
+        let fenecql = format!(
+            "get keyed select {key} where {key} in (get users select id where n < 10) order id"
+        );
+        assert_eq!(answer(&db, &sql).1, answer(&db, &fenecql).1, "{sql}");
+        assert!(!plan(&sql).contains("probed"), "{sql}: {}", plan(&sql));
+        let past =
+            format!("SELECT k.{key} FROM keyed k JOIN users u ON u.id = k.{key} WHERE u.n != 4");
+        let e = db
+            .query(&parse_one(&past).unwrap(), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("more than 100000 values"), "{past}: {e}");
+    }
+    let (_, rows) = answer(
+        &db,
+        "SELECT k.jk FROM keyed k JOIN users u ON u.id = k.jk WHERE u.n < 10",
+    );
+    assert_eq!(rows, [vec![Value::Int(5)]]);
     // Nothing to look up a missing row by: past the bound, still refused.
     let st = parse_one(
         "SELECT o.total FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE u.id IS NULL",

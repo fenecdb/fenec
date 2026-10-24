@@ -172,7 +172,9 @@ FenecQL text asks for.</p>
     first table's index — that list is held to 100 000 values, as any
     <code>in (get …)</code> is. A join that finds the joined table by its
     <code>id</code> looks each row's match up by that id past them, at any
-    size, whichever table comes first and with the joined table filtered;
+    size, whichever table comes first and with the joined table filtered,
+    where the other key is an <code>id</code>, an int, a float or a
+    timestamp;
     an aggregate, <code>DISTINCT</code>, <code>EXISTS</code> or
     <code>LEFT JOIN … IS NULL</code> over a larger joined table is refused,
     never cut. Its other conditions read one table's columns. A comma between tables is a join
@@ -183,7 +185,8 @@ FenecQL text asks for.</p>
     parser reads no schema, and SQL would have refused one two tables
     hold — and one the first table has no field of is refused, saying to
     name it with its table. A column no table has is refused, as SQL refuses
-    it, wherever the statement names it — an <code>ON</code> term too. A
+    it, wherever the statement names it — an <code>ON</code> term too — and
+    so is a table no database holds. A
     column answers under its name, <code>total</code>, or its
     <code>AS</code>; two that would answer under one name — every table's
     <code>id</code> under <code>SELECT *</code> — are refused, since a row

@@ -130,7 +130,14 @@ join writes, which the engine holds to its tables' fields (`Flat::names`),
 is held here first -- a LEFT JOIN's `on` term the reading leaves out was
 answered naming a withheld field and refused naming a missing one -- with
 the engine's refusal of a name written with no table naming no other
-table's field. A scoped token's join keeps its list alone (`Flat::probe`
+table's field. Every table a join names is held to the read rules
+(`Scope::select`, refused as a collection the token is granted nothing on
+does not exist), whether its reading reads it or not: a LEFT JOIN whose
+`on` term the reading leaves out made no inner `get` for the rules to
+reach, and the engine's check of the join's names told a token holding
+`stops read` alone that `orders` has a `dropoff` and no `nosuch` -- 200
+against 400 -- where a plain join of `orders` was 404, as for a table no
+database holds. A scoped token's join keeps its list alone (`Flat::probe`
 cleared): the probe the engine reads past the list's 100 000 values hangs
 a level off the rows that the token's masks, made for the list's one
 level, would not reach, so such a join is refused past them. Masking alone leaked the field through everything else a

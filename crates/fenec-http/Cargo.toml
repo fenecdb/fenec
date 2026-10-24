@@ -42,3 +42,8 @@ path = "tests/audit.rs"
 [[test]]
 name = "quotas"
 path = "tests/quotas.rs"
+
+# Apart: the count of lists refused past their bound is the process's own.
+[[test]]
+name = "join_lists"
+path = "tests/join_lists.rs"

@@ -531,6 +531,41 @@ fn a_joins_star_names_no_field_the_token_is_not_shown() {
     }
 }
 
+/// A join's tables are held to the token's grants whether its reading
+/// reads them or not: a LEFT JOIN whose `on` term the reading leaves out
+/// told a token granted nothing on `orders` its columns -- `o.dropoff`
+/// answered, `o.nosuch` refused naming them -- where `orders` does not
+/// exist for it, as a plain `JOIN orders` says. And a table no database
+/// holds is refused for any token, the server's too, as SQL refuses an
+/// unknown table: `on` naming nothing of it but `id`, it was answered.
+#[test]
+fn a_joins_tables_are_held_to_the_grants_and_the_schema() {
+    let n = start_with("stops read for spy\n", SETUP, false);
+    let spy = n.token(r#"{"sub":"s","role":"spy"}"#);
+    let left = "SELECT s.place FROM stops s LEFT JOIN orders o ON o.id = s.order AND o.X = 'x'";
+    let answers = [
+        n.query(&spy, &left.replace('X', "dropoff"), ""),
+        n.query(&spy, &left.replace('X', "nosuch"), ""),
+        n.query(
+            &spy,
+            "SELECT s.place FROM stops s JOIN orders o ON o.id = s.order",
+            "",
+        ),
+    ];
+    for (status, body) in &answers {
+        assert_eq!(*status, 404, "{body}");
+        assert!(body.contains("collection `orders`"), "{body}");
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0], answers[2]);
+    let nothere = "SELECT s.place FROM stops s LEFT JOIN nothere o ON o.id = s.order";
+    for token in [ROOT.to_string(), spy] {
+        let (status, body) = n.query(&token, nothere, "");
+        assert_eq!(status, 404, "{body}");
+        assert!(body.contains("collection `nothere`"), "{body}");
+    }
+}
+
 /// An inner `get`'s column is made of the rows showing it: a list of the
 /// ready orders' doors was the doors themselves, read through `in`.
 #[test]

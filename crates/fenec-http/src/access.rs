@@ -1762,6 +1762,19 @@ impl Scope {
         if let Some(f) = &mut sel.flat {
             f.probe = false;
         }
+        // A SQL join's tables, each held to the read rules whether the
+        // reading reads it or not: a LEFT JOIN's `on` the reading leaves
+        // out makes no inner `get` for the rules to reach, and the engine's
+        // check of the join's names told a token granted nothing on
+        // `orders` its columns -- `o.dropoff` answered, `o.nosuch` refused
+        // naming them -- where `orders` does not exist for it.
+        if let Some(n) = sel.flat.as_ref().and_then(|f| f.names.as_deref()) {
+            for (_, c) in &n.tables {
+                if self.filter(c, READ).is_none() {
+                    return Err(self.refused(c, "read"));
+                }
+            }
+        }
         // What a rule withholds is held out of what the statement does
         // with it before the rules are ANDed in, which read it as they must.
         if self.fielded {

@@ -247,10 +247,23 @@ the probe alone, as the first round of fixes had it, that join to three
 rows looked up each of 100 001 users; and the probe drives the table whose
 rows are answered, so `select o.total from users u join orders o on
 o.user_id = u.id order by u.id` reads `orders` by `user_id` with `users` a
-`required` level found by its id. The names are shared (`Arc`) by the copy
-every statement holding an `in (get ...)` is answered in, which would
-otherwise copy them. A scoped token's join keeps the list alone
-(access.md). In turns against main and the branch before these fixes, four
+`required` level found by its id. The probe is offered only over a key
+its `lookup` takes beside an `id` -- `id`, or an int, float or timestamp
+field (`probe_keyed`): a json, text or bool key keeps the list, which `in`
+compares as values, and its refusal past the bound, where the probe was
+refused as key types that do not match, naming a `lookup` the statement
+never wrote. The list tried first lists its ids to one past the bound and
+stops a scan there, but hands an index the bound it would have with none
+(`matching_ids_to`'s `want`): handed to `filter_candidates`, it lowered
+the ordered and composite indexes' range bound to 6.4 million rows, and a
+wide range over a collection past 12.8 million was passed over for the
+scan. Over HTTP and pinned, `query_json` writes the probe's rows itself:
+declined, as a statement holding a `lookup`, the server had `query` answer
+the statement again and walk the list a second time
+(`fenec-http/tests/join_lists.rs` counts the lists refused past their
+bound, `lists_past_bound`). The names are shared (`Arc`) by the copy every
+statement holding an `in (get ...)` is answered in, which would otherwise
+copy them. A scoped token's join keeps the list alone (access.md). In turns against main and the branch before these fixes, four
 runs a side each begun at a load under 3: the join to three rows of `vip`
 1.50 us against main's `in (get ...)` reading at 1.44 (2 322 as the probe
 alone); 1 000 orders to 100 010 users 123 us in either order (122 as the
@@ -280,7 +293,9 @@ LEFT JOIN's `on` condition on a table before it was told to go in the
 `where`, which drops the rows; `hnsw with (m = 1)` was clamped, where
 pgvector refuses it; and a name only a joined table has, read as the first
 table's, read null in every row or failed at the first, and over no rows
-not at all. The engine holds every column a join names to its table's
+not at all. The engine looks every table of a join up, read or not --
+`left join nothere o on o.id = s.order` was answered, as SQL refuses an
+unknown table -- and holds every column a join names to its table's
 fields (`Flat::names`, `join_names`) and refuses one no table has, as SQL
 refuses an unknown column -- a key with no table (`on cu.id = cid`), a
 LEFT JOIN's `on` term the reading leaves out (`... and o.nosuch = 'x'`
@@ -298,11 +313,12 @@ CI's clippy job (`cargo test -p fenec-bench --test joins_sqlite`).
 runs a task and model, B on main the same day): SQL's first try 60% ->
 74-75% for haiku and 75% -> 91-94% for sonnet, within three 98% -> 98-100%
 and 100%, refused statements 36 -> 7 over 160 runs. The browser module grew
-70.1 KB, 29.0 KB gzip, 23.0 KB brotli (802.2, 329.7, 272.9), the test
-builds 23.7 and 24.1 KB brotli -- the reviews' fixes 10.3 KB and 3.5 KB
+70.6 KB, 29.2 KB gzip, 22.9 KB brotli (802.6, 329.9, 272.9), the test
+builds 24.0 and 24.4 KB brotli -- the reviews' fixes 10.8 KB and 3.5 KB
 brotli of it, the second's 6.8 and 2.5 (the probe made of the list and
 when to read it 3.2 KB, every name held to its table, `required`'s stop
-at the page): `join.rs` 18.0 KB (`exists`'s `correlate`
+at the page), the third's 0.5 and nothing brotli: `join.rs` 18.0 KB
+(`exists`'s `correlate`
 2.5 of it), the parser's readings 24.1 (`create table` and `create index`
 with their columns and keys about 11, `exists` 1.3, the select's
 `distinct`, ordinals, distance and alias 3.7), `sqltypes` 1.9, the flat
