@@ -496,21 +496,32 @@ impl Leases {
         self.nodes.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// `node`'s record, counted as granted when this router first knew it:
+    /// as it began leading, for every node the directory named then, or as
+    /// the node was added since -- which no lease of this directory's can
+    /// have named before. Counted from the router's start, a node added a
+    /// lease and a tenth into the router's life was lapsed before its first
+    /// grant came back, and one given up on -- a second at a 3 s lease, at
+    /// background QoS beside busy loops -- had it failed over, every replica
+    /// it kept dropped, before any lease of it could run.
     fn entry<'a>(&self, m: &'a mut HashMap<String, Held>, node: &str) -> &'a mut Held {
         let started = *self.started.lock().unwrap_or_else(|e| e.into_inner());
-        m.entry(node.to_string()).or_insert_with(|| Held {
-            acked: started,
-            acked_grant: None,
-            settled: started,
-            next: fenec_http::replication::fresh_id(),
-            unnumbered: false,
-            own: false,
-            epoch: None,
-            lost: false,
-            refuses: false,
-            granting: false,
-            rounds: 0,
-            failing: false,
+        m.entry(node.to_string()).or_insert_with(|| {
+            let known = started.max(Instant::now());
+            Held {
+                acked: known,
+                acked_grant: None,
+                settled: known,
+                next: fenec_http::replication::fresh_id(),
+                unnumbered: false,
+                own: false,
+                epoch: None,
+                lost: false,
+                refuses: false,
+                granting: false,
+                rounds: 0,
+                failing: false,
+            }
         })
     }
 
@@ -698,8 +709,9 @@ impl Leases {
         }
     }
 
-    /// Makes sure every node the directory names is counted from the
-    /// router's start, even one the router never reached.
+    /// Makes sure every node the directory names is counted from when this
+    /// router first knew it, even one the router never reached
+    /// ([`Leases::entry`]).
     pub fn know(&self, node: &str) {
         let mut m = self.held();
         self.entry(&mut m, node);
@@ -929,6 +941,25 @@ mod tests {
         l.leading(|| None);
         l.know("n1");
         assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
+    }
+
+    /// A node added once the router leads is counted from when it was
+    /// added, not from the router's start: no lease of the directory's can
+    /// have named it before. Counted from the start, a node added a lease
+    /// and a tenth in was lapsed before its first grant came back.
+    #[test]
+    fn a_node_added_later_is_counted_from_its_addition() {
+        let l = Leases::new(Duration::from_millis(100));
+        l.leading(|| None);
+        l.know("n1");
+        // A sleep never ends early: the router has led past a lapse.
+        std::thread::sleep(Duration::from_millis(120));
+        let before = Instant::now();
+        l.know("n2");
+        assert_eq!(l.suspects(before), ["n1"]);
+        assert!(l.suspects(before + Duration::from_millis(105)).is_empty());
+        let after = Instant::now();
+        assert_eq!(l.suspects(after + Duration::from_millis(115)), ["n2"]);
     }
 
     /// A round woken late counts as due when it was, so the one after it is
