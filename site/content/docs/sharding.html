@@ -243,8 +243,14 @@ read the list before this one was promoted. What is cut and what became of it is
 (<code>fenec_router_cut_requests_total</code>,
 <a href="monitoring.html#router">Monitoring</a>). A standby router, and a
 region's router forwarding by its copy of the global directory, fail
-nothing over themselves, so what they have out to such a node still waits
-for their timeout. In the deploy kit's drill (<code>make drill</code>, a
+nothing over themselves, but end what they have out to the node by the same
+rule as soon as their copy of the directory shows the failover: the
+directory names the node a failover took each tenant off, so a move ends
+nothing, its source still answering. They grant nothing: a write one sends
+on before the leading router's grant has reached the new primary is asked
+again there until it has -- for two thirds of a lease or
+<code>--upstream-timeout</code>, whichever is sooner, and only while its
+client is still there. In the deploy kit's drill (<code>make drill</code>, a
 lease of 2 s, the routers' timeout 4 s, a node cut off the network and
 killed) the dead node's writers wrote again as the router failed it over,
 1.93 and 2.52 s after the kill, where they waited for the timeout before,

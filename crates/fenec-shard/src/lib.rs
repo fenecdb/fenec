@@ -281,6 +281,12 @@ pub struct Router {
     /// The requests waiting on one of [`Router::cut_grants`]: how a test
     /// knows a request has joined a grant under way.
     cut_waiting: AtomicUsize,
+    /// Told as a write lands in a directory this router follows: its own,
+    /// as a standby, or its copy of the global one ([`Arrived`]).
+    arrived: Arc<Arrived>,
+    /// The requests a following router's cut sent to a copy that refused
+    /// them, waiting to ask it again ([`Router::copy_pause`]).
+    copy_waiting: AtomicUsize,
 }
 
 /// What a node said of a grant it answered 200 (`fenec_http::admin`'s
@@ -415,6 +421,104 @@ const CUT_TRIES: usize = 3;
 /// once, such a request was answered the copy's 503.
 const CUT_ASKS: u8 = 2;
 
+/// The first wait of a request a following router's cut sent to the copy
+/// promoted where the copy refused it, unrun, 503, before the leading
+/// router's grant named the tenant there ([`Router::copy_pause`]): the
+/// grant goes out as the failover ends, so most such requests are answered
+/// at the first ask after it. Each wait after is twice the one before, up
+/// to a third of the lease, the leading router's rounds' apart: a grant
+/// that came no sooner comes with the next round.
+const COPY_ASK_FIRST: Duration = Duration::from_millis(5);
+
+/// A following router's asks of a copy that refused a request it sent there
+/// ([`Router::copy_pause`]): until when, the next wait, and the longest.
+struct CopyAsks {
+    until: Instant,
+    next: Duration,
+    most: Duration,
+}
+
+impl CopyAsks {
+    /// The asks from a first refusal at `now`: for two thirds of `lease`
+    /// or `upstream` (`--upstream-timeout`), whichever is sooner, the
+    /// waits doubling from [`COPY_ASK_FIRST`] to a third of the lease.
+    fn from(now: Instant, lease: Duration, upstream: Duration) -> CopyAsks {
+        CopyAsks {
+            until: now + (lease * 2 / 3).min(upstream),
+            next: COPY_ASK_FIRST,
+            most: (lease / 3).max(COPY_ASK_FIRST),
+        }
+    }
+
+    /// The wait before the next ask at `now`, cut to what is left of the
+    /// asks: `None` once they are over.
+    fn wait_at(&mut self, now: Instant) -> Option<Duration> {
+        let left = self.until.saturating_duration_since(now);
+        if left.is_zero() {
+            return None;
+        }
+        let wait = self.next.min(left);
+        self.next = (self.next * 2).min(self.most);
+        Some(wait)
+    }
+}
+
+/// One more of a count while it is held: a test's way to know a request is
+/// where it counts ([`Router::copy_asks_waiting`]).
+struct Counted<'a>(&'a AtomicUsize);
+
+impl<'a> Counted<'a> {
+    fn up(n: &'a AtomicUsize) -> Counted<'a> {
+        n.fetch_add(1, Ordering::SeqCst);
+        Counted(n)
+    }
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// What wakes the thread that brings a followed directory's maps up to
+/// what has arrived ([`Router::catch_up_directories`]): told by every
+/// write the follower applies to the directory's database -- the leading
+/// router's -- and by an image adopted, under that database's lock, so it
+/// takes nothing but its own. Left to the next request, a standby that was
+/// asked nothing more kept what it had out to a node failed over waiting
+/// for its timeout.
+#[derive(Default)]
+struct Arrived {
+    due: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+impl Watcher for Arrived {
+    fn notify(&self, _seq: u64) {
+        *self.due.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.wake.notify_one();
+    }
+}
+
+impl Arrived {
+    /// Told by `db`'s writes from now on.
+    fn watch(self: &Arc<Self>, db: &Arc<RwLock<Database>>) {
+        db.write()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_watcher(Arc::clone(self) as Arc<dyn Watcher>);
+    }
+
+    /// Waits until a write has landed since the last wait.
+    fn wait(&self) {
+        let due = self.due.lock().unwrap_or_else(|e| e.into_inner());
+        let mut due = self
+            .wake
+            .wait_while(due, |d| !*d)
+            .unwrap_or_else(|e| e.into_inner());
+        *due = false;
+    }
+}
+
 /// Where a forward goes ([`Router::toward`]): the node's name -- or what
 /// stands for a region's routers -- its address, the mark its node believes
 /// the router's word by, the region's routers where it is relayed, and the
@@ -462,6 +566,18 @@ impl Router {
         let mut cfg = cfg;
         cfg.token = cfg.token.filter(|t| !t.is_empty());
         cfg.entry_token = cfg.entry_token.filter(|t| !t.is_empty());
+        // The directories this router follows -- its own, as a standby,
+        // and its copy of the global one -- tell it as their writes land.
+        // A router leading its own from the start never follows it after
+        // (a promotion goes the other way), so it is told nothing, and
+        // keeps no thread waiting to be ([`Self::serve_on`]).
+        let arrived = Arc::new(Arrived::default());
+        if dir.following() {
+            arrived.watch(dir.db());
+        }
+        if let Some(g) = &global {
+            arrived.watch(read(g).db());
+        }
         Arc::new_cyclic(|me| Router {
             me: me.clone(),
             repairs: Mutex::new((false, false)),
@@ -503,6 +619,8 @@ impl Router {
             follow_soon: (Mutex::new(false), std::sync::Condvar::new()),
             cut_grants: Mutex::new(Default::default()),
             cut_waiting: AtomicUsize::new(0),
+            arrived,
+            copy_waiting: AtomicUsize::new(0),
             cfg,
         })
     }
@@ -532,6 +650,20 @@ impl Router {
         // The read replicas this router keeps follow their tenants'
         // primaries wherever those go ([`readers`]).
         self.start_following()?;
+        // A followed directory's maps kept up as its writes land, and what
+        // a failover they show had this router wait on ended
+        // ([`Self::catch_up_directories`]): from what arrived before it was
+        // told of any, first. Only where it follows one: a router leading
+        // its own and keeping no copy of the global one has none to keep up.
+        if self.read_dir().following() || self.global.is_some() {
+            let router = Arc::clone(self);
+            std::thread::Builder::new()
+                .name("fenec-directory".into())
+                .spawn(move || loop {
+                    router.catch_up_directories();
+                    router.arrived.wait();
+                })?;
+        }
         // The directory read once, under one guard let go of before the
         // line is written. Read twice in the line's arguments, both guards
         // lived to its end: a writer queued between the two -- the leasing
@@ -1518,18 +1650,10 @@ impl Router {
             };
             // A standby's directory moves as the primary's writes arrive:
             // the maps are read again before the request is answered from
-            // them, and only then.
-            if self.read_dir().stale() {
-                if let Err(e) = self.write_dir().refresh() {
-                    fenec_http::log!("could not read the directory: {e}");
-                }
-            }
-            if let Some(global) = &self.global {
-                if read(global).stale() {
-                    if let Err(e) = write(global).refresh() {
-                        fenec_http::log!("could not read the global directory: {e}");
-                    }
-                }
+            // them, and only then -- here, or by the thread their writes
+            // wake, whichever comes first.
+            if self.directories_stale() {
+                self.catch_up_directories();
             }
             let keep = match req.segments().first() {
                 Some(&"t") => {
@@ -1715,7 +1839,7 @@ impl Router {
             .map_or(Duration::ZERO, |ms| {
                 Duration::from_millis(ms).min(fenec_http::waits::LONGEST)
             });
-        let watch = watch.filter(|_| !held.is_zero());
+        let held_watch = watch.filter(|_| !held.is_zero());
         let sending = match &routers {
             None => self.pool.send_held(
                 &addr,
@@ -1724,12 +1848,14 @@ impl Router {
                 &headers,
                 &req.body,
                 held,
-                watch,
+                held_watch,
                 flying,
             ),
             // A region's routers, in turn from the one that answered last,
             // as far as the request cannot have run.
-            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held, watch),
+            Some((region, routers)) => {
+                self.relay_send(region, routers, req, &headers, held, held_watch)
+            }
         };
         let answer = match sending {
             Ok(a) => a,
@@ -1895,6 +2021,16 @@ impl Router {
         let mut node = node.to_string();
         let mut ended = upstream::ended_by(&ended).unwrap_or(upstream::Ended::Moved);
         let (mut tries, mut asks) = (1, CUT_ASKS);
+        // A follower's asks of a copy refusing it ([`Self::copy_pause`]),
+        // and its count among those waiting to ask again.
+        let mut asking = None;
+        let mut pausing = None;
+        // Whether this cut is counted sent again.
+        let mut counted = false;
+        // The client's socket: a held request's watched while its answer is
+        // waited for, any request's between a follower's asks.
+        let client_socket = watch;
+        let watch = watch.filter(|_| !held.is_zero());
         loop {
             let flying = upstream::Flying::of(tenant, &self.pool);
             let Toward {
@@ -1920,7 +2056,11 @@ impl Router {
                 );
                 return reply(out, region::homed(Response::error(502, &why), &home));
             }
-            if cut && asks == CUT_ASKS {
+            // Once a cut, however many times the copy is asked or its
+            // bucket moves: a follower's counted at every ask, one request
+            // a grant kept waiting was seven of them.
+            if cut && !counted {
+                counted = true;
                 metrics::cut(metrics::Cut::SentAgain, 1);
             }
             let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
@@ -1971,26 +2111,76 @@ impl Router {
                 // cut's, onto another node than the one it was cut from: a
                 // request moved back to where it was, or one whose node
                 // answers 503 for its own reasons, grants nothing.
-                Ok(answer)
-                    if answer.status == 503
-                        && cut
-                        && asks > 0
-                        && to != node
-                        && routers.is_none()
-                        && self.leases.is_some() =>
-                {
+                //
+                // A router following the directory that placed it -- a
+                // standby, or a region's router forwarding by its copy of
+                // the global one -- grants nothing: it asks the copy again,
+                // the copy having run nothing, until the leading router's
+                // grant reaches it, for two thirds of the lease the
+                // directory records or the upstream timeout at most, and
+                // while its client is there ([`Self::copy_pause`]).
+                Ok(answer) => {
+                    // Asked again after a grant (`None`) or a pause, or
+                    // answered: anything but a cut's 503 from another node.
+                    let again = match answer.status == 503 && cut && to != node && routers.is_none()
+                    {
+                        false => None,
+                        true => match self.places_as_leader(tenant, &to) {
+                            true => (asks > 0 && self.leases.is_some()).then_some(None),
+                            false => self.copy_pause(tenant, &mut asking).map(Some),
+                        },
+                    };
+                    let Some(pause) = again else {
+                        return self.answer_out_cold(
+                            req, out, arrived, peer, &to, answer, None, sent, forwarding, &home,
+                        );
+                    };
                     forwarding.error("503");
                     let _ = answer.read_body(&self.pool, head_only);
                     drop(forwarding);
-                    asks = match self.grant_cut_onto(&to) {
-                        true => asks - 1,
-                        false => 0,
+                    let Some(p) = pause else {
+                        asks = match self.grant_cut_onto(&to) {
+                            true => asks - 1,
+                            false => 0,
+                        };
+                        continue;
                     };
-                }
-                Ok(answer) => {
-                    return self.answer_out_cold(
-                        req, out, arrived, peer, &to, answer, None, sent, forwarding, &home,
-                    )
+                    // A follower's pause, its client looked at meanwhile:
+                    // asked again past its client's leaving, a request went
+                    // to the copy every pause for as long as they ran.
+                    pausing.get_or_insert_with(|| Counted::up(&self.copy_waiting));
+                    match upstream::pause_watching(client_socket, p) {
+                        upstream::Paused::Here => {}
+                        upstream::Paused::Gone => {
+                            metrics::gone(Route::Tenant, arrived.elapsed());
+                            fenec_http::trace::end(499);
+                            return false;
+                        }
+                        upstream::Paused::Ended => {
+                            // The copy ran nothing; the node cut may have
+                            // run it where the cut was whole, a keyed write
+                            // it ran perhaps on the copy already, which its
+                            // key finds. Told it ran nothing, a client would
+                            // send it again under a key of its own.
+                            let why = match ended {
+                                upstream::Ended::Cut { whole: true } => format!(
+                                    "tenant `{tenant}`'s new primary had not taken its writes \
+                                     yet as this request's client ended its connection, and \
+                                     node `{node}` may have run it before the failover: ask \
+                                     again with its Idempotency-Key"
+                                ),
+                                _ => format!(
+                                    "tenant `{tenant}`'s new primary had not taken its writes \
+                                     yet as this request's client ended its connection: it ran \
+                                     nothing, ask again"
+                                ),
+                            };
+                            return reply(
+                                out,
+                                region::homed(Response::retry_after(503, &why, 1), &home),
+                            );
+                        }
+                    }
                 }
                 Err(e) if upstream::client_gone(&e) => {
                     forwarding.error(e.to_string());
@@ -2005,8 +2195,21 @@ impl Router {
                         break;
                     }
                     tries += 1;
-                    let again = upstream::ended_by(&e).unwrap_or(upstream::Ended::Moved);
-                    (node, ended, asks) = (to, again, CUT_ASKS);
+                    match upstream::ended_by(&e).unwrap_or(upstream::Ended::Moved) {
+                        // Moved before its first byte, it wrote nothing: what
+                        // it was is what it still is -- cut off `node`, its
+                        // asks and pauses where they stood -- and only a try
+                        // is spent. Taken for a request that was never cut,
+                        // one a second failover's bucket moved went on to a
+                        // copy not yet granted and passed its 503 on.
+                        upstream::Ended::Moved => {}
+                        // Another cut, of another copy: counted, and asked
+                        // anew.
+                        again => {
+                            (node, ended, asks) = (to, again, CUT_ASKS);
+                            (asking, pausing, counted) = (None, None, false);
+                        }
+                    }
                 }
                 Err(e) => {
                     forwarding.error(e.to_string());
@@ -2046,6 +2249,11 @@ impl Router {
         let Some((leases, _)) = &self.leases else {
             return false;
         };
+        // A standby grants nothing: its lists may lag the leading router's
+        // ([`Self::copy_pause`]).
+        if self.read_dir().following() {
+            return false;
+        }
         let bound = leases.term * 2 / 3;
         let slot = {
             let mut grants = self.cut_grants.lock().unwrap_or_else(|e| e.into_inner());
@@ -2088,12 +2296,172 @@ impl Router {
         *done
     }
 
+    /// Whether this router's own directory places `tenant` on `node` and
+    /// leads: its failovers and grants are this router's to make. A
+    /// standby's and its copy of the global directory are a router's it
+    /// follows.
+    fn places_as_leader(&self, tenant: &str, node: &str) -> bool {
+        let dir = self.read_dir();
+        !dir.following() && dir.placement(tenant).is_some_and(|p| p.node == node)
+    }
+
+    /// How long a request a following router's cut sent to the copy
+    /// promoted waits before it asks again, the copy having refused it,
+    /// unrun, 503 ([`Self::after_cut`]): under leases a copy takes its
+    /// tenant's writes once the leading router's grant names the tenant
+    /// there, which that router sends as its failover ends, and this one
+    /// may have read the failover first. `None` once it has asked for two
+    /// thirds of the lease the directory placing the tenant records -- the
+    /// leading router's own grant waits as long for its copies, its rounds
+    /// a third of it apart -- or for `--upstream-timeout`, whichever is
+    /// sooner: two thirds of the tests' hour-long lease, a request was sent
+    /// again for 40 minutes. `None` too where the directory records no
+    /// lease, no router having leased from it: the copy's 503, which says
+    /// when to come back, is the answer then. The waits double from
+    /// [`COPY_ASK_FIRST`] to a third of the lease. `asking` keeps, from the
+    /// first refusal on, until when and how long the next wait is.
+    ///
+    /// It never grants: a grant goes from the router holding the leases,
+    /// and this one's lists may lag that one's -- a list read before the
+    /// failover would name the tenant on the node failed over, which, back
+    /// and granted it, would take writes beside the new primary. Nor does
+    /// it wait on anything it could be told by: the leading router records
+    /// no grant, and the copy is the one that knows; asked again, it has
+    /// run nothing until it answers otherwise.
+    fn copy_pause(&self, tenant: &str, asking: &mut Option<CopyAsks>) -> Option<Duration> {
+        let now = Instant::now();
+        let a = match asking {
+            Some(a) => a,
+            None => {
+                let lease = self.followed_lease(tenant)?;
+                asking.insert(CopyAsks::from(now, lease, self.cfg.upstream_timeout))
+            }
+        };
+        a.wait_at(now)
+    }
+
+    /// The lease recorded by the directory that places `tenant` for this
+    /// router: its own, or its copy of the global one.
+    fn followed_lease(&self, tenant: &str) -> Option<Duration> {
+        {
+            let dir = self.read_dir();
+            if dir.placement(tenant).is_some() {
+                return dir.lease_record();
+            }
+        }
+        self.global.as_ref().and_then(|g| read(g).lease_record())
+    }
+
     /// The requests a failover's cut sent on waiting for a grant to the
     /// node they were sent to ([`Self::grant_cut_onto`]): how a test knows
     /// a request has joined a grant under way.
     #[doc(hidden)]
     pub fn cut_grants_waiting(&self) -> usize {
         self.cut_waiting.load(Ordering::SeqCst)
+    }
+
+    /// The requests a following router's cut sent to a copy that refused
+    /// them, waiting between their asks ([`Self::copy_pause`]): how a test
+    /// knows one is waiting, and that it has stopped.
+    #[doc(hidden)]
+    pub fn copy_asks_waiting(&self) -> usize {
+        self.copy_waiting.load(Ordering::SeqCst)
+    }
+
+    /// Whether a directory this router reads has moved since its maps were
+    /// read: its own, which a standby's follower writes, or its copy of
+    /// the global one. Two reads under shared locks, as every request
+    /// asked before.
+    #[inline(always)]
+    fn directories_stale(&self) -> bool {
+        if self.read_dir().stale() {
+            return true;
+        }
+        match &self.global {
+            Some(g) => read(g).stale(),
+            None => false,
+        }
+    }
+
+    /// Brings the maps of the directories this router follows up to what
+    /// has arrived -- its own as a standby, its copy of the global one --
+    /// and ends what it had out for each tenant they show failed over off
+    /// the node it was sent to ([`directory::FailedOver`]), as the router
+    /// that failed it over ended its own at the promotion
+    /// ([`Self::promote_on`]). A standby, and a region's router forwarding
+    /// by its copy of the global directory, fail nothing over, and what
+    /// they had out to a node gone with no reset waited for
+    /// `--upstream-timeout` though the tenant answered on its new primary.
+    /// Ended by the rules the leading router's cuts follow
+    /// ([`Self::after_cut`]); only once the maps place the tenant on its
+    /// new node, so a request ended reads it there, and a forward that read
+    /// the maps before and goes out after finds its bucket's count moved
+    /// ([`upstream::Flying`]). Only where the directory follows another
+    /// router's: a leading one's own changes cut as they were made, and are
+    /// in its maps already. A move ends nothing: its source still answers,
+    /// and refuses its frozen writes on its own.
+    ///
+    /// The cuts are made before the maps are let go of, so whoever reads
+    /// the maps as they now are -- a request ended, which goes where they
+    /// place its tenant, or an operator asking where the tenant is -- reads
+    /// them with what they ended answered or on its way: a lock held over a
+    /// shutdown a request out, on a failover's rare path.
+    ///
+    /// Each directory is asked under its read lock first, and its write
+    /// lock taken only where it moved, as each request asked before: std's
+    /// lock holds new readers behind a waiting writer, so a write guard
+    /// taken for nothing was every forward's `read_dir` waiting on it. Both
+    /// are caught up before anything is cut, their write locks held
+    /// together (this directory's first, as every reader of both takes
+    /// them), and what either shows failed over is cut at once: cut a
+    /// directory at a time, a request cut by the first went on and met the
+    /// second's move of its bucket before its first byte.
+    #[cold]
+    #[inline(never)]
+    fn catch_up_directories(&self) {
+        // Each read guard let go of before its write guard is taken: a
+        // temporary of the statement taking it is held across the take,
+        // which waits for good (a debug build panics, `once`).
+        let stale = self.read_dir().stale();
+        let mut dir = stale.then(|| self.write_dir());
+        let stale = self.global.as_ref().is_some_and(|g| read(g).stale());
+        let mut global = self.global.as_ref().filter(|_| stale).map(write);
+        let mut failed = Vec::new();
+        if let Some(dir) = dir.as_mut().filter(|d| d.stale()) {
+            match dir.refresh() {
+                Ok(f) if dir.following() => failed.extend(f),
+                Ok(_) => {}
+                Err(e) => fenec_http::log!("could not read the directory: {e}"),
+            }
+        }
+        if let Some(g) = global.as_mut().filter(|g| g.stale()) {
+            match g.refresh() {
+                Ok(f) if g.following() => failed.extend(f),
+                Ok(_) => {}
+                Err(e) => fenec_http::log!("could not read the global directory: {e}"),
+            }
+        }
+        self.cut_failed_over(&failed);
+    }
+
+    /// [`Self::cut_moved`] of every tenant `failed` names, at once: every
+    /// bucket of theirs moved before any connection is shut, then one look
+    /// at each node's connections for all of its tenants
+    /// ([`upstream::Pool::cut_all`]). A tenant at a time, a failover of a
+    /// whole node read at once looked at the node's every connection for
+    /// each of its tenants, the directory's write lock held throughout; a
+    /// node at a time, a request cut off the first node met the second
+    /// node's move of its bucket, and was taken for one never cut.
+    fn cut_failed_over(&self, failed: &[directory::FailedOver]) {
+        if failed.is_empty() {
+            return;
+        }
+        let failed: Vec<(&str, &str)> = failed
+            .iter()
+            .map(|f| (f.addr.as_str(), f.tenant.as_str()))
+            .collect();
+        let cuts = self.pool.cut_all(&failed);
+        metrics::cut(metrics::Cut::StreamEnded, cuts.streams as u64);
     }
 
     /// Ends what is out to `addr` for `tenant`, which a failover has just
@@ -3518,8 +3886,7 @@ impl Router {
             }
             let from = dir
                 .placement(tenant)
-                .and_then(|p| dir.node(&p.node))
-                .map(|n| n.addr.clone());
+                .and_then(|p| Some((p.node.clone(), dir.node(&p.node)?.addr.clone())));
             (
                 dir.node(to).cloned(),
                 dir.lineage(tenant),
@@ -3552,10 +3919,15 @@ impl Router {
         ) {
             Ok((200, body)) => {
                 self.quota_after_failover(tenant, to);
-                self.promoted(tenant, to, &body).map_err(|e| message(&e))?;
+                let left = from.as_ref().map(|(name, _)| name.as_str());
+                self.promoted(tenant, to, left, &body)
+                    .map_err(|e| message(&e))?;
                 // Placed on `to` now: what is out to the node it left is
-                // answered from here rather than wait for that node.
-                if let Some(from) = &from {
+                // answered from here rather than wait for that node. A
+                // router following this one's directory reads the node it
+                // left beside the placement (`failed_from`), and ends its
+                // own ([`Self::catch_up_directories`]).
+                if let Some((_, from)) = &from {
                     self.cut_moved(tenant, from);
                 }
                 match own_replica {
@@ -4362,8 +4734,15 @@ impl Router {
     /// refuse it. A tenant whose lineage was not known is of the one said;
     /// a node from before lineages says none. Then the history the
     /// promotion forked (`"history"`), which the copy promoted at the next
-    /// failover must hold.
-    fn promoted(&self, tenant: &str, to: &str, answer: &[u8]) -> fenec_core::error::Result<()> {
+    /// failover must hold. `from`, the node the tenant was failed over
+    /// off, goes into the placement's own statement (`failed_from`).
+    fn promoted(
+        &self,
+        tenant: &str,
+        to: &str,
+        from: Option<&str>,
+        answer: &[u8],
+    ) -> fenec_core::error::Result<()> {
         let fields =
             fenec_core::json::parse_object(&String::from_utf8_lossy(answer)).unwrap_or_default();
         let said = |key: &str| {
@@ -4380,7 +4759,7 @@ impl Router {
             (Some(l), Some(known)) if known != l => dir.succeed_lineage(tenant, &l)?,
             _ => {}
         }
-        dir.place_promoted(tenant, to, said("history").as_deref())
+        dir.place_promoted(tenant, to, said("history").as_deref(), from)
     }
 }
 
@@ -4759,6 +5138,53 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The waits of a following router's asks of a copy, each ask made the
+    /// moment its wait ends ([`CopyAsks`]), over leases of every
+    /// millisecond to 12 s and three upstream timeouts: they end where two
+    /// thirds of the lease or the timeout does, whichever is sooner, never
+    /// past it; each is twice the one before, a third of the lease at most,
+    /// but the last, which what is left cuts. Without the timeout's bound
+    /// the asks of an hour's lease ran 40 minutes; without the third, a
+    /// lease of 3 837 ms waited 1 280 ms where its rounds come 1 279 apart.
+    #[test]
+    fn a_copy_is_asked_until_two_thirds_of_the_lease_or_the_upstream_timeout() {
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let waits = |lease: Duration, upstream: Duration| {
+            let (mut now, mut asks) = (t0, CopyAsks::from(t0, lease, upstream));
+            let mut waits = Vec::new();
+            while let Some(w) = asks.wait_at(now) {
+                assert!(!w.is_zero(), "a wait of nothing spins");
+                assert!(waits.len() < 64, "the asks never end");
+                waits.push(w);
+                now += w;
+            }
+            waits
+        };
+        for upstream in [ms(50), ms(1_000), Duration::from_secs(60)] {
+            for lease in (1..=12_000).map(ms) {
+                let w = waits(lease, upstream);
+                let end = (lease * 2 / 3).min(upstream);
+                assert_eq!(w.iter().sum::<Duration>(), end, "{lease:?}, {upstream:?}");
+                let most = (lease / 3).max(COPY_ASK_FIRST);
+                assert!(w.iter().all(|&w| w <= most), "{lease:?}: {w:?}");
+                let (last, before) = w.split_last().expect("every lease asks once");
+                for (i, &w) in before.iter().enumerate() {
+                    let doubled = match i {
+                        0 => COPY_ASK_FIRST,
+                        _ => (before[i - 1] * 2).min(most),
+                    };
+                    assert_eq!(w, doubled, "{lease:?}, {upstream:?}: {before:?}");
+                }
+                assert!(before.last().is_none_or(|&b| *last <= (b * 2).min(most)));
+            }
+        }
+        // An hour's lease, as the tests' rounds are: the timeout ends it.
+        let hour = waits(Duration::from_secs(3600), Duration::from_secs(60));
+        assert_eq!(hour.iter().sum::<Duration>(), Duration::from_secs(60));
+        assert_eq!(hour.last(), Some(&ms(60_000 - 40_955)));
+    }
 
     /// A grant's answer read as the object it is: `"ran": true` found
     /// where the node writes it -- searched for as bytes, in windows one

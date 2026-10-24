@@ -70,3 +70,8 @@ path = "tests/late_grants.rs"
 [[test]]
 name = "cuts"
 path = "tests/cuts.rs"
+
+# Apart, as `cuts`: two routers a test besides.
+[[test]]
+name = "follower_cuts"
+path = "tests/follower_cuts.rs"
