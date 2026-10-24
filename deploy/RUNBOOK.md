@@ -224,16 +224,22 @@ router on a region's router -- for each read of an answer: the connect,
 the answer's head, and every read after it but a stream's, which reads
 with none. Past it the client is answered 502, the request perhaps run.
 
-- **What it buys.** A request in flight to a node whose machine is gone
-  waits out the timeout, its client unanswered, unless the client gives up
-  first; at fenec-shard's 60 s every client without a bound of its own
-  waited a minute. At twice the lease it is let go of once the node's
-  tenants have been failed over (a lease and a tenth), so a client's
-  retry of a read or a keyed write reaches the new primary. With
-  `make drill`'s lease of 2 s and a timeout of 4 s, the router failed the
-  killed node over about 2 s after the kill and its tenants' writers wrote
-  again at about 4 s, where at 60 s their own 5 s client timeout had them
-  at 4.9.
+- **What it buys.** A request out to a machine that is gone waits out the
+  timeout, its client unanswered, unless the client gives up first -- but
+  for what a failover ends. When a router fails a node over, by hand or on
+  its lease, what it had out to the node for each tenant it moved is
+  answered then, not at the timeout: a read, a keyed write and a request
+  the node cannot have run go to the tenant's new primary, any other write
+  is a 502 saying it may have run, and a subscription ends for its client
+  to open again (`sharding.html#in-flight`). With `make drill`'s lease of
+  2 s the killed node's writers write again just after its failover, where
+  they waited for the timeout's 4 s before. What is left to the timeout is
+  what no failover ends: a node gone whose tenants have no copy, or whose
+  copy will not be promoted (A node lost); a relay -- the global router's to a
+  region's, a region's router's to another's -- to a router whose machine
+  is gone, which tries the next router of that region only past it; and a
+  standby router's forwards, which fail nothing over. At fenec-shard's
+  60 s each of those holds its client a minute.
 - **What it costs.** An answer slower than the timeout to begin is a 502
   while the node goes on with it: a `create index` over a large
   collection, a `compact` of a large tenant, a large batch or a heavy
@@ -252,8 +258,10 @@ with none. Past it the client is answered 502, the request perhaps run.
   subscription, a replication stream -- read with no timeout once their
   head is in.
 
-Raise it with the lease, keeping it at twice the lease; lower it no
-further than the slowest statement your clients send through the routers.
+It need not follow the lease any more, which a failover no longer waits
+on: keep it no shorter than the slowest statement your clients send
+through the routers, and no longer than you would have a client wait on a
+machine no failover covers. The kit's 10 s does both for most.
 
 ## Bring-up
 
@@ -410,9 +418,12 @@ machine lost) -- three runs on one laptop, which are observations, not
 bounds: another machine's runs fall outside them. The router failed the
 node over 1.92, 2.56 and 1.90 s after the kill -- a lease and a tenth
 after its last renewal, then the promotions; its own tenants' writers
-wrote again 3.90, 3.97 and 3.93 s after the kill, the request each had in
-flight to the dead node let go of at the upstream timeout (The routers'
-upstream timeout); the tenants whose replica it
+wrote again as it did, the request each had in flight to the dead node
+answered by the failover (a 502, the drill's writes carrying no key) and
+the next sent to the new primary -- 2.52 and 1.93 s after the kill in two
+later runs whose failovers came at 2.53 and 1.93, where they waited for
+the upstream timeout before, 3.94 and 3.95 s in two runs beside them (The
+routers' upstream timeout); the tenants whose replica it
 held, whose primaries went on writing, went at most 17, 18 and 17 ms
 between two answered writes, and every other tenant 16, 18 and 17; none
 of 41 577 acknowledged writes was lost. The second kind waits up
@@ -925,14 +936,79 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
 
 ## Known gaps
 
-- **A node paused or suspended.** A node measures its lease on the
-  system's monotonic clock, which stands still while its virtual machine is
-  paused (KVM's clock across a stop and a continue) or the machine is
-  suspended. Woken, it has lease left, and writes beside its tenants' new
-  primaries until that runs out -- two primaries for up to a lease -- and a
-  write that passed the lease's check just before its process stopped lands
-  once it resumes. Do not pause or suspend a node's machine; stop the node
-  (`systemctl stop fenec-node`) first.
+- **A node's virtual machine paused by its host.** A node measures its
+  lease on its machine's boot clock (`CLOCK_BOOTTIME` on Linux,
+  `mach_continuous_time` on macOS), which counts a suspend its own kernel
+  makes: a machine's suspend or hibernation, a guest that suspends itself,
+  EC2's hibernation. Woken past its lease, the node holds none, and a write
+  it was answering as it slept is answered 500 rather than as a success.
+  Where the hypervisor keeps the guest's clock running across a pause, the
+  lease counts the pause as well: Xen's `xl pause`, Firecracker's pause on x86,
+  QEMU/KVM's `stop` and `cont` with `-cpu ...,+invtsc` (the guest on the
+  `tsc` clocksource) or, on arm64, `kvm-no-adjvtime=on` -- read from their
+  sources, not tried. What it does not cover is a pause the guest's kernel
+  never sees, which leaves every clock in the guest where it stopped, the
+  boot clock too:
+  - QEMU/KVM's defaults, x86 and arm64: `virsh suspend` and `resume` (QEMU's
+    `stop` and `cont`); and with any of its settings, `virsh save` and
+    `restore`, a snapshot loaded, a live migration's blackout;
+  - Hyper-V's saved state, and Azure's freezes for maintenance, up to 30 s;
+  - VMware's suspend and resume;
+  - Firecracker's snapshot restore without `clock_realtime`;
+  - a container checkpointed and restored (CRIU: `podman container
+    checkpoint`, Kubernetes' checkpoint API): a time namespace keeps the
+    monotonic and boot clocks going on from where they were across a
+    restore, made so a program sees no jump -- whether CRIU sets the
+    offsets for that by default is not verified here, so take it that it
+    does;
+  - anything a hypervisor does not document, an EC2 live update or
+    migration and GCE's blackouts over 5 s among them.
+
+  The node wakes with the lease it had left and writes its tenants beside
+  the new primaries the router promoted meanwhile until the lease runs out
+  or it reads the router's first grant after the failover, which names none
+  of them -- whichever comes first -- and so does a request the router was
+  still waiting on when it resumed. No signal inside the guest tells a
+  pause soundly, and every one there is comes after the guest runs again:
+  KVM's flag for a guest QEMU stopped (`PVCLOCK_GUEST_STOPPED`) is the
+  soft-lockup watchdog's, cleared within seconds and in no interface
+  userspace has; the TSC against the monotonic clock tells a stop and a
+  continue under one VMM's settings and not a migration; and the wall clock
+  is set right by an agent once the guest runs -- if one is set up to -- or
+  slewed by NTP, never seen to jump. So:
+  - Stop the node before its machine is paused, saved, snapshotted or
+    migrated (`systemctl stop fenec-node`; its tenants fail over a lease
+    and a tenth later), and start it after.
+  - Where the cloud says ahead, do the same when it does: Azure's Scheduled
+    Events `Freeze` (at least 15 minutes ahead, `NotBefore` kept; none
+    where hardware fails, and at times only 30 s), GCE's `maintenance-event`
+    metadata (60 s ahead, for a VM that migrates on maintenance and has
+    read the key since the last event). EC2 announces no live migration.
+    Azure tells every VM of an availability set of each event: a watcher
+    stops its node only where the event's `Resources` names its own VM, or
+    every node of the set stands down for one VM's maintenance.
+  - Where a pause cannot be ruled out, keep `--auto-failover` short: the
+    overlap is the lease the node had left at the most.
+
+- **An answer sent after the lease lapsed.** A write is checked against the
+  lease as it lands and again as its answer is ready; one whose lease
+  lapsed in between is answered 500 with `"outcome": "unknown"`, and
+  `seq` and `history` in its body: it is in the node's file, and its
+  tenant may or may not have been failed over without it. Sent with an
+  `Idempotency-Key`, the client sends it again with the key -- refused
+  while the lease has lapsed, then replayed by a node still holding the
+  write or made once by a new primary. Sent with none, a read-back means
+  something only a lease and a tenth (`--auto-failover` x 1.1) after the
+  answer: until the tenant settles the node still answers reads with the
+  write in them -- one sent with `Fenec-After` too, its history holding
+  the write -- and routers send reads there, while the copy promoted may
+  lack it. After that, and not before, a read through the router, or one
+  with `Fenec-After` and `Fenec-History` set to the body's `seq` and
+  `history`, decides it -- 200 it survived, 504 it was lost. A batch's
+  `seq` is its last landed statement's: a 200 says every statement that
+  landed survived, and a 504 not which earlier ones did, which are read
+  back. A process stopped after the second check sends a success whenever
+  it runs again.
 
 - **No scrape-only token.** `/_metrics` takes a node's data or admin token,
   a router's `--token`.
@@ -940,8 +1016,11 @@ made is removed; `DRILL_KEEP=1` leaves it for a look.
   (`/t/<t>/_replication/status` on the primary's node has each), and **no
   archive lag**: `fenec archive` exports nothing, and the node's
   `fenec_node_streams` says only whether an archiver is connected.
-- **Requests in flight to a dead machine** wait at the router for its
-  upstream timeout (10 s in the kit, The routers' upstream timeout) where
-  the machine's address swallows packets, unless the client gives up
-  first, even once the node has been failed over: clients should bound
-  their requests and retry with an `Idempotency-Key`.
+- **Requests out to a dead machine no failover covers** wait at the router
+  for its upstream timeout (10 s in the kit, The routers' upstream timeout)
+  where the machine's address swallows packets, unless the client gives up
+  first: a node whose tenants were not failed over, a router a relay goes
+  to, and anything a standby router forwards -- a failover ends what the
+  router that made it had out to the node, and no other router's. Clients
+  should bound their requests and retry with an `Idempotency-Key`, which
+  is also what has a write the failover answered 502 sent again safely.

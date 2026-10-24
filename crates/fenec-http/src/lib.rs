@@ -660,6 +660,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             }
         };
         request_id::begin_request(&req);
+        metrics::begin_request();
         if cfg.router_mark.is_some() {
             audit::request(&req, cfg.router_mark.as_deref());
         }
@@ -959,6 +960,14 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                         },
                     }
                 }
+            };
+            // A consumer's commit is a tenant's write: asked of the lease
+            // again as it is answered, and refused by it 503 to come back.
+            let consumer = matches!(req.method, Method::Post | Method::Delete)
+                && matches!(req.segments().as_slice(), ["_changes", "consumers", _]);
+            let resp = match &tenant {
+                Some(t) if consumer => answered_under_lease(t, &req, resp),
+                _ => resp,
             };
             // Its `Fenec-Seq` a change of the history the database is on,
             // as every answer carrying one names it.
@@ -1551,17 +1560,151 @@ fn handle_admitted(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response
             handle(&t.db, &read_only, req)
         }
     };
-    match refused.or_else(|| refusal(t)) {
-        Some(why) if resp.status == 403 => Response::retry_after(503, &why, 1),
+    if let Some(why) = refused {
+        return match resp.status {
+            403 => Response::retry_after(503, &why, 1),
+            _ => resp,
+        };
+    }
+    answered_under_lease(t, req, resp)
+}
+
+/// A tenant's answer, its lease asked again as the answer is ready: past
+/// the write's durability -- its fsync, its wait for the replicas' streams
+/// -- and just before it is written out. `handle_admitted`'s, the admin
+/// schema's and a `/_changes` consumer's commit.
+///
+/// A write that landed while the lease let it, and whose lease lapsed
+/// before the answer -- a process stopped or starved between the two, a
+/// machine suspended, or a durability that waited past the lapse: a stream
+/// cut off with the router waits out `SENT_WAIT`, a second, where a lease's
+/// tenth is half of one at the default -- may have had its tenant promoted
+/// elsewhere meanwhile without it, and answered as a success it was a write
+/// acknowledged and lost. Whether it was is not this node's to know: still
+/// the primary, it keeps the write. So it says neither ([`outcome_unknown`]).
+/// What wrote: a block landed in this request ([`metrics::landed_at`]) --
+/// which a `/batch` holding a compact may have done before a later
+/// statement of it was refused, told to come back as if nothing had landed
+/// -- or a success of a statement that writes ([`metrics::writing`]), which
+/// is a keyed write's replay too. Whatever such a batch's later statement
+/// was answered -- a 409, a quota's 507, a 503 to come back -- says the
+/// statements before it were made, and a 503 invites them again; a 500 is
+/// an fsync's that failed, which says the outcome is unknown already. A
+/// read answered after the lapse is a read. An MCP write tool's call is
+/// answered so as well, its transport's error rather than a tool's result,
+/// which would say the write was made.
+pub(crate) fn answered_under_lease(t: &tenants::Tenant, req: &Request, resp: Response) -> Response {
+    let lapsed = t.writable().err();
+    let landed = metrics::landed_at();
+    let wrote =
+        resp.status != 500 && (landed.is_some() || (resp.status < 300 && metrics::writing()));
+    match lapsed {
+        Some(_) if wrote => outcome_unknown(t, req, landed, resp),
+        lapsed if resp.status == 403 => match refusal_after(t, lapsed) {
+            Some(why) => Response::retry_after(503, &why, 1),
+            None => resp,
+        },
         _ => resp,
+    }
+}
+
+/// The 500 of a write whose lease lapsed before its answer
+/// ([`answered_under_lease`]), as an fsync that failed answers: the outcome
+/// unknown, said in the body (`"outcome": "unknown"`) for a client to tell
+/// it from an error of the server's, with where the write left the
+/// database (`seq`, `history`) and, for a `/batch` that ran a statement at
+/// a time, how far it got (`completed`, `at`). A batch's `seq` is its last
+/// landed statement's: a read after it answered 200 says every statement
+/// that landed survived, and a 504 says nothing of which earlier ones did,
+/// which are read back. The position is in the body alone: a client takes
+/// an answer's `Fenec-Seq` as its own, and a read near sent after this one
+/// waited for a write that may be lost.
+fn outcome_unknown(
+    t: &tenants::Tenant,
+    req: &Request,
+    landed: Option<u64>,
+    resp: Response,
+) -> Response {
+    let seq = landed.or(resp.seq);
+    let history = resp
+        .history
+        .or_else(|| http::history_of(&held::read(&t.db)));
+    let keyed = req.header("idempotency-key").is_some();
+    let mut out = String::from("{\"error\":");
+    fenec_core::json::escape_into(&mut out, &lapsed_under(keyed));
+    out.push_str(",\"outcome\":\"unknown\"");
+    if let Some(n) = seq {
+        out.push_str(",\"seq\":");
+        http::push_number(&mut out, n);
+    }
+    if let Some(h) = history {
+        out.push_str(",\"history\":\"");
+        http::push_history(&mut out, h);
+        out.push('"');
+    }
+    // A batch's progress, as its stop said it.
+    if resp.status >= 300 {
+        let said = std::str::from_utf8(&resp.body)
+            .ok()
+            .and_then(|b| fenec_core::json::parse_object(b).ok())
+            .unwrap_or_default();
+        for (k, v) in said {
+            if let ("completed" | "at", Value::Int(n)) = (k.as_str(), v) {
+                out.push_str(&format!(",\"{k}\":{n}"));
+            }
+        }
+    }
+    out.push('}');
+    Response::json(500, out)
+}
+
+/// What a write whose lease lapsed before its answer is told to do
+/// ([`outcome_unknown`]). Not to read it back at once: until its tenant
+/// settles -- the router fails it over a lease and a tenth after the last
+/// renewal it counted, or renews the node -- this node answers reads, the
+/// write among them, and routers send them here, while the copy promoted
+/// may lack it. Sent with an `Idempotency-Key`, the write is sent again
+/// with it: a lapsed node refuses it before looking the key up, and once
+/// the tenant settles a node still holding the write answers it as made,
+/// and a new primary makes it once. Sent with none -- a `compact` or a
+/// batch holding one takes none -- it is waited a lease and a tenth for,
+/// and only then read back, or read after the answer's position, which a
+/// primary without it answers 504: sent at once, a read after that position
+/// is answered 200 by this node, whose history holds it, until the router
+/// fails the tenant over. The lease's own refusal is not said: it tells a
+/// write to go through the router, which is not this one's way back.
+fn lapsed_under(keyed: bool) -> String {
+    let head = "the write landed on this node, but by the time it was answered this node's \
+                lease from its router no longer let it write the tenant: the tenant may have \
+                been failed over to another node without the write, or may still be here with it";
+    match keyed {
+        true => format!(
+            "{head}. Send it again with the same Idempotency-Key: it is refused while the \
+             tenant settles, then answered as made by a node still holding the write, or made \
+             once by a new primary"
+        ),
+        false => format!(
+            "{head}. Until the tenant settles, a lease and a tenth (--auto-failover x 1.1) \
+             after this answer, this node answers reads with the write in them whether it \
+             survives or not, a read sent with Fenec-After among them. After that, read it back \
+             through the router, or send a read with Fenec-After and Fenec-History set to this \
+             answer's seq and history, which a primary without the write answers 504; for a \
+             batch, seq is its last landed statement's, and a 504 does not say which earlier \
+             ones survived"
+        ),
     }
 }
 
 /// Why this node takes no write for `t` now, if it takes none.
 fn refusal(t: &tenants::Tenant) -> Option<String> {
+    refusal_after(t, t.writable().err())
+}
+
+/// [`refusal`], the lease's answer asked already.
+fn refusal_after(t: &tenants::Tenant, lapsed: Option<String>) -> Option<String> {
     match t.is_frozen() {
         true => Some("the tenant is being moved; retry shortly".to_string()),
-        false => t.writable().err(),
+        false => lapsed,
     }
 }
 
@@ -3231,6 +3374,8 @@ mod tests {
                 body: format!(r#"{{"query":"{sql}"}}"#).into_bytes(),
                 keep_alive: false,
             };
+            // The thread's flags, as the connection resets them for each.
+            metrics::begin_request();
             handle_tenant(&t, &cfg, &req)
         };
         let made = post("create collection notes (title text)");
@@ -3241,6 +3386,157 @@ mod tests {
         assert!(body.contains("lapsed"), "{body}");
         assert!(body.ends_with(r#""retry_after":1}"#), "{body}");
         assert!(late.extra.iter().any(|(k, _)| k == "Retry-After"));
+        drop(t);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The lease runs out after a write landed and before it is answered:
+    /// the write is not answered as a success, which its tenant failed over
+    /// meanwhile would have lost, nor as a refusal, which it was not -- it
+    /// is in the file. A `/batch` holding a compact runs each statement on
+    /// its own, so the put lands before the read after it lapses the lease;
+    /// that read alone, after the lapse, is answered as the read it is.
+    #[test]
+    fn a_write_answered_after_its_lease_lapsed_is_not_a_success() {
+        struct Lapse(Arc<lease::Lease>);
+        impl fenec_core::plugin::ScalarFn for Lapse {
+            fn call(&self, _: &[Value]) -> fenec_core::error::Result<Value> {
+                self.0.grant(0, "e1", None).ok();
+                Ok(Value::Int(1))
+            }
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "fenec-lease-answer-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        let tenants = Tenants::new(&dir).unwrap().with_lease();
+        let lease = Arc::clone(tenants.lease().unwrap());
+        let held = Arc::clone(&lease);
+        let tenants = tenants.with_setup(move |db| {
+            db.registry_mut()
+                .register_fn("lapse", Arc::new(Lapse(Arc::clone(&held))))
+        });
+        let grant = || assert!(lease.grant(60_000, "e1", Some(vec!["acme".into()])).is_ok());
+        grant();
+        let t = tenants.create("acme").unwrap();
+        let cfg = Config::default();
+        let send = |path: &str, body: String| {
+            let req = Request {
+                method: Method::Post,
+                target: path.into(),
+                path: path.into(),
+                query: Vec::new(),
+                headers: Vec::new(),
+                body: body.into_bytes(),
+                keep_alive: false,
+            };
+            // The thread's flags, as the connection resets them for each.
+            metrics::begin_request();
+            handle_tenant(&t, &cfg, &req)
+        };
+        let batch = |lines: &[&str]| {
+            let lines: Vec<String> = lines
+                .iter()
+                .map(|q| {
+                    let mut line = String::from("{\"query\":");
+                    fenec_core::json::escape_into(&mut line, q);
+                    line.push('}');
+                    line
+                })
+                .collect();
+            send("/batch", lines.join("\n"))
+        };
+        let ok = batch(&[
+            "create collection notes (title text)",
+            "put notes {title: \"a\"}",
+            "get notes select title limit 1",
+        ]);
+        assert_eq!(ok.status, 200, "{}", String::from_utf8_lossy(&ok.body));
+        let late = batch(&[
+            "compact notes",
+            "put notes {title: \"b\"}",
+            "get notes select lapse() as l limit 1",
+        ]);
+        let body = String::from_utf8_lossy(&late.body);
+        assert_eq!(late.status, 500, "{body}");
+        assert!(body.contains("landed"), "{body}");
+        assert!(body.contains(r#""outcome":"unknown","seq":"#), "{body}");
+        // Its position in the body alone, which no client takes as its own.
+        assert!(late.seq.is_none() && late.history.is_none());
+        // It is in the file: the lease back, it reads there.
+        grant();
+        let read = send(
+            "/query",
+            r#"{"query":"get notes where title = \"b\" count"}"#.into(),
+        );
+        let read = String::from_utf8_lossy(&read.body);
+        assert!(read.contains(r#""count":1"#), "{read}");
+        // A read answered after the lapse is a read.
+        let after = send(
+            "/query",
+            r#"{"query":"get notes select lapse() as l limit 1"}"#.into(),
+        );
+        assert_eq!(
+            after.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&after.body)
+        );
+        drop(t);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// What a write whose lease lapsed before its answer is told to do: one
+    /// sent with an `Idempotency-Key` to send it again with the key -- a
+    /// node still holding the write replays it, a new primary makes it
+    /// once -- and one sent with none to wait a lease and a tenth before
+    /// reading it back, this node answering reads with the write in them
+    /// until then. Neither is told to read it back at once.
+    #[test]
+    fn a_lapsed_write_is_told_to_resend_with_its_key_or_to_wait_to_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "fenec-lease-told-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        let tenants = Tenants::new(&dir).unwrap().with_lease();
+        let lease = Arc::clone(tenants.lease().unwrap());
+        assert!(lease.grant(0, "e1", Some(vec!["acme".into()])).is_ok());
+        let t = tenants.create("acme").unwrap();
+        let told = |key: Option<&str>| {
+            let req = Request {
+                method: Method::Post,
+                target: "/query".into(),
+                path: "/query".into(),
+                query: Vec::new(),
+                headers: key
+                    .map(|k| ("idempotency-key".to_string(), k.to_string()))
+                    .into_iter()
+                    .collect(),
+                body: Vec::new(),
+                keep_alive: false,
+            };
+            metrics::begin_request();
+            metrics::landed(7);
+            let resp = answered_under_lease(&t, &req, Response::json(200, "{}"));
+            assert_eq!(resp.status, 500);
+            String::from_utf8(resp.body).unwrap()
+        };
+        let keyed = told(Some("k1"));
+        assert!(keyed.contains("same Idempotency-Key"), "{keyed}");
+        let bare = told(None);
+        assert!(
+            bare.contains("a lease and a tenth") && !bare.contains("Idempotency-Key"),
+            "{bare}"
+        );
+        for body in [&keyed, &bare] {
+            assert!(body.contains(r#""outcome":"unknown","seq":7"#), "{body}");
+            assert!(
+                !body.contains("send the write through the router"),
+                "{body}"
+            );
+        }
         drop(t);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -51,11 +51,30 @@
 //! where asked of the node itself it passed it on. Each hop does the same,
 //! so a region's router relaying such a request passes the end on to the
 //! home router, and the home router to the node.
+//!
+//! A node that dies with no reset -- a machine gone, a network cut --
+//! answers nothing and closes nothing, and a request out to it waited for
+//! the pool's timeout (`--upstream-timeout`, 60 s, the deploy kit's 10)
+//! even once its tenant was failed over and its new primary answered: in
+//! V5's drill the writers sat idle for seconds past the failover. So the
+//! pool knows each connection it made and what is out on it ([`Flight`]):
+//! a failover ends what is out to the node for each tenant it moved
+//! ([`Pool::cut`]) by shutting the connection down, which wakes the thread
+//! waiting on it, and the router answers that request by the rules above,
+//! sooner -- sent again to the tenant's new primary where the node cannot
+//! have run it or running it twice is harmless, a 502 saying it may have
+//! run otherwise (`Router::after_cut`). Only a request whose answer has not
+//! begun is cut: once its head is in, its answer is the node's, and a
+//! stream's is cut, so its client opens it again where its tenant is. A
+//! forward still dialing the node -- a machine gone answers no connect --
+//! gives up within a try of a second once a failover has moved a tenant
+//! ([`Pool::connect_watching`]).
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Response header ceiling, same as the server side's.
@@ -67,15 +86,44 @@ const MAX_HEAD: usize = fenec_http::http::MAX_HEADER_BYTES;
 const MAX_IDLE: usize = 32;
 
 pub struct Pool {
-    idle: Mutex<HashMap<String, Vec<Idle>>>,
+    /// Each node's connections by its address: those idle, and every one
+    /// made and not yet closed, which a failover's cut looks among
+    /// ([`Pool::cut`]). Under the lock a request takes anyway to take a
+    /// pooled connection and to put it back: a connection is put among
+    /// them as it is made and its flight marked closed as it goes, and a
+    /// request marks what it does on its connection's flight alone, so no
+    /// lock is taken a request more.
+    idle: Mutex<HashMap<String, Kept>>,
     timeout: Duration,
+    /// Moved by every failover's cut ([`Pool::cut`]), the bucket of the
+    /// tenant's mark, once the directory places the tenant elsewhere and
+    /// before the cut looks at a connection. A forward reads its own before
+    /// it reads the directory and again as its request goes out
+    /// ([`Flying`]): moved between the two, the tenant may have been failed
+    /// over after the directory was read and before the request was out
+    /// where a cut could see it -- placed on the node a moment before,
+    /// written to it a moment after, and left to wait for the timeout -- so
+    /// the directory is read again rather than the request sent. A
+    /// failover's alone: a forward reads the same number twice, a load of
+    /// a line nothing else writes. One count for every tenant, any failover
+    /// sent the forwards straddling it to the directory again, a healthy
+    /// connection let go of each.
+    moved: [AtomicU64; MOVED_BUCKETS],
+}
+
+#[derive(Default)]
+struct Kept {
+    idle: Vec<Idle>,
+    /// Every connection made to the node and not yet found closed:
+    /// those closed are let go of as the next is made, and as a cut looks.
+    flights: Vec<Arc<Flight>>,
 }
 
 /// A pooled connection and the read timeout it was left with, so that a
 /// request waiting as long sets none: the two `setsockopt`s every exchange
 /// made took 0.67 us, more than the look (`open`) made in their place.
 struct Idle {
-    stream: TcpStream,
+    conn: Conn,
     read_timeout: Duration,
     /// Set at the connect, and only by a read replica's read after
     /// ([`Pool::send_within`]): the pool's timeout otherwise, so a request
@@ -86,11 +134,335 @@ struct Idle {
 pub struct Answer {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    reader: BufReader<TcpStream>,
+    /// The connection the rest comes on, `None` once
+    /// [`Answer::read_body_kept`] has read it and handed it back.
+    reader: Option<BufReader<Conn>>,
     addr: String,
     reusable: bool,
     read_timeout: Duration,
     write_timeout: Duration,
+    /// What the forward it answers was known by, which a stream is asked
+    /// again by ([`Answer::into_stream`]).
+    flying: Flying,
+}
+
+/// What a failover knows a forward by: its tenant, as a mark, and the
+/// cuts of its mark's bucket ([`Pool::moved`]) there had been as the
+/// directory placed it.
+#[derive(Clone, Copy)]
+pub struct Flying {
+    mark: u64,
+    seen: u64,
+}
+
+impl Flying {
+    /// A request no failover ends: the router's own calls to a node, a
+    /// relay to a region's routers, a read replica's read.
+    pub const NONE: Flying = Flying { mark: 0, seen: 0 };
+
+    /// A forward of `tenant`'s request through `pool`, made before the
+    /// directory is read: the cuts its bucket has had so far. Acquired, so
+    /// a count a failover's cut moved is read with the directory as that
+    /// failover left it: the failover places its tenants first and cuts
+    /// after ([`Pool::cut`]).
+    pub fn of(tenant: &str, pool: &Pool) -> Flying {
+        let mark = mark_of(tenant);
+        Flying {
+            mark,
+            seen: pool.moved[bucket(mark)].load(Ordering::Acquire),
+        }
+    }
+}
+
+/// `tenant` as a flight carries it: a hash of its name, keyed by a number
+/// this process drew ([`seed`]), its three low bits left for the state and
+/// its fourth set, so that no tenant's is zero, which marks no forward. Two
+/// tenants on one node sharing a mark is a request of one cut by the
+/// other's failover: sent again where the directory places it, which is
+/// its own node, where it may go again; answered 502, where its write may
+/// have run -- an answer the node had on its way. So the multiply chain
+/// ends in MurmurHash3's finisher and the mark keeps its high bits: kept
+/// low, `(h | 1) << 3` dropped the top three, the low 61 bits of a product
+/// depend on the low 61 of what is multiplied alone, and two names of a
+/// multiple of 8 bytes differing only in their last byte's top three bits
+/// -- `tenant-1` and `tenant-q`, `shop-002` and `shop-00r` -- always
+/// shared one: 603 592 groups of them among the 2.1 million names `shop`
+/// and four of `[a-z0-9_-]`, none this way. Keyed, they cannot be made to
+/// share one on purpose by someone naming tenants.
+fn mark_of(tenant: &str) -> u64 {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h = seed() ^ tenant.len() as u64;
+    for chunk in tenant.as_bytes().chunks(8) {
+        let mut word = [0u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(K);
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^= h >> 33;
+    (h & !STATE) | (STATE + 1)
+}
+
+/// The key every mark of this process is hashed under: drawn once, from
+/// the standard library's own random keys (`RandomState`).
+fn seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SEED.get_or_init(|| {
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    })
+}
+
+/// Buckets of the cut counts a forward reads ([`Pool::moved`]), by a mark's
+/// top bits: a failover moves its own tenants' bucket alone, so a forward
+/// straddling an unrelated one goes out as it would have.
+const MOVED_BUCKETS: usize = 64;
+
+fn bucket(mark: u64) -> usize {
+    (mark >> (64 - MOVED_BUCKETS.trailing_zeros())) as usize
+}
+
+/// What a connection is doing, in its flight's low bits beside the mark of
+/// the tenant whose request is out on it.
+const STATE: u64 = 7;
+/// Made, or back in the pool: nothing is out.
+const IDLE: u64 = 0;
+/// A request going out, or its answer's head waited for: what a cut ends.
+const WAITING: u64 = 1;
+/// Its answer's head is in: the node's, never cut.
+const ANSWERING: u64 = 2;
+/// A stream copied to its client: cut, its client opens it again.
+const STREAMING: u64 = 3;
+/// A cut shutting the connection down: its owner waits before it closes,
+/// so the descriptor the cut shuts is still the connection's.
+const CUTTING: u64 = 4;
+/// Shut down by a cut.
+const CUT: u64 = 5;
+/// Its descriptor closed, or about to be: no cut touches it.
+const CLOSED: u64 = 6;
+
+/// What a pooled connection is doing, shared with the pool's list of the
+/// node's connections ([`Pool::cut`]): one word, the state in its low bits
+/// beside the mark of the tenant whose request is out ([`mark_of`]), so a
+/// cut compares and changes both at once -- read apart, a request of
+/// another tenant out on the connection a moment later could be the one
+/// cut. One allocation a connection, not a request; a request writes it
+/// once as the pool hands the connection over ([`Pool::take`],
+/// [`Pool::register`]) and compares it once as its answer begins.
+struct Flight {
+    word: AtomicU64,
+    #[cfg(unix)]
+    fd: std::os::fd::RawFd,
+}
+
+impl Flight {
+    /// `s`'s flight, its word `word`.
+    fn of(s: &TcpStream, word: u64) -> Flight {
+        #[cfg(unix)]
+        let fd = std::os::fd::AsRawFd::as_raw_fd(s);
+        #[cfg(not(unix))]
+        let _ = s;
+        Flight {
+            word: AtomicU64::new(word),
+            #[cfg(unix)]
+            fd,
+        }
+    }
+
+    /// Its answer's head is in: whether it was before a cut, which then
+    /// leaves it be. False, the cut came first and has shut it down.
+    fn answering(&self, mark: u64) -> bool {
+        self.word
+            .compare_exchange(
+                mark | WAITING,
+                mark | ANSWERING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// The answer is a stream: a cut ends it from here. No cut writes the
+    /// word while its head is in, so this is the owner's alone. Sequentially
+    /// consistent with the read of [`Pool::moved`] after it, as the cut's
+    /// count and its look at the word are: a cut that came while the head
+    /// was read finds it here or is found by that read
+    /// ([`Answer::into_stream`]). No lock of the pool's is taken here to
+    /// order them by, as [`Pool::take`] orders a request going out: this
+    /// is once a stream, not every request.
+    fn streaming(&self) {
+        let w = self.word.load(Ordering::Acquire);
+        self.word.store((w & !STATE) | STREAMING, Ordering::SeqCst);
+    }
+
+    /// `mark`'s request, not a byte of it written, will not go out after
+    /// all: whether the connection is the pool's again -- false, a cut has
+    /// it already.
+    fn rest(&self, mark: u64) -> bool {
+        self.word
+            .compare_exchange(mark | WAITING, IDLE, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Whether a failed exchange was a cut's doing, once the cut is done.
+    fn was_cut(&self) -> bool {
+        loop {
+            match self.word.load(Ordering::SeqCst) & STATE {
+                CUTTING => std::thread::yield_now(),
+                s => return s == CUT,
+            }
+        }
+    }
+
+    fn closed(&self) -> bool {
+        self.word.load(Ordering::Relaxed) & STATE == CLOSED
+    }
+
+    /// Marked closed before the descriptor is, waiting out a cut shutting
+    /// it down: closed under a cut, the descriptor's number could be a new
+    /// connection's by the time the cut shut it.
+    fn close(&self) {
+        let mut w = self.word.load(Ordering::SeqCst);
+        loop {
+            if w & STATE == CUTTING {
+                std::thread::yield_now();
+                w = self.word.load(Ordering::SeqCst);
+                continue;
+            }
+            match self
+                .word
+                .compare_exchange_weak(w, CLOSED, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return,
+                Err(now) => w = now,
+            }
+        }
+    }
+
+    /// Ends `mark`'s request out on this connection, where its answer has
+    /// not begun or is a stream: the connection shut down both ways, which
+    /// wakes the thread reading or writing it -- a read meets the end, a
+    /// write its refusal -- and tells a node still there, as a client gone
+    /// would. What it ended: `WAITING`, `STREAMING`, or nothing.
+    fn cut(&self, mark: u64) -> Option<u64> {
+        for from in [WAITING, STREAMING] {
+            let cutting = self.word.compare_exchange(
+                mark | from,
+                mark | CUTTING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            if cutting.is_ok() {
+                self.shut();
+                self.word.store(mark | CUT, Ordering::SeqCst);
+                return Some(from);
+            }
+        }
+        None
+    }
+
+    #[cfg(unix)]
+    fn shut(&self) {
+        use std::os::fd::FromRawFd;
+        // SAFETY: the descriptor is the connection's: its owner closes it
+        // only once the word has left `CUTTING` (`close`), and it is never
+        // closed here, the stream made over it not dropped.
+        let s = std::mem::ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(self.fd) });
+        let _ = s.shutdown(std::net::Shutdown::Both);
+    }
+
+    /// No descriptor to shut where there is no `RawFd`: the request waits
+    /// for the timeout, as before.
+    #[cfg(not(unix))]
+    fn shut(&self) {}
+}
+
+/// A connection to a node and its flight, marked closed as it is dropped,
+/// before its descriptor is.
+pub struct Conn {
+    stream: TcpStream,
+    flight: Arc<Flight>,
+}
+
+impl Read for Conn {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&self.stream).read(buf)
+    }
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        self.flight.close();
+    }
+}
+
+/// What a cut ended ([`Pool::cut`]): requests whose answer had not begun,
+/// and streams.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cuts {
+    pub waiting: usize,
+    pub streams: usize,
+}
+
+/// What a failover did to a forward that ended short of its answer
+/// ([`ended_by`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// Its cut shut the forward's connection down ([`Pool::cut`]):
+    /// `whole`, the request had gone out whole, so the node may have run
+    /// it.
+    Cut { whole: bool },
+    /// A failover moved a tenant of its mark's bucket after the directory
+    /// placed it and before it went out where a cut could see it -- or
+    /// while it connected: nothing of it was written, and the directory is
+    /// read again, which may place it where it was.
+    Moved,
+}
+
+impl std::fmt::Display for Ended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Ended::Cut { .. } => "its node was failed over before it answered",
+            Ended::Moved => "a failover moved its tenant's bucket before it went out",
+        })
+    }
+}
+
+impl std::error::Error for Ended {}
+
+/// What a failover did to the forward whose failure `e` is, where one did.
+pub fn ended_by(e: &io::Error) -> Option<Ended> {
+    e.get_ref()?.downcast_ref::<Ended>().copied()
+}
+
+/// The failure of an exchange that ended at `stage` with `e`, or the cut's
+/// where a failover's cut ended it.
+#[cold]
+#[inline(never)]
+fn failed(flight: &Flight, stage: Stage, e: io::Error) -> Failure {
+    if !flight.was_cut() {
+        return Failure(stage, e);
+    }
+    let whole = !matches!(stage, Stage::Unsent | Stage::Unread);
+    Failure(Stage::Cut, io::Error::other(Ended::Cut { whole }))
+}
+
+/// An answer whose body [`Answer::read_body_kept`] has read already.
+#[cold]
+#[inline(never)]
+fn read_already() -> io::Error {
+    bad("the answer's body was read already")
+}
+
+/// A forward a failover moved before it went out ([`Ended::Moved`]).
+#[cold]
+#[inline(never)]
+fn moved_meanwhile() -> Failure {
+    Failure(Stage::Cut, io::Error::other(Ended::Moved))
 }
 
 /// How far an exchange got before it failed, which is what decides whether
@@ -111,6 +483,10 @@ enum Stage {
     /// answer began: the node's connection is let go of, and nothing is
     /// sent again or written.
     Abandoned,
+    /// A failover's cut ended it, or moved its tenant before it went out
+    /// ([`ended_by`]): never sent again on this node, whose tenant is placed
+    /// elsewhere now.
+    Cut,
 }
 
 struct Failure(Stage, io::Error);
@@ -168,27 +544,145 @@ impl Pool {
         Pool {
             idle: Mutex::new(HashMap::new()),
             timeout,
+            moved: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
-    fn take(&self, addr: &str) -> Option<Idle> {
-        self.idle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_mut(addr)
-            .and_then(|v| v.pop())
+    /// The failovers' cuts of `mark`'s bucket so far, sequentially
+    /// consistent: what a stream reads after it marks itself one
+    /// ([`Answer::into_stream`]), and a connect watches.
+    fn moved(&self, mark: u64) -> u64 {
+        self.moved[bucket(mark)].load(Ordering::SeqCst)
+    }
+
+    /// A pooled connection to `addr`, its word `mark`'s `WAITING` from here:
+    /// a cut finds the request on it from the moment the pool's lock is let
+    /// go. Written under the lock a cut takes to list the node's
+    /// connections after it moves the count ([`Pool::cut`]), so a forward
+    /// that reads the count after this ([`Pool::exchange`]) needs no fence
+    /// of its own: the cut's lock came after this one, and finds `WAITING`,
+    /// or before, and its count is read. The word stored and the count read
+    /// sequentially consistent instead, the two were an `stlr` and an
+    /// `ldar` on aarch64 -- the load waiting for the store to drain -- and
+    /// an `xchg` on x86, every request.
+    fn take(&self, addr: &str, mark: u64) -> Option<Idle> {
+        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let i = idle.get_mut(addr).and_then(|k| k.idle.pop())?;
+        i.conn.flight.word.store(mark | WAITING, Ordering::Relaxed);
+        Some(i)
     }
 
     fn put(&self, addr: &str, s: Idle) {
         let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
-        let list = idle.entry(addr.to_string()).or_default();
+        let list = &mut idle.entry(addr.to_string()).or_default().idle;
         if list.len() < MAX_IDLE {
             list.push(s);
         }
     }
 
-    fn connect(&self, addr: &str, within: Duration, write: Duration) -> io::Result<TcpStream> {
-        dial(addr, within, write)
+    fn connect(&self, addr: &str, within: Duration, write: Duration) -> io::Result<Conn> {
+        dial(addr, within, write).map(|s| self.register(addr, s, 0))
+    }
+
+    /// [`Pool::connect`] of a forward, each address tried a
+    /// [`CONNECT_LOOK`] at a time and given up on once a failover has moved
+    /// a tenant of its bucket since the directory placed this one
+    /// ([`Pool::moved`]), for the directory to be read again: a machine gone
+    /// answers no connect, and a request dialing it as its tenant was failed
+    /// over -- every one past the node's pooled connections, each held by a
+    /// request waiting on it -- waited out the pool's timeout, where one out
+    /// on a connection is cut ([`Pool::cut`]). A try is a fresh connect, its
+    /// first SYN sent at once, as the system's own sends its next about a
+    /// second after the first; a node a second away would never be reached,
+    /// which no node a router forwards to is. A connect that fails outright
+    /// -- refused, a process gone and its machine there -- is asked the same
+    /// before it is the client's 502: refused as the failover came, it is
+    /// sent where the directory places it now.
+    fn connect_watching(
+        &self,
+        addr: &str,
+        within: Duration,
+        write: Duration,
+        flying: Flying,
+    ) -> Result<Conn, Failure> {
+        let unsent = |e| Failure(Stage::Unsent, e);
+        let moved = || self.moved(flying.mark) != flying.seen;
+        let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
+        let found = fenec_http::dial::resolve(addr, within);
+        for a in found.map_err(|e| {
+            if moved() {
+                moved_meanwhile()
+            } else {
+                unsent(e)
+            }
+        })? {
+            let deadline = Instant::now() + within;
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                match TcpStream::connect_timeout(&a, left.min(CONNECT_LOOK)) {
+                    Ok(s) => {
+                        let s = ready(s, write).map_err(unsent)?;
+                        return Ok(self.register(addr, s, flying.mark));
+                    }
+                    Err(_) if moved() => return Err(moved_meanwhile()),
+                    Err(e) if timed_out(&e) => last = e,
+                    Err(e) => {
+                        last = e;
+                        break;
+                    }
+                }
+            }
+        }
+        Err(unsent(last))
+    }
+
+    /// `s`, a connection just made to `addr`, among the node's for a cut
+    /// to find, the closed ones let go of: a lock a connection made. Its
+    /// word is `mark`'s `WAITING` before it is listed, under the lock, as
+    /// [`Pool::take`] writes a pooled one's.
+    fn register(&self, addr: &str, s: TcpStream, mark: u64) -> Conn {
+        let flight = Arc::new(Flight::of(&s, mark | WAITING));
+        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let flights = &mut idle.entry(addr.to_string()).or_default().flights;
+        flights.retain(|f| !f.closed());
+        flights.push(Arc::clone(&flight));
+        Conn { stream: s, flight }
+    }
+
+    /// Ends every request out to `addr` for `tenant` whose answer has not
+    /// begun, and every stream of its, by shutting their connections down
+    /// ([`Flight::cut`]): what a failover does for each tenant it moved off
+    /// the node at `addr`, once the directory places it elsewhere -- the
+    /// thread waiting on each then finds it so and answers its client by
+    /// what the node may have run (`Router::after_cut`), where it waited
+    /// for the timeout. A request whose answer's head is in is left to it:
+    /// its answer is the node's. The connections are looked at with no
+    /// lock held, a shutdown each.
+    pub fn cut(&self, addr: &str, tenant: &str) -> Cuts {
+        let mark = mark_of(tenant);
+        self.moved[bucket(mark)].fetch_add(1, Ordering::SeqCst);
+        let flights = {
+            let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+            match idle.get_mut(addr) {
+                Some(k) => {
+                    k.flights.retain(|f| !f.closed());
+                    k.flights.clone()
+                }
+                None => Vec::new(),
+            }
+        };
+        let mut cuts = Cuts::default();
+        for f in flights {
+            match f.cut(mark) {
+                Some(WAITING) => cuts.waiting += 1,
+                Some(_) => cuts.streams += 1,
+                None => {}
+            }
+        }
+        cuts
     }
 
     /// Sends a request and reads the response head. `headers` must not
@@ -201,7 +695,17 @@ impl Pool {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> io::Result<Answer> {
-        self.send_held(addr, method, target, headers, body, Duration::ZERO, None)
+        let none = Flying::NONE;
+        self.send_held(
+            addr,
+            method,
+            target,
+            headers,
+            body,
+            Duration::ZERO,
+            None,
+            none,
+        )
     }
 
     /// [`Pool::send`] of a request the node may hold for `held` before it
@@ -212,7 +716,8 @@ impl Pool {
     /// the head is waited for ([`answered_or_gone`]): its end is passed on
     /// to the node, and its reset lets go of the node's connection, the
     /// failure [`client_gone`]. `None` waits as an unheld request does,
-    /// with not a system call more.
+    /// with not a system call more. `flying` is what a failover's cut knows
+    /// the request by ([`Pool::cut`]), whose failure says so ([`ended_by`]).
     #[allow(clippy::too_many_arguments)]
     pub fn send_held(
         &self,
@@ -223,6 +728,7 @@ impl Pool {
         body: &[u8],
         held: Duration,
         client: Option<&TcpStream>,
+        flying: Flying,
     ) -> io::Result<Answer> {
         let times = (self.timeout + held, self.timeout, self.timeout);
         self.send_staged(
@@ -234,6 +740,7 @@ impl Pool {
             times,
             Replay::AsAsked,
             client,
+            flying,
         )
         .map_err(|Failure(_, e)| e)
     }
@@ -254,7 +761,10 @@ impl Pool {
     ) -> Result<Answer, Tried> {
         let times = (self.timeout + held, self.timeout, self.timeout);
         let replay = Replay::AsAsked;
-        match self.send_staged(addr, method, target, headers, body, times, replay, client) {
+        let none = Flying::NONE;
+        match self.send_staged(
+            addr, method, target, headers, body, times, replay, client, none,
+        ) {
             Ok(a) => Ok(a),
             Err(Failure(Stage::Unsent, e)) => Err(Tried::Unrun(e)),
             Err(Failure(Stage::Unanswered, e)) if replay.allows(method, headers) => {
@@ -284,10 +794,13 @@ impl Pool {
     ) -> Result<Answer, Near> {
         let times = (within, within, within);
         let replay = Replay::AsAsked;
-        match self.send_staged(addr, method, target, headers, body, times, replay, None) {
+        let none = Flying::NONE;
+        match self.send_staged(
+            addr, method, target, headers, body, times, replay, None, none,
+        ) {
             Ok(a) => Ok(a),
             Err(Failure(Stage::Unsent | Stage::Unread, e)) => Err(Near::Unreached(e)),
-            Err(Failure(Stage::Unanswered | Stage::Other | Stage::Abandoned, e)) => {
+            Err(Failure(Stage::Unanswered | Stage::Other | Stage::Abandoned | Stage::Cut, e)) => {
                 Err(Near::Unanswered(e))
             }
         }
@@ -334,12 +847,16 @@ impl Pool {
         times: (Duration, Duration, Duration),
         replay: Replay,
     ) -> io::Result<Answer> {
-        self.send_staged(addr, method, target, headers, body, times, replay, None)
-            .map_err(|Failure(_, e)| e)
+        let none = Flying::NONE;
+        self.send_staged(
+            addr, method, target, headers, body, times, replay, None, none,
+        )
+        .map_err(|Failure(_, e)| e)
     }
 
     /// [`Self::send_timed`], its failure with how far it got, `client`
-    /// watched while the head is waited for ([`Pool::send_held`]).
+    /// watched while the head is waited for ([`Pool::send_held`]), `flying`
+    /// what a failover's cut knows it by.
     #[allow(clippy::too_many_arguments)]
     fn send_staged(
         &self,
@@ -351,6 +868,7 @@ impl Pool {
         times: (Duration, Duration, Duration),
         replay: Replay,
         client: Option<&TcpStream>,
+        flying: Flying,
     ) -> Result<Answer, Failure> {
         let (read_timeout, connect_within, write_timeout) = times;
         let mut req = String::with_capacity(256);
@@ -396,25 +914,28 @@ impl Pool {
 
         // The node closes its idle connections together, so a closed one
         // found here is let go of and the next one looked at.
-        while let Some(idle) = self.take(addr) {
-            if !open(&idle.stream) {
+        while let Some(idle) = self.take(addr, flying.mark) {
+            if !open(&idle.conn.stream) {
                 continue;
             }
             let set = (Some(idle.read_timeout), idle.write_timeout);
             let want = (read_timeout, write_timeout);
-            match self.exchange(addr, idle.stream, set, (head, body), want, client) {
+            match self.exchange(addr, idle.conn, set, (head, body), want, client, flying) {
                 Ok(a) => return Ok(a),
                 Err(Failure(Stage::Unsent, _)) => break,
                 Err(Failure(Stage::Unanswered, _)) if replay.allows(method, headers) => break,
                 Err(f) => return Err(f),
             }
         }
-        let s = self
-            .connect(addr, connect_within, write_timeout)
-            .map_err(|e| Failure(Stage::Unsent, e))?;
+        let s = match flying.mark {
+            0 => self
+                .connect(addr, connect_within, write_timeout)
+                .map_err(|e| Failure(Stage::Unsent, e))?,
+            _ => self.connect_watching(addr, connect_within, write_timeout, flying)?,
+        };
         let set = (None, write_timeout);
         let want = (read_timeout, write_timeout);
-        self.exchange(addr, s, set, (head, body), want, client)
+        self.exchange(addr, s, set, (head, body), want, client, flying)
     }
 
     /// One request, its head and body, and the head of its answer over
@@ -422,26 +943,40 @@ impl Pool {
     /// is known -- each read of the answer bounded by `want.0` and each
     /// write by `want.1`. Each is set only where it is not already, a
     /// system call a request. `client` is watched until the answer begins
-    /// ([`answered_or_gone`]).
+    /// ([`answered_or_gone`]). Out from its first byte to its answer's
+    /// head, the request is what a failover's cut of `flying`'s tenant
+    /// ends ([`Pool::cut`]).
+    #[allow(clippy::too_many_arguments)]
     fn exchange(
         &self,
         addr: &str,
-        s: TcpStream,
+        s: Conn,
         set: (Option<Duration>, Duration),
         (head, body): (&[u8], &[u8]),
         want: (Duration, Duration),
         client: Option<&TcpStream>,
+        flying: Flying,
     ) -> Result<Answer, Failure> {
         let (read_timeout, write_timeout) = want;
+        // Out from here (`WAITING`, written as the pool handed it over): a
+        // cut shutting it down now has macOS refuse the options (EINVAL),
+        // which is the cut's to say.
         if set.0 != Some(read_timeout) {
-            s.set_read_timeout(Some(read_timeout))
-                .map_err(|e| Failure(Stage::Unsent, e))?;
+            s.stream
+                .set_read_timeout(Some(read_timeout))
+                .map_err(|e| failed(&s.flight, Stage::Unsent, e))?;
         }
         if set.1 != write_timeout {
-            s.set_write_timeout(Some(write_timeout))
-                .map_err(|e| Failure(Stage::Unsent, e))?;
+            s.stream
+                .set_write_timeout(Some(write_timeout))
+                .map_err(|e| failed(&s.flight, Stage::Unsent, e))?;
         }
-        let mut w = &s;
+        if flying.mark != 0
+            && self.moved[bucket(flying.mark)].load(Ordering::Relaxed) != flying.seen
+        {
+            return Err(self.unsent_moved(addr, s, want, flying.mark));
+        }
+        let mut w = &s.stream;
         // A `write` that fails took none of its bytes, so the request's
         // last byte never went out: an empty body writes nothing, and the
         // head's last byte is then the last.
@@ -455,7 +990,7 @@ impl Pool {
                 } else {
                     Stage::Unsent
                 };
-                Failure(stage, e)
+                failed(&s.flight, stage, e)
             })?;
         // The client's end, passed on as the node reads one from a client
         // of its own: its held claim sees it before its next run, and its
@@ -463,27 +998,40 @@ impl Pool {
         // not kept for another request.
         let mut client_ended = false;
         if let Some(client) = client {
-            if answered_or_gone(&s, client, read_timeout)? == Watched::Ended {
-                let _ = s.shutdown(std::net::Shutdown::Write);
-                client_ended = true;
+            match answered_or_gone(&s.stream, client, read_timeout) {
+                Ok(Watched::Answering) => {}
+                Ok(Watched::Ended) => {
+                    let _ = s.stream.shutdown(std::net::Shutdown::Write);
+                    client_ended = true;
+                }
+                Err(f @ Failure(Stage::Abandoned, _)) => return Err(f),
+                Err(Failure(stage, e)) => return Err(failed(&s.flight, stage, e)),
             }
         }
 
         let mut reader = BufReader::new(s);
         let mut line = String::new();
-        match reader.read_line(&mut line) {
+        let read = reader.read_line(&mut line);
+        let flight = &reader.get_ref().flight;
+        match read {
             Ok(0) => {
-                return Err(Failure(
-                    Stage::Unanswered,
-                    io::ErrorKind::UnexpectedEof.into(),
-                ))
+                let eof = io::ErrorKind::UnexpectedEof.into();
+                return Err(failed(flight, Stage::Unanswered, eof));
             }
             Ok(_) => {}
             // The connection's end, as each system reports it. Not any
             // error with nothing read: a line that is not UTF-8 is left
             // out of `line`, and that is an answer.
-            Err(e) if line.is_empty() && ended(&e) => return Err(Failure(Stage::Unanswered, e)),
-            Err(e) => return Err(Failure(Stage::Other, e)),
+            Err(e) if line.is_empty() && ended(&e) => {
+                return Err(failed(flight, Stage::Unanswered, e))
+            }
+            Err(e) => return Err(failed(flight, Stage::Other, e)),
+        }
+        // The head has begun, and the answer is the node's from here unless
+        // a cut came first, whose shutdown may have cut it short.
+        if !flight.answering(flying.mark) {
+            let e = io::ErrorKind::UnexpectedEof.into();
+            return Err(failed(flight, Stage::Unanswered, e));
         }
         let other = |e| Failure(Stage::Other, e);
         let status = line
@@ -519,12 +1067,32 @@ impl Pool {
         Ok(Answer {
             status,
             headers,
-            reader,
+            reader: Some(reader),
             addr: addr.to_string(),
             reusable,
             read_timeout,
             write_timeout,
+            flying,
         })
+    }
+
+    /// A forward a failover moved before a byte of it went out
+    /// ([`Ended::Moved`]): its connection put back for another, where no cut
+    /// has it, since its node may well be its tenant's still -- dropped, a
+    /// failover's every straddling forward closed a healthy connection.
+    #[cold]
+    #[inline(never)]
+    fn unsent_moved(&self, addr: &str, s: Conn, want: (Duration, Duration), mark: u64) -> Failure {
+        if s.flight.rest(mark) {
+            let (read_timeout, write_timeout) = want;
+            let idle = Idle {
+                conn: s,
+                read_timeout,
+                write_timeout,
+            };
+            self.put(addr, idle);
+        }
+        moved_meanwhile()
     }
 
     /// A whole request and its `Content-Length` body: the router's own
@@ -587,7 +1155,7 @@ impl Replay {
 /// which every node runs read-only on every route, a `POST /query` among
 /// them: the value [`fenec_http::read_marked`] takes, and no other, which
 /// a node refuses unrun.
-fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
+pub(crate) fn replayable(method: &str, headers: &[(&str, &str)]) -> bool {
     matches!(method, "GET" | "HEAD" | "OPTIONS")
         || headers.iter().any(|(k, v)| {
             k.eq_ignore_ascii_case("idempotency-key")
@@ -608,18 +1176,25 @@ fn dial(addr: &str, within: Duration, write: Duration) -> io::Result<TcpStream> 
     let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{addr} does not resolve"));
     for a in fenec_http::dial::resolve(addr, within)? {
         match TcpStream::connect_timeout(&a, within) {
-            Ok(s) => {
-                let _ = s.set_nodelay(true);
-                // Once a connection: the same for every request but a read
-                // replica's, which sets its own and is tracked with the
-                // connection (`Idle::write_timeout`).
-                s.set_write_timeout(Some(write))?;
-                return Ok(s);
-            }
+            Ok(s) => return ready(s, write),
             Err(e) => last = e,
         }
     }
     Err(last)
+}
+
+/// How long a forward's connect waits on a try before it looks whether its
+/// tenant was moved meanwhile ([`Pool::connect_watching`]).
+const CONNECT_LOOK: Duration = Duration::from_secs(1);
+
+/// `s`, just connected, as every request through the pool wants it.
+fn ready(s: TcpStream, write: Duration) -> io::Result<TcpStream> {
+    let _ = s.set_nodelay(true);
+    // Once a connection: the same for every request but a read replica's,
+    // which sets its own and is tracked with the connection
+    // (`Idle::write_timeout`).
+    s.set_write_timeout(Some(write))?;
+    Ok(s)
 }
 
 fn timed_out(e: &io::Error) -> bool {
@@ -806,25 +1381,27 @@ impl Answer {
     }
 
     /// [`Answer::read_body`], the answer kept for its head: the connection
-    /// handed back to the pool as a copy of its descriptor, and this
-    /// answer's reader, read to its end, dropped with it. What reads a
-    /// read replica's whole answer before a byte of it goes to the client,
-    /// so that one broken off goes home instead.
+    /// itself handed back to the pool, read to its end, and the answer left
+    /// with none. What reads a read replica's whole answer before a byte of
+    /// it goes to the client, so that one broken off goes home instead. It
+    /// kept the reader and pooled a copy of its descriptor, as `dup` and a
+    /// `close` more every read a replica answered.
     pub fn read_body_kept(&mut self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
         let Some(len) = self.content_length() else {
             return Err(bad("a stream is read as it comes"));
         };
+        let Some(mut reader) = self.reader.take() else {
+            return Err(read_already());
+        };
         let len = if head_only { 0 } else { len };
-        let body = body_of(&mut self.reader, len, |_| Ok(()))?;
-        if self.reusable && self.reader.buffer().is_empty() {
-            if let Ok(stream) = self.reader.get_ref().try_clone() {
-                let idle = Idle {
-                    stream,
-                    read_timeout: self.read_timeout,
-                    write_timeout: self.write_timeout,
-                };
-                pool.put(&self.addr, idle);
-            }
+        let body = body_of(&mut reader, len, |_| Ok(()))?;
+        if self.reusable && reader.buffer().is_empty() {
+            let idle = Idle {
+                conn: reader.into_inner(),
+                read_timeout: self.read_timeout,
+                write_timeout: self.write_timeout,
+            };
+            pool.put(&self.addr, idle);
         }
         self.reusable = false;
         Ok(body)
@@ -847,19 +1424,22 @@ impl Answer {
     /// length). Refused rather than capped: a cap would be a bound picked
     /// for an answer that never comes, and reading up to it held the
     /// thread as long as the peer chose to trickle it in.
-    pub fn read_body(mut self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
+    pub fn read_body(self, pool: &Pool, head_only: bool) -> io::Result<Vec<u8>> {
         let Some(len) = self.content_length() else {
             return Err(bad(
                 "an answer with no length, which only a stream sends and this call asks for none",
             ));
         };
+        let Some(mut reader) = self.reader else {
+            return Err(read_already());
+        };
         let len = if head_only { 0 } else { len };
-        let body = body_of(&mut self.reader, len, |_| Ok(()))?;
+        let body = body_of(&mut reader, len, |_| Ok(()))?;
         // Bytes left in the buffer would be the start of an answer nobody
         // asked for; such a connection is not reused.
-        if self.reusable && self.reader.buffer().is_empty() {
+        if self.reusable && reader.buffer().is_empty() {
             let idle = Idle {
-                stream: self.reader.into_inner(),
+                conn: reader.into_inner(),
                 read_timeout: self.read_timeout,
                 write_timeout: self.write_timeout,
             };
@@ -877,18 +1457,21 @@ impl Answer {
         let Some(len) = self.content_length() else {
             return Err(bad("an answer with no length: a stream"));
         };
+        let Some(mut reader) = self.reader else {
+            return Err(read_already());
+        };
         let timeout = &mut self.read_timeout;
-        let body = body_of(&mut self.reader, len, |reader| {
+        let body = body_of(&mut reader, len, |reader| {
             if reader.buffer().is_empty() {
                 let left = left_until(deadline)?.min(*timeout);
-                reader.get_ref().set_read_timeout(Some(left))?;
+                reader.get_ref().stream.set_read_timeout(Some(left))?;
                 *timeout = left;
             }
             Ok(())
         })?;
-        if self.reusable && self.reader.buffer().is_empty() {
+        if self.reusable && reader.buffer().is_empty() {
             let idle = Idle {
-                stream: self.reader.into_inner(),
+                conn: reader.into_inner(),
                 read_timeout: self.read_timeout,
                 write_timeout: self.write_timeout,
             };
@@ -899,10 +1482,28 @@ impl Answer {
 
     /// The rest of the answer as a byte stream, with no read timeout: an SSE
     /// stream is silent until something changes (the node's keep-alive
-    /// line bounds the silence).
-    pub fn into_stream(self) -> io::Result<BufReader<TcpStream>> {
-        self.reader.get_ref().set_read_timeout(None)?;
-        Ok(self.reader)
+    /// line bounds the silence). A failover's cut ends it from here
+    /// ([`Pool::cut`]): a node gone silent sends no keep-alive and no end,
+    /// and its stream was copied for good, its client never opening it
+    /// again where its tenant had gone. A cut while its head came in, which
+    /// passed the answer over as begun, moved its tenant's bucket in `pool`:
+    /// asked as the stream is marked one, sequentially consistent with the
+    /// cut's look ([`Flight::streaming`]), such a stream ends here, an
+    /// error, its client opening it again where the directory places it.
+    /// Asked at the head instead, every answer of every forward read its
+    /// headers for a length once more, the router's added p50 some 0.3 us.
+    pub fn into_stream(self, pool: &Pool) -> io::Result<impl Read> {
+        let Some(reader) = self.reader else {
+            return Err(read_already());
+        };
+        let conn = reader.get_ref();
+        conn.flight.streaming();
+        let Flying { mark, seen } = self.flying;
+        if mark != 0 && pool.moved(mark) != seen {
+            return Err(io::Error::other(Ended::Cut { whole: true }));
+        }
+        conn.stream.set_read_timeout(None)?;
+        Ok(reader)
     }
 }
 
@@ -946,9 +1547,9 @@ pub fn answers_health(addr: &str, within: Duration) -> bool {
 /// The `len` bytes of a body off `reader`, `before` run ahead of each read,
 /// read into a buffer of the whole length ([`zeroed`]).
 fn body_of(
-    reader: &mut BufReader<TcpStream>,
+    reader: &mut BufReader<Conn>,
     len: usize,
-    mut before: impl FnMut(&BufReader<TcpStream>) -> io::Result<()>,
+    mut before: impl FnMut(&BufReader<Conn>) -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
     let mut body = zeroed(len)?;
     let mut got = 0;
@@ -1034,6 +1635,12 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
+    /// `s` as a connection the pool did not make: no cut finds it.
+    fn unpooled(s: TcpStream) -> Conn {
+        let flight = Arc::new(Flight::of(&s, WAITING));
+        Conn { flight, stream: s }
+    }
+
     /// A connection, and the node's end of it.
     fn pair() -> (TcpStream, TcpStream) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1096,11 +1703,21 @@ mod tests {
     fn stage(pool: &Pool, s: TcpStream, set: Option<Duration>) -> &'static str {
         let head = b"DELETE /t/acme/notes/1 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
         let (both, want) = ((set, pool.timeout), (pool.timeout, pool.timeout));
-        match pool.exchange("node", s, both, (head, b""), want, None) {
+        match pool.exchange(
+            "node",
+            unpooled(s),
+            both,
+            (head, b""),
+            want,
+            None,
+            Flying::NONE,
+        ) {
             Ok(_) => "answered",
             Err(Failure(Stage::Unsent, _)) => "unsent",
             Err(Failure(Stage::Unanswered, _)) => "unanswered",
-            Err(Failure(Stage::Unread | Stage::Other | Stage::Abandoned, e)) => panic!("{e}"),
+            Err(Failure(Stage::Unread | Stage::Other | Stage::Abandoned | Stage::Cut, e)) => {
+                panic!("{e}")
+            }
         }
     }
 
@@ -1220,7 +1837,15 @@ mod tests {
         });
         let head = b"GET /t/acme/notes HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
         let (set, want) = ((None, pool.timeout), (pool.timeout, pool.timeout));
-        match pool.exchange("node", ours, set, (head, b""), want, None) {
+        match pool.exchange(
+            "node",
+            unpooled(ours),
+            set,
+            (head, b""),
+            want,
+            None,
+            Flying::NONE,
+        ) {
             Ok(a) => a,
             Err(Failure(_, e)) => panic!("{e}"),
         }
@@ -1300,5 +1925,382 @@ mod tests {
             let n = sent.recv_timeout(Duration::from_secs(30)).unwrap();
             assert!(n < SENDS, "the node sent its {n} bytes whole");
         }
+    }
+
+    const ASKED: &[u8] = b"GET /t/acme/notes HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+
+    /// Reads one request off the node's end, its head to its blank line.
+    fn request_on(theirs: &mut TcpStream) {
+        let mut asked = Vec::new();
+        let mut chunk = [0u8; 1024];
+        // Bounded: a request that never goes is the failure, not a hang.
+        theirs
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        while !asked.windows(4).any(|w| w == b"\r\n\r\n") {
+            match theirs.read(&mut chunk) {
+                Ok(0) | Err(_) => panic!("no request came"),
+                Ok(n) => asked.extend_from_slice(&chunk[..n]),
+            }
+        }
+    }
+
+    /// What the one connection the pool knows to `addr` that is not closed
+    /// is doing.
+    fn state_of(pool: &Pool, addr: &str) -> u64 {
+        let kept = pool.idle.lock().unwrap();
+        kept.get(addr)
+            .and_then(|k| k.flights.iter().find(|f| !f.closed()))
+            .map_or(CLOSED, |f| f.word.load(Ordering::SeqCst) & STATE)
+    }
+
+    /// `ASKED` sent over a connection the pool knows to `n1`, as `flying`:
+    /// its node's end, and the exchange running on a thread of its own.
+    fn out<'s>(
+        s: &'s std::thread::Scope<'s, '_>,
+        pool: &'s Pool,
+        flying: Flying,
+    ) -> (
+        TcpStream,
+        std::thread::ScopedJoinHandle<'s, Result<Answer, Failure>>,
+    ) {
+        let (ours, theirs) = pair();
+        let conn = pool.register("n1", ours, flying.mark);
+        let want = (pool.timeout, pool.timeout);
+        let set = (None, pool.timeout);
+        let exchange =
+            s.spawn(move || pool.exchange("n1", conn, set, (ASKED, b""), want, None, flying));
+        (theirs, exchange)
+    }
+
+    /// What `e` says a failover did, where the exchange failed.
+    fn ended(r: Result<Answer, Failure>) -> Ended {
+        match r {
+            Err(Failure(Stage::Cut, e)) => ended_by(&e).expect("a failover's"),
+            Err(Failure(_, e)) => panic!("not a failover's: {e}"),
+            Ok(a) => panic!("answered {}", a.status),
+        }
+    }
+
+    /// A tenant other than `of` whose mark is in its bucket, or in another.
+    fn bucketed(of: &str, same: bool) -> String {
+        let b = bucket(mark_of(of));
+        (0..100_000)
+            .map(|i| format!("tenant-{i}"))
+            .find(|t| t != of && (bucket(mark_of(t)) == b) == same)
+            .expect("one in 64 names is in a bucket")
+    }
+
+    /// Whether the node's end of a connection has heard nothing, its end
+    /// included: the router kept it.
+    fn quiet(theirs: &TcpStream) -> bool {
+        matches!(peek_now(theirs), Err(e) if e.kind() == io::ErrorKind::WouldBlock)
+    }
+
+    /// No two tenant names share a mark: every name of 8 bytes made of
+    /// `shop-` and three of `[a-z0-9_-]`, every `tenant-` and one printable
+    /// byte, and every 16 bytes made of a fixed 13 and three -- each last
+    /// byte's top bits among what differs, which the mark kept low dropped:
+    /// `tenant-1` and `tenant-q` shared one, and a failover of one cut the
+    /// other's write on a node that still served it.
+    #[test]
+    fn tenant_names_differing_anywhere_do_not_share_a_mark() {
+        let alpha = b"abcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut seen = std::collections::HashMap::new();
+        let mut names = Vec::new();
+        for a in alpha {
+            for b in alpha {
+                for c in alpha {
+                    let tail = String::from_utf8(vec![*a, *b, *c]).unwrap();
+                    names.push(format!("shop-{tail}"));
+                    names.push(format!("customer-regi{tail}"));
+                }
+            }
+        }
+        for byte in 0x21u8..0x7f {
+            names.push(format!("tenant-{}", byte as char));
+        }
+        for name in &names {
+            let mark = mark_of(name);
+            assert_eq!(mark & STATE, 0, "{name}");
+            assert_ne!(mark, 0, "{name}");
+            if let Some(other) = seen.insert(mark, name) {
+                panic!("{name} and {other} share a mark");
+            }
+        }
+        for (a, b) in [("tenant-1", "tenant-q"), ("demo-app", "demo-ap0")] {
+            assert_ne!(mark_of(a), mark_of(b), "{a} {b}");
+        }
+    }
+
+    /// A request out to a node whose answer has not begun is what a cut of
+    /// its tenant ends: its exchange is told it was cut, its request having
+    /// gone out whole, and the node's end reads the connection's end. A cut
+    /// of another tenant on the node leaves it be. A stream handed over to
+    /// be copied is ended the same way, its reader meeting the end.
+    #[test]
+    fn a_cut_ends_a_request_whose_answer_has_not_begun_and_a_stream() {
+        let pool = Pool::new(Duration::from_secs(60));
+        std::thread::scope(|s| {
+            let (mut theirs, exchange) = out(s, &pool, Flying::of("acme", &pool));
+            request_on(&mut theirs);
+            assert_eq!(state_of(&pool, "n1"), WAITING);
+            assert_eq!(pool.cut("n1", "beta"), Cuts::default());
+            assert_eq!(state_of(&pool, "n1"), WAITING);
+            let cuts = pool.cut("n1", "acme");
+            assert_eq!(
+                cuts,
+                Cuts {
+                    waiting: 1,
+                    streams: 0
+                }
+            );
+            assert_eq!(ended(exchange.join().unwrap()), Ended::Cut { whole: true });
+            theirs
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            assert_eq!(theirs.read(&mut [0u8; 16]).unwrap(), 0);
+            assert_eq!(state_of(&pool, "n1"), CLOSED);
+        });
+        std::thread::scope(|s| {
+            let (mut theirs, exchange) = out(s, &pool, Flying::of("acme", &pool));
+            request_on(&mut theirs);
+            let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+            theirs.write_all(head).unwrap();
+            let Ok(answer) = exchange.join().unwrap() else {
+                panic!("the stream's head was not read");
+            };
+            let mut stream = answer.into_stream(&pool).unwrap();
+            assert_eq!(state_of(&pool, "n1"), STREAMING);
+            theirs.write_all(b"event: seed\ndata: []\n\n").unwrap();
+            // Each read handed over as it comes, its end as an empty one.
+            let (got, came) = std::sync::mpsc::channel();
+            s.spawn(move || {
+                let mut chunk = [0u8; 1024];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    let _ = got.send(chunk[..n].to_vec());
+                    if n == 0 {
+                        return;
+                    }
+                }
+            });
+            let mut seed = Vec::new();
+            while !seed.ends_with(b"\n\n") {
+                let chunk = came.recv_timeout(Duration::from_secs(10)).unwrap();
+                assert!(
+                    !chunk.is_empty(),
+                    "the stream ended before its seed: {seed:?}"
+                );
+                seed.extend_from_slice(&chunk);
+            }
+            assert!(seed.starts_with(b"event: seed"), "{seed:?}");
+            let cuts = pool.cut("n1", "acme");
+            assert_eq!(
+                cuts,
+                Cuts {
+                    waiting: 0,
+                    streams: 1
+                }
+            );
+            let end = came.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(end.is_empty(), "{end:?}");
+        });
+    }
+
+    /// A stream whose tenant is failed over between its head and being
+    /// handed over to be copied -- its answer begun, which the cut passes
+    /// over, and not a stream yet -- ends as it is handed over: its tenant's
+    /// bucket moved meanwhile. Not asked, it was copied for good, the node
+    /// silent. A stream whose bucket did not move is handed over.
+    #[test]
+    fn a_stream_cut_between_its_head_and_its_copy_ends_as_it_is_handed_over() {
+        let pool = Pool::new(Duration::from_secs(60));
+        for cut in [true, false] {
+            std::thread::scope(|s| {
+                let (mut theirs, exchange) = out(s, &pool, Flying::of("acme", &pool));
+                request_on(&mut theirs);
+                let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+                theirs.write_all(head).unwrap();
+                let Ok(answer) = exchange.join().unwrap() else {
+                    panic!("the stream's head was not read");
+                };
+                if cut {
+                    assert_eq!(state_of(&pool, "n1"), ANSWERING);
+                    assert_eq!(pool.cut("n1", "acme"), Cuts::default());
+                    let e = answer.into_stream(&pool).err().expect("it ends");
+                    assert_eq!(ended_by(&e), Some(Ended::Cut { whole: true }));
+                } else {
+                    assert!(answer.into_stream(&pool).is_ok());
+                }
+            });
+        }
+    }
+
+    /// A request whose answer's head is in is the node's: a cut of its
+    /// tenant leaves it, and its body comes whole after the cut. And a
+    /// request no failover knows (`Flying::NONE`) -- the router's own call
+    /// to a node -- is never cut, whatever tenant is.
+    #[test]
+    fn a_cut_leaves_an_answer_begun_and_a_request_no_failover_knows() {
+        let pool = Pool::new(Duration::from_secs(60));
+        for flying in [Flying::of("acme", &pool), Flying::NONE] {
+            std::thread::scope(|s| {
+                let (mut theirs, exchange) = out(s, &pool, flying);
+                request_on(&mut theirs);
+                if flying.mark == 0 {
+                    assert_eq!(pool.cut("n1", "acme"), Cuts::default());
+                }
+                theirs
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+                    .unwrap();
+                let Ok(answer) = exchange.join().unwrap() else {
+                    panic!("its head was not read");
+                };
+                assert_eq!(pool.cut("n1", "acme"), Cuts::default());
+                theirs.write_all(b"hello").unwrap();
+                assert_eq!(answer.read_body(&pool, false).unwrap(), b"hello");
+            });
+        }
+    }
+
+    /// A read replica's answer, read whole and kept for its head, hands the
+    /// connection it came on back to the pool -- that very descriptor, open
+    /// once the answer is dropped, a cut still finding its flight -- and
+    /// the answer has no body left to read. A copy of the descriptor
+    /// pooled in its place was a `dup` and a `close` more a read.
+    #[test]
+    fn an_answer_read_for_its_head_hands_its_own_connection_back() {
+        use std::os::fd::AsRawFd;
+        let pool = Pool::new(Duration::from_secs(60));
+        std::thread::scope(|s| {
+            let (mut theirs, exchange) = out(s, &pool, Flying::of("acme", &pool));
+            request_on(&mut theirs);
+            let fd = pool.idle.lock().unwrap()["n1"].flights[0].fd;
+            theirs
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+            let Ok(mut answer) = exchange.join().unwrap() else {
+                panic!("its head was not read");
+            };
+            assert_eq!(answer.read_body_kept(&pool, false).unwrap(), b"ok");
+            assert_eq!(answer.status, 200);
+            assert!(answer.reader.is_none(), "the answer keeps a connection");
+            let again = answer.read_body_kept(&pool, false).unwrap_err();
+            assert_eq!(again.to_string(), read_already().to_string());
+            drop(answer);
+            let idle = pool.idle.lock().unwrap();
+            let kept = &idle["n1"];
+            assert_eq!(kept.idle.len(), 1);
+            assert_eq!(kept.idle[0].conn.stream.as_raw_fd(), fd);
+            assert!(open(&kept.idle[0].conn.stream));
+            assert_eq!(kept.flights.len(), 1);
+            assert!(Arc::ptr_eq(&kept.flights[0], &kept.idle[0].conn.flight));
+        });
+    }
+
+    /// A listener that answers no connect, as a machine gone does: its
+    /// queue made short (`listen` again, which both systems take: 1, since
+    /// macOS reads 0 as the most it allows) and filled, so that the next
+    /// SYN is dropped. The connections that filled it, kept open.
+    fn deaf() -> (TcpListener, Vec<TcpStream>) {
+        use std::os::fd::AsRawFd;
+        extern "C" {
+            fn listen(fd: i32, backlog: i32) -> i32;
+        }
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        // SAFETY: a listening socket's descriptor, open for the call.
+        assert_eq!(unsafe { listen(l.as_raw_fd(), 1) }, 0);
+        let at = l.local_addr().unwrap();
+        let mut filled = Vec::new();
+        while let Ok(s) = TcpStream::connect_timeout(&at, Duration::from_millis(500)) {
+            filled.push(s);
+            assert!(filled.len() < 64, "the queue never filled");
+        }
+        (l, filled)
+    }
+
+    /// A forward of `tenant` dialing `addr`, on a thread of its own: what a
+    /// failover did to it, where one did.
+    fn dialing(
+        pool: &Arc<Pool>,
+        addr: &str,
+        tenant: &str,
+    ) -> std::sync::mpsc::Receiver<Option<Ended>> {
+        let flying = Flying::of(tenant, pool);
+        let (told, dialed) = std::sync::mpsc::channel();
+        let (p, a) = (Arc::clone(pool), addr.to_string());
+        std::thread::spawn(move || {
+            let none = Duration::ZERO;
+            let sent = p.send_held(&a, "GET", "/t/acme/notes", &[], b"", none, None, flying);
+            let _ = told.send(sent.err().and_then(|e| ended_by(&e)));
+        });
+        dialed
+    }
+
+    /// A forward dialing a node that answers no connect as a failover moves
+    /// its tenant is given up on within a try of the connect, to be read
+    /// from the directory again, where it waited out the pool's timeout: a
+    /// minute here. And one whose connect is refused -- the node's process
+    /// gone, its machine there -- as its tenant moves is read from the
+    /// directory again too, where it was the client's 502.
+    #[test]
+    fn a_forward_dialing_a_node_that_answers_nothing_is_given_up_once_its_tenant_moves() {
+        let (l, _filled) = deaf();
+        let addr = l.local_addr().unwrap().to_string();
+        let pool = Arc::new(Pool::new(Duration::from_secs(60)));
+        let dialed = dialing(&pool, &addr, "acme");
+        assert_eq!(pool.cut(&addr, "acme"), Cuts::default());
+        let ended = dialed.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert_eq!(ended, Some(Ended::Moved));
+
+        let gone = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = gone.local_addr().unwrap().to_string();
+        drop(gone);
+        let flying = Flying::of("acme", &pool);
+        assert_eq!(pool.cut(&addr, "acme"), Cuts::default());
+        let none = Duration::ZERO;
+        let sent = pool.send_held(&addr, "GET", "/", &[], b"", none, None, flying);
+        assert_eq!(sent.err().and_then(|e| ended_by(&e)), Some(Ended::Moved));
+    }
+
+    /// A forward whose tenant a failover moved after the directory was read
+    /// and before its request went out writes nothing, and is read from the
+    /// directory again; its connection, healthy, goes back to the pool. One
+    /// straddling the failover of a tenant of another bucket goes out as it
+    /// would have, on its pooled connection: one count for every tenant,
+    /// any failover sent it to the directory again and closed the
+    /// connection.
+    #[test]
+    fn a_request_whose_tenant_moved_before_it_went_out_writes_nothing() {
+        let pool = Pool::new(Duration::from_secs(60));
+        let flying = Flying::of("acme", &pool);
+        assert_eq!(pool.cut("n1", &bucketed("acme", true)), Cuts::default());
+        std::thread::scope(|s| {
+            let (theirs, exchange) = out(s, &pool, flying);
+            assert_eq!(ended(exchange.join().unwrap()), Ended::Moved);
+            assert!(
+                quiet(&theirs),
+                "the node heard of a request that never went"
+            );
+            assert_eq!(state_of(&pool, "n1"), IDLE);
+            let kept = pool.idle.lock().unwrap()["n1"].idle.len();
+            assert_eq!(kept, 1, "its connection is the pool's again");
+        });
+
+        let pool = Pool::new(Duration::from_secs(60));
+        let flying = Flying::of("acme", &pool);
+        assert_eq!(pool.cut("n1", &bucketed("acme", false)), Cuts::default());
+        std::thread::scope(|s| {
+            let (mut theirs, exchange) = out(s, &pool, flying);
+            request_on(&mut theirs);
+            theirs
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            let Ok(answer) = exchange.join().unwrap() else {
+                panic!("it never went out");
+            };
+            assert_eq!(answer.status, 200);
+        });
     }
 }

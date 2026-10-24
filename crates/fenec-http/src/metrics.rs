@@ -145,6 +145,11 @@ thread_local! {
     /// the write lock is taken and read where the statement is counted,
     /// with no signature between the two having to carry it.
     static WROTE: Cell<bool> = const { Cell::new(false) };
+    /// The change the last block this thread landed left its database at,
+    /// since the request it is answering began: what a tenant's answer
+    /// after a lapsed lease names (`handle_admitted`). Set by the engine's
+    /// watcher, which runs on the thread that commits (`Hub::landed`).
+    static LANDED: Cell<Option<u64>> = const { Cell::new(None) };
     /// This thread's shard, handed out in turn.
     static MINE: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS.len();
 }
@@ -162,6 +167,33 @@ pub fn shard() -> usize {
 /// Notes that the statement this thread is running writes.
 pub fn wrote() {
     WROTE.with(|w| w.set(true));
+}
+
+/// Whether the statement this thread is running writes ([`wrote`]): what a
+/// tenant's answer is asked after a lease that lapsed under it.
+pub fn writing() -> bool {
+    WROTE.with(Cell::get)
+}
+
+/// Notes that a block landed on this thread, leaving its database at `seq`.
+pub fn landed(seq: u64) {
+    LANDED.with(|l| l.set(Some(seq)));
+}
+
+/// Where the last block this request landed left its database, if one did
+/// ([`landed`]).
+pub fn landed_at() -> Option<u64> {
+    LANDED.with(Cell::get)
+}
+
+/// A request begins on this thread: what the one before it wrote is not
+/// its. Cleared by [`record`] alone, the flag outlived a request answered
+/// on a path that records none -- `POST /_admin/tenants/<t>/schema` -- and
+/// the next request on its keep-alive connection, a read, was asked of a
+/// write it never made.
+pub fn begin_request() {
+    WROTE.with(|w| w.set(false));
+    LANDED.with(|l| l.set(None));
 }
 
 /// Statements that took `ms` or longer are logged with their text: `--slow-ms`.

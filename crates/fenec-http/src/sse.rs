@@ -84,7 +84,11 @@ impl Watcher for Hub {
     /// A block landed: held writes are woken by the collections it wrote
     /// alone, asked of the change ring only when some are held.
     fn landed(&self, db: &Database, before: u64) {
-        self.mark(db.change_seq());
+        let seq = db.change_seq();
+        self.mark(seq);
+        // On the committing thread: the request it answers asks, where its
+        // lease lapsed before the answer, what it landed.
+        crate::metrics::landed(seq);
         if self.waits.holds() {
             self.waits
                 .wrote(db.changed_collections_since(before).as_deref());

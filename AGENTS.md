@@ -72,6 +72,7 @@ make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease, a query across 100 tenants (ARGS=latency|fanout for one part; ARGS=standby a standby router's request against the primary's; ARGS=regions a region's own failover cut off from the global router, leases of 1 and 5 s; ARGS=reads a read answered by a read replica against one sent home)
 make quota-bench         # a tenant's quotas: a put held to the limit in process, a tenant with every quota against one with none over HTTP
+make fence-bench         # a node's lease: a put in process with no fence and with the lease's, and Lease::allows alone
 make policy-bench        # a scoped set under a plain rule, a field list, a transition, answering its row and a rule reading another collection, and a read by id, against the server's token, in process and over HTTP (ARGS=streams|beats: writes beside scoped streams)
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make node-archive-bench  # every tenant of a node archived: 1 000 tenants and one of 64 MB, a stream each against the node's one stream (ARGS="tenants active seconds sync way big_mb"); the syncer's passes and a close beside it (PASSES="way seconds big_mb")
@@ -894,13 +895,72 @@ none and its grant runs from the reading, as before, and a node from
 before them ignores them (`Leases::unnumbered`, said once): leased the old
 way rather than refused or failed over never, so a rolling upgrade in
 either order keeps every node writing and failed over on its own, the late
-grant open where either side is old. What leases do not cover: the node's
-lease runs on `Instant` (`CLOCK_MONOTONIC`, macOS's `CLOCK_UPTIME_RAW`),
-which stands still while a VM is stopped (kvmclock across a stop and a
-continue) or a machine suspended, so a node paused so wakes with lease left
-and writes beside the new primary until it runs out, and a write that
-passed the fence just before its process stopped lands once it resumes
-(the RUNBOOK's known gaps); a stall of 16 rounds or more can push the
+grant open where either side is old. The node's lease runs on the boot
+clock (`lease::Moment`: `CLOCK_BOOTTIME` on Linux, `mach_continuous_time` on
+Apple's systems through `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`,
+declared by hand), which counts a suspend: on `Instant`'s
+(`CLOCK_MONOTONIC`, `CLOCK_UPTIME_RAW`) a node suspended past its lease
+woke with the lease left as it was and wrote beside its tenants' new
+primaries. It fails closed, as std's `Instant::now` does: a boot clock that
+stops answering panics, Linux decides once whether it has one (before
+2.6.39, `Instant` throughout) -- a failure read past from call to call mixed
+two clocks' moments, and a timebase guessed at 1 / 1 made an Apple silicon
+lease 41.7 times as long. The router counts on `Instant`, which a suspend
+of its own machine stops: it fails over later, never sooner. It cost a
+write nothing: a fenced put 555-560 -> 548-552 ns on an M1, about 7 ns
+saved, eight runs a side in ABBA turns (`make fence-bench`), and in
+Docker's Linux VM (musl), where `CLOCK_BOOTTIME` is read through the vDSO as
+`CLOCK_MONOTONIC` is, 1 488-1 677 against 1 472-1 720, quartet by quartet
+the same at loads of 34-46 from other work; the clock as it stands, read
+again at loads of 50-88, lower in every M1 quartet (804-880 against
+821-1 114) and the same on Linux. No runner suspends, so the
+clock's test reads it between two reads of a boot clock the system vouches
+for -- `/proc/uptime`, `mach_continuous_time` -- which CI runs in a time
+namespace whose boot clock is a day ahead of its monotonic one (`unshare
+--time --boottime`, the test named whole and its one pass asked for):
+reading `CLOCK_MONOTONIC` it fails there, and reading `CLOCK_UPTIME_RAW` on
+a Mac that has slept. And a write landed under the lease is not answered as
+a success once the lease has lapsed by the time it is answered
+(`answered_under_lease`, from `handle_admitted`, the admin schema's route
+and a `/_changes` consumer's commit): a process stopped between the fence
+and the append, a suspend, or a durability that outlasted the lease -- a
+cut stream waits out `SENT_WAIT`, a second, where a lease's tenth is half
+of one at the default -- had it answered 200 and lost in the failover. It
+is answered 500 with `"outcome": "unknown"`, and `seq` and `history` in the
+body rather than in `Fenec-Seq`, which a client would take as its own (Go's
+and .NET's code `outcome_unknown`, JavaScript's and Python's `outcome`); a
+keyed one is told to send it again with its key, which the lapsed node
+refuses before the key is looked up and the tenant settled replays or
+makes once, and one with none that a read-back means something only a
+lease and a tenth after the answer, the node answering reads with the
+write in them until its tenant settles. What wrote is a statement that
+writes (`metrics::writing`, a keyed replay's too) or a block landed in the
+request (`metrics::landed`, set by `Hub::landed` on the committing thread):
+a `/batch` holding a compact, a put landed and a later statement fenced,
+was told 503 to come back as if nothing had. Both flags are cleared as each
+request begins (`metrics::begin_request`): cleared by `record` alone, they
+outlived the admin schema's answer, which records none, and the next read
+on its keep-alive connection was answered as a write once its lease
+lapsed under it (`tests/lease_answers.rs`, each failing with its part taken
+out). What
+leases do not cover: a VM stopped by its host is no suspend to the guest --
+under QEMU/KVM's defaults a `stop` and `cont` (QEMU sets the kvmclock back,
+on arm64 the virtual counter), and under any of its settings a save and
+restore or a live migration's blackout, leave every clock in the guest
+where it stopped, the boot clock too, as do Hyper-V's saved state, VMware's
+suspend, Firecracker's snapshot restore and a container's CRIU restore,
+whose time namespace keeps the clocks going on from where they were -- so a
+node paused so wakes with lease left and writes beside the new primary
+until it runs out or it reads
+the router's first grant after the failover. Every signal inside the guest
+comes once it runs again and none is sound -- KVM's `PVCLOCK_GUEST_STOPPED`
+is the soft-lockup watchdog's, in no interface userspace has; the TSC
+against the monotonic clock hangs on the VMM's settings and misses a
+migration; the wall clock is set by an agent after, or slewed -- so none is
+built; a cloud's notice comes ahead (Azure's Scheduled Events `Freeze`,
+GCE's `maintenance-event`), and the RUNBOOK's known gaps say which pauses
+count; an answer that passed the second check goes out
+whenever the process runs again; a stall of 16 rounds or more can push the
 acknowledgement out of `answered`, the node holding no lease until the
 grant after, sent at once; two directories leasing one node -- a
 misconfiguration -- can take it in turns as each other's lease lapses,
@@ -915,7 +975,15 @@ every start to ride in -- and sent to the standbys before any grant, as a
 move's flip is, `SENT_WAIT` at most); a router counts a node by that record
 (`Leases::inherited`, read as it leads) until the node has run a lease from
 one of its grants (`Held::own`, set by `Leases::ran` on the node's
-`"ran":true`, never by `Kept`, never by a take of the list alone), and
+`"ran":true`, never by `Kept`, never by a take of the list alone -- the
+answer read as the object it is, `Granted`: looked for as bytes,
+`"ran":true` was sought in windows a byte too long and never found, so
+every node was counted by the record until it came down, and a router
+restarted at 3 s over a record of 10 s failed a node it had cut off over
+11 s after it led, not 3.3 s after the node's last answer --
+`late_grants.rs`'
+`a_node_that_ran_the_router_s_lease_is_counted_by_it_not_the_record`;
+#343's tests held only the other side), and
 lowers it to its own once it has led a lease and a tenth of it
 (`Leases::lowerable`): every lease granted before it led has run out, and
 one started after it counts by what may still run. Never lowered, one 20 s
@@ -949,8 +1017,13 @@ the global router's leasing to a region's is counted by the region's alone
 (the RUNBOOK says how to lower a lease and move a node). A router from
 before the record writes and reads none (`late_grants.rs`'
 `..._waits_out_a_node_it_never_reaches`, a restart and a standby promoted
-at 1 s after 10 s, each failing with the record ignored or never written,
+at 3 s after 10 s, each failing with the record ignored or never written,
 and `a_router_that_cannot_record_its_lease_grants_no_longer_than_the_record`).
+Those tests' shorter lease is 3 s, as the other lease tests' is: at 1 s,
+once a node that ran it was counted by it, the healthy nodes beside the one
+cut off -- each grant bounded by a third of the lease, 333 ms -- went
+unrenewed past 1.1 s at background QoS and were failed over, the replica
+their failover dropped leaving the cut-off node's tenant nowhere to go.
 Cut off, a node
 stops about a round sooner, its lease run from the grant before the last it
 read: at a lease of a second it stopped 386-406 ms after the cut against
@@ -1078,7 +1151,8 @@ follower's lookup of the dead primary hanging too, 2.1-3.3 s in three
 against 5.7; by names that resolve, 2.0-2.6 s either way. What the drill's writers
 waited past that is the router's `--upstream-timeout` on a request to the
 dead node, cut by their own 5 s: at `--upstream-timeout 2` they wrote
-again 1.96 s after the kill on both builds. `make shard-bench`'s failovers
+again 1.96 s after the kill on both builds -- a wait the failover now ends
+itself (what a failover ends, below the router's pool). `make shard-bench`'s failovers
 as they were, twelve runs a side in ABBA turns at loads under 3 with all
 of the above in, the lineage and history sent and recorded among it: a
 lease's last tenant writing again 1.28 s after the cut against 1.29
@@ -6543,6 +6617,167 @@ side in ABBA turns over three rounds at loads of 1.3-2.7 (20.1-23.8 and
 inlined in it, is main's to the instruction, and `read_body`'s path for a
 body with a length the same instructions in other registers.
 
+**A failover ends what the router has out to the node for the tenants it
+moved** (`upstream::Pool::cut`, `Router::after_cut`, `cut_moved`). A node
+that dies with no reset -- a machine lost, a network cut -- answers
+nothing and closes nothing, and what the router had out to it waited for
+`--upstream-timeout` though its tenants answered on their new primaries:
+in V5's drill, at a lease of 2 s and the kit's timeout of twice that, the
+router failed the killed node over 1.9-2.6 s after the kill and its
+writers wrote again at 3.90-4.02 s, their requests let go of at the
+timeout. The pool knows every connection it made, by node, among the
+idle ones under the lock a request takes anyway (`Kept::flights`, a
+connection put among them as it is made, a lock a connect), and each
+connection's `Flight` is one word: the state in its low bits beside a
+mark of the tenant whose request is out on it, so a cut compares and
+changes both at once -- read apart, a request of another tenant out on
+the connection a moment later could be the one cut. The mark (`mark_of`)
+is a multiply chain keyed by a number the process draws from
+`RandomState`, MurmurHash3's finisher and its high 60 bits: kept low, the
+first cut's `(h | 1) << 3` dropped the top three, and the low 61 bits of a
+product depend on the low 61 of what is multiplied alone, so two names of
+a multiple of 8 bytes differing only in their last byte's top bits --
+`tenant-1` and `tenant-q` -- always shared one (603 592 groups among
+`shop` and four of `[a-z0-9_-]`, none now), and a failover of one cut the
+other's write on a node that still served it, a 502 for a write whose 200
+was on its way; keyed, nobody naming tenants can make two share one. A
+request's word is `WAITING` from the moment the pool hands it the
+connection (`take`, `register`, written under the pool's lock) and it
+claims its answer with a compare-and-swap to `ANSWERING` once the head has
+begun;
+`into_stream` marks a stream `STREAMING` and asks its bucket's cut count
+again (below), sequentially consistent with the cut's look, so a stream
+whose tenant was failed over between its head and then -- its answer
+begun, which the cut passes over -- ends there for its client to open
+again, where it was copied for good; asked at the head instead, every
+forward read its answer's headers for a length once more.
+`promote_on`, once the directory places the tenant on its copy, has the
+pool shut down (`shutdown`, both ways) each connection `WAITING` or
+`STREAMING` with the tenant's mark, through `CUTTING` to `CUT`: a thread
+waiting on one wakes to its end, sees it was cut (`was_cut`,
+`Ended::Cut`) and is answered by what the node may have run -- not run, a
+read, a request marked as one or a write under an `Idempotency-Key` sent
+to the new primary, anything else 502 saying it may have run, the rule
+`replayable` already was; a held request by the same rule with what is
+left of its wait (the router cannot tell one held from one the node had
+just run as it died, and a claim run twice takes two jobs) -- and a
+stream ends for its client to open it again. An answer begun is never
+cut: the swap to `ANSWERING` and the cut's from `WAITING` are one word's,
+so the first wins whole, and macOS's `shutdown` drops what the socket had
+read but not handed over (a cut stream's last events, which its client's
+next seed brings). A connection is marked `CLOSED` before its descriptor
+is (`Conn`'s `Drop`), waiting out a cut in `CUTTING`, so a cut never
+shuts a descriptor another connection took since. Only a failover cuts,
+by hand or on a lease, a pair's or a replica's: a node merely suspected
+may be slow, its lease running, and a write cut there would be a 502 for
+one that may well land. A forward that read the directory before the flip
+and goes out after the cut looked would wait as before, so the pool
+counts its cuts in 64 buckets by the mark's top bits (`Pool::moved`), and
+a forward reads its bucket's before the directory, acquired -- a count a
+cut moved comes with the directory as its failover left it -- and again
+before its first byte -- moved, it writes nothing, puts its connection
+back
+(`Ended::Moved`, `unsent_moved`) and reads the directory again, which
+mostly places it where it was. One count for every tenant, any failover
+had each forward straddling it close a healthy connection and count as
+cut. The second read needs no fence: the cut moves the count and then
+takes the pool's lock to list the node's connections, under which the
+forward's `WAITING` was written, so the cut's lock came after and finds
+`WAITING`, or before and the count is read. Written and read sequentially
+consistent instead, the two were an `stlr` and an `ldar` on aarch64, the
+load waiting for the store to drain, and an `xchg` on x86, every
+request. Its dial tries a second at a time (`connect_watching`,
+`CONNECT_LOOK`) and gives up once the count moved, and a connect refused
+as it moved reads the directory again rather than answer 502: past the
+node's pooled connections, each held by a request waiting on it, a
+machine gone answers no connect, and those waited out the timeout too.
+Under leases a copy takes its tenant's writes once the router's grant
+names it there, which a failover sends each node it moved tenants to as
+it ends -- a lapse's from `granted_after`, and one by hand now too
+(`failover_by_hand`, before the operator is answered): left to the next
+round, a third of a lease away, the copy refused every write of a tenant
+failed over by hand until then. A write a cut sent there before is
+refused unrun 503 -- every time in a test of four writes -- so the router
+grants that node its list (`grant_cut_onto`: one grant a node at a time
+on a thread of its own, every request refused meanwhile waiting on it two
+thirds of a lease at most, since a grant each was a reading of every
+node's list each and a turn waited on the request's thread) and asks
+again, twice (`CUT_ASKS`): the grant it joins may have read the list
+before its tenant was placed there, begun for another tenant's request a
+promotion earlier, and asking once, such a request was answered the
+copy's 503; the second grant began after the first ended, so it reads
+the tenant there. Only for a cut, and onto another node than the one it
+was cut from. A standby router and a region's router forwarding by its copy of the
+global directory fail nothing over and cut nothing: their requests wait as
+before. Cuts are counted by what became of them
+(`fenec_router_cut_requests_total{outcome}`), besides each answer's status
+class. `tests/cuts.rs` (a binary of its own) stands a wire that falls
+silent between the router and a node, carrying nothing and closing
+nothing, with the router's timeout at a minute and each client's at half
+of it: by hand, a read, a keyed and an unkeyed write the node ran with
+their answers swallowed, a keyed and an unkeyed held claim and a
+subscription, each unanswered as the failover begins and answered within
+the client's wait -- the read and the keyed write by the copy promoted,
+the latter from its key, the unkeyed write and claim 502 and run once, the
+keyed claim held there and handed the job put after; the same on a lease
+of 10 s, so its five requests are out well before it lapses; the keyed
+write and claim under leases answered by the copy, not refused; a tenant
+failed over by hand under a lease whose rounds come twenty minutes apart
+taking a write as soon as the failover answers; two tenants promoted onto
+one node, the second's write joining a grant that read the node's list
+before its promotion -- the grant and the second promotion parked at the
+node's wire, and a hook counting the requests waiting on a grant
+(`cut_grants_waiting`) -- and asking again; an answer
+whose first 16 MB had reached the router as the failover ran coming
+whole; `tenant-1`'s write whose answer had begun short of a status line
+answered 200 through `tenant-q`'s failover; and the cut passed on through
+a global router relaying to the region's router that failed the node
+over. Each fails with its part taken out -- the cut, the replay rule, the
+claim of the answer, the stream's mark, the grant, the failover's grant,
+the second ask, the mark kept low --
+and the unit tests hold the flight's states, a sweep of 110 000 names of
+8 and 16 bytes to no shared mark, a stream failed over between its head
+and its copy ending as it is handed over, the count read before a request
+goes out --
+the connection put back, another bucket's failover passed over -- and a
+dial to a listener that answers no SYN (its queue made one long, `listen`
+again with 1 -- macOS reads 0 as its most -- and filled) and to one
+refused. In `make drill` the dead node's writers wrote again as it was
+failed over, 2.52 and 1.93 s after the kill, against main's 3.94 and 3.95
+(two runs a side in turns, 0 lost); natively, the drill's flags and a
+proxy falling silent, at 3.27-3.32 s against 4.02-4.04 at the drill's
+timeout of 4 s and 5.02-5.04 -- the writers' own 5 s -- at the kit's 10,
+the failover at 3.26-3.30 either way. A new write landing on a copy
+between its promotion and the failover's grant is refused 503 with
+`Retry-After`, as during any failover under leases; one a cut sent there
+asks for the grant itself. A forward hashes its tenant's name, reads its
+bucket's count twice -- acquired, then relaxed -- and writes its
+connection's word once, under the pool's lock it takes anyway, and swaps
+it once: `make shard-bench ARGS=latency`'s added p50 20.45 us against
+main's 20.55, 8 runs a side in ABBA turns at loads of 3.7-4.8 (lower in 3
+rounds of 4); with the word stored and the count read sequentially
+consistent it was 20.55 against 20.4 over 24 runs a side (the rounds'
+differences' median +0.08 us, 9 of 12 positive). Marking a stream at its
+head rather than as it is handed over had every forward read its answer's
+headers for a length once more, and that build ran +0.2-0.3 us. A read
+through a read replica's region's router (`ARGS=reads`, 8 runs a side at
+loads of 1.9-4.2) took 63.9 us p50 against main's 66.75, sent home 61.75
+against 64.15, lower in every round: the replica's connection itself goes
+back to the pool once its body is read and the answer keeps none
+(`Answer::reader` an `Option`), where main pools a copy of its descriptor,
+a `dup` and a `close` more a read, and a first version of this change
+registered that copy under a flight of its own, a lock more and 0.4-0.5
+us. `fenec-shard`'s code grew 29.4 KB (aarch64-apple-darwin): `after_cut`
+9.3, one out-of-line copy of `answer_out` for the cold callers 8.6 -- a
+read replica's answer goes through it too, `forward_near` 8.8 KB smaller
+-- `grant_cut_onto` and its thread 5.3, the grants after a failover by
+hand 2.2 (a set of the nodes and a thread each were 8); `forward` itself
+is 3.1 KB smaller, `elsewhere` out of line now that two inline `toward`.
+On x86_64 the answer's claim is a `lock cmpxchg`, some 20 cycles, and the
+`xchg` the store before a request's first byte was is a plain `mov` now;
+Docker on this Mac runs that architecture only emulated, which times the
+emulator, so it was not measured.
+
 **A query across tenants is the router's admin's, merged by what the
 request says** (`fenec-shard/src/fanout.rs`, `POST /_shard/query`). An
 operator asked every tenant themselves for a count each or the newest
@@ -6874,18 +7109,24 @@ again 0.43-0.51 s after its standby's promotion -- since grants are
 numbered, 1.02, 0.83 and 1.00 s and 0.42-0.48, the node killed failed over
 1.90, 2.06 and 2.56 s after, its writers again 3.90-3.94 s, 40 588
 acknowledged and 0 lost (three runs of this kit's drill). The writers' figure
-is the upstream timeout's, not the failover's: a writer's request in
-flight to the dead node waits there until the router lets it go, which at
+was the upstream timeout's, not the failover's: a writer's request in
+flight to the dead node waited there until the router let it go, which at
 fenec-shard's 60 s was the writer's own 5 s client timeout, every run's
 4.86-4.92 s -- quoted at first as a promotion waiting out the replica's
-reconnect. CI's runs met a worse one before #340 -- a dead node's name its
+reconnect. The failover answers it now (the paragraph on what a failover
+ends, above): in two runs a side in turns, the writers wrote again 2.52 and
+1.93 s after the kill as the router failed the node over at 2.53 and 1.93,
+against main's 3.94 and 3.95 beside failovers at 2.49 and 2.26. CI's runs met a worse one before #340 -- a dead node's name its
 resolver was slow to refuse held up the router's whole lease round, the
 region's healthy nodes unrenewed and failed over, 26.5-31.4 s to write again
 and 12-18 s without a write for a tenant on a healthy node, the repair
 missing its 60 s in four of six runs -- which #340 fixed (the lease
-paragraph above). The kit's routers run `--upstream-timeout` at twice the
-lease (`FENEC_UPSTREAM_TIMEOUT`, 10 s), the drill's at twice its own; past
-it a slow statement is a 502 while the node finishes it, and a request
+paragraph above). The kit's routers run `--upstream-timeout` at 10 s
+(`FENEC_UPSTREAM_TIMEOUT`), the drill's at twice its lease: chosen at twice
+the lease so a failed-over node's requests were let go of, it now bounds
+only what no failover ends -- a node not failed over, a relay to a router
+gone, a standby's forwards -- and need not follow the lease; past it a
+slow statement is a 502 while the node finishes it, and a request
 carrying `Fenec-Wait` is allowed the timeout plus its wait. When
 the drill fails it prints the last 300 lines of every router's and node's
 log (`DRILL_LOG_LINES`), since the cleanup takes the containers and CI

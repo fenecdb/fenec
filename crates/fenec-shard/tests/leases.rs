@@ -57,7 +57,7 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
         &scrape,
         "fenec_router_lease_age_seconds{node=\"n1\"} ",
     ));
-    let (mut fenced, mut promoted) = (None, None);
+    let (mut fenced, mut promoted, mut unknown) = (None, None, None);
     while fenced.is_none() || promoted.is_none() {
         assert!(
             cut.elapsed() < Duration::from_secs(20),
@@ -72,6 +72,20 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
             503 => {
                 assert!(body.contains("lease"), "{body}");
                 fenced.get_or_insert_with(|| cut.elapsed());
+            }
+            // Landed while the lease ran, answered once it had lapsed --
+            // its fsync done, its wait for the replica's stream, cut, a
+            // second -- and so not a success: answered 200, it was a write
+            // acknowledged that the replica promoted never had. One at the
+            // most, the write in flight as the lease ran out: every write
+            // after it is fenced.
+            500 => {
+                assert!(body.contains(r#""outcome":"unknown""#), "{body}");
+                assert!(
+                    unknown.is_none() && fenced.is_none(),
+                    "a second unknown outcome, or one after the fence: {body}"
+                );
+                unknown = Some(cut.elapsed());
             }
             other => panic!("n1 answered {other}: {body}"),
         }
@@ -97,7 +111,7 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
     // stopped, rightly, 101 ms after the cut against a bound of 350.
     eprintln!(
         "fenced {fenced:?} after the cut ({left:?} left), promoted {promoted:?} \
-         (the last answer {age:?} before)"
+         (the last answer {age:?} before), an outcome unknown at {unknown:?}"
     );
     assert!(
         fenced >= left,

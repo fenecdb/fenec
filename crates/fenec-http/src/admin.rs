@@ -97,11 +97,16 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         // The node's admin token, which the router holds, rather than its
         // data token, which reaches every tenant: an app creating tenants
         // needs the router's token alone.
+        // Asked of the lease again as it is answered, as a tenant's write is.
         (Method::Post, ["tenants", t, "schema"]) => tenants.get(t).map(|tenant| {
             let _held = tenant.enter();
             match tenant.writable() {
                 Err(why) => Response::retry_after(503, &why, 1),
-                Ok(()) => crate::apply_schema(&tenant.db, cfg, &String::from_utf8_lossy(&req.body)),
+                Ok(()) => {
+                    let body = String::from_utf8_lossy(&req.body);
+                    let applied = crate::apply_schema(&tenant.db, cfg, &body);
+                    crate::answered_under_lease(&tenant, req, applied)
+                }
             }
         }),
         // A read of one tenant for a router's query across tenants

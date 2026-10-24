@@ -546,6 +546,22 @@ export declare class FenecError extends Error {
    * (`Retry-After`).
    */
   retryAfter?: number;
+  /**
+   * `'unknown'` on a 500 of a write a tenant's node landed and answered
+   * after its lease from the router lapsed: its tenant may have been
+   * failed over without it. Send it again with the same idempotency key,
+   * or read it back a lease and a tenth later.
+   */
+  outcome?: 'unknown';
+  /**
+   * Where a write whose `outcome` is unknown left its node's database, and
+   * of which history: a read sent after them once its tenant has settled
+   * is answered by a primary holding the write and refused 504 by one
+   * without it. Not the client's position, which the answer does not move.
+   */
+  seq?: number;
+  /** The history `seq` is a change of, as `Fenec-History` writes one. */
+  history?: string;
 }
 
 /**

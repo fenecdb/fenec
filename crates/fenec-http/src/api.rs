@@ -1200,10 +1200,10 @@ pub(crate) fn parsed(text: &str) -> Result<Arc<Statement>> {
 /// lock, and their writes land as one record or not at all: the first error
 /// puts back what the ones before it did, and the response says so
 /// (`completed` is 0). One round trip instead of N, no other writer
-/// slipping in between, and nothing half done. A create, a drop, a
-/// `create index` or a `compact` cannot be put back, so a batch holding one
-/// runs each statement on its own: it stops at the first error, and
-/// `completed` says how many were applied.
+/// slipping in between, and nothing half done. A schema change is put back
+/// as a write is (`Statement::fits_block`); a `compact` cannot be, so a
+/// batch holding one runs each statement on its own: it stops at the first
+/// error, and `completed` says how many were applied.
 pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
     let mut out = Vec::new();
     for (i, line) in body.lines().enumerate() {

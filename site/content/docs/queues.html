@@ -277,7 +277,13 @@ moment it would write something, or the end of the wait.</p>
     goes on; a tenant moved away or deleted answers its held claims 503
     with <code>Retry-After</code>, to come back through the router, which
     waits for a held request its wait longer than
-    <code>--upstream-timeout</code>.</li>
+    <code>--upstream-timeout</code>. A claim held on a node the router
+    fails over is answered then: under an <code>Idempotency-Key</code> it
+    is held again on the tenant's new primary for what is left of its
+    wait; without one it is a <code>502</code>, since the node may have run
+    it as it died, and sent again it would take a second job
+    (<a href="sharding.html#in-flight">Requests out to a node failed
+    over</a>).</li>
   <li><b>Shutdown.</b> At SIGTERM every held claim is answered at once,
     with the nothing it found, before the server syncs and exits.</li>
   <li><b>A replica</b> refuses a claim as it refuses every write (403),

@@ -134,9 +134,20 @@ public class FenecException : Exception
     /// <c>not_found</c> (404), <c>conflict</c> (409), <c>gone</c> (410), <c>unmet</c> (412: a write's require
     /// not met, its batch put back), <c>key_reused</c> (422), <c>too_many</c> (429: a tenant's quota of
     /// streams, requests or writes a second), <c>unavailable</c> (503), <c>timeout</c> (504),
-    /// <c>storage_full</c> (507: past --max-memory, or a tenant's quota of bytes or rows), or
-    /// <c>http_&lt;status&gt;</c>.</summary>
+    /// <c>storage_full</c> (507: past --max-memory, or a tenant's quota of bytes or rows),
+    /// <c>outcome_unknown</c> (500 with <c>"outcome": "unknown"</c>: a write a tenant's node landed and answered
+    /// after its lease from the router lapsed, its tenant perhaps failed over without it -- send it again with
+    /// the same idempotency key, or read it back a lease and a tenth later), or <c>http_&lt;status&gt;</c>.</summary>
     public string Code { get; }
+
+    /// <summary>Where a write whose outcome is unknown (<c>outcome_unknown</c>) left its node's database, and of
+    /// which history: a read sent after them, once its tenant has settled, is answered by a primary holding the
+    /// write and refused 504 by one without it. <c>null</c> otherwise; not the client's position, which this
+    /// answer does not move.</summary>
+    public long? Seq { get; }
+
+    /// <inheritdoc cref="Seq"/>
+    public string? History { get; }
 
     /// <summary>How many statements of a failed batch were applied: 0, since a batch lands whole or not at all,
     /// but for one holding a compact, which runs each statement on its own and keeps what ran.</summary>
@@ -166,6 +177,15 @@ public class FenecException : Exception
         At = at;
         Quota = quota;
         RetryAfter = retryAfter;
+    }
+
+    /// <summary>A write whose outcome is unknown: <c>outcome_unknown</c>, and where it left the database.</summary>
+    FenecException(int status, string message, int completed, int? at, long? seq, string? history)
+        : this(status, message, completed, at)
+    {
+        Code = "outcome_unknown";
+        Seq = seq;
+        History = history;
     }
 
     static string CodeOf(int status) => status switch
@@ -198,6 +218,13 @@ public class FenecException : Exception
                 TimeSpan? wait = r.TryGetProperty("retry_after", out var w) ? TimeSpan.FromSeconds(w.GetInt64()) : null;
                 if (r.TryGetProperty("retry_after_ms", out var ms) && ms.GetInt64() > 0)
                     wait = TimeSpan.FromMilliseconds(ms.GetInt64());
+                if (r.TryGetProperty("outcome", out var o) && o.ValueKind == JsonValueKind.String
+                    && o.GetString() == "unknown")
+                    return new FenecException(status, e.GetString() ?? body,
+                        r.TryGetProperty("completed", out var done) ? done.GetInt32() : 0,
+                        r.TryGetProperty("at", out var stop) ? stop.GetInt32() : null,
+                        r.TryGetProperty("seq", out var s) && s.TryGetInt64(out var n) ? n : null,
+                        r.TryGetProperty("history", out var h) ? h.GetString() : null);
                 return new FenecException(status, e.GetString() ?? body,
                     r.TryGetProperty("completed", out var c) ? c.GetInt32() : 0,
                     r.TryGetProperty("at", out var at) ? at.GetInt32() : null,

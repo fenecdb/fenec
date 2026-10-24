@@ -213,6 +213,43 @@ ends before an answer goes again only where running it twice is harmless — a
 answered <code>502</code>, since the node may have run it: a client that sends
 it again should send it with a key.</p>
 
+<p id="in-flight"><b>Requests out to a node failed over.</b> A node that dies
+with no reset — a machine lost, a network cut — answers nothing and closes
+nothing, so what the router has out to it would wait for
+<code>--upstream-timeout</code> (60 s), even once its tenants answer on
+their new primaries. When the router fails a node over, by hand or on a
+lease, it ends what it has out to the node for each tenant it promoted, as
+soon as the directory points the tenant at its new primary, and answers
+each by the rule above: a request the node cannot have run, a read, or a
+write with an <code>Idempotency-Key</code> goes to the new primary — a keyed
+write the old node made and sent its copy is answered from the key there,
+one it never sent runs there once — and any other write is answered
+<code>502</code>, saying it may have run. A held request (<code>Fenec-Wait</code>) goes by the same rule, with
+what is left of its wait: the router cannot tell one still held from one
+the node had just run as it died, and a claim run twice takes two jobs. A
+subscription ends, for its client to open it again where the tenant is now.
+A request whose answer had begun is left to the node, as is everything out
+to a node only suspected — a grant missed, its lease still running — whose
+writes may well land, and whose reads have nowhere better to go, and what
+is out to the node for a tenant the failover left there. A request still
+connecting to the node gives up within a second of the failover, and one
+refused as it comes is not a <code>502</code>: both go to the new
+primary. Under leases a promoted copy takes its tenant's
+writes once the router's grant names it there, which the failover sends
+each node it moved tenants to as it ends; a write sent there before is
+refused unrun, and the router then grants the copy its list at once and
+asks again — twice, since a grant under way for another tenant may have
+read the list before this one was promoted. What is cut and what became of it is counted
+(<code>fenec_router_cut_requests_total</code>,
+<a href="monitoring.html#router">Monitoring</a>). A standby router, and a
+region's router forwarding by its copy of the global directory, fail
+nothing over themselves, so what they have out to such a node still waits
+for their timeout. In the deploy kit's drill (<code>make drill</code>, a
+lease of 2 s, the routers' timeout 4 s, a node cut off the network and
+killed) the dead node's writers wrote again as the router failed it over,
+1.93 and 2.52 s after the kill, where they waited for the timeout before,
+3.94 and 3.95 s; none of their acknowledged writes was lost.</p>
+
 <p>Its only state is the <b>directory</b>: two collections in a fenecdb file of
 its own, <code>nodes</code> and <code>tenants</code>. Every change is written and
 synced before it takes effect, and a tenant's node and state change in one
@@ -813,7 +850,10 @@ is not its tenant as the directory knows it — of another lineage, or an old
 primary's copy that never heard from the new one — is refused by its node
 and listed as not promoted, the tenant left where its rows are; with
 <code>-d '{"force": true}'</code> it is promoted whatever it holds, which
-the audit log records.</p>
+the audit log records. Under <code>--auto-failover</code> the router grants
+each node the tenants went to its lease over them before it answers, so
+they take writes as soon as the answer comes: left to the next round, a
+promoted copy refused them for up to a third of a lease.</p>
 
 <pre data-lang="bash">curl -X POST localhost:8090/_shard/nodes/n1/failover
 {"node":"n1","to":"n2","promoted":["acme","beta"],"failed":[]}
@@ -933,6 +973,10 @@ fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replicas --auto-fa
     for 5.5 to 7.2 s. A node cut off from the router while its clients still
     reach it stops writing two thirds of a lease after its last renewal at
     the most: its lease runs from the grant before that one.</li>
+  <li><b>What was out to the lost node is answered at its failover</b>, not
+    at <code>--upstream-timeout</code>: a read or a keyed write goes to the
+    new primary, any other write is a <code>502</code> that it may have
+    run (<a href="#in-flight">Requests out to a node failed over</a>).</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -984,13 +1028,67 @@ can still outlast a failover until every router is upgraded. A node from
 before them is leased as before too, and the router says so once in its
 log.</p>
 
-<p>What leases do not cover. A node measures its lease on the system's
-monotonic clock, which stands still while a virtual machine is paused
-(KVM's clock across a stop and a continue) or a machine is suspended: a
-node paused so wakes with lease left and writes beside its tenants' new
-primaries until the lease runs out, with no late grant needed; and a write
-that passed the lease's check just before its process stopped lands once it
-resumes. A stall of sixteen rounds or more can leave a node without the
+<p>A node measures its lease on its machine's boot clock —
+<code>CLOCK_BOOTTIME</code> on Linux, <code>mach_continuous_time</code> on
+macOS — which counts the time the machine was suspended. A node woken from
+a suspend that outlasted its lease holds none, and the grant it reads on
+waking acknowledges an answer from before the suspend, which runs nothing
+past that answer's lease. Measured on the monotonic clock, as it was, a
+suspend did not count: the node woke with the lease it had left and wrote
+beside its tenants' new primaries until it ran out. The router counts on
+its own monotonic clock, which its machine's suspend stops, so a router
+suspended fails over later, never sooner.</p>
+
+<p>A write is checked against the lease as it lands, and again as it is
+answered. One that landed while the lease ran and is answered after it
+lapsed — its process stopped or starved between the two, its machine
+suspended, or its fsync or its wait for the replicas' streams outlasting
+the lease — is answered <code>500</code> with <code>"outcome":
+"unknown"</code> (<a href="http.html#statuses">statuses</a>): it is in the
+node's file, and its tenant may have been failed over without it or may
+still be on the node with it, which the node cannot know. Sent with an
+<code>Idempotency-Key</code>, send it again with the same key: the node
+refuses it while its lease has lapsed, before it looks the key up, and once
+the tenant settles a node still holding the write answers it as made, and a
+new primary makes it once. Sent with none, read it back — but not at once:
+the node still answers reads, the write among them, and routers send them
+there until they fail the tenant over, a lease and a tenth
+(<code>--auto-failover</code> × 1.1) after the answer, while
+the copy promoted may lack it. After that, and not before, read it back
+through the router, or send a read with <code>Fenec-After</code> and
+<code>Fenec-History</code> set to the <code>seq</code> and
+<code>history</code> the answer's body names, which a primary holding the
+write answers and one without it refuses 504 — sent at once, that read is
+answered 200 by the lapsed node, whose history holds the write. The body
+names them, not <code>Fenec-Seq</code>, which a client would take as its
+own position. Answered as a success, as it was, a failover lost it. A
+<code>/batch</code> holding a <code>compact</code>, whose statements run on
+their own, is answered so too where one of them landed before a later one
+was refused, with <code>completed</code> and <code>at</code> (it was told
+to come back, 503, as if none had); its <code>seq</code> is the last landed
+statement's, so a 200 after it says every landed statement survived, and a
+504 does not say which earlier ones did, which are read back.</p>
+
+<p>What leases do not cover. A virtual machine stopped by its host is no
+suspend to its kernel. Under QEMU/KVM's defaults, x86 and arm64, a guest
+stopped and continued (<code>virsh suspend</code> and <code>resume</code>)
+finds every clock where it stopped, the boot clock too, and so does a guest
+saved and restored or live-migrated under any of its settings; so do
+Hyper-V's saved state and Azure's freezes for maintenance, VMware's suspend
+and Firecracker's snapshot restore. A node paused so wakes with lease left
+and writes beside its tenants' new primaries until the lease runs out or it
+reads the router's first grant after the failover, which names none of them
+— with no late grant needed — and nothing inside the guest tells it soundly
+that it was paused: every signal there is comes once it runs again. Stop
+the node before its machine is paused, saved or migrated (<code>systemctl
+stop fenec-node</code>), on a cloud's notice where it gives one (Azure's
+Scheduled Events, GCE's <code>maintenance-event</code>), and where a host
+may pause it unannounced, keep the lease short: two primaries last no
+longer than the lease the node had left. The
+<a href="https://github.com/fenecdb/fenec/blob/main/deploy/RUNBOOK.md#known-gaps">runbook's
+known gaps</a> say which pauses are counted and which are not. An answer that passed the second
+check just before its process stopped still goes out whenever the process
+runs again. A stall of sixteen rounds or more can leave a node without the
 answer its next grant acknowledges, holding no lease until the grant after
 it, which the router sends at once. Two directories leasing one node — a
 misconfiguration — can take it in turns as each other's lease lapses,

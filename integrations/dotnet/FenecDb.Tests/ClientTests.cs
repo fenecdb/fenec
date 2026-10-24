@@ -539,6 +539,19 @@ public sealed class ClientTests(Servers servers)
         Assert.Equal(TimeSpan.FromSeconds(1), moved.RetryAfter);
     }
 
+    // A write a node answered after its lease lapsed is told apart from the server's own error by its body's
+    // outcome, with where it left the database; a 500 that says none is http_500 as before.
+    [Fact]
+    public void AWriteWhoseOutcomeIsUnknownSaysSo()
+    {
+        var unknown = FenecException.From(500,
+            "{\"error\":\"the write landed\",\"outcome\":\"unknown\",\"seq\":7,\"history\":\"1-00000000000000ab\",\"completed\":2,\"at\":3}");
+        Assert.Equal(("outcome_unknown", (long?)7, "1-00000000000000ab", 2, (int?)3),
+            (unknown.Code, unknown.Seq, unknown.History, unknown.Completed, unknown.At));
+        var failed = FenecException.From(500, "{\"error\":\"sync error: disk full\"}");
+        Assert.Equal(("http_500", (long?)null), (failed.Code, failed.Seq));
+    }
+
     [Fact]
     public async Task AScopedToken()
     {

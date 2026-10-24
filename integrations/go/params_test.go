@@ -20,6 +20,20 @@ func TestARefusalsWaitIsReadToTheMillisecond(t *testing.T) {
 	}
 }
 
+// A write a node answered after its lease lapsed is told apart from the
+// server's own error by its body's outcome, with where it left the
+// database; a 500 that says none is http_500 as before.
+func TestAWriteWhoseOutcomeIsUnknownSaysSo(t *testing.T) {
+	e := errorOf(500, []byte(`{"error":"the write landed","outcome":"unknown","seq":7,"history":"1-00000000000000ab","completed":2,"at":3}`))
+	if e.Code != CodeOutcomeUnknown || e.Seq != 7 || e.History != "1-00000000000000ab" || e.Completed != 2 || e.At != 3 {
+		t.Fatalf("%+v", e)
+	}
+	e = errorOf(500, []byte(`{"error":"sync error: disk full"}`))
+	if e.Code != "http_500" || e.Seq != 0 {
+		t.Fatalf("%+v", e)
+	}
+}
+
 // Every f32 written reads back through an f64, as the server reads it --
 // one in 4 099 of them, a spread over every exponent, and the tie.
 func TestEveryF32ReadsBackThroughAnF64(t *testing.T) {

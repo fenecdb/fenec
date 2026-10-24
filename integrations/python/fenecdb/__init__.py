@@ -126,7 +126,16 @@ class FenecError(Exception):
     and "write_bytes" answer 429, with the seconds to wait before sending
     again (`retry_after`) -- to the millisecond, as the server says it in
     `retry_after_ms` -- as a tenant being moved or failed over answers its
-    writes 503, in whole seconds. None otherwise."""
+    writes 503, in whole seconds. None otherwise.
+
+    A 500 whose `outcome` is "unknown" is a write a tenant's node landed and
+    answered after its lease from the router lapsed: its tenant may have
+    been failed over without it. Send it again with the same idempotency
+    key, or read it back a lease and a tenth later; `seq` and `history` say
+    where it left the node's database, and a read sent after them once the
+    tenant settles is answered by a primary holding the write and refused
+    504 by one without it. Not the client's position, which this answer
+    does not move. None otherwise."""
 
     def __init__(
         self,
@@ -137,6 +146,9 @@ class FenecError(Exception):
         completed: int | None = None,
         quota: str | None = None,
         retry_after: float | None = None,
+        outcome: str | None = None,
+        seq: int | None = None,
+        history: str | None = None,
     ):
         super().__init__(message)
         self.status = status
@@ -144,6 +156,9 @@ class FenecError(Exception):
         self.completed = completed
         self.quota = quota
         self.retry_after = retry_after
+        self.outcome = outcome
+        self.seq = seq
+        self.history = history
 
 
 class SchemaError(FenecError):
@@ -629,7 +644,7 @@ def _answer(status: int, raw: bytes) -> Any:
     """A response's JSON, or the error it says, as `Client` raises it."""
     if 200 <= status < 300:
         return json.loads(raw) if raw else None
-    at = completed = quota = retry_after = None
+    at = completed = quota = retry_after = outcome = seq = history = None
     try:
         body = json.loads(raw)
         message = body.get("error", raw.decode(errors="replace"))
@@ -642,10 +657,22 @@ def _answer(status: int, raw: bytes) -> Any:
         ms = body.get("retry_after_ms")
         if isinstance(ms, (int, float)) and ms > 0:
             retry_after = ms / 1000
+        # A write a tenant's node answered after its lease lapsed: neither
+        # made nor refused, its position for a read once the tenant settles.
+        if body.get("outcome") == "unknown":
+            outcome, seq, history = "unknown", body.get("seq"), body.get("history")
     except (ValueError, AttributeError):
         message = raw.decode(errors="replace")
     raise FenecError(
-        message, status, at=at, completed=completed, quota=quota, retry_after=retry_after
+        message,
+        status,
+        at=at,
+        completed=completed,
+        quota=quota,
+        retry_after=retry_after,
+        outcome=outcome,
+        seq=seq,
+        history=history,
     )
 
 
