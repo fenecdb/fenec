@@ -63,48 +63,66 @@ impl Drop for Resolver {
     }
 }
 
-/// Puts rows into tenants through the router, each tenant's one after
-/// another, until stopped.
-struct Writers {
-    stop: Arc<AtomicBool>,
-    threads: Vec<std::thread::JoinHandle<(usize, Vec<String>)>>,
+/// How many rounds' grants more each node is sent while something hangs,
+/// in the tests below that a hang holds up no other node's lease: a round
+/// every third of a lease, so five are well past a lease and a tenth.
+const RENEWALS: u64 = 5;
+
+/// Waits until `router`'s rounds have sent each of `nodes` [`RENEWALS`]
+/// grants more than it had when this was called ([`Router::round_grants`]),
+/// while `what` hangs: what the tests that a hang holds up no other node's
+/// lease count, rather than writes answered throughout. A machine that
+/// does not run the router's threads for a lease lapses every lease,
+/// whatever hangs -- at background QoS beside six busy loops a grant
+/// bounded by a second ran for 2.3 s, and the healthy nodes' leases
+/// lapsed, the fence working -- which writes answered cannot tell from a
+/// hang that held their renewals up. Held up -- a round waiting on the
+/// grant that hangs, a repair or a failover run on the leasing thread, a
+/// repair run in a node's grant -- a node is sent no round's grant more
+/// for as long as the hang lasts, which in these tests is past their end,
+/// whatever grants its failovers send it meanwhile: the count tells the
+/// two apart on any machine. Bounded by [`WITHIN`], a round taking
+/// milliseconds.
+fn renewed_meanwhile(router: &Router, nodes: &[&str], what: &str) {
+    let from: Vec<u64> = nodes.iter().map(|n| router.round_grants(n)).collect();
+    let deadline = Instant::now() + WITHIN;
+    loop {
+        let short: Vec<String> = nodes
+            .iter()
+            .zip(&from)
+            .map(|(n, f)| (n, router.round_grants(n).saturating_sub(*f)))
+            .filter(|(_, more)| *more < RENEWALS)
+            .map(|(n, more)| format!("{n}: {more} of {RENEWALS}"))
+            .collect();
+        if short.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} held up the other nodes' renewals: in {WITHIN:?} they were granted {short:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
-impl Writers {
-    fn start(port: u16, tenants: &[&str]) -> Writers {
-        let stop = Arc::new(AtomicBool::new(false));
-        let threads = tenants
-            .iter()
-            .map(|t| {
-                let (stop, t) = (Arc::clone(&stop), t.to_string());
-                std::thread::spawn(move || {
-                    let (mut written, mut refused) = (0, Vec::new());
-                    let path = format!("/t/{t}/query");
-                    while !stop.load(Ordering::SeqCst) {
-                        match query(port, &path, r#"put notes {title: "w"}"#) {
-                            (200, _) => written += 1,
-                            (status, body) => refused.push(format!("{t}: {status} {body}")),
-                        }
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    (written, refused)
-                })
-            })
-            .collect();
-        Writers { stop, threads }
-    }
-
-    /// The writes each tenant had answered, and every answer that was not
-    /// a write's.
-    fn stop(self) -> (Vec<usize>, Vec<String>) {
-        self.stop.store(true, Ordering::SeqCst);
-        let (mut written, mut refused) = (Vec::new(), Vec::new());
-        for t in self.threads {
-            let (w, r) = t.join().unwrap();
-            written.push(w);
-            refused.extend(r);
+/// Waits until a write through the router to `tenant` is answered while
+/// `what` hangs: the tenant is leased where it is. A write refused on the
+/// way -- a lease lapsed on a machine that did not run the router for one
+/// -- is the fence, which the next renewal ends; held up, no renewal comes
+/// while the hang lasts, and no write is answered.
+fn written_meanwhile(port: u16, tenant: &str, what: &str) {
+    let path = format!("/t/{tenant}/query");
+    let deadline = Instant::now() + WITHIN;
+    loop {
+        let (status, body) = query(port, &path, r#"put notes {title: "meanwhile"}"#);
+        if status == 200 {
+            return;
         }
-        (written, refused)
+        assert!(
+            Instant::now() < deadline,
+            "{tenant} took no write while {what}: the last answered {status} {body}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -164,27 +182,20 @@ fn until_failed_over(port: u16, node: &str, want: f64, what: &str) {
     }
 }
 
-/// The node of the three that is neither of `taken`.
-fn other<'a>(taken: [&str; 2]) -> &'a str {
-    ["n1", "n2", "n3"]
-        .into_iter()
-        .find(|n| !taken.contains(n))
-        .unwrap()
-}
-
 /// A node gone whose name its resolver never answers holds up no other
 /// node's lease. A grant looked its node's name up with no bound, and the
 /// round waited for every grant: in V5's drill the region's healthy nodes
 /// went unrenewed until they stopped writing, 18 s in CI, and the router
 /// failed one over. Here the lookup hangs until the test ends: the dead
 /// node's tenant is failed over -- its grant's lookup ends at its bound, so
-/// its failover, which waits for that grant, comes -- the other two nodes'
-/// tenants write throughout, and neither node is failed over. Its tenant's
-/// replica follows it by the same name, so the failover also halts a
-/// follower in the middle of a lookup that never ends.
+/// its failover, which waits for that grant, comes -- and the other two
+/// nodes are granted again and again and take writes meanwhile
+/// ([`renewed_meanwhile`]). Its tenant's replica follows it by the same
+/// name, so the failover also halts a follower in the middle of a lookup
+/// that never ends.
 #[test]
 fn a_dead_node_whose_name_never_resolves_holds_up_no_other_node_s_lease() {
-    let (nodes, port) = three("dns", true, TERM);
+    let (nodes, port, router) = three_leased("dns", true, TERM, upstream());
     let name = "n1.dns.leases.test:8081";
     let resolver = Resolver::new(name, nodes[0].proxy.addr.parse().unwrap());
     let body = format!(r#"{{"addr":"{name}","token":"adm-dns1"}}"#);
@@ -205,24 +216,17 @@ fn a_dead_node_whose_name_never_resolves_holds_up_no_other_node_s_lease() {
         "get notes select title",
         "one",
     );
-    let writing = Writers::start(port, &["b", "c"]);
-
     nodes[0].proxy.cut();
     resolver.silence();
-    writes_again(port, "gone");
-    assert_eq!(placed(port, "gone").0, replica);
-    // Past a lease and a tenth more, any renewal the dead node held up has
-    // shown as a refusal.
-    std::thread::sleep(TERM + TERM / 10);
-    let (written, refused) = writing.stop();
-    assert!(
-        refused.is_empty(),
-        "the healthy nodes stopped writing: {refused:?}"
-    );
-    assert!(written.iter().all(|&w| w > 0), "{written:?}");
-    assert_eq!(placed(port, "b").0, "n2");
-    assert_eq!(placed(port, "c").0, "n3");
-    assert_eq!(failed_over(port, &["n1", "n2", "n3"]), [1.0, 0.0, 0.0]);
+    // Its failover waited for, and only then a write: one sent before it
+    // waits on n1's lookup for the router's upstream timeout.
+    failover_done(port, "gone", &replica);
+    write_after_failover(port, "gone", r#"put notes {title: "after"}"#);
+    let hang = "n1's lookup that never ends";
+    renewed_meanwhile(&router, &["n2", "n3"], hang);
+    written_meanwhile(port, "b", hang);
+    written_meanwhile(port, "c", hang);
+    assert_eq!(failed_over(port, &["n1"]), [1.0]);
     drop(resolver);
 }
 
@@ -234,18 +238,19 @@ fn a_dead_node_whose_name_never_resolves_holds_up_no_other_node_s_lease() {
 /// stopped writing; run in the grant that heard the node back, it held that
 /// node's renewals, and the node was failed over again. Here n3 hangs,
 /// taking connections and answering nothing, as n1 comes back: the repair
-/// waits on n3 for the router's upstream timeout, n2's tenant writes
-/// throughout, and neither n1 nor n2 is failed over meanwhile. n3 takes no
-/// lease, so it is never failed over itself: the grants a failover of it
-/// sends every other node would renew n1 beside a repair holding n1's own.
+/// waits on n3 past the end of the test, and meanwhile n1 and n2 are
+/// granted again and again and n2's tenant takes a write
+/// ([`renewed_meanwhile`]). n3 takes no lease, so it is never failed over
+/// itself: the grants a failover of it sends every other node would renew
+/// n1 beside a repair holding n1's own.
 #[test]
 fn a_repair_waiting_on_a_node_that_hangs_holds_up_no_lease() {
     let nodes = [1, 2, 3].map(|i| node(&format!("repair{i}"), i != 3));
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
-        // The repair's wait on n3, run where it held renewals up, would
-        // outlast a lease three times over.
-        upstream_timeout: Duration::from_secs(30),
+        // The repair's wait on n3 lasts past the end of the test, so what
+        // it held up would not come while the test counts.
+        upstream_timeout: Duration::from_secs(600),
         replicas: true,
         auto_failover: Some(TERM),
         ..Config::default()
@@ -254,8 +259,9 @@ fn a_repair_waiting_on_a_node_that_hangs_holds_up_no_lease() {
     let listener = router.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     router.start_leasing().unwrap();
+    let serving = Arc::clone(&router);
     std::thread::spawn(move || {
-        let _ = router.serve_on(listener);
+        let _ = serving.serve_on(listener);
     });
     for (i, nd) in nodes.iter().enumerate() {
         let body = format!(
@@ -290,88 +296,72 @@ fn a_repair_waiting_on_a_node_that_hangs_holds_up_no_lease() {
     writes_again(port, "a");
     assert_eq!(failed_over(port, &["n1"]), [1.0]);
 
-    let writing = Writers::start(port, &["b"]);
     // n3 hangs, and n1 comes back: its next grant is answered, and the
-    // repair that follows waits on n3.
+    // repair that follows asks n3 what it holds and waits.
     nodes[2].proxy.hang();
     nodes[0].proxy.heal();
     until_failed_over(port, "n1", 0.0, "n1 never answered again");
-    // Two leases and a tenth from n1's answer, well inside the repair's
-    // wait on n3: a renewal held up by it has shown as a refusal, or as a
-    // lease left unrenewed past a lease -- n1's, failed over and back again
-    // within the window where a grant waited on the repair, is read here
-    // as it goes.
-    let window = Instant::now() + TERM * 2 + TERM / 10;
-    let mut oldest = [0f64; 2];
-    while Instant::now() < window {
-        let (_, scrape) = call(port, "GET", "/_metrics", "", None);
-        for (i, n) in ["n1", "n2"].iter().enumerate() {
-            let age = number_after(
-                &scrape,
-                &format!("fenec_router_lease_age_seconds{{node=\"{n}\"}} "),
-            );
-            oldest[i] = oldest[i].max(age);
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    until_heard(
+        &nodes[2].proxy,
+        "GET /_admin/tenants ",
+        "the repair never asked n3",
+    );
+    let hang = "the repair waiting on n3";
+    renewed_meanwhile(&router, &["n1", "n2"], hang);
+    written_meanwhile(port, "b", hang);
+}
+
+/// Waits until `proxy`, hung, has been sent `request` (bounded by
+/// [`WITHIN`]): what hangs on it has reached it.
+fn until_heard(proxy: &Proxy, request: &str, what: &str) {
+    let deadline = Instant::now() + WITHIN;
+    while !proxy.heard().contains(request) {
+        assert!(Instant::now() < deadline, "{what} in {WITHIN:?}");
+        std::thread::sleep(Duration::from_millis(20));
     }
-    let (written, refused) = writing.stop();
-    assert!(
-        refused.is_empty(),
-        "n2 stopped writing while the repair waited on n3: {refused:?}"
-    );
-    assert!(written[0] > 0);
-    assert_eq!(placed(port, "b").0, "n2");
-    // A lease is renewed every third of one: a node unrenewed for a whole
-    // one was held up, two thirds of a lease past its due.
-    assert!(
-        oldest.iter().all(|&age| age < TERM.as_secs_f64()),
-        "a node went unrenewed beside the repair: oldest leases (n1, n2) {oldest:?} s"
-    );
-    assert_eq!(failed_over(port, &["n1", "n2"]), [0.0, 0.0]);
 }
 
 /// A failover holds up no lease. Promoting a node's tenants calls the nodes
 /// they go to, each call as long as its node takes, and the leasing thread
 /// ran it between rounds: a promotion's node that hung held every other
 /// node's renewal for the router's upstream timeout. Here n1 is cut off as
-/// the node its tenant's replica is on hangs: n1's failover waits on that
-/// node, and the third node's tenant writes throughout.
+/// n2, which keeps its tenant's replica, hangs: n1's failover waits on n2
+/// past the end of the test, and meanwhile n3 is granted again and again
+/// and its tenant takes a write ([`renewed_meanwhile`]). n2 takes no lease,
+/// so it is never failed over itself: its failover drops the replicas it
+/// keeps, and one that came before n1's -- the two lapse a lease and a
+/// tenth after their last renewals, whichever was earlier -- left n1's
+/// failover nothing to promote and nothing to wait on (1 run in 8 at
+/// background QoS beside seven busy loops).
 #[test]
 fn a_failover_waiting_on_a_promotion_that_hangs_holds_up_no_lease() {
-    let (nodes, port) = three("promote", true, TERM);
+    let nodes = [1, 2, 3].map(|i| node(&format!("promote{i}"), i != 2));
+    // The promotion's wait on n2 lasts past the end of the test, so what it
+    // held up would not come while the test counts.
+    let (router, port) = leasing_replicas(Duration::from_secs(600));
+    put_node(port, "n1", &nodes[0].proxy.addr, "adm-promote1");
+    put_node(port, "n2", &nodes[1].proxy.addr, "adm-promote2");
+    // `a` made while n1 and n2 are the only nodes: its replica is on n2.
     tenant_on(port, "a", "n1");
+    assert_eq!(placed(port, "a").1.as_deref(), Some("n2"));
     assert_eq!(
         query(port, "/t/a/query", r#"put notes {title: "one"}"#).0,
         200
     );
-    let replica = placed(port, "a").1.expect("a has a replica");
-    until(
-        by_name(&nodes, &replica).port,
-        "/t/a/query",
-        "get notes select title",
-        "one",
-    );
-    let third = other(["n1", &replica]);
-    tenant_on(port, "w", third);
-    assert_eq!(
-        query(port, "/t/w/query", r#"put notes {title: "one"}"#).0,
-        200
-    );
-    let writing = Writers::start(port, &["w"]);
-
-    by_name(&nodes, &replica).proxy.hang();
+    until(nodes[1].port, "/t/a/query", "get notes select title", "one");
+    put_node(port, "n3", &nodes[2].proxy.addr, "adm-promote3");
+    tenant_on(port, "w", "n3");
+    nodes[1].proxy.hang();
     nodes[0].proxy.cut();
     until_failed_over(port, "n1", 1.0, "n1 was never judged lapsed");
-    // Two leases and a tenth from the failover's start, inside its wait on
-    // the hung node (the router's 10 s): a renewal it held up has shown.
-    std::thread::sleep(TERM * 2 + TERM / 10);
-    let (written, refused) = writing.stop();
-    assert!(
-        refused.is_empty(),
-        "{third} stopped writing while n1's failover waited on {replica}: {refused:?}"
+    until_heard(
+        &nodes[1].proxy,
+        "/a/promote ",
+        "n1's failover never asked n2 to promote a",
     );
-    assert!(written[0] > 0);
-    assert_eq!(failed_over(port, &[third]), [0.0]);
+    let hang = "n1's failover waiting on n2";
+    renewed_meanwhile(&router, &["n3"], hang);
+    written_meanwhile(port, "w", hang);
 }
 
 /// A node that answers a grant a byte at a time: its node's stats at once,
@@ -446,14 +436,15 @@ fn answer_trickling(conn: TcpStream, granted: &AtomicBool, token: &str) {
 /// a third of the lease, but the grant as a whole is not, and the round
 /// waited for every grant before the next: a node that answered a byte at
 /// a time held every other node's renewal for as long. Here n3 trickles,
-/// and n1's tenant writes throughout.
+/// and meanwhile n1 is granted again and again and its tenant takes a
+/// write ([`renewed_meanwhile`]).
 #[test]
 fn a_node_trickling_its_answer_holds_up_no_other_node_s_lease() {
     let n1 = node("trickle1", true);
     let (slow, granted) = trickling_node("adm-trickle3");
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
-        upstream_timeout: Duration::from_secs(10),
+        upstream_timeout: upstream(),
         auto_failover: Some(TERM),
         ..Config::default()
     };
@@ -461,8 +452,9 @@ fn a_node_trickling_its_answer_holds_up_no_other_node_s_lease() {
     let listener = router.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     router.start_leasing().unwrap();
+    let serving = Arc::clone(&router);
     std::thread::spawn(move || {
-        let _ = router.serve_on(listener);
+        let _ = serving.serve_on(listener);
     });
     for (name, addr, token) in [
         ("n1", n1.proxy.addr.as_str(), "adm-trickle1"),
@@ -477,22 +469,15 @@ fn a_node_trickling_its_answer_holds_up_no_other_node_s_lease() {
         query(port, "/t/w/query", r#"put notes {title: "one"}"#).0,
         200
     );
-    let writing = Writers::start(port, &["w"]);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + WITHIN;
     while !granted.load(Ordering::SeqCst) {
         assert!(Instant::now() < deadline, "n3 was never sent a grant");
         std::thread::sleep(Duration::from_millis(20));
     }
-    // Two leases and a tenth of n3 trickling: a renewal it held up has
-    // shown as a refusal.
-    std::thread::sleep(TERM * 2 + TERM / 10);
-    let (written, refused) = writing.stop();
-    assert!(
-        refused.is_empty(),
-        "n1 stopped writing while n3 trickled its answer: {refused:?}"
-    );
-    assert!(written[0] > 0);
-    assert_eq!(failed_over(port, &["n1"]), [0.0]);
+    // n3 trickles its answer for as long as the router reads it.
+    let hang = "n3 trickling its answer";
+    renewed_meanwhile(&router, &["n1"], hang);
+    written_meanwhile(port, "w", hang);
 }
 
 /// A tenant another operation holds as its node is failed over on a lease
@@ -501,13 +486,13 @@ fn a_node_trickling_its_answer_holds_up_no_other_node_s_lease() {
 /// giving it a replica, which runs beside the failovers -- and a failover
 /// by hand says so and is asked again; on a lease nobody asked again, and
 /// the tenant stayed on its node, gone. Here a quota is being set on n1's
-/// tenant as n1 hangs: the quota's call waits on n1 for the router's 10 s
-/// and holds the tenant past n1's failover, which comes back to it. And
-/// meanwhile no grant to n1 names the tenant -- read off what n1's hung
-/// proxy heard: each grant's list is sent, without it. Left in n1's list,
-/// every grant of those 10 s named it by its list's epoch, and a late one
-/// n1 took (the lease module's hole) would run its lease past the tenant's
-/// promotion for as long as the quota held it.
+/// tenant as n1 hangs: the quota's call waits on n1 and holds the tenant
+/// past n1's failover until the test cuts n1 off, and the failover comes
+/// back to it. And meanwhile no grant to n1 names the tenant -- read off
+/// what n1's hung proxy heard: each grant's list is sent, without it. Left
+/// in n1's list, every grant of the hold named it by its list's epoch, and
+/// a late one n1 took (the lease module's hole) would run its lease past
+/// the tenant's promotion for as long as the quota held it.
 #[test]
 fn a_tenant_held_through_its_node_s_failover_is_failed_over_once_let_go() {
     let (nodes, port) = three("held", true, TERM);
@@ -524,8 +509,12 @@ fn a_tenant_held_through_its_node_s_failover_is_failed_over_once_let_go() {
         "one",
     );
     nodes[0].proxy.hang();
-    // Holds `t` from now until its call to n1 times out: past n1's lapse,
-    // which comes a lease and a tenth after n1's last renewal at most.
+    // Holds `t` from now until its call to n1 ends, which the test ends
+    // once n1 has been failed over and sent a grant past it: n1's lapse
+    // comes a lease and a tenth after its last renewal at most. Ended by
+    // the router's timeout, ten seconds, the hold was a guess at how soon
+    // all of that came, and the router's other calls in the test held to
+    // the same ten seconds ([`upstream`]).
     let quota = std::thread::spawn(move || {
         call(
             port,
@@ -537,12 +526,20 @@ fn a_tenant_held_through_its_node_s_failover_is_failed_over_once_let_go() {
     });
     until_failed_over(port, "n1", 1.0, "n1 was never judged lapsed");
     let from = nodes[0].proxy.heard().len();
+    let deadline = Instant::now() + WITHIN;
+    while !nodes[0].proxy.heard()[from..].contains("POST /_admin/lease") {
+        assert!(
+            Instant::now() < deadline,
+            "n1 was sent no grant while t was held"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    nodes[0].proxy.cut();
     let (status, body) = quota.join().unwrap();
     assert_eq!(status, 502, "the quota's call to n1 was answered: {body}");
     // The grants n1 was sent while the quota held `t` past the failover.
     let heard = nodes[0].proxy.heard();
     let grants: Vec<&str> = heard[from..].split("POST /_admin/lease").skip(1).collect();
-    assert!(!grants.is_empty(), "n1 was sent no grant while t was held");
     for g in &grants {
         let list = g
             .split_once("\"primaries\":[")
@@ -591,7 +588,7 @@ fn leasing_router(path: &Path, upstream: Option<&str>) -> (Arc<Router>, u16) {
     });
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
-        upstream_timeout: Duration::from_secs(10),
+        upstream_timeout: nodes::upstream(),
         replicas: true,
         auto_failover: Some(TERM),
         ..Config::default()
@@ -800,9 +797,15 @@ impl Filter {
 
 /// A router leasing for [`TERM`] over n1 alone at first, with replicas.
 fn router_with_replicas() -> u16 {
+    leasing_replicas(upstream()).1
+}
+
+/// A router leasing for [`TERM`] with replicas, its upstream timeout
+/// `upstream`, over no node yet.
+fn leasing_replicas(upstream: Duration) -> (Arc<Router>, u16) {
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
-        upstream_timeout: Duration::from_secs(10),
+        upstream_timeout: upstream,
         replicas: true,
         auto_failover: Some(TERM),
         ..Config::default()
@@ -811,10 +814,11 @@ fn router_with_replicas() -> u16 {
     let listener = router.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     router.start_leasing().unwrap();
+    let serving = Arc::clone(&router);
     std::thread::spawn(move || {
-        let _ = router.serve_on(listener);
+        let _ = serving.serve_on(listener);
     });
-    port
+    (router, port)
 }
 
 fn put_node(port: u16, name: &str, addr: &str, token: &str) {

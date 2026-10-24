@@ -149,7 +149,7 @@ fn a_lapsed_lease_fails_a_node_over_within_its_region() {
     let nodes = [1, 2, 3, 4].map(|i| node(&format!("region{i}"), true));
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
-        upstream_timeout: Duration::from_secs(10),
+        upstream_timeout: upstream(),
         replicas: true,
         auto_failover: Some(TERM),
         ..Config::default()
@@ -336,7 +336,7 @@ fn a_round_that_read_the_lists_before_a_create_does_not_take_the_tenant_back() {
     // A lease no round renews on its own: the test runs the one round.
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
-        upstream_timeout: Duration::from_secs(10),
+        upstream_timeout: upstream(),
         auto_failover: Some(Duration::from_secs(60)),
         ..Config::default()
     };

@@ -106,22 +106,14 @@ impl Proxy {
         let gate = (Arc::clone(&hold), Arc::clone(&held));
         std::thread::spawn(move || {
             for client in listener.incoming() {
-                let Ok(mut client) = client else { continue };
-                if flag.load(Ordering::SeqCst) {
-                    let _ = client.shutdown(Shutdown::Both);
-                    continue;
-                }
-                if swallow.load(Ordering::SeqCst) {
-                    let kept = Arc::clone(&kept);
-                    std::thread::spawn(move || {
-                        let mut buf = [0u8; 16 * 1024];
-                        while let Ok(n @ 1..) = client.read(&mut buf) {
-                            kept.lock().unwrap().extend_from_slice(&buf[..n]);
-                        }
-                    });
-                    continue;
-                }
-                carry(client, &to, &streams, &gate);
+                let Ok(client) = client else { continue };
+                let state = State {
+                    cut: &flag,
+                    hung: &swallow,
+                    open: &streams,
+                    heard: &kept,
+                };
+                carry(client, &to, &state, &gate);
             }
         });
         Proxy {
@@ -136,10 +128,16 @@ impl Proxy {
     }
 
     /// Hangs: what it carries is ended, so a pooled client connects again,
-    /// and every connection after is taken and left unanswered.
+    /// and every connection after is taken and left unanswered. Set under
+    /// the lock a connection is kept among the open ones with, which asks
+    /// it again there ([`carry`]): set apart from it, a connection taken
+    /// before the flag and kept after the ends was carried on, and a
+    /// promotion meant to hang on it was answered (a run in twelve beside
+    /// eleven other suites and sixteen busy loops).
     pub fn hang(&self) {
+        let mut open = self.open.lock().unwrap();
         self.hung.store(true, Ordering::SeqCst);
-        for s in self.open.lock().unwrap().drain(..) {
+        for s in open.drain(..) {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
@@ -149,9 +147,13 @@ impl Proxy {
         String::from_utf8_lossy(&self.heard.lock().unwrap()).into_owned()
     }
 
+    /// Cuts it off: what it carries is ended -- what it took while hung
+    /// too, so what waits on it meets the end -- and every connection
+    /// after, set as [`Proxy::hang`] is.
     pub fn cut(&self) {
+        let mut open = self.open.lock().unwrap();
         self.cut.store(true, Ordering::SeqCst);
-        for s in self.open.lock().unwrap().drain(..) {
+        for s in open.drain(..) {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
@@ -191,13 +193,47 @@ impl Proxy {
 
 type Gate = (Arc<AtomicBool>, Arc<(Mutex<usize>, Condvar)>);
 
-/// Connects `client` to `target`, both ways, kept among `open`; what the
-/// client sends held at `gate` where it is the request to hold.
-fn carry(client: TcpStream, target: &str, open: &Mutex<Vec<TcpStream>>, gate: &Gate) {
-    let Ok(server) = TcpStream::connect(target) else {
+/// What a proxy's connections are carried by: cut, hung, the connections
+/// it carries, what it heard while hung.
+struct State<'a> {
+    cut: &'a AtomicBool,
+    hung: &'a AtomicBool,
+    open: &'a Mutex<Vec<TcpStream>>,
+    heard: &'a Arc<Mutex<Vec<u8>>>,
+}
+
+/// Connects `client` to `target`, both ways, kept among the open ones;
+/// what the client sends held at `gate` where it is the request to hold.
+/// Cut, it is ended; hung, it is taken and left unanswered, what it sends
+/// kept -- asked as it is kept among the open ones, under their lock, which
+/// [`Proxy::hang`] and [`Proxy::cut`] set their flags under.
+fn carry(mut client: TcpStream, target: &str, state: &State<'_>, gate: &Gate) {
+    let server = match state.cut.load(Ordering::SeqCst) || state.hung.load(Ordering::SeqCst) {
+        true => None,
+        false => TcpStream::connect(target).ok(),
+    };
+    let mut held = state.open.lock().unwrap();
+    if state.cut.load(Ordering::SeqCst) {
+        let _ = client.shutdown(Shutdown::Both);
+        return;
+    }
+    if state.hung.load(Ordering::SeqCst) {
+        // Among the open ones, so a cut ends it: what waits on it then
+        // meets the end.
+        held.push(client.try_clone().unwrap());
+        drop(held);
+        let kept = Arc::clone(state.heard);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 16 * 1024];
+            while let Ok(n @ 1..) = client.read(&mut buf) {
+                kept.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        return;
+    }
+    let Some(server) = server else {
         return;
     };
-    let mut held = open.lock().unwrap();
     held.push(client.try_clone().unwrap());
     held.push(server.try_clone().unwrap());
     drop(held);
@@ -292,13 +328,36 @@ pub fn until(port: u16, path: &str, sql: &str, want: &str) {
     }
 }
 
+/// The upstream timeout of the lease tests' routers: the router's own
+/// default, a minute. Each call it bounds does what a node does durably --
+/// a tenant made, a replica told to follow, a schema applied -- and ten
+/// seconds was a guess at the disk: beside eleven other suites and sixteen
+/// busy loops a node's rename of a copy's `.follows` took 13.3 s, the
+/// router gave its follow up, and the tenant it made had no replica (in 2
+/// runs of 3, and `leases.rs`' in 1 of 2). A test whose subject is a call
+/// that waits out the timeout gives its own.
+pub fn upstream() -> Duration {
+    Config::default().upstream_timeout
+}
+
 /// Three nodes behind a router leasing them for `term`, each registered at
 /// its proxy.
 pub fn three(tag: &str, lease: bool, term: Duration) -> ([Node; 3], u16) {
+    let (nodes, port, _) = three_leased(tag, lease, term, upstream());
+    (nodes, port)
+}
+
+/// [`three`] with the router's upstream timeout `upstream`, and the router.
+pub fn three_leased(
+    tag: &str,
+    lease: bool,
+    term: Duration,
+    upstream: Duration,
+) -> ([Node; 3], u16, Arc<Router>) {
     let nodes = [1, 2, 3].map(|i| node(&format!("{tag}{i}"), lease));
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
-        upstream_timeout: Duration::from_secs(10),
+        upstream_timeout: upstream,
         replicas: true,
         auto_failover: Some(term),
         ..Config::default()
@@ -307,8 +366,9 @@ pub fn three(tag: &str, lease: bool, term: Duration) -> ([Node; 3], u16) {
     let listener = router.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     router.start_leasing().unwrap();
+    let serving = Arc::clone(&router);
     std::thread::spawn(move || {
-        let _ = router.serve_on(listener);
+        let _ = serving.serve_on(listener);
     });
     for (i, nd) in nodes.iter().enumerate() {
         let body = format!(
@@ -325,7 +385,7 @@ pub fn three(tag: &str, lease: bool, term: Duration) -> ([Node; 3], u16) {
         );
         assert!(status == 200 || status == 201, "{body}");
     }
-    (nodes, port)
+    (nodes, port, router)
 }
 
 /// Where the directory keeps `tenant`: its node, and its replica's.
