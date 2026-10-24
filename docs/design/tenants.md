@@ -208,13 +208,18 @@ the record was raised to as well (`late_grants.rs`'
 of 113 samples without on e5b8413e). Each round after the first is due a
 third after the last was due, not after the last woke
 (`lease::round_due`), and one woken more than a third late counts from its
-wake, so the rounds it missed are not run back to back: counted from the
-wake, every wake's lateness put the rounds after it as late, and at
-background QoS, where a park of a second wakes up to 0.2 s late, the rounds
-of a 3 s lease came 1.18 s apart on average and two of them up to 2.40 s,
-a node's next grant left 0.6 s to be late in before its lease lapsed; 1.00
-s and 2.04-2.18 s now (a stand-in node timing the grants it was sent, four
-runs a side in ABBA turns, the same beside six busy loops). A thread finding the record raised
+wake, so at most two rounds come together -- one woken just under a third
+late, followed at once by the next, due as it starts -- and never the run
+of rounds a stopped process missed: counted from the wake, every wake's
+lateness put the rounds after it as late, and at background QoS, where a
+park of a second wakes up to 0.2 s late, the rounds of a 3 s lease came
+1.18 s apart on average and two of them up to 2.40 s, a node's next grant
+left 0.6 s to be late in before its lease lapsed; 1.00 s and 2.04-2.18 s
+now (a stand-in node timing the grants it was sent, four runs a side in
+ABBA turns, the same beside six busy loops). `lease_stalls.rs`'
+`the_leasing_thread_s_rounds_are_due_from_when_the_last_was_due` holds the
+leasing thread to it by what it works each round's due out as, not by a
+clock (`Router::rounds_on_schedule`). A thread finding the record raised
 by another of this router's waits for the standbys too before its grant
 (`standbys_sent`, at once once sent): each node's grant is a thread, and
 the second node's went while the first waited. What it does not cover: the first

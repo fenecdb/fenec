@@ -286,11 +286,17 @@ pub fn call(
     auth: Option<&str>,
 ) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    // As long as the router waits on any one node it calls ([`upstream`]):
-    // a client giving up sooner measured the machine. At twenty seconds a
-    // tenant's create through `cuts.rs`' router -- a minute a node call --
-    // went unanswered beside three other suites and eight busy loops at
-    // background QoS, in 2 runs of 3.
+    // As long as the router waits on any one call it makes to a node
+    // ([`upstream`]): a client giving up sooner measured the machine. At
+    // twenty seconds a tenant's create through `cuts.rs`' router -- a
+    // minute a node call -- went unanswered beside three other suites and
+    // eight busy loops at background QoS, in 2 runs of 3. That bounds a
+    // call, not a request: one the router answers through several node
+    // calls in a row -- a create's on its node, its grant, its schema's,
+    // its replica's follow -- outlasts it where more than one of them is
+    // that slow, and the test then fails saying no answer came in
+    // [`WITHIN`], which is so: a minute is past every wait these tests
+    // allow one answer.
     s.set_read_timeout(Some(WITHIN)).unwrap();
     let auth = auth.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
     write!(
@@ -411,12 +417,19 @@ pub fn fenced(status: u16, body: &str) -> bool {
         || (status == 500 && body.contains("lease from its router no longer let it write"))
 }
 
+/// Whether the router answered `status` and `body` for a request it cut
+/// as its node was failed over, 502 saying it may have run: a node whose
+/// lease lapsed on a machine that did not run the router for one is failed
+/// over, and was during a test's setup.
+pub fn cut_at_failover(status: u16, body: &str) -> bool {
+    status == 502 && body.contains("was failed over while this request was out")
+}
+
 /// Writes `sql` to `tenant` through the router once it is leased where it
 /// is ([`fenced`]): a write that is one row however often it lands -- a
 /// `put` naming its id, a `create ... if not exists`. So it is sent again
-/// where the router cut it at its node's failover too, 502 saying it may
-/// have run, which a write run twice would make two rows of: a node whose
-/// lease lapsed so is failed over, and was during a test's setup.
+/// where the router cut it at its node's failover too
+/// ([`cut_at_failover`]), which a write run twice would make two rows of.
 pub fn written(port: u16, tenant: &str, sql: &str) {
     let path = format!("/t/{tenant}/query");
     let deadline = Instant::now() + WITHIN;
@@ -425,9 +438,8 @@ pub fn written(port: u16, tenant: &str, sql: &str) {
         if status == 200 {
             return;
         }
-        let cut = status == 502 && body.contains("was failed over while this request was out");
         assert!(
-            (fenced(status, &body) || cut) && Instant::now() < deadline,
+            (fenced(status, &body) || cut_at_failover(status, &body)) && Instant::now() < deadline,
             "{sql} to {tenant}: {status} {body}"
         );
         std::thread::sleep(Duration::from_millis(20));

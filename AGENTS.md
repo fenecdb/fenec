@@ -1056,7 +1056,7 @@ promoted by `POST /_replication/promote` and the units switched at once;
   wait a refusal would take (`audit::would_wait`), a claim still held when a
   freeze returns, another tenant answered while a slow open is held at a
   gate, a grant queued behind another (`Router::grants_waiting`), the
-  rounds' grants to a node while another hangs (`Router::round_grants`),
+  rounds' grants a node took while another hangs (`Router::round_grants`),
   where writes answered throughout measured the machine. A timeout
   a test gives its servers or clients bounds every request they make, not
   just the one it is about: a router's upstream timeout of 600 ms failed a

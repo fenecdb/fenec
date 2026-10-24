@@ -102,8 +102,10 @@ pub fn lapse(term: Duration) -> Duration {
 /// When a round that starts `now` counts as due, the next one coming
 /// `period` after that: the moment it was due -- a `period` after the last
 /// was -- where it woke within a period of it, and `now` where it woke
-/// later still, a process stopped, so the rounds it missed are not run
-/// back to back. Counted from when each woke, every wake's lateness put
+/// later still, a process stopped, so at most two rounds come together --
+/// one woken just under a period late followed at once by the next -- and
+/// never the run of rounds a stop missed. Counted from when each woke,
+/// every wake's lateness put
 /// the rounds after it as late: at background QoS, where a park of a
 /// second wakes up to 0.2 s late, the rounds of a 3 s lease came 1.18 s
 /// apart on average and two of them up to 2.40 s, so the next grant had
@@ -162,6 +164,10 @@ pub struct Leases {
     granting: AtomicU64,
     /// The leasing thread, woken when the lease granted gets shorter.
     leasing: Mutex<Option<std::thread::Thread>>,
+    /// When the leasing thread's last round was due, and how many of its
+    /// rounds were due a third of a lease after the one before
+    /// ([`Leases::round_began`]).
+    schedule: Mutex<(Option<Instant>, u64)>,
 }
 
 #[derive(Clone)]
@@ -197,7 +203,7 @@ struct Held {
     /// A round's grant to it is under way: the next round sends it none
     /// ([`Leases::begin_grant`]).
     granting: bool,
-    /// How many of the rounds' grants to it have ended ([`Leases::rounds`]).
+    /// How many of the rounds' grants it took ([`Leases::rounds`]).
     rounds: u64,
     /// Its lease looked lapsed, and a failover of it waits for its turn to
     /// judge again ([`Leases::suspects`]).
@@ -245,6 +251,7 @@ impl Leases {
             said: AtomicBool::new(false),
             granting: AtomicU64::new(millis(term)),
             leasing: Mutex::new(None),
+            schedule: Mutex::new((None, 0)),
         }
     }
 
@@ -396,6 +403,26 @@ impl Leases {
         *self.leasing.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread);
     }
 
+    /// The leasing thread's round counted as due at `due` began, the rounds
+    /// coming a `period` apart ([`round_due`]).
+    pub fn round_began(&self, due: Instant, period: Duration) {
+        let mut s = self.schedule.lock().unwrap_or_else(|e| e.into_inner());
+        if s.0.map(|at| at + period) == Some(due) {
+            s.1 += 1;
+        }
+        s.0 = Some(due);
+    }
+
+    /// How many of the leasing thread's rounds counted as due exactly a
+    /// third of a lease after the one before: what a test reads to know the
+    /// rounds are due from when the last was due ([`round_due`]) without
+    /// timing the machine. A round counted from when it woke is never due
+    /// that exactly, every wake late by a few nanoseconds at least; one
+    /// counted from its due is, unless it woke more than a period late.
+    pub fn rounds_on_schedule(&self) -> u64 {
+        self.schedule.lock().unwrap_or_else(|e| e.into_inner()).1
+    }
+
     /// Whether to say the record could not be written: once a process.
     pub fn say_unrecorded(&self) -> bool {
         !self.said.swap(true, Ordering::SeqCst)
@@ -538,18 +565,19 @@ impl Leases {
         !std::mem::replace(&mut h.granting, true)
     }
 
-    /// A round's grant to `node` has ended.
-    pub fn end_grant(&self, node: &str) {
+    /// A round's grant to `node` has ended, `taken` where the node took it.
+    pub fn end_grant(&self, node: &str, taken: bool) {
         if let Some(h) = self.held().get_mut(node) {
             h.granting = false;
-            h.rounds += 1;
+            h.rounds += u64::from(taken);
         }
     }
 
-    /// How many of the rounds' grants to `node` have ended, answered or
-    /// not: what a test counts to know a node is granted round after round
-    /// while something else hangs. A grant a failover or a create sends is
-    /// not a round's, and does not count.
+    /// How many of the rounds' grants `node` took: what a test counts to
+    /// know a node is renewed round after round while something else hangs.
+    /// A grant given up on does not count -- a hang that had the healthy
+    /// nodes' grants time out would pass a count of grants that ended --
+    /// nor does one a failover or a create sends, which is not a round's.
     pub fn rounds(&self, node: &str) -> u64 {
         self.held().get(node).map_or(0, |h| h.rounds)
     }
@@ -803,9 +831,9 @@ mod tests {
         // A round's grant to a node is one at a time.
         assert!(l.begin_grant("n1"));
         assert!(!l.begin_grant("n1"));
-        l.end_grant("n1");
+        l.end_grant("n1", true);
         assert!(l.begin_grant("n1"));
-        l.end_grant("n1");
+        l.end_grant("n1", true);
         // A standby forgets, and counts from the moment it leases again --
         // its first round once promoted, not its last round while it
         // followed: counted from that round 120 ms before, n1 would have
@@ -968,7 +996,9 @@ mod tests {
     /// as early as it would have been: counted from the wake, every round
     /// after one woken late came as late, the leeway of each wake adding up.
     /// One woken more than a round late -- the process stopped -- counts
-    /// from the wake, so the rounds it missed are not run back to back.
+    /// from the wake, so the rounds it missed are not run back to back: at
+    /// most two come together, one woken just under a round late and the
+    /// next, due as it starts.
     #[test]
     fn a_round_woken_late_puts_none_after_it_late() {
         let period = Duration::from_millis(1_000);

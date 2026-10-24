@@ -344,13 +344,18 @@ impl Granted {
 
 /// Ends a round's grant to a node however the grant ends, a panic in it
 /// too: left marked as under way, the node would never be granted by a
-/// round again ([`lease::Leases::begin_grant`]).
-struct Granting<'a>(&'a Router, &'a str);
+/// round again ([`lease::Leases::begin_grant`]). Whether the node took it,
+/// once it is known, is counted ([`lease::Leases::rounds`]).
+struct Granting<'a> {
+    router: &'a Router,
+    node: &'a str,
+    taken: bool,
+}
 
 impl Drop for Granting<'_> {
     fn drop(&mut self) {
-        if let Some((leases, _)) = &self.0.leases {
-            leases.end_grant(self.1);
+        if let Some((leases, _)) = &self.router.leases {
+            leases.end_grant(self.node, self.taken);
         }
     }
 }
@@ -760,7 +765,9 @@ impl Router {
                             continue;
                         }
                     }
-                    last = Some(lease::round_due(last, now, period));
+                    let due = lease::round_due(last, now, period);
+                    last = Some(due);
+                    leases.round_began(due, period);
                     router.round(false);
                 }
             })?;
@@ -828,14 +835,21 @@ impl Router {
                 .spawn(move || {
                     // Ended however the grant ends, a panic in it too: left
                     // set, the node would never be granted again.
-                    let _ended = (!wait).then(|| Granting(&router, &node));
-                    router.grant(&node, &list, reading, &holder);
+                    let mut ended = (!wait).then(|| Granting {
+                        router: &router,
+                        node: &node,
+                        taken: false,
+                    });
+                    let taken = router.grant(&node, &list, reading, &holder);
+                    if let Some(e) = ended.as_mut() {
+                        e.taken = taken;
+                    }
                 });
             match spawned {
                 Ok(h) => grants.push(h),
                 Err(e) => {
                     if !wait {
-                        leases.end_grant(&name);
+                        leases.end_grant(&name, false);
                     }
                     fenec_http::log!("no thread for a lease grant to `{name}`: {e}");
                 }
@@ -947,10 +961,12 @@ impl Router {
             for (other, list) in &lists {
                 if other != node {
                     let holder = &holder;
-                    s.spawn(move || self.grant(other, list, reading, holder));
+                    s.spawn(move || {
+                        self.grant(other, list, reading, holder);
+                    });
                 }
             }
-            let back = self.grant_held(&mut sent, node, own, reading, &holder);
+            let (back, _) = self.grant_held(&mut sent, node, own, reading, &holder);
             drop(sent);
             back
         })
@@ -1171,29 +1187,31 @@ impl Router {
     /// the list of ([`lease::Leases::turn`]). A node that answers after it
     /// was failed over has a repair run on a thread of its own
     /// ([`Self::repair_soon`]), which has its copies follow its tenants' new
-    /// primaries.
+    /// primaries. Whether the node took the lease.
     fn grant(
         &self,
         node: &str,
         primaries: &[String],
         reading: u64,
         holder: &fenec_http::lease::Holder,
-    ) {
+    ) -> bool {
         let Some((leases, _)) = &self.leases else {
-            return;
+            return false;
         };
         let turn = leases.turn(node);
         let mut sent = leases.wait_turn(&turn);
-        let back = self.grant_held(&mut sent, node, primaries, reading, holder);
+        let (back, taken) = self.grant_held(&mut sent, node, primaries, reading, holder);
         drop(sent);
         if back {
             self.answers_again(node);
         }
+        taken
     }
 
     /// [`Self::grant`] with the node's turn held, `sent` the reading of the
     /// newest list it was sent: whether the node answered after it was
-    /// failed over. The list itself goes only when the node may not hold
+    /// failed over, and whether it took the lease. The list itself goes
+    /// only when the node may not hold
     /// it, and again with it when the node says it does not; each grant
     /// numbered and acknowledging the newest one answered, the one that
     /// acknowledges this one sent at once where the node's lease is short
@@ -1205,23 +1223,23 @@ impl Router {
         primaries: &[String],
         reading: u64,
         holder: &fenec_http::lease::Holder,
-    ) -> bool {
+    ) -> (bool, bool) {
         let Some((leases, pool)) = &self.leases else {
-            return false;
+            return (false, false);
         };
         let Some(n) = self.read_dir().node(node).cloned() else {
-            return false;
+            return (false, false);
         };
         if reading < *sent {
-            return false;
+            return (false, false);
         }
         let Some(term) = self.grant_term() else {
-            return false;
+            return (false, false);
         };
         *sent = reading;
         let epoch = lease::epoch_of(primaries);
         let mut with_list = leases.epoch(node).as_deref() != Some(epoch.as_str());
-        let (mut back, mut followed) = (false, false);
+        let (mut back, mut followed, mut taken) = (false, false, false);
         loop {
             let numbered = leases.number(node);
             let mut body = format!("{{\"ms\":{},\"epoch\":{}", term.as_millis(), quote(&epoch));
@@ -1269,6 +1287,7 @@ impl Router {
                     _ => lease::Answer::Silent,
                 };
             back |= leases.answered(node, numbered.grant, &epoch, &answer, Instant::now());
+            taken |= matches!(answer, lease::Answer::Taken);
             if matches!(answer, lease::Answer::Taken) && !answered_number {
                 leases.unnumbered(node);
             }
@@ -1295,7 +1314,7 @@ impl Router {
                 _ => break,
             }
         }
-        back
+        (back, taken)
     }
 
     /// The lease a grant runs, the directory made to record one no shorter
@@ -2358,12 +2377,21 @@ impl Router {
         self.global.as_ref().and_then(|g| read(g).lease_record())
     }
 
-    /// How many of the leasing thread's grants to `node` have ended
-    /// ([`lease::Leases::rounds`]): how a test knows a node is granted round
+    /// How many of the leasing thread's grants `node` took
+    /// ([`lease::Leases::rounds`]): how a test knows a node is renewed round
     /// after round while another node, a repair or a failover hangs.
     #[doc(hidden)]
     pub fn round_grants(&self, node: &str) -> u64 {
         self.leases.as_ref().map_or(0, |(l, _)| l.rounds(node))
+    }
+
+    /// How many of the leasing thread's rounds were due a third of a lease
+    /// after the one before ([`lease::Leases::rounds_on_schedule`]).
+    #[doc(hidden)]
+    pub fn rounds_on_schedule(&self) -> u64 {
+        self.leases
+            .as_ref()
+            .map_or(0, |(l, _)| l.rounds_on_schedule())
     }
 
     /// The requests a failover's cut sent on waiting for a grant to the

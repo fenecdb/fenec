@@ -68,9 +68,11 @@ impl Drop for Resolver {
 /// every third of a lease, so five are well past a lease and a tenth.
 const RENEWALS: u64 = 5;
 
-/// Waits until `router`'s rounds have sent each of `nodes` [`RENEWALS`]
-/// grants more than it had when this was called ([`Router::round_grants`]),
-/// while `what` hangs: what the tests that a hang holds up no other node's
+/// Waits until each of `nodes` has taken [`RENEWALS`] grants of `router`'s
+/// rounds more than it had when this was called ([`Router::round_grants`],
+/// which counts a grant given up on not at all: a hang that had the healthy
+/// nodes' grants time out would pass a count of grants ended), while `what`
+/// hangs: what the tests that a hang holds up no other node's
 /// lease count, rather than writes answered throughout. A machine that
 /// does not run the router's threads for a lease lapses every lease,
 /// whatever hangs -- at background QoS beside six busy loops a grant
@@ -107,9 +109,12 @@ fn renewed_meanwhile(router: &Router, nodes: &[&str], what: &str) {
 
 /// Waits until a write through the router to `tenant` is answered while
 /// `what` hangs: the tenant is leased where it is. A write refused on the
-/// way -- a lease lapsed on a machine that did not run the router for one
-/// -- is the fence, which the next renewal ends; held up, no renewal comes
-/// while the hang lasts, and no write is answered.
+/// way as [`written`]'s may be -- by the fence ([`fenced`]), or cut at its
+/// node's failover ([`cut_at_failover`]), a lease lapsed on a machine that
+/// did not run the router for one -- is sent again, the next renewal or the
+/// failover ending it, and its row counts for nothing here; held up, no
+/// renewal comes while the hang lasts, and no write is answered. Any other
+/// answer fails the test.
 fn written_meanwhile(port: u16, tenant: &str, what: &str) {
     let path = format!("/t/{tenant}/query");
     let deadline = Instant::now() + WITHIN;
@@ -119,7 +124,7 @@ fn written_meanwhile(port: u16, tenant: &str, what: &str) {
             return;
         }
         assert!(
-            Instant::now() < deadline,
+            (fenced(status, &body) || cut_at_failover(status, &body)) && Instant::now() < deadline,
             "{tenant} took no write while {what}: the last answered {status} {body}"
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -189,6 +194,30 @@ fn until_failed_over(port: u16, node: &str, want: f64, what: &str) {
     let deadline = Instant::now() + WITHIN;
     while failed_over(port, &[node]) != [want] {
         assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The leasing thread's rounds are each due a third of a lease after the
+/// last was due, not after it woke ([`fenec_shard::lease::round_due`]):
+/// counted from the wake, every wake's lateness put the rounds after it as
+/// late, and at background QoS beside busy loops the next grant came too
+/// late for the lease. Read by what the thread works each round's due out
+/// as ([`Router::rounds_on_schedule`]), never by a clock: a round counted
+/// from its wake is never due exactly a third after the last, since a wake
+/// is late by a few nanoseconds at least. Three rounds of a second each
+/// woken within a second of their due, in [`WITHIN`]: a machine that runs
+/// the thread at all does that.
+#[test]
+fn the_leasing_thread_s_rounds_are_due_from_when_the_last_was_due() {
+    let (router, _port) = leasing_replicas(upstream());
+    let deadline = Instant::now() + WITHIN;
+    while router.rounds_on_schedule() < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "in {WITHIN:?} {} rounds were due a third of a lease after the one before",
+            router.rounds_on_schedule()
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -684,7 +713,13 @@ fn a_promoted_standby_router_counts_every_lease_from_its_promotion() {
 /// A proxy that forwards, but once armed does with a request whose bytes
 /// name `pattern` what it is told -- holds it until let go (from the review
 /// of #340, `held_empty.rs`), or ends its connection unanswered -- and, cut,
-/// carries nothing.
+/// carries nothing. A request held is out at the node as far as its client
+/// can tell, so the node's end of that connection is not passed on while
+/// it is: the node closes a connection idle past its `idle_timeout` (60 s
+/// from its last use, which may be the setup's), and passed on, that close
+/// ended the router's wait on a promotion meant to hang -- in the review of
+/// #369, at 56 s of the test's 60, so the test passed with its bug put
+/// back.
 struct Filter {
     addr: String,
     armed: Arc<AtomicBool>,
@@ -725,6 +760,10 @@ impl Filter {
                 o.lock().unwrap().push(server.try_clone().unwrap());
                 let (a, r, g) = (Arc::clone(&a), Arc::clone(&r), Arc::clone(&g));
                 let (c2, s2) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+                // Whether this connection's request is held at the gate, set
+                // and cleared under the gate's lock.
+                let holding = Arc::new(AtomicBool::new(false));
+                let (h, back) = (Arc::clone(&holding), Arc::clone(&g));
                 std::thread::spawn(move || {
                     let (mut from, mut to) = (c2, s2);
                     let mut buf = [0u8; 16 * 1024];
@@ -742,11 +781,14 @@ impl Filter {
                             }
                             let (m, cv) = &*g;
                             let mut s = m.lock().unwrap();
+                            h.store(true, Ordering::SeqCst);
                             s.0 += 1;
                             cv.notify_all();
                             while !s.1 {
                                 s = cv.wait(s).unwrap();
                             }
+                            h.store(false, Ordering::SeqCst);
+                            cv.notify_all();
                         }
                         if to.write_all(&buf[..n]).is_err() {
                             break;
@@ -757,6 +799,12 @@ impl Filter {
                 std::thread::spawn(move || {
                     let (mut from, mut to) = (server, client);
                     let _ = std::io::copy(&mut from, &mut to);
+                    let (m, cv) = &*back;
+                    let mut s = m.lock().unwrap();
+                    while holding.load(Ordering::SeqCst) {
+                        s = cv.wait(s).unwrap();
+                    }
+                    drop(s);
                     let _ = to.shutdown(std::net::Shutdown::Write);
                 });
             }
