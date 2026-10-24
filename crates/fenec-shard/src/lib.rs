@@ -284,6 +284,9 @@ pub struct Router {
     /// Told as a write lands in a directory this router follows: its own,
     /// as a standby, or its copy of the global one ([`Arrived`]).
     arrived: Arc<Arrived>,
+    /// The requests a following router's cut sent to a copy that refused
+    /// them, waiting to ask it again ([`Router::copy_pause`]).
+    copy_waiting: AtomicUsize,
 }
 
 /// What a node said of a grant it answered 200 (`fenec_http::admin`'s
@@ -418,15 +421,39 @@ const CUT_TRIES: usize = 3;
 /// once, such a request was answered the copy's 503.
 const CUT_ASKS: u8 = 2;
 
-/// The first wait, and the longest, of a request a following router's cut
-/// sent to the copy promoted where the copy refused it, unrun, 503, before
-/// the leading router's grant named the tenant there
-/// ([`Router::copy_pause`]): the grant goes out as the failover ends, so
-/// most such requests are answered at the first ask after it, and one
-/// whose grant comes later -- a failover of many tenants, the node granted
-/// once every one is promoted -- is asked a few times a second.
+/// The first wait of a request a following router's cut sent to the copy
+/// promoted where the copy refused it, unrun, 503, before the leading
+/// router's grant named the tenant there ([`Router::copy_pause`]): the
+/// grant goes out as the failover ends, so most such requests are answered
+/// at the first ask after it. Each wait after is twice the one before, up
+/// to a third of the lease, the leading router's rounds' apart: a grant
+/// that came no sooner comes with the next round.
 const COPY_ASK_FIRST: Duration = Duration::from_millis(5);
-const COPY_ASK_MOST: Duration = Duration::from_millis(200);
+
+/// A following router's asks of a copy that refused a request it sent there
+/// ([`Router::copy_pause`]): until when, the next wait, and the longest.
+struct CopyAsks {
+    until: Instant,
+    next: Duration,
+    most: Duration,
+}
+
+/// One more of a count while it is held: a test's way to know a request is
+/// where it counts ([`Router::copy_asks_waiting`]).
+struct Counted<'a>(&'a AtomicUsize);
+
+impl<'a> Counted<'a> {
+    fn up(n: &'a AtomicUsize) -> Counted<'a> {
+        n.fetch_add(1, Ordering::SeqCst);
+        Counted(n)
+    }
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// What wakes the thread that brings a followed directory's maps up to
 /// what has arrived ([`Router::catch_up_directories`]): told by every
@@ -568,6 +595,7 @@ impl Router {
             cut_grants: Mutex::new(Default::default()),
             cut_waiting: AtomicUsize::new(0),
             arrived,
+            copy_waiting: AtomicUsize::new(0),
             cfg,
         })
     }
@@ -1786,7 +1814,7 @@ impl Router {
             .map_or(Duration::ZERO, |ms| {
                 Duration::from_millis(ms).min(fenec_http::waits::LONGEST)
             });
-        let watch = watch.filter(|_| !held.is_zero());
+        let held_watch = watch.filter(|_| !held.is_zero());
         let sending = match &routers {
             None => self.pool.send_held(
                 &addr,
@@ -1795,12 +1823,14 @@ impl Router {
                 &headers,
                 &req.body,
                 held,
-                watch,
+                held_watch,
                 flying,
             ),
             // A region's routers, in turn from the one that answered last,
             // as far as the request cannot have run.
-            Some((region, routers)) => self.relay_send(region, routers, req, &headers, held, watch),
+            Some((region, routers)) => {
+                self.relay_send(region, routers, req, &headers, held, held_watch)
+            }
         };
         let answer = match sending {
             Ok(a) => a,
@@ -1966,8 +1996,14 @@ impl Router {
         let mut node = node.to_string();
         let mut ended = upstream::ended_by(&ended).unwrap_or(upstream::Ended::Moved);
         let (mut tries, mut asks) = (1, CUT_ASKS);
-        // A follower's asks of a copy refusing it ([`Self::copy_pause`]).
+        // A follower's asks of a copy refusing it ([`Self::copy_pause`]),
+        // and its count among those waiting to ask again.
         let mut asking = None;
+        let mut pausing = None;
+        // The client's socket: a held request's watched while its answer is
+        // waited for, any request's between a follower's asks.
+        let client_socket = watch;
+        let watch = watch.filter(|_| !held.is_zero());
         loop {
             let flying = upstream::Flying::of(tenant, &self.pool);
             let Toward {
@@ -1993,7 +2029,11 @@ impl Router {
                 );
                 return reply(out, region::homed(Response::error(502, &why), &home));
             }
-            if cut && asks == CUT_ASKS {
+            // Once a cut, however many times the copy is asked: the
+            // leader's grants count `asks` down, a follower's pauses fill
+            // `asking`. A follower's counted at every ask, one request a
+            // grant kept waiting was seven of them.
+            if cut && asks == CUT_ASKS && asking.is_none() {
                 metrics::cut(metrics::Cut::SentAgain, 1);
             }
             let named = client.zip(mark).map(|(ip, mark)| format!("{ip} {mark}"));
@@ -2050,7 +2090,8 @@ impl Router {
                 // the global one -- grants nothing: it asks the copy again,
                 // the copy having run nothing, until the leading router's
                 // grant reaches it, for two thirds of the lease the
-                // directory records at most ([`Self::copy_pause`]).
+                // directory records or the upstream timeout at most, and
+                // while its client is there ([`Self::copy_pause`]).
                 Ok(answer) => {
                     // Asked again after a grant (`None`) or a pause, or
                     // answered: anything but a cut's 503 from another node.
@@ -2070,13 +2111,34 @@ impl Router {
                     forwarding.error("503");
                     let _ = answer.read_body(&self.pool, head_only);
                     drop(forwarding);
-                    match pause {
-                        Some(p) => std::thread::sleep(p),
-                        None => {
-                            asks = match self.grant_cut_onto(&to) {
-                                true => asks - 1,
-                                false => 0,
-                            }
+                    let Some(p) = pause else {
+                        asks = match self.grant_cut_onto(&to) {
+                            true => asks - 1,
+                            false => 0,
+                        };
+                        continue;
+                    };
+                    // A follower's pause, its client looked at meanwhile:
+                    // asked again past its client's leaving, a request went
+                    // to the copy every pause for as long as they ran.
+                    pausing.get_or_insert_with(|| Counted::up(&self.copy_waiting));
+                    match upstream::pause_watching(client_socket, p) {
+                        upstream::Paused::Here => {}
+                        upstream::Paused::Gone => {
+                            metrics::gone(Route::Tenant, arrived.elapsed());
+                            fenec_http::trace::end(499);
+                            return false;
+                        }
+                        upstream::Paused::Ended => {
+                            let why = format!(
+                                "tenant `{tenant}`'s new primary had not taken its writes yet as \
+                                 this request's client ended its connection: it ran nothing, \
+                                 ask again"
+                            );
+                            return reply(
+                                out,
+                                region::homed(Response::retry_after(503, &why, 1), &home),
+                            );
                         }
                     }
                 }
@@ -2095,6 +2157,8 @@ impl Router {
                     tries += 1;
                     let again = upstream::ended_by(&e).unwrap_or(upstream::Ended::Moved);
                     (node, ended, asks) = (to, again, CUT_ASKS);
+                    // Another cut, of another copy: counted, and asked anew.
+                    (asking, pausing) = (None, None);
                 }
                 Err(e) => {
                     forwarding.error(e.to_string());
@@ -2198,10 +2262,13 @@ impl Router {
     /// may have read the failover first. `None` once it has asked for two
     /// thirds of the lease the directory placing the tenant records -- the
     /// leading router's own grant waits as long for its copies, its rounds
-    /// a third of it apart -- or where it records none, no router having
-    /// leased from it: the copy's 503, which says when to come back, is
-    /// the answer then. `asking` keeps, from the first refusal on, until
-    /// when and how long the next wait is.
+    /// a third of it apart -- or for `--upstream-timeout`, whichever is
+    /// sooner: two thirds of the tests' hour-long lease, a request was sent
+    /// again for 40 minutes. `None` too where the directory records no
+    /// lease, no router having leased from it: the copy's 503, which says
+    /// when to come back, is the answer then. The waits double from
+    /// [`COPY_ASK_FIRST`] to a third of the lease. `asking` keeps, from the
+    /// first refusal on, until when and how long the next wait is.
     ///
     /// It never grants: a grant goes from the router holding the leases,
     /// and this one's lists may lag that one's -- a list read before the
@@ -2210,25 +2277,25 @@ impl Router {
     /// it wait on anything it could be told by: the leading router records
     /// no grant, and the copy is the one that knows; asked again, it has
     /// run nothing until it answers otherwise.
-    fn copy_pause(
-        &self,
-        tenant: &str,
-        asking: &mut Option<(Instant, Duration)>,
-    ) -> Option<Duration> {
+    fn copy_pause(&self, tenant: &str, asking: &mut Option<CopyAsks>) -> Option<Duration> {
         let now = Instant::now();
-        let (until, next) = match asking {
+        let a = match asking {
             Some(a) => a,
             None => {
                 let lease = self.followed_lease(tenant)?;
-                asking.insert((now + lease * 2 / 3, COPY_ASK_FIRST))
+                asking.insert(CopyAsks {
+                    until: now + (lease * 2 / 3).min(self.cfg.upstream_timeout),
+                    next: COPY_ASK_FIRST,
+                    most: (lease / 3).max(COPY_ASK_FIRST),
+                })
             }
         };
-        let left = until.saturating_duration_since(now);
+        let left = a.until.saturating_duration_since(now);
         if left.is_zero() {
             return None;
         }
-        let wait = (*next).min(left);
-        *next = (*next * 2).min(COPY_ASK_MOST);
+        let wait = a.next.min(left);
+        a.next = (a.next * 2).min(a.most);
         Some(wait)
     }
 
@@ -2250,6 +2317,14 @@ impl Router {
     #[doc(hidden)]
     pub fn cut_grants_waiting(&self) -> usize {
         self.cut_waiting.load(Ordering::SeqCst)
+    }
+
+    /// The requests a following router's cut sent to a copy that refused
+    /// them, waiting between their asks ([`Self::copy_pause`]): how a test
+    /// knows one is waiting, and that it has stopped.
+    #[doc(hidden)]
+    pub fn copy_asks_waiting(&self) -> usize {
+        self.copy_waiting.load(Ordering::SeqCst)
     }
 
     /// Whether a directory this router reads has moved since its maps were
@@ -2290,18 +2365,21 @@ impl Router {
     /// place its tenant, or an operator asking where the tenant is -- reads
     /// them with what they ended answered or on its way: a lock held over a
     /// shutdown a request out, on a failover's rare path.
+    ///
+    /// Each directory is asked under its read lock first, and its write
+    /// lock taken only where it moved, as each request asked before: std's
+    /// lock holds new readers behind a waiting writer, so a write guard
+    /// taken for nothing was every forward's `read_dir` waiting on it.
     #[cold]
     #[inline(never)]
     fn catch_up_directories(&self) {
-        {
+        if self.read_dir().stale() {
             let mut dir = self.write_dir();
             if dir.stale() {
                 match dir.refresh() {
                     Ok(failed) => {
                         if dir.following() {
-                            for f in failed {
-                                self.cut_moved(&f.tenant, &f.addr);
-                            }
+                            self.cut_failed_over(&failed);
                         }
                     }
                     Err(e) => fenec_http::log!("could not read the directory: {e}"),
@@ -2309,19 +2387,42 @@ impl Router {
             }
         }
         if let Some(global) = &self.global {
-            let mut g = write(global);
-            if g.stale() {
-                match g.refresh() {
-                    Ok(failed) => {
-                        if g.following() {
-                            for f in failed {
-                                self.cut_moved(&f.tenant, &f.addr);
+            if read(global).stale() {
+                let mut g = write(global);
+                if g.stale() {
+                    match g.refresh() {
+                        Ok(failed) => {
+                            if g.following() {
+                                self.cut_failed_over(&failed);
                             }
                         }
+                        Err(e) => fenec_http::log!("could not read the global directory: {e}"),
                     }
-                    Err(e) => fenec_http::log!("could not read the global directory: {e}"),
                 }
             }
+        }
+    }
+
+    /// [`Self::cut_moved`] of every tenant `failed` names, a node at a time:
+    /// one look at each node's connections for all of its tenants
+    /// ([`upstream::Pool::cut_all`]). A tenant at a time, a failover of a
+    /// whole node read at once looked at the node's every connection for
+    /// each of its tenants, the directory's write lock held throughout.
+    ///
+    /// The nodes are found by a walk of the list each: a catch-up names one
+    /// node, or a few, and grouped through a map its code was 2.2 KB more.
+    fn cut_failed_over(&self, failed: &[directory::FailedOver]) {
+        let mut done: Vec<&str> = Vec::new();
+        for f in failed {
+            if done.contains(&f.addr.as_str()) {
+                continue;
+            }
+            done.push(&f.addr);
+            let theirs = failed.iter().filter(|g| g.addr == f.addr);
+            let cuts = self
+                .pool
+                .cut_all(&f.addr, theirs.map(|g| g.tenant.as_str()));
+            metrics::cut(metrics::Cut::StreamEnded, cuts.streams as u64);
         }
     }
 

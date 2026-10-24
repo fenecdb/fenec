@@ -619,7 +619,14 @@ does not fail it over on its own; a node or router from before lineages
 protects less and breaks nothing; and a node or router from before
 numbered lease grants leases as before, so a grant read late can still
 give a node a lease past its failover until both sides are upgraded (the
-router logs each such node once). Files go one way: a binary refuses record
+router logs each such node once). A router from before `failed_from`
+(the node a failover took a tenant off, which a router following the
+directory ends what it had out to that node by) leaves it as it was in the
+placements it writes, so a standby from before it promoted in the middle
+of an upgrade over a directory a newer router wrote can have the routers
+following it end a move's requests as a failover's, a 502 for a write that
+may have landed: upgrade the standbys first, as step 2 does, and promote
+none older than the router it replaces. Files go one way: a binary refuses record
 kinds newer than it, so once an upgraded
 node has written a tenant, that node cannot go back to the older binary --
 and an older node may not follow a newer primary's replication stream where

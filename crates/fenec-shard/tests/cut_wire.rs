@@ -189,6 +189,16 @@ impl Wire {
         );
     }
 
+    /// How many times the router has sent `marker` through the wire.
+    pub fn times_sent(&self, marker: &str) -> usize {
+        let traffic = self.s.traffic.lock().unwrap();
+        traffic
+            .sent
+            .windows(marker.len())
+            .filter(|w| *w == marker.as_bytes())
+            .count()
+    }
+
     /// Waits until the router has sent `marker` through the wire `n` times.
     pub fn until_sent(&self, marker: &str, n: usize) {
         let traffic = self.s.traffic.lock().unwrap();

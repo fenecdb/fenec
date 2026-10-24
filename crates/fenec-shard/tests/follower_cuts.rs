@@ -14,7 +14,10 @@
 //! begins, by an event.
 //!
 //! A binary of its own, as `cuts.rs` is: each test holds a thread a
-//! request beside three nodes, their replication and two routers.
+//! request beside three nodes, their replication and two routers. Its
+//! tests run one at a time ([`serial`]): the cuts counted are the
+//! process's, every router's in it, and each test holds what its own
+//! routers counted exactly.
 
 #[path = "lease_nodes.rs"]
 mod nodes;
@@ -26,12 +29,31 @@ use fenec_http::replication::{fresh_id, Follower, Replication};
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
 use nodes::{call, node, placed, until, Node};
+use std::io::Write;
 use std::net::SocketAddr;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 use wire::*;
+
+/// The binary's tests one at a time: `fenec_router_cut_requests_total` is
+/// the process's, and counted beside another test's failover a test's
+/// deltas held what that one cut too.
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Waits until `f` holds, bounded as a client's wait is.
+fn until_so(what: &str, f: impl Fn() -> bool) {
+    let deadline = Instant::now() + WITHIN;
+    while !f() {
+        assert!(Instant::now() < deadline, "{what} never came");
+        std::thread::yield_now();
+    }
+}
 
 /// The directories' replication token: a standby's and a region's router's
 /// streams of the directory they follow.
@@ -222,8 +244,10 @@ fn acme(at: u16, port_of: impl Fn(&str) -> u16) -> String {
 /// promoted, a keyed write n1 ran answered once from its key, an unkeyed
 /// one 502 and not run again, a keyed held claim handed the job put after,
 /// an unkeyed one 502, and the subscription ended -- each by `front`'s own
-/// cut, read off the directory it follows. `rport` is the replica's node.
-fn what_was_out_is_answered(front: u16, leader: u16, n1: &Wire, rport: u16) {
+/// cut, read off the directory it follows, and counted once. `rport` is the
+/// replica's node and `copy` its wire: the job is put once the keyed claim
+/// has been sent there, so the claim's own wait bounds nothing.
+fn what_was_out_is_answered(front: u16, leader: u16, n1: &Wire, rport: u16, copy: &Wire) {
     let before = cuts(front);
     let stream = subscribed(front);
 
@@ -248,14 +272,14 @@ fn what_was_out_is_answered(front: u16, leader: u16, n1: &Wire, rport: u16) {
         front,
         "POST",
         PATH,
-        "Fenec-Wait: 20000\r\nIdempotency-Key: claim-1\r\n",
+        "Fenec-Wait: 30000\r\nIdempotency-Key: claim-1\r\n",
         &claim("with-key"),
     );
     let held = asking(
         front,
         "POST",
         PATH,
-        "Fenec-Wait: 20000\r\n",
+        "Fenec-Wait: 30000\r\n",
         &claim("no-key"),
     );
     n1.until_heard("with-key");
@@ -301,6 +325,9 @@ fn what_was_out_is_answered(front: u16, leader: u16, n1: &Wire, rport: u16) {
     assert_eq!(status, 502, "{b}");
     assert_eq!(stream.recv_timeout(WITHIN), Ok(true), "the stream");
 
+    // Sent on to the copy promoted: held there, or about to be, and the
+    // job put now its to take.
+    copy.until_sent("claim-1", 1);
     let (status, b) = nodes::query(front, PATH, "put jobs {run_at: 1}");
     assert_eq!(status, 200, "{b}");
     let (status, _, b) = answer(&held_keyed, "the keyed claim");
@@ -309,10 +336,10 @@ fn what_was_out_is_answered(front: u16, leader: u16, n1: &Wire, rport: u16) {
 
     assert_eq!(titled(rport, "plain"), 1);
     assert_eq!(titled(rport, "keyed"), 1);
+    // Three sent again, two that may have run, one stream: each once.
     let after = cuts(front);
-    assert!(after[0] - before[0] >= 3.0, "{before:?} -> {after:?}");
-    assert!(after[1] - before[1] >= 2.0, "{before:?} -> {after:?}");
-    assert!(after[2] - before[2] >= 1.0, "{before:?} -> {after:?}");
+    let counted: Vec<f64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(counted, [3.0, 2.0, 1.0], "{before:?} -> {after:?}");
 }
 
 /// A standby router's clients, n1 failed over by hand at the primary: what
@@ -323,11 +350,13 @@ fn what_was_out_is_answered(front: u16, leader: u16, n1: &Wire, rport: u16) {
 /// client's half of it.
 #[test]
 fn what_a_standby_had_out_to_a_node_failed_over_is_answered() {
+    let _serial = serial();
     let p = pair("sb", None, |_, w| w.addr.clone());
     let replica = acme(p.primary, |n| p.port_of(n));
     until_placed(p.standby, "acme", "n1");
     let rport = p.port_of(&replica);
-    what_was_out_is_answered(p.standby, p.primary, &p.wires[0], rport);
+    let copy = &p.wires[replica[1..].parse::<usize>().unwrap() - 1];
+    what_was_out_is_answered(p.standby, p.primary, &p.wires[0], rport, copy);
 }
 
 /// The same through a region's router whose copy of the global directory
@@ -336,6 +365,7 @@ fn what_a_standby_had_out_to_a_node_failed_over_is_answered() {
 /// it.
 #[test]
 fn what_a_region_s_router_had_out_by_its_copy_of_the_global_directory_is_answered() {
+    let _serial = serial();
     fenec_http::audit::set_delay(0);
     let f = files("region");
     let nodes: Vec<Node> = (1..=3)
@@ -374,7 +404,8 @@ fn what_a_region_s_router_had_out_by_its_copy_of_the_global_directory_is_answere
     // The region's router places the tenant by its copy: its own
     // directory lists none of the global one's.
     until(uport, PATH, "get notes select title", "before");
-    what_was_out_is_answered(uport, gport, &wires[0], port_of(&replica));
+    let copy = &wires[replica[1..].parse::<usize>().unwrap() - 1];
+    what_was_out_is_answered(uport, gport, &wires[0], port_of(&replica), copy);
 }
 
 /// A move a standby reads ends nothing it had out: a write out to n1 as
@@ -385,6 +416,7 @@ fn what_a_region_s_router_had_out_by_its_copy_of_the_global_directory_is_answere
 /// saying it may have run.
 #[test]
 fn a_move_a_standby_reads_ends_nothing_it_had_out() {
+    let _serial = serial();
     let p = pair("move", None, |_, w| w.addr.clone());
     let replica = acme(p.primary, |n| p.port_of(n));
     until_placed(p.standby, "acme", "n1");
@@ -478,6 +510,7 @@ impl Drop for Lookups {
 /// write landed on n1, on the history the failover left.
 #[test]
 fn a_standby_s_forward_that_read_the_maps_before_the_failover_goes_where_they_say_after() {
+    let _serial = serial();
     let n1 = format!("n1.fcut-dial-{}.test", std::process::id());
     let lookups = std::cell::OnceCell::new();
     let p = pair("dial", None, |i, w| match i {
@@ -522,17 +555,14 @@ fn a_standby_s_forward_that_read_the_maps_before_the_failover_goes_where_they_sa
 /// the primary's -- and asks the copy again until the primary's grant has
 /// come: here held at the copy's wire until the standby has been refused
 /// and asked again. Passed on, the client had the 503; granted, the
-/// standby's grant was a second router's lease on the node.
+/// standby's grant was a second router's lease on the node. Sent again
+/// however many times, the write is counted sent again once: counted at
+/// each ask, one request was seven.
 #[test]
 fn a_standby_s_write_refused_by_a_copy_not_yet_granted_waits_for_the_grant() {
+    let _serial = serial();
     let p = pair("grant", Some(NO_ROUND), |_, w| w.addr.clone());
-    // Leased before: a create grants its node.
-    for n in ["n2", "n3"] {
-        let at = format!(r#"{{"node":"{n}"}}"#);
-        let target = format!("/_shard/tenants/own-{n}");
-        let (status, b) = call(p.primary, "PUT", &target, &at, None);
-        assert_eq!(status, 201, "{b}");
-    }
+    leased(p.primary);
     let replica = acme(p.primary, |n| p.port_of(n));
     until_placed(p.standby, "acme", "n1");
     let rport = p.port_of(&replica);
@@ -549,17 +579,170 @@ fn a_standby_s_write_refused_by_a_copy_not_yet_granted_waits_for_the_grant() {
     p.wires[0].until_heard("note-1");
     unanswered(&keyed, "the keyed write");
     copy.park("/_admin/lease");
-    let primary = p.primary;
-    let failover =
-        std::thread::spawn(move || call(primary, "POST", "/_shard/nodes/n1/failover", "", None));
+    let before = cuts(p.standby);
+    let failover = fail_over_n1(p.primary);
     // Refused by the copy, and asked again: neither passed on nor granted.
-    copy.until_sent("note-1", 2);
+    copy.until_sent("note-1", 3);
     unanswered(&keyed, "the keyed write");
     assert_eq!(p.standby_router.cut_grants_waiting(), 0);
+    assert_eq!(p.standby_router.copy_asks_waiting(), 1);
     copy.let_through("/_admin/lease", 1 << 20);
     let (status, _, b) = answer(&keyed, "the keyed write");
     assert_eq!(status, 200, "{b}");
     assert_eq!(titled(rport, "keyed"), 1);
+    let after = cuts(p.standby);
+    let counted: Vec<f64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(counted, [1.0, 0.0, 0.0], "{before:?} -> {after:?}");
+    let (status, b) = failover.join().unwrap();
+    assert_eq!(status, 200, "{b}");
+}
+
+/// n2 and n3 leased by the router at `port`: a create of a tenant of its
+/// own on each grants it.
+fn leased(port: u16) {
+    for n in ["n2", "n3"] {
+        let at = format!(r#"{{"node":"{n}"}}"#);
+        let target = format!("/_shard/tenants/own-{n}");
+        let (status, b) = call(port, "PUT", &target, &at, None);
+        assert_eq!(status, 201, "{b}");
+    }
+}
+
+/// n1 failed over by hand at the router at `port`, on a thread of its own:
+/// its grant to the copy may be held at the copy's wire.
+fn fail_over_n1(port: u16) -> std::thread::JoinHandle<(u16, String)> {
+    std::thread::spawn(move || call(port, "POST", "/_shard/nodes/n1/failover", "", None))
+}
+
+/// A standby's write a copy not yet granted refuses, its client gone while
+/// the standby waits to ask again: the standby stops asking -- at once,
+/// its pause watching the client -- and the write never lands, the copy
+/// granted after. Asked on past its client, it was sent again until the
+/// grant came or two thirds of the lease ran out: 40 minutes at this one.
+#[test]
+fn a_standby_stops_asking_a_copy_for_a_client_that_left() {
+    let _serial = serial();
+    let p = pair("left", Some(NO_ROUND), |_, w| w.addr.clone());
+    leased(p.primary);
+    let replica = acme(p.primary, |n| p.port_of(n));
+    until_placed(p.standby, "acme", "n1");
+    let rport = p.port_of(&replica);
+    let copy = &p.wires[replica[1..].parse::<usize>().unwrap() - 1];
+
+    p.wires[0].fall_silent();
+    let sql = body(r#"put notes {title: "left"}"#);
+    let mut client = TcpStream::connect(("127.0.0.1", p.standby)).unwrap();
+    write!(
+        client,
+        "POST {PATH} HTTP/1.1\r\nHost: t\r\nIdempotency-Key: left-1\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{sql}",
+        sql.len()
+    )
+    .unwrap();
+    p.wires[0].until_heard("left-1");
+    copy.park("/_admin/lease");
+    let failover = fail_over_n1(p.primary);
+    copy.until_sent("left-1", 2);
+    until_so("the standby waiting to ask again", || {
+        p.standby_router.copy_asks_waiting() == 1
+    });
+    drop(client);
+    until_so("the standby stopping", || {
+        p.standby_router.copy_asks_waiting() == 0
+    });
+    let sent = copy.times_sent("left-1");
+    copy.let_through("/_admin/lease", 1 << 20);
+    // The failover answered once it granted the copy, which takes writes
+    // now: one through the standby lands.
+    let (status, b) = failover.join().unwrap();
+    assert_eq!(status, 200, "{b}");
+    let (status, b) = nodes::query(p.standby, PATH, r#"put notes {title: "after"}"#);
+    assert_eq!(status, 200, "{b}");
+    assert_eq!(titled(rport, "after"), 1);
+    assert_eq!(
+        copy.times_sent("left-1"),
+        sent,
+        "asked again after its client left"
+    );
+    assert_eq!(titled(rport, "left"), 0);
+}
+
+/// A region's router that leads its own directory under leases, and a
+/// tenant its copy of the global directory places, failed over by the
+/// global router: the region's router cuts its write and waits for the
+/// global router's grant to reach the copy -- held at the copy's wire --
+/// asking the copy again, and grants nothing, the tenant being no tenant
+/// of the directory it leads. Taken for its own, the router granted the
+/// copy its own list, which names nothing there, twice, and passed the
+/// copy's 503 on.
+#[test]
+fn a_region_s_leading_router_waits_for_the_global_grant_to_a_copy_it_follows() {
+    let _serial = serial();
+    fenec_http::audit::set_delay(0);
+    let f = files("lead");
+    let nodes: Vec<Node> = (1..=3)
+        .map(|i| node(&format!("fcut-lead{i}"), true))
+        .collect();
+    let wires: Vec<Wire> = nodes.iter().map(|n| Wire::to(n.port)).collect();
+    let (db, repl) = directory(&f.0.join("global.fenec"), None);
+    let global = Router::replicated(Directory::load(db).unwrap(), config(Some(NO_ROUND)), repl);
+    let gport = serve(&global);
+    for (i, w) in wires.iter().enumerate() {
+        let body = format!(
+            r#"{{"addr":"{}","token":"adm-fcut-lead{}"}}"#,
+            w.addr,
+            i + 1
+        );
+        let target = format!("/_shard/nodes/n{}", i + 1);
+        let (status, body) = call(gport, "PUT", &target, &body, None);
+        assert!(status == 200 || status == 201, "{body}");
+    }
+    leased(gport);
+    let (gdb, _following) = directory(&f.0.join("us.global.fenec"), Some(gport));
+    let cfg = Config {
+        region: Some("us".into()),
+        global: vec![format!("http://127.0.0.1:{gport}")],
+        ..config(Some(NO_ROUND))
+    };
+    let us = Router::regional(
+        Directory::in_memory(),
+        cfg,
+        None,
+        Directory::load(gdb).unwrap(),
+    )
+    .unwrap();
+    let uport = serve(&us);
+    let port_of = |n: &str| nodes[n[1..].parse::<usize>().unwrap() - 1].port;
+    let replica = acme(gport, port_of);
+    until(uport, PATH, "get notes select title", "before");
+    let copy = &wires[replica[1..].parse::<usize>().unwrap() - 1];
+
+    wires[0].fall_silent();
+    let keyed = asking(
+        uport,
+        "POST",
+        PATH,
+        "Idempotency-Key: note-g\r\n",
+        &body(r#"put notes {title: "keyed"}"#),
+    );
+    wires[0].until_heard("note-g");
+    unanswered(&keyed, "the keyed write");
+    copy.park("/_admin/lease");
+    let before = cuts(uport);
+    let failover = fail_over_n1(gport);
+    // Refused and asked again past the two asks a grant of its own came
+    // with: the router waits, its own leases none of the copy's.
+    copy.until_sent("note-g", 4);
+    unanswered(&keyed, "the keyed write");
+    assert_eq!(us.cut_grants_waiting(), 0);
+    assert_eq!(us.copy_asks_waiting(), 1);
+    copy.let_through("/_admin/lease", 1 << 20);
+    let (status, _, b) = answer(&keyed, "the keyed write");
+    assert_eq!(status, 200, "{b}");
+    assert_eq!(titled(port_of(&replica), "keyed"), 1);
+    let after = cuts(uport);
+    let counted: Vec<f64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(counted, [1.0, 0.0, 0.0], "{before:?} -> {after:?}");
     let (status, b) = failover.join().unwrap();
     assert_eq!(status, 200, "{b}");
 }
