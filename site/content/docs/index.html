@@ -71,6 +71,8 @@ to.</p>
     <p>Segments, the mapped file, one writer, and why there is no page cache.</p></li>
   <li><a href="fenecql.html">FenecQL</a>
     <p>The language: statements, types, operators, indexes, parameters.</p></li>
+  <li><a href="sql.html">From SQL</a>
+    <p>The SQL it reads as written, what it refuses and what to write instead, and where the meaning is not SQL's.</p></li>
   <li><a href="javascript.html">JavaScript and TypeScript</a>
     <p>The browser client, the query builder and generated TypeScript types.</p></li>
   <li><a href="mobile.html">Mobile and native apps</a>
@@ -108,7 +110,7 @@ should live.</p>
 <table>
 <thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
 <tbody>
-<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">294 KB gzip<br><small>the wasm module</small></td></tr>
+<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">301 KB gzip<br><small>the wasm module</small></td></tr>
 <tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1331–1897 KB</td></tr>
 <tr><td>Server</td><td><code>fenec-server</code>: HTTP, replication and tenants in one process</td><td class="n">2.99 MB image</td></tr>
 <tr><td>Embedded</td><td><code>fenec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
@@ -122,7 +124,7 @@ should live.</p>
 
 <ul>
   <li><b>One writer.</b> Many readers, but one write or batch at a time.</li>
-  <li><b>No SQL and no JOIN.</b> Every client speaks FenecQL, over HTTP or in process.</li>
+  <li><b>No SQL dialect and no JOIN.</b> Every client speaks FenecQL, over HTTP or in process; it reads SQL's everyday spellings as the statements they mean (<a href="sql.html">From SQL</a>).</li>
   <li><b>No decimals.</b> Store money as cents.</li>
 </ul>
 
@@ -139,8 +141,12 @@ than a roadmap.</p>
     <code>lookup</code> attaches to each of its rows — and, chained, the
     children of those — and filters by another's rows only through an
     uncorrelated <code>in (get …)</code>.</li>
-  <li><b>No SQL.</b> FenecQL is the one language, in the page, in Rust and
-    over HTTP.</li>
+  <li><b>No SQL dialect.</b> FenecQL is the one language, in the page, in
+    Rust and over HTTP. It reads <code>INSERT … VALUES</code>,
+    <code>UPDATE … SET</code>, <code>IN (…)</code>, <code>BETWEEN</code>,
+    <code>LIKE</code> and <code>ON CONFLICT</code> as the statements they
+    mean and refuses the rest saying what to write; there is no wire
+    protocol for SQL drivers, and no ORM speaks it.</li>
   <li><b>No multi-writer replication,</b> and no change of a field's type in
     place: it would rewrite every document under the write lock.</li>
   <li><b>No decimal type.</b> <code>float</code> is binary floating point and

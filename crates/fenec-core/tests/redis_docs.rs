@@ -7,13 +7,18 @@ use fenec_core::prelude::*;
 
 const PAGE: &str = include_str!("../../../site/content/docs/redis.html");
 
-/// The page's `<pre data-lang="fenecql">` blocks, unescaped.
-fn blocks(page: &str) -> Vec<String> {
-    let open = "<pre data-lang=\"fenecql\">";
+/// The page's `<pre data-lang="...">` blocks of the languages named, in
+/// the page's order, unescaped.
+fn blocks(page: &str, langs: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = page;
-    while let Some(at) = rest.find(open) {
-        rest = &rest[at + open.len()..];
+    while let Some(at) = rest.find("<pre data-lang=\"") {
+        rest = &rest[at + "<pre data-lang=\"".len()..];
+        let (lang, after) = rest.split_once("\">").expect("a block's tag ends");
+        if !langs.contains(&lang) {
+            continue;
+        }
+        rest = after;
         let end = rest.find("</pre>").expect("a block ends");
         out.push(
             rest[..end]
@@ -48,12 +53,18 @@ fn every_recipe_runs_and_answers_what_the_page_says() {
 /// answered, as JSON writes them and a client sends them back -- a day's
 /// sketches put into a rollup (`put daily $1`).
 pub(crate) fn run_page(page: &str) -> (usize, usize) {
+    run_blocks(page, &["fenecql"])
+}
+
+/// [`run_page`] over the blocks of the languages named: `sql_docs.rs`
+/// runs its page's SQL with its FenecQL, in the page's order.
+pub(crate) fn run_blocks(page: &str, langs: &[&str]) -> (usize, usize) {
     let mut db = Database::new();
     let mut now = 1_777_800_000_000;
     db.set_clock(Some(now));
     let (mut statements, mut checked) = (0, 0);
     let mut rows = String::from("[]");
-    for block in blocks(page) {
+    for block in blocks(page, langs) {
         for line in block.lines().filter(|l| !l.trim().is_empty()) {
             if let Some(comment) = line.trim().strip_prefix("--") {
                 if let Some(s) = comment.trim().strip_suffix(" s later") {

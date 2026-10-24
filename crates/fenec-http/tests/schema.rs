@@ -164,10 +164,14 @@ fn the_schema_is_described_as_the_statements_that_make_it() {
     assert!(plan.contains(r#""statements":[],"refusals":[]"#), "{plan}");
     // A scoped token is told of what it reads, and nothing else.
     let (_, mine) = n.call(&user, "GET", "/_schema?as=fenecql", "");
+    // The `id` no field declares, named in a comment, which a plan reads
+    // past.
     assert_eq!(
         mine,
-        r#"{"format":1,"fenecql":"create collection todos (title text required, done bool @hash)\n"}"#
+        r#"{"format":1,"fenecql":"-- every row also has an `id`, an int the database makes: `where id = 1`\ncreate collection todos (title text required, done bool @hash)\n"}"#
     );
+    let (status, plan) = n.call(&user, "POST", "/_schema/plan?mode=follow", &mine);
+    assert_eq!(status, 200, "{plan}");
     // An index over several fields: in the text, in `/collections`, and
     // planned back as nothing to do; one the code lacks, refused with the
     // migration that drops it.

@@ -2522,7 +2522,7 @@ fn source_or_err<'a>(
         None => schema
             .field_pos(name)
             .map(|p| (p, None))
-            .ok_or_else(|| Error::NotFound(format!("field `{owner}{name}`"))),
+            .ok_or_else(|| crate::schema::no_field(&format!("{owner}{name}"))),
     }
 }
 
@@ -2808,7 +2808,14 @@ impl Step<'_> {
             return Ok(true);
         };
         let test = self.test.get_or_init(|| Filter::new(self.child, f, ctx));
-        test.matches(id, ctx)
+        test.matches(id, ctx).map_err(|e| match e {
+            Error::NotFound(m) => Error::NotFound(format!(
+                "{m} in `{}`{}",
+                self.l.collection,
+                crate::schema::AFTER_LOOKUP
+            )),
+            e => e,
+        })
     }
 
     /// [`Step::ids`] for a row of a level above that answered groups: its
@@ -2889,8 +2896,7 @@ impl<'a> Above<'a> {
         let (c, list) = match self {
             Above::Docs(c) if name == "id" => return Ok((None, DataType::Int)),
             Above::Docs(c) => {
-                let p = (c.schema.field_pos(name))
-                    .ok_or_else(|| Error::NotFound(format!("field `{name}`")))?;
+                let p = (c.schema.field_pos(name)).ok_or_else(|| crate::schema::no_field(name))?;
                 return Ok((Some(p), c.schema.fields[p].ty.clone()));
             }
             Above::Rows(c, list) => (c, list),
@@ -7225,6 +7231,10 @@ impl Database {
     ) -> Result<Response> {
         // Taken out for the statement, as `set` takes it: an upsert's
         // values call its functions while the row is written.
+        if let Some(on) = pick.and_then(|p| p.conflict.as_deref()) {
+            let names_id = docs.iter().flatten().any(|(k, _)| k == "id") || docs_param.is_some();
+            self.collection(collection)?.schema.arbiter(on, names_id)?;
+        }
         let registry = std::mem::take(&mut self.registry);
         let list = pick.and_then(|p| p.returning.as_ref());
         let mut answered = list.map(|_| (Vec::new(), Vec::new()));
@@ -12447,7 +12457,19 @@ enum Test<'q> {
     /// A `nocase` field's text against values folded where it is bound,
     /// by its fold.
     Folded(Slot, CaseFold, Box<Folded>),
+    /// SQL's `like` over a text field (`query::sql_like`), its pattern
+    /// checked and folded once a query: through `eval`, a scan by one took
+    /// five times a scan by `~`.
+    Pattern(Slot, Box<Pattern>),
     Eval(&'q Expr),
+}
+
+/// What a [`Test::Pattern`] matches a row's text against: the pattern
+/// and its escape, and the fold both sides are compared by.
+struct Pattern {
+    pat: String,
+    esc: String,
+    fold: Option<CaseFold>,
 }
 
 /// What a [`Test::Folded`] asks of its field's fold. Folded as a row was
@@ -12641,8 +12663,67 @@ impl<'q> Filter<'q> {
                 (Some(s), Some(v)) => Test::Has(s, v),
                 _ => Test::Eval(e),
             },
+            Expr::Call(name, args) if name == "like" || name == "ilike" => {
+                Filter::bind_pattern(c, name.starts_with('i'), args, &value, &mut slot)
+                    .unwrap_or(Test::Eval(e))
+            }
             _ => Test::Eval(e),
         }
+    }
+
+    /// `like(<a text field>, <pattern> [, <escape>])`, `ilike` when `ci`,
+    /// the pattern and the escape values: bound as [`Test::Pattern`],
+    /// which answers as `sql_like` does. `None` for anything `sql_like`
+    /// would refuse or read otherwise -- a field of another type, a path,
+    /// an escape it takes no case of, a pattern ending in it -- left to
+    /// `eval`, which says why at the first row.
+    #[inline(never)]
+    fn bind_pattern(
+        c: &Collection,
+        ci: bool,
+        args: &'q [Expr],
+        value: &dyn Fn(&Expr) -> Option<Value>,
+        slot: &mut dyn FnMut(&'q Expr) -> Option<Slot>,
+    ) -> Option<Test<'q>> {
+        let [x, p, e @ ..] = args else { return None };
+        let Some(Slot::At(at)) = slot(x) else {
+            return None;
+        };
+        let field = &c.schema.fields[at];
+        if field.ty != DataType::Text {
+            return None;
+        }
+        let fold = field.case_fold();
+        #[cfg(feature = "nocase")]
+        let fold = fold.or(ci.then_some(CaseFold::Unicode));
+        #[cfg(not(feature = "nocase"))]
+        if ci {
+            return None;
+        }
+        let esc = match e {
+            [] => String::new(),
+            [e] => match value(e)? {
+                Value::Text(t) => t,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let Value::Text(pat) = value(p)? else {
+            return None;
+        };
+        let fit = |s: &str| match fold {
+            Some(f) => crate::case::fold(s, f).into_owned(),
+            None => s.to_string(),
+        };
+        let pat = fit(&pat);
+        if esc.chars().nth(1).is_some() || fit(&esc) != esc {
+            return None;
+        }
+        like_pattern(&[], pat.as_bytes(), esc.as_bytes())?;
+        Some(Test::Pattern(
+            Slot::At(at),
+            Box::new(Pattern { pat, esc, fold }),
+        ))
     }
 
     /// `distance(<point field>, <point>) <op> <value>` -- the call's
@@ -12744,6 +12825,16 @@ impl<'q> Filter<'q> {
     fn apart(&self, slot: Slot, t: &Test, v: &Value) -> bool {
         match t {
             Test::Folded(_, f, folded) => self.folded(slot, v, *f, folded),
+            Test::Pattern(_, p) => match v {
+                Value::Text(h) => {
+                    let h = match p.fold {
+                        Some(f) => crate::case::fold(h, f),
+                        None => std::borrow::Cow::Borrowed(h.as_str()),
+                    };
+                    like_pattern(h.as_bytes(), p.pat.as_bytes(), p.esc.as_bytes()) == Some(true)
+                }
+                _ => false,
+            },
             #[cfg(feature = "geo")]
             t => geo_test(t, v),
             #[cfg(not(feature = "geo"))]
@@ -12898,11 +12989,12 @@ impl<'q> Filter<'q> {
             // browser module's count over 20 000 rows by two numbers, which
             // runs neither, 1.25 -> 1.34 ms.
             #[cfg(feature = "geo")]
-            Test::Distance { slot, .. } | Test::Within(slot, _) | Test::Folded(slot, ..) => {
-                self.apart(*slot, t, get(*slot))
-            }
+            Test::Distance { slot, .. }
+            | Test::Within(slot, _)
+            | Test::Folded(slot, ..)
+            | Test::Pattern(slot, _) => self.apart(*slot, t, get(*slot)),
             #[cfg(not(feature = "geo"))]
-            Test::Folded(slot, ..) => self.apart(*slot, t, get(*slot)),
+            Test::Folded(slot, ..) | Test::Pattern(slot, _) => self.apart(*slot, t, get(*slot)),
             Test::Eval(e) => {
                 let mut row = StoreRow {
                     store: &self.c.store,

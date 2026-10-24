@@ -60,6 +60,9 @@ function indexText(ix) {
   return `@${kind}${args.length ? `(${args.join(', ')})` : ''}`;
 }
 
+/** The comment a server's `GET /_schema?as=fenecql` begins with. */
+const ID_NOTE = '-- every row also has an `id`, an int the database makes: `where id = 1`\n';
+
 /**
  * A description's collections as the FenecQL that makes them: the browser
  * module reads a description so -- reading its JSON was 8 KB of the module
@@ -156,7 +159,12 @@ export class Engine {
         return await this.#batch(items);
       }
       if (method === 'GET' && route === '/_schema') {
-        return { status: 200, json: this.#db.describe(new URLSearchParams(query).get('as') === 'fenecql' ? 'fenecql' : 'json'), seq: null };
+        const text = new URLSearchParams(query).get('as') === 'fenecql';
+        const json = this.#db.describe(text ? 'fenecql' : 'json');
+        // As a server writes it (`with_id_note`): the `id` no field
+        // declares, in a comment a plan reads past.
+        if (text && json.fenecql) json.fenecql = ID_NOTE + json.fenecql;
+        return { status: 200, json, seq: null };
       }
       if (method === 'POST' && route === '/_schema/plan') {
         let d = null;

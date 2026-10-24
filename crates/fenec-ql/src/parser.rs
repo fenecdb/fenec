@@ -75,6 +75,63 @@ use fenec_core::value::{DataType, Value, VecPrec};
 /// queries.
 pub const MAX_EXPR_DEPTH: usize = 512;
 
+/// What an index is written as, said where SQL's `create index` is not it.
+const INDEX_FORM: &str = "an index is `create index on <collection> (<field>, ...) @hash`, \
+                          `@sorted` or `@unique`: it names its kind, and has no name";
+
+/// What SQL's `join` is answered with: both ways a key runs, and the
+/// filter by another collection's rows.
+const JOIN: &str = "FenecQL has no `join`: `get orders where ... lookup items on order_id` \
+                    attaches each order's items, `get items where ... lookup orders on id = \
+                    order_id` each item's order -- the clauses after `lookup` are the looked-up \
+                    collection's -- and `where order_id in (get orders select id where ...)` \
+                    filters by another collection";
+
+/// What an insert that names no fields is answered with.
+const NAMED: &str = "an insert names its fields: `insert into <collection> (<field>, ...) values \
+                     (...)`, or `insert <collection> {<field>: <value>}`";
+
+/// The words a statement begins with, and SQL's that `Parser::statement`
+/// answers: one a `get` stops at is the next statement's, any other an
+/// alias or a mistake.
+const COMMANDS: [&str; 20] = [
+    "get",
+    "select",
+    "put",
+    "insert",
+    "set",
+    "update",
+    "del",
+    "delete",
+    "create",
+    "drop",
+    "alter",
+    "explain",
+    "collections",
+    "describe",
+    "compact",
+    "truncate",
+    "begin",
+    "start",
+    "commit",
+    "rollback",
+];
+
+/// What PostgreSQL's `->>` is answered with, and `json_extract()` by the
+/// engine in its words.
+const JSON_PATH: &str = "a json field's member is read by a path: `meta.source`, not \
+                         `meta->>'source'`";
+
+/// What full text in a filter is answered with: SQL's `match(...)`,
+/// PostgreSQL's `@@`.
+const FULLTEXT: &str = "full text is the `match` clause over an `@text` field: \
+                        `get docs where ... match body $1`";
+
+/// What a test of a double-quoted text alone is refused with, after the
+/// text and its name (`Parser::quoted`): SQL's quoted column, FenecQL's
+/// text, so the test answers the same for every row.
+const QUOTED: &str = "double quotes make text here, the same in every row";
+
 pub struct Parser {
     toks: Vec<Token>,
     i: usize,
@@ -406,6 +463,22 @@ pub fn parse_one(src: &str) -> Result<Statement> {
     one(parse(src)?)
 }
 
+/// A value the row cannot change: a literal, or a parameter.
+fn fixed(e: &Expr) -> bool {
+    matches!(e, Expr::Lit(_) | Expr::Param(_))
+}
+
+/// Whether a text `~` is handed reads as a regular expression: anchored
+/// (`^a`, `a$`) or holding `.*` or `.+`, which a text searched for as
+/// written seldom does. Narrow on purpose: `[draft]` and `a.b` are text
+/// people search for.
+fn regex_like(t: &str) -> bool {
+    let b = t.as_bytes();
+    (b.len() > 1 && (b[0] == b'^' || b[b.len() - 1] == b'$'))
+        || b.windows(2)
+            .any(|w| w[0] == b'.' && matches!(w[1], b'*' | b'+'))
+}
+
 fn one(mut s: Vec<Statement>) -> Result<Statement> {
     if s.len() != 1 {
         return Err(Error::Query(format!(
@@ -590,22 +663,25 @@ impl Parser {
 
     /// A name: a collection's, a field's where one is declared or named
     /// alone. A path is no name, and is refused rather than taken for one.
+    /// `"Users"` is a name where only a name can stand, as SQL quotes one:
+    /// that was an error before, so no text that parsed reads otherwise.
     fn ident(&mut self) -> Result<String> {
         match self.next() {
-            Tok::Ident(s) if s.contains('.') => {
+            Tok::Ident(s) | Tok::Str(s) if s.contains('.') => {
                 self.i -= 1;
                 self.err(format!("`{s}` is a path; a name holds no dot"))
             }
-            Tok::Ident(s) => Ok(s),
+            Tok::Ident(s) | Tok::Str(s) => Ok(s),
             other => self.err(format!("expected a name, found {}", other.describe())),
         }
     }
 
     /// A field, or a path into a json field (`meta.source.rank`): what a
-    /// `select`, an `order` and a `create index` take.
+    /// `select`, an `order` and a `create index` take. Double-quoted too,
+    /// as [`Self::ident`].
     fn path(&mut self) -> Result<String> {
         match self.next() {
-            Tok::Ident(s) => Ok(s),
+            Tok::Ident(s) | Tok::Str(s) => Ok(s),
             other => self.err(format!("expected a name, found {}", other.describe())),
         }
     }
@@ -690,7 +766,55 @@ impl Parser {
                 };
                 Ok(Statement::Compact(which))
             }
+            // SQL's words with no statement of their own here, each
+            // answered with what FenecQL writes: an error that teaches,
+            // where an agent writing SQL by habit would retry blind.
+            "join" | "inner" | "left" | "right" | "full" | "cross" => self.err(JOIN),
+            // `from users u join orders o`: the alias, then the join.
+            _ if matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
+                Some(Tok::Ident(k)) if k.eq_ignore_ascii_case("join")) =>
+            {
+                self.err(JOIN)
+            }
+            "truncate" => self.err("FenecQL deletes every row with `del <collection>`"),
+            "begin" | "start" | "commit" | "rollback" => self.err(
+                "FenecQL has no open transaction: a `/batch` of statements (in the page, a `run` \
+                 of several) lands whole or not at all",
+            ),
+            // `from users u where ...`: a word after a name that ends a
+            // statement, as SQL's alias does. (One `format!` for both was 20
+            // bytes smaller raw and 322 larger brotli.)
+            other if self.i > 0 && matches!(self.toks[self.i - 1].tok, Tok::Ident(_)) => {
+                Err(self.alias(other))
+            }
             other => self.err(format!("unknown command `{other}`")),
+        }
+    }
+
+    /// `msg` and what was found where it is refused: at the text's end
+    /// "end of input", which a next line moves -- so the shell, reading a
+    /// line at a time, holds a statement it refuses there as open.
+    #[inline(never)]
+    fn taught(&self, msg: &str) -> Error {
+        self.error(&format!("{msg}; found {}", self.peek().describe()))
+    }
+
+    /// `other`, a word that begins no statement after a name that ends
+    /// one: SQL's alias, if it is one.
+    #[inline(never)]
+    fn alias(&self, other: &str) -> Error {
+        self.error(&format!(
+            "unknown command `{other}`: an alias, if it is one, FenecQL does not take -- a \
+             statement's one collection names its fields bare"
+        ))
+    }
+
+    /// `table` after `create`, `drop` or `alter`: SQL's, refused with what
+    /// FenecQL writes.
+    fn no_table(&mut self, what: &str) -> Result<()> {
+        match self.peek_kw("table") {
+            true => self.err(format!("FenecQL writes `{what} collection`")),
+            false => Ok(()),
         }
     }
 
@@ -699,6 +823,10 @@ impl Parser {
         if self.peek_kw("index") {
             return self.create_index();
         }
+        if self.peek_kw("unique") {
+            return self.err(INDEX_FORM);
+        }
+        self.no_table("create")?;
         self.expect_kw("collection")?;
         let mut if_not_exists = false;
         if self.eat_kw("if") {
@@ -794,10 +922,17 @@ impl Parser {
             self.expect_kw("exists")?;
             if_not_exists = true;
         }
-        self.expect_kw("on")?;
+        // SQL's `create index users_email on users (email)`: a name, and no
+        // kind.
+        if !self.eat_kw("on") {
+            return Err(self.taught(INDEX_FORM));
+        }
         let collection = self.ident()?;
         let mut keys = self.index_keys()?;
-        self.expect(Tok::At)?;
+        if !matches!(self.peek(), Tok::At) {
+            return Err(self.taught(INDEX_FORM));
+        }
+        self.next();
         // Several fields: an index over them, ordered part by part.
         if keys.len() > 1 {
             let unique = self.composite_kind()?;
@@ -1119,6 +1254,7 @@ impl Parser {
                 if_exists,
             });
         }
+        self.no_table("drop")?;
         self.expect_kw("collection")?;
         let mut if_exists = false;
         if self.eat_kw("if") {
@@ -1135,6 +1271,7 @@ impl Parser {
     /// [field] <field> | rename [field] <field> to <name>`.
     fn alter(&mut self) -> Result<Statement> {
         self.expect_kw("alter")?;
+        self.no_table("alter")?;
         self.expect_kw("collection")?;
         let collection = self.ident()?;
         let change = match self.ident()?.to_ascii_lowercase().as_str() {
@@ -1218,10 +1355,18 @@ impl Parser {
                 self.next();
             }
             self.expect(Tok::RBracket)?;
+        } else if insert && !matches!(self.peek(), Tok::LBrace) {
+            docs = self.values()?;
         } else {
             docs.push(self.object()?);
-            // consecutive objects are accepted too: put docs {..} {..}
-            while matches!(self.peek(), Tok::LBrace) {
+            // consecutive objects are accepted too: put docs {..} {..}, and
+            // with commas between them, a list without its brackets.
+            loop {
+                match (self.peek(), self.toks.get(self.i + 1).map(|t| &t.tok)) {
+                    (Tok::LBrace, _) => {}
+                    (Tok::Comma, Some(Tok::LBrace)) => self.i += 1,
+                    _ => break,
+                }
                 docs.push(self.object()?);
             }
         }
@@ -1232,7 +1377,7 @@ impl Parser {
         // passed over, and the answer counts what was written. `else set
         // {..}` sets the row holding it instead -- an upsert, `new.f`
         // reading the document's `f`.
-        let if_absent = self.eat_kw("if");
+        let mut if_absent = self.eat_kw("if");
         let mut else_set = None;
         if if_absent {
             self.expect_kw("absent")?;
@@ -1241,20 +1386,30 @@ impl Parser {
                 else_set = Some(self.object()?);
             }
         }
+        let mut conflict = None;
+        if !if_absent && self.eat_kw("on") {
+            if_absent = true;
+            (else_set, conflict) = self.on_conflict(&collection)?;
+        }
         // `require` and `returning`, either first.
-        let (mut require, mut pick) = (None, None);
+        let mut require = None;
+        let mut returning = None;
         loop {
             if self.peek_kw("require") {
                 require = self.require()?;
             } else if self.eat_kw("returning") {
-                pick = Some(Box::new(Pick {
-                    returning: Some(self.projection_list()?),
-                    ..Pick::default()
-                }));
+                returning = Some(self.projection_list()?);
             } else {
                 break;
             }
         }
+        let pick = (returning.is_some() || conflict.is_some()).then(|| {
+            Box::new(Pick {
+                returning,
+                conflict,
+                ..Pick::default()
+            })
+        });
         Ok(Statement::Put {
             collection,
             docs,
@@ -1265,6 +1420,132 @@ impl Parser {
             require,
             pick,
         })
+    }
+
+    /// SQL's `(<a>, <b>) values (..), (..)` after `insert into <name>`: a
+    /// document a row, each value its column's -- `insert <name> {a: ..,
+    /// b: ..}`. The columns are named: the parser reads no schema, and a
+    /// collection's fields have no order a statement could lean on, `id`
+    /// not among them and a field added going last.
+    fn values(&mut self) -> Result<Vec<Vec<(String, Expr)>>> {
+        // `values {a: 1}, {a: 2}`: documents, which name their fields. Each
+        // refusal here says what it found (`taught`), so one at the text's
+        // end is one a next line moves, and the shell reads it as open.
+        if self.eat_kw("values") {
+            if !matches!(self.peek(), Tok::LBrace) {
+                return Err(self.taught(NAMED));
+            }
+            let mut docs = vec![self.object()?];
+            while matches!(self.peek(), Tok::Comma) {
+                self.next();
+                docs.push(self.object()?);
+            }
+            return Ok(docs);
+        }
+        let cols = match self.peek() {
+            Tok::LParen => self.names()?,
+            _ if self.peek_kw("select") || self.peek_kw("get") => vec![],
+            _ => return Err(self.taught(NAMED)),
+        };
+        if self.peek_kw("select") || self.peek_kw("get") {
+            return self.err(
+                "FenecQL inserts documents, not a query's rows: read them with `get`, and write \
+                 them with `insert <collection> $1`, a parameter holding them",
+            );
+        }
+        self.expect_kw("values")?;
+        let mut docs = Vec::new();
+        loop {
+            self.expect(Tok::LParen)?;
+            let mut doc = Vec::with_capacity(cols.len());
+            loop {
+                let v = self.expr()?;
+                doc.push((cols.get(doc.len()).cloned().unwrap_or_default(), v));
+                if !matches!(self.peek(), Tok::Comma) {
+                    break;
+                }
+                self.next();
+            }
+            if doc.len() != cols.len() {
+                return self.err(format!(
+                    "a row of {} values for {} fields",
+                    doc.len(),
+                    cols.len()
+                ));
+            }
+            self.expect(Tok::RParen)?;
+            docs.push(doc);
+            if !matches!(self.peek(), Tok::Comma) {
+                return Ok(docs);
+            }
+            self.next();
+        }
+    }
+
+    /// SQL's `on conflict [(<key>, ...)] do nothing` and `do update set
+    /// ...`, `on` read: FenecQL's `if absent` and `if absent else set
+    /// {...}` -- the pairs the `else set` holds -- and the target, which
+    /// the engine holds to the one unique key the collection's rows can
+    /// be found by (`Schema::arbiter`): `if absent` is held by the id or
+    /// any `@unique` value, and with two the target and it would part.
+    /// With no target, SQLite's reading, they map as they are.
+    /// `excluded.f` is `new.f`, the document's `f`, and `<name>.f` the
+    /// row's `f`.
+    #[allow(clippy::type_complexity)]
+    fn on_conflict(
+        &mut self,
+        collection: &str,
+    ) -> Result<(Option<Vec<(String, Expr)>>, Option<Vec<String>>)> {
+        self.expect_kw("conflict")?;
+        let target = match self.peek() {
+            Tok::LParen => Some(self.names()?),
+            _ => None,
+        };
+        if !self.eat_kw("do") {
+            return Err(self.taught(
+                "an upsert names its unique field, or none: `on conflict (email) do ...`, or \
+                 `on conflict do nothing`",
+            ));
+        }
+        if self.eat_kw("nothing") {
+            return Ok((None, target));
+        }
+        self.expect_kw("update")?;
+        self.expect_kw("set")?;
+        let mut set = self.assignments()?;
+        if self.peek_kw("where") {
+            return self.err("FenecQL's upsert sets the row it finds held, with no `where`");
+        }
+        for (_, e) in &mut set {
+            let _ = e.rewrite(&mut |e| {
+                if let Expr::Field(f) = e {
+                    match f.split_once('.') {
+                        Some((t, rest)) if t.eq_ignore_ascii_case("excluded") => {
+                            *f = format!("new.{rest}")
+                        }
+                        Some((t, rest)) if t == collection => *f = rest.to_string(),
+                        _ => {}
+                    }
+                }
+                Ok(false)
+            });
+        }
+        Ok((Some(set), target))
+    }
+
+    /// SQL's `a = <expr>, b = <expr>` after `set`: an update's pairs, as
+    /// `{a: <expr>, b: <expr>}` holds them.
+    fn assignments(&mut self) -> Result<Vec<(String, Expr)>> {
+        let mut pairs = Vec::new();
+        loop {
+            let key = self.path()?;
+            self.expect(Tok::Eq)?;
+            pairs.push((key, self.expr()?));
+            if !matches!(self.peek(), Tok::Comma) {
+                return Ok(pairs);
+            }
+            self.next();
+        }
     }
 
     /// `require <n>` after a write: it must write exactly `n` rows, or it is
@@ -1292,8 +1573,7 @@ impl Parser {
                 break;
             }
             let key = match self.next() {
-                Tok::Ident(s) => s,
-                Tok::Str(s) => s,
+                Tok::Ident(s) | Tok::Str(s) | Tok::Single(s) => s,
                 other => {
                     return self.err(format!("expected a field name, found {}", other.describe()))
                 }
@@ -1317,9 +1597,37 @@ impl Parser {
                      // is followed by `from` it is a projection, otherwise the first name
                      // is the collection.
         let mut list = SelectList::default();
+        // SQL's `select distinct a, b`: a group of each -- which takes an
+        // aggregate here, so the hint names one (named without it, agents
+        // wrote `group city` alone and were refused again). In `in (select
+        // distinct ...)` it changes nothing, and is passed over. A join
+        // further on is answered first.
+        if self.peek_kw("distinct")
+            && matches!(&self.toks[self.i - 1].tok, Tok::Ident(w) if w.eq_ignore_ascii_case("select"))
+            && matches!(
+                self.toks.get(self.i + 1).map(|t| &t.tok),
+                Some(Tok::Ident(_) | Tok::Star)
+            )
+        {
+            if self.subqueries > 0 {
+                self.next();
+            } else {
+                let joins = self.toks[self.i..]
+                    .iter()
+                    .any(|t| matches!(&t.tok, Tok::Ident(w) if w.eq_ignore_ascii_case("join")));
+                return self.err(match joins {
+                    true => JOIN,
+                    false => {
+                        "FenecQL has no `distinct`: `get t select city, count(*) group city` \
+                         answers each city once, and a `group` needs an aggregate -- or \
+                         `select count(distinct city)` counts them"
+                    }
+                });
+            }
+        }
         if !self.peek_kw("from") {
             let save = self.i;
-            match self.projection_before_from() {
+            match self.projection_before_from()? {
                 Some(l) => list = l,
                 None => self.i = save,
             }
@@ -1482,6 +1790,29 @@ impl Parser {
             }
             break;
         }
+        // SQL's join, where the clauses stop -- `join`, an alias before it,
+        // a comma between two collections -- and an alias alone, answered
+        // before the check, whose refusal of a grouping over the join's
+        // columns came first and hid the hint (the agent eval: 11 of 32
+        // joins).
+        if self.joined() {
+            return self.err(JOIN);
+        }
+        // An alias only where SQL's clause follows it (`from users u group
+        // by u.city`): a word at the end of the text may be a statement
+        // still being typed, which the shell holds back as one beginning
+        // no statement, refused where it stands.
+        if let (Tok::Ident(w), Some(Tok::Ident(k))) =
+            (self.peek(), self.toks.get(self.i + 1).map(|t| &t.tok))
+        {
+            if !COMMANDS.iter().any(|c| w.eq_ignore_ascii_case(c))
+                && ["where", "group", "order", "limit", "having"]
+                    .iter()
+                    .any(|c| k.eq_ignore_ascii_case(c))
+            {
+                return Err(self.alias(&w.to_ascii_lowercase()));
+            }
+        }
         // The semantic check also runs here so the error carries a position.
         // The engine repeats the same check, because plan structures can be
         // built independently of FenecQL.
@@ -1527,7 +1858,12 @@ impl Parser {
         loop {
             // A field, or an aggregate of one, by the name it answers
             // under -- what a key was before it could be an expression.
-            let (field, expr) = match self.expr()? {
+            let ti = self.i;
+            let e = self.expr()?;
+            if self.alone(ti) {
+                return Err(self.quoted(ti));
+            }
+            let (field, expr) = match e {
                 Expr::Field(f) => (f, None),
                 e @ Expr::Call(..) if e.aggregate_name().is_some() => match label_of(&e) {
                     Some(label) => (label, None),
@@ -1544,6 +1880,18 @@ impl Parser {
                 self.eat_kw("asc");
                 true
             };
+            // SQL's `nulls first` and `nulls last`, where they say what
+            // the order does here: nulls before the values ascending,
+            // after them descending.
+            if self.eat_kw("nulls") {
+                let nulls = if asc { "first" } else { "last" };
+                if !self.eat_kw(nulls) {
+                    return Err(self.taught(
+                        "a null comes first ascending and last descending: to turn that round, \
+                         order by `<key> is null` first",
+                    ));
+                }
+            }
             if collate.is_none() {
                 collate = self.collate()?;
             }
@@ -1717,23 +2065,35 @@ impl Parser {
         }
     }
 
-    fn projection_before_from(&mut self) -> Option<SelectList> {
+    /// `Ok(None)` where the words after `select` are no list followed by
+    /// `from`; a double-quoted name among them is refused there, which a
+    /// collection's name after `select` never is.
+    fn projection_before_from(&mut self) -> Result<Option<SelectList>> {
         let list = self.select_list();
         self.cut |= self.at_eof();
-        let list = list.ok()?;
-        self.eat_kw("from").then_some(list)
+        match list {
+            Ok(list) => Ok(self.eat_kw("from").then_some(list)),
+            Err(Error::Query(m)) if m.ends_with(QUOTED) => Err(Error::Query(m)),
+            Err(_) => Ok(None),
+        }
     }
 
     /// `group symbol, bucket(at, 1m)`: the keys, each an expression over the
     /// row or a name the select list gives an item.
     fn group_list(&mut self) -> Result<Vec<Expr>> {
         self.eat_kw("by");
-        let mut out = vec![self.expr()?];
-        while matches!(self.peek(), Tok::Comma) {
-            self.next();
+        let mut out = Vec::new();
+        loop {
+            let ti = self.i;
             out.push(self.expr()?);
+            if self.alone(ti) {
+                return Err(self.quoted(ti));
+            }
+            if !matches!(self.peek(), Tok::Comma) {
+                return Ok(out);
+            }
+            self.next();
         }
-        Ok(out)
     }
 
     /// `brand top 5 disjunctive, price ranges [0, 2500, 5000], color`: each
@@ -1823,7 +2183,12 @@ impl Parser {
             } else if star {
                 return self.err("after `*` the list takes `highlight()` and `snippet()` alone");
             } else {
+                let ti = self.i;
                 let e = self.expr()?;
+                // `select "name"`: SQL's column, text here.
+                if self.alone(ti) {
+                    return Err(self.quoted(ti));
+                }
                 let name = match self.eat_kw("as") {
                     true => Some(self.ident()?),
                     false => None,
@@ -1873,8 +2238,12 @@ impl Parser {
     fn set(&mut self) -> Result<Statement> {
         self.next(); // set / update
         let collection = self.ident()?;
-        self.eat_kw("set");
-        let set = self.object()?;
+        // SQL's `update <name> set a = 1, b = b + 1`, the pairs FenecQL's
+        // object holds.
+        let set = match self.eat_kw("set") && !matches!(self.peek(), Tok::LBrace) {
+            true => self.assignments()?,
+            false => self.object()?,
+        };
         let (filter, require, pick) = self.write_clauses()?;
         Ok(Statement::Update {
             collection,
@@ -2029,8 +2398,14 @@ impl Parser {
     }
 
     fn cmp_expr(&mut self) -> Result<Expr> {
+        let at = self.i;
         let left = self.arith()?;
-
+        // A double-quoted text alone on the left: SQL's quoted column,
+        // FenecQL's text. Against values alone the test answers the same
+        // for every row -- `where "name" = 'a'` all of them or none -- and
+        // is refused (`quoted`). A parameter on the left with text on the
+        // right stays, a policy's claim tested: `$jwt.role = "admin"`.
+        let lq = self.alone(at);
         let op = match self.peek() {
             Tok::Eq => Some(CmpOp::Eq),
             Tok::Ne => Some(CmpOp::Ne),
@@ -2042,47 +2417,234 @@ impl Parser {
         };
         if let Some(op) = op {
             self.next();
+            let r = self.i;
             let right = self.arith()?;
+            if lq && fixed(&right) {
+                return Err(self.quoted(at));
+            }
+            if matches!(left, Expr::Lit(_)) && self.alone(r) {
+                return Err(self.quoted(r));
+            }
             return Ok(Expr::Cmp(op, Box::new(left), Box::new(right)));
         }
         if matches!(self.peek(), Tok::Tilde) {
             self.next();
             let right = self.arith()?;
+            if lq && fixed(&right) {
+                return Err(self.quoted(at));
+            }
+            // PostgreSQL's `~` is a regular expression, FenecQL's text
+            // contained: `email ~ '@example\.org$'` ran, matched nothing,
+            // and agents told their users no such rows existed.
+            if matches!(&right, Expr::Lit(Value::Text(t)) if regex_like(t)) {
+                return self.err(
+                    "`~` finds the text as written, not a regular expression: `like 'abc%'` \
+                     for a start, `like '%abc'` for an end, `like 'a%b'` for a gap",
+                );
+            }
             return Ok(Expr::Like(Box::new(left), Box::new(right)));
         }
-        if self.peek_kw("has") {
+        // A word a test is named by -- `not`, `has`, `in`, `is`, `like`,
+        // `ilike`, `between` -- by its first letter, before the call: the
+        // words that follow an operand most, `and`, `or`, `where`, `order`
+        // and `as`, called it for nothing, a parse of a filtered `get` 2%
+        // slower.
+        match self.peek() {
+            Tok::Ident(w)
+                if matches!(
+                    w.as_bytes().first().map(|b| b | 0x20),
+                    Some(b'n' | b'h' | b'i' | b'l' | b'b')
+                ) =>
+            {
+                self.worded(at, lq, left)
+            }
+            // PostgreSQL's `@@`.
+            Tok::At => self.err(FULLTEXT),
+            _ => Ok(left),
+        }
+    }
+
+    /// A test named by a word after its operand `left`, read from `at`:
+    /// `has`, `in`, `is [not] null`, and SQL's `like`, `ilike` and
+    /// `between`, `not` before any of the last three. Out of line, so that
+    /// `cmp_expr`, a frame every level of parentheses holds, stays the
+    /// size it was: inlined, the depth test's 512 levels outgrew its 8 MiB
+    /// in a debug build.
+    #[inline(never)]
+    fn worded(&mut self, at: usize, lq: bool, left: Expr) -> Result<Expr> {
+        let Tok::Ident(w) = self.peek() else {
+            return Ok(left);
+        };
+        // SQL's `x not in (..)`, `not like`, `not between`: the test, `not`
+        // over it -- which no FenecQL text had after an operand.
+        let negated = w.eq_ignore_ascii_case("not")
+            && matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
+                Some(Tok::Ident(k)) if ["in", "like", "ilike", "between"]
+                    .iter().any(|w| k.eq_ignore_ascii_case(w)));
+        // `x not` where the text ends: a test a next line may name, which
+        // the shell reads as open where a word of no statement stood.
+        let open = w.eq_ignore_ascii_case("not")
+            && matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::Eof));
+        if negated || open {
             self.next();
+        }
+        if open {
+            return self.err("`not` after a value takes `in`, `like`, `ilike` or `between`");
+        }
+        let e = if self.eat_kw("has") {
             let right = self.arith()?;
-            return Ok(Expr::Has(Box::new(left), Box::new(right)));
-        }
-        if self.peek_kw("in") {
-            self.next();
-            if matches!(self.peek(), Tok::LParen) {
-                return self.subquery(left);
+            if lq && fixed(&right) {
+                return Err(self.quoted(at));
             }
-            self.expect(Tok::LBracket)?;
-            let mut items = Vec::new();
-            loop {
-                if matches!(self.peek(), Tok::RBracket) {
-                    break;
-                }
-                items.push(self.expr()?);
-                if !matches!(self.peek(), Tok::Comma) {
-                    break;
-                }
-                self.next();
+            Expr::Has(Box::new(left), Box::new(right))
+        } else if self.eat_kw("in") {
+            let e = self.in_list(left)?;
+            let fixed_list = match &e {
+                Expr::In(_, items) => items.iter().all(fixed),
+                _ => true,
+            };
+            if lq && fixed_list {
+                return Err(self.quoted(at));
             }
-            self.expect(Tok::RBracket)?;
-            return Ok(Expr::In(Box::new(left), items));
-        }
-        if self.peek_kw("is") {
-            self.next();
+            e
+        } else if self.peek_kw("like") || self.peek_kw("ilike") {
+            // SQL's patterns, `%` and `_`: a call, as `case` is
+            // (`query::sql_like`), so no walk over an expression grew a
+            // variant.
+            let name = match self.next() {
+                Tok::Ident(w) => w.to_ascii_lowercase(),
+                _ => String::new(),
+            };
+            let mut args = vec![left, self.arith()?];
+            if self.eat_kw("escape") {
+                args.push(self.arith()?);
+            }
+            if lq && args[1..].iter().all(fixed) {
+                return Err(self.quoted(at));
+            }
+            Expr::Call(name, args)
+        } else if self.eat_kw("between") {
+            // SQL's bounds are both in: `>= low and <= high`, the `and`
+            // its own before the boolean's, an operand on each side.
+            let low = self.arith()?;
+            self.expect_kw("and")?;
+            let high = self.arith()?;
+            if lq && fixed(&low) && fixed(&high) {
+                return Err(self.quoted(at));
+            }
+            // The operand twice: a field or a value, copied as one -- a
+            // copy of any expression was `Expr`'s whole clone, 2 KB of the
+            // browser module.
+            let twice = match &left {
+                Expr::Field(f) => Expr::Field(f.clone()),
+                Expr::Param(i) => Expr::Param(*i),
+                _ => {
+                    self.i = at;
+                    return self.err("`between` takes a field: write `x >= a and x <= b`");
+                }
+            };
+            Expr::And(
+                Box::new(Expr::Cmp(CmpOp::Ge, Box::new(twice), Box::new(low))),
+                Box::new(Expr::Cmp(CmpOp::Le, Box::new(left), Box::new(high))),
+            )
+        } else if self.eat_kw("is") {
+            if lq {
+                return Err(self.quoted(at));
+            }
             let negated = self.eat_kw("not");
-            self.expect_kw("null")?;
-            let e = Expr::IsNull(Box::new(left));
+            // SQL's `is true` and `is false` are `= true` and `= false`, a
+            // null neither; `is distinct from` is `!=`, which a null is of
+            // any value but null -- FenecQL's `=` and `!=` take a null as
+            // a value, as those do.
+            let e = if self.eat_kw("distinct") {
+                self.expect_kw("from")?;
+                let right = self.arith()?;
+                let op = if negated { CmpOp::Eq } else { CmpOp::Ne };
+                return Ok(Expr::Cmp(op, Box::new(left), Box::new(right)));
+            } else if self.peek_kw("true") || self.peek_kw("false") {
+                let right = self.primary()?;
+                Expr::Cmp(CmpOp::Eq, Box::new(left), Box::new(right))
+            } else {
+                self.expect_kw("null")?;
+                Expr::IsNull(Box::new(left))
+            };
             return Ok(if negated { Expr::Not(Box::new(e)) } else { e });
+        } else {
+            return Ok(left);
+        };
+        Ok(match negated {
+            true => Expr::Not(Box::new(e)),
+            false => e,
+        })
+    }
+
+    /// After `in`: `[a, b]`, FenecQL's list; `(get ...)` or `(select ...)`,
+    /// a subquery's; or `(a, b)`, SQL's list, read as `[a, b]` -- which no
+    /// FenecQL text had, a `(` there taking a subquery alone.
+    fn in_list(&mut self, left: Expr) -> Result<Expr> {
+        let (open, close) = match self.peek() {
+            Tok::LParen => (Tok::LParen, Tok::RParen),
+            _ => (Tok::LBracket, Tok::RBracket),
+        };
+        if open == Tok::LParen
+            && matches!(self.toks.get(self.i + 1).map(|t| &t.tok),
+                Some(Tok::Ident(k)) if k.eq_ignore_ascii_case("get") || k.eq_ignore_ascii_case("select"))
+        {
+            return self.subquery(left);
         }
-        Ok(left)
+        self.expect(open)?;
+        let mut items = Vec::new();
+        loop {
+            if self.peek() == &close {
+                break;
+            }
+            items.push(self.expr()?);
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        self.expect(close)?;
+        Ok(Expr::In(Box::new(left), items))
+    }
+
+    /// Refuses the double-quoted text at `at` (SQL's quoted column), which
+    /// stands where only a field could make the answer depend on the row:
+    /// alone in a test against values, as an item of a select list, a key
+    /// of `order` or `group`, an aggregate's argument.
+    #[inline(never)]
+    fn quoted(&mut self, at: usize) -> Error {
+        self.i = at;
+        let name = match &self.toks[at].tok {
+            Tok::Str(s) => s.as_str(),
+            _ => "",
+        };
+        self.error(&format!("`{name}`, not \"{name}\": {QUOTED}"))
+    }
+
+    /// Whether a `get`'s clauses stopped at SQL's join: `join` or a word
+    /// that leads one, an alias before either or before a comma, or a
+    /// comma between collections. None begins a statement, so no text that
+    /// parsed reads otherwise.
+    fn joined(&self) -> bool {
+        let word = |t: Option<&Token>| {
+            matches!(t.map(|t| &t.tok), Some(Tok::Ident(w))
+                if ["join", "inner", "left", "right", "full", "cross"]
+                    .iter().any(|k| w.eq_ignore_ascii_case(k)))
+        };
+        let (a, b) = (self.toks.get(self.i), self.toks.get(self.i + 1));
+        match a.map(|t| &t.tok) {
+            Some(Tok::Comma) => true,
+            Some(Tok::Ident(_)) => {
+                word(a) || word(b) || matches!(b.map(|t| &t.tok), Some(Tok::Comma))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the tokens from `at` to here are a double-quoted text alone.
+    fn alone(&self, at: usize) -> bool {
+        self.i == at + 1 && matches!(self.toks[at].tok, Tok::Str(_))
     }
 
     // arith   := term ( ("+" | "-") term )*
@@ -2161,7 +2723,21 @@ impl Parser {
     /// whose duration is the text `15m`.
     #[inline(never)]
     fn call(&mut self, name: String) -> Result<Expr> {
+        // SQL's `exists (select ...)` and MySQL's `match (f) against (..)`.
+        match name.as_str() {
+            "exists" => {
+                return self.err(
+                    "FenecQL's `exists` is a `lookup` that is `required`: `get users lookup \
+                     orders on user_id required` keeps the users with an order",
+                )
+            }
+            "match" => return self.err(FULLTEXT),
+            _ => {}
+        }
         let mut args = Vec::new();
+        // `max("at")`: SQL's column, text here, folded over every row the
+        // same.
+        let folds = AGGREGATES.contains(&name.as_str());
         if name == "count" && matches!(self.peek(), Tok::Star) {
             self.next();
         } else if name == "count"
@@ -2172,7 +2748,11 @@ impl Parser {
             )
         {
             self.next();
+            let ti = self.i;
             args.push(Expr::Call("distinct".into(), vec![self.expr()?]));
+            if self.alone(ti) {
+                return Err(self.quoted(ti));
+            }
         }
         loop {
             if matches!(self.peek(), Tok::RParen) || !args.is_empty() && name == "count" {
@@ -2189,7 +2769,13 @@ impl Parser {
                     self.i += 2;
                     args.push(Expr::Lit(Value::Text(d)));
                 }
-                None => args.push(self.expr()?),
+                None => {
+                    let ti = self.i;
+                    args.push(self.expr()?);
+                    if folds && self.alone(ti) {
+                        return Err(self.quoted(ti));
+                    }
+                }
             }
             if args.len() == 1 && matches!(name.as_str(), "first" | "last") && self.eat_kw("by") {
                 args.push(self.expr()?);
@@ -2223,12 +2809,9 @@ impl Parser {
 
     /// `(get <collection> select <field> ...)` after `in`: a query whose one
     /// column is the list, run before the query around it.
+    /// A `get` or a `select` follows the `(` ([`Self::in_list`]).
     fn subquery(&mut self, left: Expr) -> Result<Expr> {
-        self.expect(Tok::LParen)?;
-        if !(self.peek_kw("get") || self.peek_kw("select")) {
-            return self
-                .err("`in (...)` takes a `get`: `in (get <collection> select <field> ...)`");
-        }
+        self.next();
         if self.subqueries >= MAX_SUBQUERY_DEPTH {
             return self.err(format!(
                 "`in (get ...)` nested too deep: at most {MAX_SUBQUERY_DEPTH} levels"
@@ -2257,6 +2840,13 @@ impl Parser {
         match self.peek().clone() {
             Tok::LParen => {
                 self.next();
+                // SQL's scalar subquery, `= (select max(at) from t)`.
+                if self.peek_kw("get") || self.peek_kw("select") {
+                    return self.err(
+                        "a query stands after `in`: `where x in (get <collection> select \
+                         <field> ...)`; one value is read by a statement of its own",
+                    );
+                }
                 let e = self.expr()?;
                 self.expect(Tok::RParen)?;
                 Ok(e)
@@ -2329,7 +2919,7 @@ impl Parser {
                 }
                 Ok(Expr::Lit(Value::List(vals)))
             }
-            Tok::Str(s) => {
+            Tok::Str(s) | Tok::Single(s) => {
                 self.next();
                 Ok(Expr::Lit(Value::Text(s)))
             }
@@ -2372,6 +2962,8 @@ impl Parser {
                 }
                 Ok(Expr::Field(name))
             }
+            // PostgreSQL's `meta->>'source'`, lexed `-` and `>`.
+            Tok::Gt if self.toks[self.i - 1].tok == Tok::Minus => self.err(JSON_PATH),
             other => self.err(format!("expected a value, found {}", other.describe())),
         }
     }
@@ -2542,6 +3134,12 @@ mod tests {
         "collections",
         "describe notes",
         "compact notes",
+        // SQL's spellings, the same statements.
+        "insert into notes (body, topic) values ('a', 3), ($1, $2) on conflict (topic) do update set body = excluded.body returning id",
+        "insert into notes values {body: 'a'}, {body: 'b'} on conflict do nothing",
+        "update notes set topic = 4, body = body || '!' where id = 3 returning *",
+        "get notes where topic not in (1, 2) and posted between $1 and $2 and body like 'a%' escape '!' and body is distinct from 'it''s'",
+        "select topic, count(body) from notes where body ilike '%x%' and id in (select distinct n from tops) group by topic order by topic desc nulls last",
     ];
 
     /// The words of a text, cut where the white space between them is.
@@ -2659,6 +3257,9 @@ mod tests {
                 "alter collection notes alter",
                 "alter collection notes alter field",
                 "alter collection notes alter field posted",
+                // The SQL order's list again, of the spellings' statement.
+                "select topic,",
+                "select topic, count(body)",
             ]
         );
         // A refusal of what was read stands at once, wherever it is placed.

@@ -5,4 +5,5 @@
 //! without the indexes.
 
 mod e2e;
+mod sql;
 mod text;

@@ -12,8 +12,11 @@ behaviour worth knowing before it surprises you.</p>
 <p>Before you choose it, at a glance:</p>
 
 <ul>
-  <li><b>FenecQL, not SQL.</b> <code>select a from t</code> works; JOINs do
-    not. <code>lookup</code> covers related rows (below).</li>
+  <li><b>FenecQL, not SQL.</b> <code>select a from t</code>, <code>insert
+    into t (a) values (1)</code>, <code>update t set a = 1</code>,
+    <code>in (…)</code>, <code>between</code> and <code>like</code> work
+    (<a href="/docs/sql">From SQL</a>); JOINs do not. <code>lookup</code>
+    covers related rows (below).</li>
   <li><b>One writer per file.</b> Readers run beside it, and a
     <code>/batch</code> holds the writer while it runs. Scale out with a file
     per tenant (<a href="/docs/sharding">Tenants and sharding</a>).</li>

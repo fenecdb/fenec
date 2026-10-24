@@ -10,8 +10,12 @@ documents and search them by vector, by text or by filter.</p>
 <h2>Statements</h2>
 
 <p>FenecQL is a small language with vectors in the core. It is not SQL and
-does not try to be, though the familiar <code>select … from</code> word order
-is accepted. These are all its statements.</p>
+does not try to be, but it reads SQL's everyday spellings as the statements
+they mean — <code>select … from</code>, <code>INSERT INTO … VALUES</code>,
+<code>UPDATE … SET a = …</code>, <code>IN (…)</code>,
+<code>BETWEEN</code>, <code>LIKE</code>, <code>ON CONFLICT</code> — and
+refuses the rest saying what to write: see <a href="/docs/sql">From
+SQL</a>. These are all its statements.</p>
 
 <pre data-lang="fenecql">create collection [if not exists] &lt;name&gt; ( &lt;field&gt; &lt;type&gt; [required] [collate und|tr] [nocase] [@index], ...
                                          [, @sorted(&lt;field&gt; [desc], ...) | @unique(&lt;field&gt;, ...)] )
@@ -29,6 +33,8 @@ insert [into] &lt;name&gt; { field: value, ... }     -- as put, refusing an id t
 put &lt;name&gt; { field: value, ... } if absent     -- a held id or @unique value passed over, and not counted
 put &lt;name&gt; { ... } if absent else set { n: n + new.n }   -- an upsert: the row holding it set, new.f the document's
 put &lt;name&gt; $1 [if absent ...]                -- the documents a parameter holds: an object, or a list of them
+insert into &lt;name&gt; (a, b) values (1, 'x'), ... [on conflict do nothing | do update set a = ...]  -- SQL's spelling
+update &lt;name&gt; set a = &lt;expr&gt;, b = &lt;expr&gt; [where ...]   -- SQL's spelling of set
 get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt; [fuzzy [N]] [prefix]] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
@@ -131,8 +137,8 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Indexes</b></td><td><code>@sorted(owner, created desc)</code> and <code>@unique(org, slug)</code> over several fields (see <a href="#composite">Indexes over several fields</a>), <code>@hash</code>, <code>@unique</code>, <code>@sorted</code>, <code>@ttl(30m)</code> (a <code>timestamp</code> field's rows expire — see <a href="#ttl">Rows that expire</a>), <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's), <code>@geo</code> (a <code>geo</code> field's)</td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
-<tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>in (get …)</code> — see <a href="#subqueries">Subqueries</a>, <code>is null</code></td></tr>
-<tr><td><b>Arithmetic</b></td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> on numbers, a <code>timestamp</code> moved by milliseconds, and <code>+</code> joining two texts — in a <code>set</code>'s values and in <code>where</code>; see <a href="#writes">Writes that read the row</a></td></tr>
+<tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> (or <code>&lt;&gt;</code>) <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code> (or <code>in (..)</code>), <code>in (get …)</code> — see <a href="#subqueries">Subqueries</a>, <code>is null</code>, <code>between a and b</code>, <code>like</code> and <code>ilike</code> with <code>%</code> and <code>_</code>, <code>not in</code>, <code>not like</code>, <code>not between</code> — see <a href="/docs/sql">From SQL</a></td></tr>
+<tr><td><b>Arithmetic</b></td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> on numbers, a <code>timestamp</code> moved by milliseconds, and <code>+</code> (or <code>||</code>) joining two texts — in a <code>set</code>'s values and in <code>where</code>; see <a href="#writes">Writes that read the row</a></td></tr>
 <tr><td><b>Logic</b></td><td><code>and</code> <code>or</code> <code>not</code> — <code>and</code> binds tighter</td></tr>
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL, wherever a value goes, and as <code>limit</code>, <code>offset</code> and a facet's <code>top</code> — see <a href="#paging">Pages by parameters</a></td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>greatest</code> <code>least</code> <code>now</code> <code>expired</code> (<a href="#reaper">rows past their <code>@ttl</code></a>) <code>timestamp</code> <code>bucket(at, 15m [, zone])</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code> <code>distance(loc, p)</code> <code>within(loc, box)</code> (<a href="#geo">Points</a>), <code>case when … then … else … end</code>, plus plugins — see <a href="#functions">Functions over a row</a></td></tr>
@@ -143,7 +149,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Highlights</b></td><td><code>highlight(body)</code> and <code>snippet(body, 20)</code> in the select list mark the words a <code>match</code> found, as UTF-16 offsets or between tags you pass — see <a href="#highlights">Highlights and snippets</a></td></tr>
 <tr><td><b>Facets</b></td><td><code>facet brand, color top 10</code> counts each value over every row the query matches, beside the page — see <a href="#facets">Facets</a></td></tr>
 <tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
-<tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>count(distinct …)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> <code>first(… by …)</code> <code>last(… by …)</code> <code>approx_count_distinct</code> <code>hll_accumulate</code> <code>hll_combine</code> over fields, paths or expressions, whole or per <code>group</code> of one key or several, the groups kept by <code>having</code> — see <a href="#aggregates">Aggregates</a> and the <a href="/docs/analytics">analytics and market-data recipes</a></td></tr>
+<tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>count(…)</code> (the rows it is not null in) <code>count(distinct …)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> <code>first(… by …)</code> <code>last(… by …)</code> <code>approx_count_distinct</code> <code>hll_accumulate</code> <code>hll_combine</code> over fields, paths or expressions, whole or per <code>group</code> of one key or several, the groups kept by <code>having</code> — see <a href="#aggregates">Aggregates</a> and the <a href="/docs/analytics">analytics and market-data recipes</a></td></tr>
 <tr><td><b>Columns</b></td><td><code>select px * qty as notional</code>: an expression over the row, named with <code>as</code> — see <a href="#columns">Columns worked out</a></td></tr>
 <tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>, a parameter's as a number written), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; a word of a <code>fuzzy</code> or <code>prefix</code> <code>match</code> 10 000 words of the index; expression depth 512 levels; a <code>json</code> value 64 levels deep, a path 64 keys; <code>in (get …)</code> 100 000 values and 4 levels — see <a href="limits.html">Limits</a></td></tr>
 </tbody>
@@ -1881,7 +1887,7 @@ refused, and asks for <code>as</code>.</p>
 
 <h2 id="aggregates">Aggregates</h2>
 
-<p>Put <code>count(*)</code>, <code>count(distinct …)</code>,
+<p>Put <code>count(*)</code>, <code>count(…)</code>, <code>count(distinct …)</code>,
 <code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>,
 <code>first</code> or <code>last</code> in the select list to get totals.
 Add <code>group</code> for one row per distinct set of its keys' values.</p>

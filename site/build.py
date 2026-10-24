@@ -63,6 +63,7 @@ NAV = [
     ]),
     ("Query", [
         ("docs/fenecql", "FenecQL"),
+        ("docs/sql", "From SQL"),
         ("docs/javascript", "JavaScript and TypeScript"),
         ("docs/mobile", "Mobile and native apps"),
         ("docs/http", "HTTP endpoint"),
@@ -110,7 +111,8 @@ KEYWORDS = {
     "fenecql": """create drop collection index if not exists get put set del select
         from where near order limit offset count ef exact asc desc and or in has is
         null true false collections describe compact begin commit on match fuse
-        lookup group insert set del rerank absent returning fuzzy prefix""".split(),
+        lookup group insert set del rerank absent returning fuzzy prefix like ilike
+        between""".split(),
     "js": """import export from const let var async await function return new class
         extends if else for of while try catch finally throw typeof null undefined
         true false this default""".split(),
@@ -130,7 +132,9 @@ KEYWORDS = {
     "go": """package import func return if else for range var const defer go
         nil true false type struct map""".split(),
     "sql": """INSTALL LOAD ATTACH AS SELECT FROM WHERE GROUP BY COPY TO TYPE
-        FORMAT count avg sum""".split(),
+        FORMAT count avg sum INSERT INTO VALUES UPDATE SET DELETE ON CONFLICT DO
+        NOTHING RETURNING ORDER LIMIT OFFSET DESC ASC AND OR NOT IN BETWEEN LIKE
+        ILIKE ESCAPE IS NULL DISTINCT HAVING""".split(),
     "swift": """import let var func return if else for in while do try await async
         throws catch struct class enum init self some any guard case switch
         nil true false as is static private public""".split(),
@@ -1043,23 +1047,36 @@ LLMS_BRIEF = """\
 > over HTTP with a file per tenant, and search built in -- BM25 over text,
 > with typos, highlights and facets, and HNSW vectors for meaning. It runs in
 > the browser as WebAssembly, in an app, and as a server. Its query language
-> is FenecQL, which is not SQL.
+> is FenecQL, which is not SQL but reads SQL's everyday spellings.
 
 Writing FenecQL -- the reference below spells it out in full:
 
-- It is not SQL. There is no JOIN: related rows come from `lookup`, and a
+- It is not SQL, but it reads SQL's everyday spellings as the statements
+  they mean: `INSERT INTO t (a, b) VALUES (1, 'x')`, `UPDATE t SET a = 1
+  WHERE ...`, `IN (1, 2)`, `BETWEEN`, `LIKE` and `ILIKE`, `ON CONFLICT DO
+  NOTHING` and `DO UPDATE SET`, single quotes and `||`
+  (https://fenecdb.com/docs/sql). A double-quoted word is text, never a
+  column: a field is written bare, `where name = 'Ada'`. Every row has an
+  `id` (an int the database makes; no `rowid`, no `_id`). There is no
+  JOIN: related rows come from `lookup`, and a
   filter by another collection's rows from an uncorrelated
-  `in (get <collection> select <field> where ...)`. There is no interactive
+  `in (get <collection> select <field> where ...)`, or `not in (...)` for
+  the rows it does not name. There is no interactive
   transaction: a `/batch` of statements (in the page, a `run` of several)
   lands whole or not at all, and `require <n>` after a write makes its count
   a condition that puts the whole batch back.
-- The aggregates -- `count(*)`, `count(distinct f)`, `sum`, `avg`, `min`,
-  `max`, `first(f by k)`, `last(f by k)` -- go in the select list, over
-  every match or per `group <key>`, and `having` keeps groups.
+- The aggregates -- `count(*)`, `count(f)` (the rows where `f` is not
+  null), `count(distinct f)`, `sum`, `avg`, `min`, `max`, `first(f by k)`,
+  `last(f by k)` -- go in the select list, over every match or per
+  `group <key>`, and `having` keeps groups. Distinct values are a group:
+  `select city, count(*) group city`.
+- Text: `like 'a%'` and `ilike` take SQL's `%` and `_`; `~` is a
+  case-insensitive *contains* (`email ~ "@example.org"`), never a regular
+  expression, and `match` ranks words over an `@text` field.
 - Square brackets are list literals and nothing else: `tags: ["a", "b"]`,
   `tags [text]`. Nothing here marks an optional part with them; a clause you
   do not need is simply left out.
-- Strings take double quotes. Parameters are `$1`, `$2`, ...; a vector
+- Strings take double or single quotes. Parameters are `$1`, `$2`, ...; a vector
   parameter is a list of numbers. A timestamp is written as text,
   `"2026-09-01T10:00:00Z"`, or `"2026-01-01"` in a comparison.
 - Types: `bool int float text bytes timestamp`, lists such as `[text]`,
@@ -1089,8 +1106,12 @@ Writing FenecQL -- the reference below spells it out in full:
   `match ... prefix` one half typed. Each returns at most 10 000 rows
   (`limit + offset`) and adds a `_score` column.
 - After `lookup`, every clause belongs to the child collection and `limit`
-  counts children per parent. `required` goes right after `on <field>` and
-  keeps only the parents with a matching child; `count` goes before `lookup`.
+  counts children per parent. `on <field>` names the child's field that
+  holds the parent's `id` (`get orders lookup items on order_id`); `on <its
+  field> = <this one's>` runs the other way (`get items lookup orders on
+  id = order_id` attaches each item's order). `required` goes right after
+  `on <field>` and keeps only the parents with a matching child -- SQL's
+  `exists`; `count` goes before `lookup`.
 
 Every statement, by example:
 
@@ -1104,6 +1125,9 @@ get articles where title in ["Rust", "Go"] count
 get articles select title, sum(views), max(published) where tags has "lang" group title order sum(views) desc limit 5
 get articles order published desc limit 20 lookup comments on article_id where score >= 4 order published desc limit 3
 get articles count lookup comments on article_id required where score = 5
+get comments where score >= 4 lookup articles on id = article_id select title
+insert into articles (title, views) values ('Nim', 4), ('Odin', 2)
+get articles where title like 'R%' and views between 1 and 100 and title not in ["Zig"]
 get articles select title, highlight(body) match body "borowing" fuzzy facet tags limit 10
 get articles select title where published >= "2026-01-01" near embed $1 limit 3
 get articles match body "borrowing" near embed $1 fuse limit 10

@@ -185,7 +185,21 @@ impl Registry {
                      has no `@ttl`"
                         .into(),
                 ),
-                false => Error::Query(format!("unknown function `{name}`")),
+                // What an agent tries for text after SQL's `like`.
+                false => {
+                    let hint = match name {
+                        "contains" | "starts_with" | "ends_with" | "strpos" | "instr"
+                        | "position" => ": text is matched by `like '%a%'`, `'a%'` or `'%a'`",
+                        "json_extract"
+                        | "json_value"
+                        | "jsonb_extract_path_text"
+                        | "json_extract_path_text" => {
+                            ": a json field's member is read by a path, `meta.source`"
+                        }
+                        _ => "",
+                    };
+                    Error::Query(format!("unknown function `{name}`{hint}"))
+                }
             }
         })?;
         let (lo, hi) = (*lo, *hi);
