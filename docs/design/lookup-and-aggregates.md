@@ -61,7 +61,7 @@ write. Ad hoc, use `required`; on every page load, use the field. With
 no `order` and no facet the page is the first parents kept in id order, so
 the parent side stops once it holds them (`retain_with_children_to`): it
 probed every parent the filter passed, a page of twenty over 20 000
-products 1.41 ms, and probes until twenty are kept, 0.036.
+products 1.41-1.43 ms, and probes until twenty are kept, 0.036.
 
 ## lookup over several fields
 

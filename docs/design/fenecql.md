@@ -250,7 +250,14 @@ o.user_id = u.id order by u.id` reads `orders` by `user_id` with `users` a
 `required` level found by its id. The names are shared (`Arc`) by the copy
 every statement holding an `in (get ...)` is answered in, which would
 otherwise copy them. A scoped token's join keeps the list alone
-(access.md). An aggregate, `distinct`, `exists`
+(access.md). In turns against main and the branch before these fixes, four
+runs a side each begun at a load under 3: the join to three rows of `vip`
+1.50 us against main's `in (get ...)` reading at 1.44 (2 322 as the probe
+alone); 1 000 orders to 100 010 users 123 us in either order (122 as the
+probe alone, which refused the other order; `lookup ... required` 147 on
+main); `where u.n != 4`, which no index names, 168 against `lookup ...
+required where`'s 189 -- 3 061 while the list was tried first; a join's
+parse 2.25-2.29 -> 2.42 us. An aggregate, `distinct`, `exists`
 and `left join ... is null` -- no row to look a missing match up by --
 over a larger joined table still read the list and are refused past it,
 never cut. `exists (... limit 0)` was true, and a `limit` there is held to
