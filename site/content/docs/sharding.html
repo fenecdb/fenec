@@ -248,9 +248,9 @@ rule as soon as their copy of the directory shows the failover: the
 directory names the node a failover took each tenant off, so a move ends
 nothing, its source still answering. They grant nothing: a write one sends
 on before the leading router's grant has reached the new primary is asked
-again there until it has -- for two thirds of a lease, and
-<code>--upstream-timeout</code>, at most, and only while its client is
-still there. In the deploy kit's drill (<code>make drill</code>, a
+again there until it has -- for two thirds of a lease or
+<code>--upstream-timeout</code>, whichever is sooner, and only while its
+client is still there. In the deploy kit's drill (<code>make drill</code>, a
 lease of 2 s, the routers' timeout 4 s, a node cut off the network and
 killed) the dead node's writers wrote again as the router failed it over,
 1.93 and 2.52 s after the kill, where they waited for the timeout before,

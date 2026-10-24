@@ -428,10 +428,14 @@ whoever reads the maps after reads them cut: a request ended goes where
 they place its tenant, a forward that read them before and goes out after
 finds its bucket's count moved (`Flying`), as the leader's do, and a test
 waiting for a standby to place a tenant elsewhere knows whatever it cut
-is cut. They are made a node at a time (`cut_failed_over`,
-`Pool::cut_all`): each bucket of the node's tenants moved once, the
-node's connections listed once and each one's mark looked up among
-theirs, where a cut a tenant copied the node's every connection a tenant
+is cut. Both directories are caught up first, their write locks held
+together, and what either shows failed over is cut at once
+(`cut_failed_over`, `Pool::cut_all`): every bucket of the tenants moved
+once, before any connection is shut -- moved a node or a directory at a
+time, a request cut off the first went on with the count it read and met
+the next one's move before its first byte -- then each node's
+connections listed once and each one's mark looked up among its tenants',
+where a cut a tenant copied the node's every connection a tenant
 -- a node of 1 000 tenants failed over at once, 300 connections open to
 it and 100 of them out for those tenants, held the write lock 0.68-0.78
 ms, its cuts 0.16-0.20 of it, against 7.35-8.44 and 6.8-7.8 a tenant at a
@@ -460,11 +464,20 @@ grant to a copy waits as long), and passes the copy's 503, which says
 when to come back, on past that or where no lease is recorded: two
 thirds of the tests' hour-long lease, a request was sent again for 40
 minutes. Its client is watched between the asks, as a held request's is
-(`pause_watching`, one `poll`): its end has the router answer it 503, run
-nowhere, and its reset lets it go -- asked on past its client, a request
-went to the copy every pause for as long as the pauses ran. And it is
-counted sent again once, however many times the copy is asked: counted at
-each ask, one request a grant kept waiting was seven. Fencing is the
+(`pause_watching`, one `poll`, watching no more where the `poll` fails):
+its end has the router answer it 503 -- saying it ran nowhere where the
+cut came before it was sent whole, and otherwise that the node failed
+over may have run it and its key sends it again once -- and its
+reset lets it go; asked on past its client, a request went to the copy
+every pause for as long as the pauses ran. A request asked again that
+finds its bucket's count moved before its first byte -- a second
+failover in its bucket, read by a catch-up or made by the leader -- wrote
+nothing, and stays what it was, cut off its node with its asks where
+they stood, a try spent: taken for one never cut, it went on to a copy
+not yet granted and passed its 503 on. And it is
+counted sent again once, however many times the copy is asked or its
+bucket moves: counted at each ask, one request a grant kept waiting was
+seven. Fencing is the
 leader's, and a follower's cut adds nothing to what may write: it cuts
 only on a placement the leader recorded once the copy answered its
 promotion -- under a lease, after the node's lease lapsed by its own
@@ -497,23 +510,36 @@ own directory under leases cutting a tenant its copy of the global
 directory places, waiting for the global router's grant to the copy and
 granting nothing -- taken for its own, the tenant no tenant of the
 directory it leads, it granted the copy that directory's list, naming
-nothing there, twice, and passed the copy's 503 on. The binary's tests run
+nothing there, twice, and passed the copy's 503 on; and a keyed write
+the standby cut off n1 whose dial of the copy -- its name held at the
+test's resolver -- straddles the standby's catch-up of a second tenant of
+n1, in its bucket, its promotion held at its copy's wire: the write meets
+its bucket moved, and waits for the grant as before, counted once. The
+binary's tests run
 one at a time, since the cuts counted are the process's, every router's
 in it, and each is held to what its own routers counted exactly; the job
 a keyed claim takes is put once the claim has been sent to the copy, so
-its wait bounds nothing. Each fails with its part taken out: no cut (six
-of the seven, all but the move's), no thread (five: nothing asked them
+its wait bounds nothing. Each fails with its part taken out: no cut (seven
+of the eight, all but the move's), no thread (five: nothing asked them
 after the failover), a cut on any node changed (the move's), no
-`failed_from` written (six), no bump of the bucket's count (the dial's),
+`failed_from` written (seven), no bump of the bucket's count (the dial's),
 no asking again (the three lease tests'), a standby that grants -- both
 its checks and `grant_term`'s refusal taken out (the same three: its own
 grant held at the wire), a count at each ask (the two lease tests that
 count), the client unwatched (the leaving client's), `places_as_leader`
-asking `following` alone (the region leader's); `directory::tests` hold
+asking `following` alone (the region leader's), a move after a cut taken
+for a request never cut (the bucket's: the copy's 503 passed on), a count
+at each turn of the cut's (the bucket's, two); `directory::tests` hold
 the rule over each order of a failover and a move read at once, from the
 ring and from a reading, and `upstream::tests` a cut of several tenants,
 each bucket moved once (a tenant at a time, two in a bucket moved it
-twice), and a pause watching its client. Nothing on the forward path
+twice), every bucket of a cut off several nodes moved before any
+connection is shut (read on the cutting thread as each node's are, a node
+at a time it read one short), and a pause watching its client; the
+lib's `tests` the asks of a copy over every lease to 12 s and three
+upstream timeouts, ending at two thirds of the lease or the timeout,
+whichever is sooner, a third of the lease apart at most (either bound
+taken out, it fails). Nothing on the forward path
 changed but the client's socket handed on to a cut request -- `toward` is
 main's code, `connection` asks the same two `stale` reads as before with
 the refresh behind them out of line now -- and a router leading its own

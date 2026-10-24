@@ -970,11 +970,12 @@ each grants the nodes it moved tenants to as it ends (`granted_after`). A
 router following the directory -- a standby, a region's router by its
 global copy -- cuts too, woken as a write lands there (`Arrived`), where
 the placement names the node it failed over off (`failed_from`; every
-other placement clears it, so a move cuts nothing), under the directory's
-write lock -- taken only where it moved -- a node at a time (`cut_all`);
-it grants nothing, asking a copy that refuses a replay unrun again, counted
-once, while its client stays, for two thirds of the recorded lease or
-`--upstream-timeout` at most (`copy_pause`).
+other placement clears it, so a move cuts nothing), under the directories'
+write locks -- taken only where they moved -- every bucket moved before any
+node's connections are shut (`cut_all`); it grants nothing, asking a copy
+that refuses a replay unrun again, counted once, while its client stays,
+for two thirds of the recorded lease or `--upstream-timeout`, whichever is
+sooner (`copy_pause`), a move of its bucket meanwhile keeping its cut.
 
 **[A query across tenants is the router's admin's, merged as the request
 says.](docs/design/router.md#queries-across-tenants)** Nodes run it

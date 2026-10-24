@@ -46,12 +46,13 @@ fn serial() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Waits until `f` holds, bounded as a client's wait is.
+/// Waits until `f` holds, bounded as a client's wait is: asked again
+/// each millisecond, where a spin held a core for the wait.
 fn until_so(what: &str, f: impl Fn() -> bool) {
     let deadline = Instant::now() + WITHIN;
     while !f() {
         assert!(Instant::now() < deadline, "{what} never came");
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -590,6 +591,85 @@ fn a_standby_s_write_refused_by_a_copy_not_yet_granted_waits_for_the_grant() {
     let (status, _, b) = answer(&keyed, "the keyed write");
     assert_eq!(status, 200, "{b}");
     assert_eq!(titled(rport, "keyed"), 1);
+    let after = cuts(p.standby);
+    let counted: Vec<f64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    assert_eq!(counted, [1.0, 0.0, 0.0], "{before:?} -> {after:?}");
+    let (status, b) = failover.join().unwrap();
+    assert_eq!(status, 200, "{b}");
+}
+
+/// A write a standby's cut sends to the copy promoted, its bucket moved
+/// before its first byte by another tenant's failover the standby reads
+/// after -- here `beta`'s, of n1 too and in `acme`'s bucket, its
+/// promotion held at its copy's wire while the write's dial of `acme`'s
+/// copy is held at its lookup -- wrote nothing, and is still what it was:
+/// cut, waiting for the leading router's grant to the copy, and counted
+/// sent again once. Taken for a request never cut, the copy's 503 went to
+/// its client.
+#[test]
+fn a_standby_s_cut_write_whose_bucket_another_failover_moves_still_waits_for_the_grant() {
+    let _serial = serial();
+    let lookups: [std::cell::OnceCell<Lookups>; 3] = Default::default();
+    let p = pair("moved", Some(NO_ROUND), |i, w| {
+        let at: SocketAddr = w.addr.parse().unwrap();
+        let name = format!("n{}.fcut-moved-{}.test:8081", i + 1, std::process::id());
+        assert!(lookups[i].set(Lookups::of(&name, at)).is_ok());
+        name
+    });
+    let lookups = lookups.map(|l| l.into_inner().unwrap());
+    leased(p.primary);
+    let replica = acme(p.primary, |n| p.port_of(n));
+    let beta = (0..100_000)
+        .map(|i| format!("tenant-{i}"))
+        .find(|t| fenec_shard::upstream::same_bucket(t, "acme"))
+        .expect("one in 64 names is in a bucket");
+    let at = format!("/_shard/tenants/{beta}");
+    let (status, b) = call(p.primary, "PUT", &at, r#"{"node":"n1"}"#, None);
+    assert_eq!(status, 201, "{b}");
+    let beta_replica = placed(p.primary, &beta).1.expect("beta has a replica");
+    assert_ne!(
+        beta_replica, replica,
+        "beta's copy is on the node acme's is not"
+    );
+    until_placed(p.standby, "acme", "n1");
+    until_placed(p.standby, &beta, "n1");
+    let index = |n: &str| n[1..].parse::<usize>().unwrap() - 1;
+    let (x, y) = (index(&replica), index(&beta_replica));
+    // The primary's pool holds a connection to each node, so the failover's
+    // calls dial nothing: the lookup held is the standby's.
+    let (status, b) = call(p.primary, "GET", "/_shard/tenants?bytes", "", None);
+    assert_eq!(status, 200, "{b}");
+
+    p.wires[0].fall_silent();
+    let keyed = asking(
+        p.standby,
+        "POST",
+        PATH,
+        "Idempotency-Key: moved-1\r\n",
+        &body(r#"put notes {title: "keyed"}"#),
+    );
+    p.wires[0].until_heard("moved-1");
+    unanswered(&keyed, "the keyed write");
+    let beta_promoted = format!("{beta}/promote");
+    p.wires[x].park("/_admin/lease");
+    p.wires[y].park(&beta_promoted);
+    lookups[x].hold();
+    let before = cuts(p.standby);
+    let failover = fail_over_n1(p.primary);
+    // acme promoted and its write cut: sent on, it dials acme's copy.
+    until_placed(p.standby, "acme", &replica);
+    lookups[x].until_held();
+    // beta promoted: the standby's catch-up moves acme's bucket.
+    p.wires[y].let_through(&beta_promoted, 1);
+    until_placed(p.standby, &beta, &beta_replica);
+    lookups[x].release();
+    // Refused by the copy, and asked again.
+    p.wires[x].until_sent("moved-1", 2);
+    unanswered(&keyed, "the keyed write");
+    p.wires[x].let_through("/_admin/lease", 1 << 20);
+    let (status, _, b) = answer(&keyed, "the keyed write");
+    assert_eq!(status, 200, "{b}");
+    assert_eq!(titled(p.port_of(&replica), "keyed"), 1);
     let after = cuts(p.standby);
     let counted: Vec<f64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
     assert_eq!(counted, [1.0, 0.0, 0.0], "{before:?} -> {after:?}");
